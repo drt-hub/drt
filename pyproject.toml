@@ -4,14 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "drt-core"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "Reverse ETL for the code-first data stack"
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "drt-hub", email = "masukai9612kf@gmail.com" }]
 keywords = ["reverse-etl", "data-engineering", "dbt", "bigquery", "cli"]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",

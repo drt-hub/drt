@@ -12,11 +12,12 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Python](https://img.shields.io/pypi/pyversions/drt-core)](https://pypi.org/project/drt-core/)
 
-**drt** syncs data from your data warehouse (BigQuery) to external services — declaratively, via YAML and CLI.
+**drt** syncs data from your data warehouse to external services — declaratively, via YAML and CLI.
 Think `dbt run` → `drt run`. Same developer experience, opposite data direction.
 
 ```bash
-pip install drt-core[bigquery]
+pip install drt-core          # core (DuckDB included)
+pip install drt-core[bigquery]  # + BigQuery
 drt init
 drt run --dry-run
 drt run
@@ -54,9 +55,11 @@ This creates:
 
 ```
 my-drt-project/
-├── drt_project.yml   # project config (source: BigQuery)
+├── drt_project.yml   # project config
 └── syncs/            # put your sync definitions here
 ```
+
+`drt init` prompts for source type: **bigquery**, **duckdb**, or **postgres**.
 
 ### 3. Create a sync
 
@@ -106,15 +109,28 @@ drt status                  # show recent sync status
 
 ---
 
+## Connectors
+
+| Type | Name | Install |
+|------|------|---------|
+| **Source** | BigQuery | `pip install drt-core[bigquery]` |
+| **Source** | DuckDB | `pip install drt-core[duckdb]` |
+| **Source** | PostgreSQL | `pip install drt-core[postgres]` |
+| **Destination** | REST API | (core) |
+| **Destination** | Slack Incoming Webhook | (core) |
+| **Destination** | GitHub Actions (workflow_dispatch) | (core) |
+| **Destination** | HubSpot (Contacts / Deals / Companies) | (core) |
+
+---
+
 ## Roadmap
 
 | Version | Focus |
 |---------|-------|
-| **v0.1** | BigQuery source + REST API destination, CLI skeleton, dry-run |
-| v0.2 | Incremental sync, upsert/delete, state persistence |
-| v0.3 | Slack / Google Sheets connectors, scheduling |
+| **v0.1** ✅ | BigQuery / DuckDB / Postgres sources · REST API / Slack / GitHub Actions / HubSpot destinations · CLI · dry-run |
+| v0.2 | Incremental sync, state persistence improvements |
+| v0.3 | Scheduling (cron-style), Google Sheets connector |
 | v0.4 | MCP Server (`uvx drt mcp run`), AI Skills |
-| v0.5+ | CRM connectors (HubSpot, Salesforce) |
 | v1.x | Rust engine (PyO3) |
 
 ---

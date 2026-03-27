@@ -16,17 +16,33 @@ from typing import Literal
 import typer
 from jinja2 import Environment, PackageLoader
 
-from drt.config.credentials import BigQueryProfile, save_profile
+from drt.config.credentials import (
+    BigQueryProfile,
+    DuckDBProfile,
+    PostgresProfile,
+    ProfileConfig,
+    save_profile,
+)
 
 
 @dataclass
 class InitAnswers:
     project_name: str
     profile_name: str
-    gcp_project: str
-    dataset: str
-    auth_method: Literal["application_default", "keyfile"]
+    source_type: Literal["bigquery", "duckdb", "postgres"]
+    # BigQuery
+    gcp_project: str = ""
+    dataset: str = ""
+    auth_method: Literal["application_default", "keyfile"] = "application_default"
     keyfile: str | None = None
+    # DuckDB
+    duckdb_database: str = ":memory:"
+    # Postgres
+    pg_host: str = "localhost"
+    pg_port: int = 5432
+    pg_dbname: str = ""
+    pg_user: str = ""
+    pg_password_env: str = "PG_PASSWORD"
 
 
 def run_wizard() -> InitAnswers:
@@ -35,47 +51,55 @@ def run_wizard() -> InitAnswers:
     typer.echo("  Welcome to drt! Let's set up your project.")
     typer.echo("")
 
-    project_name = typer.prompt(
-        "  Project name",
-        default=Path.cwd().name,
-    )
-    profile_name = typer.prompt(
-        "  Profile name",
-        default="dev",
-    )
-    source_type = typer.prompt(
-        "  Source type",
+    project_name = typer.prompt("  Project name", default=Path.cwd().name)
+    profile_name = typer.prompt("  Profile name", default="dev")
+    raw_source = typer.prompt(
+        "  Source type [bigquery/duckdb/postgres]",
         default="bigquery",
     )
+    source_type: Literal["bigquery", "duckdb", "postgres"] = (
+        raw_source if raw_source in ("bigquery", "duckdb", "postgres") else "bigquery"
+    )
 
-    gcp_project = ""
-    dataset = ""
-    auth_method: Literal["application_default", "keyfile"] = "application_default"
-    keyfile: str | None = None
+    answers = InitAnswers(
+        project_name=project_name,
+        profile_name=profile_name,
+        source_type=source_type,
+    )
 
     if source_type == "bigquery":
-        gcp_project = typer.prompt("  GCP project ID")
-        dataset = typer.prompt("  BigQuery dataset")
+        answers.gcp_project = typer.prompt("  GCP project ID")
+        answers.dataset = typer.prompt("  BigQuery dataset")
         raw_method = typer.prompt(
             "  Auth method [application_default/keyfile]",
             default="application_default",
         )
-        auth_method = "keyfile" if raw_method == "keyfile" else "application_default"
-        if auth_method == "keyfile":
-            keyfile = typer.prompt(
+        answers.auth_method = (
+            "keyfile" if raw_method == "keyfile" else "application_default"
+        )
+        if answers.auth_method == "keyfile":
+            answers.keyfile = typer.prompt(
                 "  Path to service account keyfile",
                 default="~/.config/gcloud/service_account.json",
             )
 
+    elif source_type == "duckdb":
+        answers.duckdb_database = typer.prompt(
+            "  DuckDB database path (:memory: for in-memory)",
+            default=":memory:",
+        )
+
+    elif source_type == "postgres":
+        answers.pg_host = typer.prompt("  Host", default="localhost")
+        answers.pg_port = int(typer.prompt("  Port", default="5432"))
+        answers.pg_dbname = typer.prompt("  Database name")
+        answers.pg_user = typer.prompt("  User")
+        answers.pg_password_env = typer.prompt(
+            "  Env var for password", default="PG_PASSWORD"
+        )
+
     typer.echo("")
-    return InitAnswers(
-        project_name=project_name,
-        profile_name=profile_name,
-        gcp_project=gcp_project,
-        dataset=dataset,
-        auth_method=auth_method,
-        keyfile=keyfile,
-    )
+    return answers
 
 
 def scaffold_project(answers: InitAnswers, project_dir: Path) -> list[str]:
@@ -121,13 +145,29 @@ def scaffold_project(answers: InitAnswers, project_dir: Path) -> list[str]:
         created.append(str(drt_gitignore))
 
     # --- ~/.drt/profiles.yml ---
-    profile = BigQueryProfile(
-        type="bigquery",
-        project=answers.gcp_project,
-        dataset=answers.dataset,
-        method=answers.auth_method,
-        keyfile=answers.keyfile,
-    )
+    profile: ProfileConfig
+    if answers.source_type == "bigquery":
+        profile = BigQueryProfile(
+            type="bigquery",
+            project=answers.gcp_project,
+            dataset=answers.dataset,
+            method=answers.auth_method,
+            keyfile=answers.keyfile,
+        )
+    elif answers.source_type == "duckdb":
+        profile = DuckDBProfile(
+            type="duckdb",
+            database=answers.duckdb_database,
+        )
+    else:
+        profile = PostgresProfile(
+            type="postgres",
+            host=answers.pg_host,
+            port=answers.pg_port,
+            dbname=answers.pg_dbname,
+            user=answers.pg_user,
+            password_env=answers.pg_password_env,
+        )
     profiles_path = save_profile(answers.profile_name, profile)
     created.append(str(profiles_path))
 
