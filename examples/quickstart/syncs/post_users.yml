@@ -1,0 +1,19 @@
+name: post_users
+description: "POST user records from DuckDB to httpbin.org"
+model: ref('users')
+destination:
+  type: rest_api
+  url: https://httpbin.org/post
+  method: POST
+  headers:
+    Content-Type: application/json
+  body_template: |
+    {
+      "id":    {{ row.id }},
+      "name":  "{{ row.name }}",
+      "email": "{{ row.email }}"
+    }
+sync:
+  mode: full
+  batch_size: 1
+  on_error: fail
