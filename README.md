@@ -149,6 +149,17 @@ dlt (load) → dbt (transform) → drt (activate)
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Disclaimer
+
+drt is an independent open-source project and is **not affiliated with,
+endorsed by, or sponsored by** dbt Labs, dlt-hub, or any other company.
+
+"dbt" is a registered trademark of dbt Labs, Inc.
+"dlt" is a project maintained by dlt-hub.
+
+drt is designed to complement these tools as part of the modern data stack,
+but is a separate project with its own codebase and maintainers.
+
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE).
