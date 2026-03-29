@@ -61,6 +61,14 @@ uv run mypy drt
 
 Example: `feat/snowflake-source`, `fix/empty-batch-rest-api`, `docs/quickstart-update`
 
+## Branch Strategy
+
+drt uses **GitHub Flow** — all development happens on feature branches that merge directly into `main`.
+
+- `main` is always in a releasable state
+- No `develop` or `release` branches
+- Releases are marked with tags (`v0.2.0`, `v0.3.0`, …)
+
 ## Submitting Changes
 
 1. Fork the repository
@@ -68,6 +76,8 @@ Example: `feat/snowflake-source`, `fix/empty-batch-rest-api`, `docs/quickstart-u
 3. Make your changes with tests
 4. Run `make lint` and `make test` to verify everything passes
 5. Open a Pull Request and fill out the PR template
+
+> **Merge strategy:** All PRs are merged with **Squash & merge**. Your branch commits are squashed into a single commit on `main`, so individual WIP commits don't need to be cleaned up.
 
 ## Pull Request Checklist
 
