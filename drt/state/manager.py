@@ -20,6 +20,7 @@ class SyncState:
     records_synced: int
     status: str  # "success" | "failed" | "partial"
     error: str | None = None
+    last_cursor_value: str | None = None  # watermark for incremental sync
 
 
 class StateManager:

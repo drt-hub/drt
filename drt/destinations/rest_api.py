@@ -17,11 +17,9 @@ from drt.config.models import RestApiDestinationConfig, SyncOptions
 from drt.destinations.auth import AuthHandler
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
-from drt.destinations.retry import RetryConfig, with_retry
+from drt.destinations.retry import with_retry
 from drt.destinations.row_errors import DetailedSyncResult, RowError
 from drt.templates.renderer import render_template
-
-_DEFAULT_RETRY = RetryConfig()
 
 
 class RestApiDestination:
@@ -75,7 +73,7 @@ class RestApiDestination:
                     return response
 
                 try:
-                    with_retry(do_request, _DEFAULT_RETRY)
+                    with_retry(do_request, sync_options.retry)
                     result.success += 1
                 except httpx.HTTPStatusError as e:
                     result.row_errors.append(

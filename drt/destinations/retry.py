@@ -7,23 +7,13 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import TypeVar
 
 import httpx
 
+from drt.config.models import RetryConfig
+
 T = TypeVar("T")
-
-
-@dataclass
-class RetryConfig:
-    """Configuration for exponential backoff retry."""
-
-    max_attempts: int = 3
-    initial_backoff: float = 1.0
-    backoff_multiplier: float = 2.0
-    max_backoff: float = 60.0
-    retryable_status_codes: tuple[int, ...] = (429, 500, 502, 503, 504)
 
 
 def with_retry(fn: Callable[[], T], config: RetryConfig) -> T:

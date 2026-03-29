@@ -42,6 +42,8 @@ def resolve_model_ref(
     model_str: str,
     project_dir: Path,
     profile: ProfileConfig,
+    cursor_field: str | None = None,
+    last_cursor_value: str | None = None,
 ) -> str:
     """Resolve a model reference to a runnable SQL query.
 
@@ -50,6 +52,8 @@ def resolve_model_ref(
             Can be ref('table_name'), a raw SQL string, or a table name.
         project_dir: Root of the drt project (contains syncs/).
         profile: Resolved profile (supplies dataset for ref() expansion).
+        cursor_field: Column name used for incremental filtering (e.g. updated_at).
+        last_cursor_value: Previous watermark; rows with cursor > this are fetched.
 
     Returns:
         A SQL query string ready to send to the source.
@@ -60,15 +64,24 @@ def resolve_model_ref(
         # Check for a hand-written SQL file first
         sql_file = project_dir / "syncs" / "models" / f"{table_name}.sql"
         if sql_file.exists():
-            return sql_file.read_text().strip()
-        # Fall back to qualified table SELECT — syntax differs by source
-        if isinstance(profile, BigQueryProfile):
-            return f"SELECT * FROM `{profile.dataset}`.`{table_name}`"
-        if isinstance(profile, DuckDBProfile):
-            return f"SELECT * FROM {table_name}"
-        if isinstance(profile, PostgresProfile):
-            return f'SELECT * FROM "{table_name}"'
-        return f"SELECT * FROM {table_name}"
+            base_sql = sql_file.read_text().strip()
+        elif isinstance(profile, BigQueryProfile):
+            base_sql = f"SELECT * FROM `{profile.dataset}`.`{table_name}`"
+        elif isinstance(profile, DuckDBProfile):
+            base_sql = f"SELECT * FROM {table_name}"
+        elif isinstance(profile, PostgresProfile):
+            base_sql = f'SELECT * FROM "{table_name}"'
+        else:
+            base_sql = f"SELECT * FROM {table_name}"
+    else:
+        # Not a ref() — treat as raw SQL or bare table name
+        base_sql = model_str
 
-    # Not a ref() — treat as raw SQL or bare table name
-    return model_str
+    # Inject incremental WHERE clause when cursor info is available
+    if cursor_field and last_cursor_value:
+        return (
+            f"SELECT * FROM ({base_sql}) AS _drt_base"
+            f" WHERE {cursor_field} > '{last_cursor_value}'"
+        )
+
+    return base_sql

@@ -11,7 +11,13 @@ import json
 import time
 
 from drt.config.credentials import BigQueryProfile
-from drt.config.models import RateLimitConfig, RestApiDestinationConfig, SyncConfig, SyncOptions
+from drt.config.models import (
+    RateLimitConfig,
+    RestApiDestinationConfig,
+    RetryConfig,
+    SyncConfig,
+    SyncOptions,
+)
 from drt.destinations.rest_api import RestApiDestination
 from drt.engine.sync import run_sync
 from tests.integration.conftest import FakeSource
@@ -31,7 +37,12 @@ def _dest_config(httpserver, body_template: str | None = None, auth=None) -> Res
     )
 
 
-def _sync(dest: RestApiDestinationConfig, rate_limit_rps: int = 100, on_error: str = "skip") -> SyncConfig:  # noqa: E501
+def _sync(
+    dest: RestApiDestinationConfig,
+    rate_limit_rps: int = 100,
+    on_error: str = "skip",
+    retry: RetryConfig | None = None,
+) -> SyncConfig:
     return SyncConfig(
         name="test_sync",
         model="ref('table')",
@@ -40,6 +51,7 @@ def _sync(dest: RestApiDestinationConfig, rate_limit_rps: int = 100, on_error: s
             batch_size=10,
             rate_limit=RateLimitConfig(requests_per_second=rate_limit_rps),
             on_error=on_error,
+            retry=retry or RetryConfig(),
         ),
     )
 
@@ -145,18 +157,9 @@ def test_on_error_skip_continues(httpserver, tmp_path):
 
     source = FakeSource([{"id": 1}, {"id": 2}, {"id": 3}])
     dest_cfg = _dest_config(httpserver)
-
-    # RetryConfig with max_attempts=1 so the 500 fails immediately
-    import drt.destinations.rest_api as ra_module
-    from drt.destinations.retry import RetryConfig as RC
-    original = ra_module._DEFAULT_RETRY
-    ra_module._DEFAULT_RETRY = RC(max_attempts=1)
-
-    try:
-        sync = _sync(dest_cfg, on_error="skip")
-        result = run_sync(sync, source, RestApiDestination(), _profile(), tmp_path)
-    finally:
-        ra_module._DEFAULT_RETRY = original
+    # max_attempts=1 so the 500 fails immediately without retry
+    sync = _sync(dest_cfg, on_error="skip", retry=RetryConfig(max_attempts=1))
+    result = run_sync(sync, source, RestApiDestination(), _profile(), tmp_path)
 
     assert result.failed == 1
     assert result.success == 2
@@ -171,18 +174,13 @@ def test_retry_on_500_succeeds_on_third(httpserver, tmp_path):
     httpserver.expect_ordered_request("/webhook").respond_with_data("err", status=500)
     httpserver.expect_ordered_request("/webhook").respond_with_data("OK", status=200)
 
-    import drt.destinations.rest_api as ra_module
-    from drt.destinations.retry import RetryConfig as RC
-    original = ra_module._DEFAULT_RETRY
-    ra_module._DEFAULT_RETRY = RC(max_attempts=3, initial_backoff=0.01, backoff_multiplier=1.0)
-
-    try:
-        source = FakeSource([{"id": 1}])
-        dest_cfg = _dest_config(httpserver)
-        sync = _sync(dest_cfg)
-        result = run_sync(sync, source, RestApiDestination(), _profile(), tmp_path)
-    finally:
-        ra_module._DEFAULT_RETRY = original
+    source = FakeSource([{"id": 1}])
+    dest_cfg = _dest_config(httpserver)
+    sync = _sync(
+        dest_cfg,
+        retry=RetryConfig(max_attempts=3, initial_backoff=0.01, backoff_multiplier=1.0),
+    )
+    result = run_sync(sync, source, RestApiDestination(), _profile(), tmp_path)
 
     assert result.success == 1
     assert result.failed == 0

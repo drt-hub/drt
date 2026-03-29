@@ -56,12 +56,33 @@ def run_sync(
         Aggregated SyncResult across all batches.
     """
     started_at = datetime.now(timezone.utc).isoformat()
-    query = resolve_model_ref(sync.model, project_dir, profile)
+
+    # Load last cursor value for incremental syncs
+    cursor_field = sync.sync.cursor_field if sync.sync.mode == "incremental" else None
+    last_cursor_value: str | None = None
+    if cursor_field and state_manager:
+        prev = state_manager.get_last_sync(sync.name)
+        if prev:
+            last_cursor_value = prev.last_cursor_value
+
+    query = resolve_model_ref(
+        sync.model, project_dir, profile, cursor_field, last_cursor_value
+    )
 
     records_iter = source.extract(query, profile)
     total_result = SyncResult()
+    new_cursor_value: str | None = last_cursor_value
 
     for record_batch in batch(records_iter, sync.sync.batch_size):
+        # Track max cursor value seen across all batches
+        if cursor_field:
+            for row in record_batch:
+                val = row.get(cursor_field)
+                if val is not None:
+                    str_val = str(val)
+                    if new_cursor_value is None or str_val > new_cursor_value:
+                        new_cursor_value = str_val
+
         if dry_run:
             total_result.success += len(record_batch)
             continue
@@ -88,6 +109,7 @@ def run_sync(
                 records_synced=total_result.success,
                 status=status,
                 error=total_result.errors[0] if total_result.errors else None,
+                last_cursor_value=new_cursor_value if cursor_field else None,
             )
         )
 

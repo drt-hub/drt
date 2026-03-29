@@ -37,10 +37,10 @@ from typing import Any
 import httpx
 
 from drt.config.credentials import resolve_env
-from drt.config.models import GitHubActionsDestinationConfig, SyncOptions
+from drt.config.models import GitHubActionsDestinationConfig, RetryConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
-from drt.destinations.retry import RetryConfig, with_retry
+from drt.destinations.retry import with_retry
 from drt.templates.renderer import render_template
 
 _GITHUB_API = "https://api.github.com"

@@ -62,3 +62,44 @@ def test_resolve_sql_file_takes_priority(tmp_path: Path) -> None:
 def test_resolve_non_ref_string_passthrough(tmp_path: Path) -> None:
     table = "analytics.my_table"
     assert resolve_model_ref(table, tmp_path, _profile()) == table
+
+
+# ---------------------------------------------------------------------------
+# incremental cursor injection
+# ---------------------------------------------------------------------------
+
+def test_resolve_incremental_injects_where(tmp_path: Path) -> None:
+    sql = resolve_model_ref(
+        "ref('events')",
+        tmp_path,
+        _profile("ds"),
+        cursor_field="updated_at",
+        last_cursor_value="2024-01-01T00:00:00",
+    )
+    assert "WHERE updated_at > '2024-01-01T00:00:00'" in sql
+    assert "SELECT * FROM `ds`.`events`" in sql
+
+
+def test_resolve_no_cursor_returns_base_sql(tmp_path: Path) -> None:
+    sql = resolve_model_ref(
+        "ref('events')",
+        tmp_path,
+        _profile("ds"),
+        cursor_field="updated_at",
+        last_cursor_value=None,
+    )
+    assert sql == "SELECT * FROM `ds`.`events`"
+    assert "WHERE" not in sql
+
+
+def test_resolve_incremental_raw_sql(tmp_path: Path) -> None:
+    raw = "SELECT * FROM events WHERE active = true"
+    sql = resolve_model_ref(
+        raw,
+        tmp_path,
+        _profile(),
+        cursor_field="updated_at",
+        last_cursor_value="2024-06-01",
+    )
+    assert "WHERE updated_at > '2024-06-01'" in sql
+    assert raw in sql
