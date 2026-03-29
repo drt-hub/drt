@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-03-30
+
+### Added
+
+#### Incremental Sync
+- `sync.mode: incremental` — watermark-based incremental sync using a `cursor_field`
+- Saves `last_cursor_value` in `.drt/state.json` after each run
+- Injects `WHERE {cursor_field} > '{last_cursor_value}'` automatically on next run
+- Works with both `ref('table')` and raw SQL models
+
+#### Retry Configuration
+- `sync.retry` is now fully configurable per-sync in YAML (`max_attempts`, `initial_backoff`, `backoff_multiplier`, `max_backoff`, `retryable_status_codes`)
+- Previously used a hardcoded default; now reads from `SyncOptions.retry`
+
+### Fixed
+- Removed duplicate `RetryConfig` dataclass from `destinations/retry.py` (was shadowing the Pydantic model in `config/models.py`)
+
+### Tests
+- 6 new unit tests for incremental sync (resolver + engine)
+- Integration test suite cleaned up: removed monkey-patching of internal `_DEFAULT_RETRY`
+
 ## [0.1.1] - 2026-03-29
 
 ### Fixed
