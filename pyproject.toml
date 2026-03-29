@@ -35,6 +35,7 @@ dependencies = [
 bigquery = ["google-cloud-bigquery>=3.0"]
 duckdb = ["duckdb>=0.10"]
 postgres = ["psycopg2-binary>=2.9"]
+redshift = ["psycopg2-binary>=2.9"]  # Redshift uses PostgreSQL wire protocol
 mcp = ["fastmcp>=0.1"]
 dev = [
     "pytest>=8.0",

@@ -21,6 +21,7 @@ from drt.config.credentials import (
     DuckDBProfile,
     PostgresProfile,
     ProfileConfig,
+    RedshiftProfile,
     save_profile,
 )
 
@@ -29,7 +30,7 @@ from drt.config.credentials import (
 class InitAnswers:
     project_name: str
     profile_name: str
-    source_type: Literal["bigquery", "duckdb", "postgres"]
+    source_type: Literal["bigquery", "duckdb", "postgres", "redshift"]
     # BigQuery
     gcp_project: str = ""
     dataset: str = ""
@@ -43,6 +44,13 @@ class InitAnswers:
     pg_dbname: str = ""
     pg_user: str = ""
     pg_password_env: str = "PG_PASSWORD"
+    # Redshift
+    rs_host: str = ""
+    rs_port: int = 5439
+    rs_dbname: str = ""
+    rs_user: str = ""
+    rs_password_env: str = "REDSHIFT_PASSWORD"
+    rs_schema: str = "public"
 
 
 def run_wizard() -> InitAnswers:
@@ -54,11 +62,11 @@ def run_wizard() -> InitAnswers:
     project_name = typer.prompt("  Project name", default=Path.cwd().name)
     profile_name = typer.prompt("  Profile name", default="dev")
     raw_source = typer.prompt(
-        "  Source type [bigquery/duckdb/postgres]",
+        "  Source type [bigquery/duckdb/postgres/redshift]",
         default="bigquery",
     )
-    source_type: Literal["bigquery", "duckdb", "postgres"] = (
-        raw_source if raw_source in ("bigquery", "duckdb", "postgres") else "bigquery"
+    source_type: Literal["bigquery", "duckdb", "postgres", "redshift"] = (
+        raw_source if raw_source in ("bigquery", "duckdb", "postgres", "redshift") else "bigquery"
     )
 
     answers = InitAnswers(
@@ -97,6 +105,16 @@ def run_wizard() -> InitAnswers:
         answers.pg_password_env = typer.prompt(
             "  Env var for password", default="PG_PASSWORD"
         )
+
+    elif source_type == "redshift":
+        answers.rs_host = typer.prompt("  Host (e.g., my-cluster.xxx.us-east-1.redshift.amazonaws.com)")
+        answers.rs_port = int(typer.prompt("  Port", default="5439"))
+        answers.rs_dbname = typer.prompt("  Database name")
+        answers.rs_user = typer.prompt("  User")
+        answers.rs_password_env = typer.prompt(
+            "  Env var for password", default="REDSHIFT_PASSWORD"
+        )
+        answers.rs_schema = typer.prompt("  Schema", default="public")
 
     typer.echo("")
     return answers
@@ -168,6 +186,18 @@ def scaffold_project(answers: InitAnswers, project_dir: Path) -> list[str]:
             user=answers.pg_user,
             password_env=answers.pg_password_env,
         )
+
+    if answers.source_type == "redshift":
+        profile = RedshiftProfile(
+            type="redshift",
+            host=answers.rs_host,
+            port=answers.rs_port,
+            dbname=answers.rs_dbname,
+            user=answers.rs_user,
+            password_env=answers.rs_password_env,
+            schema=answers.rs_schema,
+        )
+
     profiles_path = save_profile(answers.profile_name, profile)
     created.append(str(profiles_path))
 
