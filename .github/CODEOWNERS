@@ -1,0 +1,19 @@
+# Default owner for everything
+* @drt-hub
+
+# CLI and config
+drt/cli/ @drt-hub
+drt/config/ @drt-hub
+
+# Sources
+drt/sources/ @drt-hub
+
+# Destinations
+drt/destinations/ @drt-hub
+
+# Engine (Rust rewrite candidate — review carefully)
+drt/engine/ @drt-hub
+
+# CI/CD and release
+.github/ @drt-hub
+pyproject.toml @drt-hub

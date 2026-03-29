@@ -16,8 +16,14 @@
 Think `dbt run` → `drt run`. Same developer experience, opposite data direction.
 
 ```bash
+# pip
 pip install drt-core          # core (DuckDB included)
 pip install drt-core[bigquery]  # + BigQuery
+
+# uv (recommended)
+uv add drt-core
+uv add drt-core[bigquery]
+
 drt init
 drt run --dry-run
 drt run
@@ -42,6 +48,8 @@ drt run
 
 ```bash
 pip install drt-core[bigquery]
+# or
+uv add drt-core[bigquery]
 ```
 
 ### 2. Initialize a project
@@ -111,15 +119,23 @@ drt status                  # show recent sync status
 
 ## Connectors
 
-| Type | Name | Install |
-|------|------|---------|
-| **Source** | BigQuery | `pip install drt-core[bigquery]` |
-| **Source** | DuckDB | `pip install drt-core[duckdb]` |
-| **Source** | PostgreSQL | `pip install drt-core[postgres]` |
-| **Destination** | REST API | (core) |
-| **Destination** | Slack Incoming Webhook | (core) |
-| **Destination** | GitHub Actions (workflow_dispatch) | (core) |
-| **Destination** | HubSpot (Contacts / Deals / Companies) | (core) |
+| Type | Name | Status | Install |
+|------|------|--------|---------|
+| **Source** | BigQuery | ✅ v0.1 | `pip install drt-core[bigquery]` |
+| **Source** | DuckDB | ✅ v0.1 | (core) |
+| **Source** | PostgreSQL | ✅ v0.1 | `pip install drt-core[postgres]` |
+| **Source** | Snowflake | 🗓 planned | `pip install drt-core[snowflake]` |
+| **Source** | Redshift | 🗓 planned | `pip install drt-core[redshift]` |
+| **Source** | MySQL | 🗓 planned | `pip install drt-core[mysql]` |
+| **Destination** | REST API | ✅ v0.1 | (core) |
+| **Destination** | Slack Incoming Webhook | ✅ v0.1 | (core) |
+| **Destination** | GitHub Actions (workflow_dispatch) | ✅ v0.1 | (core) |
+| **Destination** | HubSpot (Contacts / Deals / Companies) | ✅ v0.1 | (core) |
+| **Destination** | Google Sheets | 🗓 v0.3 | (core) |
+| **Destination** | Salesforce | 🗓 planned | (core) |
+| **Destination** | Notion | 🗓 planned | (core) |
+| **Destination** | Linear | 🗓 planned | (core) |
+| **Destination** | SendGrid | 🗓 planned | (core) |
 
 ---
 
@@ -128,8 +144,8 @@ drt status                  # show recent sync status
 | Version | Focus |
 |---------|-------|
 | **v0.1** ✅ | BigQuery / DuckDB / Postgres sources · REST API / Slack / GitHub Actions / HubSpot destinations · CLI · dry-run |
-| v0.2 | Incremental sync, state persistence improvements |
-| v0.3 | Scheduling (cron-style), Google Sheets connector |
+| v0.2 | Incremental sync (`updated_at` watermark), state persistence improvements |
+| v0.3 | Scheduling (cron-style), Google Sheets connector, Snowflake source |
 | v0.4 | MCP Server (`uvx drt mcp run`), AI Skills |
 | v1.x | Rust engine (PyO3) |
 
