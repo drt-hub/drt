@@ -2,7 +2,7 @@
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ---------------------------------------------------------------------------
 # Auth (shared across destination types)
@@ -136,6 +136,14 @@ class SyncOptions(BaseModel):
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
     retry: RetryConfig = Field(default_factory=RetryConfig)
     on_error: Literal["skip", "fail"] = "fail"
+
+    @model_validator(mode="after")
+    def _check_incremental_cursor(self) -> "SyncOptions":
+        if self.mode == "incremental" and not self.cursor_field:
+            raise ValueError(
+                "cursor_field is required when mode is 'incremental'."
+            )
+        return self
 
 
 class SyncConfig(BaseModel):

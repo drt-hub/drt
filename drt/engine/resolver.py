@@ -79,9 +79,31 @@ def resolve_model_ref(
 
     # Inject incremental WHERE clause when cursor info is available
     if cursor_field and last_cursor_value:
+        safe_field = _validate_cursor_field(cursor_field)
+        safe_value = last_cursor_value.replace("'", "''")  # standard SQL escaping
         return (
             f"SELECT * FROM ({base_sql}) AS _drt_base"
-            f" WHERE {cursor_field} > '{last_cursor_value}'"
+            f" WHERE {safe_field} > '{safe_value}'"
         )
 
     return base_sql
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_SAFE_IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_.]*$")
+
+
+def _validate_cursor_field(field: str) -> str:
+    """Ensure cursor_field is a safe SQL identifier (letters/digits/underscore/dot).
+
+    Raises ValueError for anything that could enable SQL injection.
+    """
+    if not _SAFE_IDENTIFIER.match(field):
+        raise ValueError(
+            f"cursor_field {field!r} contains invalid characters. "
+            "Only letters, digits, underscores, and dots are allowed."
+        )
+    return field

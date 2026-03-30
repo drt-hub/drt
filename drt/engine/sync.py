@@ -20,6 +20,14 @@ from drt.sources.base import Source
 from drt.state.manager import StateManager, SyncState
 
 
+def _cursor_gt(new: str, current: str) -> bool:
+    """Return True if new > current, using numeric comparison when both are numeric."""
+    try:
+        return float(new) > float(current)
+    except (ValueError, TypeError):
+        return new > current
+
+
 def batch(iterable: Iterator[Any], size: int) -> Iterator[list[Any]]:
     """Yield successive batches of `size` from an iterator."""
     chunk: list[Any] = []
@@ -80,7 +88,7 @@ def run_sync(
                 val = row.get(cursor_field)
                 if val is not None:
                     str_val = str(val)
-                    if new_cursor_value is None or str_val > new_cursor_value:
+                    if new_cursor_value is None or _cursor_gt(str_val, new_cursor_value):
                         new_cursor_value = str_val
 
         if dry_run:
@@ -92,6 +100,7 @@ def run_sync(
         total_result.failed += result.failed
         total_result.skipped += result.skipped
         total_result.errors.extend(result.errors)
+        total_result.row_errors.extend(getattr(result, "row_errors", []))
 
         if sync.sync.on_error == "fail" and result.failed > 0:
             break

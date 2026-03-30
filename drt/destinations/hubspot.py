@@ -52,6 +52,7 @@ from drt.config.models import HubSpotDestinationConfig, RetryConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
 from drt.destinations.retry import with_retry
+from drt.destinations.row_errors import DetailedSyncResult, RowError
 from drt.templates.renderer import render_template
 
 _HUBSPOT_API = "https://api.hubapi.com/crm/v3/objects"
@@ -83,14 +84,14 @@ class HubSpotDestination:
             "Content-Type": "application/json",
         }
         upsert_url = f"{_HUBSPOT_API}/{config.object_type}"
-        result = SyncResult()
+        result = DetailedSyncResult()
         # HubSpot rate limit: 100 req/10s for private apps
         rate_limiter = RateLimiter(
             min(sync_options.rate_limit.requests_per_second, 9)
         )
 
-        with httpx.Client() as client:
-            for record in records:
+        with httpx.Client(timeout=30.0) as client:
+            for i, record in enumerate(records):
                 rate_limiter.acquire()
 
                 # Build properties dict
@@ -100,7 +101,14 @@ class HubSpotDestination:
                         properties = json.loads(rendered)
                     except (ValueError, json.JSONDecodeError) as e:
                         result.failed += 1
-                        result.errors.append(f"properties_template error: {e}")
+                        result.row_errors.append(
+                            RowError(
+                                batch_index=i,
+                                record_preview=json.dumps(record)[:200],
+                                http_status=None,
+                                error_message=f"properties_template error: {e}",
+                            )
+                        )
                         continue
                 else:
                     properties = record
@@ -134,11 +142,23 @@ class HubSpotDestination:
                     result.success += 1
                 except httpx.HTTPStatusError as e:
                     result.failed += 1
-                    result.errors.append(
-                        f"HTTP {e.response.status_code}: {e.response.text[:200]}"
+                    result.row_errors.append(
+                        RowError(
+                            batch_index=i,
+                            record_preview=json.dumps(record)[:200],
+                            http_status=e.response.status_code,
+                            error_message=e.response.text[:500],
+                        )
                     )
                 except Exception as e:
                     result.failed += 1
-                    result.errors.append(str(e))
+                    result.row_errors.append(
+                        RowError(
+                            batch_index=i,
+                            record_preview=json.dumps(record)[:200],
+                            http_status=None,
+                            error_message=str(e),
+                        )
+                    )
 
-        return result
+        return result  # type: ignore[return-value]

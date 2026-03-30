@@ -33,9 +33,17 @@ class StateManager:
     def _load_all(self) -> dict[str, Any]:
         if not self._state_file.exists():
             return {}
-        with self._state_file.open() as f:
-            result: dict[str, Any] = json.load(f)
-            return result
+        try:
+            with self._state_file.open() as f:
+                result: dict[str, Any] = json.load(f) or {}
+                return result
+        except (json.JSONDecodeError, ValueError):
+            import sys
+            print(
+                f"Warning: {self._state_file} is corrupted and will be reset.",
+                file=sys.stderr,
+            )
+            return {}
 
     def _save_all(self, data: dict[str, Any]) -> None:
         self._state_dir.mkdir(exist_ok=True)

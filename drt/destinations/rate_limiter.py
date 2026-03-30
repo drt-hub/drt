@@ -23,6 +23,8 @@ class RateLimiter:
 
     def acquire(self) -> None:
         """Block until the next request slot is available."""
+        if self.requests_per_second <= 0:
+            return  # no rate limiting
         min_interval = 1.0 / self.requests_per_second
         elapsed = time.monotonic() - self._last
         wait = min_interval - elapsed

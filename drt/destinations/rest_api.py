@@ -37,7 +37,7 @@ class RestApiDestination:
         headers = {**config.headers, **auth_headers}
         rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)
 
-        with httpx.Client() as client:
+        with httpx.Client(timeout=30.0) as client:
             for i, record in enumerate(records):
                 rate_limiter.acquire()
 

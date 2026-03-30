@@ -40,10 +40,18 @@ from typing import Any
 
 import httpx
 
-from drt.config.models import SlackDestinationConfig, SyncOptions
+from drt.config.models import RetryConfig, SlackDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
+from drt.destinations.retry import with_retry
+from drt.destinations.row_errors import DetailedSyncResult, RowError
 from drt.templates.renderer import render_template
+
+_DEFAULT_RETRY = RetryConfig(
+    max_attempts=3,
+    initial_backoff=1.0,
+    retryable_status_codes=(429, 500, 502, 503, 504),
+)
 
 
 class SlackDestination:
@@ -63,11 +71,11 @@ class SlackDestination:
                 "Slack destination: provide 'webhook_url' or set 'webhook_url_env'."
             )
 
-        result = SyncResult()
+        result = DetailedSyncResult()
         rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)
 
-        with httpx.Client() as client:
-            for record in records:
+        with httpx.Client(timeout=30.0) as client:
+            for i, record in enumerate(records):
                 rate_limiter.acquire()
                 try:
                     rendered = render_template(config.message_template, record)
@@ -76,11 +84,35 @@ class SlackDestination:
                     else:
                         payload = {"text": rendered}
 
-                    response = client.post(webhook_url, json=payload)
-                    response.raise_for_status()
+                    def do_post(
+                        _url: str = webhook_url,  # type: ignore[assignment]
+                        _payload: dict[str, Any] = payload,
+                    ) -> httpx.Response:
+                        response = client.post(_url, json=_payload)
+                        response.raise_for_status()
+                        return response
+
+                    with_retry(do_post, _DEFAULT_RETRY)
                     result.success += 1
+                except httpx.HTTPStatusError as e:
+                    result.failed += 1
+                    result.row_errors.append(
+                        RowError(
+                            batch_index=i,
+                            record_preview=json.dumps(record)[:200],
+                            http_status=e.response.status_code,
+                            error_message=e.response.text[:500],
+                        )
+                    )
                 except Exception as e:
                     result.failed += 1
-                    result.errors.append(str(e))
+                    result.row_errors.append(
+                        RowError(
+                            batch_index=i,
+                            record_preview=json.dumps(record)[:200],
+                            http_status=None,
+                            error_message=str(e),
+                        )
+                    )
 
-        return result
+        return result  # type: ignore[return-value]
