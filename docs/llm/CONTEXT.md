@@ -83,8 +83,43 @@ drt validate                      # validate all sync YAMLs
 drt run                           # run all syncs
 drt run --select <sync-name>      # run one sync
 drt run --dry-run                 # preview without writing data
+drt run --verbose                 # show row-level error details on failure
 drt status                        # show recent sync results
+drt status --verbose              # show per-row error details
+drt mcp run                       # start MCP server (requires drt-core[mcp])
 ```
+
+## MCP Server
+
+drt exposes its operations as MCP tools so LLMs can trigger syncs, check status, and validate configs without a terminal.
+
+```bash
+pip install drt-core[mcp]
+drt mcp run   # starts stdio MCP server
+```
+
+### Available MCP tools
+
+| Tool | Description |
+|------|-------------|
+| `drt_list_syncs` | Returns all sync definitions (name, model, destination type, mode) |
+| `drt_run_sync(sync_name, dry_run=False)` | Runs a sync; returns success/failed counts and errors |
+| `drt_get_status(sync_name=None)` | Returns last run result(s); omit sync_name for all |
+| `drt_validate()` | Validates all sync YAMLs; returns valid list and errors dict |
+| `drt_get_schema(schema_type="sync")` | Returns JSON Schema for "sync" or "project" config |
+
+The MCP server reads from the current working directory (the drt project root).
+
+## AI Skills for Claude Code
+
+Four official slash commands in `.claude/commands/`:
+
+| Skill | File | Purpose |
+|-------|------|---------|
+| `/drt-create-sync` | `drt-create-sync.md` | Generate sync YAML from user intent |
+| `/drt-debug` | `drt-debug.md` | Diagnose and fix failing syncs |
+| `/drt-init` | `drt-init.md` | Guide through project initialization |
+| `/drt-migrate` | `drt-migrate.md` | Migrate from Census/Hightouch to drt |
 
 ## Key Concepts
 

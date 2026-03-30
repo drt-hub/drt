@@ -111,9 +111,61 @@ drt list                    # list sync definitions
 drt run                     # run all syncs
 drt run --select <name>     # run a specific sync
 drt run --dry-run           # dry run
+drt run --verbose           # show row-level error details
 drt validate                # validate sync YAML configs
 drt status                  # show recent sync status
+drt status --verbose        # show per-row error details
+drt mcp run                 # start MCP server (requires drt-core[mcp])
 ```
+
+---
+
+## MCP Server
+
+Connect drt to Claude, Cursor, or any MCP-compatible client so you can run syncs, check status, and validate configs without leaving your AI environment.
+
+```bash
+pip install drt-core[mcp]
+drt mcp run
+```
+
+**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "drt": {
+      "command": "drt",
+      "args": ["mcp", "run"]
+    }
+  }
+}
+```
+
+**Available MCP tools:**
+
+| Tool | What it does |
+|------|-------------|
+| `drt_list_syncs` | List all sync definitions |
+| `drt_run_sync` | Run a sync (supports `dry_run`) |
+| `drt_get_status` | Get last run result(s) |
+| `drt_validate` | Validate sync YAML configs |
+| `drt_get_schema` | Return JSON Schema for config files |
+
+---
+
+## AI Skills for Claude Code
+
+Install the official Claude Code skills to generate YAML, debug failures, and migrate from other tools — all from the chat interface.
+
+The skills live in `.claude/commands/` in this repo. Copy them to your drt project or reference them directly.
+
+| Skill | Trigger | What it does |
+|-------|---------|-------------|
+| `/drt-create-sync` | "create a sync" | Generates valid sync YAML from your intent |
+| `/drt-debug` | "sync failed" | Diagnoses errors and suggests fixes |
+| `/drt-init` | "set up drt" | Guides through project initialization |
+| `/drt-migrate` | "migrate from Census" | Converts existing configs to drt YAML |
 
 ---
 
