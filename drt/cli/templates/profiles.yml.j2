@@ -3,6 +3,7 @@
 {% if source_type == "bigquery" %}
   project: {{ gcp_project }}
   dataset: {{ dataset }}
+  location: {{ location }}
   method: {{ auth_method }}
 {% if auth_method == "keyfile" %}
   keyfile: {{ keyfile }}

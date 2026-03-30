@@ -33,6 +33,7 @@ class InitAnswers:
     # BigQuery
     gcp_project: str = ""
     dataset: str = ""
+    location: str = "US"
     auth_method: Literal["application_default", "keyfile"] = "application_default"
     keyfile: str | None = None
     # DuckDB
@@ -70,6 +71,7 @@ def run_wizard() -> InitAnswers:
     if source_type == "bigquery":
         answers.gcp_project = typer.prompt("  GCP project ID")
         answers.dataset = typer.prompt("  BigQuery dataset")
+        answers.location = typer.prompt("  Dataset location", default="US")
         raw_method = typer.prompt(
             "  Auth method [application_default/keyfile]",
             default="application_default",

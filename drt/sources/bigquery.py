@@ -49,7 +49,11 @@ class BigQuerySource:
             creds = service_account.Credentials.from_service_account_file(
                 os.path.expanduser(config.keyfile)
             )
-            return bigquery.Client(project=config.project, credentials=creds)
+            return bigquery.Client(
+                project=config.project,
+                credentials=creds,
+                location=config.location,
+            )
 
         # Application Default Credentials (gcloud auth application-default login)
-        return bigquery.Client(project=config.project)
+        return bigquery.Client(project=config.project, location=config.location)

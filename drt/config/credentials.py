@@ -44,6 +44,7 @@ class BigQueryProfile:
     dataset: str
     method: Literal["application_default", "keyfile"] = "application_default"
     keyfile: str | None = None
+    location: str = "US"  # e.g. "US", "EU", "asia-northeast1"
 
 
 @dataclass
