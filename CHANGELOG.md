@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-03-30
+
+### Fixed
+
+- **SQL injection** (#42): `cursor_field` now validated as a safe SQL identifier; `last_cursor_value` escaped with standard `''` quoting in incremental WHERE clauses
+- **row_errors lost** (#43): `run_sync()` now aggregates `row_errors` across all batches
+- **Numeric cursor comparison** (#44): Incremental cursor uses numeric comparison (`float()`) when possible — fixes `"9" > "10"` regression for integer/timestamp cursors
+- **HTTP timeout** (#45): `httpx.Client(timeout=30.0)` added to all destinations (REST API, Slack, HubSpot, GitHub Actions) — prevents indefinite hangs
+- **BasicAuth empty credentials** (#46): `BasicAuth` now raises `ValueError` when `username_env`/`password_env` are not set (was silently sending empty credentials)
+- **Corrupted state.json** (#47): `JSONDecodeError` on corrupted `.drt/state.json` is caught; prints warning to stderr and resets to empty state instead of crashing all syncs
+- **Slack retry** (#48): `SlackDestination` now uses `with_retry` — 429 rate limit responses are retried with backoff
+- **Incremental cursor_field validation** (#49): `SyncOptions` raises `ValidationError` if `mode: incremental` is set without `cursor_field`
+- **RateLimiter ZeroDivisionError** (#50): `RateLimiter.acquire()` returns immediately when `requests_per_second <= 0`
+
+### Added
+
+- **Destination unit tests** (#51): 10 new unit tests for `SlackDestination`, `HubSpotDestination`, `GitHubActionsDestination` (84 tests total)
+
+### Refactored
+
+- **DetailedSyncResult unification** (#52): Slack, HubSpot, and GitHub Actions destinations now use `DetailedSyncResult` + `RowError` — consistent row-level error reporting across all destinations
+
 ## [0.3.2] - 2026-03-30
 
 ### Fixed
