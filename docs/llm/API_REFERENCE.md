@@ -36,6 +36,16 @@ prod_pg:
   type: postgres
   connection_string_env: DATABASE_URL   # env var with postgres:// URL
   dataset: public
+
+# Redshift example:
+redshift_prod:
+  type: redshift
+  host: my-cluster.xxx.us-east-1.redshift.amazonaws.com
+  port: 5439              # default: 5439
+  dbname: analytics
+  user: analyst
+  password_env: REDSHIFT_PASSWORD
+  schema: public          # default: "public"
 ```
 
 ---

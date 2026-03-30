@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] - 2026-03-30
+
+### Added
+
+- **Redshift source** (#76, closes #20): Amazon Redshift connector via psycopg2. New `RedshiftProfile` with host/port/dbname/user/password_env/schema fields (port defaults to 5439). `drt init` wizard updated to support `redshift` source type. Install: `pip install drt-core[redshift]`.
+
 ## [0.3.3] - 2026-03-30
 
 ### Fixed

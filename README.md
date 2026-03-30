@@ -189,7 +189,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | **Source** | DuckDB | ✅ v0.1 | (core) |
 | **Source** | PostgreSQL | ✅ v0.1 | `pip install drt-core[postgres]` |
 | **Source** | Snowflake | 🗓 planned | `pip install drt-core[snowflake]` |
-| **Source** | Redshift | 🗓 planned | `pip install drt-core[redshift]` |
+| **Source** | Redshift | ✅ v0.3.4 | `pip install drt-core[redshift]` |
 | **Source** | MySQL | 🗓 planned | `pip install drt-core[mysql]` |
 | **Destination** | REST API | ✅ v0.1 | (core) |
 | **Destination** | Slack Incoming Webhook | ✅ v0.1 | (core) |
@@ -210,7 +210,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 |---------|-------|
 | **v0.1** ✅ | BigQuery / DuckDB / Postgres sources · REST API / Slack / GitHub Actions / HubSpot destinations · CLI · dry-run |
 | **v0.2** ✅ | Incremental sync (`cursor_field` watermark) · retry config per-sync |
-| **v0.3** ✅ | MCP Server (`drt mcp run`) · AI Skills for Claude Code · LLM-readable docs · row-level errors · security hardening |
+| **v0.3** ✅ | MCP Server (`drt mcp run`) · AI Skills for Claude Code · LLM-readable docs · row-level errors · security hardening · Redshift source |
 | v0.4 | Dagster integration · Google Sheets destination · dbt post-hook · examples |
 | v0.5 | Snowflake source · CSV/JSON destination · test coverage |
 | v0.6 | Salesforce destination · Airflow integration |
