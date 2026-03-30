@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-03-30
+
+### Fixed
+
+- **BigQuery location**: `profiles.yml` now supports a `location` field (e.g. `"EU"`, `"asia-northeast1"`); passed to `bigquery.Client()` so queries route to the correct regional endpoint. Defaults to `"US"` for backwards compatibility. ([#54](https://github.com/drt-hub/drt/issues/54))
+- `drt init` wizard now prompts for dataset location when configuring a BigQuery profile.
+
 ## [0.3.0] - 2026-03-30
 
 ### Added
