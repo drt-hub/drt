@@ -22,6 +22,8 @@ import os
 from collections.abc import Iterator
 from typing import Any
 
+from psycopg2 import sql
+
 from drt.config.credentials import RedshiftProfile
 
 
@@ -42,7 +44,7 @@ class RedshiftSource:
             cur = conn.cursor()
             # Set search_path to the configured schema
             if config.schema:
-                cur.execute(f"SET search_path TO {config.schema}")
+                cur.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(config.schema)))
             cur.execute(query)
             columns = [desc[0] for desc in cur.description]
             for row in cur.fetchall():
