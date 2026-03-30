@@ -6,6 +6,8 @@ directly from engine, config, or source/destination code.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
@@ -13,6 +15,9 @@ from rich.text import Text
 from drt.config.models import SyncConfig
 from drt.destinations.base import SyncResult
 from drt.state.manager import SyncState
+
+if TYPE_CHECKING:
+    from drt.destinations.row_errors import RowError
 
 console = Console()
 
@@ -137,6 +142,52 @@ def print_status_table(states: dict[str, SyncState]) -> None:
         )
 
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# verbose row errors
+# ---------------------------------------------------------------------------
+
+def print_row_errors(row_errors: list[RowError]) -> None:
+    """Print per-row error details (used with --verbose flag)."""
+    for re in row_errors:
+        http_part = f"HTTP {re.http_status} " if re.http_status is not None else ""
+        console.print(
+            f"  [dim]row {re.batch_index}:[/dim] "
+            f"[red]{http_part}{re.error_message[:120]}[/red]"
+        )
+
+
+def print_status_verbose(
+    states: dict[str, SyncState],
+    row_errors_by_sync: dict[str, list[RowError]],
+) -> None:
+    """Print status table followed by per-row error details for each sync."""
+    if not states:
+        console.print("[dim]No sync history found. Run `drt run` first.[/dim]")
+        return
+
+    for name, state in sorted(states.items()):
+        status_icon = {
+            "success": "[green]✓[/green]",
+            "failed": "[red]✗[/red]",
+            "partial": "[yellow]⚠[/yellow]",
+        }.get(state.status, state.status)
+
+        last_run = state.last_run_at[:19].replace("T", " ")
+        console.print(
+            f"{name}  last run: {last_run}  "
+            f"{status_icon} {state.records_synced}"
+            + (f"  [red]✗ {state.error}[/red]" if state.error else "")
+        )
+
+        row_errs = row_errors_by_sync.get(name, [])
+        for re in row_errs:
+            http_part = f"HTTP {re.http_status} " if re.http_status is not None else ""
+            console.print(
+                f"  [dim]row {re.batch_index}:[/dim] "
+                f"[red]{http_part}{re.error_message[:120]}[/red]"
+            )
 
 
 # ---------------------------------------------------------------------------

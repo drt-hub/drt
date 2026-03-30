@@ -3,10 +3,15 @@
 Designed with Rust-compatibility in mind: clear boundaries, no magic.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from drt.config.models import SyncOptions
+
+if TYPE_CHECKING:
+    from drt.destinations.row_errors import RowError
 
 
 @dataclass
@@ -17,6 +22,7 @@ class SyncResult:
     failed: int = 0
     skipped: int = 0
     errors: list[str] = field(default_factory=list)
+    row_errors: list[RowError] = field(default_factory=list)
 
     @property
     def total(self) -> int:
