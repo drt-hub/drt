@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-03-30
+
+### Added
+
+#### MCP Server
+- `drt mcp run` — start a FastMCP server (stdio transport) for Claude Desktop, Cursor, and any MCP-compatible client
+- 5 MCP tools: `drt_list_syncs`, `drt_run_sync`, `drt_get_status`, `drt_validate`, `drt_get_schema`
+- Install: `pip install drt-core[mcp]`
+
+#### AI Skills for Claude Code
+- `.claude/commands/drt-create-sync.md` — `/drt-create-sync` skill: generate sync YAML from user intent
+- `.claude/commands/drt-debug.md` — `/drt-debug` skill: diagnose and fix failing syncs
+- `.claude/commands/drt-init.md` — `/drt-init` skill: guide through project initialization
+- `.claude/commands/drt-migrate.md` — `/drt-migrate` skill: migrate from Census/Hightouch to drt
+
+#### LLM-readable Docs
+- `docs/llm/CONTEXT.md` — architecture, key concepts, state file format (optimized for LLM consumption)
+- `docs/llm/API_REFERENCE.md` — all config fields with types, defaults, and full YAML examples
+
+#### Row-level Error Details
+- `RowError` dataclass: `batch_index`, `record_preview` (200-char PII-safe), `http_status`, `error_message`, `timestamp`
+- `drt run --verbose` and `drt status --verbose` show per-row error details
+- `RestApiDestination` now populates `row_errors` on each failure
+
+### Tests
+- 82 tests total (up from 53 in v0.2)
+- MCP server tests auto-skip when `fastmcp` not installed
+
 ## [0.2.0] - 2026-03-30
 
 ### Added
