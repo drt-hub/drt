@@ -128,6 +128,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             dataset=raw["dataset"],
             method=raw.get("method", "application_default"),
             keyfile=raw.get("keyfile"),
+            location=raw.get("location", "US"),
         )
     if source_type == "duckdb":
         return DuckDBProfile(

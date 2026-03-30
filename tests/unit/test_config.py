@@ -140,6 +140,22 @@ def test_save_and_load_profile(tmp_path: Path) -> None:
     assert loaded.method == "application_default"
 
 
+def test_load_profile_bigquery_location(tmp_path: Path) -> None:
+    (tmp_path / "profiles.yml").write_text(
+        "dev:\n  type: bigquery\n  project: p\n  dataset: d\n  location: asia-northeast1\n"
+    )
+    loaded = load_profile("dev", config_dir=tmp_path)
+    assert loaded.location == "asia-northeast1"
+
+
+def test_load_profile_bigquery_location_default(tmp_path: Path) -> None:
+    (tmp_path / "profiles.yml").write_text(
+        "dev:\n  type: bigquery\n  project: p\n  dataset: d\n"
+    )
+    loaded = load_profile("dev", config_dir=tmp_path)
+    assert loaded.location == "US"
+
+
 def test_load_profile_missing_file(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="profiles.yml not found"):
         load_profile("dev", config_dir=tmp_path)
