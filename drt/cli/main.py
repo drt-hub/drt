@@ -9,7 +9,12 @@ from typing import TYPE_CHECKING
 import typer
 
 if TYPE_CHECKING:
-    from drt.config.credentials import BigQueryProfile, DuckDBProfile, PostgresProfile
+    from drt.config.credentials import (
+        BigQueryProfile,
+        DuckDBProfile,
+        PostgresProfile,
+        RedshiftProfile,
+    )
     from drt.config.models import SyncConfig
     from drt.destinations.github_actions import GitHubActionsDestination
     from drt.destinations.hubspot import HubSpotDestination
@@ -18,6 +23,7 @@ if TYPE_CHECKING:
     from drt.sources.bigquery import BigQuerySource
     from drt.sources.duckdb import DuckDBSource
     from drt.sources.postgres import PostgresSource
+    from drt.sources.redshift import RedshiftSource
 
 from drt import __version__
 from drt.cli.output import (
@@ -240,12 +246,18 @@ def mcp_run() -> None:
 # ---------------------------------------------------------------------------
 
 def _get_source(
-    profile: BigQueryProfile | DuckDBProfile | PostgresProfile,
-) -> BigQuerySource | DuckDBSource | PostgresSource:
-    from drt.config.credentials import BigQueryProfile, DuckDBProfile, PostgresProfile
+    profile: BigQueryProfile | DuckDBProfile | PostgresProfile | RedshiftProfile,
+) -> BigQuerySource | DuckDBSource | PostgresSource | RedshiftSource:
+    from drt.config.credentials import (
+        BigQueryProfile,
+        DuckDBProfile,
+        PostgresProfile,
+        RedshiftProfile,
+    )
     from drt.sources.bigquery import BigQuerySource
     from drt.sources.duckdb import DuckDBSource
     from drt.sources.postgres import PostgresSource
+    from drt.sources.redshift import RedshiftSource
 
     if isinstance(profile, BigQueryProfile):
         return BigQuerySource()
@@ -253,6 +265,8 @@ def _get_source(
         return DuckDBSource()
     if isinstance(profile, PostgresProfile):
         return PostgresSource()
+    if isinstance(profile, RedshiftProfile):
+        return RedshiftSource()
     raise ValueError(f"Unsupported source type: {type(profile)}")
 
 

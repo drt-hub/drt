@@ -64,8 +64,32 @@ class PostgresProfile:
     password: str | None = None       # explicit (non-recommended)
 
 
+@dataclass
+class RedshiftProfile:
+    """Amazon Redshift profile — PostgreSQL-compatible with schema support.
+
+    Example ~/.drt/profiles.yml:
+        redshift_prod:
+          type: redshift
+          host: my-cluster.xxx.us-east-1.redshift.amazonaws.com
+          port: 5439
+          dbname: analytics
+          user: analyst
+          password_env: REDSHIFT_PASSWORD
+          schema: public
+    """
+    type: Literal["redshift"]
+    host: str = ""
+    port: int = 5439  # Redshift default port
+    dbname: str = ""
+    user: str = ""
+    password_env: str | None = None   # env var name
+    password: str | None = None       # explicit (non-recommended)
+    schema: str = "public"            # Redshift schema
+
+
 # Union type — used throughout the codebase
-ProfileConfig = BigQueryProfile | DuckDBProfile | PostgresProfile
+ProfileConfig = BigQueryProfile | DuckDBProfile | PostgresProfile | RedshiftProfile
 
 
 # ---------------------------------------------------------------------------
@@ -146,9 +170,21 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             password=raw.get("password"),
         )
 
+    if source_type == "redshift":
+        return RedshiftProfile(
+            type="redshift",
+            host=raw.get("host", ""),
+            port=int(raw.get("port", 5439)),
+            dbname=raw.get("dbname", ""),
+            user=raw.get("user", ""),
+            password_env=raw.get("password_env"),
+            password=raw.get("password"),
+            schema=raw.get("schema", "public"),
+        )
+
     raise ValueError(
         f"Unsupported source type '{source_type}'. "
-        "Supported: bigquery, duckdb, postgres"
+        "Supported: bigquery, duckdb, postgres, redshift"
     )
 
 
@@ -185,6 +221,17 @@ def save_profile(
             "port": profile.port,
             "dbname": profile.dbname,
             "user": profile.user,
+        }
+        if profile.password_env:
+            entry["password_env"] = profile.password_env
+    elif isinstance(profile, RedshiftProfile):
+        entry = {
+            "type": "redshift",
+            "host": profile.host,
+            "port": profile.port,
+            "dbname": profile.dbname,
+            "user": profile.user,
+            "schema": profile.schema,
         }
         if profile.password_env:
             entry["password_env"] = profile.password_env
