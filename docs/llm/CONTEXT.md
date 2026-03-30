@@ -112,14 +112,21 @@ The MCP server reads from the current working directory (the drt project root).
 
 ## AI Skills for Claude Code
 
-Four official slash commands in `.claude/commands/`:
+Four skills available via the Claude Code plugin marketplace:
+
+```bash
+/plugin marketplace add drt-hub/drt
+/plugin install drt@drt-hub
+```
 
 | Skill | File | Purpose |
 |-------|------|---------|
-| `/drt-create-sync` | `drt-create-sync.md` | Generate sync YAML from user intent |
-| `/drt-debug` | `drt-debug.md` | Diagnose and fix failing syncs |
-| `/drt-init` | `drt-init.md` | Guide through project initialization |
-| `/drt-migrate` | `drt-migrate.md` | Migrate from Census/Hightouch to drt |
+| `drt-create-sync` | `skills/drt/skills/drt-create-sync/SKILL.md` | Generate sync YAML from user intent |
+| `drt-debug` | `skills/drt/skills/drt-debug/SKILL.md` | Diagnose and fix failing syncs |
+| `drt-init` | `skills/drt/skills/drt-init/SKILL.md` | Guide through project initialization |
+| `drt-migrate` | `skills/drt/skills/drt-migrate/SKILL.md` | Migrate from Census/Hightouch to drt |
+
+Slash command versions also available in `.claude/commands/` for manual installation.
 
 ## Key Concepts
 

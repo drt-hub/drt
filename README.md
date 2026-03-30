@@ -158,7 +158,16 @@ drt mcp run
 
 Install the official Claude Code skills to generate YAML, debug failures, and migrate from other tools — all from the chat interface.
 
-The skills live in `.claude/commands/` in this repo. Copy them to your drt project or reference them directly.
+### Install via Plugin Marketplace (recommended)
+
+```bash
+/plugin marketplace add drt-hub/drt
+/plugin install drt@drt-hub
+```
+
+### Manual install (slash commands)
+
+Copy the files from `.claude/commands/` into your drt project's `.claude/commands/` directory.
 
 | Skill | Trigger | What it does |
 |-------|---------|-------------|
