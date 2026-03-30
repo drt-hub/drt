@@ -24,7 +24,9 @@ from drt.cli.output import (
     console,
     print_error,
     print_init_success,
+    print_row_errors,
     print_status_table,
+    print_status_verbose,
     print_sync_result,
     print_sync_start,
     print_sync_table,
@@ -130,14 +132,8 @@ def run(
         print_sync_result(sync.name, result, time.monotonic() - t0)
         if result.failed > 0:
             had_errors = True
-            if verbose and hasattr(result, "row_errors"):
-                from drt.destinations.row_errors import DetailedSyncResult
-                if isinstance(result, DetailedSyncResult):
-                    for re in result.row_errors:
-                        console.print(
-                            f"    [dim]row {re.batch_index}[/dim] "
-                            f"[red]HTTP {re.http_status}[/red] {re.error_message[:120]}"
-                        )
+            if verbose and result.row_errors:
+                print_row_errors(result.row_errors)
 
     if had_errors:
         raise typer.Exit(1)
@@ -192,12 +188,18 @@ def validate(
 # ---------------------------------------------------------------------------
 
 @app.command()
-def status() -> None:
+def status(
+    verbose: bool = typer.Option(False, "--verbose", help="Show row-level error details."),
+) -> None:
     """Show the status of the most recent sync runs."""
     from drt.state.manager import StateManager
 
     states = StateManager(Path(".")).get_all()
-    print_status_table(states)
+    if verbose:
+        # row_errors are not persisted in state; show table with placeholder for future extension
+        print_status_verbose(states, {})
+    else:
+        print_status_table(states)
 
 
 # ---------------------------------------------------------------------------

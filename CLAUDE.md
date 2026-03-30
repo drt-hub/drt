@@ -50,9 +50,11 @@ make fmt      # ruff format + fix
 
 ## Current Status
 
-- **Phase 1 in progress** — CLI skeleton, config models, BigQuery source stub, REST API destination, State Manager
-- Core protocols are defined but not fully wired in CLI yet
-- No real BigQuery/HTTP calls in tests (use mocks)
+- **v0.2 released** — Incremental sync, retry config, 53 tests passing
+- CLI fully wired: `init`, `run`, `list`, `validate`, `status`
+- Sources: BigQuery, DuckDB, PostgreSQL
+- Destinations: REST API, Slack, GitHub Actions, HubSpot
+- Integration tests use `pytest-httpserver` (no real HTTP mocking)
 
 ## What NOT to do
 
@@ -64,6 +66,7 @@ make fmt      # ruff format + fix
 ## Roadmap Reference
 
 See the roadmap table in README.md. The short version:
-- v0.1: BigQuery → REST API working end-to-end
-- v0.4: MCP Server via FastMCP
+- v0.1 ✅: BigQuery → REST API working end-to-end
+- v0.2 ✅: Incremental sync + retry from config
+- v0.3: MCP Server (`uvx drt mcp run`) + AI Skills for Claude Code + LLM-readable docs
 - v1.x: Rust engine via PyO3
