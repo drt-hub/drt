@@ -15,18 +15,13 @@
 **drt** syncs data from your data warehouse to external services — declaratively, via YAML and CLI.
 Think `dbt run` → `drt run`. Same developer experience, opposite data direction.
 
+<p align="center">
+  <img src="docs/assets/quickstart.gif" alt="drt quickstart demo" width="700">
+</p>
+
 ```bash
-# pip
 pip install drt-core          # core (DuckDB included)
-pip install drt-core[bigquery]  # + BigQuery
-
-# uv (recommended)
-uv add drt-core
-uv add drt-core[bigquery]
-
-drt init
-drt run --dry-run
-drt run
+drt init && drt run
 ```
 
 ---
