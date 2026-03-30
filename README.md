@@ -165,6 +165,9 @@ Install the official Claude Code skills to generate YAML, debug failures, and mi
 /plugin install drt@drt-hub
 ```
 
+> **Tip:** Enable auto-update so you always get the latest skills when drt is updated:
+> `/plugin` → Marketplaces → drt-hub → Enable auto-update
+
 ### Manual install (slash commands)
 
 Copy the files from `.claude/commands/` into your drt project's `.claude/commands/` directory.

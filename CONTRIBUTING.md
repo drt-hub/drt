@@ -107,3 +107,19 @@ Do **not** change the `Source` or `Destination` protocol signatures without prio
 ## Code of Conduct
 
 Be kind, be constructive. We follow the [Contributor Covenant](https://www.contributor-covenant.org/).
+
+## Updating AI Skills
+
+drt ships Claude Code skills via the plugin marketplace (`skills/drt/`). When you update skill content, users only receive the update if the plugin version is bumped.
+
+**Rule: bump the version in all three places whenever any `SKILL.md` changes:**
+
+```bash
+# 1. skills/drt/.claude-plugin/plugin.json
+# 2. .claude-plugin/marketplace.json  (plugin entry version)
+# 3. .claude-plugin/plugin.json       (repo-level version)
+```
+
+Keep the version in sync with `pyproject.toml` (e.g. if releasing `0.4.0`, set all plugin versions to `0.4.0`).
+
+If you add a **new skill**, also add an entry to `skills/drt/.claude-plugin/plugin.json` if needed, and document it in `README.md` and `docs/llm/CONTEXT.md`.
