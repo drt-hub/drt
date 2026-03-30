@@ -50,10 +50,11 @@ make fmt      # ruff format + fix
 
 ## Current Status
 
-- **v0.2 released** — Incremental sync, retry config, 53 tests passing
-- CLI fully wired: `init`, `run`, `list`, `validate`, `status`
+- **v0.3 released** — MCP Server, AI Skills, LLM docs, row-level errors, 82 tests passing
+- CLI fully wired: `init`, `run`, `list`, `validate`, `status`, `mcp run`
 - Sources: BigQuery, DuckDB, PostgreSQL
 - Destinations: REST API, Slack, GitHub Actions, HubSpot
+- MCP Server: `drt mcp run` via `drt-core[mcp]` (FastMCP)
 - Integration tests use `pytest-httpserver` (no real HTTP mocking)
 
 ## What NOT to do
@@ -68,5 +69,5 @@ make fmt      # ruff format + fix
 See the roadmap table in README.md. The short version:
 - v0.1 ✅: BigQuery → REST API working end-to-end
 - v0.2 ✅: Incremental sync + retry from config
-- v0.3: MCP Server (`uvx drt mcp run`) + AI Skills for Claude Code + LLM-readable docs
+- v0.3 ✅: MCP Server + AI Skills for Claude Code + LLM-readable docs + row-level errors
 - v1.x: Rust engine via PyO3
