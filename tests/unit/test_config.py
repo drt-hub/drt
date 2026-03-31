@@ -12,8 +12,10 @@ from drt.config.models import (
     ApiKeyAuth,
     BasicAuth,
     BearerAuth,
+    GoogleSheetsDestinationConfig,
     ProjectConfig,
     RestApiDestinationConfig,
+    SyncConfig,
 )
 from drt.config.parser import load_project, load_syncs
 
@@ -178,3 +180,36 @@ def test_save_profile_appends(tmp_path: Path) -> None:
     data = yaml.safe_load(profiles_path.read_text())
     assert "dev" in data
     assert "prod" in data
+
+
+# ---------------------------------------------------------------------------
+# Google Sheets destination config
+# ---------------------------------------------------------------------------
+
+def test_google_sheets_destination_config_parses() -> None:
+    raw = {
+        "name": "export_to_sheets",
+        "model": "ref('users')",
+        "destination": {
+            "type": "google_sheets",
+            "spreadsheet_id": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms",
+            "sheet": "Sheet1",
+            "mode": "overwrite",
+        },
+    }
+    cfg = SyncConfig(**raw)
+    assert cfg.destination.type == "google_sheets"
+    assert cfg.destination.spreadsheet_id == "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
+    assert cfg.destination.sheet == "Sheet1"
+    assert cfg.destination.mode == "overwrite"
+
+
+def test_google_sheets_destination_defaults() -> None:
+    cfg = GoogleSheetsDestinationConfig(
+        type="google_sheets",
+        spreadsheet_id="abc123",
+    )
+    assert cfg.sheet == "Sheet1"
+    assert cfg.mode == "overwrite"
+    assert cfg.credentials_path is None
+    assert cfg.credentials_env is None

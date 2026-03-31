@@ -92,6 +92,15 @@ class GitHubActionsDestinationConfig(BaseModel):
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
 
 
+class GoogleSheetsDestinationConfig(BaseModel):
+    type: Literal["google_sheets"]
+    spreadsheet_id: str
+    sheet: str = "Sheet1"
+    mode: Literal["overwrite", "append"] = "overwrite"
+    credentials_path: str | None = None
+    credentials_env: str | None = None
+
+
 class HubSpotDestinationConfig(BaseModel):
     type: Literal["hubspot"]
     object_type: Literal["contacts", "deals", "companies"] = "contacts"
@@ -108,7 +117,8 @@ DestinationConfig = Annotated[
     RestApiDestinationConfig
     | SlackDestinationConfig
     | GitHubActionsDestinationConfig
-    | HubSpotDestinationConfig,
+    | HubSpotDestinationConfig
+    | GoogleSheetsDestinationConfig,
     Field(discriminator="type"),
 ]
 
