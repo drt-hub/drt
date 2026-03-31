@@ -130,13 +130,37 @@ class PostgresDestinationConfig(BaseModel):
         return self
 
 
+class MySQLDestinationConfig(BaseModel):
+    type: Literal["mysql"]
+    host: str | None = None
+    host_env: str | None = None
+    port: int = 3306
+    dbname: str | None = None
+    dbname_env: str | None = None
+    user: str | None = None
+    user_env: str | None = None
+    password: str | None = None
+    password_env: str | None = None
+    table: str  # e.g. "interviewer_learning_profiles"
+    upsert_key: list[str]  # columns for ON DUPLICATE KEY
+
+    @model_validator(mode="after")
+    def _check_connection(self) -> "MySQLDestinationConfig":
+        if not self.host and not self.host_env:
+            raise ValueError("Either host or host_env is required.")
+        if not self.dbname and not self.dbname_env:
+            raise ValueError("Either dbname or dbname_env is required.")
+        return self
+
+
 # Discriminated union — add new destination types here
 DestinationConfig = Annotated[
     RestApiDestinationConfig
     | SlackDestinationConfig
     | GitHubActionsDestinationConfig
     | HubSpotDestinationConfig
-    | PostgresDestinationConfig,
+    | PostgresDestinationConfig
+    | MySQLDestinationConfig,
     Field(discriminator="type"),
 ]
 

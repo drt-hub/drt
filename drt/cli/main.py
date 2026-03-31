@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from drt.config.models import SyncConfig
     from drt.destinations.github_actions import GitHubActionsDestination
     from drt.destinations.hubspot import HubSpotDestination
+    from drt.destinations.mysql import MySQLDestination
     from drt.destinations.postgres import PostgresDestination
     from drt.destinations.rest_api import RestApiDestination
     from drt.destinations.slack import SlackDestination
@@ -286,16 +287,19 @@ def _get_destination(
     | GitHubActionsDestination
     | HubSpotDestination
     | PostgresDestination
+    | MySQLDestination
 ):
     from drt.config.models import (
         GitHubActionsDestinationConfig,
         HubSpotDestinationConfig,
+        MySQLDestinationConfig,
         PostgresDestinationConfig,
         RestApiDestinationConfig,
         SlackDestinationConfig,
     )
     from drt.destinations.github_actions import GitHubActionsDestination
     from drt.destinations.hubspot import HubSpotDestination
+    from drt.destinations.mysql import MySQLDestination
     from drt.destinations.postgres import PostgresDestination
     from drt.destinations.rest_api import RestApiDestination
     from drt.destinations.slack import SlackDestination
@@ -311,4 +315,6 @@ def _get_destination(
         return HubSpotDestination()
     if isinstance(dest, PostgresDestinationConfig):
         return PostgresDestination()
+    if isinstance(dest, MySQLDestinationConfig):
+        return MySQLDestination()
     raise ValueError(f"Unsupported destination type: {dest.type}")
