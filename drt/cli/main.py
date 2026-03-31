@@ -274,7 +274,13 @@ def _get_source(
 
 def _get_destination(
     sync: SyncConfig,
-) -> RestApiDestination | SlackDestination | GitHubActionsDestination | HubSpotDestination | GoogleSheetsDestination:
+) -> (
+    RestApiDestination
+    | SlackDestination
+    | GitHubActionsDestination
+    | HubSpotDestination
+    | GoogleSheetsDestination
+):
     from drt.config.models import (
         GitHubActionsDestinationConfig,
         GoogleSheetsDestinationConfig,
