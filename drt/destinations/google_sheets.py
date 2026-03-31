@@ -18,7 +18,6 @@ from typing import Any
 
 from drt.config.models import GoogleSheetsDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
-from drt.destinations.row_errors import DetailedSyncResult
 
 
 def _build_sheets_service(config: GoogleSheetsDestinationConfig) -> Any:
@@ -56,7 +55,7 @@ class GoogleSheetsDestination:
         if not records:
             return SyncResult()
 
-        result = DetailedSyncResult()
+        result = SyncResult()
 
         try:
             service = _build_sheets_service(config)
@@ -95,4 +94,4 @@ class GoogleSheetsDestination:
             result.failed = len(records)
             result.errors.append(str(e))
 
-        return result  # type: ignore[return-value]
+        return result

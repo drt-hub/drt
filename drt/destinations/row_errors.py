@@ -8,6 +8,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from drt.destinations.base import SyncResult
 
 
 @dataclass
@@ -23,24 +27,14 @@ class RowError:
     )
 
 
-@dataclass
 class DetailedSyncResult:
-    """Extended SyncResult with per-row error details.
+    """Factory for SyncResult. Kept for backward compatibility.
 
-    Backward-compatible: exposes the same ``success``, ``failed``,
-    ``skipped``, and ``errors`` attributes as SyncResult.
+    All destinations now return SyncResult directly.
+    This wrapper avoids breaking existing imports.
     """
 
-    success: int = 0
-    failed: int = 0
-    skipped: int = 0
-    row_errors: list[RowError] = field(default_factory=list)
+    def __new__(cls, **kwargs: int) -> SyncResult:  # type: ignore[misc]
+        from drt.destinations.base import SyncResult
 
-    @property
-    def total(self) -> int:
-        return self.success + self.failed + self.skipped
-
-    @property
-    def errors(self) -> list[str]:
-        """Backward-compatible: flat list of error messages."""
-        return [e.error_message for e in self.row_errors]
+        return SyncResult(**kwargs)  # type: ignore[return-value]

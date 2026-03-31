@@ -23,7 +23,7 @@ from typing import Any
 from drt.config.credentials import resolve_env
 from drt.config.models import PostgresDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
-from drt.destinations.row_errors import DetailedSyncResult, RowError
+from drt.destinations.row_errors import RowError
 
 
 class PostgresDestination:
@@ -39,7 +39,7 @@ class PostgresDestination:
             return SyncResult()
 
         conn = self._connect(config)
-        result = DetailedSyncResult()
+        result = SyncResult()
 
         try:
             cur = conn.cursor()
@@ -65,7 +65,7 @@ class PostgresDestination:
                     )
                     if sync_options.on_error == "fail":
                         conn.rollback()
-                        return result  # type: ignore[return-value]
+                        return result
                     # on_error == "skip": rollback this row, continue
                     conn.rollback()
                     # Re-open transaction for next rows
@@ -76,7 +76,7 @@ class PostgresDestination:
         finally:
             conn.close()
 
-        return result  # type: ignore[return-value]
+        return result
 
     @staticmethod
     def _build_upsert_sql(

@@ -41,7 +41,7 @@ from drt.config.models import GitHubActionsDestinationConfig, RetryConfig, SyncO
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
 from drt.destinations.retry import with_retry
-from drt.destinations.row_errors import DetailedSyncResult, RowError
+from drt.destinations.row_errors import RowError
 from drt.templates.renderer import render_template
 
 _GITHUB_API = "https://api.github.com"
@@ -78,7 +78,7 @@ class GitHubActionsDestination:
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
-        result = DetailedSyncResult()
+        result = SyncResult()
         # GitHub rate limit: 1000 workflow_dispatch/hour per repo — be conservative
         rate_limiter = RateLimiter(
             min(sync_options.rate_limit.requests_per_second, 5)
@@ -142,4 +142,4 @@ class GitHubActionsDestination:
                         )
                     )
 
-        return result  # type: ignore[return-value]
+        return result

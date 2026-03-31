@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 
-from drt.destinations.row_errors import DetailedSyncResult, RowError
+from drt.destinations.base import SyncResult
+from drt.destinations.row_errors import RowError
 
 
 class TestRowError:
@@ -65,32 +66,20 @@ class TestRowError:
         assert len(err.record_preview) == 200
 
 
-class TestDetailedSyncResult:
+class TestSyncResultRowErrors:
     def test_initial_state(self) -> None:
-        result = DetailedSyncResult()
+        result = SyncResult()
         assert result.success == 0
         assert result.failed == 0
         assert result.skipped == 0
         assert result.row_errors == []
 
     def test_total_property(self) -> None:
-        result = DetailedSyncResult(success=3, failed=1, skipped=1)
+        result = SyncResult(success=3, failed=1, skipped=1)
         assert result.total == 5
 
-    def test_errors_property_backward_compat(self) -> None:
-        result = DetailedSyncResult()
-        result.row_errors.append(
-            RowError(
-                batch_index=0,
-                record_preview="{}",
-                http_status=500,
-                error_message="server error",
-            )
-        )
-        assert result.errors == ["server error"]
-
     def test_append_row_errors(self) -> None:
-        result = DetailedSyncResult()
+        result = SyncResult()
         for i in range(3):
             result.row_errors.append(
                 RowError(
@@ -101,8 +90,7 @@ class TestDetailedSyncResult:
                 )
             )
         assert len(result.row_errors) == 3
-        assert result.errors == ["error 0", "error 1", "error 2"]
 
-    def test_errors_empty_when_no_row_errors(self) -> None:
-        result = DetailedSyncResult(success=5)
-        assert result.errors == []
+    def test_row_errors_empty_on_success(self) -> None:
+        result = SyncResult(success=5)
+        assert result.row_errors == []

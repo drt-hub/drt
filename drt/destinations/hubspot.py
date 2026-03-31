@@ -52,7 +52,7 @@ from drt.config.models import HubSpotDestinationConfig, RetryConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
 from drt.destinations.retry import with_retry
-from drt.destinations.row_errors import DetailedSyncResult, RowError
+from drt.destinations.row_errors import RowError
 from drt.templates.renderer import render_template
 
 _HUBSPOT_API = "https://api.hubapi.com/crm/v3/objects"
@@ -84,7 +84,7 @@ class HubSpotDestination:
             "Content-Type": "application/json",
         }
         upsert_url = f"{_HUBSPOT_API}/{config.object_type}"
-        result = DetailedSyncResult()
+        result = SyncResult()
         # HubSpot rate limit: 100 req/10s for private apps
         rate_limiter = RateLimiter(
             min(sync_options.rate_limit.requests_per_second, 9)
@@ -161,4 +161,4 @@ class HubSpotDestination:
                         )
                     )
 
-        return result  # type: ignore[return-value]
+        return result

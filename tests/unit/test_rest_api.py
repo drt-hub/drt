@@ -12,8 +12,8 @@ from drt.config.models import (
     RetryConfig,
     SyncOptions,
 )
+from drt.destinations.base import SyncResult
 from drt.destinations.rest_api import RestApiDestination
-from drt.destinations.row_errors import DetailedSyncResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -85,7 +85,8 @@ class TestRestApiDestinationSuccess:
 
             result = RestApiDestination().load([{"id": 1}], config, options)
 
-        assert isinstance(result, DetailedSyncResult)
+        assert isinstance(result, SyncResult)
+        assert hasattr(result, "row_errors")
 
 
 # ---------------------------------------------------------------------------
@@ -205,10 +206,9 @@ class TestRestApiDestinationRowErrors:
 
             result = RestApiDestination().load(records, config, options)
 
-        # errors property should be a flat list of error_message strings
-        assert isinstance(result.errors, list)
-        assert len(result.errors) == 2
-        assert all(isinstance(e, str) for e in result.errors)
+        # row_errors should contain error details for each failed row
+        assert len(result.row_errors) == 2
+        assert all(isinstance(e.error_message, str) for e in result.row_errors)
 
     def test_non_http_exception_creates_row_error(self) -> None:
         records = [{"id": 1}]
