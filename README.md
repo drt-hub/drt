@@ -201,14 +201,17 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 
 ## Roadmap
 
+> **Detailed plans & progress → [GitHub Milestones](https://github.com/drt-hub/drt/milestones)**
+> **Looking to contribute? → [Good First Issues](https://github.com/drt-hub/drt/issues?q=is%3Aopen+label%3A%22good+first+issue%22)**
+
 | Version | Focus |
 |---------|-------|
 | **v0.1** ✅ | BigQuery / DuckDB / Postgres sources · REST API / Slack / GitHub Actions / HubSpot destinations · CLI · dry-run |
 | **v0.2** ✅ | Incremental sync (`cursor_field` watermark) · retry config per-sync |
 | **v0.3** ✅ | MCP Server (`drt mcp run`) · AI Skills for Claude Code · LLM-readable docs · row-level errors · security hardening · Redshift source |
-| v0.4 | Dagster integration · Google Sheets destination · dbt post-hook · examples |
-| v0.5 | Snowflake source · CSV/JSON destination · test coverage |
-| v0.6 | Salesforce destination · Airflow integration |
+| [v0.4](https://github.com/drt-hub/drt/milestone/1) | Dagster integration · Google Sheets destination · dbt post-hook · examples |
+| [v0.5](https://github.com/drt-hub/drt/milestone/2) | Snowflake source · CSV/JSON destination · test coverage |
+| [v0.6](https://github.com/drt-hub/drt/milestone/3) | Salesforce destination · Airflow integration |
 | v1.x | Rust engine (PyO3) |
 
 ---
