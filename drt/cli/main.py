@@ -276,6 +276,7 @@ def _get_destination(
 ) -> RestApiDestination | SlackDestination | GitHubActionsDestination | HubSpotDestination:
     from drt.config.models import (
         GitHubActionsDestinationConfig,
+        GoogleSheetsDestinationConfig,
         HubSpotDestinationConfig,
         RestApiDestinationConfig,
         SlackDestinationConfig,
@@ -294,4 +295,8 @@ def _get_destination(
         return GitHubActionsDestination()
     if isinstance(dest, HubSpotDestinationConfig):
         return HubSpotDestination()
+    if isinstance(dest, GoogleSheetsDestinationConfig):
+        from drt.destinations.google_sheets import GoogleSheetsDestination
+
+        return GoogleSheetsDestination()
     raise ValueError(f"Unsupported destination type: {dest.type}")
