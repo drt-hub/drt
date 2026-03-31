@@ -35,8 +35,8 @@ dbt run && drt run
 Or with [dagster-drt](../integrations/dagster-drt/):
 
 ```python
-from dagster import Definitions, job
-from dagster_dbt import DbtCliResource, dbt_assets
+from dagster import Definitions
+from dagster_dbt import dbt_assets
 from dagster_drt import drt_assets
 
 defs = Definitions(
