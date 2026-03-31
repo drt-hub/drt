@@ -1,0 +1,12 @@
+name: export_to_sheets
+description: "Export user data to Google Sheets"
+model: ref('users')
+destination:
+  type: google_sheets
+  spreadsheet_id: "YOUR_SPREADSHEET_ID"
+  sheet: "Sheet1"
+  mode: overwrite
+  credentials_path: /path/to/service-account-key.json
+sync:
+  mode: full
+  batch_size: 100
