@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from drt.config.models import SyncOptions
+from drt.config.models import DestinationConfig, SyncOptions
 
 if TYPE_CHECKING:
     from drt.destinations.row_errors import RowError
@@ -36,7 +36,7 @@ class Destination(Protocol):
     def load(
         self,
         records: list[dict[str, Any]],
-        config: object,  # specific config type per destination
+        config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult:
         """Send a batch of records to the destination."""

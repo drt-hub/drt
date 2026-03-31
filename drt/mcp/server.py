@@ -97,8 +97,8 @@ def create_server(project_dir: Path | None = None) -> Any:
 
         result = run_sync(
             sync,
-            source,  # type: ignore[arg-type]  # concrete types vs Protocol
-            dest,  # type: ignore[arg-type]
+            source,
+            dest,
             profile,
             _project_dir,
             dry_run,

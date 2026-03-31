@@ -48,7 +48,7 @@ from typing import Any
 import httpx
 
 from drt.config.credentials import resolve_env
-from drt.config.models import HubSpotDestinationConfig, RetryConfig, SyncOptions
+from drt.config.models import DestinationConfig, HubSpotDestinationConfig, RetryConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
 from drt.destinations.retry import with_retry
@@ -69,9 +69,10 @@ class HubSpotDestination:
     def load(
         self,
         records: list[dict[str, Any]],
-        config: HubSpotDestinationConfig,
+        config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult:
+        assert isinstance(config, HubSpotDestinationConfig)
         token = resolve_env(config.auth.token, config.auth.token_env)
         if not token:
             raise ValueError(

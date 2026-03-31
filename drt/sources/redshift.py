@@ -24,7 +24,7 @@ from typing import Any
 
 from psycopg2 import sql
 
-from drt.config.credentials import RedshiftProfile
+from drt.config.credentials import ProfileConfig, RedshiftProfile
 
 
 class RedshiftSource:
@@ -37,8 +37,9 @@ class RedshiftSource:
       - Connection string uses same parameters
     """
 
-    def extract(self, query: str, config: RedshiftProfile) -> Iterator[dict[str, Any]]:
+    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
         """Execute query and yield records as dicts."""
+        assert isinstance(config, RedshiftProfile)
         conn = self._connect(config)
         try:
             cur = conn.cursor()
@@ -52,8 +53,9 @@ class RedshiftSource:
         finally:
             conn.close()
 
-    def test_connection(self, config: RedshiftProfile) -> bool:
+    def test_connection(self, config: ProfileConfig) -> bool:
         """Test if the Redshift cluster is reachable."""
+        assert isinstance(config, RedshiftProfile)
         try:
             conn = self._connect(config)
             cur = conn.cursor()

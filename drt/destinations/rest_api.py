@@ -14,7 +14,7 @@ from typing import Any
 
 import httpx
 
-from drt.config.models import RestApiDestinationConfig, SyncOptions
+from drt.config.models import DestinationConfig, RestApiDestinationConfig, SyncOptions
 from drt.destinations.auth import AuthHandler
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
@@ -29,9 +29,10 @@ class RestApiDestination:
     def load(
         self,
         records: list[dict[str, Any]],
-        config: RestApiDestinationConfig,
+        config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult:
+        assert isinstance(config, RestApiDestinationConfig)
         result = SyncResult()
         auth_headers = AuthHandler(config.auth).get_headers()
         headers = {**config.headers, **auth_headers}

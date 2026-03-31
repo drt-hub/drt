@@ -37,7 +37,12 @@ from typing import Any
 import httpx
 
 from drt.config.credentials import resolve_env
-from drt.config.models import GitHubActionsDestinationConfig, RetryConfig, SyncOptions
+from drt.config.models import (
+    DestinationConfig,
+    GitHubActionsDestinationConfig,
+    RetryConfig,
+    SyncOptions,
+)
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
 from drt.destinations.retry import with_retry
@@ -58,9 +63,10 @@ class GitHubActionsDestination:
     def load(
         self,
         records: list[dict[str, Any]],
-        config: GitHubActionsDestinationConfig,
+        config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult:
+        assert isinstance(config, GitHubActionsDestinationConfig)
         token = resolve_env(config.auth.token, config.auth.token_env)
         if not token:
             raise ValueError(

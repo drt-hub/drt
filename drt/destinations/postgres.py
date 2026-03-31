@@ -21,7 +21,7 @@ import json
 from typing import Any
 
 from drt.config.credentials import resolve_env
-from drt.config.models import PostgresDestinationConfig, SyncOptions
+from drt.config.models import DestinationConfig, PostgresDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 
@@ -32,9 +32,10 @@ class PostgresDestination:
     def load(
         self,
         records: list[dict[str, Any]],
-        config: PostgresDestinationConfig,
+        config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult:
+        assert isinstance(config, PostgresDestinationConfig)
         if not records:
             return SyncResult()
 

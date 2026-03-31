@@ -40,7 +40,7 @@ from typing import Any
 
 import httpx
 
-from drt.config.models import RetryConfig, SlackDestinationConfig, SyncOptions
+from drt.config.models import DestinationConfig, RetryConfig, SlackDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
 from drt.destinations.retry import with_retry
@@ -60,9 +60,10 @@ class SlackDestination:
     def load(
         self,
         records: list[dict[str, Any]],
-        config: SlackDestinationConfig,
+        config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult:
+        assert isinstance(config, SlackDestinationConfig)
         webhook_url = config.webhook_url or (
             os.environ.get(config.webhook_url_env) if config.webhook_url_env else None
         )
@@ -84,10 +85,10 @@ class SlackDestination:
                     else:
                         payload = {"text": rendered}
 
-                    def do_post(
-                        _url: str = webhook_url,  # type: ignore[assignment]
-                        _payload: dict[str, Any] = payload,
-                    ) -> httpx.Response:
+                    _url = webhook_url
+                    _payload = payload
+
+                    def do_post() -> httpx.Response:
                         response = client.post(_url, json=_payload)
                         response.raise_for_status()
                         return response

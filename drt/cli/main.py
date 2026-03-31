@@ -135,7 +135,7 @@ def run(
         print_sync_start(sync.name, dry_run)
         t0 = time.monotonic()
         try:
-            result = run_sync(sync, source, dest, profile, Path("."), dry_run, state_mgr)  # type: ignore[arg-type]
+            result = run_sync(sync, source, dest, profile, Path("."), dry_run, state_mgr)
         except Exception as e:
             print_error(f"[{sync.name}] Unexpected error: {e}")
             had_errors = True

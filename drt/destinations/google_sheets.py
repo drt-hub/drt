@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from drt.config.models import GoogleSheetsDestinationConfig, SyncOptions
+from drt.config.models import DestinationConfig, GoogleSheetsDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 
 
@@ -30,7 +30,7 @@ def _build_sheets_service(config: GoogleSheetsDestinationConfig) -> Any:
     )
 
     if keyfile:
-        creds = service_account.Credentials.from_service_account_file(
+        creds = service_account.Credentials.from_service_account_file(  # type: ignore[no-untyped-call]
             keyfile, scopes=["https://www.googleapis.com/auth/spreadsheets"]
         )
     else:
@@ -49,9 +49,10 @@ class GoogleSheetsDestination:
     def load(
         self,
         records: list[dict[str, Any]],
-        config: GoogleSheetsDestinationConfig,
+        config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult:
+        assert isinstance(config, GoogleSheetsDestinationConfig)
         if not records:
             return SyncResult()
 

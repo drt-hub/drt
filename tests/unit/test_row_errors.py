@@ -1,4 +1,4 @@
-"""Unit tests for RowError and DetailedSyncResult."""
+"""Unit tests for RowError and SyncResult."""
 
 from __future__ import annotations
 

@@ -12,13 +12,17 @@ import pytest
 
 pytest.importorskip("fastmcp", reason="requires drt-core[mcp]")
 
+from typing import Any
+
+from fastmcp import FastMCP  # noqa: E402
+
 from drt.mcp.server import create_server  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-async def call(server, tool_name: str, **kwargs):  # type: ignore[no-untyped-def]
+async def call(server: FastMCP, tool_name: str, **kwargs: Any) -> Any:
     """Call an MCP tool and return the structured result.
 
     FastMCP wraps non-dict returns in {"result": value};
@@ -52,7 +56,7 @@ def project_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
-def server(project_dir: Path):  # type: ignore[no-untyped-def]
+def server(project_dir: Path) -> FastMCP:
     return create_server(project_dir)
 
 
@@ -81,7 +85,7 @@ async def test_server_has_expected_tools() -> None:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_list_syncs_returns_sync(server) -> None:  # type: ignore[no-untyped-def]
+async def test_list_syncs_returns_sync(server: FastMCP) -> None:
     result = await call(server, "drt_list_syncs")
     assert len(result) == 1
     assert result[0]["name"] == "notify"
@@ -102,7 +106,7 @@ async def test_list_syncs_empty_project(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_validate_returns_valid_syncs(server) -> None:  # type: ignore[no-untyped-def]
+async def test_validate_returns_valid_syncs(server: FastMCP) -> None:
     result = await call(server, "drt_validate")
     assert "notify" in result["valid"]
     assert result["errors"] == {}
@@ -113,13 +117,13 @@ async def test_validate_returns_valid_syncs(server) -> None:  # type: ignore[no-
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_get_status_no_history(server) -> None:  # type: ignore[no-untyped-def]
+async def test_get_status_no_history(server: FastMCP) -> None:
     result = await call(server, "drt_get_status")
     assert result == {}
 
 
 @pytest.mark.asyncio
-async def test_get_status_specific_not_found(server) -> None:  # type: ignore[no-untyped-def]
+async def test_get_status_specific_not_found(server: FastMCP) -> None:
     result = await call(server, "drt_get_status", sync_name="nonexistent")
     assert "error" in result
 
@@ -146,14 +150,14 @@ async def test_get_status_after_state_saved(server, project_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_get_schema_sync(server) -> None:  # type: ignore[no-untyped-def]
+async def test_get_schema_sync(server: FastMCP) -> None:
     schema = await call(server, "drt_get_schema", schema_type="sync")
     assert isinstance(schema, dict)
     assert "$defs" in schema or "properties" in schema
 
 
 @pytest.mark.asyncio
-async def test_get_schema_project(server) -> None:  # type: ignore[no-untyped-def]
+async def test_get_schema_project(server: FastMCP) -> None:
     schema = await call(server, "drt_get_schema", schema_type="project")
     assert isinstance(schema, dict)
     assert "$defs" in schema or "properties" in schema

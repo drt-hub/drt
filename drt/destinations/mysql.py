@@ -21,7 +21,7 @@ import json
 from typing import Any
 
 from drt.config.credentials import resolve_env
-from drt.config.models import MySQLDestinationConfig, SyncOptions
+from drt.config.models import DestinationConfig, MySQLDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 
@@ -32,9 +32,10 @@ class MySQLDestination:
     def load(
         self,
         records: list[dict[str, Any]],
-        config: MySQLDestinationConfig,
+        config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult:
+        assert isinstance(config, MySQLDestinationConfig)
         if not records:
             return SyncResult()
 

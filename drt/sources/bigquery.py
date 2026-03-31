@@ -13,21 +13,23 @@ import os
 from collections.abc import Iterator
 from typing import Any
 
-from drt.config.credentials import BigQueryProfile
+from drt.config.credentials import BigQueryProfile, ProfileConfig
 
 
 class BigQuerySource:
     """Extract records from Google BigQuery."""
 
-    def extract(self, query: str, config: BigQueryProfile) -> Iterator[dict[str, Any]]:
+    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
         """Run a SQL query and yield rows as dicts."""
+        assert isinstance(config, BigQueryProfile)
         client = self._build_client(config)
         rows = client.query(query).result()
         for row in rows:
             yield dict(row)
 
-    def test_connection(self, config: BigQueryProfile) -> bool:
+    def test_connection(self, config: ProfileConfig) -> bool:
         """Return True if BigQuery is reachable with the given profile."""
+        assert isinstance(config, BigQueryProfile)
         try:
             client = self._build_client(config)
             client.query("SELECT 1").result()
@@ -46,7 +48,7 @@ class BigQuerySource:
         if config.method == "keyfile" and config.keyfile:
             from google.oauth2 import service_account
 
-            creds = service_account.Credentials.from_service_account_file(
+            creds = service_account.Credentials.from_service_account_file(  # type: ignore[no-untyped-call]
                 os.path.expanduser(config.keyfile)
             )
             return bigquery.Client(
