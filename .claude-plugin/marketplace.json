@@ -11,7 +11,7 @@
       "name": "drt",
       "source": "./skills/drt",
       "description": "Create syncs, debug failures, initialize projects, and migrate from Census/Hightouch to drt",
-      "version": "0.3.4",
+      "version": "0.4.0",
       "license": "Apache-2.0",
       "homepage": "https://github.com/drt-hub/drt",
       "repository": "https://github.com/drt-hub/drt",

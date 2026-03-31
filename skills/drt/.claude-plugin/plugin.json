@@ -1,7 +1,7 @@
 {
   "name": "drt",
   "description": "Skills for drt — create syncs, debug failures, initialize projects, and migrate from Census/Hightouch",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "author": {
     "name": "drt-hub"
   },

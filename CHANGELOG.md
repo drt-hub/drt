@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-03-31
+
+### Added
+
+- **Google Sheets destination** (#64): Overwrite or append mode. Service account or ADC auth. Install: `pip install drt-core[sheets]`
+- **PostgreSQL destination** (#81): Upsert via `INSERT ... ON CONFLICT DO UPDATE`. Row-level error handling
+- **MySQL destination** (#83): Upsert via `INSERT ... ON DUPLICATE KEY UPDATE`. Row-level error handling
+- **dagster-drt integration** (#63): `integrations/dagster-drt/` package. Expose drt syncs as Dagster assets with `drt_assets()`
+- **dbt manifest reader** (#65): `drt.integrations.dbt.resolve_ref_from_manifest()` resolves `ref()` from `target/manifest.json`
+- **Google Sheets example** (#94): `examples/duckdb_to_google_sheets/`
+- **dbt usage guide**: `docs/guides/using-with-dbt.md`
+
+### Refactored
+
+- **Type safety overhaul** (#80, #110): Eliminated 13 `type: ignore` annotations. `Destination.load()` config type `object` → `DestinationConfig`. `Source.extract()` config type narrowed to `ProfileConfig`. `DetailedSyncResult` removed in favor of `SyncResult`. All sources/destinations use `assert isinstance()` for type narrowing
+- **Redshift lazy import** (#78): `RedshiftSource` no longer crashes when `psycopg2` is not installed
+
+### Tests
+
+- 136 tests total (up from 101 in v0.3.4)
+
 ## [0.3.4] - 2026-03-30
 
 ### Added

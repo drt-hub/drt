@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "drt-core"
-version = "0.3.4"
+version = "0.4.0"
 description = "Reverse ETL for the code-first data stack"
 readme = "README.md"
 license = { file = "LICENSE" }
