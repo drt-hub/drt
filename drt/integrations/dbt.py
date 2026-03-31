@@ -34,6 +34,7 @@ def resolve_ref_from_manifest(
 
     for node in nodes.values():
         if node.get("name") == model_name:
-            return node.get("relation_name")
+            rel: str | None = node.get("relation_name")
+            return rel
 
     return None
