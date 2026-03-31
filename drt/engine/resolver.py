@@ -81,10 +81,7 @@ def resolve_model_ref(
     if cursor_field and last_cursor_value:
         safe_field = _validate_cursor_field(cursor_field)
         safe_value = last_cursor_value.replace("'", "''")  # standard SQL escaping
-        return (
-            f"SELECT * FROM ({base_sql}) AS _drt_base"
-            f" WHERE {safe_field} > '{safe_value}'"
-        )
+        return f"SELECT * FROM ({base_sql}) AS _drt_base WHERE {safe_field} > '{safe_value}'"
 
     return base_sql
 

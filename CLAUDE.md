@@ -33,11 +33,16 @@ drt/
 
 ## Protocols (critical interfaces)
 
-- `Source.extract(query, config) -> Iterator[dict]`
-- `Destination.load(records, config) -> SyncResult`
+- `Source.extract(query: str, config: ProfileConfig) -> Iterator[dict]`
+- `Destination.load(records: list[dict], config: DestinationConfig, sync_options: SyncOptions) -> SyncResult`
 - `StateManager.get_last_sync / save_sync`
 
-These interfaces are stable. New sources/destinations implement these protocols — do not change the signatures.
+These interfaces are stable. Implementations must match the Protocol signature exactly (use union types `ProfileConfig` / `DestinationConfig`, then `assert isinstance()` to narrow).
+
+**Type safety rules:**
+- `type: ignore` is prohibited except for external library stub issues (`no-untyped-call`). CI enforces this.
+- Protocol signatures may be improved for type safety via PR (not a breaking change if runtime behavior is unchanged).
+- New sources/destinations must pass `mypy --strict` without `type: ignore`.
 
 ## Development Commands
 
@@ -61,7 +66,7 @@ make fmt      # ruff format + fix
 
 - Do not add a GUI or web UI — this is a CLI-first tool
 - Do not add RBAC or multi-tenancy — small team / personal use
-- Do not change Source/Destination protocol signatures without discussion
+- Do not add `type: ignore` — CI will reject it (except `no-untyped-call` for external libraries)
 - Do not add heavy dependencies to core — extras (`[bigquery]`, `[mcp]`) exist for a reason
 
 ## Roadmap Reference

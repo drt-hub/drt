@@ -16,13 +16,14 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
-from drt.config.credentials import DuckDBProfile
+from drt.config.credentials import DuckDBProfile, ProfileConfig
 
 
 class DuckDBSource:
     """Extract records from a DuckDB database."""
 
-    def extract(self, query: str, config: DuckDBProfile) -> Iterator[dict[str, Any]]:
+    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
+        assert isinstance(config, DuckDBProfile)
         try:
             import duckdb
         except ImportError as e:
@@ -37,9 +38,11 @@ class DuckDBSource:
         finally:
             conn.close()
 
-    def test_connection(self, config: DuckDBProfile) -> bool:
+    def test_connection(self, config: ProfileConfig) -> bool:
+        assert isinstance(config, DuckDBProfile)
         try:
             import duckdb
+
             conn = duckdb.connect(config.database)
             conn.execute("SELECT 1").fetchall()
             conn.close()

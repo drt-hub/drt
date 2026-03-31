@@ -84,9 +84,7 @@ def run_wizard() -> InitAnswers:
             "  Auth method [application_default/keyfile]",
             default="application_default",
         )
-        answers.auth_method = (
-            "keyfile" if raw_method == "keyfile" else "application_default"
-        )
+        answers.auth_method = "keyfile" if raw_method == "keyfile" else "application_default"
         if answers.auth_method == "keyfile":
             answers.keyfile = typer.prompt(
                 "  Path to service account keyfile",
@@ -104,9 +102,7 @@ def run_wizard() -> InitAnswers:
         answers.pg_port = int(typer.prompt("  Port", default="5432"))
         answers.pg_dbname = typer.prompt("  Database name")
         answers.pg_user = typer.prompt("  User")
-        answers.pg_password_env = typer.prompt(
-            "  Env var for password", default="PG_PASSWORD"
-        )
+        answers.pg_password_env = typer.prompt("  Env var for password", default="PG_PASSWORD")
 
     elif source_type == "redshift":
         answers.rs_host = typer.prompt(
@@ -153,9 +149,7 @@ def scaffold_project(answers: InitAnswers, project_dir: Path) -> list[str]:
     example_sync = syncs_dir / "example_sync.yml"
     if not example_sync.exists():
         tmpl = env.get_template("example_sync.yml.j2")
-        example_sync.write_text(
-            tmpl.render(dataset=answers.dataset or "your_dataset")
-        )
+        example_sync.write_text(tmpl.render(dataset=answers.dataset or "your_dataset"))
         created.append(str(example_sync))
 
     # --- .drt/.gitignore (keep state out of git) ---

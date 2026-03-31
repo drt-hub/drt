@@ -53,13 +53,9 @@ class AuthHandler:
             username = os.environ.get(auth.username_env, "")
             password = os.environ.get(auth.password_env, "")
             if not username:
-                raise ValueError(
-                    f"BasicAuth: env var '{auth.username_env}' is not set."
-                )
+                raise ValueError(f"BasicAuth: env var '{auth.username_env}' is not set.")
             if not password:
-                raise ValueError(
-                    f"BasicAuth: env var '{auth.password_env}' is not set."
-                )
+                raise ValueError(f"BasicAuth: env var '{auth.password_env}' is not set.")
             encoded = base64.b64encode(f"{username}:{password}".encode()).decode()
             return {"Authorization": f"Basic {encoded}"}
 

@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 # Auth (shared across destination types)
 # ---------------------------------------------------------------------------
 
+
 class BearerAuth(BaseModel):
     type: Literal["bearer"]
     token: str | None = None
@@ -37,6 +38,7 @@ AuthConfig = Annotated[
 # Source config (inline — kept for backward compat; prefer profiles.yml)
 # ---------------------------------------------------------------------------
 
+
 class SourceConfig(BaseModel):
     type: Literal["bigquery", "snowflake", "postgres", "duckdb"]
     project: str | None = None
@@ -48,6 +50,7 @@ class SourceConfig(BaseModel):
 # Project
 # ---------------------------------------------------------------------------
 
+
 class ProjectConfig(BaseModel):
     name: str
     version: str = "0.1"
@@ -58,6 +61,7 @@ class ProjectConfig(BaseModel):
 # ---------------------------------------------------------------------------
 # Destination configs — discriminated union
 # ---------------------------------------------------------------------------
+
 
 class RestApiDestinationConfig(BaseModel):
     type: Literal["rest_api"]
@@ -84,8 +88,8 @@ class GitHubActionsDestinationConfig(BaseModel):
     type: Literal["github_actions"]
     owner: str
     repo: str
-    workflow_id: str          # filename (e.g. "deploy.yml") or workflow ID
-    ref: str = "main"         # branch/tag to run on
+    workflow_id: str  # filename (e.g. "deploy.yml") or workflow ID
+    ref: str = "main"  # branch/tag to run on
     # Jinja2 template → JSON object for workflow inputs
     # Example: '{"environment": "{{ row.env }}", "version": "{{ row.version }}"}'
     inputs_template: str | None = None
@@ -117,6 +121,7 @@ DestinationConfig = Annotated[
 # Sync options
 # ---------------------------------------------------------------------------
 
+
 class RateLimitConfig(BaseModel):
     requests_per_second: int = 10
 
@@ -140,9 +145,7 @@ class SyncOptions(BaseModel):
     @model_validator(mode="after")
     def _check_incremental_cursor(self) -> "SyncOptions":
         if self.mode == "incremental" and not self.cursor_field:
-            raise ValueError(
-                "cursor_field is required when mode is 'incremental'."
-            )
+            raise ValueError("cursor_field is required when mode is 'incremental'.")
         return self
 
 

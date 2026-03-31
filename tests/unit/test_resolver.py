@@ -16,6 +16,7 @@ def _profile(dataset: str = "my_dataset") -> BigQueryProfile:
 # parse_ref
 # ---------------------------------------------------------------------------
 
+
 def test_parse_ref_single_quotes() -> None:
     assert parse_ref("ref('new_users')") == "new_users"
 
@@ -39,6 +40,7 @@ def test_parse_ref_none_for_table_name() -> None:
 # ---------------------------------------------------------------------------
 # resolve_model_ref
 # ---------------------------------------------------------------------------
+
 
 def test_resolve_ref_to_select(tmp_path: Path) -> None:
     sql = resolve_model_ref("ref('orders')", tmp_path, _profile("sales"))
@@ -67,6 +69,7 @@ def test_resolve_non_ref_string_passthrough(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # incremental cursor injection
 # ---------------------------------------------------------------------------
+
 
 def test_resolve_incremental_injects_where(tmp_path: Path) -> None:
     sql = resolve_model_ref(

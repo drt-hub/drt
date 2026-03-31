@@ -25,13 +25,20 @@ jobs:
         run: pip install uv
 
       - name: Install dependencies
-        run: uv pip install --system -e ".[dev]"
+        run: uv pip install --system -e ".[dev,bigquery,postgres,duckdb,redshift]"
 
       - name: Lint (ruff)
         run: ruff check drt tests
 
       - name: Type check (mypy)
-        run: mypy drt
+        run: mypy drt tests
+
+      - name: No type-ignore allowed
+        run: |
+          if grep -rn "type: ignore" drt/ tests/ --include="*.py" | grep -v "# type: ignore\[no-untyped-call\]"; then
+            echo "::error::Unauthorized type: ignore found. Only external library issues (no-untyped-call) are allowed."
+            exit 1
+          fi
 
       - name: Test (pytest)
         run: pytest

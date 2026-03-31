@@ -4,7 +4,7 @@ Features:
   - Auth header injection (Bearer, API Key, Basic) via AuthHandler
   - Token-bucket rate limiting via RateLimiter
   - Exponential backoff retry via with_retry
-  - Row-level error tracking via DetailedSyncResult
+  - Row-level error tracking via SyncResult
 """
 
 from __future__ import annotations
@@ -14,12 +14,12 @@ from typing import Any
 
 import httpx
 
-from drt.config.models import RestApiDestinationConfig, SyncOptions
+from drt.config.models import DestinationConfig, RestApiDestinationConfig, SyncOptions
 from drt.destinations.auth import AuthHandler
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
 from drt.destinations.retry import with_retry
-from drt.destinations.row_errors import DetailedSyncResult, RowError
+from drt.destinations.row_errors import RowError
 from drt.templates.renderer import render_template
 
 
@@ -29,10 +29,11 @@ class RestApiDestination:
     def load(
         self,
         records: list[dict[str, Any]],
-        config: RestApiDestinationConfig,
+        config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult:
-        result = DetailedSyncResult()
+        assert isinstance(config, RestApiDestinationConfig)
+        result = SyncResult()
         auth_headers = AuthHandler(config.auth).get_headers()
         headers = {**config.headers, **auth_headers}
         rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)
@@ -97,6 +98,4 @@ class RestApiDestination:
                     )
                     result.failed += 1
 
-        # Return as SyncResult-compatible object
-        # DetailedSyncResult has all SyncResult fields + row_errors
-        return result  # type: ignore[return-value]
+        return result

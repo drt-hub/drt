@@ -48,11 +48,11 @@ from typing import Any
 import httpx
 
 from drt.config.credentials import resolve_env
-from drt.config.models import HubSpotDestinationConfig, RetryConfig, SyncOptions
+from drt.config.models import DestinationConfig, HubSpotDestinationConfig, RetryConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
 from drt.destinations.retry import with_retry
-from drt.destinations.row_errors import DetailedSyncResult, RowError
+from drt.destinations.row_errors import RowError
 from drt.templates.renderer import render_template
 
 _HUBSPOT_API = "https://api.hubapi.com/crm/v3/objects"
@@ -69,9 +69,10 @@ class HubSpotDestination:
     def load(
         self,
         records: list[dict[str, Any]],
-        config: HubSpotDestinationConfig,
+        config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult:
+        assert isinstance(config, HubSpotDestinationConfig)
         token = resolve_env(config.auth.token, config.auth.token_env)
         if not token:
             raise ValueError(
@@ -84,11 +85,9 @@ class HubSpotDestination:
             "Content-Type": "application/json",
         }
         upsert_url = f"{_HUBSPOT_API}/{config.object_type}"
-        result = DetailedSyncResult()
+        result = SyncResult()
         # HubSpot rate limit: 100 req/10s for private apps
-        rate_limiter = RateLimiter(
-            min(sync_options.rate_limit.requests_per_second, 9)
-        )
+        rate_limiter = RateLimiter(min(sync_options.rate_limit.requests_per_second, 9))
 
         with httpx.Client(timeout=30.0) as client:
             for i, record in enumerate(records):
@@ -161,4 +160,4 @@ class HubSpotDestination:
                         )
                     )
 
-        return result  # type: ignore[return-value]
+        return result

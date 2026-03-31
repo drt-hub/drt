@@ -13,6 +13,7 @@ from drt.config.credentials import RedshiftProfile  # noqa: E402
 # FakeRedshiftSource (test double)
 # ---------------------------------------------------------------------------
 
+
 class FakeRedshiftSource:
     """Fake Redshift source for testing without a real cluster."""
 
@@ -36,6 +37,7 @@ class FakeRedshiftSource:
 # ---------------------------------------------------------------------------
 # Profile tests
 # ---------------------------------------------------------------------------
+
 
 def test_redshift_profile_defaults() -> None:
     """RedshiftProfile has sensible defaults."""
@@ -64,6 +66,7 @@ def test_redshift_profile_custom_schema() -> None:
 # ---------------------------------------------------------------------------
 # FakeRedshiftSource tests
 # ---------------------------------------------------------------------------
+
 
 def test_fake_redshift_source_extract() -> None:
     """FakeRedshiftSource yields configured rows."""
@@ -123,6 +126,7 @@ def test_fake_redshift_source_empty() -> None:
 # ---------------------------------------------------------------------------
 # Integration with engine (using FakeRedshiftSource)
 # ---------------------------------------------------------------------------
+
 
 def test_redshift_source_with_engine_pattern(tmp_path: pytest.TempPathFactory) -> None:
     """Verify FakeRedshiftSource follows the Source protocol."""

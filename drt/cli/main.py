@@ -65,6 +65,7 @@ def main(
 # init
 # ---------------------------------------------------------------------------
 
+
 @app.command()
 def init() -> None:
     """Initialize a new drt project in the current directory."""
@@ -85,6 +86,7 @@ def init() -> None:
 # ---------------------------------------------------------------------------
 # run
 # ---------------------------------------------------------------------------
+
 
 @app.command()
 def run(
@@ -130,7 +132,7 @@ def run(
         print_sync_start(sync.name, dry_run)
         t0 = time.monotonic()
         try:
-            result = run_sync(sync, source, dest, profile, Path("."), dry_run, state_mgr)  # type: ignore[arg-type]
+            result = run_sync(sync, source, dest, profile, Path("."), dry_run, state_mgr)
         except Exception as e:
             print_error(f"[{sync.name}] Unexpected error: {e}")
             had_errors = True
@@ -149,6 +151,7 @@ def run(
 # list
 # ---------------------------------------------------------------------------
 
+
 @app.command(name="list")
 def list_syncs() -> None:
     """List all sync definitions in the project."""
@@ -161,6 +164,7 @@ def list_syncs() -> None:
 # ---------------------------------------------------------------------------
 # validate
 # ---------------------------------------------------------------------------
+
 
 @app.command()
 def validate(
@@ -192,6 +196,7 @@ def validate(
 # ---------------------------------------------------------------------------
 # status
 # ---------------------------------------------------------------------------
+
 
 @app.command()
 def status(
@@ -244,6 +249,7 @@ def mcp_run() -> None:
 # ---------------------------------------------------------------------------
 # Source / Destination factories
 # ---------------------------------------------------------------------------
+
 
 def _get_source(
     profile: BigQueryProfile | DuckDBProfile | PostgresProfile | RedshiftProfile,

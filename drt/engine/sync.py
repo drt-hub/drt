@@ -73,9 +73,7 @@ def run_sync(
         if prev:
             last_cursor_value = prev.last_cursor_value
 
-    query = resolve_model_ref(
-        sync.model, project_dir, profile, cursor_field, last_cursor_value
-    )
+    query = resolve_model_ref(sync.model, project_dir, profile, cursor_field, last_cursor_value)
 
     records_iter = source.extract(query, profile)
     total_result = SyncResult()
@@ -99,16 +97,17 @@ def run_sync(
         total_result.success += result.success
         total_result.failed += result.failed
         total_result.skipped += result.skipped
-        total_result.errors.extend(result.errors)
-        total_result.row_errors.extend(getattr(result, "row_errors", []))
+        total_result.row_errors.extend(result.row_errors)
 
         if sync.sync.on_error == "fail" and result.failed > 0:
             break
 
     if state_manager is not None:
         status = (
-            "success" if total_result.failed == 0
-            else "partial" if total_result.success > 0
+            "success"
+            if total_result.failed == 0
+            else "partial"
+            if total_result.success > 0
             else "failed"
         )
         state_manager.save_sync(

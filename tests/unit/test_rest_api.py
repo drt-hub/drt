@@ -12,12 +12,13 @@ from drt.config.models import (
     RetryConfig,
     SyncOptions,
 )
+from drt.destinations.base import SyncResult
 from drt.destinations.rest_api import RestApiDestination
-from drt.destinations.row_errors import DetailedSyncResult
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _sync_options(max_attempts: int = 1) -> SyncOptions:
     return SyncOptions(
@@ -56,6 +57,7 @@ def _make_response(status_code: int, text: str = "") -> httpx.Response:
 # Success cases
 # ---------------------------------------------------------------------------
 
+
 class TestRestApiDestinationSuccess:
     def test_all_records_succeed(self) -> None:
         records = [{"id": 1}, {"id": 2}, {"id": 3}]
@@ -85,12 +87,13 @@ class TestRestApiDestinationSuccess:
 
             result = RestApiDestination().load([{"id": 1}], config, options)
 
-        assert isinstance(result, DetailedSyncResult)
+        assert isinstance(result, SyncResult)
 
 
 # ---------------------------------------------------------------------------
 # Failure cases — row_errors populated
 # ---------------------------------------------------------------------------
+
 
 class TestRestApiDestinationRowErrors:
     def test_http_422_creates_row_error(self) -> None:

@@ -74,6 +74,11 @@ ignore_missing_imports = true
 module = "drt.mcp.server"
 disallow_untyped_decorators = false
 
+[[tool.mypy.overrides]]
+# google-auth stubs are incomplete (from_service_account_file is untyped)
+module = "drt.sources.bigquery"
+disallow_untyped_calls = false
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

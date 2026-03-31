@@ -40,11 +40,11 @@ from typing import Any
 
 import httpx
 
-from drt.config.models import RetryConfig, SlackDestinationConfig, SyncOptions
+from drt.config.models import DestinationConfig, RetryConfig, SlackDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
 from drt.destinations.retry import with_retry
-from drt.destinations.row_errors import DetailedSyncResult, RowError
+from drt.destinations.row_errors import RowError
 from drt.templates.renderer import render_template
 
 _DEFAULT_RETRY = RetryConfig(
@@ -60,18 +60,18 @@ class SlackDestination:
     def load(
         self,
         records: list[dict[str, Any]],
-        config: SlackDestinationConfig,
+        config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult:
+        assert isinstance(config, SlackDestinationConfig)
         webhook_url = config.webhook_url or (
             os.environ.get(config.webhook_url_env) if config.webhook_url_env else None
         )
         if not webhook_url:
-            raise ValueError(
-                "Slack destination: provide 'webhook_url' or set 'webhook_url_env'."
-            )
+            raise ValueError("Slack destination: provide 'webhook_url' or set 'webhook_url_env'.")
+        resolved_url: str = webhook_url
 
-        result = DetailedSyncResult()
+        result = SyncResult()
         rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)
 
         with httpx.Client(timeout=30.0) as client:
@@ -85,7 +85,7 @@ class SlackDestination:
                         payload = {"text": rendered}
 
                     def do_post(
-                        _url: str = webhook_url,  # type: ignore[assignment]
+                        _url: str = resolved_url,
                         _payload: dict[str, Any] = payload,
                     ) -> httpx.Response:
                         response = client.post(_url, json=_payload)
@@ -115,4 +115,4 @@ class SlackDestination:
                         )
                     )
 
-        return result  # type: ignore[return-value]
+        return result

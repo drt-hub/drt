@@ -18,13 +18,14 @@ import os
 from collections.abc import Iterator
 from typing import Any
 
-from drt.config.credentials import PostgresProfile
+from drt.config.credentials import PostgresProfile, ProfileConfig
 
 
 class PostgresSource:
     """Extract records from a PostgreSQL database."""
 
-    def extract(self, query: str, config: PostgresProfile) -> Iterator[dict[str, Any]]:
+    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
+        assert isinstance(config, PostgresProfile)
         conn = self._connect(config)
         try:
             cur = conn.cursor()
@@ -35,7 +36,8 @@ class PostgresSource:
         finally:
             conn.close()
 
-    def test_connection(self, config: PostgresProfile) -> bool:
+    def test_connection(self, config: ProfileConfig) -> bool:
+        assert isinstance(config, PostgresProfile)
         try:
             conn = self._connect(config)
             cur = conn.cursor()
@@ -45,7 +47,8 @@ class PostgresSource:
         except Exception:
             return False
 
-    def _connect(self, config: PostgresProfile) -> Any:
+    def _connect(self, config: ProfileConfig) -> Any:
+        assert isinstance(config, PostgresProfile)
         try:
             import psycopg2
         except ImportError as e:

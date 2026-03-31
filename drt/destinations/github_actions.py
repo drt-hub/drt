@@ -37,11 +37,16 @@ from typing import Any
 import httpx
 
 from drt.config.credentials import resolve_env
-from drt.config.models import GitHubActionsDestinationConfig, RetryConfig, SyncOptions
+from drt.config.models import (
+    DestinationConfig,
+    GitHubActionsDestinationConfig,
+    RetryConfig,
+    SyncOptions,
+)
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
 from drt.destinations.retry import with_retry
-from drt.destinations.row_errors import DetailedSyncResult, RowError
+from drt.destinations.row_errors import RowError
 from drt.templates.renderer import render_template
 
 _GITHUB_API = "https://api.github.com"
@@ -58,9 +63,10 @@ class GitHubActionsDestination:
     def load(
         self,
         records: list[dict[str, Any]],
-        config: GitHubActionsDestinationConfig,
+        config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult:
+        assert isinstance(config, GitHubActionsDestinationConfig)
         token = resolve_env(config.auth.token, config.auth.token_env)
         if not token:
             raise ValueError(
@@ -78,11 +84,9 @@ class GitHubActionsDestination:
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
-        result = DetailedSyncResult()
+        result = SyncResult()
         # GitHub rate limit: 1000 workflow_dispatch/hour per repo — be conservative
-        rate_limiter = RateLimiter(
-            min(sync_options.rate_limit.requests_per_second, 5)
-        )
+        rate_limiter = RateLimiter(min(sync_options.rate_limit.requests_per_second, 5))
 
         with httpx.Client(timeout=30.0) as client:
             for i, record in enumerate(records):
@@ -142,4 +146,4 @@ class GitHubActionsDestination:
                         )
                     )
 
-        return result  # type: ignore[return-value]
+        return result
