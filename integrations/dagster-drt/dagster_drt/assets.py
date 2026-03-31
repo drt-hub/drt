@@ -1,14 +1,26 @@
 """Expose drt syncs as Dagster assets."""
-from __future__ import annotations
+
 from pathlib import Path
-from typing import Any
+from typing import Any, Union
+
 from dagster import AssetExecutionContext, AssetsDefinition, asset
 
+
 def drt_assets(
-    project_dir: str | Path,
-    sync_names: list[str] | None = None,
+    project_dir: Union[str, Path],
+    sync_names: Union[list[str], None] = None,
 ) -> list[AssetsDefinition]:
+    """Create Dagster assets from drt sync definitions.
+
+    Args:
+        project_dir: Path to drt project root.
+        sync_names: Optional filter. If None, discovers all syncs.
+
+    Returns:
+        List of Dagster asset definitions.
+    """
     from drt.config.parser import load_syncs
+
     project_path = Path(project_dir)
     syncs = load_syncs(project_path)
     if sync_names:
@@ -20,10 +32,13 @@ def drt_assets(
         sync_desc = sync_config.description
 
         @asset(name=f"drt_{sync_name}", description=sync_desc)
-        def _asset_fn(context: AssetExecutionContext, _sync_cfg: Any = sync_config) -> dict[str, Any]:
+        def _asset_fn(
+            context: AssetExecutionContext,
+            _sync_cfg: Any = sync_config,
+        ) -> dict[str, Any]:
+            from drt.cli.main import _get_destination, _get_source
             from drt.config.credentials import load_profile
             from drt.config.parser import load_project
-            from drt.cli.main import _get_source, _get_destination
             from drt.engine.sync import run_sync
             from drt.state.manager import StateManager
 
@@ -33,8 +48,12 @@ def drt_assets(
             destination = _get_destination(_sync_cfg)
             state_mgr = StateManager(project_path)
 
-            result = run_sync(_sync_cfg, source, destination, profile, project_path, state_manager=state_mgr)
-            context.log.info(f"drt sync '{_sync_cfg.name}': {result.success} synced, {result.failed} failed")
+            result = run_sync(
+                _sync_cfg, source, destination, profile, project_path, state_manager=state_mgr
+            )
+            context.log.info(
+                f"drt sync '{_sync_cfg.name}': {result.success} synced, {result.failed} failed"
+            )
             return {"success": result.success, "failed": result.failed}
 
         assets_list.append(_asset_fn)
