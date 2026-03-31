@@ -23,9 +23,7 @@ def create_server(project_dir: Path | None = None) -> Any:
     try:
         from fastmcp import FastMCP
     except ImportError as e:
-        raise ImportError(
-            "MCP server requires: pip install drt-core[mcp]"
-        ) from e
+        raise ImportError("MCP server requires: pip install drt-core[mcp]") from e
 
     _project_dir = project_dir or Path(".")
 
@@ -98,7 +96,13 @@ def create_server(project_dir: Path | None = None) -> Any:
         state_mgr = StateManager(_project_dir)
 
         result = run_sync(
-            sync, source, dest, profile, _project_dir, dry_run, state_mgr  # type: ignore[arg-type]
+            sync,
+            source,  # type: ignore[arg-type]  # concrete types vs Protocol
+            dest,  # type: ignore[arg-type]
+            profile,
+            _project_dir,
+            dry_run,
+            state_mgr,
         )
 
         return {

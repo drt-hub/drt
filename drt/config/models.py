@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 # Auth (shared across destination types)
 # ---------------------------------------------------------------------------
 
+
 class BearerAuth(BaseModel):
     type: Literal["bearer"]
     token: str | None = None
@@ -37,6 +38,7 @@ AuthConfig = Annotated[
 # Source config (inline — kept for backward compat; prefer profiles.yml)
 # ---------------------------------------------------------------------------
 
+
 class SourceConfig(BaseModel):
     type: Literal["bigquery", "snowflake", "postgres", "duckdb"]
     project: str | None = None
@@ -48,6 +50,7 @@ class SourceConfig(BaseModel):
 # Project
 # ---------------------------------------------------------------------------
 
+
 class ProjectConfig(BaseModel):
     name: str
     version: str = "0.1"
@@ -58,6 +61,7 @@ class ProjectConfig(BaseModel):
 # ---------------------------------------------------------------------------
 # Destination configs — discriminated union
 # ---------------------------------------------------------------------------
+
 
 class RestApiDestinationConfig(BaseModel):
     type: Literal["rest_api"]
@@ -84,8 +88,8 @@ class GitHubActionsDestinationConfig(BaseModel):
     type: Literal["github_actions"]
     owner: str
     repo: str
-    workflow_id: str          # filename (e.g. "deploy.yml") or workflow ID
-    ref: str = "main"         # branch/tag to run on
+    workflow_id: str  # filename (e.g. "deploy.yml") or workflow ID
+    ref: str = "main"  # branch/tag to run on
     # Jinja2 template → JSON object for workflow inputs
     # Example: '{"environment": "{{ row.env }}", "version": "{{ row.version }}"}'
     inputs_template: str | None = None
@@ -103,12 +107,36 @@ class HubSpotDestinationConfig(BaseModel):
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
 
 
+class PostgresDestinationConfig(BaseModel):
+    type: Literal["postgres"]
+    host: str | None = None
+    host_env: str | None = None
+    port: int = 5432
+    dbname: str | None = None
+    dbname_env: str | None = None
+    user: str | None = None
+    user_env: str | None = None
+    password: str | None = None
+    password_env: str | None = None
+    table: str  # e.g. "public.analytics_scores"
+    upsert_key: list[str]  # columns for ON CONFLICT
+
+    @model_validator(mode="after")
+    def _check_connection(self) -> "PostgresDestinationConfig":
+        if not self.host and not self.host_env:
+            raise ValueError("Either host or host_env is required.")
+        if not self.dbname and not self.dbname_env:
+            raise ValueError("Either dbname or dbname_env is required.")
+        return self
+
+
 # Discriminated union — add new destination types here
 DestinationConfig = Annotated[
     RestApiDestinationConfig
     | SlackDestinationConfig
     | GitHubActionsDestinationConfig
-    | HubSpotDestinationConfig,
+    | HubSpotDestinationConfig
+    | PostgresDestinationConfig,
     Field(discriminator="type"),
 ]
 
@@ -116,6 +144,7 @@ DestinationConfig = Annotated[
 # ---------------------------------------------------------------------------
 # Sync options
 # ---------------------------------------------------------------------------
+
 
 class RateLimitConfig(BaseModel):
     requests_per_second: int = 10
@@ -140,9 +169,7 @@ class SyncOptions(BaseModel):
     @model_validator(mode="after")
     def _check_incremental_cursor(self) -> "SyncOptions":
         if self.mode == "incremental" and not self.cursor_field:
-            raise ValueError(
-                "cursor_field is required when mode is 'incremental'."
-            )
+            raise ValueError("cursor_field is required when mode is 'incremental'.")
         return self
 
 

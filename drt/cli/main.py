@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from drt.config.models import SyncConfig
     from drt.destinations.github_actions import GitHubActionsDestination
     from drt.destinations.hubspot import HubSpotDestination
+    from drt.destinations.postgres import PostgresDestination
     from drt.destinations.rest_api import RestApiDestination
     from drt.destinations.slack import SlackDestination
     from drt.sources.bigquery import BigQuerySource
@@ -65,6 +66,7 @@ def main(
 # init
 # ---------------------------------------------------------------------------
 
+
 @app.command()
 def init() -> None:
     """Initialize a new drt project in the current directory."""
@@ -85,6 +87,7 @@ def init() -> None:
 # ---------------------------------------------------------------------------
 # run
 # ---------------------------------------------------------------------------
+
 
 @app.command()
 def run(
@@ -149,6 +152,7 @@ def run(
 # list
 # ---------------------------------------------------------------------------
 
+
 @app.command(name="list")
 def list_syncs() -> None:
     """List all sync definitions in the project."""
@@ -161,6 +165,7 @@ def list_syncs() -> None:
 # ---------------------------------------------------------------------------
 # validate
 # ---------------------------------------------------------------------------
+
 
 @app.command()
 def validate(
@@ -192,6 +197,7 @@ def validate(
 # ---------------------------------------------------------------------------
 # status
 # ---------------------------------------------------------------------------
+
 
 @app.command()
 def status(
@@ -245,6 +251,7 @@ def mcp_run() -> None:
 # Source / Destination factories
 # ---------------------------------------------------------------------------
 
+
 def _get_source(
     profile: BigQueryProfile | DuckDBProfile | PostgresProfile | RedshiftProfile,
 ) -> BigQuerySource | DuckDBSource | PostgresSource | RedshiftSource:
@@ -273,15 +280,23 @@ def _get_source(
 
 def _get_destination(
     sync: SyncConfig,
-) -> RestApiDestination | SlackDestination | GitHubActionsDestination | HubSpotDestination:
+) -> (
+    RestApiDestination
+    | SlackDestination
+    | GitHubActionsDestination
+    | HubSpotDestination
+    | PostgresDestination
+):
     from drt.config.models import (
         GitHubActionsDestinationConfig,
         HubSpotDestinationConfig,
+        PostgresDestinationConfig,
         RestApiDestinationConfig,
         SlackDestinationConfig,
     )
     from drt.destinations.github_actions import GitHubActionsDestination
     from drt.destinations.hubspot import HubSpotDestination
+    from drt.destinations.postgres import PostgresDestination
     from drt.destinations.rest_api import RestApiDestination
     from drt.destinations.slack import SlackDestination
 
@@ -294,4 +309,6 @@ def _get_destination(
         return GitHubActionsDestination()
     if isinstance(dest, HubSpotDestinationConfig):
         return HubSpotDestination()
+    if isinstance(dest, PostgresDestinationConfig):
+        return PostgresDestination()
     raise ValueError(f"Unsupported destination type: {dest.type}")
