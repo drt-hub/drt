@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     )
     from drt.config.models import SyncConfig
     from drt.destinations.github_actions import GitHubActionsDestination
+    from drt.destinations.google_sheets import GoogleSheetsDestination
     from drt.destinations.hubspot import HubSpotDestination
     from drt.destinations.rest_api import RestApiDestination
     from drt.destinations.slack import SlackDestination
@@ -273,7 +274,7 @@ def _get_source(
 
 def _get_destination(
     sync: SyncConfig,
-) -> RestApiDestination | SlackDestination | GitHubActionsDestination | HubSpotDestination:
+) -> RestApiDestination | SlackDestination | GitHubActionsDestination | HubSpotDestination | GoogleSheetsDestination:
     from drt.config.models import (
         GitHubActionsDestinationConfig,
         GoogleSheetsDestinationConfig,
