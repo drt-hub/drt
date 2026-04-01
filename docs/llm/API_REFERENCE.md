@@ -163,6 +163,52 @@ destination:
     token_env: HUBSPOT_TOKEN      # Private App token with CRM write scope
 ```
 
+### `type: google_sheets`
+
+```yaml
+destination:
+  type: google_sheets
+  spreadsheet_id: "1BxiMVs0XRA5nFMd..."   # required: Google Sheets ID from URL
+  sheet: "Sheet1"                           # default: "Sheet1"
+  mode: overwrite                           # "overwrite" (default) | "append"
+  credentials_path: /path/to/sa-key.json   # service account JSON keyfile
+  credentials_env: GOOGLE_SA_KEY_PATH      # or: env var pointing to keyfile
+```
+
+> `overwrite` clears the sheet then writes header + data rows. `append` adds data rows only.
+
+### `type: postgres` (destination)
+
+```yaml
+destination:
+  type: postgres
+  host_env: TARGET_PG_HOST           # env var for host (or use host:)
+  port: 5432                         # default: 5432
+  dbname_env: TARGET_PG_DBNAME       # env var for database name
+  user_env: TARGET_PG_USER           # env var for user
+  password_env: TARGET_PG_PASSWORD   # env var for password
+  table: public.analytics_scores     # required: target table
+  upsert_key: [id]                   # required: columns for ON CONFLICT
+```
+
+> Uses `INSERT ... ON CONFLICT (upsert_key) DO UPDATE SET ...` for idempotent writes.
+
+### `type: mysql`
+
+```yaml
+destination:
+  type: mysql
+  host_env: TARGET_MYSQL_HOST        # env var for host
+  port: 3306                         # default: 3306
+  database_env: TARGET_MYSQL_DB      # env var for database
+  user_env: TARGET_MYSQL_USER        # env var for user
+  password_env: TARGET_MYSQL_PASS    # env var for password
+  table: analytics.scores            # required: target table
+  upsert_key: [id]                   # required: columns for ON DUPLICATE KEY
+```
+
+> Uses `INSERT ... ON DUPLICATE KEY UPDATE ...` for idempotent writes.
+
 ---
 
 ## Auth Configs
@@ -286,6 +332,47 @@ sync:
   mode: incremental
   cursor_field: approved_at
   on_error: fail
+```
+
+### Google Sheets export — overwrite
+
+```yaml
+name: export_to_sheets
+description: "Export user data to Google Sheets"
+model: ref('users')
+
+destination:
+  type: google_sheets
+  spreadsheet_id: "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
+  sheet: "Sheet1"
+  mode: overwrite
+  credentials_path: /path/to/sa-key.json
+
+sync:
+  mode: full
+  batch_size: 100
+```
+
+### PostgreSQL upsert
+
+```yaml
+name: sync_scores
+description: "Upsert analytics scores to target Postgres"
+model: ref('user_scores')
+
+destination:
+  type: postgres
+  host_env: TARGET_PG_HOST
+  dbname_env: TARGET_PG_DBNAME
+  user_env: TARGET_PG_USER
+  password_env: TARGET_PG_PASSWORD
+  table: public.analytics_scores
+  upsert_key: [user_id]
+
+sync:
+  mode: incremental
+  cursor_field: updated_at
+  on_error: skip
 ```
 
 ### REST API with custom auth header

@@ -4,7 +4,7 @@ Create a drt sync YAML configuration file for the user.
 
 1. Ask the user for the following (or infer from context if already provided):
    - **Source table or SQL**: what data to sync (e.g. `ref('new_users')` or a SQL query)
-   - **Destination**: where to send it (Slack, REST API, HubSpot, GitHub Actions, or other)
+   - **Destination**: where to send it (Slack, REST API, HubSpot, GitHub Actions, Google Sheets, PostgreSQL, MySQL, or other)
    - **Sync mode**: full (every run) or incremental (watermark-based, needs a cursor column)
    - **Frequency intent**: helps set `batch_size` and `rate_limit`
 
