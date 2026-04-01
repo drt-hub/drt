@@ -1,3 +1,4 @@
+
 Guide the user through initializing a new drt project.
 
 ## Steps
@@ -17,7 +18,7 @@ Guide the user through initializing a new drt project.
    `drt init` will prompt for:
    - Project name
    - Source type (bigquery / duckdb / postgres)
-   - GCP project + dataset (if BigQuery)
+   - GCP project + dataset + location (if BigQuery)
    - Auth method (Application Default Credentials or keyfile)
 
 3. This creates:
@@ -41,7 +42,7 @@ Guide the user through initializing a new drt project.
    drt list
    ```
 
-6. Offer to create a first sync using `/drt-create-sync`.
+6. Offer to create a first sync using the `drt-create-sync` skill.
 
 ## Tips
 
@@ -49,3 +50,4 @@ Guide the user through initializing a new drt project.
 - Put each sync in a separate `syncs/<name>.yml` file
 - Use `drt run --dry-run` to test without writing data
 - Use `drt status` to check recent run results
+- For non-US BigQuery datasets, set `location` in `profiles.yml` (e.g. `"EU"`, `"asia-northeast1"`)

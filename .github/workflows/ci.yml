@@ -33,5 +33,8 @@ jobs:
       - name: Type check (mypy)
         run: mypy drt
 
+      - name: Check skills sync
+        run: make check-skills
+
       - name: Test (pytest)
         run: pytest
