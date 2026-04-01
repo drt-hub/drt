@@ -112,6 +112,12 @@ class PostgresDestination:
                 "PostgreSQL destination requires: pip install drt-core[postgres]"
             ) from e
 
+        # Connection string takes precedence
+        conn_str = resolve_env(None, config.connection_string_env) if config.connection_string_env else None
+        if conn_str:
+            return psycopg2.connect(conn_str)
+
+        # Fall back to individual parameters
         host = resolve_env(config.host, config.host_env)
         dbname = resolve_env(config.dbname, config.dbname_env)
         user = resolve_env(config.user, config.user_env)

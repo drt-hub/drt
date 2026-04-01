@@ -127,6 +127,7 @@ class SslConfig(BaseModel):
 
 class PostgresDestinationConfig(BaseModel):
     type: Literal["postgres"]
+    connection_string_env: str | None = None
     host: str | None = None
     host_env: str | None = None
     port: int = 5432
@@ -142,15 +143,18 @@ class PostgresDestinationConfig(BaseModel):
 
     @model_validator(mode="after")
     def _check_connection(self) -> "PostgresDestinationConfig":
+        if self.connection_string_env:
+            return self  # connection string takes precedence
         if not self.host and not self.host_env:
-            raise ValueError("Either host or host_env is required.")
+            raise ValueError("Either host, host_env, or connection_string_env is required.")
         if not self.dbname and not self.dbname_env:
-            raise ValueError("Either dbname or dbname_env is required.")
+            raise ValueError("Either dbname, dbname_env, or connection_string_env is required.")
         return self
 
 
 class MySQLDestinationConfig(BaseModel):
     type: Literal["mysql"]
+    connection_string_env: str | None = None
     host: str | None = None
     host_env: str | None = None
     port: int = 3306
@@ -166,10 +170,12 @@ class MySQLDestinationConfig(BaseModel):
 
     @model_validator(mode="after")
     def _check_connection(self) -> "MySQLDestinationConfig":
+        if self.connection_string_env:
+            return self  # connection string takes precedence
         if not self.host and not self.host_env:
-            raise ValueError("Either host or host_env is required.")
+            raise ValueError("Either host, host_env, or connection_string_env is required.")
         if not self.dbname and not self.dbname_env:
-            raise ValueError("Either dbname or dbname_env is required.")
+            raise ValueError("Either dbname, dbname_env, or connection_string_env is required.")
         return self
 
 

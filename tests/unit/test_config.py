@@ -302,3 +302,85 @@ def test_google_sheets_destination_defaults() -> None:
     assert cfg.mode == "overwrite"
     assert cfg.credentials_path is None
     assert cfg.credentials_env is None
+
+
+# ---------------------------------------------------------------------------
+# PostgresDestinationConfig — connection_string_env
+# ---------------------------------------------------------------------------
+
+def test_postgres_config_connection_string_env() -> None:
+    """connection_string_env should be accepted without host/dbname."""
+    cfg = PostgresDestinationConfig(
+        type="postgres",
+        connection_string_env="DATABASE_URL",
+        table="public.scores",
+        upsert_key=["id"],
+    )
+    assert cfg.connection_string_env == "DATABASE_URL"
+    assert cfg.host is None
+    assert cfg.dbname is None
+
+
+def test_postgres_config_individual_params() -> None:
+    """Individual host/dbname params should still work (backward compat)."""
+    cfg = PostgresDestinationConfig(
+        type="postgres",
+        host="localhost",
+        dbname="analytics",
+        table="public.scores",
+        upsert_key=["id"],
+    )
+    assert cfg.host == "localhost"
+    assert cfg.dbname == "analytics"
+    assert cfg.connection_string_env is None
+
+
+def test_postgres_config_no_connection_method_raises() -> None:
+    """Validation should fail when no connection method is provided."""
+    with pytest.raises(ValueError, match="connection_string_env"):
+        PostgresDestinationConfig(
+            type="postgres",
+            table="public.scores",
+            upsert_key=["id"],
+        )
+
+
+# ---------------------------------------------------------------------------
+# MySQLDestinationConfig — connection_string_env
+# ---------------------------------------------------------------------------
+
+def test_mysql_config_connection_string_env() -> None:
+    """connection_string_env should be accepted without host/dbname."""
+    cfg = MySQLDestinationConfig(
+        type="mysql",
+        connection_string_env="MYSQL_URL",
+        table="scores",
+        upsert_key=["id"],
+    )
+    assert cfg.connection_string_env == "MYSQL_URL"
+    assert cfg.host is None
+    assert cfg.dbname is None
+
+
+def test_mysql_config_individual_params() -> None:
+    """Individual host/dbname params should still work (backward compat)."""
+    cfg = MySQLDestinationConfig(
+        type="mysql",
+        host="localhost",
+        dbname="analytics",
+        table="scores",
+        upsert_key=["id"],
+    )
+    assert cfg.host == "localhost"
+    assert cfg.dbname == "analytics"
+    assert cfg.connection_string_env is None
+
+
+def test_mysql_config_no_connection_method_raises() -> None:
+    """Validation should fail when no connection method is provided."""
+    with pytest.raises(ValueError, match="connection_string_env"):
+        MySQLDestinationConfig(
+            type="mysql",
+            table="scores",
+            upsert_key=["id"],
+        )

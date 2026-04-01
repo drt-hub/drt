@@ -180,6 +180,14 @@ destination:
 ### `type: postgres` (destination)
 
 ```yaml
+# Option A: connection string via env var
+destination:
+  type: postgres
+  connection_string_env: DATABASE_URL  # env var with postgres://user:pass@host:5432/dbname
+  table: public.analytics_scores       # required: target table
+  upsert_key: [id]                     # required: columns for ON CONFLICT
+
+# Option B: individual parameters
 destination:
   type: postgres
   host_env: TARGET_PG_HOST           # env var for host (or use host:)
@@ -197,10 +205,19 @@ destination:
 ```
 
 > Uses `INSERT ... ON CONFLICT (upsert_key) DO UPDATE SET ...` for idempotent writes.
+> `connection_string_env` takes precedence over individual parameters when both are set.
 
 ### `type: mysql`
 
 ```yaml
+# Option A: connection string via env var
+destination:
+  type: mysql
+  connection_string_env: MYSQL_URL     # env var with mysql://user:pass@host:3306/dbname
+  table: analytics.scores              # required: target table
+  upsert_key: [id]                     # required: columns for ON DUPLICATE KEY
+
+# Option B: individual parameters
 destination:
   type: mysql
   host_env: TARGET_MYSQL_HOST        # env var for host
@@ -218,6 +235,7 @@ destination:
 ```
 
 > Uses `INSERT ... ON DUPLICATE KEY UPDATE ...` for idempotent writes.
+> `connection_string_env` takes precedence over individual parameters when both are set.
 
 ---
 

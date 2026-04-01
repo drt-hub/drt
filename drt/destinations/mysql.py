@@ -103,6 +103,26 @@ class MySQLDestination:
         except ImportError as e:
             raise ImportError("MySQL destination requires: pip install drt-core[mysql]") from e
 
+        # Connection string takes precedence
+        conn_str = resolve_env(None, config.connection_string_env) if config.connection_string_env else None
+        if conn_str:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(conn_str)
+            kwargs: dict[str, Any] = {
+                "host": parsed.hostname,
+                "port": parsed.port or config.port,
+                "database": parsed.path.lstrip("/"),
+                "charset": "utf8mb4",
+                "autocommit": False,
+            }
+            if parsed.username:
+                kwargs["user"] = parsed.username
+            if parsed.password:
+                kwargs["password"] = parsed.password
+            return pymysql.connect(**kwargs)
+
+        # Fall back to individual parameters
         host = resolve_env(config.host, config.host_env)
         dbname = resolve_env(config.dbname, config.dbname_env)
         user = resolve_env(config.user, config.user_env)
@@ -113,7 +133,7 @@ class MySQLDestination:
         if not dbname:
             raise ValueError("MySQL destination: dbname could not be resolved.")
 
-        kwargs: dict[str, Any] = {
+        kwargs_individual: dict[str, Any] = {
             "host": host,
             "port": config.port,
             "database": dbname,
@@ -121,9 +141,9 @@ class MySQLDestination:
             "autocommit": False,
         }
         if user:
-            kwargs["user"] = user
+            kwargs_individual["user"] = user
         if password:
-            kwargs["password"] = password
+            kwargs_individual["password"] = password
 
         if config.ssl and config.ssl.enabled:
             ssl_dict: dict[str, Any] = {}
@@ -136,6 +156,6 @@ class MySQLDestination:
             key = resolve_env(None, config.ssl.key_env)
             if key:
                 ssl_dict["key"] = key
-            kwargs["ssl"] = ssl_dict
+            kwargs_individual["ssl"] = ssl_dict
 
-        return pymysql.connect(**kwargs)
+        return pymysql.connect(**kwargs_individual)
