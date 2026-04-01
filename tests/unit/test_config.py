@@ -13,8 +13,11 @@ from drt.config.models import (
     BasicAuth,
     BearerAuth,
     GoogleSheetsDestinationConfig,
+    MySQLDestinationConfig,
+    PostgresDestinationConfig,
     ProjectConfig,
     RestApiDestinationConfig,
+    SslConfig,
     SyncConfig,
     SyncOptions,
 )
@@ -235,6 +238,59 @@ def test_sync_options_upsert_in_sync_config() -> None:
     }
     cfg = SyncConfig(**raw)
     assert cfg.sync.mode == "upsert"
+
+
+def test_ssl_config_defaults() -> None:
+    ssl = SslConfig()
+    assert ssl.enabled is False
+    assert ssl.ca_env is None
+    assert ssl.cert_env is None
+    assert ssl.key_env is None
+
+
+def test_ssl_config_full() -> None:
+    ssl = SslConfig(enabled=True, ca_env="SSL_CA", cert_env="SSL_CERT", key_env="SSL_KEY")
+    assert ssl.enabled is True
+    assert ssl.ca_env == "SSL_CA"
+
+
+def test_postgres_destination_with_ssl() -> None:
+    cfg = PostgresDestinationConfig(
+        type="postgres",
+        host="localhost",
+        dbname="testdb",
+        table="t",
+        upsert_key=["id"],
+        ssl=SslConfig(enabled=True, ca_env="PG_SSL_CA"),
+    )
+    assert cfg.ssl is not None
+    assert cfg.ssl.enabled is True
+    assert cfg.ssl.ca_env == "PG_SSL_CA"
+
+
+def test_postgres_destination_without_ssl() -> None:
+    cfg = PostgresDestinationConfig(
+        type="postgres",
+        host="localhost",
+        dbname="testdb",
+        table="t",
+        upsert_key=["id"],
+    )
+    assert cfg.ssl is None
+
+
+def test_mysql_destination_with_ssl() -> None:
+    cfg = MySQLDestinationConfig(
+        type="mysql",
+        host="localhost",
+        dbname="testdb",
+        table="t",
+        upsert_key=["id"],
+        ssl=SslConfig(enabled=True, ca_env="MYSQL_SSL_CA", cert_env="MYSQL_SSL_CERT"),
+    )
+    assert cfg.ssl is not None
+    assert cfg.ssl.enabled is True
+    assert cfg.ssl.ca_env == "MYSQL_SSL_CA"
 
 
 def test_google_sheets_destination_defaults() -> None:

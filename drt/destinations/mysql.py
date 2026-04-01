@@ -125,4 +125,17 @@ class MySQLDestination:
         if password:
             kwargs["password"] = password
 
+        if config.ssl and config.ssl.enabled:
+            ssl_dict: dict[str, Any] = {}
+            ca = resolve_env(None, config.ssl.ca_env)
+            if ca:
+                ssl_dict["ca"] = ca
+            cert = resolve_env(None, config.ssl.cert_env)
+            if cert:
+                ssl_dict["cert"] = cert
+            key = resolve_env(None, config.ssl.key_env)
+            if key:
+                ssl_dict["key"] = key
+            kwargs["ssl"] = ssl_dict
+
         return pymysql.connect(**kwargs)

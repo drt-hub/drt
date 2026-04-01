@@ -116,6 +116,15 @@ class HubSpotDestinationConfig(BaseModel):
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
 
 
+class SslConfig(BaseModel):
+    """SSL/TLS connection options for DB destinations."""
+
+    enabled: bool = False
+    ca_env: str | None = None  # env var for CA cert path
+    cert_env: str | None = None  # env var for client cert path
+    key_env: str | None = None  # env var for client key path
+
+
 class PostgresDestinationConfig(BaseModel):
     type: Literal["postgres"]
     host: str | None = None
@@ -129,6 +138,7 @@ class PostgresDestinationConfig(BaseModel):
     password_env: str | None = None
     table: str  # e.g. "public.analytics_scores"
     upsert_key: list[str]  # columns for ON CONFLICT
+    ssl: SslConfig | None = None
 
     @model_validator(mode="after")
     def _check_connection(self) -> "PostgresDestinationConfig":
@@ -152,6 +162,7 @@ class MySQLDestinationConfig(BaseModel):
     password_env: str | None = None
     table: str  # e.g. "interviewer_learning_profiles"
     upsert_key: list[str]  # columns for ON DUPLICATE KEY
+    ssl: SslConfig | None = None
 
     @model_validator(mode="after")
     def _check_connection(self) -> "MySQLDestinationConfig":
