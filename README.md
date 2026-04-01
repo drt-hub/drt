@@ -39,62 +39,68 @@ drt init && drt run
 
 ## Quickstart
 
+No cloud accounts needed — runs locally with DuckDB in about 5 minutes.
+
 ### 1. Install
 
 ```bash
-pip install drt-core[bigquery]
-# or
-uv add drt-core[bigquery]
+pip install drt-core
 ```
 
-### 2. Initialize a project
+> For cloud sources: `pip install drt-core[bigquery]`, `drt-core[postgres]`, etc.
+
+### 2. Set up a project
 
 ```bash
 mkdir my-drt-project && cd my-drt-project
-drt init
+drt init   # select "duckdb" as source
 ```
 
-This creates:
+### 3. Create sample data
 
+```bash
+python -c "
+import duckdb
+c = duckdb.connect('warehouse.duckdb')
+c.execute('''CREATE TABLE IF NOT EXISTS users AS SELECT * FROM (VALUES
+  (1, 'Alice', 'alice@example.com'),
+  (2, 'Bob',   'bob@example.com'),
+  (3, 'Carol', 'carol@example.com')
+) t(id, name, email)''')
+c.close()
+"
 ```
-my-drt-project/
-├── drt_project.yml   # project config
-└── syncs/            # put your sync definitions here
-```
 
-`drt init` prompts for source type: **bigquery**, **duckdb**, **postgres**, or **redshift**.
-
-### 3. Create a sync
+### 4. Create a sync
 
 ```yaml
-# syncs/notify_slack.yml
-name: notify_slack
-description: "Notify Slack on new users"
-model: ref('new_users')
+# syncs/post_users.yml
+name: post_users
+description: "POST user records to an API"
+model: ref('users')
 destination:
   type: rest_api
-  url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+  url: "https://httpbin.org/post"
   method: POST
   headers:
     Content-Type: "application/json"
   body_template: |
-    { "text": "New user: {{ row.name }} ({{ row.email }})" }
+    { "id": {{ row.id }}, "name": "{{ row.name }}", "email": "{{ row.email }}" }
 sync:
   mode: full
-  batch_size: 100
-  rate_limit:
-    requests_per_second: 5
-  on_error: skip
+  batch_size: 1
+  on_error: fail
 ```
 
-### 4. Run
+### 5. Run
 
 ```bash
-drt run --dry-run        # preview, no data written
-drt run                  # run all syncs
-drt run --select notify_slack  # run one sync
-drt status               # check recent sync results
+drt run --dry-run   # preview, no data sent
+drt run             # run for real
+drt status          # check results
 ```
+
+> See [examples/](examples/) for more: Slack, Google Sheets, HubSpot, GitHub Actions, etc.
 
 ---
 

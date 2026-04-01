@@ -1,6 +1,6 @@
 {
   "name": "drt",
-  "description": "Skills for drt — create syncs, debug failures, initialize projects, and migrate from Census/Hightouch",
+  "description": "Skills for drt \u2014 create syncs, debug failures, initialize projects, and migrate from Census/Hightouch",
   "version": "0.4.0",
   "author": {
     "name": "drt-hub"
@@ -8,5 +8,12 @@
   "license": "Apache-2.0",
   "homepage": "https://github.com/drt-hub/drt",
   "repository": "https://github.com/drt-hub/drt",
-  "keywords": ["reverse-etl", "data-pipeline", "bigquery", "dbt", "dlt", "sync"]
+  "keywords": [
+    "reverse-etl",
+    "data-pipeline",
+    "bigquery",
+    "dbt",
+    "dlt",
+    "sync"
+  ]
 }
