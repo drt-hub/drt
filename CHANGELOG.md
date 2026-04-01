@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-04-01
+
+### Added
+
+- **Upsert sync mode** (#130): `mode: upsert` for explicit intent in YAML — behaves like `mode: full` with `upsert_key`
+- **SSL/TLS for DB destinations** (#131): Optional `ssl` config for PostgreSQL and MySQL with `ca_env`, `cert_env`, `key_env`
+- **Connection string support** (#132): `connection_string_env` for PostgreSQL and MySQL — alternative to individual host/port/dbname params
+- **dagster-drt: DagsterDrtTranslator** (#127): Customise asset keys, group names, deps, and metadata (follows dagster-dbt pattern)
+- **dagster-drt: DrtConfig with dry_run** (#126): RunConfig controllable from Dagster UI, plus `drt_assets(dry_run=True)` for build-time defaults
+- **dagster-drt: MaterializeResult** (#128): Assets return structured metadata (rows_synced, rows_failed, rows_skipped, dry_run, row_errors_count)
+
+### Fixed
+
+- **MySQL type: ignore** (#133): Replaced `# type: ignore[import-untyped]` with `types-PyMySQL` dev dependency
+
 ## [0.4.0] - 2026-03-31
 
 ### Added

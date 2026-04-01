@@ -14,7 +14,7 @@ dlt (load into DWH) → dbt (transform) → drt (activate out of DWH)
 - **Tagline:** "Reverse ETL for the code-first data stack"
 - **Install:** `pip install drt-core` or `uv add drt-core`
 - **Package name:** `drt-core` (PyPI) — CLI command is `drt`
-- **Current version:** v0.4.0
+- **Current version:** v0.4.1
 
 ## What drt is NOT
 
@@ -116,6 +116,28 @@ drt mcp run   # starts stdio MCP server
 
 The MCP server reads from the current working directory (the drt project root).
 
+## Orchestration: dagster-drt
+
+Community-maintained Dagster integration. Install: `pip install dagster-drt`
+
+```python
+from dagster_drt import drt_assets, DagsterDrtTranslator, DrtConfig
+
+# Basic usage
+assets = drt_assets(project_dir="path/to/drt-project")
+
+# Custom translator for group names and deps
+class MyTranslator(DagsterDrtTranslator):
+    def get_group_name(self, sync_config):
+        return "reverse_etl"
+
+assets = drt_assets(
+    project_dir="path/to/drt-project",
+    dagster_drt_translator=MyTranslator(),
+    dry_run=True,  # build-time default
+)
+```
+
 ## AI Skills for Claude Code
 
 Four skills available via the Claude Code plugin marketplace:
@@ -147,6 +169,9 @@ Slash command versions also available in `.claude/commands/` for manual installa
 - drt saves `last_cursor_value` in `.drt/state.json` after each run
 - Next run automatically injects `WHERE <cursor_field> > '<last_value>'`
 - Cursor comparison uses numeric ordering when possible (handles integer/float cursors correctly)
+
+**Upsert mode**: Semantic alias for `mode: full` when `upsert_key` is set. Makes YAML intent explicit.
+- Set `sync.mode: upsert` — behaves identically to `mode: full`
 
 ### Model Reference
 

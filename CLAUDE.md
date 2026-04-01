@@ -50,12 +50,12 @@ make fmt      # ruff format + fix
 
 ## Current Status
 
-- **v0.4.0 released** — Google Sheets, PostgreSQL dest, MySQL dest, dagster-drt, dbt manifest reader
+- **v0.4.1 released** — SSL/TLS + connection_string_env for DB destinations, upsert sync mode, dagster-drt enhancements (Translator, DrtConfig, MaterializeResult)
 - CLI fully wired: `init`, `run`, `list`, `validate`, `status`, `mcp run`
 - Sources: BigQuery, DuckDB, PostgreSQL, Redshift
 - Destinations: REST API, Slack, GitHub Actions, HubSpot, Google Sheets, PostgreSQL, MySQL
 - Integrations: MCP Server (`drt-core[mcp]`), dagster-drt, dbt manifest reader
-- 136 tests, integration tests use `pytest-httpserver`
+- 152+ tests, integration tests use `pytest-httpserver`
 
 ## What NOT to do
 

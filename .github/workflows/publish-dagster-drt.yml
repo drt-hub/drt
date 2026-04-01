@@ -1,9 +1,9 @@
-name: Publish to PyPI
+name: Publish dagster-drt to PyPI
 
 on:
   push:
     tags:
-      - "v*"
+      - "dagster-drt-v*"
 
 jobs:
   publish:
@@ -23,8 +23,11 @@ jobs:
       - name: Install uv
         run: pip install uv
 
-      - name: Build
+      - name: Build dagster-drt
+        working-directory: integrations/dagster-drt
         run: uv build
 
-      - name: Publish to PyPI
+      - name: Publish dagster-drt to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: integrations/dagster-drt/dist/

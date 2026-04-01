@@ -34,9 +34,13 @@ Check that all documentation and version references are consistent before a drt 
    - `.claude/commands/drt-create-sync.md` lists all destinations
    - `skills/drt/skills/drt-create-sync/SKILL.md` lists all destinations
 
-9. **CI** — verify all tests pass: `make test && make lint`
+9. **dagster-drt dependency** — verify:
+   - `integrations/dagster-drt/pyproject.toml` has `drt-core>=` matching or exceeding the version being released
+   - If drt-core has breaking changes, dagster-drt tests still pass
 
-10. **GitHub** — verify:
+10. **CI** — verify all tests pass: `make test && make lint`
+
+11. **GitHub** — verify:
     - All milestone issues are closed or moved
     - No open PRs blocking the release
 

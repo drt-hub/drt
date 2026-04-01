@@ -18,7 +18,7 @@ profile: default          # optional, default: "default" — maps to ~/.drt/prof
 
 ```yaml
 default:
-  type: bigquery            # "bigquery" | "duckdb" | "postgres"
+  type: bigquery            # "bigquery" | "duckdb" | "postgres" | "redshift"
   project: my-gcp-project   # BigQuery: GCP project ID
   dataset: analytics        # BigQuery: dataset name
   location: US              # optional: "US" (default), "EU", "asia-northeast1", etc.
@@ -62,7 +62,7 @@ destination:                # required: see Destination Configs below
   # ... destination-specific fields
 
 sync:                       # optional: all fields have defaults
-  mode: full                # "full" (default) | "incremental" | "upsert"
+  mode: full                # "full" (default) | "incremental" | "upsert"  # "upsert" is a semantic alias for "full" when upsert_key is set
   cursor_field: updated_at  # required when mode=incremental — column name for watermark
   batch_size: 100           # default: 100 — rows per destination call
   on_error: fail            # "fail" (default) | "skip"
@@ -400,6 +400,31 @@ destination:
 sync:
   mode: incremental
   cursor_field: updated_at
+  on_error: skip
+```
+
+### MySQL upsert
+
+```yaml
+name: sync_leads_mysql
+description: "Upsert lead scores to target MySQL"
+model: ref('lead_scores')
+
+destination:
+  type: mysql
+  host_env: TARGET_MYSQL_HOST
+  database_env: TARGET_MYSQL_DB
+  user_env: TARGET_MYSQL_USER
+  password_env: TARGET_MYSQL_PASS
+  table: marketing.lead_scores
+  upsert_key: [lead_id]
+  ssl:
+    enabled: true
+    ca_env: MYSQL_SSL_CA
+
+sync:
+  mode: upsert
+  batch_size: 200
   on_error: skip
 ```
 
