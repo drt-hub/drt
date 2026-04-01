@@ -104,7 +104,11 @@ class MySQLDestination:
             raise ImportError("MySQL destination requires: pip install drt-core[mysql]") from e
 
         # Connection string takes precedence
-        conn_str = resolve_env(None, config.connection_string_env) if config.connection_string_env else None
+        conn_str = (
+            resolve_env(None, config.connection_string_env)
+            if config.connection_string_env
+            else None
+        )
         if conn_str:
             from urllib.parse import urlparse
 
