@@ -1,0 +1,10 @@
+name: export_users 
+source: 
+  type: sqlite 
+  query: SELECT * FROM users 
+destination: 
+  type: sheets 
+  spreadsheet_id: "your_spreadsheet_id" 
+  sheet: "Sheet1" 
+  credentials_path: /path/to/service-account-key.json 
+  mode: overwrite

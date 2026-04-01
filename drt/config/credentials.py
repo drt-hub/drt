@@ -54,6 +54,12 @@ class DuckDBProfile:
 
 
 @dataclass
+class SQLiteProfile:
+    type: Literal["sqlite"]
+    database: str = ":memory:"  # path or :memory:
+    
+       
+@dataclass
 class PostgresProfile:
     type: Literal["postgres"]
     host: str = "localhost"
@@ -89,7 +95,7 @@ class RedshiftProfile:
 
 
 # Union type — used throughout the codebase
-ProfileConfig = BigQueryProfile | DuckDBProfile | PostgresProfile | RedshiftProfile
+ProfileConfig = BigQueryProfile | DuckDBProfile | SQLiteProfile | PostgresProfile | RedshiftProfile
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +165,12 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             type="duckdb",
             database=raw.get("database", ":memory:"),
         )
+        
+    if source_type == "sqlite":
+        return SQLiteProfile(
+            type="sqlite",
+            database=raw.get("database", ":memory:"),
+        )
     if source_type == "postgres":
         return PostgresProfile(
             type="postgres",
@@ -184,7 +196,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
 
     raise ValueError(
         f"Unsupported source type '{source_type}'. "
-        "Supported: bigquery, duckdb, postgres, redshift"
+        "Supported: bigquery, duckdb, sqlite, postgres, redshift"
     )
 
 
@@ -214,6 +226,8 @@ def save_profile(
             entry["keyfile"] = profile.keyfile
     elif isinstance(profile, DuckDBProfile):
         entry = {"type": "duckdb", "database": profile.database}
+    elif isinstance(profile, SQLiteProfile):
+        entry = {"type": "sqlite", "database": profile.database}
     elif isinstance(profile, PostgresProfile):
         entry = {
             "type": "postgres",
