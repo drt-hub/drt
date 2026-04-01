@@ -189,6 +189,11 @@ destination:
   password_env: TARGET_PG_PASSWORD   # env var for password
   table: public.analytics_scores     # required: target table
   upsert_key: [id]                   # required: columns for ON CONFLICT
+  ssl:                               # optional: SSL/TLS connection
+    enabled: true
+    ca_env: PG_SSL_CA                # env var for CA cert path
+    cert_env: PG_SSL_CERT            # env var for client cert path
+    key_env: PG_SSL_KEY              # env var for client key path
 ```
 
 > Uses `INSERT ... ON CONFLICT (upsert_key) DO UPDATE SET ...` for idempotent writes.
@@ -205,6 +210,11 @@ destination:
   password_env: TARGET_MYSQL_PASS    # env var for password
   table: analytics.scores            # required: target table
   upsert_key: [id]                   # required: columns for ON DUPLICATE KEY
+  ssl:                               # optional: SSL/TLS connection
+    enabled: true
+    ca_env: MYSQL_SSL_CA             # env var for CA cert path
+    cert_env: MYSQL_SSL_CERT         # env var for client cert path
+    key_env: MYSQL_SSL_KEY           # env var for client key path
 ```
 
 > Uses `INSERT ... ON DUPLICATE KEY UPDATE ...` for idempotent writes.

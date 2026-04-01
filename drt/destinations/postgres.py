@@ -122,10 +122,24 @@ class PostgresDestination:
         if not dbname:
             raise ValueError("PostgreSQL destination: dbname could not be resolved.")
 
-        return psycopg2.connect(
-            host=host,
-            port=config.port,
-            dbname=dbname,
-            user=user,
-            password=password,
-        )
+        kwargs: dict[str, Any] = {
+            "host": host,
+            "port": config.port,
+            "dbname": dbname,
+            "user": user,
+            "password": password,
+        }
+
+        if config.ssl and config.ssl.enabled:
+            kwargs["sslmode"] = "require"
+            ca = resolve_env(None, config.ssl.ca_env)
+            if ca:
+                kwargs["sslrootcert"] = ca
+            cert = resolve_env(None, config.ssl.cert_env)
+            if cert:
+                kwargs["sslcert"] = cert
+            key = resolve_env(None, config.ssl.key_env)
+            if key:
+                kwargs["sslkey"] = key
+
+        return psycopg2.connect(**kwargs)
