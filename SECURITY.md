@@ -2,11 +2,19 @@
 
 ## Supported Versions
 
+### drt-core
+
 | Version | Supported |
 |---------|-----------|
 | 0.4.x   | ✅        |
 | 0.3.x   | ✅        |
 | < 0.3   | ❌        |
+
+### dagster-drt
+
+| Version | Supported |
+|---------|-----------|
+| 0.1.x   | ✅        |
 
 ## Reporting a Vulnerability
 

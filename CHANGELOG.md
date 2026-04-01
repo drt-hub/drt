@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## dagster-drt
+
+> `dagster-drt` is published as a separate PyPI package with its own version.
+
+### [0.1.0] - 2026-04-01 (dagster-drt)
+
+- First PyPI release (`pip install dagster-drt`)
+- **DagsterDrtTranslator** (#127): Customise asset keys, group names, deps, and metadata (follows dagster-dbt pattern)
+- **DrtConfig with dry_run** (#126): RunConfig controllable from Dagster UI, plus `drt_assets(dry_run=True)` for build-time defaults
+- **MaterializeResult** (#128): Assets return structured metadata (rows_synced, rows_failed, rows_skipped, dry_run, row_errors_count)
+- Requires `drt-core>=0.4.1`
+
+---
+
+## drt-core
+
 ## [0.4.1] - 2026-04-01
 
 ### Added

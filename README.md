@@ -204,6 +204,9 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | **Destination** | Notion | 🗓 planned | (core) |
 | **Destination** | Linear | 🗓 planned | (core) |
 | **Destination** | SendGrid | 🗓 planned | (core) |
+| **Integration** | Dagster | ✅ v0.4 | `pip install dagster-drt` |
+| **Integration** | Airflow | 🗓 v0.6 | `pip install airflow-drt` |
+| **Integration** | dbt manifest reader | ✅ v0.4 | (core) |
 
 ---
 
@@ -221,6 +224,34 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | [v0.5](https://github.com/drt-hub/drt/milestone/2) | Snowflake source · CSV/JSON destination · test coverage |
 | [v0.6](https://github.com/drt-hub/drt/milestone/3) | Salesforce destination · Airflow integration |
 | v1.x | Rust engine (PyO3) |
+
+---
+
+## Orchestration: dagster-drt
+
+Community-maintained [Dagster](https://dagster.io/) integration. Expose drt syncs as Dagster assets with full observability.
+
+```bash
+pip install dagster-drt
+```
+
+```python
+from dagster import Definitions
+from dagster_drt import drt_assets, DagsterDrtTranslator
+
+class MyTranslator(DagsterDrtTranslator):
+    def get_group_name(self, sync_config):
+        return "reverse_etl"
+
+defs = Definitions(
+    assets=drt_assets(
+        project_dir="path/to/drt-project",
+        dagster_drt_translator=MyTranslator(),
+    )
+)
+```
+
+See [dagster-drt README](integrations/dagster-drt/README.md) for full API docs (Translator, DrtConfig dry-run, MaterializeResult).
 
 ---
 
