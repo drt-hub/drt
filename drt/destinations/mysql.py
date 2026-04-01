@@ -99,7 +99,7 @@ class MySQLDestination:
     @staticmethod
     def _connect(config: MySQLDestinationConfig) -> Any:
         try:
-            import pymysql  # type: ignore[import-untyped]
+            import pymysql
         except ImportError as e:
             raise ImportError("MySQL destination requires: pip install drt-core[mysql]") from e
 
