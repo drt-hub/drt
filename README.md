@@ -62,7 +62,7 @@ my-drt-project/
 └── syncs/            # put your sync definitions here
 ```
 
-`drt init` prompts for source type: **bigquery**, **duckdb**, or **postgres**.
+`drt init` prompts for source type: **bigquery**, **duckdb**, **postgres**, or **redshift**.
 
 ### 3. Create a sync
 
@@ -190,7 +190,9 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | **Destination** | Slack Incoming Webhook | ✅ v0.1 | (core) |
 | **Destination** | GitHub Actions (workflow_dispatch) | ✅ v0.1 | (core) |
 | **Destination** | HubSpot (Contacts / Deals / Companies) | ✅ v0.1 | (core) |
-| **Destination** | Google Sheets | 🗓 v0.4 | `pip install drt-core[sheets]` |
+| **Destination** | Google Sheets | ✅ v0.4 | `pip install drt-core[sheets]` |
+| **Destination** | PostgreSQL (upsert) | ✅ v0.4 | `pip install drt-core[postgres]` |
+| **Destination** | MySQL (upsert) | ✅ v0.4 | `pip install drt-core[mysql]` |
 | **Destination** | CSV / JSON file | 🗓 v0.5 | (core) |
 | **Destination** | Salesforce | 🗓 v0.6 | `pip install drt-core[salesforce]` |
 | **Destination** | Notion | 🗓 planned | (core) |
@@ -209,7 +211,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | **v0.1** ✅ | BigQuery / DuckDB / Postgres sources · REST API / Slack / GitHub Actions / HubSpot destinations · CLI · dry-run |
 | **v0.2** ✅ | Incremental sync (`cursor_field` watermark) · retry config per-sync |
 | **v0.3** ✅ | MCP Server (`drt mcp run`) · AI Skills for Claude Code · LLM-readable docs · row-level errors · security hardening · Redshift source |
-| [v0.4](https://github.com/drt-hub/drt/milestone/1) | Dagster integration · Google Sheets destination · dbt post-hook · examples |
+| **v0.4** ✅ | Google Sheets / PostgreSQL / MySQL destinations · dagster-drt · dbt manifest reader · type safety overhaul |
 | [v0.5](https://github.com/drt-hub/drt/milestone/2) | Snowflake source · CSV/JSON destination · test coverage |
 | [v0.6](https://github.com/drt-hub/drt/milestone/3) | Salesforce destination · Airflow integration |
 | v1.x | Rust engine (PyO3) |
