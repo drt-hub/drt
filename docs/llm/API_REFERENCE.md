@@ -62,7 +62,7 @@ destination:                # required: see Destination Configs below
   # ... destination-specific fields
 
 sync:                       # optional: all fields have defaults
-  mode: full                # "full" (default) | "incremental"
+  mode: full                # "full" (default) | "incremental" | "upsert"
   cursor_field: updated_at  # required when mode=incremental — column name for watermark
   batch_size: 100           # default: 100 — rows per destination call
   on_error: fail            # "fail" (default) | "skip"

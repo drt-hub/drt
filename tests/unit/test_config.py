@@ -16,6 +16,7 @@ from drt.config.models import (
     ProjectConfig,
     RestApiDestinationConfig,
     SyncConfig,
+    SyncOptions,
 )
 from drt.config.parser import load_project, load_syncs
 
@@ -202,6 +203,38 @@ def test_google_sheets_destination_config_parses() -> None:
     assert cfg.destination.spreadsheet_id == "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
     assert cfg.destination.sheet == "Sheet1"
     assert cfg.destination.mode == "overwrite"
+
+
+# ---------------------------------------------------------------------------
+# SyncOptions — upsert mode
+# ---------------------------------------------------------------------------
+
+def test_sync_options_upsert_mode_accepted() -> None:
+    """mode='upsert' is valid and behaves like 'full' (no cursor_field required)."""
+    opts = SyncOptions(mode="upsert")
+    assert opts.mode == "upsert"
+    assert opts.cursor_field is None
+
+
+def test_sync_options_full_mode_still_works() -> None:
+    """Backward compat: mode='full' remains the default."""
+    opts = SyncOptions()
+    assert opts.mode == "full"
+
+
+def test_sync_options_upsert_in_sync_config() -> None:
+    """mode='upsert' works end-to-end inside a SyncConfig."""
+    raw = {
+        "name": "upsert_sync",
+        "model": "ref('scores')",
+        "destination": {
+            "type": "rest_api",
+            "url": "https://example.com/api",
+        },
+        "sync": {"mode": "upsert"},
+    }
+    cfg = SyncConfig(**raw)
+    assert cfg.sync.mode == "upsert"
 
 
 def test_google_sheets_destination_defaults() -> None:

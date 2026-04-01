@@ -193,7 +193,7 @@ class RetryConfig(BaseModel):
 
 
 class SyncOptions(BaseModel):
-    mode: Literal["full", "incremental"] = "full"
+    mode: Literal["full", "incremental", "upsert"] = "full"
     cursor_field: str | None = None  # required when mode=incremental
     batch_size: int = 100
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
