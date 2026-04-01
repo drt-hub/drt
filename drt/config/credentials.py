@@ -88,8 +88,30 @@ class RedshiftProfile:
     schema: str = "public"            # Redshift schema
 
 
+@dataclass
+class MySQLProfile:
+    """MySQL profile for extracting data from MySQL databases.
+
+    Example ~/.drt/profiles.yml:
+        mysql:
+          type: mysql
+          host: localhost
+          port: 3306
+          dbname: analytics
+          user: analyst
+          password_env: MYSQL_PASSWORD
+    """
+    type: Literal["mysql"]
+    host: str = "localhost"
+    port: int = 3306  # MySQL default port
+    dbname: str = ""
+    user: str = ""
+    password_env: str | None = None   # env var name
+    password: str | None = None       # explicit (non-recommended)
+
+
 # Union type — used throughout the codebase
-ProfileConfig = BigQueryProfile | DuckDBProfile | PostgresProfile | RedshiftProfile
+ProfileConfig = BigQueryProfile | DuckDBProfile | PostgresProfile | RedshiftProfile | MySQLProfile
 
 
 # ---------------------------------------------------------------------------
@@ -182,9 +204,20 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             schema=raw.get("schema", "public"),
         )
 
+    if source_type == "mysql":
+        return MySQLProfile(
+            type="mysql",
+            host=raw.get("host", "localhost"),
+            port=int(raw.get("port", 3306)),
+            dbname=raw.get("dbname", ""),
+            user=raw.get("user", ""),
+            password_env=raw.get("password_env"),
+            password=raw.get("password"),
+        )
+
     raise ValueError(
         f"Unsupported source type '{source_type}'. "
-        "Supported: bigquery, duckdb, postgres, redshift"
+        "Supported: bigquery, duckdb, postgres, redshift, mysql"
     )
 
 
@@ -232,6 +265,16 @@ def save_profile(
             "dbname": profile.dbname,
             "user": profile.user,
             "schema": profile.schema,
+        }
+        if profile.password_env:
+            entry["password_env"] = profile.password_env
+    elif isinstance(profile, MySQLProfile):
+        entry = {
+            "type": "mysql",
+            "host": profile.host,
+            "port": profile.port,
+            "dbname": profile.dbname,
+            "user": profile.user,
         }
         if profile.password_env:
             entry["password_env"] = profile.password_env

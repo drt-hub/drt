@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from drt.config.credentials import (
         BigQueryProfile,
         DuckDBProfile,
+        MySQLProfile,
         PostgresProfile,
         RedshiftProfile,
     )
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from drt.destinations.slack import SlackDestination
     from drt.sources.bigquery import BigQuerySource
     from drt.sources.duckdb import DuckDBSource
+    from drt.sources.mysql import MySQLSource
     from drt.sources.postgres import PostgresSource
     from drt.sources.redshift import RedshiftSource
 
@@ -255,16 +257,18 @@ def mcp_run() -> None:
 
 
 def _get_source(
-    profile: BigQueryProfile | DuckDBProfile | PostgresProfile | RedshiftProfile,
-) -> BigQuerySource | DuckDBSource | PostgresSource | RedshiftSource:
+    profile: BigQueryProfile | DuckDBProfile | MySQLProfile | PostgresProfile | RedshiftProfile,
+) -> BigQuerySource | DuckDBSource | MySQLSource | PostgresSource | RedshiftSource:
     from drt.config.credentials import (
         BigQueryProfile,
         DuckDBProfile,
+        MySQLProfile,
         PostgresProfile,
         RedshiftProfile,
     )
     from drt.sources.bigquery import BigQuerySource
     from drt.sources.duckdb import DuckDBSource
+    from drt.sources.mysql import MySQLSource
     from drt.sources.postgres import PostgresSource
 
     if isinstance(profile, BigQueryProfile):
@@ -273,6 +277,8 @@ def _get_source(
         return DuckDBSource()
     if isinstance(profile, PostgresProfile):
         return PostgresSource()
+    if isinstance(profile, MySQLProfile):
+        return MySQLSource()
     if isinstance(profile, RedshiftProfile):
         from drt.sources.redshift import RedshiftSource
 
