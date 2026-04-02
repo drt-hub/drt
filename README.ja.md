@@ -1,3 +1,7 @@
+[English](./README.md) | [日本語](./README.ja.md)
+
+> **Note:** この翻訳は最新でない可能性があります。正確な情報は [README.md](README.md) を参照してください。
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/drt-hub/.github/main/profile/assets/logo-dark.svg">
   <img src="https://raw.githubusercontent.com/drt-hub/.github/main/profile/assets/logo.svg" alt="drt logo" width="200">
