@@ -13,12 +13,11 @@ Example ~/.drt/profiles.yml:
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from typing import Any
 
-import sqlite3
-
-from drt.config.credentials import SQLiteProfile, ProfileConfig
+from drt.config.credentials import ProfileConfig, SQLiteProfile
 
 
 class SQLiteSource:
