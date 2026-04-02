@@ -40,7 +40,7 @@ AuthConfig = Annotated[
 
 
 class SourceConfig(BaseModel):
-    type: Literal["bigquery", "snowflake", "postgres", "duckdb"]
+    type: Literal["bigquery", "snowflake", "postgres", "duckdb", "clickhouse"]
     project: str | None = None
     dataset: str | None = None
     credentials: str | None = None

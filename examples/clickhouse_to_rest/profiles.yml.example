@@ -1,0 +1,7 @@
+dev:
+  type: clickhouse
+  host: localhost
+  port: 8123
+  database: default
+  user: default
+  password_env: CLICKHOUSE_PASSWORD

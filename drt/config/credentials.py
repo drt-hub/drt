@@ -93,9 +93,20 @@ class RedshiftProfile:
     password: str | None = None       # explicit (non-recommended)
     schema: str = "public"            # Redshift schema
 
+@dataclass
+class ClickHouseProfile:
+    """ClickHouse profile via HTTP/s using clickhouse-connect."""
+    type: Literal["clickhouse"]
+    host: str = "localhost"
+    port: int = 8123
+    database: str = "default"
+    user: str = "default"
+    password_env: str | None = None   # env var name
+    password: str | None = None       # explicit (non-recommended)
+
 
 # Union type — used throughout the codebase
-ProfileConfig = BigQueryProfile | DuckDBProfile | SQLiteProfile | PostgresProfile | RedshiftProfile
+ProfileConfig = BigQueryProfile | DuckDBProfile | SQLiteProfile | PostgresProfile | RedshiftProfile | ClickHouseProfile
 
 
 # ---------------------------------------------------------------------------
@@ -194,9 +205,20 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             schema=raw.get("schema", "public"),
         )
 
+    if source_type == "clickhouse":
+        return ClickHouseProfile(
+            type="clickhouse",
+            host=raw.get("host", "localhost"),
+            port=int(raw.get("port", 8123)),
+            database=raw.get("database", "default"),
+            user=raw.get("user", "default"),
+            password_env=raw.get("password_env"),
+            password=raw.get("password"),
+        )
+
     raise ValueError(
         f"Unsupported source type '{source_type}'. "
-        "Supported: bigquery, duckdb, sqlite, postgres, redshift"
+        "Supported: bigquery, duckdb, sqlite, postgres, redshift, clickhouse"
     )
 
 
@@ -246,6 +268,16 @@ def save_profile(
             "dbname": profile.dbname,
             "user": profile.user,
             "schema": profile.schema,
+        }
+        if profile.password_env:
+            entry["password_env"] = profile.password_env
+    elif isinstance(profile, ClickHouseProfile):
+        entry = {
+            "type": "clickhouse",
+            "host": profile.host,
+            "port": profile.port,
+            "database": profile.database,
+            "user": profile.user,
         }
         if profile.password_env:
             entry["password_env"] = profile.password_env

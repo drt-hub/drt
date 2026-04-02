@@ -11,6 +11,7 @@ import typer
 if TYPE_CHECKING:
     from drt.config.credentials import (
         BigQueryProfile,
+        ClickHouseProfile,
         DuckDBProfile,
         PostgresProfile,
         RedshiftProfile,
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
     from drt.destinations.rest_api import RestApiDestination
     from drt.destinations.slack import SlackDestination
     from drt.sources.bigquery import BigQuerySource
+    from drt.sources.clickhouse import ClickHouseSource
     from drt.sources.duckdb import DuckDBSource
     from drt.sources.postgres import PostgresSource
     from drt.sources.redshift import RedshiftSource
@@ -258,10 +260,11 @@ def mcp_run() -> None:
 
 
 def _get_source(
-    profile: BigQueryProfile | DuckDBProfile | SQLiteProfile | PostgresProfile | RedshiftProfile,
-) -> BigQuerySource | DuckDBSource | SQLiteSource | PostgresSource | RedshiftSource:
+    profile: BigQueryProfile | DuckDBProfile | SQLiteProfile | PostgresProfile | RedshiftProfile | ClickHouseProfile,
+) -> BigQuerySource | DuckDBSource | SQLiteSource | PostgresSource | RedshiftSource | ClickHouseSource:
     from drt.config.credentials import (
         BigQueryProfile,
+        ClickHouseProfile,
         DuckDBProfile,
         PostgresProfile,
         RedshiftProfile,
@@ -284,6 +287,9 @@ def _get_source(
         from drt.sources.redshift import RedshiftSource
 
         return RedshiftSource()
+    if isinstance(profile, ClickHouseProfile):
+        from drt.sources.clickhouse import ClickHouseSource
+        return ClickHouseSource()
     raise ValueError(f"Unsupported source type: {type(profile)}")
 
 

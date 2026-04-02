@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## drt-core
 
+## [0.4.3] - 2026-04-02
+
+### Added
+
+- **ClickHouse source connector** (#148): High-performance source using `clickhouse-connect` (HTTP interface). Supports host, port, database, user, and password/password_env. Includes `examples/clickhouse_to_rest/`.
+
 ## [0.4.2] - 2026-04-02
 
 ### Added
