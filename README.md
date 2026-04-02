@@ -3,6 +3,8 @@
   <img src="https://raw.githubusercontent.com/drt-hub/.github/main/profile/assets/logo.svg" alt="drt logo" width="200">
 </picture>
 
+[English](./README.md) | [日本語](./README.ja.md)
+
 # drt — data reverse tool
 
 > Reverse ETL for the code-first data stack.
