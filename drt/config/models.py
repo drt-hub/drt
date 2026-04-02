@@ -191,6 +191,15 @@ class MySQLDestinationConfig(BaseModel):
         return self
 
 
+class LineNotifyDestinationConfig(BaseModel):
+    type: Literal["line_notify"]
+    token: str | None = None
+    token_env: str | None = None
+    # Jinja2 template for LINE Notify message.
+    # Example: "New user: {{ row.name }} ({{ row.email }})"
+    message_template: str = "{{ row }}"
+
+
 # Discriminated union — add new destination types here
 DestinationConfig = Annotated[
     RestApiDestinationConfig
@@ -200,7 +209,8 @@ DestinationConfig = Annotated[
     | HubSpotDestinationConfig
     | GoogleSheetsDestinationConfig
     | PostgresDestinationConfig
-    | MySQLDestinationConfig,
+    | MySQLDestinationConfig
+    | LineNotifyDestinationConfig,
     Field(discriminator="type"),
 ]
 
