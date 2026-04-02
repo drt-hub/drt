@@ -1,0 +1,9 @@
+# Copy this file to profiles.yml and fill in your values
+# For Discord, you need to create a webhook in your Discord server:
+# 1. Go to Server Settings > Integrations > Webhooks
+# 2. Click "Create Webhook"
+# 3. Copy the Webhook URL
+
+local:
+  type: duckdb
+  database: ":memory:"  # Or path to your DuckDB file

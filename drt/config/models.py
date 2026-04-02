@@ -84,6 +84,18 @@ class SlackDestinationConfig(BaseModel):
     block_kit: bool = False
 
 
+class DiscordDestinationConfig(BaseModel):
+    type: Literal["discord"]
+    webhook_url: str | None = None
+    webhook_url_env: str | None = None
+    # Jinja2 template for Discord message. Supports plain text or embeds JSON.
+    # Plain text example: "New user: {{ row.name }} ({{ row.email }})"
+    # Embeds: full JSON payload with "embeds" array
+    message_template: str = "{{ row }}"
+    # If True, treat message_template as a JSON payload with embeds
+    embeds: bool = False
+
+
 class GitHubActionsDestinationConfig(BaseModel):
     type: Literal["github_actions"]
     owner: str
@@ -183,6 +195,7 @@ class MySQLDestinationConfig(BaseModel):
 DestinationConfig = Annotated[
     RestApiDestinationConfig
     | SlackDestinationConfig
+    | DiscordDestinationConfig
     | GitHubActionsDestinationConfig
     | HubSpotDestinationConfig
     | GoogleSheetsDestinationConfig
