@@ -13,7 +13,6 @@ import pytest
 from drt.config.credentials import ClickHouseProfile
 from drt.sources.clickhouse import ClickHouseSource
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -69,7 +68,7 @@ class TestClickHouseSource:
         mock_client = _fake_client()
         with patch.object(ClickHouseSource, "_connect", return_value=mock_client):
             assert source.test_connection(config) is True
-        
+
         mock_client.query.assert_called_with("SELECT 1")
         mock_client.close.assert_called_once()
 
@@ -91,13 +90,12 @@ class TestClickHouseSource:
     def test_connect_parameters(self) -> None:
         source = ClickHouseSource()
         config = _config(user="analyst", database="prod")
-        
-        with patch("clickhouse_connect.get_client") as mock_get_client:
-            # We also need to mock the import or ensure the module is available
-            # Since we installed it with uv pip install, it should be available.
+
+        mock_module = MagicMock()
+        with patch.dict("sys.modules", {"clickhouse_connect": mock_module}):
             source._connect(config)
-            
-            mock_get_client.assert_called_once_with(
+
+            mock_module.get_client.assert_called_once_with(
                 host="localhost",
                 port=8123,
                 database="prod",

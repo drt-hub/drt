@@ -260,8 +260,22 @@ def mcp_run() -> None:
 
 
 def _get_source(
-    profile: BigQueryProfile | DuckDBProfile | SQLiteProfile | PostgresProfile | RedshiftProfile | ClickHouseProfile,
-) -> BigQuerySource | DuckDBSource | SQLiteSource | PostgresSource | RedshiftSource | ClickHouseSource:
+    profile: (
+        BigQueryProfile
+        | DuckDBProfile
+        | SQLiteProfile
+        | PostgresProfile
+        | RedshiftProfile
+        | ClickHouseProfile
+    ),
+) -> (
+    BigQuerySource
+    | DuckDBSource
+    | SQLiteSource
+    | PostgresSource
+    | RedshiftSource
+    | ClickHouseSource
+):
     from drt.config.credentials import (
         BigQueryProfile,
         ClickHouseProfile,
@@ -289,6 +303,7 @@ def _get_source(
         return RedshiftSource()
     if isinstance(profile, ClickHouseProfile):
         from drt.sources.clickhouse import ClickHouseSource
+
         return ClickHouseSource()
     raise ValueError(f"Unsupported source type: {type(profile)}")
 

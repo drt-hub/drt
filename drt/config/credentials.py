@@ -37,6 +37,7 @@ import yaml
 # Source profile types
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class BigQueryProfile:
     type: Literal["bigquery"]
@@ -66,8 +67,8 @@ class PostgresProfile:
     port: int = 5432
     dbname: str = ""
     user: str = ""
-    password_env: str | None = None   # env var name
-    password: str | None = None       # explicit (non-recommended)
+    password_env: str | None = None  # env var name
+    password: str | None = None  # explicit (non-recommended)
 
 
 @dataclass
@@ -84,34 +85,45 @@ class RedshiftProfile:
           password_env: REDSHIFT_PASSWORD
           schema: public
     """
+
     type: Literal["redshift"]
     host: str = ""
     port: int = 5439  # Redshift default port
     dbname: str = ""
     user: str = ""
-    password_env: str | None = None   # env var name
-    password: str | None = None       # explicit (non-recommended)
-    schema: str = "public"            # Redshift schema
+    password_env: str | None = None  # env var name
+    password: str | None = None  # explicit (non-recommended)
+    schema: str = "public"  # Redshift schema
+
 
 @dataclass
 class ClickHouseProfile:
     """ClickHouse profile via HTTP/s using clickhouse-connect."""
+
     type: Literal["clickhouse"]
     host: str = "localhost"
     port: int = 8123
     database: str = "default"
     user: str = "default"
-    password_env: str | None = None   # env var name
-    password: str | None = None       # explicit (non-recommended)
+    password_env: str | None = None  # env var name
+    password: str | None = None  # explicit (non-recommended)
 
 
 # Union type — used throughout the codebase
-ProfileConfig = BigQueryProfile | DuckDBProfile | SQLiteProfile | PostgresProfile | RedshiftProfile | ClickHouseProfile
+ProfileConfig = (
+    BigQueryProfile
+    | DuckDBProfile
+    | SQLiteProfile
+    | PostgresProfile
+    | RedshiftProfile
+    | ClickHouseProfile
+)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _config_dir(override: Path | None = None) -> Path:
     return override if override is not None else Path.home() / ".drt"
@@ -129,6 +141,7 @@ def resolve_env(value: str | None, env_var: str | None) -> str | None:
 # ---------------------------------------------------------------------------
 # Load / Save
 # ---------------------------------------------------------------------------
+
 
 def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileConfig:
     """Load a named profile from ~/.drt/profiles.yml.
@@ -155,8 +168,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
     if profile_name not in data:
         available = ", ".join(data.keys()) or "(none)"
         raise KeyError(
-            f"Profile '{profile_name}' not found in {profiles_path}. "
-            f"Available: {available}"
+            f"Profile '{profile_name}' not found in {profiles_path}. Available: {available}"
         )
 
     raw = data[profile_name]
@@ -176,7 +188,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             type="duckdb",
             database=raw.get("database", ":memory:"),
         )
-        
+
     if source_type == "sqlite":
         return SQLiteProfile(
             type="sqlite",
