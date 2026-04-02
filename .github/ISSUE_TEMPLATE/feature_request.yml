@@ -1,7 +1,7 @@
 name: Feature Request
 description: Suggest a new connector, command, or capability
 title: "[Feature]: "
-labels: ["enhancement"]
+labels: ["feat"]
 
 body:
   - type: textarea
