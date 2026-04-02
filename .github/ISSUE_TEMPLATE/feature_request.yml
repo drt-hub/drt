@@ -1,6 +1,6 @@
 name: Feature Request
 description: Suggest a new connector, command, or capability
-title: "[Feature]: "
+title: "[Feature] "
 labels: ["feat"]
 
 body:
