@@ -38,7 +38,7 @@ from typing import Any
 
 import httpx
 
-from drt.config.models import DestinationConfig, RetryConfig, SyncOptions, DiscordDestinationConfig
+from drt.config.models import DestinationConfig, DiscordDestinationConfig, RetryConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
 from drt.destinations.retry import with_retry
@@ -66,9 +66,7 @@ class DiscordDestination:
             os.environ.get(config.webhook_url_env) if config.webhook_url_env else None
         )
         if not webhook_url:
-            raise ValueError(
-                "Discord destination: provide 'webhook_url' or set 'webhook_url_env'."
-            )
+            raise ValueError("Discord destination: provide 'webhook_url' or set 'webhook_url_env'.")
 
         result = SyncResult()
         rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)
