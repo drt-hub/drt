@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "drt-hub",
-  "description": "Skills for drt — Reverse ETL for the code-first data stack. Sync data from BigQuery, DuckDB, or PostgreSQL to REST APIs, Slack, HubSpot, GitHub Actions, and more.",
+  "description": "Skills for drt \u2014 Reverse ETL for the code-first data stack. Sync data from BigQuery, DuckDB, or PostgreSQL to REST APIs, Slack, HubSpot, GitHub Actions, and more.",
   "owner": {
     "name": "drt-hub",
     "email": "drt-hub@users.noreply.github.com"
@@ -11,11 +11,17 @@
       "name": "drt",
       "source": "./skills/drt",
       "description": "Create syncs, debug failures, initialize projects, and migrate from Census/Hightouch to drt",
-      "version": "0.4.0",
+      "version": "0.4.3",
       "license": "Apache-2.0",
       "homepage": "https://github.com/drt-hub/drt",
       "repository": "https://github.com/drt-hub/drt",
-      "keywords": ["reverse-etl", "data-pipeline", "bigquery", "dbt", "dlt"]
+      "keywords": [
+        "reverse-etl",
+        "data-pipeline",
+        "bigquery",
+        "dbt",
+        "dlt"
+      ]
     }
   ]
 }

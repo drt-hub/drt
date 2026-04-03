@@ -37,6 +37,7 @@ import yaml
 # Source profile types
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class BigQueryProfile:
     type: Literal["bigquery"]
@@ -54,14 +55,20 @@ class DuckDBProfile:
 
 
 @dataclass
+class SQLiteProfile:
+    type: Literal["sqlite"]
+    database: str = ":memory:"  # path or :memory:
+
+
+@dataclass
 class PostgresProfile:
     type: Literal["postgres"]
     host: str = "localhost"
     port: int = 5432
     dbname: str = ""
     user: str = ""
-    password_env: str | None = None   # env var name
-    password: str | None = None       # explicit (non-recommended)
+    password_env: str | None = None  # env var name
+    password: str | None = None  # explicit (non-recommended)
 
 
 @dataclass
@@ -78,23 +85,45 @@ class RedshiftProfile:
           password_env: REDSHIFT_PASSWORD
           schema: public
     """
+
     type: Literal["redshift"]
     host: str = ""
     port: int = 5439  # Redshift default port
     dbname: str = ""
     user: str = ""
-    password_env: str | None = None   # env var name
-    password: str | None = None       # explicit (non-recommended)
-    schema: str = "public"            # Redshift schema
+    password_env: str | None = None  # env var name
+    password: str | None = None  # explicit (non-recommended)
+    schema: str = "public"  # Redshift schema
+
+
+@dataclass
+class ClickHouseProfile:
+    """ClickHouse profile via HTTP/s using clickhouse-connect."""
+
+    type: Literal["clickhouse"]
+    host: str = "localhost"
+    port: int = 8123
+    database: str = "default"
+    user: str = "default"
+    password_env: str | None = None  # env var name
+    password: str | None = None  # explicit (non-recommended)
 
 
 # Union type — used throughout the codebase
-ProfileConfig = BigQueryProfile | DuckDBProfile | PostgresProfile | RedshiftProfile
+ProfileConfig = (
+    BigQueryProfile
+    | DuckDBProfile
+    | SQLiteProfile
+    | PostgresProfile
+    | RedshiftProfile
+    | ClickHouseProfile
+)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _config_dir(override: Path | None = None) -> Path:
     return override if override is not None else Path.home() / ".drt"
@@ -112,6 +141,7 @@ def resolve_env(value: str | None, env_var: str | None) -> str | None:
 # ---------------------------------------------------------------------------
 # Load / Save
 # ---------------------------------------------------------------------------
+
 
 def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileConfig:
     """Load a named profile from ~/.drt/profiles.yml.
@@ -138,8 +168,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
     if profile_name not in data:
         available = ", ".join(data.keys()) or "(none)"
         raise KeyError(
-            f"Profile '{profile_name}' not found in {profiles_path}. "
-            f"Available: {available}"
+            f"Profile '{profile_name}' not found in {profiles_path}. Available: {available}"
         )
 
     raw = data[profile_name]
@@ -157,6 +186,12 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
     if source_type == "duckdb":
         return DuckDBProfile(
             type="duckdb",
+            database=raw.get("database", ":memory:"),
+        )
+
+    if source_type == "sqlite":
+        return SQLiteProfile(
+            type="sqlite",
             database=raw.get("database", ":memory:"),
         )
     if source_type == "postgres":
@@ -182,9 +217,20 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             schema=raw.get("schema", "public"),
         )
 
+    if source_type == "clickhouse":
+        return ClickHouseProfile(
+            type="clickhouse",
+            host=raw.get("host", "localhost"),
+            port=int(raw.get("port", 8123)),
+            database=raw.get("database", "default"),
+            user=raw.get("user", "default"),
+            password_env=raw.get("password_env"),
+            password=raw.get("password"),
+        )
+
     raise ValueError(
         f"Unsupported source type '{source_type}'. "
-        "Supported: bigquery, duckdb, postgres, redshift"
+        "Supported: bigquery, duckdb, sqlite, postgres, redshift, clickhouse"
     )
 
 
@@ -214,6 +260,8 @@ def save_profile(
             entry["keyfile"] = profile.keyfile
     elif isinstance(profile, DuckDBProfile):
         entry = {"type": "duckdb", "database": profile.database}
+    elif isinstance(profile, SQLiteProfile):
+        entry = {"type": "sqlite", "database": profile.database}
     elif isinstance(profile, PostgresProfile):
         entry = {
             "type": "postgres",
@@ -232,6 +280,16 @@ def save_profile(
             "dbname": profile.dbname,
             "user": profile.user,
             "schema": profile.schema,
+        }
+        if profile.password_env:
+            entry["password_env"] = profile.password_env
+    elif isinstance(profile, ClickHouseProfile):
+        entry = {
+            "type": "clickhouse",
+            "host": profile.host,
+            "port": profile.port,
+            "database": profile.database,
+            "user": profile.user,
         }
         if profile.password_env:
             entry["password_env"] = profile.password_env

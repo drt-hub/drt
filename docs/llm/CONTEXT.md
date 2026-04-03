@@ -14,7 +14,7 @@ dlt (load into DWH) → dbt (transform) → drt (activate out of DWH)
 - **Tagline:** "Reverse ETL for the code-first data stack"
 - **Install:** `pip install drt-core` or `uv add drt-core`
 - **Package name:** `drt-core` (PyPI) — CLI command is `drt`
-- **Current version:** v0.3.4
+- **Current version:** v0.4.3
 
 ## What drt is NOT
 
@@ -55,8 +55,10 @@ my-project/
 |--------|-------|-------|
 | BigQuery | `drt-core[bigquery]` | Uses ADC or keyfile. Supports `location` (e.g. `"EU"`, `"asia-northeast1"`) |
 | DuckDB | (core) | Local `.duckdb` file |
+| SQLite | (core) | Built-in `sqlite3`, no extra dependencies. Local `.sqlite` files or `:memory:` |
 | PostgreSQL | `drt-core[postgres]` | Connection string via env |
 | Redshift | `drt-core[redshift]` | PostgreSQL wire protocol via psycopg2. Supports `schema` (search_path). Port defaults to 5439. |
+| ClickHouse | `drt-core[clickhouse]` | HTTP interface via `clickhouse-connect`. Supports host, port, database, user, password_env. |
 
 Source is configured in `~/.drt/profiles.yml` (dbt-style):
 
@@ -74,8 +76,12 @@ default:
 |-------------|-------------|-------|
 | REST API (generic) | `rest_api` | Any HTTP endpoint |
 | Slack Webhook | `slack` | Incoming webhook |
+| Discord Webhook | `discord` | Plain text or rich embeds via webhook URL |
 | GitHub Actions | `github_actions` | workflow_dispatch trigger |
 | HubSpot CRM | `hubspot` | Contacts / Deals / Companies upsert |
+| Google Sheets | `google_sheets` | Overwrite or append. Requires `drt-core[sheets]` |
+| PostgreSQL (upsert) | `postgres` | INSERT ... ON CONFLICT DO UPDATE. Requires `drt-core[postgres]` |
+| MySQL (upsert) | `mysql` | INSERT ... ON DUPLICATE KEY UPDATE. Requires `drt-core[mysql]` |
 
 ## CLI Commands
 
@@ -113,6 +119,28 @@ drt mcp run   # starts stdio MCP server
 
 The MCP server reads from the current working directory (the drt project root).
 
+## Orchestration: dagster-drt
+
+Community-maintained Dagster integration. Install: `pip install dagster-drt`
+
+```python
+from dagster_drt import drt_assets, DagsterDrtTranslator, DrtConfig
+
+# Basic usage
+assets = drt_assets(project_dir="path/to/drt-project")
+
+# Custom translator for group names and deps
+class MyTranslator(DagsterDrtTranslator):
+    def get_group_name(self, sync_config):
+        return "reverse_etl"
+
+assets = drt_assets(
+    project_dir="path/to/drt-project",
+    dagster_drt_translator=MyTranslator(),
+    dry_run=True,  # build-time default
+)
+```
+
 ## AI Skills for Claude Code
 
 Four skills available via the Claude Code plugin marketplace:
@@ -144,6 +172,9 @@ Slash command versions also available in `.claude/commands/` for manual installa
 - drt saves `last_cursor_value` in `.drt/state.json` after each run
 - Next run automatically injects `WHERE <cursor_field> > '<last_value>'`
 - Cursor comparison uses numeric ordering when possible (handles integer/float cursors correctly)
+
+**Upsert mode**: Semantic alias for `mode: full` when `upsert_key` is set. Makes YAML intent explicit.
+- Set `sync.mode: upsert` — behaves identically to `mode: full`
 
 ### Model Reference
 

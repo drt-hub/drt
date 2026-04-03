@@ -1,3 +1,5 @@
+[English](./README.md) | [日本語](./README.ja.md)
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/drt-hub/.github/main/profile/assets/logo-dark.svg">
   <img src="https://raw.githubusercontent.com/drt-hub/.github/main/profile/assets/logo.svg" alt="drt logo" width="200">
@@ -39,62 +41,68 @@ drt init && drt run
 
 ## Quickstart
 
+No cloud accounts needed — runs locally with DuckDB in about 5 minutes.
+
 ### 1. Install
 
 ```bash
-pip install drt-core[bigquery]
-# or
-uv add drt-core[bigquery]
+pip install drt-core
 ```
 
-### 2. Initialize a project
+> For cloud sources: `pip install drt-core[bigquery]`, `drt-core[postgres]`, etc.
+
+### 2. Set up a project
 
 ```bash
 mkdir my-drt-project && cd my-drt-project
-drt init
+drt init   # select "duckdb" as source
 ```
 
-This creates:
+### 3. Create sample data
 
+```bash
+python -c "
+import duckdb
+c = duckdb.connect('warehouse.duckdb')
+c.execute('''CREATE TABLE IF NOT EXISTS users AS SELECT * FROM (VALUES
+  (1, 'Alice', 'alice@example.com'),
+  (2, 'Bob',   'bob@example.com'),
+  (3, 'Carol', 'carol@example.com')
+) t(id, name, email)''')
+c.close()
+"
 ```
-my-drt-project/
-├── drt_project.yml   # project config
-└── syncs/            # put your sync definitions here
-```
 
-`drt init` prompts for source type: **bigquery**, **duckdb**, or **postgres**.
-
-### 3. Create a sync
+### 4. Create a sync
 
 ```yaml
-# syncs/notify_slack.yml
-name: notify_slack
-description: "Notify Slack on new users"
-model: ref('new_users')
+# syncs/post_users.yml
+name: post_users
+description: "POST user records to an API"
+model: ref('users')
 destination:
   type: rest_api
-  url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+  url: "https://httpbin.org/post"
   method: POST
   headers:
     Content-Type: "application/json"
   body_template: |
-    { "text": "New user: {{ row.name }} ({{ row.email }})" }
+    { "id": {{ row.id }}, "name": "{{ row.name }}", "email": "{{ row.email }}" }
 sync:
   mode: full
-  batch_size: 100
-  rate_limit:
-    requests_per_second: 5
-  on_error: skip
+  batch_size: 1
+  on_error: fail
 ```
 
-### 4. Run
+### 5. Run
 
 ```bash
-drt run --dry-run        # preview, no data written
-drt run                  # run all syncs
-drt run --select notify_slack  # run one sync
-drt status               # check recent sync results
+drt run --dry-run   # preview, no data sent
+drt run             # run for real
+drt status          # check results
 ```
+
+> See [examples/](examples/) for more: Slack, Google Sheets, HubSpot, GitHub Actions, etc.
 
 ---
 
@@ -184,18 +192,26 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | **Source** | DuckDB | ✅ v0.1 | (core) |
 | **Source** | PostgreSQL | ✅ v0.1 | `pip install drt-core[postgres]` |
 | **Source** | Snowflake | 🗓 planned | `pip install drt-core[snowflake]` |
+| **Source** | SQLite | ✅ v0.4.2 | (core) |
 | **Source** | Redshift | ✅ v0.3.4 | `pip install drt-core[redshift]` |
+| **Source** | ClickHouse | ✅ v0.4.3 | `pip install drt-core[clickhouse]` |
 | **Source** | MySQL | 🗓 planned | `pip install drt-core[mysql]` |
 | **Destination** | REST API | ✅ v0.1 | (core) |
 | **Destination** | Slack Incoming Webhook | ✅ v0.1 | (core) |
+| **Destination** | Discord Webhook | ✅ v0.4.2 | (core) |
 | **Destination** | GitHub Actions (workflow_dispatch) | ✅ v0.1 | (core) |
 | **Destination** | HubSpot (Contacts / Deals / Companies) | ✅ v0.1 | (core) |
-| **Destination** | Google Sheets | 🗓 v0.4 | `pip install drt-core[sheets]` |
+| **Destination** | Google Sheets | ✅ v0.4 | `pip install drt-core[sheets]` |
+| **Destination** | PostgreSQL (upsert) | ✅ v0.4 | `pip install drt-core[postgres]` |
+| **Destination** | MySQL (upsert) | ✅ v0.4 | `pip install drt-core[mysql]` |
 | **Destination** | CSV / JSON file | 🗓 v0.5 | (core) |
 | **Destination** | Salesforce | 🗓 v0.6 | `pip install drt-core[salesforce]` |
 | **Destination** | Notion | 🗓 planned | (core) |
 | **Destination** | Linear | 🗓 planned | (core) |
 | **Destination** | SendGrid | 🗓 planned | (core) |
+| **Integration** | Dagster | ✅ v0.4 | `pip install dagster-drt` |
+| **Integration** | Airflow | 🗓 v0.6 | `pip install airflow-drt` |
+| **Integration** | dbt manifest reader | ✅ v0.4 | (core) |
 
 ---
 
@@ -209,10 +225,40 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | **v0.1** ✅ | BigQuery / DuckDB / Postgres sources · REST API / Slack / GitHub Actions / HubSpot destinations · CLI · dry-run |
 | **v0.2** ✅ | Incremental sync (`cursor_field` watermark) · retry config per-sync |
 | **v0.3** ✅ | MCP Server (`drt mcp run`) · AI Skills for Claude Code · LLM-readable docs · row-level errors · security hardening · Redshift source |
-| [v0.4](https://github.com/drt-hub/drt/milestone/1) | Dagster integration · Google Sheets destination · dbt post-hook · examples |
-| [v0.5](https://github.com/drt-hub/drt/milestone/2) | Snowflake source · CSV/JSON destination · test coverage |
-| [v0.6](https://github.com/drt-hub/drt/milestone/3) | Salesforce destination · Airflow integration |
+| **v0.4** ✅ | Google Sheets / PostgreSQL / MySQL destinations · dagster-drt · dbt manifest reader · type safety overhaul |
+| [v0.5](https://github.com/drt-hub/drt/milestone/2) | Snowflake source · CSV/JSON + Parquet destinations · test coverage · Docker |
+| [v0.6](https://github.com/drt-hub/drt/milestone/3) | Salesforce · Airflow integration · Jira / Twilio / Intercom destinations |
+| [v0.7](https://github.com/drt-hub/drt/milestone/4) | DWH destinations (Snowflake / BigQuery / ClickHouse / Databricks) · Cloud storage (S3 / GCS / Azure Blob) |
+| [v0.8](https://github.com/drt-hub/drt/milestone/5) | Lakehouse sources (Delta Lake / Apache Iceberg) |
 | v1.x | Rust engine (PyO3) |
+
+---
+
+## Orchestration: dagster-drt
+
+Community-maintained [Dagster](https://dagster.io/) integration. Expose drt syncs as Dagster assets with full observability.
+
+```bash
+pip install dagster-drt
+```
+
+```python
+from dagster import Definitions
+from dagster_drt import drt_assets, DagsterDrtTranslator
+
+class MyTranslator(DagsterDrtTranslator):
+    def get_group_name(self, sync_config):
+        return "reverse_etl"
+
+defs = Definitions(
+    assets=drt_assets(
+        project_dir="path/to/drt-project",
+        dagster_drt_translator=MyTranslator(),
+    )
+)
+```
+
+See [dagster-drt README](integrations/dagster-drt/README.md) for full API docs (Translator, DrtConfig dry-run, MaterializeResult).
 
 ---
 

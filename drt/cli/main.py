@@ -11,11 +11,14 @@ import typer
 if TYPE_CHECKING:
     from drt.config.credentials import (
         BigQueryProfile,
+        ClickHouseProfile,
         DuckDBProfile,
         PostgresProfile,
         RedshiftProfile,
+        SQLiteProfile,
     )
     from drt.config.models import SyncConfig
+    from drt.destinations.discord import DiscordDestination
     from drt.destinations.github_actions import GitHubActionsDestination
     from drt.destinations.google_sheets import GoogleSheetsDestination
     from drt.destinations.hubspot import HubSpotDestination
@@ -24,9 +27,11 @@ if TYPE_CHECKING:
     from drt.destinations.rest_api import RestApiDestination
     from drt.destinations.slack import SlackDestination
     from drt.sources.bigquery import BigQuerySource
+    from drt.sources.clickhouse import ClickHouseSource
     from drt.sources.duckdb import DuckDBSource
     from drt.sources.postgres import PostgresSource
     from drt.sources.redshift import RedshiftSource
+    from drt.sources.sqlite import SQLiteSource
 
 from drt import __version__
 from drt.cli.output import (
@@ -255,28 +260,51 @@ def mcp_run() -> None:
 
 
 def _get_source(
-    profile: BigQueryProfile | DuckDBProfile | PostgresProfile | RedshiftProfile,
-) -> BigQuerySource | DuckDBSource | PostgresSource | RedshiftSource:
+    profile: (
+        BigQueryProfile
+        | DuckDBProfile
+        | SQLiteProfile
+        | PostgresProfile
+        | RedshiftProfile
+        | ClickHouseProfile
+    ),
+) -> (
+    BigQuerySource
+    | DuckDBSource
+    | SQLiteSource
+    | PostgresSource
+    | RedshiftSource
+    | ClickHouseSource
+):
     from drt.config.credentials import (
         BigQueryProfile,
+        ClickHouseProfile,
         DuckDBProfile,
         PostgresProfile,
         RedshiftProfile,
+        SQLiteProfile,
     )
     from drt.sources.bigquery import BigQuerySource
     from drt.sources.duckdb import DuckDBSource
     from drt.sources.postgres import PostgresSource
+    from drt.sources.sqlite import SQLiteSource
 
     if isinstance(profile, BigQueryProfile):
         return BigQuerySource()
     if isinstance(profile, DuckDBProfile):
         return DuckDBSource()
+    if isinstance(profile, SQLiteProfile):
+        return SQLiteSource()
     if isinstance(profile, PostgresProfile):
         return PostgresSource()
     if isinstance(profile, RedshiftProfile):
         from drt.sources.redshift import RedshiftSource
 
         return RedshiftSource()
+    if isinstance(profile, ClickHouseProfile):
+        from drt.sources.clickhouse import ClickHouseSource
+
+        return ClickHouseSource()
     raise ValueError(f"Unsupported source type: {type(profile)}")
 
 
@@ -285,6 +313,7 @@ def _get_destination(
 ) -> (
     RestApiDestination
     | SlackDestination
+    | DiscordDestination
     | GitHubActionsDestination
     | HubSpotDestination
     | GoogleSheetsDestination
@@ -292,6 +321,7 @@ def _get_destination(
     | MySQLDestination
 ):
     from drt.config.models import (
+        DiscordDestinationConfig,
         GitHubActionsDestinationConfig,
         GoogleSheetsDestinationConfig,
         HubSpotDestinationConfig,
@@ -300,6 +330,7 @@ def _get_destination(
         RestApiDestinationConfig,
         SlackDestinationConfig,
     )
+    from drt.destinations.discord import DiscordDestination
     from drt.destinations.github_actions import GitHubActionsDestination
     from drt.destinations.hubspot import HubSpotDestination
     from drt.destinations.mysql import MySQLDestination
@@ -312,6 +343,8 @@ def _get_destination(
         return RestApiDestination()
     if isinstance(dest, SlackDestinationConfig):
         return SlackDestination()
+    if isinstance(dest, DiscordDestinationConfig):
+        return DiscordDestination()
     if isinstance(dest, GitHubActionsDestinationConfig):
         return GitHubActionsDestination()
     if isinstance(dest, HubSpotDestinationConfig):

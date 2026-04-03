@@ -4,12 +4,20 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dagster-drt"
-version = "0.4.0"
-description = "Dagster integration for drt (data reverse tool)"
+version = "0.1.0"
+description = "Community-maintained Dagster integration for drt (data reverse tool)"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
 dependencies = [
     "dagster>=1.6",
-    "drt-core>=0.3",
+    "drt-core>=0.4.1",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
 ]

@@ -10,11 +10,13 @@ from pytest_httpserver import HTTPServer
 
 from drt.config.models import (
     BearerAuth,
+    DiscordDestinationConfig,
     GitHubActionsDestinationConfig,
     HubSpotDestinationConfig,
     SlackDestinationConfig,
     SyncOptions,
 )
+from drt.destinations.discord import DiscordDestination
 from drt.destinations.github_actions import GitHubActionsDestination
 from drt.destinations.hubspot import HubSpotDestination
 from drt.destinations.slack import SlackDestination
@@ -76,6 +78,60 @@ class TestSlackDestination:
             ),
         )
         result = SlackDestination().load([{"msg": "hello"}], config, _options())
+        assert result.success == 1
+
+
+# ---------------------------------------------------------------------------
+# DiscordDestination
+# ---------------------------------------------------------------------------
+
+
+class TestDiscordDestination:
+    def test_success(self, httpserver: HTTPServer) -> None:
+        httpserver.expect_request("/webhook").respond_with_data("ok", status=200)
+        config = DiscordDestinationConfig(
+            type="discord",
+            webhook_url=httpserver.url_for("/webhook"),
+            message_template="hello {{ row.name }}",
+        )
+        result = DiscordDestination().load([{"name": "Alice"}], config, _options())
+        assert result.success == 1
+        assert result.failed == 0
+
+    def test_on_error_skip(self, httpserver: HTTPServer) -> None:
+        httpserver.expect_ordered_request("/webhook").respond_with_data("", status=500)
+        httpserver.expect_ordered_request("/webhook").respond_with_data("ok", status=200)
+        config = DiscordDestinationConfig(
+            type="discord",
+            webhook_url=httpserver.url_for("/webhook"),
+            message_template="{{ row.msg }}",
+        )
+        opts = SyncOptions(on_error="skip")
+        result = DiscordDestination().load(
+            [{"msg": "a"}, {"msg": "b"}], config, opts
+        )
+        assert result.failed == 1
+        assert result.success == 1
+
+    def test_missing_webhook_raises(self) -> None:
+        config = DiscordDestinationConfig(type="discord", message_template="hi")
+        with pytest.raises(ValueError, match="webhook_url"):
+            DiscordDestination().load([{"x": 1}], config, _options())
+
+    def test_embeds_payload(self, httpserver: HTTPServer) -> None:
+        httpserver.expect_request("/webhook").respond_with_data("ok", status=200)
+        config = DiscordDestinationConfig(
+            type="discord",
+            webhook_url=httpserver.url_for("/webhook"),
+            embeds=True,
+            message_template=(
+                '{"embeds": [{"title": "{{ row.title }}",'
+                ' "description": "{{ row.desc }}", "color": 3447003}]}'
+            ),
+        )
+        result = DiscordDestination().load(
+            [{"title": "New Alert", "desc": "Something happened"}], config, _options()
+        )
         assert result.success == 1
 
 

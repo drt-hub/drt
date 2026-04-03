@@ -1,10 +1,13 @@
 name: Bug Report
 description: Something isn't working as expected
+title: "[Bug] "
 labels: ["bug"]
+
 body:
   - type: markdown
     attributes:
-      value: Thanks for reporting a bug! Please fill in as much detail as possible.
+      value: |
+        Thanks for reporting a bug! Please fill in as much detail as possible.
 
   - type: textarea
     id: description
@@ -29,6 +32,14 @@ body:
     id: expected
     attributes:
       label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened?
     validations:
       required: true
 

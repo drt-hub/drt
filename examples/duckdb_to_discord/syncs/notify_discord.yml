@@ -1,0 +1,13 @@
+name: notify_discord
+description: "Notify new users to Discord channel (DuckDB → Discord)"
+model: ref('new_users')
+destination:
+  type: discord
+  webhook_url_env: DISCORD_WEBHOOK_URL
+  message_template: ":wave: New user: **{{ row.name }}** ({{ row.email }})"
+sync:
+  mode: full
+  batch_size: 1       # Discord: send one message at a time
+  rate_limit:
+    requests_per_second: 2
+  on_error: skip

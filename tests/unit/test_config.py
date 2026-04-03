@@ -13,9 +13,13 @@ from drt.config.models import (
     BasicAuth,
     BearerAuth,
     GoogleSheetsDestinationConfig,
+    MySQLDestinationConfig,
+    PostgresDestinationConfig,
     ProjectConfig,
     RestApiDestinationConfig,
+    SslConfig,
     SyncConfig,
+    SyncOptions,
 )
 from drt.config.parser import load_project, load_syncs
 
@@ -204,6 +208,91 @@ def test_google_sheets_destination_config_parses() -> None:
     assert cfg.destination.mode == "overwrite"
 
 
+# ---------------------------------------------------------------------------
+# SyncOptions — upsert mode
+# ---------------------------------------------------------------------------
+
+def test_sync_options_upsert_mode_accepted() -> None:
+    """mode='upsert' is valid and behaves like 'full' (no cursor_field required)."""
+    opts = SyncOptions(mode="upsert")
+    assert opts.mode == "upsert"
+    assert opts.cursor_field is None
+
+
+def test_sync_options_full_mode_still_works() -> None:
+    """Backward compat: mode='full' remains the default."""
+    opts = SyncOptions()
+    assert opts.mode == "full"
+
+
+def test_sync_options_upsert_in_sync_config() -> None:
+    """mode='upsert' works end-to-end inside a SyncConfig."""
+    raw = {
+        "name": "upsert_sync",
+        "model": "ref('scores')",
+        "destination": {
+            "type": "rest_api",
+            "url": "https://example.com/api",
+        },
+        "sync": {"mode": "upsert"},
+    }
+    cfg = SyncConfig(**raw)
+    assert cfg.sync.mode == "upsert"
+
+
+def test_ssl_config_defaults() -> None:
+    ssl = SslConfig()
+    assert ssl.enabled is False
+    assert ssl.ca_env is None
+    assert ssl.cert_env is None
+    assert ssl.key_env is None
+
+
+def test_ssl_config_full() -> None:
+    ssl = SslConfig(enabled=True, ca_env="SSL_CA", cert_env="SSL_CERT", key_env="SSL_KEY")
+    assert ssl.enabled is True
+    assert ssl.ca_env == "SSL_CA"
+
+
+def test_postgres_destination_with_ssl() -> None:
+    cfg = PostgresDestinationConfig(
+        type="postgres",
+        host="localhost",
+        dbname="testdb",
+        table="t",
+        upsert_key=["id"],
+        ssl=SslConfig(enabled=True, ca_env="PG_SSL_CA"),
+    )
+    assert cfg.ssl is not None
+    assert cfg.ssl.enabled is True
+    assert cfg.ssl.ca_env == "PG_SSL_CA"
+
+
+def test_postgres_destination_without_ssl() -> None:
+    cfg = PostgresDestinationConfig(
+        type="postgres",
+        host="localhost",
+        dbname="testdb",
+        table="t",
+        upsert_key=["id"],
+    )
+    assert cfg.ssl is None
+
+
+def test_mysql_destination_with_ssl() -> None:
+    cfg = MySQLDestinationConfig(
+        type="mysql",
+        host="localhost",
+        dbname="testdb",
+        table="t",
+        upsert_key=["id"],
+        ssl=SslConfig(enabled=True, ca_env="MYSQL_SSL_CA", cert_env="MYSQL_SSL_CERT"),
+    )
+    assert cfg.ssl is not None
+    assert cfg.ssl.enabled is True
+    assert cfg.ssl.ca_env == "MYSQL_SSL_CA"
+
+
 def test_google_sheets_destination_defaults() -> None:
     cfg = GoogleSheetsDestinationConfig(
         type="google_sheets",
@@ -213,3 +302,85 @@ def test_google_sheets_destination_defaults() -> None:
     assert cfg.mode == "overwrite"
     assert cfg.credentials_path is None
     assert cfg.credentials_env is None
+
+
+# ---------------------------------------------------------------------------
+# PostgresDestinationConfig — connection_string_env
+# ---------------------------------------------------------------------------
+
+def test_postgres_config_connection_string_env() -> None:
+    """connection_string_env should be accepted without host/dbname."""
+    cfg = PostgresDestinationConfig(
+        type="postgres",
+        connection_string_env="DATABASE_URL",
+        table="public.scores",
+        upsert_key=["id"],
+    )
+    assert cfg.connection_string_env == "DATABASE_URL"
+    assert cfg.host is None
+    assert cfg.dbname is None
+
+
+def test_postgres_config_individual_params() -> None:
+    """Individual host/dbname params should still work (backward compat)."""
+    cfg = PostgresDestinationConfig(
+        type="postgres",
+        host="localhost",
+        dbname="analytics",
+        table="public.scores",
+        upsert_key=["id"],
+    )
+    assert cfg.host == "localhost"
+    assert cfg.dbname == "analytics"
+    assert cfg.connection_string_env is None
+
+
+def test_postgres_config_no_connection_method_raises() -> None:
+    """Validation should fail when no connection method is provided."""
+    with pytest.raises(ValueError, match="connection_string_env"):
+        PostgresDestinationConfig(
+            type="postgres",
+            table="public.scores",
+            upsert_key=["id"],
+        )
+
+
+# ---------------------------------------------------------------------------
+# MySQLDestinationConfig — connection_string_env
+# ---------------------------------------------------------------------------
+
+def test_mysql_config_connection_string_env() -> None:
+    """connection_string_env should be accepted without host/dbname."""
+    cfg = MySQLDestinationConfig(
+        type="mysql",
+        connection_string_env="MYSQL_URL",
+        table="scores",
+        upsert_key=["id"],
+    )
+    assert cfg.connection_string_env == "MYSQL_URL"
+    assert cfg.host is None
+    assert cfg.dbname is None
+
+
+def test_mysql_config_individual_params() -> None:
+    """Individual host/dbname params should still work (backward compat)."""
+    cfg = MySQLDestinationConfig(
+        type="mysql",
+        host="localhost",
+        dbname="analytics",
+        table="scores",
+        upsert_key=["id"],
+    )
+    assert cfg.host == "localhost"
+    assert cfg.dbname == "analytics"
+    assert cfg.connection_string_env is None
+
+
+def test_mysql_config_no_connection_method_raises() -> None:
+    """Validation should fail when no connection method is provided."""
+    with pytest.raises(ValueError, match="connection_string_env"):
+        MySQLDestinationConfig(
+            type="mysql",
+            table="scores",
+            upsert_key=["id"],
+        )

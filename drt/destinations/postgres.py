@@ -112,6 +112,16 @@ class PostgresDestination:
                 "PostgreSQL destination requires: pip install drt-core[postgres]"
             ) from e
 
+        # Connection string takes precedence
+        conn_str = (
+            resolve_env(None, config.connection_string_env)
+            if config.connection_string_env
+            else None
+        )
+        if conn_str:
+            return psycopg2.connect(conn_str)
+
+        # Fall back to individual parameters
         host = resolve_env(config.host, config.host_env)
         dbname = resolve_env(config.dbname, config.dbname_env)
         user = resolve_env(config.user, config.user_env)
@@ -122,10 +132,24 @@ class PostgresDestination:
         if not dbname:
             raise ValueError("PostgreSQL destination: dbname could not be resolved.")
 
-        return psycopg2.connect(
-            host=host,
-            port=config.port,
-            dbname=dbname,
-            user=user,
-            password=password,
-        )
+        kwargs: dict[str, Any] = {
+            "host": host,
+            "port": config.port,
+            "dbname": dbname,
+            "user": user,
+            "password": password,
+        }
+
+        if config.ssl and config.ssl.enabled:
+            kwargs["sslmode"] = "require"
+            ca = resolve_env(None, config.ssl.ca_env)
+            if ca:
+                kwargs["sslrootcert"] = ca
+            cert = resolve_env(None, config.ssl.cert_env)
+            if cert:
+                kwargs["sslcert"] = cert
+            key = resolve_env(None, config.ssl.key_env)
+            if key:
+                kwargs["sslkey"] = key
+
+        return psycopg2.connect(**kwargs)

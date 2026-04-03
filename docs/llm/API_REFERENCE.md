@@ -18,7 +18,7 @@ profile: default          # optional, default: "default" — maps to ~/.drt/prof
 
 ```yaml
 default:
-  type: bigquery            # "bigquery" | "duckdb" | "postgres"
+  type: bigquery            # "bigquery" | "duckdb" | "sqlite" | "postgres" | "redshift" | "clickhouse"
   project: my-gcp-project   # BigQuery: GCP project ID
   dataset: analytics        # BigQuery: dataset name
   location: US              # optional: "US" (default), "EU", "asia-northeast1", etc.
@@ -30,6 +30,11 @@ duckdb_local:
   type: duckdb
   database: ./data/local.duckdb
   dataset: main
+
+# SQLite example:
+sqlite_local:
+  type: sqlite
+  database: ./data/local.db     # path to .sqlite/.db file, or ":memory:"
 
 # PostgreSQL example:
 prod_pg:
@@ -46,6 +51,15 @@ redshift_prod:
   user: analyst
   password_env: REDSHIFT_PASSWORD
   schema: public          # default: "public"
+
+# ClickHouse example:
+ch_prod:
+  type: clickhouse
+  host: localhost
+  port: 8123              # default: 8123 (HTTP interface)
+  database: default
+  user: default
+  password_env: CLICKHOUSE_PASSWORD
 ```
 
 ---
@@ -62,7 +76,7 @@ destination:                # required: see Destination Configs below
   # ... destination-specific fields
 
 sync:                       # optional: all fields have defaults
-  mode: full                # "full" (default) | "incremental"
+  mode: full                # "full" (default) | "incremental" | "upsert"  # "upsert" is a semantic alias for "full" when upsert_key is set
   cursor_field: updated_at  # required when mode=incremental — column name for watermark
   batch_size: 100           # default: 100 — rows per destination call
   on_error: fail            # "fail" (default) | "skip"
@@ -125,6 +139,32 @@ Block Kit example:
     }
 ```
 
+### `type: discord`
+
+```yaml
+destination:
+  type: discord
+  webhook_url: "https://discord.com/api/webhooks/..."  # provide webhook_url OR webhook_url_env
+  webhook_url_env: DISCORD_WEBHOOK_URL                 # env var name
+  message_template: "New user: {{ row.name }} ({{ row.email }})"  # Jinja2, default: "{{ row }}"
+  embeds: false                                        # true = message_template is embeds JSON
+```
+
+Embeds example:
+```yaml
+  embeds: true
+  message_template: |
+    {
+      "embeds": [
+        {
+          "title": "{{ row.title }}",
+          "description": "{{ row.description }}",
+          "color": 3447003
+        }
+      ]
+    }
+```
+
 ### `type: github_actions`
 
 ```yaml
@@ -162,6 +202,80 @@ destination:
     type: bearer
     token_env: HUBSPOT_TOKEN      # Private App token with CRM write scope
 ```
+
+### `type: google_sheets`
+
+```yaml
+destination:
+  type: google_sheets
+  spreadsheet_id: "1BxiMVs0XRA5nFMd..."   # required: Google Sheets ID from URL
+  sheet: "Sheet1"                           # default: "Sheet1"
+  mode: overwrite                           # "overwrite" (default) | "append"
+  credentials_path: /path/to/sa-key.json   # service account JSON keyfile
+  credentials_env: GOOGLE_SA_KEY_PATH      # or: env var pointing to keyfile
+```
+
+> `overwrite` clears the sheet then writes header + data rows. `append` adds data rows only.
+
+### `type: postgres` (destination)
+
+```yaml
+# Option A: connection string via env var
+destination:
+  type: postgres
+  connection_string_env: DATABASE_URL  # env var with postgres://user:pass@host:5432/dbname
+  table: public.analytics_scores       # required: target table
+  upsert_key: [id]                     # required: columns for ON CONFLICT
+
+# Option B: individual parameters
+destination:
+  type: postgres
+  host_env: TARGET_PG_HOST           # env var for host (or use host:)
+  port: 5432                         # default: 5432
+  dbname_env: TARGET_PG_DBNAME       # env var for database name
+  user_env: TARGET_PG_USER           # env var for user
+  password_env: TARGET_PG_PASSWORD   # env var for password
+  table: public.analytics_scores     # required: target table
+  upsert_key: [id]                   # required: columns for ON CONFLICT
+  ssl:                               # optional: SSL/TLS connection
+    enabled: true
+    ca_env: PG_SSL_CA                # env var for CA cert path
+    cert_env: PG_SSL_CERT            # env var for client cert path
+    key_env: PG_SSL_KEY              # env var for client key path
+```
+
+> Uses `INSERT ... ON CONFLICT (upsert_key) DO UPDATE SET ...` for idempotent writes.
+> `connection_string_env` takes precedence over individual parameters when both are set.
+
+### `type: mysql`
+
+```yaml
+# Option A: connection string via env var
+destination:
+  type: mysql
+  connection_string_env: MYSQL_URL     # env var with mysql://user:pass@host:3306/dbname
+  table: analytics.scores              # required: target table
+  upsert_key: [id]                     # required: columns for ON DUPLICATE KEY
+
+# Option B: individual parameters
+destination:
+  type: mysql
+  host_env: TARGET_MYSQL_HOST        # env var for host
+  port: 3306                         # default: 3306
+  database_env: TARGET_MYSQL_DB      # env var for database
+  user_env: TARGET_MYSQL_USER        # env var for user
+  password_env: TARGET_MYSQL_PASS    # env var for password
+  table: analytics.scores            # required: target table
+  upsert_key: [id]                   # required: columns for ON DUPLICATE KEY
+  ssl:                               # optional: SSL/TLS connection
+    enabled: true
+    ca_env: MYSQL_SSL_CA             # env var for CA cert path
+    cert_env: MYSQL_SSL_CERT         # env var for client cert path
+    key_env: MYSQL_SSL_KEY           # env var for client key path
+```
+
+> Uses `INSERT ... ON DUPLICATE KEY UPDATE ...` for idempotent writes.
+> `connection_string_env` takes precedence over individual parameters when both are set.
 
 ---
 
@@ -218,6 +332,27 @@ destination:
   type: slack
   webhook_url_env: SLACK_WEBHOOK_URL
   message_template: ":wave: New user: *{{ row.name }}* ({{ row.email }})"
+
+sync:
+  mode: incremental
+  cursor_field: created_at
+  batch_size: 50
+  on_error: skip
+  rate_limit:
+    requests_per_second: 5
+```
+
+### Discord notification — incremental
+
+```yaml
+name: new_order_discord
+description: "Notify Discord when new orders arrive"
+model: ref('orders')
+
+destination:
+  type: discord
+  webhook_url_env: DISCORD_WEBHOOK_URL
+  message_template: ":package: New order #{{ row.order_id }} from {{ row.customer_name }} (${{ row.total }})"
 
 sync:
   mode: incremental
@@ -286,6 +421,72 @@ sync:
   mode: incremental
   cursor_field: approved_at
   on_error: fail
+```
+
+### Google Sheets export — overwrite
+
+```yaml
+name: export_to_sheets
+description: "Export user data to Google Sheets"
+model: ref('users')
+
+destination:
+  type: google_sheets
+  spreadsheet_id: "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
+  sheet: "Sheet1"
+  mode: overwrite
+  credentials_path: /path/to/sa-key.json
+
+sync:
+  mode: full
+  batch_size: 100
+```
+
+### PostgreSQL upsert
+
+```yaml
+name: sync_scores
+description: "Upsert analytics scores to target Postgres"
+model: ref('user_scores')
+
+destination:
+  type: postgres
+  host_env: TARGET_PG_HOST
+  dbname_env: TARGET_PG_DBNAME
+  user_env: TARGET_PG_USER
+  password_env: TARGET_PG_PASSWORD
+  table: public.analytics_scores
+  upsert_key: [user_id]
+
+sync:
+  mode: incremental
+  cursor_field: updated_at
+  on_error: skip
+```
+
+### MySQL upsert
+
+```yaml
+name: sync_leads_mysql
+description: "Upsert lead scores to target MySQL"
+model: ref('lead_scores')
+
+destination:
+  type: mysql
+  host_env: TARGET_MYSQL_HOST
+  database_env: TARGET_MYSQL_DB
+  user_env: TARGET_MYSQL_USER
+  password_env: TARGET_MYSQL_PASS
+  table: marketing.lead_scores
+  upsert_key: [lead_id]
+  ssl:
+    enabled: true
+    ca_env: MYSQL_SSL_CA
+
+sync:
+  mode: upsert
+  batch_size: 200
+  on_error: skip
 ```
 
 ### REST API with custom auth header

@@ -40,7 +40,7 @@ AuthConfig = Annotated[
 
 
 class SourceConfig(BaseModel):
-    type: Literal["bigquery", "snowflake", "postgres", "duckdb"]
+    type: Literal["bigquery", "snowflake", "postgres", "duckdb", "clickhouse"]
     project: str | None = None
     dataset: str | None = None
     credentials: str | None = None
@@ -84,6 +84,18 @@ class SlackDestinationConfig(BaseModel):
     block_kit: bool = False
 
 
+class DiscordDestinationConfig(BaseModel):
+    type: Literal["discord"]
+    webhook_url: str | None = None
+    webhook_url_env: str | None = None
+    # Jinja2 template for Discord message. Supports plain text or embeds JSON.
+    # Plain text example: "New user: {{ row.name }} ({{ row.email }})"
+    # Embeds: full JSON payload with "embeds" array
+    message_template: str = "{{ row }}"
+    # If True, treat message_template as a JSON payload with embeds
+    embeds: bool = False
+
+
 class GitHubActionsDestinationConfig(BaseModel):
     type: Literal["github_actions"]
     owner: str
@@ -116,8 +128,18 @@ class HubSpotDestinationConfig(BaseModel):
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
 
 
+class SslConfig(BaseModel):
+    """SSL/TLS connection options for DB destinations."""
+
+    enabled: bool = False
+    ca_env: str | None = None  # env var for CA cert path
+    cert_env: str | None = None  # env var for client cert path
+    key_env: str | None = None  # env var for client key path
+
+
 class PostgresDestinationConfig(BaseModel):
     type: Literal["postgres"]
+    connection_string_env: str | None = None
     host: str | None = None
     host_env: str | None = None
     port: int = 5432
@@ -129,18 +151,22 @@ class PostgresDestinationConfig(BaseModel):
     password_env: str | None = None
     table: str  # e.g. "public.analytics_scores"
     upsert_key: list[str]  # columns for ON CONFLICT
+    ssl: SslConfig | None = None
 
     @model_validator(mode="after")
     def _check_connection(self) -> "PostgresDestinationConfig":
+        if self.connection_string_env:
+            return self  # connection string takes precedence
         if not self.host and not self.host_env:
-            raise ValueError("Either host or host_env is required.")
+            raise ValueError("Either host, host_env, or connection_string_env is required.")
         if not self.dbname and not self.dbname_env:
-            raise ValueError("Either dbname or dbname_env is required.")
+            raise ValueError("Either dbname, dbname_env, or connection_string_env is required.")
         return self
 
 
 class MySQLDestinationConfig(BaseModel):
     type: Literal["mysql"]
+    connection_string_env: str | None = None
     host: str | None = None
     host_env: str | None = None
     port: int = 3306
@@ -152,13 +178,16 @@ class MySQLDestinationConfig(BaseModel):
     password_env: str | None = None
     table: str  # e.g. "interviewer_learning_profiles"
     upsert_key: list[str]  # columns for ON DUPLICATE KEY
+    ssl: SslConfig | None = None
 
     @model_validator(mode="after")
     def _check_connection(self) -> "MySQLDestinationConfig":
+        if self.connection_string_env:
+            return self  # connection string takes precedence
         if not self.host and not self.host_env:
-            raise ValueError("Either host or host_env is required.")
+            raise ValueError("Either host, host_env, or connection_string_env is required.")
         if not self.dbname and not self.dbname_env:
-            raise ValueError("Either dbname or dbname_env is required.")
+            raise ValueError("Either dbname, dbname_env, or connection_string_env is required.")
         return self
 
 
@@ -166,6 +195,7 @@ class MySQLDestinationConfig(BaseModel):
 DestinationConfig = Annotated[
     RestApiDestinationConfig
     | SlackDestinationConfig
+    | DiscordDestinationConfig
     | GitHubActionsDestinationConfig
     | HubSpotDestinationConfig
     | GoogleSheetsDestinationConfig
@@ -193,7 +223,7 @@ class RetryConfig(BaseModel):
 
 
 class SyncOptions(BaseModel):
-    mode: Literal["full", "incremental"] = "full"
+    mode: Literal["full", "incremental", "upsert"] = "full"
     cursor_field: str | None = None  # required when mode=incremental
     batch_size: int = 100
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)

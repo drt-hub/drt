@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "drt-core"
-version = "0.4.0"
+version = "0.4.3"
 description = "Reverse ETL for the code-first data stack"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -36,6 +36,7 @@ bigquery = ["google-cloud-bigquery>=3.0"]
 duckdb = ["duckdb>=0.10"]
 postgres = ["psycopg2-binary>=2.9"]
 redshift = ["psycopg2-binary>=2.9"]  # Redshift uses PostgreSQL wire protocol
+clickhouse = ["clickhouse-connect>=0.7.0"]
 sheets = ["google-api-python-client>=2.0", "google-auth>=2.0"]
 mysql = ["pymysql>=1.1"]
 mcp = ["fastmcp>=2.0"]
@@ -46,6 +47,7 @@ dev = [
     "mypy>=1.10",
     "ruff>=0.4",
     "types-pyyaml",
+    "types-PyMySQL",
 ]
 
 [project.scripts]

@@ -33,11 +33,11 @@ drt/
 
 ## Protocols (critical interfaces)
 
-- `Source.extract(query, config) -> Iterator[dict]`
-- `Destination.load(records, config) -> SyncResult`
+- `Source.extract(query: str, config: ProfileConfig) -> Iterator[dict]`
+- `Destination.load(records: list[dict], config: DestinationConfig, sync_options: SyncOptions) -> SyncResult`
 - `StateManager.get_last_sync / save_sync`
 
-These interfaces are stable. New sources/destinations implement these protocols — do not change the signatures.
+Implementations use `assert isinstance(config, SpecificConfig)` for type narrowing. `type: ignore` is only allowed for external library issues.
 
 ## Development Commands
 
@@ -50,18 +50,18 @@ make fmt      # ruff format + fix
 
 ## Current Status
 
-- **v0.3.4 released** — Redshift source connector (`drt-core[redshift]`)
+- **v0.4.3 released** — ClickHouse source, Discord CLI fix, SQLite in init wizard, README.ja.md (community contributions)
 - CLI fully wired: `init`, `run`, `list`, `validate`, `status`, `mcp run`
-- Sources: BigQuery, DuckDB, PostgreSQL, Redshift
-- Destinations: REST API, Slack, GitHub Actions, HubSpot
-- MCP Server: `drt mcp run` via `drt-core[mcp]` (FastMCP)
-- 84 tests, integration tests use `pytest-httpserver` (no real HTTP mocking)
+- Sources: BigQuery, DuckDB, PostgreSQL, Redshift, SQLite, ClickHouse
+- Destinations: REST API, Slack, Discord, GitHub Actions, HubSpot, Google Sheets, PostgreSQL, MySQL
+- Integrations: MCP Server (`drt-core[mcp]`), dagster-drt, dbt manifest reader
+- 170+ tests, integration tests use `pytest-httpserver`
 
 ## What NOT to do
 
 - Do not add a GUI or web UI — this is a CLI-first tool
 - Do not add RBAC or multi-tenancy — small team / personal use
-- Do not change Source/Destination protocol signatures without discussion
+- Do not add `type: ignore` — only allowed for external library issues (`no-untyped-call`, `import-untyped`)
 - Do not add heavy dependencies to core — extras (`[bigquery]`, `[mcp]`) exist for a reason
 
 ## Roadmap Reference
@@ -71,9 +71,11 @@ make fmt      # ruff format + fix
 - v0.1 ✅: BigQuery → REST API working end-to-end
 - v0.2 ✅: Incremental sync + retry from config
 - v0.3 ✅: MCP Server + AI Skills for Claude Code + LLM-readable docs + row-level errors + security hardening + Redshift source
-- [v0.4](https://github.com/drt-hub/drt/milestone/1): Dagster integration + Google Sheets destination + dbt post-hook + examples
-- [v0.5](https://github.com/drt-hub/drt/milestone/2): Snowflake source + CSV/JSON destination + test coverage
-- [v0.6](https://github.com/drt-hub/drt/milestone/3): Salesforce destination + Airflow integration
+- v0.4 ✅: Google Sheets / PostgreSQL / MySQL destinations + dagster-drt + dbt manifest reader + type safety overhaul
+- [v0.5](https://github.com/drt-hub/drt/milestone/2): Snowflake source + CSV/JSON + Parquet destinations + test coverage + Docker
+- [v0.6](https://github.com/drt-hub/drt/milestone/3): Salesforce + Airflow integration + Jira / Twilio / Intercom destinations
+- [v0.7](https://github.com/drt-hub/drt/milestone/4): DWH destinations (Snowflake / BigQuery / ClickHouse / Databricks) + Cloud storage (S3 / GCS / Azure Blob)
+- [v0.8](https://github.com/drt-hub/drt/milestone/5): Lakehouse sources (Delta Lake / Apache Iceberg)
 - v1.x: Rust engine via PyO3
 
 **Good First Issues:** https://github.com/drt-hub/drt/issues?q=is%3Aopen+label%3A%22good+first+issue%22

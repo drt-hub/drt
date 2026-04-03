@@ -1,6 +1,8 @@
 name: Feature Request
 description: Suggest a new connector, command, or capability
+title: "[Feature] "
 labels: ["feat"]
+
 body:
   - type: textarea
     id: problem
@@ -16,6 +18,7 @@ body:
     attributes:
       label: Proposed solution
       description: What would you like drt to do?
+      placeholder: "Describe the feature you'd like to see..."
     validations:
       required: true
 
@@ -40,6 +43,7 @@ body:
     attributes:
       label: Alternatives considered
       description: What workarounds or other tools have you tried?
+      placeholder: "Describe any alternatives you've considered..."
 
   - type: textarea
     id: yaml-example

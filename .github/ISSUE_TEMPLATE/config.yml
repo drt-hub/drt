@@ -1,8 +1,10 @@
-blank_issues_enabled: true
+blank_issues_enabled: false
+
 contact_links:
   - name: Question / Discussion
     url: https://github.com/drt-hub/drt/discussions
     about: Ask questions or discuss ideas in Discussions.
+
   - name: Security Vulnerability
     url: https://github.com/drt-hub/drt/security/advisories/new
     about: Report security issues privately via GitHub Security Advisories.
