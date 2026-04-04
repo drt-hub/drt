@@ -4,7 +4,7 @@
 
 Community-maintained [Dagster](https://dagster.io/) integration for [drt](https://github.com/drt-hub/drt) (data reverse tool).
 
-Expose drt syncs as Dagster assets with full observability — metrics, dependencies, and dry-run support.
+Expose drt syncs as Dagster assets with full observability — metrics, dependencies, subsetting, and dry-run support.
 
 ## Installation
 
@@ -15,64 +15,119 @@ pip install dagster-drt
 ## Quick Start
 
 ```python
-from dagster import Definitions
-from dagster_drt import drt_assets
+from dagster import AssetExecutionContext, Definitions
+from dagster_drt import drt_assets, DagsterDrtResource
 
-defs = Definitions(assets=drt_assets(project_dir="path/to/drt-project"))
-```
+@drt_assets(project_dir="path/to/drt-project")
+def my_syncs(context: AssetExecutionContext, drt: DagsterDrtResource):
+    yield from drt.run(context=context)
 
-## Features
-
-### DagsterDrtTranslator
-
-Customise how drt syncs map to Dagster assets. Subclass and override methods:
-
-```python
-from dagster import AssetKey
-from dagster_drt import DagsterDrtTranslator, drt_assets
-
-class MyTranslator(DagsterDrtTranslator):
-    def get_group_name(self, sync_config):
-        return "reverse_etl"
-
-    def get_deps(self, sync_config):
-        deps_map = {
-            "trigger_bq_meeting_gha": [AssetKey("bq_meeting_cloudsql")],
-        }
-        return deps_map.get(sync_config.name, [])
-
-assets = drt_assets(
-    project_dir="pipeline/data-reverse",
-    dagster_drt_translator=MyTranslator(),
+defs = Definitions(
+    assets=[my_syncs],
+    resources={"drt": DagsterDrtResource(project_dir="path/to/drt-project")},
 )
 ```
 
-**Available methods:**
+## API Overview
 
-| Method | Default | Purpose |
-|--------|---------|---------|
-| `get_asset_key(sync_config)` | `AssetKey(f"drt_{name}")` | Asset key |
-| `get_group_name(sync_config)` | `None` | Group name |
-| `get_description(sync_config)` | `sync_config.description` | Asset description |
-| `get_deps(sync_config)` | `[]` | Upstream dependencies |
-| `get_metadata(sync_config)` | `{}` | Static metadata |
+| Component | Purpose |
+|---|---|
+| `@drt_assets` | Decorator — creates `@multi_asset` from drt syncs |
+| `build_drt_asset_specs()` | Spec-only generation (for Pipes / custom execution) |
+| `DagsterDrtResource` | Execution resource with `.run()` |
+| `DagsterDrtTranslator` | Customise how syncs map to assets |
+| `DrtConfig` | Per-run config (dry-run) from Dagster UI |
 
-### Dry-Run Support (DrtConfig)
+## Features
 
-Control dry-run mode per-run from the Dagster UI, or set a build-time default:
+### @drt_assets Decorator
+
+Creates a Dagster `multi_asset` with `can_subset=True` from drt sync definitions:
 
 ```python
-# Build-time default: all syncs in dry-run mode
-assets = drt_assets(project_dir="...", dry_run=True)
-
-# Override per-run via Dagster UI → Run Config:
-# ops:
-#   drt_my_sync:
-#     config:
-#       dry_run: false
+@drt_assets(
+    project_dir=".",
+    sync_names=["sync_a", "sync_b"],  # optional filter
+    group_name="reverse_etl",         # optional group override
+    partitions_def=DailyPartitionsDefinition(start_date="2024-01-01"),
+    pool="drt_pool",                  # optional concurrency control
+)
+def my_syncs(context: AssetExecutionContext, drt: DagsterDrtResource):
+    yield from drt.run(context=context)
 ```
 
-### MaterializeResult
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_dir` | `str \| Path` | required | Path to drt project root |
+| `sync_names` | `list[str] \| None` | `None` | Filter to specific syncs |
+| `dagster_drt_translator` | `DagsterDrtTranslator \| None` | `None` | Custom translator |
+| `name` | `str \| None` | `None` | Op name |
+| `group_name` | `str \| None` | `None` | Group name override |
+| `partitions_def` | `PartitionsDefinition \| None` | `None` | Partitions |
+| `backfill_policy` | `BackfillPolicy \| None` | auto `single_run` | Backfill policy |
+| `pool` | `str \| None` | `None` | Concurrency pool |
+
+### DagsterDrtResource
+
+Execution resource that yields `MaterializeResult` per sync:
+
+```python
+DagsterDrtResource(
+    project_dir=".",  # optional if @drt_assets has it
+    dry_run=False,    # default dry-run mode
+)
+```
+
+- Auto-resolves `project_dir` from `@drt_assets` metadata
+- Filters to `context.selected_asset_keys` for subset execution
+- Supports `dry_run` override per-run: `drt.run(context=ctx, dry_run=True)`
+
+### DagsterDrtTranslator
+
+Customise how drt syncs map to Dagster assets. Override `get_asset_spec()`:
+
+```python
+from dagster_drt import DagsterDrtTranslator, drt_assets
+
+class MyTranslator(DagsterDrtTranslator):
+    def get_asset_spec(self, data):
+        default = super().get_asset_spec(data)
+        return default.replace_attributes(
+            group_name="reverse_etl",
+            owners=["team:data"],
+        )
+
+@drt_assets(project_dir=".", dagster_drt_translator=MyTranslator())
+def my_syncs(context, drt):
+    yield from drt.run(context=context)
+```
+
+Legacy per-attribute methods (`get_asset_key`, `get_group_name`, etc.) still work but emit deprecation warnings. Migrate to `get_asset_spec()`.
+
+### build_drt_asset_specs (Pipes / Custom Execution)
+
+Generate specs without execution logic — use with Dagster Pipes for remote execution:
+
+```python
+from dagster import multi_asset
+from dagster_drt import build_drt_asset_specs
+
+specs = build_drt_asset_specs(project_dir=".", sync_names=["my_sync"])
+
+@multi_asset(specs=specs, can_subset=True)
+def my_drt_assets(context, pipes: PipesCloudRunJobClient):
+    return pipes.run(
+        context=context,
+        job_name="drt-runner",
+        command=["drt", "run", "--sync", "my_sync"],
+    ).get_results()
+```
+
+This is the same pattern as dagster-dlt's `build_dlt_asset_specs()`.
+
+### MaterializeResult Metadata
 
 Assets return `MaterializeResult` with structured metadata visible in the Dagster UI:
 
@@ -83,40 +138,59 @@ Assets return `MaterializeResult` with structured metadata visible in the Dagste
 - `dry_run` — whether dry-run was active
 - `row_errors_count` — number of row-level errors (details in logs)
 
-### Filtering Syncs
+### Asset Kinds
 
-```python
-# Only expose specific syncs as assets
-assets = drt_assets(
-    project_dir="...",
-    sync_names=["sync_a", "sync_b"],
-)
-```
+Assets are tagged with `kinds={"drt", "<destination_type>"}` (e.g. `{"drt", "rest_api"}`), visible in the Dagster UI asset graph.
 
 ## Usage with dagster-dbt
 
 ```python
 from dagster import Definitions
-from dagster_dbt import dbt_assets
-from dagster_drt import drt_assets, DagsterDrtTranslator
+from dagster_dbt import dbt_assets, DbtCliResource
+from dagster_drt import drt_assets, DagsterDrtResource
+
+@dbt_assets(manifest=dbt_project.manifest_path)
+def my_dbt_assets(context, dbt: DbtCliResource):
+    yield from dbt.cli(["build"], context=context).stream()
+
+@drt_assets(project_dir="path/to/drt-project")
+def my_drt_syncs(context, drt: DagsterDrtResource):
+    yield from drt.run(context=context)
 
 defs = Definitions(
-    assets=[*my_dbt_assets, *drt_assets("path/to/drt-project")],
+    assets=[my_dbt_assets, my_drt_syncs],
+    resources={
+        "dbt": DbtCliResource(project_dir=dbt_project),
+        "drt": DagsterDrtResource(project_dir="path/to/drt-project"),
+    },
 )
 ```
 
-## API Reference
+## Migration from v0.1
 
-### `drt_assets()`
+v0.2 introduces the `@drt_assets` decorator, `DagsterDrtResource`, and `build_drt_asset_specs()`. The old `drt_assets()` function is renamed to `drt_assets_legacy()` and emits a deprecation warning.
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `project_dir` | `str \| Path` | required | Path to drt project root |
-| `sync_names` | `list[str] \| None` | `None` | Filter to specific syncs |
-| `dagster_drt_translator` | `DagsterDrtTranslator \| None` | `None` | Custom translator |
-| `dry_run` | `bool` | `False` | Default dry-run mode |
+**Before (v0.1):**
 
-Returns: `list[AssetsDefinition]`
+```python
+from dagster_drt import drt_assets
+defs = Definitions(assets=drt_assets(project_dir="."))
+```
+
+**After (v0.2):**
+
+```python
+from dagster_drt import drt_assets, DagsterDrtResource
+
+@drt_assets(project_dir=".")
+def my_syncs(context, drt: DagsterDrtResource):
+    yield from drt.run(context=context)
+
+defs = Definitions(
+    assets=[my_syncs],
+    resources={"drt": DagsterDrtResource(project_dir=".")},
+)
+```
 
 ## License
 

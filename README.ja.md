@@ -240,28 +240,27 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 
 ## オーケストレーション: dagster-drt
 
-コミュニティによって維持管理されている [Dagster](https://dagster.io/) との統合。 drtの同期を、可観測性を備えた Dagster アセットとして公開します。
+コミュニティによって維持管理されている [Dagster](https://dagster.io/) との統合。drt の同期を、可観測性を備えた Dagster アセットとして公開します。
+
 ```bash
 pip install dagster-drt
 ```
 
 ```python
-from dagster import Definitions
-from dagster_drt import drt_assets, DagsterDrtTranslator
+from dagster import AssetExecutionContext, Definitions
+from dagster_drt import drt_assets, DagsterDrtResource
 
-class MyTranslator(DagsterDrtTranslator):
-    def get_group_name(self, sync_config):
-        return "reverse_etl"
+@drt_assets(project_dir="path/to/drt-project")
+def my_syncs(context: AssetExecutionContext, drt: DagsterDrtResource):
+    yield from drt.run(context=context)
 
 defs = Definitions(
-    assets=drt_assets(
-        project_dir="path/to/drt-project",
-        dagster_drt_translator=MyTranslator(),
-    )
+    assets=[my_syncs],
+    resources={"drt": DagsterDrtResource(project_dir="path/to/drt-project")},
 )
 ```
 
-詳細なAPIドキュメント（Translator、DrtConfigのドライラン、MaterializeResult）については、 [dagster-drt README](integrations/dagster-drt/README.md) を参照してください。
+詳細な API ドキュメント（Translator、Pipes サポート、DrtConfig のドライラン、MaterializeResult）については、[dagster-drt README](integrations/dagster-drt/README.md) を参照してください。
 
 ---
 

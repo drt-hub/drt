@@ -124,21 +124,23 @@ The MCP server reads from the current working directory (the drt project root).
 Community-maintained Dagster integration. Install: `pip install dagster-drt`
 
 ```python
-from dagster_drt import drt_assets, DagsterDrtTranslator, DrtConfig
+from dagster import AssetExecutionContext, Definitions
+from dagster_drt import drt_assets, DagsterDrtResource, DagsterDrtTranslator
 
-# Basic usage
-assets = drt_assets(project_dir="path/to/drt-project")
+# Basic usage — @drt_assets decorator + DagsterDrtResource
+@drt_assets(project_dir="path/to/drt-project")
+def my_syncs(context: AssetExecutionContext, drt: DagsterDrtResource):
+    yield from drt.run(context=context)
 
-# Custom translator for group names and deps
-class MyTranslator(DagsterDrtTranslator):
-    def get_group_name(self, sync_config):
-        return "reverse_etl"
-
-assets = drt_assets(
-    project_dir="path/to/drt-project",
-    dagster_drt_translator=MyTranslator(),
-    dry_run=True,  # build-time default
+defs = Definitions(
+    assets=[my_syncs],
+    resources={"drt": DagsterDrtResource(project_dir="path/to/drt-project")},
 )
+
+# Pipes-based remote execution (Cloud Run, K8s, etc.)
+from dagster_drt import build_drt_asset_specs
+specs = build_drt_asset_specs(project_dir=".")
+# Use specs with @multi_asset + PipesClient
 ```
 
 ## AI Skills for Claude Code

@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > `dagster-drt` is published as a separate PyPI package with its own version.
 
+### [0.2.0] - 2026-04-04 (dagster-drt)
+
+- **API alignment with dagster-dbt / dagster-dlt patterns** (#176, #177, #178, #179)
+- **`@drt_assets` decorator** — wraps `@multi_asset(can_subset=True)`, replacing the old `drt_assets()` function
+- **`build_drt_asset_specs()`** — pure spec generation, decoupled from execution. Enables Dagster Pipes remote execution (#175)
+- **`DagsterDrtResource`** — `ConfigurableResource` with `.run()` yielding `MaterializeResult` per sync. Auto-resolves `project_dir` from `@drt_assets` metadata
+- **`DagsterDrtTranslator.get_asset_spec()`** — new primary override point (per-attribute methods deprecated)
+- **`partitions_def`, `backfill_policy`, `pool`** support on `@drt_assets`
+- **Asset `kinds`** metadata — `{"drt", "<destination_type>"}` visible in Dagster UI
+- **Group name conflict detection** — raises if translator and decorator both set group names
+- **Subset execution** — `DagsterDrtResource.run()` respects `context.selected_asset_keys`
+- Old `drt_assets()` function renamed to `drt_assets_legacy()` with deprecation warning
+- Requires `drt-core>=0.4.1`, `dagster>=1.6`
+
 ### [0.1.0] - 2026-04-01 (dagster-drt)
 
 - First PyPI release (`pip install dagster-drt`)
