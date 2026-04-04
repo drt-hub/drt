@@ -36,5 +36,8 @@ jobs:
       - name: Check skills sync
         run: make check-skills
 
+      - name: Check i18n sync
+        run: make check-i18n || echo "::warning::Some translations are stale. Run 'make check-i18n' for details."
+
       - name: Test (pytest)
         run: pytest

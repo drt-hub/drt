@@ -1,4 +1,4 @@
-.PHONY: install dev lint fmt test clean sync-skills check-skills sync-version release-check topics sync-labels
+.PHONY: install dev lint fmt test clean sync-skills check-skills check-i18n sync-version release-check topics sync-labels
 
 # ── Development ────────────────────────────────────────────────────────────────
 
@@ -51,6 +51,9 @@ check-skills:  ## Verify .claude/commands/ matches skills (CI gate)
 		exit 1; \
 	fi; \
 	echo "✓ All skills in sync"
+
+check-i18n:  ## Check if translated *.{lang}.md files are in sync with English base
+	@bash scripts/check-i18n-sync.sh
 
 sync-version:  ## Propagate version from pyproject.toml to all plugin JSONs
 	@python3 scripts/sync-version.py

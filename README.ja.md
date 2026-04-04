@@ -1,3 +1,5 @@
+<!-- i18n-sync: base=README.md, hash=da09e7fded81c276bc17449c8eae4feea3a4afe4 -->
+
 [English](./README.md) | [日本語](./README.ja.md)
 
 > **Note:** この翻訳は最新でない可能性があります。正確な情報は [README.md](README.md) を参照してください。
