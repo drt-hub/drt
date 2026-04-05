@@ -41,12 +41,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Snowflake source connector** (#162): Extract data from Snowflake using `snowflake-connector-python`. Supports account, user, password/password_env, database, schema, warehouse, and optional role. Install: `pip install drt-core[snowflake]`.
 
-## [Unreleased]
-
-### Added
-
-- **Snowflake source connector** (#162): Extract data from Snowflake using snowflake-connector-python. Supports account, user, password/password_env, database, schema, warehouse, and optional role. Install: pip install drt-core[snowflake].
-
 ## [0.4.3] - 2026-04-02
 
 ### Added
