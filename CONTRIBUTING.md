@@ -26,7 +26,7 @@ uv sync --extra dev --extra bigquery
 
 ### Pre-commit hooks
 
-We use [pre-commit](https://pre-commit.com/) to run ruff and mypy before each commit.
+You can optionally use [pre-commit](https://pre-commit.com/) to run ruff and mypy before each commit. This is optional — you can also use `make lint` and `make fmt` directly.
 
 ```bash
 uv pip install pre-commit
