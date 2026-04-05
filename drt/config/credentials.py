@@ -110,7 +110,6 @@ class ClickHouseProfile:
 
 
 
-
 @dataclass
 class SnowflakeProfile:
     """Snowflake profile using snowflake-connector-python."""
@@ -246,13 +245,19 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
         )
 
     if source_type == "snowflake":
+        _db = raw.get("database", "")
+        if not _db:
+            raise ValueError(
+                "Snowflake profile requires 'database'. "
+                "Add database: YOUR_DB to your profile in ~/.drt/profiles.yml"
+            )
         return SnowflakeProfile(
             type="snowflake",
             account=raw.get("account", ""),
             user=raw.get("user", ""),
             password_env=raw.get("password_env"),
             password=raw.get("password"),
-            database=raw.get("database", ""),
+            database=_db,
             schema=raw.get("schema") or "PUBLIC",
             warehouse=raw.get("warehouse", ""),
             role=raw.get("role"),

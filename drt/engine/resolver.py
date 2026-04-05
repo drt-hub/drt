@@ -78,7 +78,10 @@ def resolve_model_ref(
         elif isinstance(profile, PostgresProfile):
             base_sql = f'SELECT * FROM "{table_name}"'
         elif isinstance(profile, SnowflakeProfile):
-            base_sql = f'SELECT * FROM "{profile.database}"."{profile.schema}"."{table_name}"'
+            if profile.database:
+                base_sql = f'SELECT * FROM "{profile.database}"."{profile.schema}"."{table_name}"'
+            else:
+                base_sql = f'SELECT * FROM "{table_name}"'
         else:
             base_sql = f"SELECT * FROM {table_name}"
     else:

@@ -73,8 +73,9 @@ class SnowflakeSource:
             "password": password,
             "database": config.database,
             "schema": config.schema,
-            "warehouse": config.warehouse,
         }
+        if config.warehouse:
+            connect_args["warehouse"] = config.warehouse
         if config.role:
             connect_args["role"] = config.role
 
