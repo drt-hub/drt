@@ -27,7 +27,7 @@ def _sync_options():
         mode="full",
         batch_size=100,
         on_error="skip",
-        rate_limit=RateLimitConfig(requests_per_second=100),
+        rate_limit=RateLimitConfig(requests_per_second=0),
     )
 
 
@@ -85,9 +85,12 @@ class TestDiscordDestination:
             mock_response = MagicMock()
             mock_response.status_code = 401
             mock_response.text = "Unauthorized"
-            mock_client.post.side_effect = httpx.HTTPStatusError(
-                "401", request=MagicMock(), response=mock_response
+            mock_response.raise_for_status = MagicMock(
+                side_effect=httpx.HTTPStatusError(
+                    "401", request=MagicMock(), response=mock_response
+                )
             )
+            mock_client.post.return_value = mock_response
 
             result = dest.load(records, config, _sync_options())
 
@@ -119,6 +122,7 @@ class TestDiscordDestination:
             result = dest.load(records, config, _sync_options())
 
         assert result.success == 1
+        assert mock_client.post.call_args[0][0] == "https://discord.com/api/webhooks/env"
 
     def test_multiple_records(self):
         dest = DiscordDestination()
