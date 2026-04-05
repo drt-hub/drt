@@ -1,4 +1,4 @@
-<!-- i18n-sync: base=CONTRIBUTING.md, hash=43c09a58b7d6f74aab228fccd85d8d37b15ded02 -->
+<!-- i18n-sync: base=CONTRIBUTING.md, hash=8991d51e967280adc48c8a2b507a9f929ce67a01 -->
 
 [English](./CONTRIBUTING.md) | [日本語](./CONTRIBUTING.ja.md)
 
@@ -75,6 +75,21 @@ drt は **GitHub Flow** を使用します — すべての開発はフィーチ
 - `develop` や `release` ブランチはありません
 - リリースはタグ（`v0.2.0`, `v0.3.0`, ...）でマークされます
 
+## コミット署名（必須）
+
+`main` ブランチではサプライチェーン攻撃対策として**署名付きコミット**が必須です。すべての PR は **Squash & merge** でマージされ、GitHub が自動的にスカッシュコミットに署名するため、**コントリビューターが署名を設定しなくても貢献できます**。
+
+ただし、保護ブランチへの直接プッシュや、コミットに「Verified」バッジを表示したい場合は、SSH 署名を設定してください：
+
+```bash
+# 既存の SSH 鍵を使用（なければ生成: ssh-keygen -t ed25519）
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/id_ed25519.pub
+git config --global commit.gpgsign true
+```
+
+同じ鍵を [GitHub の SSH 設定](https://github.com/settings/keys)で **Signing Key** として追加してください。
+
 ## 変更の提出
 
 1. リポジトリをフォークする
@@ -83,7 +98,7 @@ drt は **GitHub Flow** を使用します — すべての開発はフィーチ
 4. `make lint` と `make test` を実行してすべてがパスすることを確認する
 5. プルリクエストを開き、PR テンプレートに記入する
 
-> **マージ戦略:** すべての PR は **Squash & merge** でマージされます。ブランチのコミットは `main` 上の単一のコミットにスカッシュされるため、WIP コミットをクリーンアップする必要はありません。
+> **マージ戦略:** すべての PR は **Squash & merge** でマージされます。ブランチのコミットは `main` 上の単一のコミットにスカッシュされるため、WIP コミットをクリーンアップする必要はありません。GitHub がスカッシュコミットに自動署名します。
 
 ## プルリクエストチェックリスト
 

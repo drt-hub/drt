@@ -71,6 +71,21 @@ drt uses **GitHub Flow** — all development happens on feature branches that me
 - No `develop` or `release` branches
 - Releases are marked with tags (`v0.2.0`, `v0.3.0`, …)
 
+## Commit Signing (Required)
+
+The `main` branch requires **signed commits** to protect against supply chain attacks. All PRs are merged with **Squash & merge**, and GitHub automatically signs the squash commit — so **you don't need to set up signing just to contribute**.
+
+However, if you push directly to protected branches or want your commits to show the "Verified" badge, set up SSH signing:
+
+```bash
+# Use your existing SSH key (or generate one with: ssh-keygen -t ed25519)
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/id_ed25519.pub
+git config --global commit.gpgsign true
+```
+
+Then add the same key as a **Signing Key** on [GitHub SSH settings](https://github.com/settings/keys).
+
 ## Submitting Changes
 
 1. Fork the repository
@@ -79,7 +94,7 @@ drt uses **GitHub Flow** — all development happens on feature branches that me
 4. Run `make lint` and `make test` to verify everything passes
 5. Open a Pull Request and fill out the PR template
 
-> **Merge strategy:** All PRs are merged with **Squash & merge**. Your branch commits are squashed into a single commit on `main`, so individual WIP commits don't need to be cleaned up.
+> **Merge strategy:** All PRs are merged with **Squash & merge**. Your branch commits are squashed into a single commit on `main`, so individual WIP commits don't need to be cleaned up. GitHub signs the squash commit automatically.
 
 ## Pull Request Checklist
 
