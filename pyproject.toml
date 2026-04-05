@@ -37,6 +37,8 @@ duckdb = ["duckdb>=0.10"]
 postgres = ["psycopg2-binary>=2.9"]
 redshift = ["psycopg2-binary>=2.9"]  # Redshift uses PostgreSQL wire protocol
 clickhouse = ["clickhouse-connect>=0.7.0"]
+snowflake = ["snowflake-connector-python>=3.0"]
+snowflake = ["snowflake-connector-python>=3.0"]
 sheets = ["google-api-python-client>=2.0", "google-auth>=2.0"]
 mysql = ["pymysql>=1.1"]
 mcp = ["fastmcp>=2.0"]

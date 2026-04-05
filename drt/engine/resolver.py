@@ -14,7 +14,13 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from drt.config.credentials import BigQueryProfile, DuckDBProfile, PostgresProfile, ProfileConfig
+from drt.config.credentials import (
+    BigQueryProfile,
+    DuckDBProfile,
+    PostgresProfile,
+    ProfileConfig,
+    SnowflakeProfile,
+)
 
 # Matches: ref('table') or ref("table")
 _REF_PATTERN = re.compile(r"""^ref\(\s*['"]([^'"]+)['"]\s*\)$""", re.IGNORECASE)
@@ -71,6 +77,8 @@ def resolve_model_ref(
             base_sql = f"SELECT * FROM {table_name}"
         elif isinstance(profile, PostgresProfile):
             base_sql = f'SELECT * FROM "{table_name}"'
+        elif isinstance(profile, SnowflakeProfile):
+            base_sql = f'SELECT * FROM "{profile.database}"."{profile.schema}"."{table_name}"'
         else:
             base_sql = f"SELECT * FROM {table_name}"
     else:

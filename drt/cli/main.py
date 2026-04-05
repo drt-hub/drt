@@ -15,6 +15,7 @@ if TYPE_CHECKING:
         DuckDBProfile,
         PostgresProfile,
         RedshiftProfile,
+        SnowflakeProfile,
         SQLiteProfile,
     )
     from drt.config.models import SyncConfig
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from drt.sources.duckdb import DuckDBSource
     from drt.sources.postgres import PostgresSource
     from drt.sources.redshift import RedshiftSource
+    from drt.sources.snowflake import SnowflakeSource
     from drt.sources.sqlite import SQLiteSource
 
 from drt import __version__
@@ -267,6 +269,7 @@ def _get_source(
         | PostgresProfile
         | RedshiftProfile
         | ClickHouseProfile
+        | SnowflakeProfile
     ),
 ) -> (
     BigQuerySource
@@ -275,6 +278,7 @@ def _get_source(
     | PostgresSource
     | RedshiftSource
     | ClickHouseSource
+    | SnowflakeSource
 ):
     from drt.config.credentials import (
         BigQueryProfile,
@@ -282,6 +286,7 @@ def _get_source(
         DuckDBProfile,
         PostgresProfile,
         RedshiftProfile,
+        SnowflakeProfile,
         SQLiteProfile,
     )
     from drt.sources.bigquery import BigQuerySource
@@ -305,6 +310,10 @@ def _get_source(
         from drt.sources.clickhouse import ClickHouseSource
 
         return ClickHouseSource()
+    if isinstance(profile, SnowflakeProfile):
+        from drt.sources.snowflake import SnowflakeSource
+
+        return SnowflakeSource()
     raise ValueError(f"Unsupported source type: {type(profile)}")
 
 

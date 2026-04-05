@@ -109,6 +109,22 @@ class ClickHouseProfile:
     password: str | None = None  # explicit (non-recommended)
 
 
+
+
+@dataclass
+class SnowflakeProfile:
+    """Snowflake profile using snowflake-connector-python."""
+
+    type: Literal["snowflake"]
+    account: str = ""
+    user: str = ""
+    password_env: str | None = None
+    password: str | None = None
+    database: str = ""
+    schema: str = "PUBLIC"
+    warehouse: str = ""
+    role: str | None = None
+
 # Union type — used throughout the codebase
 ProfileConfig = (
     BigQueryProfile
@@ -117,6 +133,7 @@ ProfileConfig = (
     | PostgresProfile
     | RedshiftProfile
     | ClickHouseProfile
+    | SnowflakeProfile
 )
 
 
@@ -228,9 +245,22 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             password=raw.get("password"),
         )
 
+    if source_type == "snowflake":
+        return SnowflakeProfile(
+            type="snowflake",
+            account=raw.get("account", ""),
+            user=raw.get("user", ""),
+            password_env=raw.get("password_env"),
+            password=raw.get("password"),
+            database=raw.get("database", ""),
+            schema=raw.get("schema", "PUBLIC"),
+            warehouse=raw.get("warehouse", ""),
+            role=raw.get("role"),
+        )
+
     raise ValueError(
-        f"Unsupported source type '{source_type}'. "
-        "Supported: bigquery, duckdb, sqlite, postgres, redshift, clickhouse"
+        f"Unsupported source type \'{source_type}\'. "
+        "Supported: bigquery, duckdb, sqlite, postgres, redshift, clickhouse, snowflake"
     )
 
 
@@ -293,6 +323,19 @@ def save_profile(
         }
         if profile.password_env:
             entry["password_env"] = profile.password_env
+    elif isinstance(profile, SnowflakeProfile):
+        entry = {
+            "type": "snowflake",
+            "account": profile.account,
+            "user": profile.user,
+            "database": profile.database,
+            "schema": profile.schema,
+            "warehouse": profile.warehouse,
+        }
+        if profile.password_env:
+            entry["password_env"] = profile.password_env
+        if profile.role:
+            entry["role"] = profile.role
     else:
         raise ValueError(f"Unknown profile type: {type(profile)}")
 
