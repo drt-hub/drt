@@ -1,0 +1,20 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.4
+    hooks:
+      - id: ruff
+        args: [--fix]
+        files: ^(drt|tests)/
+      - id: ruff-format
+        files: ^(drt|tests)/
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.10.0
+    hooks:
+      - id: mypy
+        files: ^drt/
+        additional_dependencies:
+          - types-pyyaml
+          - types-PyMySQL
+          - pydantic>=2.0
+          - typer>=0.12
