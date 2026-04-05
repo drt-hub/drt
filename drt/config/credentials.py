@@ -109,7 +109,6 @@ class ClickHouseProfile:
     password: str | None = None  # explicit (non-recommended)
 
 
-
 @dataclass
 class SnowflakeProfile:
     """Snowflake profile using snowflake-connector-python."""
