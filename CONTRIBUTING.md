@@ -29,7 +29,7 @@ uv sync --extra dev --extra bigquery
 We use [pre-commit](https://pre-commit.com/) to run ruff and mypy before each commit.
 
 ```bash
-pip install pre-commit
+uv pip install pre-commit
 pre-commit install
 ```
 
