@@ -30,11 +30,13 @@ class SnowflakeSource:
         conn = self._connect(config)
         try:
             cur = conn.cursor()
-            cur.execute(query)
-            columns = [desc[0] for desc in cur.description]
-            for row in cur.fetchall():
-                yield dict(zip(columns, row))
-            cur.close()
+            try:
+                cur.execute(query)
+                columns = [desc[0] for desc in cur.description]
+                for row in cur.fetchall():
+                    yield dict(zip(columns, row))
+            finally:
+                cur.close()
         finally:
             conn.close()
 
@@ -44,9 +46,11 @@ class SnowflakeSource:
         try:
             conn = self._connect(config)
             cur = conn.cursor()
-            cur.execute("SELECT 1")
-            cur.close()
-            return True
+            try:
+                cur.execute("SELECT 1")
+                return True
+            finally:
+                cur.close()
         except Exception:
             return False
         finally:

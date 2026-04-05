@@ -253,13 +253,13 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             password_env=raw.get("password_env"),
             password=raw.get("password"),
             database=raw.get("database", ""),
-            schema=raw.get("schema", "PUBLIC"),
+            schema=raw.get("schema") or "PUBLIC",
             warehouse=raw.get("warehouse", ""),
             role=raw.get("role"),
         )
 
     raise ValueError(
-        f"Unsupported source type \'{source_type}\'. "
+        f"Unsupported source type '{source_type}'. "
         "Supported: bigquery, duckdb, sqlite, postgres, redshift, clickhouse, snowflake"
     )
 
