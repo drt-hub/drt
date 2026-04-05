@@ -95,7 +95,11 @@ class TestSnowflakeSource:
         mock_module = MagicMock()
         mock_connector = MagicMock()
         mock_module.connector = mock_connector
-        with patch.dict("sys.modules", {"snowflake": mock_module, "snowflake.connector": mock_connector}):
+        modules = {
+            "snowflake": mock_module,
+            "snowflake.connector": mock_connector,
+        }
+        with patch.dict("sys.modules", modules):
             source._connect(config)
             mock_connector.connect.assert_called_once_with(
                 account="xy12345.us-east-1",
@@ -113,7 +117,11 @@ class TestSnowflakeSource:
         mock_module = MagicMock()
         mock_connector = MagicMock()
         mock_module.connector = mock_connector
-        with patch.dict("sys.modules", {"snowflake": mock_module, "snowflake.connector": mock_connector}):
+        modules = {
+            "snowflake": mock_module,
+            "snowflake.connector": mock_connector,
+        }
+        with patch.dict("sys.modules", modules):
             source._connect(config)
             call_kwargs = mock_connector.connect.call_args[1]
             assert "role" not in call_kwargs
@@ -124,8 +132,14 @@ class TestSnowflakeSource:
         mock_module = MagicMock()
         mock_connector = MagicMock()
         mock_module.connector = mock_connector
-        with patch.dict("sys.modules", {"snowflake": mock_module, "snowflake.connector": mock_connector}), \
-             patch.dict("os.environ", {"SNOWFLAKE_PASSWORD": "env_secret"}):
+        modules = {
+            "snowflake": mock_module,
+            "snowflake.connector": mock_connector,
+        }
+        with (
+            patch.dict("sys.modules", modules),
+            patch.dict("os.environ", {"SNOWFLAKE_PASSWORD": "env_secret"}),
+        ):
             source._connect(config)
             call_kwargs = mock_connector.connect.call_args[1]
             assert call_kwargs["password"] == "env_secret"
