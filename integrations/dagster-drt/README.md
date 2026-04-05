@@ -1,7 +1,7 @@
 # dagster-drt
 
 [![PyPI](https://img.shields.io/pypi/v/dagster-drt)](https://pypi.org/project/dagster-drt/)
-[![Downloads](https://static.pepy.tech/badge/dagster-drt)](https://pepy.tech/projects/dagster-drt)
+[![dagster-drt downloads](https://img.shields.io/pepy/dt/dagster-drt?label=dagster-drt%20downloads)](https://pepy.tech/projects/dagster-drt)
 
 Community-maintained [Dagster](https://dagster.io/) integration for [drt](https://github.com/drt-hub/drt) (data reverse tool).
 
