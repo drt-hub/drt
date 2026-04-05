@@ -11,6 +11,8 @@
 
 [![CI](https://github.com/drt-hub/drt/actions/workflows/ci.yml/badge.svg)](https://github.com/drt-hub/drt/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/drt-core)](https://pypi.org/project/drt-core/)
+[![Downloads](https://static.pepy.tech/badge/drt-core)](https://pepy.tech/projects/drt-core)
+[![Downloads](https://static.pepy.tech/badge/dagster-drt)](https://pepy.tech/projects/dagster-drt)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Python](https://img.shields.io/pypi/pyversions/drt-core)](https://pypi.org/project/drt-core/)
 

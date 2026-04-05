@@ -28,6 +28,6 @@ jobs:
           path-to-signatures: "signatures/cla.json"
           path-to-document: "https://github.com/drt-hub/drt/blob/main/CLA.md"
           branch: "main"
-          allowlist: "bot*,dependabot*,github-actions*"
+          allowlist: "bot*,dependabot*,github-actions*,masukai,K-Masuda-SL"
           remote-organization-name: "drt-hub"
           remote-repository-name: "drt"
