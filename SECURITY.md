@@ -24,8 +24,9 @@ The `main` branch enforces the following rules to mitigate supply chain attacks 
 - **Signed commits required** — prevents commit author spoofing via force-push
 - **Force-push and branch deletion disabled**
 - **PR reviews required** — at least 1 approval; stale reviews are dismissed on new pushes
-- **Admin enforcement enabled** — admins cannot bypass these rules
 - **Status checks required** — CI must pass before merge
+
+> **Note:** `enforce_admins` is currently disabled to keep the solo-maintainer workflow practical. This will be re-enabled when the project has multiple maintainers.
 
 ## Reporting a Vulnerability
 
