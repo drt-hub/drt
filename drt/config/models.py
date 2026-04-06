@@ -191,6 +191,33 @@ class MySQLDestinationConfig(BaseModel):
         return self
 
 
+class ClickHouseDestinationConfig(BaseModel):
+    type: Literal["clickhouse"]
+    connection_string_env: str | None = None
+    host: str | None = None
+    host_env: str | None = None
+    port: int = 8123
+    database: str | None = None
+    database_env: str | None = None
+    user: str | None = None
+    user_env: str | None = None
+    password: str | None = None
+    password_env: str | None = None
+    table: str  # e.g. "default.analytics_scores"
+    upsert_key: list[str]  # columns for deduplication
+    secure: bool = False  # use HTTPS (port 8443)
+
+    @model_validator(mode="after")
+    def _check_connection(self) -> "ClickHouseDestinationConfig":
+        if self.connection_string_env:
+            return self  # connection string takes precedence
+        if not self.host and not self.host_env:
+            raise ValueError("Either host, host_env, or connection_string_env is required.")
+        if not self.database and not self.database_env:
+            raise ValueError("Either database, database_env, or connection_string_env is required.")
+        return self
+
+
 # Discriminated union — add new destination types here
 DestinationConfig = Annotated[
     RestApiDestinationConfig
@@ -200,7 +227,8 @@ DestinationConfig = Annotated[
     | HubSpotDestinationConfig
     | GoogleSheetsDestinationConfig
     | PostgresDestinationConfig
-    | MySQLDestinationConfig,
+    | MySQLDestinationConfig
+    | ClickHouseDestinationConfig,
     Field(discriminator="type"),
 ]
 
