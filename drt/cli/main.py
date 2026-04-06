@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from drt.destinations.postgres import PostgresDestination
     from drt.destinations.rest_api import RestApiDestination
     from drt.destinations.slack import SlackDestination
+    from drt.destinations.teams import TeamsDestination
     from drt.sources.bigquery import BigQuerySource
     from drt.sources.clickhouse import ClickHouseSource
     from drt.sources.duckdb import DuckDBSource
@@ -328,6 +329,7 @@ def _get_destination(
     | GoogleSheetsDestination
     | PostgresDestination
     | MySQLDestination
+    | TeamsDestination
 ):
     from drt.config.models import (
         DiscordDestinationConfig,
@@ -338,6 +340,7 @@ def _get_destination(
         PostgresDestinationConfig,
         RestApiDestinationConfig,
         SlackDestinationConfig,
+        TeamsDestinationConfig,
     )
     from drt.destinations.discord import DiscordDestination
     from drt.destinations.github_actions import GitHubActionsDestination
@@ -366,4 +369,8 @@ def _get_destination(
         return PostgresDestination()
     if isinstance(dest, MySQLDestinationConfig):
         return MySQLDestination()
+    if isinstance(dest, TeamsDestinationConfig):
+        from drt.destinations.teams import TeamsDestination
+
+        return TeamsDestination()
     raise ValueError(f"Unsupported destination type: {dest.type}")

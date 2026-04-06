@@ -191,6 +191,16 @@ class MySQLDestinationConfig(BaseModel):
         return self
 
 
+class TeamsDestinationConfig(BaseModel):
+    type: Literal["teams"]
+    webhook_url: str | None = None
+    webhook_url_env: str | None = None
+    # Jinja2 template for the message card. Supports plain text or Adaptive Card JSON.
+    message_template: str = "{{ row }}"
+    # If True, treat message_template as an Adaptive Card JSON payload
+    adaptive_card: bool = False
+
+
 # Discriminated union — add new destination types here
 DestinationConfig = Annotated[
     RestApiDestinationConfig
@@ -200,7 +210,8 @@ DestinationConfig = Annotated[
     | HubSpotDestinationConfig
     | GoogleSheetsDestinationConfig
     | PostgresDestinationConfig
-    | MySQLDestinationConfig,
+    | MySQLDestinationConfig
+    | TeamsDestinationConfig,
     Field(discriminator="type"),
 ]
 
