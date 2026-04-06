@@ -203,9 +203,11 @@ class ClickHouseDestinationConfig(BaseModel):
     user_env: str | None = None
     password: str | None = None
     password_env: str | None = None
-    table: str  # e.g. "default.analytics_scores"
-    upsert_key: list[str]  # columns for deduplication
-    secure: bool = False  # use HTTPS (port 8443)
+    table: str  # unqualified table name (database set via database/database_env)
+    # Informational only for ClickHouse. drt does not enforce/create
+    # ReplacingMergeTree tables or apply upsert semantics from this field.
+    upsert_key: list[str] | None = None
+    secure: bool = False  # use HTTPS/TLS; set port explicitly for your deployment (commonly 8443)
 
     @model_validator(mode="after")
     def _check_connection(self) -> "ClickHouseDestinationConfig":

@@ -30,7 +30,6 @@ def _config(**overrides: Any) -> ClickHouseDestinationConfig:
         "user": "default",
         "password": "",
         "table": "analytics_scores",
-        "upsert_key": ["id"],
     }
     defaults.update(overrides)
     return ClickHouseDestinationConfig(**defaults)
@@ -50,8 +49,12 @@ class TestClickHouseDestinationConfig:
     def test_valid_config(self) -> None:
         config = _config()
         assert config.table == "analytics_scores"
-        assert config.upsert_key == ["id"]
+        assert config.upsert_key is None
         assert config.port == 8123
+
+    def test_upsert_key_optional(self) -> None:
+        config = _config(upsert_key=["id", "ts"])
+        assert config.upsert_key == ["id", "ts"]
 
     def test_host_env_instead_of_host(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("CH_HOST", "ch.example.com")

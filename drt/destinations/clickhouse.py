@@ -1,7 +1,12 @@
 """ClickHouse destination — insert rows into a ClickHouse table.
 
-Uses clickhouse-connect for HTTP-based batch inserts.
-Deduplication is handled by ClickHouse's ReplacingMergeTree engine at merge time.
+Uses clickhouse-connect for HTTP-based inserts. Each record is inserted
+individually to enable row-level error tracking (consistent with the
+PostgreSQL and MySQL destination pattern).
+
+Deduplication is handled by ClickHouse's ReplacingMergeTree engine at merge
+time — the destination performs simple INSERTs.
+
 Requires: pip install drt-core[clickhouse]
 
 Example sync YAML:
@@ -12,8 +17,7 @@ Example sync YAML:
       database_env: TARGET_CH_DATABASE
       user_env: TARGET_CH_USER
       password_env: TARGET_CH_PASSWORD
-      table: default.analytics_scores
-      upsert_key: [id]
+      table: analytics_scores
 """
 
 from __future__ import annotations

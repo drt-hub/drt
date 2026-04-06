@@ -39,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **ClickHouse destination connector** (#166): Insert rows into ClickHouse tables using `clickhouse-connect` (HTTP client). Supports host, database, user, password (with `_env` variants), connection string, table, upsert_key, and HTTPS via `secure` flag. 16 unit tests. Install: `pip install drt-core[clickhouse]`.
+- **ClickHouse destination connector** (#166): Insert rows into ClickHouse tables using `clickhouse-connect` (HTTP client). Supports host, database, user, password (with `_env` variants), connection string, table, and HTTPS via `secure` flag. Deduplication relies on ClickHouse's ReplacingMergeTree engine. 16 unit tests. Install: `pip install drt-core[clickhouse]`.
 - **Snowflake source connector** (#162): Extract data from Snowflake using `snowflake-connector-python`. Supports account, user, password/password_env, database, schema, warehouse, and optional role. Install: `pip install drt-core[snowflake]`.
 - **Dockerfile and docker-compose example** (#161): Lightweight `python:3.12-slim` image with configurable `DRT_EXTRAS` build arg, non-root user, and pinned version. Includes `docker-compose.yml` and `.dockerignore`.
 
