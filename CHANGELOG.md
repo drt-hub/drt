@@ -39,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Microsoft Teams destination** (#85): Send messages to Teams channels via Incoming Webhook. Supports plain text and Adaptive Card payloads via Jinja2 templates. 8 unit tests. No extra dependencies.
+- **Microsoft Teams destination** (#85): Send messages to Teams channels via Incoming Webhook. Supports plain text and Adaptive Card payloads via Jinja2 templates. 10 unit tests. No extra dependencies.
 - **Snowflake source connector** (#162): Extract data from Snowflake using `snowflake-connector-python`. Supports account, user, password/password_env, database, schema, warehouse, and optional role. Install: `pip install drt-core[snowflake]`.
 - **Dockerfile and docker-compose example** (#161): Lightweight `python:3.12-slim` image with configurable `DRT_EXTRAS` build arg, non-root user, and pinned version. Includes `docker-compose.yml` and `.dockerignore`.
 
