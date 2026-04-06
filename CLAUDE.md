@@ -53,9 +53,9 @@ make fmt      # ruff format + fix
 - **v0.4.3 released** — ClickHouse source, Discord CLI fix, SQLite in init wizard, README.ja.md (community contributions)
 - CLI fully wired: `init`, `run`, `list`, `validate`, `status`, `mcp run`
 - Sources: BigQuery, DuckDB, PostgreSQL, Redshift, SQLite, ClickHouse
-- Destinations: REST API, Slack, Discord, GitHub Actions, HubSpot, Google Sheets, PostgreSQL, MySQL
+- Destinations: REST API, Slack, Discord, GitHub Actions, HubSpot, Google Sheets, PostgreSQL, MySQL, ClickHouse, Parquet, Microsoft Teams, CSV/JSON/JSONL
 - Integrations: MCP Server (`drt-core[mcp]`), dagster-drt, dbt manifest reader
-- 170+ tests, integration tests use `pytest-httpserver`
+- 220+ tests, integration tests use `pytest-httpserver`
 
 ## What NOT to do
 

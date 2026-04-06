@@ -207,7 +207,10 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | **Destination** | Google Sheets | ✅ v0.4 | `pip install drt-core[sheets]` |
 | **Destination** | PostgreSQL (upsert) | ✅ v0.4 | `pip install drt-core[postgres]` |
 | **Destination** | MySQL (upsert) | ✅ v0.4 | `pip install drt-core[mysql]` |
-| **Destination** | CSV / JSON file | 🗓 v0.5 | (core) |
+| **Destination** | ClickHouse | ✅ v0.5 | `pip install drt-core[clickhouse]` |
+| **Destination** | Parquet file | ✅ v0.5 | `pip install drt-core[parquet]` |
+| **Destination** | Microsoft Teams Webhook | ✅ v0.5 | (core) |
+| **Destination** | CSV / JSON / JSONL file | ✅ v0.5 | (core) |
 | **Destination** | Salesforce | 🗓 v0.6 | `pip install drt-core[salesforce]` |
 | **Destination** | Notion | 🗓 planned | (core) |
 | **Destination** | Linear | 🗓 planned | (core) |
@@ -229,7 +232,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | **v0.2** ✅ | Incremental sync (`cursor_field` watermark) · retry config per-sync |
 | **v0.3** ✅ | MCP Server (`drt mcp run`) · AI Skills for Claude Code · LLM-readable docs · row-level errors · security hardening · Redshift source |
 | **v0.4** ✅ | Google Sheets / PostgreSQL / MySQL destinations · dagster-drt · dbt manifest reader · type safety overhaul |
-| [v0.5](https://github.com/drt-hub/drt/milestone/2) | Snowflake source · CSV/JSON + Parquet destinations · test coverage · Docker |
+| **v0.5** ✅ | Snowflake source · ClickHouse / Parquet / Teams / CSV+JSON destinations · Docker · test coverage |
 | [v0.6](https://github.com/drt-hub/drt/milestone/3) | Salesforce · Airflow integration · Jira / Twilio / Intercom destinations |
 | [v0.7](https://github.com/drt-hub/drt/milestone/4) | DWH destinations (Snowflake / BigQuery / ClickHouse / Databricks) · Cloud storage (S3 / GCS / Azure Blob) |
 | [v0.8](https://github.com/drt-hub/drt/milestone/5) | Lakehouse sources (Delta Lake / Apache Iceberg) |
