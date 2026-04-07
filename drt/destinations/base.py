@@ -23,6 +23,7 @@ class SyncResult:
     skipped: int = 0
     errors: list[str] = field(default_factory=list)
     row_errors: list[RowError] = field(default_factory=list)
+    duration_seconds: float | None = None
 
     @property
     def total(self) -> int:
