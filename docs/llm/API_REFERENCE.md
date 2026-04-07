@@ -88,6 +88,13 @@ sync:                       # optional: all fields have defaults
     backoff_multiplier: 2.0 # default: 2.0
     max_backoff: 60.0       # default: 60.0 seconds
     retryable_status_codes: [429, 500, 502, 503, 504]  # default as shown
+
+tests:                      # optional: post-sync validation (DB destinations only)
+  - row_count:
+      min: 1                # optional: minimum expected rows
+      max: 10000            # optional: maximum expected rows
+  - not_null:
+      columns: [id, name]   # required: columns that must not contain NULLs
 ```
 
 ---

@@ -50,6 +50,9 @@ from drt.cli.output import (
     print_sync_result,
     print_sync_start,
     print_sync_table,
+    print_test_header,
+    print_test_result,
+    print_test_skip,
     print_validation_error,
     print_validation_ok,
 )
@@ -303,6 +306,95 @@ def status(
         print_status_verbose(states, {})
     else:
         print_status_table(states)
+
+
+# ---------------------------------------------------------------------------
+# test
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="test")
+def test_syncs(
+    select: str = typer.Option(
+        None, "--select", "-s", help="Test a specific sync by name."
+    ),
+) -> None:
+    """Run post-sync validation tests."""
+    from drt.config.parser import load_syncs
+    from drt.destinations.query import (
+        execute_test_query,
+        get_table_name,
+        is_queryable,
+    )
+    from drt.engine.test_runner import build_test_query
+
+    syncs = load_syncs(Path("."))
+    if not syncs:
+        console.print("[dim]No syncs found.[/dim]")
+        return
+
+    if select:
+        syncs = [s for s in syncs if s.name == select]
+        if not syncs:
+            print_error(f"No sync named '{select}' found.")
+            raise typer.Exit(1)
+
+    syncs_with_tests = [s for s in syncs if s.tests]
+    if not syncs_with_tests:
+        console.print("[dim]No tests defined in any sync.[/dim]")
+        return
+
+    had_failures = False
+
+    for sync in syncs_with_tests:
+        print_test_header(sync.name)
+
+        if not is_queryable(sync.destination):
+            print_test_skip(
+                sync.name,
+                f"tests not supported for {sync.destination.type}"
+                " destinations",
+            )
+            continue
+
+        table = get_table_name(sync.destination)
+        for test_def in sync.tests:
+            test_name = _test_display_name(test_def)
+            try:
+                query, check = build_test_query(test_def, table)
+                result_val = execute_test_query(
+                    sync.destination, query
+                )
+                passed = check(result_val)
+                print_test_result(
+                    test_name, passed, str(result_val)
+                )
+                if not passed:
+                    had_failures = True
+            except Exception as e:
+                print_test_result(test_name, False, str(e))
+                had_failures = True
+
+    if had_failures:
+        raise typer.Exit(1)
+
+
+def _test_display_name(test_def: object) -> str:
+    """Human-readable name for a test definition."""
+    from drt.config.models import SyncTest
+
+    assert isinstance(test_def, SyncTest)
+    if test_def.row_count is not None:
+        parts = []
+        if test_def.row_count.min is not None:
+            parts.append(f"min={test_def.row_count.min}")
+        if test_def.row_count.max is not None:
+            parts.append(f"max={test_def.row_count.max}")
+        return f"row_count({', '.join(parts)})"
+    if test_def.not_null is not None:
+        cols = ", ".join(test_def.not_null.columns)
+        return f"not_null({cols})"
+    return "unknown"
 
 
 # ---------------------------------------------------------------------------

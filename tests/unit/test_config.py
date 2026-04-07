@@ -384,3 +384,42 @@ def test_mysql_config_no_connection_method_raises() -> None:
             table="scores",
             upsert_key=["id"],
         )
+
+
+# ---------------------------------------------------------------------------
+# SyncConfig tests
+# ---------------------------------------------------------------------------
+
+
+def test_sync_config_with_tests() -> None:
+    data = {
+        "name": "s",
+        "model": "SELECT 1",
+        "destination": {
+            "type": "rest_api",
+            "url": "http://x",
+            "method": "POST",
+        },
+        "tests": [
+            {"row_count": {"min": 1}},
+            {"not_null": {"columns": ["id", "name"]}},
+        ],
+    }
+    sync = SyncConfig.model_validate(data)
+    assert len(sync.tests) == 2
+    assert sync.tests[0].row_count is not None
+    assert sync.tests[1].not_null is not None
+
+
+def test_sync_config_without_tests() -> None:
+    data = {
+        "name": "s",
+        "model": "SELECT 1",
+        "destination": {
+            "type": "rest_api",
+            "url": "http://x",
+            "method": "POST",
+        },
+    }
+    sync = SyncConfig.model_validate(data)
+    assert sync.tests == []

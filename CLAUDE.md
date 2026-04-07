@@ -51,7 +51,7 @@ make fmt      # ruff format + fix
 ## Current Status
 
 - **v0.5 in progress** — Snowflake source, ClickHouse / Parquet / Teams / CSV+JSON destinations, Docker, test coverage
-- CLI fully wired: `init`, `run`, `list`, `validate`, `status`, `mcp run`
+- CLI fully wired: `init`, `run`, `list`, `validate`, `status`, `test`, `mcp run`
 - Sources: BigQuery, DuckDB, PostgreSQL, Redshift, SQLite, ClickHouse
 - Destinations: REST API, Slack, Discord, GitHub Actions, HubSpot, Google Sheets, PostgreSQL, MySQL, ClickHouse, Parquet, Microsoft Teams, CSV/JSON/JSONL
 - Integrations: MCP Server (`drt-core[mcp]`), dagster-drt, dbt manifest reader

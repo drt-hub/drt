@@ -111,6 +111,25 @@ def print_validation_error(sync_name: str, errors: list[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# test
+# ---------------------------------------------------------------------------
+
+def print_test_header(sync_name: str) -> None:
+    console.print(f"\n[bold]{sync_name}[/bold]")
+
+
+def print_test_result(
+    test_name: str, passed: bool, message: str
+) -> None:
+    mark = "[green]✓[/green]" if passed else "[red]✗[/red]"
+    console.print(f"  {mark} {test_name}: {message}")
+
+
+def print_test_skip(sync_name: str, reason: str) -> None:
+    console.print(f"  [dim]⏭ {sync_name}: {reason}[/dim]")
+
+
+# ---------------------------------------------------------------------------
 # status
 # ---------------------------------------------------------------------------
 

@@ -294,9 +294,24 @@ class SyncOptions(BaseModel):
         return self
 
 
+class RowCountTest(BaseModel):
+    min: int | None = None
+    max: int | None = None
+
+
+class NotNullTest(BaseModel):
+    columns: list[str]
+
+
+class SyncTest(BaseModel):
+    row_count: RowCountTest | None = None
+    not_null: NotNullTest | None = None
+
+
 class SyncConfig(BaseModel):
     name: str
     description: str = ""
     model: str
     destination: DestinationConfig
     sync: SyncOptions = Field(default_factory=SyncOptions)
+    tests: list[SyncTest] = Field(default_factory=list)
