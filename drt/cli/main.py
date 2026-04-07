@@ -108,12 +108,19 @@ def run(
     select: str = typer.Option(None, "--select", "-s", help="Run a specific sync by name."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without writing data."),
     verbose: bool = typer.Option(False, "--verbose", help="Show row-level error details."),
+    output: str = typer.Option(
+        "text", "--output", "-o", help="Output format: text or json."
+    ),
 ) -> None:
     """Run sync(s) defined in the project."""
+    import json as json_mod
+
     from drt.config.credentials import load_profile
     from drt.config.parser import load_project, load_syncs
     from drt.engine.sync import run_sync
     from drt.state.manager import StateManager
+
+    json_mode = output == "json"
 
     try:
         project = load_project(Path("."))
@@ -129,7 +136,11 @@ def run(
 
     syncs = load_syncs(Path("."))
     if not syncs:
-        console.print("[dim]No syncs found in syncs/. Add .yml files to get started.[/dim]")
+        if not json_mode:
+            console.print(
+                "[dim]No syncs found in syncs/."
+                " Add .yml files to get started.[/dim]"
+            )
         raise typer.Exit()
 
     if select:
@@ -141,22 +152,62 @@ def run(
     source = _get_source(profile)
     state_mgr = StateManager(Path("."))
     had_errors = False
+    json_results: list[dict[str, object]] = []
+    t_total = time.monotonic()
 
     for sync in syncs:
         dest = _get_destination(sync)
-        print_sync_start(sync.name, dry_run)
+        if not json_mode:
+            print_sync_start(sync.name, dry_run)
         t0 = time.monotonic()
         try:
-            result = run_sync(sync, source, dest, profile, Path("."), dry_run, state_mgr)
+            result = run_sync(
+                sync, source, dest, profile, Path("."), dry_run, state_mgr
+            )
         except Exception as e:
-            print_error(f"[{sync.name}] Unexpected error: {e}")
+            elapsed = round(time.monotonic() - t0, 2)
+            if json_mode:
+                json_results.append({
+                    "name": sync.name,
+                    "status": "failed",
+                    "rows_synced": 0,
+                    "rows_failed": 0,
+                    "duration_seconds": elapsed,
+                    "dry_run": dry_run,
+                    "error": str(e),
+                })
+            else:
+                print_error(f"[{sync.name}] Unexpected error: {e}")
             had_errors = True
             continue
-        print_sync_result(sync.name, result, time.monotonic() - t0)
+        elapsed = round(time.monotonic() - t0, 2)
+        if json_mode:
+            json_results.append({
+                "name": sync.name,
+                "status": (
+                    "success" if result.failed == 0
+                    else "partial" if result.success > 0
+                    else "failed"
+                ),
+                "rows_synced": result.success,
+                "rows_failed": result.failed,
+                "duration_seconds": elapsed,
+                "dry_run": dry_run,
+            })
+        else:
+            print_sync_result(sync.name, result, elapsed)
         if result.failed > 0:
             had_errors = True
-            if verbose and result.row_errors:
+            if not json_mode and verbose and result.row_errors:
                 print_row_errors(result.row_errors)
+
+    if json_mode:
+        print(json_mod.dumps({
+            "syncs": json_results,
+            "total_duration_seconds": round(
+                time.monotonic() - t_total, 2
+            ),
+        }, indent=2))
 
     if had_errors:
         raise typer.Exit(1)
@@ -221,13 +272,34 @@ def validate(
 @app.command()
 def status(
     verbose: bool = typer.Option(False, "--verbose", help="Show row-level error details."),
+    output: str = typer.Option(
+        "text", "--output", "-o", help="Output format: text or json."
+    ),
 ) -> None:
     """Show the status of the most recent sync runs."""
+    import json as json_mod
+
     from drt.state.manager import StateManager
 
     states = StateManager(Path(".")).get_all()
+
+    if output == "json":
+        print(json_mod.dumps({
+            "syncs": [
+                {
+                    "name": name,
+                    "status": state.status,
+                    "last_run_at": state.last_run_at,
+                    "records_synced": state.records_synced,
+                    "last_cursor_value": state.last_cursor_value,
+                    "error": state.error,
+                }
+                for name, state in sorted(states.items())
+            ],
+        }, indent=2))
+        return
+
     if verbose:
-        # row_errors are not persisted in state; show table with placeholder for future extension
         print_status_verbose(states, {})
     else:
         print_status_table(states)
