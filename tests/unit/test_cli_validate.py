@@ -9,7 +9,7 @@ import yaml
 from typer.testing import CliRunner
 
 from drt.cli.main import app
-from drt.config.parser import SyncLoadResult, _format_validation_errors, load_syncs_safe
+from drt.config.parser import _format_validation_errors, load_syncs_safe
 
 runner = CliRunner()
 
