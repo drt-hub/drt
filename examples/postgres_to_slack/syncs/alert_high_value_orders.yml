@@ -1,0 +1,14 @@
+name: alert_high_value_orders
+description: "Notify Slack when high-value orders are placed"
+model: ref('high_value_orders')
+destination:
+  type: slack
+  webhook_url_env: SLACK_WEBHOOK_URL
+  message_template: "🔔 New order: {{ row.customer_name }} — {{ row.currency }}{{ row.amount }} (Order #{{ row.id }})"
+sync:
+  mode: incremental
+  cursor_field: created_at
+  batch_size: 50
+  rate_limit:
+    requests_per_second: 1
+  on_error: skip
