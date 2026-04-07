@@ -128,7 +128,7 @@ drt --show-completion       # show completion script
 
 ### Shell completion
 
-Tab completion works out of the box for bash, zsh, and fish:
+Shell completion is supported for bash, zsh, and fish:
 
 ```bash
 # Install completion for your current shell
@@ -140,7 +140,7 @@ drt --show-completion >> ~/.zshrc    # zsh
 drt --show-completion > ~/.config/fish/completions/drt.fish  # fish
 ```
 
-After installation, restart your shell and tab-complete commands, options, and sync names.
+After installation, restart your shell and tab-complete commands and options.
 
 ---
 
