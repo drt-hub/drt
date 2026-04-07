@@ -37,7 +37,6 @@ import yaml
 # Source profile types
 # ---------------------------------------------------------------------------
 
-
 @dataclass
 class BigQueryProfile:
     type: Literal["bigquery"]
