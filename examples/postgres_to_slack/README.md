@@ -16,7 +16,7 @@ Send a Slack notification whenever new high-value orders appear in your PostgreS
 drt init   # select "postgres" as source
 ```
 
-Edit `profiles.yml`:
+Edit `~/.drt/profiles.yml`:
 
 ```yaml
 default:
@@ -47,9 +47,9 @@ drt run
 ```
 postgres_to_slack/
 ├── drt_project.yml
-├── models/
-│   └── high_value_orders.sql
 ├── syncs/
-│   └── alert_high_value_orders.yml
+│   ├── alert_high_value_orders.yml
+│   └── models/
+│       └── high_value_orders.sql
 └── README.md
 ```
