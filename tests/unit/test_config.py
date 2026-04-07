@@ -20,7 +20,6 @@ from drt.config.models import (
     SslConfig,
     SyncConfig,
     SyncOptions,
-    SyncTest,
 )
 from drt.config.parser import load_project, load_syncs
 
