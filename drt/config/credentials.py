@@ -46,6 +46,9 @@ class BigQueryProfile:
     method: Literal["application_default", "keyfile"] = "application_default"
     keyfile: str | None = None
     location: str = "US"  # e.g. "US", "EU", "asia-northeast1"
+    
+    def describe(self) -> str:
+        return f"{self.type} ({self.project}.{self.dataset})"
 
 
 @dataclass
@@ -53,11 +56,17 @@ class DuckDBProfile:
     type: Literal["duckdb"]
     database: str = ":memory:"  # path or :memory:
 
+    def describe(self) -> str:
+        return f"{self.type} ({self.database})"
+
 
 @dataclass
 class SQLiteProfile:
     type: Literal["sqlite"]
     database: str = ":memory:"  # path or :memory:
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.database})"
 
 
 @dataclass
@@ -69,6 +78,9 @@ class PostgresProfile:
     user: str = ""
     password_env: str | None = None  # env var name
     password: str | None = None  # explicit (non-recommended)
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.host}:{self.port}/{self.dbname})"
 
 
 @dataclass
@@ -95,6 +107,9 @@ class RedshiftProfile:
     password: str | None = None  # explicit (non-recommended)
     schema: str = "public"  # Redshift schema
 
+    def describe(self) -> str:
+        return f"{self.type} ({self.host}:{self.port}/{self.dbname})"
+
 
 @dataclass
 class ClickHouseProfile:
@@ -107,6 +122,9 @@ class ClickHouseProfile:
     user: str = "default"
     password_env: str | None = None  # env var name
     password: str | None = None  # explicit (non-recommended)
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.host}:{self.port}/{self.database})"
 
 
 @dataclass
@@ -122,6 +140,9 @@ class SnowflakeProfile:
     schema: str = "PUBLIC"
     warehouse: str = ""
     role: str | None = None
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.account}/{self.database}.{self.schema})"
 
 # Union type — used throughout the codebase
 ProfileConfig = (

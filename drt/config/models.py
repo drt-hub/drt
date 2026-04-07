@@ -71,6 +71,9 @@ class RestApiDestinationConfig(BaseModel):
     body_template: str | None = None
     auth: AuthConfig | None = None
 
+    def describe(self) -> str:
+        return f"{self.type} ({self.url})"
+
 
 class SlackDestinationConfig(BaseModel):
     type: Literal["slack"]
@@ -82,6 +85,9 @@ class SlackDestinationConfig(BaseModel):
     message_template: str = "{{ row }}"
     # If True, treat message_template as a Block Kit JSON payload
     block_kit: bool = False
+
+    def describe(self) -> str:
+        return f"{self.type} (webhook)"
 
 
 class DiscordDestinationConfig(BaseModel):
@@ -95,6 +101,9 @@ class DiscordDestinationConfig(BaseModel):
     # If True, treat message_template as a JSON payload with embeds
     embeds: bool = False
 
+    def describe(self) -> str:
+        return f"{self.type} (webhook)"
+
 
 class GitHubActionsDestinationConfig(BaseModel):
     type: Literal["github_actions"]
@@ -107,6 +116,9 @@ class GitHubActionsDestinationConfig(BaseModel):
     inputs_template: str | None = None
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
 
+    def describe(self) -> str:
+        return f"{self.type} ({self.owner}/{self.repo})"
+
 
 class GoogleSheetsDestinationConfig(BaseModel):
     type: Literal["google_sheets"]
@@ -115,6 +127,9 @@ class GoogleSheetsDestinationConfig(BaseModel):
     mode: Literal["overwrite", "append"] = "overwrite"
     credentials_path: str | None = None
     credentials_env: str | None = None
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.sheet})"
 
 
 class HubSpotDestinationConfig(BaseModel):
@@ -126,6 +141,9 @@ class HubSpotDestinationConfig(BaseModel):
     # Example: '{"email": "{{ row.email }}", "firstname": "{{ row.name }}"}'
     properties_template: str | None = None
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.object_type})"
 
 
 class SslConfig(BaseModel):
@@ -152,6 +170,9 @@ class PostgresDestinationConfig(BaseModel):
     table: str  # e.g. "public.analytics_scores"
     upsert_key: list[str]  # columns for ON CONFLICT
     ssl: SslConfig | None = None
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.table})"
 
     @model_validator(mode="after")
     def _check_connection(self) -> "PostgresDestinationConfig":
@@ -180,6 +201,9 @@ class MySQLDestinationConfig(BaseModel):
     upsert_key: list[str]  # columns for ON DUPLICATE KEY
     ssl: SslConfig | None = None
 
+    def describe(self) -> str:
+        return f"{self.type} ({self.table})"
+
     @model_validator(mode="after")
     def _check_connection(self) -> "MySQLDestinationConfig":
         if self.connection_string_env:
@@ -199,6 +223,9 @@ class TeamsDestinationConfig(BaseModel):
     message_template: str = "{{ row }}"
     # If True, treat message_template as an Adaptive Card JSON payload
     adaptive_card: bool = False
+
+    def describe(self) -> str:
+        return f"{self.type} (webhook)"
 
 
 class ClickHouseDestinationConfig(BaseModel):
@@ -220,6 +247,9 @@ class ClickHouseDestinationConfig(BaseModel):
     upsert_key: list[str] | None = None
     secure: bool = False  # use HTTPS/TLS; set port explicitly for your deployment (commonly 8443)
 
+    def describe(self) -> str:
+        return f"{self.type} ({self.table})"
+
     @model_validator(mode="after")
     def _check_connection(self) -> "ClickHouseDestinationConfig":
         if self.connection_string_env:
@@ -237,11 +267,17 @@ class ParquetDestinationConfig(BaseModel):
     partition_by: list[str] | None = None  # optional partition columns
     compression: Literal["snappy", "gzip", "zstd", "none"] = "snappy"
 
+    def describe(self) -> str:
+        return f"{self.type} ({self.path})"
+
 
 class FileDestinationConfig(BaseModel):
     type: Literal["file"]
     path: str  # output file path, e.g. "output/data.csv"
     format: Literal["csv", "json", "jsonl"] = "csv"
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.path})"
 
 
 # Discriminated union — add new destination types here

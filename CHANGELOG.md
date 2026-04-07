@@ -44,6 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Parquet file destination** (#171): Write sync results to local Parquet files using pandas + pyarrow. Supports snappy/gzip/zstd compression and partition columns. 11 unit tests. Install: `pip install drt-core[parquet]`.
 - **CSV/JSON/JSONL file destination** (#67): Write sync results to local CSV, JSON, or JSONL files. No extra dependencies — uses stdlib csv and json. 12 unit tests.
 - **Snowflake source connector** (#162): Extract data from Snowflake using `snowflake-connector-python`. Supports account, user, password/password_env, database, schema, warehouse, and optional role. Install: `pip install drt-core[snowflake]`.
+- **Dry-run summary** (#185): Enhanced `--dry-run` to show a summary including Source, Destination, Rows to sync, and Sync mode.
+- **`drt sync` command** (#186): Added `sync` as an alias for `run` that accepts a sync name as a positional argument (e.g. `drt sync my_sync --dry-run`).
 - **Dockerfile and docker-compose example** (#161): Lightweight `python:3.12-slim` image with configurable `DRT_EXTRAS` build arg, non-root user, and pinned version. Includes `docker-compose.yml` and `.dockerignore`.
 
 ## [0.4.3] - 2026-04-02

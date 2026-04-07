@@ -1,0 +1,5 @@
+name: my_sync
+model: ref('users')
+destination:
+  type: slack
+  webhook_url: https://hooks.slack.com/services/xxx
