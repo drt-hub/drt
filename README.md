@@ -122,7 +122,25 @@ drt validate                # validate sync YAML configs
 drt status                  # show recent sync status
 drt status --verbose        # show per-row error details
 drt mcp run                 # start MCP server (requires drt-core[mcp])
+drt --install-completion    # install shell completion (bash/zsh/fish)
+drt --show-completion       # show completion script
 ```
+
+### Shell completion
+
+Shell completion is supported for bash, zsh, and fish:
+
+```bash
+# Install completion for your current shell
+drt --install-completion
+
+# Or manually add to your shell config
+drt --show-completion >> ~/.bashrc   # bash
+drt --show-completion >> ~/.zshrc    # zsh
+drt --show-completion > ~/.config/fish/completions/drt.fish  # fish
+```
+
+After installation, restart your shell and tab-complete commands and options.
 
 ---
 
