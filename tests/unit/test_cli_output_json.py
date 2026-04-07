@@ -1,4 +1,4 @@
-"""Tests for --output json flag on drt status."""
+"""Tests for --output json flag on drt run and drt status."""
 
 from __future__ import annotations
 
@@ -28,6 +28,56 @@ def test_status_json_empty(tmp_path: Path, monkeypatch: object) -> None:
     data = json.loads(result.output)
     assert data["syncs"] == []
     mp.undo()
+
+
+# ---------------------------------------------------------------------------
+# drt run --output json
+# ---------------------------------------------------------------------------
+
+
+def test_run_json_no_project(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    """run --output json without drt_project.yml should exit 1."""
+    import pytest
+
+    mp = pytest.MonkeyPatch()
+    mp.chdir(tmp_path)
+    result = runner.invoke(app, ["run", "--output", "json"])
+    assert result.exit_code == 1
+    mp.undo()
+
+
+def test_run_json_no_syncs(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    """run --output json with no syncs should not print rich output."""
+    import pytest
+    import yaml
+
+    mp = pytest.MonkeyPatch()
+    mp.chdir(tmp_path)
+
+    # Create minimal project file
+    (tmp_path / "drt_project.yml").write_text(
+        yaml.dump({"version": "0.1", "profile": "default"})
+    )
+    # Create empty credentials
+    creds_dir = tmp_path / ".drt"
+    creds_dir.mkdir()
+    (creds_dir / "credentials.yml").write_text(
+        yaml.dump({"profiles": {"default": {"type": "duckdb"}}})
+    )
+
+    result = runner.invoke(app, ["run", "--output", "json"])
+    # Should not contain rich markup
+    assert "[dim]" not in result.output
+    mp.undo()
+
+
+# ---------------------------------------------------------------------------
+# drt status --output json
+# ---------------------------------------------------------------------------
 
 
 def test_status_json_with_state(
