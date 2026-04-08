@@ -201,6 +201,18 @@ class TeamsDestinationConfig(BaseModel):
     adaptive_card: bool = False
 
 
+class JiraDestinationConfig(BaseModel):
+    type: Literal["jira"]
+    base_url_env: str  # e.g. JIRA_BASE_URL -> https://myorg.atlassian.net
+    email_env: str  # Jira account email env var
+    token_env: str  # Jira API token env var
+    project_key: str  # can include Jinja2 template syntax
+    issue_type: str = "Task"  # can include Jinja2 template syntax
+    summary_template: str
+    description_template: str
+    issue_id_field: str = "issue_id"  # row key that indicates update mode
+
+
 class ClickHouseDestinationConfig(BaseModel):
     type: Literal["clickhouse"]
     connection_string_env: str | None = None
@@ -255,6 +267,7 @@ DestinationConfig = Annotated[
     | PostgresDestinationConfig
     | MySQLDestinationConfig
     | TeamsDestinationConfig
+    | JiraDestinationConfig
     | ClickHouseDestinationConfig
     | ParquetDestinationConfig
     | FileDestinationConfig,

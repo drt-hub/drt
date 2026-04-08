@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from drt.destinations.github_actions import GitHubActionsDestination
     from drt.destinations.google_sheets import GoogleSheetsDestination
     from drt.destinations.hubspot import HubSpotDestination
+    from drt.destinations.jira import JiraDestination
     from drt.destinations.mysql import MySQLDestination
     from drt.destinations.parquet import ParquetDestination
     from drt.destinations.postgres import PostgresDestination
@@ -499,6 +500,7 @@ def _get_destination(
     | DiscordDestination
     | GitHubActionsDestination
     | HubSpotDestination
+    | JiraDestination
     | GoogleSheetsDestination
     | PostgresDestination
     | MySQLDestination
@@ -514,6 +516,7 @@ def _get_destination(
         GitHubActionsDestinationConfig,
         GoogleSheetsDestinationConfig,
         HubSpotDestinationConfig,
+        JiraDestinationConfig,
         MySQLDestinationConfig,
         ParquetDestinationConfig,
         PostgresDestinationConfig,
@@ -525,6 +528,7 @@ def _get_destination(
     from drt.destinations.discord import DiscordDestination
     from drt.destinations.github_actions import GitHubActionsDestination
     from drt.destinations.hubspot import HubSpotDestination
+    from drt.destinations.jira import JiraDestination
     from drt.destinations.mysql import MySQLDestination
     from drt.destinations.postgres import PostgresDestination
     from drt.destinations.rest_api import RestApiDestination
@@ -541,6 +545,8 @@ def _get_destination(
         return GitHubActionsDestination()
     if isinstance(dest, HubSpotDestinationConfig):
         return HubSpotDestination()
+    if isinstance(dest, JiraDestinationConfig):
+        return JiraDestination()
     if isinstance(dest, GoogleSheetsDestinationConfig):
         from drt.destinations.google_sheets import GoogleSheetsDestination
 

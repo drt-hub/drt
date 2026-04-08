@@ -1,0 +1,21 @@
+name: jira_test_sync
+description: "Safe Jira destination smoke test (use dry-run)"
+
+# Reads from a table you can populate with the sample rows in test_data.py
+model: ref('jira_test_rows')
+
+destination:
+  type: jira
+  base_url_env: JIRA_BASE_URL
+  email_env: JIRA_EMAIL
+  token_env: JIRA_API_TOKEN
+  project_key: "ENG"
+  issue_type: "Task"
+  summary_template: "[drt test] {{ row.metric }} exceeded threshold"
+  description_template: "Value: {{ row.value }}, Threshold: {{ row.threshold }}"
+  issue_id_field: "issue_id"
+
+sync:
+  mode: full
+  batch_size: 10
+  on_error: fail

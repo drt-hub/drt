@@ -13,6 +13,7 @@ from drt.config.models import (
     BasicAuth,
     BearerAuth,
     GoogleSheetsDestinationConfig,
+    JiraDestinationConfig,
     MySQLDestinationConfig,
     PostgresDestinationConfig,
     ProjectConfig,
@@ -302,6 +303,21 @@ def test_google_sheets_destination_defaults() -> None:
     assert cfg.mode == "overwrite"
     assert cfg.credentials_path is None
     assert cfg.credentials_env is None
+
+
+def test_jira_destination_defaults() -> None:
+    cfg = JiraDestinationConfig(
+        type="jira",
+        base_url_env="JIRA_BASE_URL",
+        email_env="JIRA_EMAIL",
+        token_env="JIRA_API_TOKEN",
+        project_key="ENG",
+        summary_template="Alert: {{ row.metric }}",
+        description_template="Value: {{ row.value }}",
+    )
+    assert cfg.type == "jira"
+    assert cfg.issue_type == "Task"
+    assert cfg.issue_id_field == "issue_id"
 
 
 # ---------------------------------------------------------------------------
