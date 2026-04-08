@@ -120,7 +120,6 @@ drt init                    # initialize project
 drt list                    # list sync definitions
 drt run                     # run all syncs
 drt run --select <name>     # run a specific sync
-drt sync <name>             # alias for run --select
 drt run --dry-run           # dry run
 drt run --verbose           # show row-level error details
 drt validate                # validate sync YAML configs
