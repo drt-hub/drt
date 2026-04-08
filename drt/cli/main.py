@@ -117,16 +117,6 @@ def run(
     _run_syncs(select, dry_run, verbose, output)
 
 
-@app.command()
-def sync(
-    name: str = typer.Argument(None, help="Sync name to run."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Preview without writing data."),
-    verbose: bool = typer.Option(False, "--verbose", help="Show row-level error details."),
-) -> None:
-    """Run a specific sync (alias for run --select)."""
-    _run_syncs(name, dry_run, verbose, "text")
-
-
 def _run_syncs(
     select: str | None,
     dry_run: bool,
