@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from drt.config.models import JiraDestinationConfig, RateLimitConfig, RetryConfig, SyncOptions
 from drt.destinations.jira import JiraDestination
 
 
-def _options() -> SyncOptions:
+def _options(on_error: str = "skip") -> SyncOptions:
     return SyncOptions(
         rate_limit=RateLimitConfig(requests_per_second=1000),
         retry=RetryConfig(max_attempts=1, initial_backoff=0.0, backoff_multiplier=1.0),
-        on_error="skip",
+        on_error=on_error,
     )
 
 
@@ -31,6 +33,19 @@ def _config(**overrides: object) -> JiraDestinationConfig:
     }
     data.update(overrides)
     return JiraDestinationConfig(**data)
+
+
+def _http_error(status: int, text: str) -> httpx.HTTPStatusError:
+    response = httpx.Response(
+        status_code=status,
+        text=text,
+        request=httpx.Request("POST", "http://x"),
+    )
+    return httpx.HTTPStatusError(
+        message=f"HTTP {status}",
+        request=response.request,
+        response=response,
+    )
 
 
 class TestJiraDestination:
@@ -89,6 +104,9 @@ class TestJiraDestination:
         mock_client.put.assert_called_once()
         args, kwargs = mock_client.put.call_args
         assert args[0] == "https://myorg.atlassian.net/rest/api/3/issue/ENG-123"
+        # Updates should not attempt project/type reassignment by default.
+        assert "project" not in kwargs["json"]["fields"]
+        assert "issuetype" not in kwargs["json"]["fields"]
         assert kwargs["json"]["fields"]["summary"] == "Alert: memory exceeded threshold"
 
     def test_templates_render_for_project_and_issue_type(
@@ -135,3 +153,47 @@ class TestJiraDestination:
                 _config(),
                 _options(),
             )
+
+    def test_on_error_fail_stops_within_batch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("JIRA_BASE_URL", "https://myorg.atlassian.net")
+        monkeypatch.setenv("JIRA_EMAIL", "bot@example.com")
+        monkeypatch.setenv("JIRA_API_TOKEN", "token-123")
+
+        rows = [
+            {"metric": "cpu", "value": 95, "threshold": 80},
+            {"metric": "memory", "value": 88, "threshold": 75},
+        ]
+
+        with patch("drt.destinations.jira.httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.post.side_effect = _http_error(400, "bad request")
+
+            result = JiraDestination().load(rows, _config(), _options(on_error="fail"))
+
+        assert result.failed == 1
+        assert result.success == 0
+        assert mock_client.post.call_count == 1
+
+    def test_non_serializable_row_preview_is_safe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("JIRA_BASE_URL", "https://myorg.atlassian.net")
+        monkeypatch.setenv("JIRA_EMAIL", "bot@example.com")
+        monkeypatch.setenv("JIRA_API_TOKEN", "token-123")
+
+        row = {
+            "metric": "cpu",
+            "value": 95,
+            "threshold": 80,
+            "seen_at": datetime(2026, 1, 1, 12, 0, 0),
+        }
+
+        with patch("drt.destinations.jira.httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.post.side_effect = _http_error(400, "bad request")
+
+            result = JiraDestination().load([row], _config(), _options())
+
+        assert result.failed == 1
+        assert result.row_errors
+        assert "seen_at" in result.row_errors[0].record_preview

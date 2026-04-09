@@ -34,21 +34,16 @@ _DEFAULT_RETRY = RetryConfig(
 class JiraDestination:
     """Create or update Jira issues from sync records."""
 
-    _client: httpx.Client | None = None
-    _config: JiraDestinationConfig | None = None
-    _auth: httpx.BasicAuth | None = None
-
-    def create_issue(self, row: dict[str, Any]) -> None:
+    def create_issue(
+        self,
+        row: dict[str, Any],
+        *,
+        client: httpx.Client,
+        config: JiraDestinationConfig,
+        auth: httpx.BasicAuth,
+        retry_config: RetryConfig,
+    ) -> None:
         """Create a new Jira issue for one row."""
-        if self._client is None or self._config is None or self._auth is None:
-            raise RuntimeError("JiraDestination is not initialized. Call load() first.")
-
-        client = self._client
-        config = self._config
-        auth = self._auth
-        assert client is not None
-        assert config is not None
-        assert auth is not None
 
         project_key = render_template(config.project_key, row)
         issue_type = render_template(config.issue_type, row)
@@ -70,29 +65,24 @@ class JiraDestination:
             response.raise_for_status()
             return response
 
-        with_retry(do_post, _DEFAULT_RETRY)
+        with_retry(do_post, retry_config)
 
-    def update_issue(self, row: dict[str, Any], issue_id: str) -> None:
+    def update_issue(
+        self,
+        row: dict[str, Any],
+        issue_id: str,
+        *,
+        client: httpx.Client,
+        config: JiraDestinationConfig,
+        auth: httpx.BasicAuth,
+        retry_config: RetryConfig,
+    ) -> None:
         """Update an existing Jira issue for one row."""
-        if self._client is None or self._config is None or self._auth is None:
-            raise RuntimeError("JiraDestination is not initialized. Call load() first.")
-
-        client = self._client
-        config = self._config
-        auth = self._auth
-        assert client is not None
-        assert config is not None
-        assert auth is not None
-
-        project_key = render_template(config.project_key, row)
-        issue_type = render_template(config.issue_type, row)
         summary = render_template(config.summary_template, row)
         description = render_template(config.description_template, row)
 
         payload = {
             "fields": {
-                "project": {"key": project_key},
-                "issuetype": {"name": issue_type},
                 "summary": summary,
                 "description": _to_adf(description),
             }
@@ -104,7 +94,7 @@ class JiraDestination:
             response.raise_for_status()
             return response
 
-        with_retry(do_put, _DEFAULT_RETRY)
+        with_retry(do_put, retry_config)
 
     def load(
         self,
@@ -133,22 +123,32 @@ class JiraDestination:
         result = SyncResult()
         rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)
         auth = httpx.BasicAuth(username=email, password=token)
+        retry_config = sync_options.retry if sync_options.retry else _DEFAULT_RETRY
 
         with httpx.Client(timeout=30.0) as client:
-            self._client = client
-            self._config = config
-            self._auth = auth
-
             for i, row in enumerate(records):
                 rate_limiter.acquire()
                 issue_id = row.get(config.issue_id_field)
 
                 try:
                     if issue_id is not None and str(issue_id).strip():
-                        self.update_issue(row, str(issue_id))
+                        self.update_issue(
+                            row,
+                            str(issue_id),
+                            client=client,
+                            config=config,
+                            auth=auth,
+                            retry_config=retry_config,
+                        )
                         logger.info("Jira issue updated: %s", issue_id)
                     else:
-                        self.create_issue(row)
+                        self.create_issue(
+                            row,
+                            client=client,
+                            config=config,
+                            auth=auth,
+                            retry_config=retry_config,
+                        )
                         logger.info("Jira issue created for row index %s", i)
                     result.success += 1
                 except httpx.HTTPStatusError as e:
@@ -157,26 +157,26 @@ class JiraDestination:
                     result.row_errors.append(
                         RowError(
                             batch_index=i,
-                            record_preview=json.dumps(row)[:200],
+                            record_preview=_record_preview(row),
                             http_status=e.response.status_code,
                             error_message=e.response.text[:500],
                         )
                     )
+                    if sync_options.on_error == "fail":
+                        break
                 except Exception as e:
                     result.failed += 1
                     logger.warning("Jira destination failed for row %s: %s", i, e)
                     result.row_errors.append(
                         RowError(
                             batch_index=i,
-                            record_preview=json.dumps(row)[:200],
+                            record_preview=_record_preview(row),
                             http_status=None,
                             error_message=str(e),
                         )
                     )
-
-        self._client = None
-        self._config = None
-        self._auth = None
+                    if sync_options.on_error == "fail":
+                        break
         return result
 
 
@@ -197,3 +197,8 @@ def _to_adf(text: str) -> dict[str, Any]:
             }
         ],
     }
+
+
+def _record_preview(row: dict[str, Any]) -> str:
+    """Best-effort JSON preview that tolerates non-serializable values."""
+    return json.dumps(row, default=str)[:200]
