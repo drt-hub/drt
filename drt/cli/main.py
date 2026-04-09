@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from drt.destinations.sendgrid import SendGridDestination
     from drt.destinations.slack import SlackDestination
     from drt.destinations.teams import TeamsDestination
+    from drt.destinations.linear import LinearDestination
     from drt.sources.bigquery import BigQuerySource
     from drt.sources.clickhouse import ClickHouseSource
     from drt.sources.duckdb import DuckDBSource
@@ -512,6 +513,7 @@ def _get_destination(
     | ClickHouseDestination
     | ParquetDestination
     | FileDestination
+    | LinearDestination
 ):
     from drt.config.models import (
         ClickHouseDestinationConfig,
@@ -528,6 +530,7 @@ def _get_destination(
         SendGridDestinationConfig,
         SlackDestinationConfig,
         TeamsDestinationConfig,
+        LinearDestinationConfig,
     )
     from drt.destinations.clickhouse import ClickHouseDestination
     from drt.destinations.discord import DiscordDestination
@@ -539,6 +542,7 @@ def _get_destination(
     from drt.destinations.rest_api import RestApiDestination
     from drt.destinations.sendgrid import SendGridDestination
     from drt.destinations.slack import SlackDestination
+    from drt.destinations.linear import LinearDestination
 
     dest = sync.destination
     if isinstance(dest, RestApiDestinationConfig):
@@ -557,7 +561,6 @@ def _get_destination(
         return SendGridDestination()
     if isinstance(dest, GoogleSheetsDestinationConfig):
         from drt.destinations.google_sheets import GoogleSheetsDestination
-
         return GoogleSheetsDestination()
     if isinstance(dest, PostgresDestinationConfig):
         return PostgresDestination()
@@ -577,4 +580,6 @@ def _get_destination(
         from drt.destinations.file import FileDestination
 
         return FileDestination()
+    if isinstance(dest, LinearDestinationConfig):
+        return LinearDestination()
     raise ValueError(f"Unsupported destination type: {dest.type}")

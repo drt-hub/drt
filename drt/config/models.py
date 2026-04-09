@@ -163,6 +163,7 @@ class SendGridDestinationConfig(BaseModel):
 class LinearDestinationConfig(BaseModel):
     type: Literal["linear"]
     team_id_env: str
+    team_id: str | None = None 
     title_template: str
     description_template: str
     label_ids: list[str] = []
