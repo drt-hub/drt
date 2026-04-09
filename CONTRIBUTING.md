@@ -133,7 +133,7 @@ chore: bump dependencies
 
 This walkthrough builds a complete destination connector from scratch. We'll create a simple **Console** destination that prints records to stdout — a useful debugging tool and a template for real connectors.
 
-By the end you'll have touched every file a new connector requires.
+By the end you'll have touched the core files needed to add a new connector. Before opening a PR, also check the checklist above for any additional required updates, such as adding an example under `examples/`.
 
 ### Step 1: Define the config model
 
@@ -218,7 +218,7 @@ class ConsoleDestination:
 - The class does **not** inherit from anything — it implements the `Destination` Protocol
 - `load()` must accept `records`, `config`, and `sync_options` with exact signatures
 - Use `assert isinstance(config, YourConfig)` for type narrowing
-- Return `SyncResult` — track `success`, `failed`, `errors`, and `row_errors`
+- Return `SyncResult` — track `success` and `failed`, use `errors` for general/batch-level failures, and use `row_errors` only when you have row-level context to report
 - Handle empty records as an early return
 - Use `try/finally` to close connections (see `PostgresDestination` for the pattern)
 
@@ -305,6 +305,14 @@ class TestConsoleDestinationLoad:
         result = ConsoleDestination().load([], _config(), _options())
         assert result.success == 0
         assert result.failed == 0
+
+    def test_error_handling(self, monkeypatch) -> None:
+        # Force json.dumps to fail
+        import json
+        monkeypatch.setattr(json, "dumps", lambda *a, **kw: (_ for _ in ()).throw(ValueError("boom")))
+        result = ConsoleDestination().load([{"id": 1}], _config(), _options())
+        assert result.failed == 1
+        assert "boom" in result.errors[0]
 ```
 
 **Test patterns to follow:**
@@ -320,7 +328,6 @@ If your destination needs an extra dependency:
 
 ```toml
 [project.optional-dependencies]
-console = []  # no extras needed for console
 clickhouse = ["clickhouse-connect>=0.7.0"]  # example with a real dependency
 ```
 
@@ -342,9 +349,7 @@ Add an entry under `[Unreleased] > Added`:
 git checkout -b feat/console-destination
 git add drt/destinations/console.py drt/config/models.py drt/cli/main.py \
         tests/unit/test_console_destination.py CHANGELOG.md
-git commit -m "feat: add Console destination connector
-
-Closes #NNN"
+git commit -m "feat: add Console destination connector" -m "Closes #NNN"
 make lint   # ruff + mypy must pass
 make test   # all tests must pass
 git push origin feat/console-destination
