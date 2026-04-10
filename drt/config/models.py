@@ -148,10 +148,18 @@ class HubSpotDestinationConfig(BaseModel):
 
 class SendGridDestinationConfig(BaseModel):
     type: Literal["sendgrid"]
-    object_type: Literal["contacts", "deals", "companies"] = "contacts"
-    id_property: str = "email"
-    properties_template: str | None = None
-    auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
+    # Sender info
+    from_email: str
+    from_name: str | None = None
+    # Templates
+    subject_template: str
+    body_template: str
+    # Optional: allow custom recipient field (default = "email")
+    to_email_field: str = "email" 
+    # Optional: SendGrid list IDs for recipient management
+    list_ids: list[str] | None = None 
+    # Auth (reuses shared AuthConfig)
+    auth: AuthConfig  
     
     
 class SslConfig(BaseModel):

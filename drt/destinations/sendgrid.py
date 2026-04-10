@@ -1,20 +1,11 @@
-"""SendGrid destination — Marketing Contacts upsert + transactional emails.
+"""SendGrid destination — Transactional Email Integration.
 
-Supports:
-1. Upserting contacts into SendGrid Marketing Contacts.
-2. Sending transactional emails per row (e.g. onboarding emails, alerts, billing reminders).
+Sends one email per record using SendGrid's v3 Mail Send API.
+Supports subject + body templating via Jinja2.
 
-Contacts:
-- Upserts contacts using the SendGrid v3 Marketing Contacts API.
-- Deduplicates automatically by email.
+No extra dependencies required (uses httpx from core).
 
-Transactional Emails:
-- Sends one email per row using dynamic templates.
-- Useful for onboarding emails, alert notifications, billing reminders, etc.
-
-Requires: SENDGRID_API_KEY (API key with Marketing and/or Mail Send permissions).
-
-Example sync YAML — transactional emails:
+Example sync YAML:
 
     destination:
       type: sendgrid
@@ -25,44 +16,43 @@ Example sync YAML — transactional emails:
         Hi {{ row.first_name }},
 
         Thanks for signing up. Your account is ready.
+      list_ids: ["abc123"]
       auth:
         type: bearer
         token_env: SENDGRID_API_KEY
 
-Example sync YAML — contacts:
+SendGrid API reference:
+    Endpoint: POST https://api.sendgrid.com/v3/mail/send
+    Docs: https://docs.sendgrid.com/api-reference/mail-send/mail-send
+    Auth: Authorization: Bearer <SENDGRID_API_KEY>
 
-    destination:
-      type: sendgrid
-      list_ids: ["your-list-id"]
-      properties_template: |
-        {
-          "email": "{{ row.email }}",
-          "first_name": "{{ row.first_name }}",
-          "last_name": "{{ row.last_name }}"
-        }
-      auth:
-        type: bearer
-        token_env: SENDGRID_API_KEY
+Example payload:
+    {
+      "personalizations": [{"to": [{"email": "user@example.com"}]}],
+      "from": {"email": "noreply@example.com"},
+      "subject": "Welcome!",
+      "content": [{"type": "text/plain", "value": "Hi there"}]
+    }
 """
 
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 import httpx
 
-from drt.config.credentials import resolve_env
-from drt.config.models import SendGridDestinationConfig, RetryConfig, SyncOptions
+from drt.config.models import (
+    SendGridDestinationConfig,
+    RetryConfig,
+    SyncOptions,
+)
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
 from drt.destinations.retry import with_retry
 from drt.destinations.row_errors import RowError
 from drt.templates.renderer import render_template
-
-
-_SENDGRID_CONTACTS_API = "https://api.sendgrid.com/v3/marketing/contacts"
-_SENDGRID_MAIL_API = "https://api.sendgrid.com/v3/mail/send"
 
 _DEFAULT_RETRY = RetryConfig(
     max_attempts=3,
@@ -72,7 +62,9 @@ _DEFAULT_RETRY = RetryConfig(
 
 
 class SendGridDestination:
-    """SendGrid destination supporting contacts + transactional email."""
+    """Send records as transactional emails via SendGrid."""
+
+    SENDGRID_API_URL = "https://api.sendgrid.com/v3/mail/send"
 
     def load(
         self,
@@ -80,182 +72,117 @@ class SendGridDestination:
         config: SendGridDestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult:
-        token = resolve_env(config.auth.token, config.auth.token_env)
-        if not token:
+        assert isinstance(config, SendGridDestinationConfig)
+
+        # --- Auth (explicit, no getattr) ---
+        if config.auth.type != "bearer":
+            raise ValueError("SendGrid destination requires bearer auth.")
+
+        api_key = config.auth.token or (
+            os.environ.get(config.auth.token_env)
+            if config.auth.token_env
+            else None
+        )
+
+        if not api_key:
             raise ValueError(
-                "SendGrid destination: set SENDGRID_API_KEY env var "
-                "or provide auth.token_env in the sync config."
+                "SendGrid destination: missing API key via auth.token or auth.token_env."
             )
 
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        }
+        # --- Required fields (already enforced by Pydantic, but kept for clarity) ---
+        if not config.from_email:
+            raise ValueError("SendGrid destination: 'from_email' is required.")
 
         result = SyncResult()
         rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)
 
-        # Detect mode
-        is_email_mode = hasattr(config, "subject_template") and hasattr(config, "body_template")
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
 
         with httpx.Client(timeout=30.0) as client:
+            for i, record in enumerate(records):
+                rate_limiter.acquire()
+                try:
+                    # --- Render templates ---
+                    subject = render_template(config.subject_template, record)
+                    body = render_template(config.body_template, record)
 
-            # =========================
-            # 📧 TRANSACTIONAL EMAIL MODE
-            # =========================
-            if is_email_mode:
-                for i, record in enumerate(records):
-                    rate_limiter.acquire()
-
-                    try:
-                        to_email = record.get("email")
-                        if not to_email:
-                            raise ValueError("Missing required field: email")
-
-                        subject = render_template(config.subject_template, record)
-                        body = render_template(config.body_template, record)
-
-                        payload = {
-                            "personalizations": [
-                                {
-                                    "to": [{"email": to_email}]
-                                }
-                            ],
-                            "from": {
-                                "email": config.from_email,
-                                **({"name": config.from_name} if getattr(config, "from_name", None) else {}),
-                            },
-                            "subject": subject,
-                            "content": [
-                                {
-                                    "type": "text/plain",
-                                    "value": body,
-                                }
-                            ],
-                        }
-
-                        def send_email() -> httpx.Response:
-                            response = client.post(
-                                _SENDGRID_MAIL_API,
-                                json=payload,
-                                headers=headers,
-                            )
-                            response.raise_for_status()
-                            return response
-
-                        with_retry(send_email, _DEFAULT_RETRY)
-                        result.success += 1
-
-                    except httpx.HTTPStatusError as e:
-                        result.failed += 1
-                        result.row_errors.append(
-                            RowError(
-                                batch_index=i,
-                                record_preview=json.dumps(record)[:200],
-                                http_status=e.response.status_code,
-                                error_message=e.response.text[:500],
-                            )
+                    # --- Resolve recipient ---
+                    to_email = record.get(config.to_email_field)
+                    if not to_email:
+                        raise ValueError(
+                            f"Record missing '{config.to_email_field}' field for recipient."
                         )
 
-                    except Exception as e:
-                        result.failed += 1
-                        result.row_errors.append(
-                            RowError(
-                                batch_index=i,
-                                record_preview=json.dumps(record)[:200],
-                                http_status=None,
-                                error_message=str(e),
-                            )
-                        )
+                    # --- Build payload (SendGrid spec) ---
+                    payload: dict[str, Any] = {
+                        "personalizations": [
+                            {
+                                "to": [{"email": to_email}],
+                                "subject": subject,
+                            }
+                        ],
+                        "from": {
+                            "email": config.from_email,
+                            **({"name": config.from_name} if config.from_name else {}),
+                        },
+                        "content": [
+                            {
+                                "type": "text/plain",
+                                "value": body,
+                            }
+                        ],
+                    }
 
-            # =========================
-            # 👥 CONTACTS MODE (BATCH)
-            # =========================
-            else:
-                batch_size = min(1000, getattr(sync_options, "batch_size", 1000))
-
-                def chunked(data: list[dict[str, Any]], size: int):
-                    for i in range(0, len(data), size):
-                        yield i, data[i : i + size]
-
-                for batch_index, batch in chunked(records, batch_size):
-                    rate_limiter.acquire()
-
-                    contacts = []
-                    row_map = []
-
-                    for i, record in enumerate(batch):
-                        global_index = batch_index + i
-
-                        try:
-                            if config.properties_template:
-                                rendered = render_template(
-                                    config.properties_template, record
-                                )
-                                contact = json.loads(rendered)
-                            else:
-                                contact = record
-
-                            if "email" not in contact:
-                                raise ValueError("Missing required field: email")
-
-                            contacts.append(contact)
-                            row_map.append(global_index)
-
-                        except Exception as e:
-                            result.failed += 1
-                            result.row_errors.append(
-                                RowError(
-                                    batch_index=global_index,
-                                    record_preview=json.dumps(record)[:200],
-                                    http_status=None,
-                                    error_message=str(e),
-                                )
-                            )
-
-                    if not contacts:
-                        continue
-
-                    payload: dict[str, Any] = {"contacts": contacts}
-
-                    if getattr(config, "list_ids", None):
+                    # --- Optional list_ids (explicit field) ---
+                    if config.list_ids:
                         payload["list_ids"] = config.list_ids
 
-                    def upsert_contacts() -> httpx.Response:
-                        response = client.put(
-                            _SENDGRID_CONTACTS_API,
-                            json=payload,
+                    # --- HTTP send with retry ---
+                    def do_post() -> httpx.Response:
+                        response = client.post(
+                            self.SENDGRID_API_URL,
                             headers=headers,
+                            json=payload,
                         )
                         response.raise_for_status()
                         return response
 
-                    try:
-                        with_retry(upsert_contacts, _DEFAULT_RETRY)
-                        result.success += len(contacts)
+                    with_retry(do_post, _DEFAULT_RETRY)
+                    result.success += 1
 
-                    except httpx.HTTPStatusError as e:
-                        for idx in row_map:
-                            result.failed += 1
-                            result.row_errors.append(
-                                RowError(
-                                    batch_index=idx,
-                                    record_preview="batch item",
-                                    http_status=e.response.status_code,
-                                    error_message=e.response.text[:500],
-                                )
-                            )
-
-                    except Exception as e:
-                        for idx in row_map:
-                            result.failed += 1
-                            result.row_errors.append(
-                                RowError(
-                                    batch_index=idx,
-                                    record_preview="batch item",
-                                    http_status=None,
-                                    error_message=str(e),
-                                )
-                            )
+                except httpx.HTTPStatusError as e:
+                    result.failed += 1
+                    result.row_errors.append(
+                        RowError(
+                            batch_index=i,
+                            record_preview=json.dumps(record)[:200],
+                            http_status=e.response.status_code,
+                            error_message=e.response.text[:500],
+                        )
+                    )
+                except httpx.RequestError as e:
+                    result.failed += 1
+                    result.row_errors.append(
+                        RowError(
+                            batch_index=i,
+                            record_preview=json.dumps(record)[:200],
+                            http_status=None,
+                            error_message=f"Request error: {str(e)}",
+                        )
+                    )
+                except Exception as e:
+                    result.failed += 1
+                    result.row_errors.append(
+                        RowError(
+                            batch_index=i,
+                            record_preview=json.dumps(record)[:200],
+                            http_status=None,
+                            error_message=str(e),
+                        )
+                    )
 
         return result
+    
