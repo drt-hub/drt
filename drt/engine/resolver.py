@@ -10,6 +10,7 @@ Resolution order:
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -90,6 +91,9 @@ def resolve_model_ref(
         # Not a ref() — treat as raw SQL or bare table name
         base_sql = model_str
 
+    # Expand environment variables: ${VAR} syntax
+    base_sql = _expand_env_vars(base_sql)
+
     # Inject incremental WHERE clause when cursor info is available
     if cursor_field and last_cursor_value:
         safe_field = _validate_cursor_field(cursor_field)
@@ -111,6 +115,26 @@ def _resolve_from_dbt(table_name: str, project_dir: Path) -> str | None:
     from drt.integrations.dbt import resolve_ref_from_manifest
 
     return resolve_ref_from_manifest(table_name, project_dir)
+
+
+_ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
+
+
+def _expand_env_vars(sql: str) -> str:
+    """Expand ``${VAR}`` placeholders with environment variable values.
+
+    Raises ``ValueError`` if a referenced variable is not set.
+    """
+    def _replace(match: re.Match[str]) -> str:
+        var = match.group(1)
+        val = os.environ.get(var)
+        if val is None:
+            raise ValueError(
+                f"Environment variable ${{{var}}} is not set"
+            )
+        return val
+
+    return _ENV_VAR_PATTERN.sub(_replace, sql)
 
 
 _SAFE_IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_.]*$")

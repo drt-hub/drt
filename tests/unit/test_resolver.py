@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from drt.config.credentials import BigQueryProfile
 from drt.engine.resolver import parse_ref, resolve_model_ref
 
@@ -159,3 +161,50 @@ def test_resolve_incremental_raw_sql(tmp_path: Path) -> None:
     )
     assert "WHERE updated_at > '2024-06-01'" in sql
     assert raw in sql
+
+
+# ---------------------------------------------------------------------------
+# environment variable substitution
+# ---------------------------------------------------------------------------
+
+def test_env_var_substitution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BQ_DATASET", "analytics")
+    sql = resolve_model_ref(
+        "SELECT * FROM `${BQ_DATASET}`.users",
+        tmp_path,
+        _profile(),
+    )
+    assert sql == "SELECT * FROM `analytics`.users"
+
+
+def test_env_var_multiple(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GCP_PROJECT", "my-proj")
+    monkeypatch.setenv("BQ_DATASET", "raw")
+    sql = resolve_model_ref(
+        "SELECT * FROM `${GCP_PROJECT}.${BQ_DATASET}.users`",
+        tmp_path,
+        _profile(),
+    )
+    assert sql == "SELECT * FROM `my-proj.raw.users`"
+
+
+def test_env_var_missing_raises(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="NONEXISTENT_VAR"):
+        resolve_model_ref(
+            "SELECT * FROM ${NONEXISTENT_VAR}.users",
+            tmp_path,
+            _profile(),
+        )
+
+
+def test_env_var_no_expansion_without_syntax(tmp_path: Path) -> None:
+    sql = resolve_model_ref(
+        "SELECT * FROM users",
+        tmp_path,
+        _profile(),
+    )
+    assert sql == "SELECT * FROM users"
