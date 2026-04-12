@@ -8,10 +8,10 @@ import httpx
 import pytest
 
 from drt.config.models import (
-    SendGridDestinationConfig,
-    RateLimitConfig,
-    SyncOptions,
     BearerAuth,
+    RateLimitConfig,
+    SendGridDestinationConfig,
+    SyncOptions,
 )
 from drt.destinations.sendgrid import SendGridDestination
 
@@ -112,8 +112,7 @@ class TestSendGridDestination:
 
             dest = SendGridDestination()
             records = [
-                {"first_name": f"user{i}", "email": f"user{i}@example.com"}
-                for i in range(3)
+                {"first_name": f"user{i}", "email": f"user{i}@example.com"} for i in range(3)
             ]
 
             dest.load(records, _config(), _sync_options())
@@ -130,9 +129,7 @@ class TestSendGridDestination:
         def fail_once_then_succeed(*args, **kwargs):
             if not hasattr(fail_once_then_succeed, "called"):
                 fail_once_then_succeed.called = True
-                raise httpx.HTTPStatusError(
-                    "500", request=MagicMock(), response=error_response
-                )
+                raise httpx.HTTPStatusError("500", request=MagicMock(), response=error_response)
             return mock_response
 
         mock_client.post.side_effect = fail_once_then_succeed
@@ -160,4 +157,3 @@ class TestSendGridDestination:
         assert result.success == 0
         assert result.failed == 1
         assert "missing 'email'" in result.row_errors[0].error_message
-        
