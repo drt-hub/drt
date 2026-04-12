@@ -92,6 +92,62 @@ def test_resolve_no_cursor_returns_base_sql(tmp_path: Path) -> None:
     assert "WHERE" not in sql
 
 
+# ---------------------------------------------------------------------------
+# dbt manifest resolution
+# ---------------------------------------------------------------------------
+
+def test_resolve_ref_from_dbt_manifest(tmp_path: Path) -> None:
+    """ref() should resolve from dbt manifest.json when available."""
+    import json
+
+    target = tmp_path / "target"
+    target.mkdir()
+    manifest = {
+        "nodes": {
+            "model.my_project.users": {
+                "name": "users",
+                "relation_name": '"analytics"."public"."users"',
+            }
+        }
+    }
+    (target / "manifest.json").write_text(json.dumps(manifest))
+
+    sql = resolve_model_ref("ref('users')", tmp_path, _profile())
+    assert sql == 'SELECT * FROM "analytics"."public"."users"'
+
+
+def test_resolve_ref_dbt_manifest_not_found_falls_back(tmp_path: Path) -> None:
+    """Without manifest.json, ref() falls back to profile-based resolution."""
+    sql = resolve_model_ref("ref('users')", tmp_path, _profile("ds"))
+    assert sql == "SELECT * FROM `ds`.`users`"
+
+
+def test_resolve_ref_sql_file_beats_dbt_manifest(tmp_path: Path) -> None:
+    """SQL file should take priority over dbt manifest."""
+    import json
+
+    # Create SQL file
+    models = tmp_path / "syncs" / "models"
+    models.mkdir(parents=True)
+    (models / "users.sql").write_text("SELECT id, name FROM raw.users")
+
+    # Create dbt manifest
+    target = tmp_path / "target"
+    target.mkdir()
+    manifest = {
+        "nodes": {
+            "model.proj.users": {
+                "name": "users",
+                "relation_name": '"analytics"."users"',
+            }
+        }
+    }
+    (target / "manifest.json").write_text(json.dumps(manifest))
+
+    sql = resolve_model_ref("ref('users')", tmp_path, _profile())
+    assert sql == "SELECT id, name FROM raw.users"
+
+
 def test_resolve_incremental_raw_sql(tmp_path: Path) -> None:
     raw = "SELECT * FROM events WHERE active = true"
     sql = resolve_model_ref(

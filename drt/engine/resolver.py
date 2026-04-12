@@ -3,10 +3,9 @@
 Mirrors dbt's ref() concept but without requiring a dbt manifest.
 Resolution order:
   1. syncs/models/{name}.sql  — raw SQL file wins
-  2. ref('name')              — SELECT * FROM {dataset}.{name}
-  3. anything else            — used as SQL directly
-
-Future: integrate with dbt manifest.json for full dbt compatibility.
+  2. dbt target/manifest.json — fully-qualified relation_name from dbt
+  3. ref('name')              — SELECT * FROM {dataset}.{name}
+  4. anything else            — used as SQL directly
 """
 
 from __future__ import annotations
@@ -67,10 +66,13 @@ def resolve_model_ref(
     table_name = parse_ref(model_str)
 
     if table_name is not None:
-        # Check for a hand-written SQL file first
+        # 1. Check for a hand-written SQL file first
         sql_file = project_dir / "syncs" / "models" / f"{table_name}.sql"
         if sql_file.exists():
             base_sql = sql_file.read_text().strip()
+        # 2. Check dbt manifest.json
+        elif (dbt_table := _resolve_from_dbt(table_name, project_dir)) is not None:
+            base_sql = f"SELECT * FROM {dbt_table}"
         elif isinstance(profile, BigQueryProfile):
             base_sql = f"SELECT * FROM `{profile.dataset}`.`{table_name}`"
         elif isinstance(profile, DuckDBProfile):
@@ -103,6 +105,13 @@ def resolve_model_ref(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _resolve_from_dbt(table_name: str, project_dir: Path) -> str | None:
+    """Try to resolve a table name from dbt manifest.json."""
+    from drt.integrations.dbt import resolve_ref_from_manifest
+
+    return resolve_ref_from_manifest(table_name, project_dir)
+
 
 _SAFE_IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_.]*$")
 
