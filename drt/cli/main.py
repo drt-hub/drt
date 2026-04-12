@@ -42,13 +42,13 @@ if TYPE_CHECKING:
 from drt import __version__
 from drt.cli.output import (
     console,
+    print_dry_run_summary,
     print_error,
     print_init_success,
     print_row_errors,
     print_status_table,
     print_status_verbose,
     print_sync_result,
-    print_dry_run_summary,
     print_sync_start,
     print_sync_table,
     print_test_header,
@@ -112,21 +112,9 @@ def run(
     select: str = typer.Option(None, "--select", "-s", help="Run a specific sync by name."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without writing data."),
     verbose: bool = typer.Option(False, "--verbose", help="Show row-level error details."),
-    output: str = typer.Option(
-        "text", "--output", "-o", help="Output format: text or json."
-    ),
+    output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
 ) -> None:
     """Run sync(s) defined in the project."""
-    _run_syncs(select, dry_run, verbose, output)
-
-
-def _run_syncs(
-    select: str | None,
-    dry_run: bool,
-    verbose: bool,
-    output: str,
-) -> None:
-    """Internal implementation of the run/sync commands."""
     import json as json_mod
 
     from drt.config.credentials import load_profile
@@ -151,10 +139,7 @@ def _run_syncs(
     syncs = load_syncs(Path("."))
     if not syncs:
         if not json_mode:
-            console.print(
-                "[dim]No syncs found in syncs/."
-                " Add .yml files to get started.[/dim]"
-            )
+            console.print("[dim]No syncs found in syncs/. Add .yml files to get started.[/dim]")
         raise typer.Exit()
 
     if select:
@@ -175,39 +160,43 @@ def _run_syncs(
             print_sync_start(sync.name, dry_run)
         t0 = time.monotonic()
         try:
-            result = run_sync(
-                sync, source, dest, profile, Path("."), dry_run, state_mgr
-            )
+            result = run_sync(sync, source, dest, profile, Path("."), dry_run, state_mgr)
         except Exception as e:
             elapsed = round(time.monotonic() - t0, 2)
             if json_mode:
-                json_results.append({
-                    "name": sync.name,
-                    "status": "failed",
-                    "rows_synced": 0,
-                    "rows_failed": 0,
-                    "duration_seconds": elapsed,
-                    "dry_run": dry_run,
-                    "error": str(e),
-                })
+                json_results.append(
+                    {
+                        "name": sync.name,
+                        "status": "failed",
+                        "rows_synced": 0,
+                        "rows_failed": 0,
+                        "duration_seconds": elapsed,
+                        "dry_run": dry_run,
+                        "error": str(e),
+                    }
+                )
             else:
                 print_error(f"[{sync.name}] Unexpected error: {e}")
             had_errors = True
             continue
         elapsed = round(time.monotonic() - t0, 2)
         if json_mode:
-            json_results.append({
-                "name": sync.name,
-                "status": (
-                    "success" if result.failed == 0
-                    else "partial" if result.success > 0
-                    else "failed"
-                ),
-                "rows_synced": result.success,
-                "rows_failed": result.failed,
-                "duration_seconds": elapsed,
-                "dry_run": dry_run,
-            })
+            json_results.append(
+                {
+                    "name": sync.name,
+                    "status": (
+                        "success"
+                        if result.failed == 0
+                        else "partial"
+                        if result.success > 0
+                        else "failed"
+                    ),
+                    "rows_synced": result.success,
+                    "rows_failed": result.failed,
+                    "duration_seconds": elapsed,
+                    "dry_run": dry_run,
+                }
+            )
         else:
             if dry_run:
                 print_dry_run_summary(sync, profile, result.success)
@@ -219,12 +208,15 @@ def _run_syncs(
                 print_row_errors(result.row_errors)
 
     if json_mode:
-        print(json_mod.dumps({
-            "syncs": json_results,
-            "total_duration_seconds": round(
-                time.monotonic() - t_total, 2
-            ),
-        }, indent=2))
+        print(
+            json_mod.dumps(
+                {
+                    "syncs": json_results,
+                    "total_duration_seconds": round(time.monotonic() - t_total, 2),
+                },
+                indent=2,
+            )
+        )
 
     if had_errors:
         raise typer.Exit(1)
@@ -289,9 +281,7 @@ def validate(
 @app.command()
 def status(
     verbose: bool = typer.Option(False, "--verbose", help="Show row-level error details."),
-    output: str = typer.Option(
-        "text", "--output", "-o", help="Output format: text or json."
-    ),
+    output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
 ) -> None:
     """Show the status of the most recent sync runs."""
     import json as json_mod
@@ -301,19 +291,24 @@ def status(
     states = StateManager(Path(".")).get_all()
 
     if output == "json":
-        print(json_mod.dumps({
-            "syncs": [
+        print(
+            json_mod.dumps(
                 {
-                    "name": name,
-                    "status": state.status,
-                    "last_run_at": state.last_run_at,
-                    "records_synced": state.records_synced,
-                    "last_cursor_value": state.last_cursor_value,
-                    "error": state.error,
-                }
-                for name, state in sorted(states.items())
-            ],
-        }, indent=2))
+                    "syncs": [
+                        {
+                            "name": name,
+                            "status": state.status,
+                            "last_run_at": state.last_run_at,
+                            "records_synced": state.records_synced,
+                            "last_cursor_value": state.last_cursor_value,
+                            "error": state.error,
+                        }
+                        for name, state in sorted(states.items())
+                    ],
+                },
+                indent=2,
+            )
+        )
         return
 
     if verbose:
@@ -329,9 +324,7 @@ def status(
 
 @app.command(name="test")
 def test_syncs(
-    select: str = typer.Option(
-        None, "--select", "-s", help="Test a specific sync by name."
-    ),
+    select: str = typer.Option(None, "--select", "-s", help="Test a specific sync by name."),
 ) -> None:
     """Run post-sync validation tests."""
     from drt.config.parser import load_syncs
@@ -366,8 +359,7 @@ def test_syncs(
         if not is_queryable(sync.destination):
             print_test_skip(
                 sync.name,
-                f"tests not supported for {sync.destination.type}"
-                " destinations",
+                f"tests not supported for {sync.destination.type} destinations",
             )
             continue
 
@@ -376,13 +368,9 @@ def test_syncs(
             test_name = _test_display_name(test_def)
             try:
                 query, check = build_test_query(test_def, table)
-                result_val = execute_test_query(
-                    sync.destination, query
-                )
+                result_val = execute_test_query(sync.destination, query)
                 passed = check(result_val)
-                print_test_result(
-                    test_name, passed, str(result_val)
-                )
+                print_test_result(test_name, passed, str(result_val))
                 if not passed:
                     had_failures = True
             except Exception as e:

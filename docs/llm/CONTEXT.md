@@ -91,7 +91,6 @@ drt list                          # list sync definitions
 drt validate                      # validate all sync YAMLs
 drt run                           # run all syncs
 drt run --select <sync-name>      # run one sync
-drt sync <sync-name>              # alias for run --select
 drt run --dry-run                 # preview without writing data
 drt run --verbose                 # show row-level error details on failure
 drt status                        # show recent sync results
