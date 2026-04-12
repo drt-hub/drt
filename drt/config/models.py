@@ -162,15 +162,18 @@ class SendGridDestinationConfig(BaseModel):
 
 class LinearDestinationConfig(BaseModel):
     type: Literal["linear"]
-    team_id_env: str
-    team_id: str | None = None 
+    team_id: str | None = None
+    team_id_env: str | None = None
     title_template: str
     description_template: str
     label_ids: list[str] = []
     assignee_id: str | None = None
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
-    
-    
+
+    def describe(self) -> str:
+        return "linear (issue)"
+
+
 class SslConfig(BaseModel):
     """SSL/TLS connection options for DB destinations."""
 

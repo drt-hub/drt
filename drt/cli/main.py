@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from drt.destinations.google_sheets import GoogleSheetsDestination
     from drt.destinations.hubspot import HubSpotDestination
     from drt.destinations.jira import JiraDestination
+    from drt.destinations.linear import LinearDestination
     from drt.destinations.mysql import MySQLDestination
     from drt.destinations.parquet import ParquetDestination
     from drt.destinations.postgres import PostgresDestination
@@ -33,7 +34,6 @@ if TYPE_CHECKING:
     from drt.destinations.sendgrid import SendGridDestination
     from drt.destinations.slack import SlackDestination
     from drt.destinations.teams import TeamsDestination
-    from drt.destinations.linear import LinearDestination
     from drt.sources.bigquery import BigQuerySource
     from drt.sources.clickhouse import ClickHouseSource
     from drt.sources.duckdb import DuckDBSource
@@ -523,6 +523,7 @@ def _get_destination(
         GoogleSheetsDestinationConfig,
         HubSpotDestinationConfig,
         JiraDestinationConfig,
+        LinearDestinationConfig,
         MySQLDestinationConfig,
         ParquetDestinationConfig,
         PostgresDestinationConfig,
@@ -530,19 +531,18 @@ def _get_destination(
         SendGridDestinationConfig,
         SlackDestinationConfig,
         TeamsDestinationConfig,
-        LinearDestinationConfig,
     )
     from drt.destinations.clickhouse import ClickHouseDestination
     from drt.destinations.discord import DiscordDestination
     from drt.destinations.github_actions import GitHubActionsDestination
     from drt.destinations.hubspot import HubSpotDestination
     from drt.destinations.jira import JiraDestination
+    from drt.destinations.linear import LinearDestination
     from drt.destinations.mysql import MySQLDestination
     from drt.destinations.postgres import PostgresDestination
     from drt.destinations.rest_api import RestApiDestination
     from drt.destinations.sendgrid import SendGridDestination
     from drt.destinations.slack import SlackDestination
-    from drt.destinations.linear import LinearDestination
 
     dest = sync.destination
     if isinstance(dest, RestApiDestinationConfig):
@@ -561,6 +561,7 @@ def _get_destination(
         return SendGridDestination()
     if isinstance(dest, GoogleSheetsDestinationConfig):
         from drt.destinations.google_sheets import GoogleSheetsDestination
+
         return GoogleSheetsDestination()
     if isinstance(dest, PostgresDestinationConfig):
         return PostgresDestination()
