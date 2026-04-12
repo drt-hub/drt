@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -67,6 +68,21 @@ app = typer.Typer(
 )
 
 
+def _resolve_profile_name(
+    cli_flag: str | None, project_profile: str
+) -> str:
+    """Resolve which profile to use.
+
+    Precedence: --profile flag > DRT_PROFILE env var > drt_project.yml
+    """
+    if cli_flag:
+        return cli_flag
+    env = os.environ.get("DRT_PROFILE")
+    if env:
+        return env
+    return project_profile
+
+
 def version_callback(value: bool) -> None:
     if value:
         console.print(f"drt version {__version__}")
@@ -115,6 +131,9 @@ def run(
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without writing data."),
     verbose: bool = typer.Option(False, "--verbose", help="Show row-level error details."),
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
+    profile_name: str = typer.Option(
+        None, "--profile", "-p", help="Override profile (default: drt_project.yml or DRT_PROFILE)."
+    ),
 ) -> None:
     """Run sync(s) defined in the project."""
     import json as json_mod
@@ -132,8 +151,9 @@ def run(
         print_error(str(e))
         raise typer.Exit(1)
 
+    resolved = _resolve_profile_name(profile_name, project.profile)
     try:
-        profile = load_profile(project.profile)
+        profile = load_profile(resolved)
     except (FileNotFoundError, KeyError, ValueError) as e:
         print_error(str(e))
         raise typer.Exit(1)
