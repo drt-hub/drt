@@ -309,7 +309,11 @@ class TestConsoleDestinationLoad:
     def test_error_handling(self, monkeypatch) -> None:
         # Force json.dumps to fail
         import json
-        monkeypatch.setattr(json, "dumps", lambda *a, **kw: (_ for _ in ()).throw(ValueError("boom")))
+
+        def _raise(*a, **kw):
+            raise ValueError("boom")
+
+        monkeypatch.setattr(json, "dumps", _raise)
         result = ConsoleDestination().load([{"id": 1}], _config(), _options())
         assert result.failed == 1
         assert "boom" in result.errors[0]
