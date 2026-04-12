@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from drt.destinations.google_sheets import GoogleSheetsDestination
     from drt.destinations.hubspot import HubSpotDestination
     from drt.destinations.jira import JiraDestination
+    from drt.destinations.linear import LinearDestination
     from drt.destinations.mysql import MySQLDestination
     from drt.destinations.parquet import ParquetDestination
     from drt.destinations.postgres import PostgresDestination
@@ -512,6 +513,7 @@ def _get_destination(
     | ClickHouseDestination
     | ParquetDestination
     | FileDestination
+    | LinearDestination
 ):
     from drt.config.models import (
         ClickHouseDestinationConfig,
@@ -521,6 +523,7 @@ def _get_destination(
         GoogleSheetsDestinationConfig,
         HubSpotDestinationConfig,
         JiraDestinationConfig,
+        LinearDestinationConfig,
         MySQLDestinationConfig,
         ParquetDestinationConfig,
         PostgresDestinationConfig,
@@ -534,6 +537,7 @@ def _get_destination(
     from drt.destinations.github_actions import GitHubActionsDestination
     from drt.destinations.hubspot import HubSpotDestination
     from drt.destinations.jira import JiraDestination
+    from drt.destinations.linear import LinearDestination
     from drt.destinations.mysql import MySQLDestination
     from drt.destinations.postgres import PostgresDestination
     from drt.destinations.rest_api import RestApiDestination
@@ -577,4 +581,6 @@ def _get_destination(
         from drt.destinations.file import FileDestination
 
         return FileDestination()
+    if isinstance(dest, LinearDestinationConfig):
+        return LinearDestination()
     raise ValueError(f"Unsupported destination type: {dest.type}")
