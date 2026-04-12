@@ -8,12 +8,12 @@
 
 ご協力いただきありがとうございます！
 
-## 開発環境のセットアップ
+## 開発セットアップ
 
 ### 前提条件
 
 - Python 3.10+
-- [uv](https://docs.astral.sh/uv/)（推奨）または pip
+- [uv](https://docs.astral.sh/uv/) (推奨) または pip
 
 ### クローンとインストール
 
@@ -22,19 +22,34 @@ git clone https://github.com/drt-hub/drt.git
 cd drt
 ```
 
-**uv を使う場合（推奨）：**
+**uv を使う場合 (推奨):**
 
 ```bash
 uv sync --extra dev --extra bigquery
 ```
 
-**pip を使う場合：**
+### pre-commit フック
+
+任意で [pre-commit](https://pre-commit.com/) を使用して、各コミットの前に ruff と mypy を実行できます。これはオプションです — `make lint` と `make fmt` を直接使用することもできます。
+
+```bash
+uv pip install pre-commit
+pre-commit install
+```
+
+すべてのファイルに対して手動で実行するには:
+
+```bash
+pre-commit run --all-files
+```
+
+**pip を使う場合:**
 
 ```bash
 pip install -e ".[dev,bigquery]"
 ```
 
-または Makefile のショートカット：
+または、Makefile のショートカットを使用します:
 
 ```bash
 make dev
