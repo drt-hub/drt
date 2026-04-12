@@ -17,6 +17,7 @@ from pathlib import Path
 from drt.config.credentials import (
     BigQueryProfile,
     DuckDBProfile,
+    MySQLProfile,
     PostgresProfile,
     ProfileConfig,
     SnowflakeProfile,
@@ -80,6 +81,8 @@ def resolve_model_ref(
             base_sql = f"SELECT * FROM {table_name}"
         elif isinstance(profile, PostgresProfile):
             base_sql = f'SELECT * FROM "{table_name}"'
+        elif isinstance(profile, MySQLProfile):
+            base_sql = f"SELECT * FROM `{table_name}`"
         elif isinstance(profile, SnowflakeProfile):
             if profile.database:
                 base_sql = f'SELECT * FROM "{profile.database}"."{profile.schema}"."{table_name}"'
@@ -98,10 +101,7 @@ def resolve_model_ref(
     if cursor_field and last_cursor_value:
         safe_field = _validate_cursor_field(cursor_field)
         safe_value = last_cursor_value.replace("'", "''")  # standard SQL escaping
-        return (
-            f"SELECT * FROM ({base_sql}) AS _drt_base"
-            f" WHERE {safe_field} > '{safe_value}'"
-        )
+        return f"SELECT * FROM ({base_sql}) AS _drt_base WHERE {safe_field} > '{safe_value}'"
 
     return base_sql
 
@@ -109,6 +109,7 @@ def resolve_model_ref(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _resolve_from_dbt(table_name: str, project_dir: Path) -> str | None:
     """Try to resolve a table name from dbt manifest.json."""
@@ -125,13 +126,12 @@ def _expand_env_vars(sql: str) -> str:
 
     Raises ``ValueError`` if a referenced variable is not set.
     """
+
     def _replace(match: re.Match[str]) -> str:
         var = match.group(1)
         val = os.environ.get(var)
         if val is None:
-            raise ValueError(
-                f"Environment variable ${{{var}}} is not set"
-            )
+            raise ValueError(f"Environment variable ${{{var}}} is not set")
         return val
 
     return _ENV_VAR_PATTERN.sub(_replace, sql)

@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **MySQL source connector** (#19): Extract data from MySQL databases using pymysql. Supports host, port, dbname, user, password via env var. Backtick quoting for table names. Install: `pip install drt-core[mysql]`.
 - **Jira destination connector** (#158): Create and update Jira issues via REST API v3 with env-based auth (`base_url_env`, `email_env`, `token_env`) and Jinja2 templates for issue fields.
 - **Microsoft Teams destination** (#85): Send messages to Teams channels via Incoming Webhook. Supports plain text and Adaptive Card payloads via Jinja2 templates. 10 unit tests. No extra dependencies.
 - **ClickHouse destination connector** (#166): Insert rows into ClickHouse tables using `clickhouse-connect` (HTTP client). Supports host, database, user, password (with `_env` variants), connection string, table, and HTTPS via `secure` flag. Deduplication relies on ClickHouse's ReplacingMergeTree engine. 16 unit tests. Install: `pip install drt-core[clickhouse]`.

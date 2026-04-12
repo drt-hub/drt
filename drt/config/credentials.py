@@ -37,6 +37,7 @@ import yaml
 # Source profile types
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class BigQueryProfile:
     type: Literal["bigquery"]
@@ -45,7 +46,7 @@ class BigQueryProfile:
     method: Literal["application_default", "keyfile"] = "application_default"
     keyfile: str | None = None
     location: str = "US"  # e.g. "US", "EU", "asia-northeast1"
-    
+
     def describe(self) -> str:
         return f"{self.type} ({self.project}.{self.dataset})"
 
@@ -127,6 +128,32 @@ class ClickHouseProfile:
 
 
 @dataclass
+class MySQLProfile:
+    """MySQL profile for extracting data from MySQL databases.
+
+    Example ~/.drt/profiles.yml:
+        mysql:
+          type: mysql
+          host: localhost
+          port: 3306
+          dbname: analytics
+          user: analyst
+          password_env: MYSQL_PASSWORD
+    """
+
+    type: Literal["mysql"]
+    host: str = "localhost"
+    port: int = 3306
+    dbname: str = ""
+    user: str = ""
+    password_env: str | None = None
+    password: str | None = None
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.host}:{self.port}/{self.dbname})"
+
+
+@dataclass
 class SnowflakeProfile:
     """Snowflake profile using snowflake-connector-python."""
 
@@ -143,6 +170,7 @@ class SnowflakeProfile:
     def describe(self) -> str:
         return f"{self.type} ({self.account}/{self.database}.{self.schema})"
 
+
 # Union type — used throughout the codebase
 ProfileConfig = (
     BigQueryProfile
@@ -151,6 +179,7 @@ ProfileConfig = (
     | PostgresProfile
     | RedshiftProfile
     | ClickHouseProfile
+    | MySQLProfile
     | SnowflakeProfile
 )
 
@@ -263,6 +292,17 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             password=raw.get("password"),
         )
 
+    if source_type == "mysql":
+        return MySQLProfile(
+            type="mysql",
+            host=raw.get("host", "localhost"),
+            port=int(raw.get("port", 3306)),
+            dbname=raw.get("dbname", ""),
+            user=raw.get("user", ""),
+            password_env=raw.get("password_env"),
+            password=raw.get("password"),
+        )
+
     if source_type == "snowflake":
         _db = raw.get("database", "")
         if not _db:
@@ -284,7 +324,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
 
     raise ValueError(
         f"Unsupported source type '{source_type}'. "
-        "Supported: bigquery, duckdb, sqlite, postgres, redshift, clickhouse, snowflake"
+        "Supported: bigquery, duckdb, sqlite, postgres, redshift, clickhouse, mysql, snowflake"
     )
 
 
@@ -343,6 +383,16 @@ def save_profile(
             "host": profile.host,
             "port": profile.port,
             "database": profile.database,
+            "user": profile.user,
+        }
+        if profile.password_env:
+            entry["password_env"] = profile.password_env
+    elif isinstance(profile, MySQLProfile):
+        entry = {
+            "type": "mysql",
+            "host": profile.host,
+            "port": profile.port,
+            "dbname": profile.dbname,
             "user": profile.user,
         }
         if profile.password_env:

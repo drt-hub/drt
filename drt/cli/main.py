@@ -14,6 +14,7 @@ if TYPE_CHECKING:
         BigQueryProfile,
         ClickHouseProfile,
         DuckDBProfile,
+        MySQLProfile,
         PostgresProfile,
         RedshiftProfile,
         SnowflakeProfile,
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
     from drt.sources.bigquery import BigQuerySource
     from drt.sources.clickhouse import ClickHouseSource
     from drt.sources.duckdb import DuckDBSource
+    from drt.sources.mysql import MySQLSource
     from drt.sources.postgres import PostgresSource
     from drt.sources.redshift import RedshiftSource
     from drt.sources.snowflake import SnowflakeSource
@@ -69,9 +71,7 @@ app = typer.Typer(
 )
 
 
-def _resolve_profile_name(
-    cli_flag: str | None, project_profile: str
-) -> str:
+def _resolve_profile_name(cli_flag: str | None, project_profile: str) -> str:
     """Resolve which profile to use.
 
     Precedence: --profile flag > DRT_PROFILE env var > drt_project.yml
@@ -468,6 +468,7 @@ def _get_source(
         | PostgresProfile
         | RedshiftProfile
         | ClickHouseProfile
+        | MySQLProfile
         | SnowflakeProfile
     ),
 ) -> (
@@ -477,12 +478,14 @@ def _get_source(
     | PostgresSource
     | RedshiftSource
     | ClickHouseSource
+    | MySQLSource
     | SnowflakeSource
 ):
     from drt.config.credentials import (
         BigQueryProfile,
         ClickHouseProfile,
         DuckDBProfile,
+        MySQLProfile,
         PostgresProfile,
         RedshiftProfile,
         SnowflakeProfile,
@@ -490,6 +493,7 @@ def _get_source(
     )
     from drt.sources.bigquery import BigQuerySource
     from drt.sources.duckdb import DuckDBSource
+    from drt.sources.mysql import MySQLSource
     from drt.sources.postgres import PostgresSource
     from drt.sources.sqlite import SQLiteSource
 
@@ -501,6 +505,8 @@ def _get_source(
         return SQLiteSource()
     if isinstance(profile, PostgresProfile):
         return PostgresSource()
+    if isinstance(profile, MySQLProfile):
+        return MySQLSource()
     if isinstance(profile, RedshiftProfile):
         from drt.sources.redshift import RedshiftSource
 
