@@ -95,6 +95,9 @@ def run_drt_sync(
     }
 
 
+_airflow_operator_cls: type | None = None
+
+
 class DrtRunOperator:
     """Airflow Operator that runs a drt sync.
 
@@ -114,6 +117,8 @@ class DrtRunOperator:
     """
 
     def __new__(cls, *args: Any, **kwargs: Any) -> Any:
+        global _airflow_operator_cls  # noqa: PLW0603
+
         try:
             from airflow.models import BaseOperator
         except ImportError as e:
@@ -123,8 +128,7 @@ class DrtRunOperator:
                 "or install Airflow: pip install apache-airflow"
             ) from e
 
-        # Dynamically create a class that inherits from BaseOperator
-        if not hasattr(cls, "_airflow_cls"):
+        if _airflow_operator_cls is None:
 
             class _DrtRunOperator(BaseOperator):  # type: ignore[misc]
                 """Airflow operator that runs a drt sync."""
@@ -153,6 +157,6 @@ class DrtRunOperator:
                         profile=self.profile,
                     )
 
-            cls._airflow_cls = _DrtRunOperator
+            _airflow_operator_cls = _DrtRunOperator
 
-        return cls._airflow_cls(*args, **kwargs)
+        return _airflow_operator_cls(*args, **kwargs)
