@@ -44,7 +44,7 @@ def batch(iterable: Iterator[Any], size: int) -> Iterator[list[Any]]:
 def run_sync(
     sync: SyncConfig,
     source: Source,
-    destination: Destination,
+    destination: Destination | StagedDestination,
     profile: ProfileConfig,
     project_dir: Path,
     dry_run: bool = False,
@@ -99,9 +99,11 @@ def run_sync(
             continue
 
         if is_staged:
+            assert isinstance(destination, StagedDestination)
             destination.stage(record_batch, sync.destination, sync.sync)
             total_result.success += len(record_batch)
         else:
+            assert isinstance(destination, Destination)
             result = destination.load(record_batch, sync.destination, sync.sync)
             total_result.success += result.success
             total_result.failed += result.failed
@@ -114,6 +116,7 @@ def run_sync(
 
     # Finalize staged destinations (upload file, trigger job, poll)
     if is_staged and not dry_run and total_result.success > 0:
+        assert isinstance(destination, StagedDestination)
         finalize_result = destination.finalize(sync.destination, sync.sync)
         total_result.failed += finalize_result.failed
         total_result.errors.extend(finalize_result.errors)
