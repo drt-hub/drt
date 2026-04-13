@@ -1,4 +1,4 @@
-"""Tests for dbt init integration — list_models_from_manifest."""
+"""Tests for dbt init integration — list_models_from_manifest + CLI."""
 
 from __future__ import annotations
 
@@ -6,8 +6,12 @@ import json
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
+from drt.cli.main import app
 from drt.integrations.dbt import list_models_from_manifest
+
+runner = CliRunner()
 
 
 def _manifest(models: list[dict]) -> dict:
@@ -94,3 +98,55 @@ def test_list_models_with_description(tmp_path: Path) -> None:
 
     models = list_models_from_manifest(path)
     assert models[0].description == "All active users"
+
+
+# ---------------------------------------------------------------------------
+# CLI --from-dbt
+# ---------------------------------------------------------------------------
+
+
+def test_init_from_dbt_generates_syncs(tmp_path: Path) -> None:
+    manifest = _manifest([
+        {"name": "users", "relation_name": '"analytics"."users"'},
+        {"name": "orders", "relation_name": '"analytics"."orders"'},
+    ])
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+
+    mp = pytest.MonkeyPatch()
+    mp.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--from-dbt", str(manifest_path)], input="all\n")
+    assert result.exit_code == 0
+    assert (tmp_path / "syncs" / "sync_users.yml").exists()
+    assert (tmp_path / "syncs" / "sync_orders.yml").exists()
+    mp.undo()
+
+
+def test_init_from_dbt_missing_manifest(tmp_path: Path) -> None:
+    mp = pytest.MonkeyPatch()
+    mp.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--from-dbt", "/nonexistent/manifest.json"])
+    assert result.exit_code == 1
+    mp.undo()
+
+
+def test_init_from_dbt_select_specific(tmp_path: Path) -> None:
+    manifest = _manifest([
+        {"name": "users", "relation_name": '"users"'},
+        {"name": "orders", "relation_name": '"orders"'},
+        {"name": "products", "relation_name": '"products"'},
+    ])
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+
+    mp = pytest.MonkeyPatch()
+    mp.chdir(tmp_path)
+
+    # Select only model 1 (orders, sorted alphabetically)
+    result = runner.invoke(app, ["init", "--from-dbt", str(manifest_path)], input="1\n")
+    assert result.exit_code == 0
+    assert (tmp_path / "syncs" / "sync_orders.yml").exists()
+    assert not (tmp_path / "syncs" / "sync_users.yml").exists()
+    mp.undo()
