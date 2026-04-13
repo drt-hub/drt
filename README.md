@@ -303,7 +303,11 @@ drt is designed to work alongside, not against, the modern data stack:
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+We welcome contributions of all sizes — from typo fixes to new connectors. drt has a transparent [contributor ladder](GOVERNANCE.md#roles) so your work builds toward greater trust and responsibility over time.
+
+- **Get started:** [CONTRIBUTING.md](CONTRIBUTING.md) — setup, workflow, and your first connector tutorial
+- **Pick something to work on:** [Good First Issues](https://github.com/drt-hub/drt/issues?q=is%3Aopen+label%3A%22good+first+issue%22)
+- **Understand how decisions are made:** [GOVERNANCE.md](GOVERNANCE.md)
 
 ## Disclaimer
 
