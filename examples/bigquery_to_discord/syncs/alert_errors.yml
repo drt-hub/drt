@@ -1,0 +1,14 @@
+name: alert_errors
+description: "Notify Discord when errors are detected in BigQuery"
+model: ref('recent_errors')
+destination:
+  type: discord
+  webhook_url_env: DISCORD_WEBHOOK_URL
+  message_template: "🚨 **{{ row.service_name }}** — {{ row.error_message }} (Error #{{ row.id }})"
+sync:
+  mode: incremental
+  cursor_field: created_at
+  batch_size: 1  # Discord: send one message at a time
+  rate_limit:
+    requests_per_second: 2
+  on_error: skip

@@ -71,6 +71,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Python 3.13 support** (#225): Added to CI matrix and classifiers
 - **`duration_seconds` in SyncResult** (#226): Track sync execution time
 
+#### Examples
+- **BigQuery → Discord example** (#266): Alert pipeline that queries BigQuery for error spikes and posts a Discord notification via Incoming Webhook using incremental sync. Includes `examples/bigquery_to_discord/`.
+
 ### Tests
 - 382+ tests (up from 170+ in v0.4.3)
 - Source and destination protocol contract tests (#209, #210)
