@@ -445,6 +445,44 @@ auth:
 
 → Sends `Authorization: Basic <base64(username:password)>` header.
 
+### `type: google_ads`
+
+```yaml
+destination:
+  type: google_ads
+  customer_id: "1234567890"            # required: Google Ads customer ID (no hyphens)
+  conversion_action: "customers/1234567890/conversionActions/987"  # required
+  gclid_field: gclid                   # row field for click ID (default: "gclid")
+  conversion_time_field: conversion_time  # row field for timestamp
+  conversion_value_field: revenue      # optional: row field for conversion value
+  currency_code: JPY                   # default: USD
+  developer_token_env: GOOGLE_ADS_DEVELOPER_TOKEN
+  auth:
+    type: oauth2_client_credentials
+    token_url: "https://oauth2.googleapis.com/token"
+    client_id_env: GOOGLE_ADS_CLIENT_ID
+    client_secret_env: GOOGLE_ADS_CLIENT_SECRET
+```
+
+---
+
+## Auth Configs
+
+Auth configs are used inside destination configs under the `auth:` key.
+
+### OAuth2 Client Credentials
+
+```yaml
+auth:
+  type: oauth2_client_credentials
+  token_url: "https://auth.example.com/oauth/token"  # required
+  client_id_env: OAUTH_CLIENT_ID       # required: env var name
+  client_secret_env: OAUTH_CLIENT_SECRET  # required: env var name
+  scope: "contacts.write"             # optional
+```
+
+→ Exchanges client credentials for an access token, caches until expiry. Sends `Authorization: Bearer <access_token>` header.
+
 ---
 
 ## Complete Examples

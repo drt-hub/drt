@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from drt.destinations.discord import DiscordDestination
     from drt.destinations.file import FileDestination
     from drt.destinations.github_actions import GitHubActionsDestination
+    from drt.destinations.google_ads import GoogleAdsDestination
     from drt.destinations.google_sheets import GoogleSheetsDestination
     from drt.destinations.hubspot import HubSpotDestination
     from drt.destinations.jira import JiraDestination
@@ -105,8 +106,18 @@ def main(
 
 
 @app.command()
-def init() -> None:
+def init(
+    from_dbt: str = typer.Option(
+        None,
+        "--from-dbt",
+        help="Path to dbt manifest.json — generate sync YAMLs from dbt models.",
+    ),
+) -> None:
     """Initialize a new drt project in the current directory."""
+    if from_dbt:
+        _init_from_dbt(Path(from_dbt))
+        return
+
     from drt.cli.init_wizard import run_wizard, scaffold_project
 
     try:
@@ -119,6 +130,78 @@ def init() -> None:
     except Exception as e:
         print_error(str(e))
         raise typer.Exit(1)
+
+
+def _init_from_dbt(manifest_path: Path) -> None:
+    """Generate sync YAML scaffolds from dbt manifest.json."""
+    import yaml
+
+    from drt.integrations.dbt import list_models_from_manifest
+
+    try:
+        models = list_models_from_manifest(manifest_path)
+    except FileNotFoundError as e:
+        print_error(str(e))
+        raise typer.Exit(1)
+
+    if not models:
+        console.print("[dim]No models found in manifest.[/dim]")
+        return
+
+    console.print(f"\n[bold]Found {len(models)} dbt models:[/bold]\n")
+    for i, m in enumerate(models):
+        desc = f" — {m.description}" if m.description else ""
+        console.print(f"  {i + 1}. {m.name}{desc}")
+
+    console.print("")
+    raw = typer.prompt(
+        "Select models (comma-separated numbers, or 'all')",
+        default="all",
+    )
+
+    if raw.strip().lower() == "all":
+        selected = models
+    else:
+        indices = [int(x.strip()) - 1 for x in raw.split(",") if x.strip().isdigit()]
+        selected = [models[i] for i in indices if 0 <= i < len(models)]
+
+    if not selected:
+        console.print("[dim]No models selected.[/dim]")
+        return
+
+    syncs_dir = Path(".") / "syncs"
+    syncs_dir.mkdir(exist_ok=True)
+    created: list[str] = []
+
+    for model in selected:
+        sync_data = {
+            "name": f"sync_{model.name}",
+            "description": model.description or f"Sync {model.name} to destination",
+            "model": f"ref('{model.name}')",
+            "destination": {
+                "type": "rest_api",
+                "url": "https://example.com/api",
+                "method": "POST",
+            },
+        }
+        path = syncs_dir / f"sync_{model.name}.yml"
+        if path.exists():
+            console.print(f"  [dim]skip[/dim] {path} (already exists)")
+            continue
+        with path.open("w") as f:
+            yaml.dump(sync_data, f, default_flow_style=False, sort_keys=False)
+        created.append(str(path))
+
+    if created:
+        console.print(f"\n[green]Created {len(created)} sync file(s):[/green]")
+        for c in created:
+            console.print(f"  {c}")
+        console.print(
+            "\n[dim]Edit the destination config in each file,"
+            " then run: drt validate && drt run --dry-run[/dim]"
+        )
+    else:
+        console.print("[dim]No new sync files created.[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -251,11 +334,32 @@ def run(
 
 
 @app.command(name="list")
-def list_syncs() -> None:
+def list_syncs(
+    output: str = typer.Option(
+        "text", "--output", "-o", help="Output format: text or json."
+    ),
+) -> None:
     """List all sync definitions in the project."""
+    import json as json_mod
+
     from drt.config.parser import load_syncs
 
     syncs = load_syncs(Path("."))
+
+    if output == "json":
+        print(json_mod.dumps({
+            "syncs": [
+                {
+                    "name": s.name,
+                    "destination_type": s.destination.type,
+                    "mode": s.sync.mode,
+                    "description": s.description,
+                }
+                for s in syncs
+            ],
+        }, indent=2))
+        return
+
     print_sync_table(syncs)
 
 
@@ -269,12 +373,32 @@ def validate(
     emit_schema: bool = typer.Option(  # noqa: E501
         False, "--emit-schema", help="Write JSON Schemas to .drt/schemas/."
     ),
+    output: str = typer.Option(
+        "text", "--output", "-o", help="Output format: text or json."
+    ),
 ) -> None:
     """Validate sync definitions against the JSON Schema."""
+    import json as json_mod
+
     from drt.config.parser import load_syncs_safe
     from drt.config.schema import write_schemas
 
     result = load_syncs_safe(Path("."))
+
+    if output == "json":
+        print(json_mod.dumps({
+            "results": [
+                {"name": s.name, "valid": True}
+                for s in result.syncs
+            ] + [
+                {"name": name, "valid": False, "errors": errs}
+                for name, errs in result.errors.items()
+            ],
+        }, indent=2))
+        if result.errors:
+            raise typer.Exit(code=1)
+        return
+
     if not result.syncs and not result.errors:
         console.print("[dim]No syncs found.[/dim]")
         return
@@ -540,12 +664,14 @@ def _get_destination(
     | ParquetDestination
     | FileDestination
     | LinearDestination
+    | GoogleAdsDestination
 ):
     from drt.config.models import (
         ClickHouseDestinationConfig,
         DiscordDestinationConfig,
         FileDestinationConfig,
         GitHubActionsDestinationConfig,
+        GoogleAdsDestinationConfig,
         GoogleSheetsDestinationConfig,
         HubSpotDestinationConfig,
         JiraDestinationConfig,
@@ -609,4 +735,8 @@ def _get_destination(
         return FileDestination()
     if isinstance(dest, LinearDestinationConfig):
         return LinearDestination()
+    if isinstance(dest, GoogleAdsDestinationConfig):
+        from drt.destinations.google_ads import GoogleAdsDestination
+
+        return GoogleAdsDestination()
     raise ValueError(f"Unsupported destination type: {dest.type}")

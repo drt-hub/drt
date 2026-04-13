@@ -28,8 +28,16 @@ class BasicAuth(BaseModel):
     password_env: str
 
 
+class OAuth2ClientCredentialsAuth(BaseModel):
+    type: Literal["oauth2_client_credentials"]
+    token_url: str
+    client_id_env: str
+    client_secret_env: str
+    scope: str | None = None
+
+
 AuthConfig = Annotated[
-    BearerAuth | ApiKeyAuth | BasicAuth,
+    BearerAuth | ApiKeyAuth | BasicAuth | OAuth2ClientCredentialsAuth,
     Field(discriminator="type"),
 ]
 
@@ -323,6 +331,21 @@ class FileDestinationConfig(BaseModel):
         return f"{self.type} ({self.path})"
 
 
+class GoogleAdsDestinationConfig(BaseModel):
+    type: Literal["google_ads"]
+    customer_id: str  # Google Ads customer ID (without hyphens)
+    conversion_action: str  # e.g. "customers/123/conversionActions/456"
+    gclid_field: str = "gclid"  # row field containing the click ID
+    conversion_time_field: str = "conversion_time"  # row field for timestamp
+    conversion_value_field: str | None = None  # optional: row field for value
+    currency_code: str = "USD"
+    developer_token_env: str = "GOOGLE_ADS_DEVELOPER_TOKEN"
+    auth: AuthConfig | None = None  # typically oauth2_client_credentials
+
+    def describe(self) -> str:
+        return f"google_ads ({self.customer_id})"
+
+
 # Discriminated union — add new destination types here
 DestinationConfig = Annotated[
     RestApiDestinationConfig
@@ -339,6 +362,7 @@ DestinationConfig = Annotated[
     | JiraDestinationConfig
     | ClickHouseDestinationConfig
     | ParquetDestinationConfig
+    | GoogleAdsDestinationConfig
     | FileDestinationConfig,
     Field(discriminator="type"),
 ]

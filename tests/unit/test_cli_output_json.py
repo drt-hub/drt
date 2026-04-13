@@ -135,3 +135,98 @@ def test_status_json_no_rich_markup(
     json.loads(result.output)
 
     mp.undo()
+
+
+# ---------------------------------------------------------------------------
+# drt list --output json
+# ---------------------------------------------------------------------------
+
+
+def test_list_json(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    import pytest
+    import yaml
+
+    mp = pytest.MonkeyPatch()
+    mp.chdir(tmp_path)
+
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    with (syncs_dir / "test.yml").open("w") as f:
+        yaml.dump({
+            "name": "my-sync",
+            "model": "SELECT 1",
+            "destination": {
+                "type": "rest_api",
+                "url": "http://example.com",
+                "method": "POST",
+            },
+        }, f)
+
+    result = runner.invoke(app, ["list", "--output", "json"])
+    data = json.loads(result.output)
+    assert len(data["syncs"]) == 1
+    assert data["syncs"][0]["name"] == "my-sync"
+    assert data["syncs"][0]["destination_type"] == "rest_api"
+    assert data["syncs"][0]["mode"] == "full"
+
+    mp.undo()
+
+
+# ---------------------------------------------------------------------------
+# drt validate --output json
+# ---------------------------------------------------------------------------
+
+
+def test_validate_json_valid(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    import pytest
+    import yaml
+
+    mp = pytest.MonkeyPatch()
+    mp.chdir(tmp_path)
+
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    with (syncs_dir / "ok.yml").open("w") as f:
+        yaml.dump({
+            "name": "good",
+            "model": "SELECT 1",
+            "destination": {
+                "type": "rest_api",
+                "url": "http://example.com",
+                "method": "POST",
+            },
+        }, f)
+
+    result = runner.invoke(app, ["validate", "--output", "json"])
+    data = json.loads(result.output)
+    assert len(data["results"]) == 1
+    assert data["results"][0]["valid"] is True
+    assert result.exit_code == 0
+
+    mp.undo()
+
+
+def test_validate_json_invalid(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    import pytest
+    import yaml
+
+    mp = pytest.MonkeyPatch()
+    mp.chdir(tmp_path)
+
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    with (syncs_dir / "bad.yml").open("w") as f:
+        yaml.dump({"name": "broken"}, f)
+
+    result = runner.invoke(app, ["validate", "--output", "json"])
+    data = json.loads(result.output)
+    assert any(r["valid"] is False for r in data["results"])
+    assert result.exit_code == 1
+
+    mp.undo()

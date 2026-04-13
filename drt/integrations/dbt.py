@@ -12,7 +12,47 @@ Usage:
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
+
+
+@dataclass
+class DbtModel:
+    """A model extracted from dbt manifest.json."""
+
+    name: str
+    relation_name: str | None
+    description: str
+    resource_type: str
+
+
+def list_models_from_manifest(
+    manifest_path: Path,
+) -> list[DbtModel]:
+    """List all models from a dbt manifest.json.
+
+    Returns a list of DbtModel with name, relation_name, and description.
+    """
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Manifest not found: {manifest_path}")
+
+    manifest = json.loads(manifest_path.read_text())
+    nodes = manifest.get("nodes", {})
+
+    models: list[DbtModel] = []
+    for node in nodes.values():
+        if node.get("resource_type") != "model":
+            continue
+        models.append(
+            DbtModel(
+                name=node.get("name", ""),
+                relation_name=node.get("relation_name"),
+                description=node.get("description", ""),
+                resource_type=node.get("resource_type", "model"),
+            )
+        )
+
+    return sorted(models, key=lambda m: m.name)
 
 
 def resolve_ref_from_manifest(
