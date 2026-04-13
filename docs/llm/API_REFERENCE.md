@@ -405,6 +405,45 @@ destination:
   body_template: "{{ row.message }}"   # Jinja2 template for email body
 ```
 
+### `type: staged_upload`
+
+For APIs that require file upload → job trigger → poll for completion
+(e.g. Amazon Marketing Cloud, Salesforce Bulk API 2.0).
+
+```yaml
+destination:
+  type: staged_upload
+  format: csv                          # "csv" | "json" | "jsonl"
+  stage:
+    url: "https://upload.example.com/files"
+    method: POST
+    auth:
+      type: bearer
+      token_env: API_TOKEN
+    response_extract:
+      upload_id: "uploadId"            # extract from response JSON
+  trigger:
+    url: "https://api.example.com/jobs"
+    method: POST
+    body_template: '{"uploadId": "{{ upload_id }}"}'
+    auth:
+      type: bearer
+      token_env: API_TOKEN
+    response_extract:
+      job_id: "jobId"
+  poll:                                # optional — omit for fire-and-forget
+    url: "https://api.example.com/jobs/{{ job_id }}"
+    method: GET
+    auth:
+      type: bearer
+      token_env: API_TOKEN
+    status_field: "status"
+    success_values: ["SUCCEEDED"]
+    failure_values: ["FAILED"]
+    interval_seconds: 30               # default: 30
+    timeout_seconds: 3600              # default: 3600
+```
+
 ---
 
 ## Auth Configs

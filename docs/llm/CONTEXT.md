@@ -94,6 +94,7 @@ default:
 | Linear | `linear` | Create issues via GraphQL API |
 | SendGrid | `sendgrid` | Transactional emails via v3 Mail Send API |
 | Google Ads | `google_ads` | Offline click conversion upload |
+| Staged Upload | `staged_upload` | Async bulk APIs: file upload → job trigger → poll |
 
 ## CLI Commands
 
