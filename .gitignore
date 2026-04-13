@@ -28,9 +28,10 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 
-# IDE
+# IDE / tools
 .vscode/
 .idea/
+.serena/
 *.swp
 *.swo
 
