@@ -193,12 +193,55 @@ def _config_dir(override: Path | None = None) -> Path:
     return override if override is not None else Path.home() / ".drt"
 
 
+def _load_secrets(project_dir: Path | None = None) -> dict[str, Any]:
+    """Load .drt/secrets.toml if it exists.
+
+    Returns a nested dict matching the TOML structure.
+    """
+    secrets_path = (project_dir or Path(".")) / ".drt" / "secrets.toml"
+    if not secrets_path.exists():
+        return {}
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10
+        try:
+            import tomli as tomllib  # type: ignore[no-redef]
+        except ModuleNotFoundError:
+            return {}
+    with secrets_path.open("rb") as f:
+        data: dict[str, Any] = tomllib.load(f)
+    return data
+
+
+def _lookup_secrets_toml(env_var: str) -> str | None:
+    """Look up an env-var-style key in secrets.toml.
+
+    Walks all nested dicts searching for a matching key.
+    """
+    secrets = _load_secrets()
+
+    def _search(d: dict[str, Any]) -> str | None:
+        for k, v in d.items():
+            if k == env_var and isinstance(v, str):
+                return v
+            if isinstance(v, dict):
+                found = _search(v)
+                if found is not None:
+                    return found
+        return None
+
+    return _search(secrets)
+
+
 def resolve_env(value: str | None, env_var: str | None) -> str | None:
-    """Resolve a secret value: explicit value → env var → None."""
+    """Resolve a secret value: explicit value → env var → secrets.toml → None."""
     if value is not None:
         return value
     if env_var is not None:
-        return os.environ.get(env_var)
+        env_val = os.environ.get(env_var)
+        if env_val is not None:
+            return env_val
+        return _lookup_secrets_toml(env_var)
     return None
 
 

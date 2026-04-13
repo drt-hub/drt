@@ -45,4 +45,5 @@ Thumbs.db
 *.pem
 *.key
 credentials.json
+secrets.toml
 service_account.json
