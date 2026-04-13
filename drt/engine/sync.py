@@ -15,7 +15,7 @@ from typing import Any
 
 from drt.config.credentials import ProfileConfig
 from drt.config.models import SyncConfig
-from drt.destinations.base import Destination, SyncResult
+from drt.destinations.base import Destination, StagedDestination, SyncResult
 from drt.engine.resolver import resolve_model_ref
 from drt.sources.base import Source
 from drt.state.manager import StateManager, SyncState
@@ -82,6 +82,7 @@ def run_sync(
     records_iter = source.extract(query, profile)
     total_result = SyncResult()
     new_cursor_value: str | None = last_cursor_value
+    is_staged = isinstance(destination, StagedDestination)
 
     for record_batch in batch(records_iter, sync.sync.batch_size):
         # Track max cursor value seen across all batches
@@ -97,15 +98,28 @@ def run_sync(
             total_result.success += len(record_batch)
             continue
 
-        result = destination.load(record_batch, sync.destination, sync.sync)
-        total_result.success += result.success
-        total_result.failed += result.failed
-        total_result.skipped += result.skipped
-        total_result.errors.extend(result.errors)
-        total_result.row_errors.extend(getattr(result, "row_errors", []))
+        if is_staged:
+            destination.stage(record_batch, sync.destination, sync.sync)
+            total_result.success += len(record_batch)
+        else:
+            result = destination.load(record_batch, sync.destination, sync.sync)
+            total_result.success += result.success
+            total_result.failed += result.failed
+            total_result.skipped += result.skipped
+            total_result.errors.extend(result.errors)
+            total_result.row_errors.extend(getattr(result, "row_errors", []))
 
-        if sync.sync.on_error == "fail" and result.failed > 0:
-            break
+            if sync.sync.on_error == "fail" and result.failed > 0:
+                break
+
+    # Finalize staged destinations (upload file, trigger job, poll)
+    if is_staged and not dry_run and total_result.success > 0:
+        finalize_result = destination.finalize(sync.destination, sync.sync)
+        total_result.failed += finalize_result.failed
+        total_result.errors.extend(finalize_result.errors)
+        total_result.row_errors.extend(
+            getattr(finalize_result, "row_errors", [])
+        )
 
     total_result.duration_seconds = round(time.perf_counter() - t0, 3)
 
