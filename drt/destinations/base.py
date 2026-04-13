@@ -43,3 +43,31 @@ class Destination(Protocol):
     ) -> SyncResult:
         """Send a batch of records to the destination."""
         ...
+
+
+@runtime_checkable
+class StagedDestination(Protocol):
+    """Destination that accumulates records, then uploads as a batch job.
+
+    Used for APIs that require file upload → job trigger → poll for completion
+    (e.g. Salesforce Bulk API, Amazon Marketing Cloud).
+
+    Engine calls stage() per batch, then finalize() once after all batches.
+    """
+
+    def stage(
+        self,
+        records: list[dict[str, Any]],
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> None:
+        """Accumulate records for later upload."""
+        ...
+
+    def finalize(
+        self,
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        """Upload staged file, trigger job, poll for completion."""
+        ...
