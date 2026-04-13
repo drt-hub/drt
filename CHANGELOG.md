@@ -46,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`--output json` for validate/list** (#230): Structured JSON output for `drt validate` and `drt list`.
 - **MCP Server: `drt_list_connectors`** (#262): New tool listing all available sources and destinations.
 - **MCP Server: improved `drt_validate`** (#262): Per-file error reporting via `load_syncs_safe()`.
+- **BigQuery → Discord example** (#266): Alert pipeline that queries BigQuery for recent error rows and posts a Discord notification per row via Incoming Webhook using incremental sync. Includes `examples/bigquery_to_discord/`.
 
 ## [0.5.0] - 2026-04-13
 
