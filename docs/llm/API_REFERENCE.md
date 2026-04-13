@@ -445,6 +445,19 @@ auth:
 
 → Sends `Authorization: Basic <base64(username:password)>` header.
 
+### OAuth2 Client Credentials
+
+```yaml
+auth:
+  type: oauth2_client_credentials
+  token_url: "https://auth.example.com/oauth/token"  # required
+  client_id_env: OAUTH_CLIENT_ID       # required: env var name
+  client_secret_env: OAUTH_CLIENT_SECRET  # required: env var name
+  scope: "contacts.write"             # optional
+```
+
+→ Exchanges client credentials for an access token, caches until expiry. Sends `Authorization: Bearer <access_token>` header.
+
 ---
 
 ## Complete Examples

@@ -28,8 +28,16 @@ class BasicAuth(BaseModel):
     password_env: str
 
 
+class OAuth2ClientCredentialsAuth(BaseModel):
+    type: Literal["oauth2_client_credentials"]
+    token_url: str
+    client_id_env: str
+    client_secret_env: str
+    scope: str | None = None
+
+
 AuthConfig = Annotated[
-    BearerAuth | ApiKeyAuth | BasicAuth,
+    BearerAuth | ApiKeyAuth | BasicAuth | OAuth2ClientCredentialsAuth,
     Field(discriminator="type"),
 ]
 
