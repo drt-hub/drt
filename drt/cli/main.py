@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from drt.destinations.discord import DiscordDestination
     from drt.destinations.file import FileDestination
     from drt.destinations.github_actions import GitHubActionsDestination
+    from drt.destinations.google_ads import GoogleAdsDestination
     from drt.destinations.google_sheets import GoogleSheetsDestination
     from drt.destinations.hubspot import HubSpotDestination
     from drt.destinations.jira import JiraDestination
@@ -663,12 +664,14 @@ def _get_destination(
     | ParquetDestination
     | FileDestination
     | LinearDestination
+    | GoogleAdsDestination
 ):
     from drt.config.models import (
         ClickHouseDestinationConfig,
         DiscordDestinationConfig,
         FileDestinationConfig,
         GitHubActionsDestinationConfig,
+        GoogleAdsDestinationConfig,
         GoogleSheetsDestinationConfig,
         HubSpotDestinationConfig,
         JiraDestinationConfig,
@@ -732,4 +735,8 @@ def _get_destination(
         return FileDestination()
     if isinstance(dest, LinearDestinationConfig):
         return LinearDestination()
+    if isinstance(dest, GoogleAdsDestinationConfig):
+        from drt.destinations.google_ads import GoogleAdsDestination
+
+        return GoogleAdsDestination()
     raise ValueError(f"Unsupported destination type: {dest.type}")
