@@ -729,6 +729,7 @@ def _get_destination(
         RestApiDestinationConfig,
         SendGridDestinationConfig,
         SlackDestinationConfig,
+        StagedUploadDestinationConfig,
         TeamsDestinationConfig,
     )
     from drt.destinations.clickhouse import ClickHouseDestination
@@ -786,4 +787,8 @@ def _get_destination(
         from drt.destinations.google_ads import GoogleAdsDestination
 
         return GoogleAdsDestination()
+    if isinstance(dest, StagedUploadDestinationConfig):
+        from drt.destinations.staged_upload import StagedUploadDestination
+
+        return StagedUploadDestination()
     raise ValueError(f"Unsupported destination type: {dest.type}")
