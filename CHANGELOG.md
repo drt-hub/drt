@@ -35,21 +35,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## drt-core
 
-## [Unreleased]
+## [0.5.0] - 2026-04-13
 
 ### Added
 
-- **MySQL source connector** (#19): Extract data from MySQL databases using pymysql. Supports host, port, dbname, user, password via env var. Backtick quoting for table names. Install: `pip install drt-core[mysql]`.
-- **Jira destination connector** (#158): Create and update Jira issues via REST API v3 with env-based auth (`base_url_env`, `email_env`, `token_env`) and Jinja2 templates for issue fields.
-- **Microsoft Teams destination** (#85): Send messages to Teams channels via Incoming Webhook. Supports plain text and Adaptive Card payloads via Jinja2 templates. 10 unit tests. No extra dependencies.
-- **ClickHouse destination connector** (#166): Insert rows into ClickHouse tables using `clickhouse-connect` (HTTP client). Supports host, database, user, password (with `_env` variants), connection string, table, and HTTPS via `secure` flag. Deduplication relies on ClickHouse's ReplacingMergeTree engine. 16 unit tests. Install: `pip install drt-core[clickhouse]`.
-- **Parquet file destination** (#171): Write sync results to local Parquet files using pandas + pyarrow. Supports snappy/gzip/zstd compression and partition columns. 11 unit tests. Install: `pip install drt-core[parquet]`.
-- **CSV/JSON/JSONL file destination** (#67): Write sync results to local CSV, JSON, or JSONL files. No extra dependencies — uses stdlib csv and json. 12 unit tests.
-- **Snowflake source connector** (#162): Extract data from Snowflake using `snowflake-connector-python`. Supports account, user, password/password_env, database, schema, warehouse, and optional role. Install: `pip install drt-core[snowflake]`.
-- **Linear destination connector** (#195): Create Linear issues via GraphQL API with Jinja2 templates for title and description. Supports team ID, label IDs, and assignee via env vars.
-- **SendGrid email destination** (#194): Send transactional emails via SendGrid's v3 Mail Send API. Supports Jinja2 templates for subject and body, configurable recipient field, and bearer auth via env var.
-- **Dry-run summary** (#219): Enhanced `--dry-run` to show a summary including Source, Destination, Rows to sync, and Sync mode.
-- **Dockerfile and docker-compose example** (#161): Lightweight `python:3.12-slim` image with configurable `DRT_EXTRAS` build arg, non-root user, and pinned version. Includes `docker-compose.yml` and `.dockerignore`.
+#### Sources
+- **Snowflake source connector** (#162): Extract data from Snowflake using `snowflake-connector-python`. Supports account, user, password/password_env, database, schema, warehouse, and optional role. Install: `pip install drt-core[snowflake]`
+- **MySQL source connector** (#19): Extract data from MySQL databases using pymysql. Supports host, port, dbname, user, password via env var. Backtick quoting for table names. Install: `pip install drt-core[mysql]`
+
+#### Destinations
+- **ClickHouse destination** (#166): Insert rows via `clickhouse-connect` (HTTP). Supports connection string, HTTPS via `secure` flag. Install: `pip install drt-core[clickhouse]`
+- **Parquet file destination** (#171): Write to local Parquet files with snappy/gzip/zstd compression and partition columns. Install: `pip install drt-core[parquet]`
+- **CSV/JSON/JSONL file destination** (#67): Write to local files using stdlib csv/json. No extra dependencies
+- **Microsoft Teams destination** (#85): Incoming Webhook with plain text and Adaptive Card payloads
+- **Jira destination** (#158): Create/update Jira issues via REST API v3 with Jinja2 templates
+- **Linear destination** (#195): Create Linear issues via GraphQL API with Jinja2 templates
+- **SendGrid email destination** (#194): Transactional emails via SendGrid v3 Mail Send API
+
+#### CLI
+- **`drt test` command** (#141): Post-sync data validation. Supports `row_count` (min/max) and `not_null` (columns) tests for DB destinations (PostgreSQL, MySQL, ClickHouse)
+- **`--output json` flag** (#142): Structured JSON output for `drt run` and `drt status`. Designed for CI/scripting use
+- **`--profile` CLI override** (#238): Runtime profile switching via `--profile` flag or `DRT_PROFILE` env var. Precedence: flag > env var > drt_project.yml
+- **Improved `drt validate` errors** (#104): User-friendly error messages with YAML field paths instead of raw Pydantic tracebacks. Shows ✓/✗ per sync file
+- **Dry-run summary** (#219): Enhanced `--dry-run` shows Source, Destination, Rows to sync, and Sync mode
+
+#### Multi-environment support
+- **`${VAR}` env var substitution** (#240): Use `${VAR}` syntax in `model:` field for environment-specific SQL queries
+- **dbt manifest resolution** (#239): `ref('model')` now resolves from dbt `target/manifest.json` when available. Resolution order: SQL file > dbt manifest > profile-based expansion
+- **`secrets.toml`** (#143): Local secret management via `.drt/secrets.toml` (dlt-like pattern). Resolution order: explicit value > env var > secrets.toml
+
+#### Infrastructure
+- **Dockerfile and docker-compose** (#161): `python:3.12-slim` image with `DRT_EXTRAS` build arg, non-root user
+- **Codecov integration** (#103): Coverage badge, PR reports. Patch checks set to informational
+- **Pre-commit hooks** (#105): ruff + mypy
+- **Python 3.13 support** (#225): Added to CI matrix and classifiers
+- **`duration_seconds` in SyncResult** (#226): Track sync execution time
+
+### Tests
+- 382+ tests (up from 170+ in v0.4.3)
+- Source and destination protocol contract tests (#209, #210)
+- Slack Block Kit tests (#97), state persistence tests (#100)
+- CLI validate error case tests (#98)
+- Codecov coverage at 64%
 
 ## [0.4.3] - 2026-04-02
 

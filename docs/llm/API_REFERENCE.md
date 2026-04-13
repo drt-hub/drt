@@ -10,6 +10,7 @@ Single-file reference for all configuration fields. Optimized for LLM use — us
 name: my-project          # required: project identifier
 version: "0.1"            # optional, default: "0.1"
 profile: default          # optional, default: "default" — maps to ~/.drt/profiles.yml
+                          # Override at runtime: drt run --profile prd  or  DRT_PROFILE=prd drt run
 ```
 
 ---
@@ -18,7 +19,7 @@ profile: default          # optional, default: "default" — maps to ~/.drt/prof
 
 ```yaml
 default:
-  type: bigquery            # "bigquery" | "duckdb" | "sqlite" | "postgres" | "redshift" | "clickhouse"
+  type: bigquery            # "bigquery" | "duckdb" | "sqlite" | "postgres" | "redshift" | "clickhouse" | "snowflake" | "mysql"
   project: my-gcp-project   # BigQuery: GCP project ID
   dataset: analytics        # BigQuery: dataset name
   location: US              # optional: "US" (default), "EU", "asia-northeast1", etc.
@@ -61,6 +62,37 @@ ch_prod:
   user: default
   password_env: CLICKHOUSE_PASSWORD
 ```
+
+---
+
+## `.drt/secrets.toml` (optional)
+
+Local secret store for development. Gitignored by default.
+
+Resolution order: explicit YAML value > environment variable > secrets.toml
+
+```toml
+[destinations.mysql]
+MYSQL_PASSWORD = "local-dev-password"
+
+[destinations.github_actions]
+GH_TOKEN = "ghp_xxxx"
+
+[sources.snowflake]
+SNOWFLAKE_PASSWORD = "dev-password"
+```
+
+---
+
+## Environment variable substitution in `model:`
+
+Use `${VAR}` syntax for environment-specific SQL:
+
+```yaml
+model: SELECT * FROM `${GCP_PROJECT}.${BQ_DATASET}.users`
+```
+
+Raises an error if the variable is not set.
 
 ---
 
