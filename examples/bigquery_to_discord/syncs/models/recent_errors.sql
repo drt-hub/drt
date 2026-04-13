@@ -6,4 +6,3 @@ SELECT
     created_at
 FROM `your_project.your_dataset.app_logs`
 WHERE status = 'error'
-ORDER BY created_at DESC
