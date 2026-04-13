@@ -35,6 +35,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## drt-core
 
+## [Unreleased]
+
+### Added
+
+- **Airflow integration** (#70): Built-in `run_drt_sync()` helper and `DrtRunOperator` for Apache Airflow. No extra package needed — included in drt-core.
+- **Google Ads destination** (#217): Upload offline click conversions. Supports partial failure handling and OAuth2 auth.
+- **OAuth2 Client Credentials auth** (#259): Token exchange with caching for REST API destination.
+- **`drt init --from-dbt`** (#215): Generate sync YAML scaffolds from dbt `manifest.json`.
+- **`--output json` for validate/list** (#230): Structured JSON output for `drt validate` and `drt list`.
+- **MCP Server: `drt_list_connectors`** (#262): New tool listing all available sources and destinations.
+- **MCP Server: improved `drt_validate`** (#262): Per-file error reporting via `load_syncs_safe()`.
+
 ## [0.5.0] - 2026-04-13
 
 ### Added

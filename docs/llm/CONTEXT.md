@@ -91,6 +91,7 @@ default:
 | Jira | `jira` | Create/update issues via REST API v3 |
 | Linear | `linear` | Create issues via GraphQL API |
 | SendGrid | `sendgrid` | Transactional emails via v3 Mail Send API |
+| Google Ads | `google_ads` | Offline click conversion upload |
 
 ## CLI Commands
 
