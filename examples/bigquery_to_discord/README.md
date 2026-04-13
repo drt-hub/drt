@@ -23,7 +23,15 @@ default:
   type: bigquery
   project: your_gcp_project_id
   dataset: your_dataset
-  keyfile_env: GOOGLE_APPLICATION_CREDENTIALS
+  method: application_default
+```
+
+Then authenticate via Application Default Credentials:
+
+```bash
+gcloud auth application-default login
+# or set a service account key file:
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
 ```
 
 ### 2. Set your Discord webhook
