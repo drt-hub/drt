@@ -346,6 +346,38 @@ class GoogleAdsDestinationConfig(BaseModel):
         return f"google_ads ({self.customer_id})"
 
 
+class StagedUploadPhaseConfig(BaseModel):
+    url: str
+    method: str = "POST"
+    headers: dict[str, str] | None = None
+    auth: AuthConfig | None = None
+    body_template: str | None = None
+    response_extract: dict[str, str] | None = None
+
+
+class StagedUploadPollConfig(BaseModel):
+    url: str
+    method: str = "GET"
+    headers: dict[str, str] | None = None
+    auth: AuthConfig | None = None
+    status_field: str = "status"
+    success_values: list[str] = ["SUCCEEDED", "COMPLETED"]
+    failure_values: list[str] = ["FAILED", "ERROR"]
+    interval_seconds: int = 30
+    timeout_seconds: int = 3600
+
+
+class StagedUploadDestinationConfig(BaseModel):
+    type: Literal["staged_upload"]
+    stage: StagedUploadPhaseConfig
+    trigger: StagedUploadPhaseConfig
+    poll: StagedUploadPollConfig | None = None
+    format: Literal["csv", "json", "jsonl"] = "csv"
+
+    def describe(self) -> str:
+        return "staged_upload"
+
+
 # Discriminated union — add new destination types here
 DestinationConfig = Annotated[
     RestApiDestinationConfig
@@ -363,7 +395,8 @@ DestinationConfig = Annotated[
     | ClickHouseDestinationConfig
     | ParquetDestinationConfig
     | GoogleAdsDestinationConfig
-    | FileDestinationConfig,
+    | FileDestinationConfig
+    | StagedUploadDestinationConfig,
     Field(discriminator="type"),
 ]
 
