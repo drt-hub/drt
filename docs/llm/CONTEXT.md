@@ -133,6 +133,14 @@ drt mcp run   # starts stdio MCP server
 
 The MCP server reads from the current working directory (the drt project root).
 
+## Orchestration
+
+drt provides built-in helpers for Airflow and Prefect (no separate package needed), plus a first-class Dagster integration (`dagster-drt` on PyPI).
+
+- **Airflow**: `drt.integrations.airflow` — `run_drt_sync()` + `DrtRunOperator`. See `docs/guides/using-with-airflow.md`.
+- **Prefect**: `drt.integrations.prefect` — `run_drt_sync()` + `drt_sync_task`. See `docs/guides/using-with-prefect.md`.
+- **Dagster**: `pip install dagster-drt`. See below.
+
 ## Orchestration: dagster-drt
 
 Community-maintained Dagster integration. Install: `pip install dagster-drt`
