@@ -26,6 +26,20 @@ from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 
 
+def _serialize_value(value: Any) -> Any:
+    """Wrap dict values with psycopg2.extras.Json for JSONB columns.
+
+    psycopg2 has no default adapter for dict, so values bound for JSONB
+    columns (common when sourcing from BigQuery) must be wrapped before
+    execute(). Follows the same pattern as MySQL's _serialize_value (#311).
+    """
+    if isinstance(value, dict):
+        from psycopg2.extras import Json
+
+        return Json(value)
+    return value
+
+
 class PostgresDestination:
     """Upsert records into a PostgreSQL table."""
 
@@ -51,7 +65,7 @@ class PostgresDestination:
 
             for i, record in enumerate(records):
                 try:
-                    values = [record.get(c) for c in columns]
+                    values = [_serialize_value(record.get(c)) for c in columns]
                     cur.execute(sql, values)
                     result.success += 1
                 except Exception as e:

@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from drt.config.models import PostgresDestinationConfig, SyncOptions
-from drt.destinations.postgres import PostgresDestination
+from drt.destinations.postgres import PostgresDestination, _serialize_value
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -188,3 +188,62 @@ class TestPostgresDestinationLoad:
 
         PostgresDestination().load([{"id": 1, "score": 0.5}], _config(), _options(on_error="fail"))
         conn.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Value serialization
+# ---------------------------------------------------------------------------
+
+
+class TestSerializeValue:
+    def test_dict_wrapped_with_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Mock psycopg2.extras.Json
+        mock_json_cls = MagicMock()
+        mock_json_cls.side_effect = lambda v: MagicMock(adapted=v, __class__=type("Json", (), {}))
+        mock_extras = MagicMock()
+        mock_extras.Json = mock_json_cls
+        monkeypatch.setitem(__import__("sys").modules, "psycopg2.extras", mock_extras)
+
+        result = _serialize_value({"lang": "ja"})
+        mock_json_cls.assert_called_once_with({"lang": "ja"})
+
+    def test_nested_dict_wrapped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mock_json_cls = MagicMock()
+        mock_json_cls.side_effect = lambda v: MagicMock(adapted=v)
+        mock_extras = MagicMock()
+        mock_extras.Json = mock_json_cls
+        monkeypatch.setitem(__import__("sys").modules, "psycopg2.extras", mock_extras)
+
+        data = {"user": {"name": "test", "prefs": [1, 2]}}
+        _serialize_value(data)
+        mock_json_cls.assert_called_once_with(data)
+
+    def test_non_dict_passthrough(self) -> None:
+        assert _serialize_value("hello") == "hello"
+        assert _serialize_value(42) == 42
+        assert _serialize_value(3.14) == 3.14
+        assert _serialize_value(None) is None
+        assert _serialize_value([1, 2, 3]) == [1, 2, 3]
+        assert _serialize_value(True) is True
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_dict_value_in_load(self, mock_connect: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify that dict values are serialized when loading records."""
+        # Mock psycopg2.extras.Json
+        mock_json_cls = MagicMock()
+        mock_json_cls.side_effect = lambda v: MagicMock(adapted=v)
+        mock_extras = MagicMock()
+        mock_extras.Json = mock_json_cls
+        monkeypatch.setitem(__import__("sys").modules, "psycopg2.extras", mock_extras)
+
+        conn = _fake_connection()
+        mock_connect.return_value = conn
+
+        records = [
+            {"id": 1, "profile": {"lang": "ja", "theme": "dark"}},
+        ]
+        result = PostgresDestination().load(records, _config(), _options())
+
+        assert result.success == 1
+        # Verify Json was called with the dict value
+        mock_json_cls.assert_called_once_with({"lang": "ja", "theme": "dark"})

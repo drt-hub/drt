@@ -52,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **MySQL destination**: auto-serialize `dict`/`list` values to JSON strings before passing to pymysql (#311). Also shipped in [0.5.1](#051---2026-04-14).
+- **PostgreSQL destination**: wrap `dict` values with `psycopg2.extras.Json` before `cur.execute()` to fix crash on JSONB columns (#315). Same pattern as MySQL fix in #311. Backward compatible — non-dict values pass through unchanged.
 
 ## [0.5.1] - 2026-04-14
 
