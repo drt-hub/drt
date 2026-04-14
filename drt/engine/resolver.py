@@ -22,6 +22,7 @@ from drt.config.credentials import (
     PostgresProfile,
     ProfileConfig,
     SnowflakeProfile,
+    SQLServerProfile,
 )
 
 # Matches: ref('table') or ref("table")
@@ -95,6 +96,8 @@ def resolve_model_ref(
                 base_sql = f"SELECT * FROM {profile.catalog}.{profile.schema}.{table_name}"
             else:
                 base_sql = f"SELECT * FROM {profile.schema}.{table_name}"
+        elif isinstance(profile, SQLServerProfile):
+            base_sql = f"SELECT * FROM [{profile.schema}].[{table_name}]"
         else:
             base_sql = f"SELECT * FROM {table_name}"
     else:

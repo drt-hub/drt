@@ -172,6 +172,23 @@ class SnowflakeProfile:
 
 
 @dataclass
+class SQLServerProfile:
+    """SQL Server profile using pymssql."""
+
+    type: Literal["sqlserver"]
+    host: str = ""
+    port: int = 1433
+    database: str = ""
+    user: str = ""
+    password_env: str | None = None
+    password: str | None = None
+    schema: str = "dbo"
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.host}/{self.database}.{self.schema})"
+
+
+@dataclass
 class DatabricksProfile:
     """Databricks SQL Warehouse profile using databricks-sql-connector."""
 
@@ -199,6 +216,7 @@ ProfileConfig = (
     | MySQLProfile
     | SnowflakeProfile
     | DatabricksProfile
+    | SQLServerProfile
 )
 
 
@@ -383,6 +401,23 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             role=raw.get("role"),
         )
 
+    if source_type == "sqlserver":
+        _db = raw.get("database", "")
+        if not _db:
+            raise ValueError(
+                "SQL Server profile requires 'database'."
+            )
+        return SQLServerProfile(
+            type="sqlserver",
+            host=raw.get("host", ""),
+            port=int(raw.get("port", 1433)),
+            database=_db,
+            user=raw.get("user", ""),
+            password_env=raw.get("password_env"),
+            password=raw.get("password"),
+            schema=raw.get("schema") or "dbo",
+        )
+
     if source_type == "databricks":
         _host = raw.get("server_hostname", "")
         _path = raw.get("http_path", "")
@@ -403,7 +438,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
     raise ValueError(
         f"Unsupported source type '{source_type}'. "
         "Supported: bigquery, duckdb, sqlite, postgres, redshift, clickhouse, "
-        "mysql, snowflake, databricks"
+        "mysql, snowflake, databricks, sqlserver"
     )
 
 
@@ -489,6 +524,17 @@ def save_profile(
             entry["password_env"] = profile.password_env
         if profile.role:
             entry["role"] = profile.role
+    elif isinstance(profile, SQLServerProfile):
+        entry = {
+            "type": "sqlserver",
+            "host": profile.host,
+            "port": profile.port,
+            "database": profile.database,
+            "user": profile.user,
+            "schema": profile.schema,
+        }
+        if profile.password_env:
+            entry["password_env"] = profile.password_env
     elif isinstance(profile, DatabricksProfile):
         entry = {
             "type": "databricks",

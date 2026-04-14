@@ -16,6 +16,7 @@ from drt.sources.postgres import PostgresSource
 from drt.sources.redshift import RedshiftSource
 from drt.sources.snowflake import SnowflakeSource
 from drt.sources.sqlite import SQLiteSource
+from drt.sources.sqlserver import SQLServerSource
 
 ALL_SOURCES = [
     BigQuerySource,
@@ -27,6 +28,7 @@ ALL_SOURCES = [
     RedshiftSource,
     SnowflakeSource,
     SQLiteSource,
+    SQLServerSource,
 ]
 
 
