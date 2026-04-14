@@ -35,6 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## drt-core
 
+## [0.5.1] - 2026-04-14
+
+### Fixed
+
+- **MySQL destination**: auto-serialize `dict`/`list` values to JSON strings before passing to pymysql (#311). Fixes BigQuery → MySQL reverse ETL where BigQuery JSON columns come back as Python `dict`/`list`. Backward compatible — strings, ints, and other types pass through unchanged.
+
 ## [0.5.0] - 2026-04-13
 
 ### Added
