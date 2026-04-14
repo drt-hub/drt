@@ -213,36 +213,48 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 
 ## Connectors
 
-| Type | Name | Status | Install |
-|------|------|--------|---------|
-| **Source** | BigQuery | ✅ v0.1 | `pip install drt-core[bigquery]` |
-| **Source** | DuckDB | ✅ v0.1 | (core) |
-| **Source** | PostgreSQL | ✅ v0.1 | `pip install drt-core[postgres]` |
-| **Source** | Snowflake | ✅ v0.5 | `pip install drt-core[snowflake]` |
-| **Source** | SQLite | ✅ v0.4.2 | (core) |
-| **Source** | Redshift | ✅ v0.3.4 | `pip install drt-core[redshift]` |
-| **Source** | ClickHouse | ✅ v0.4.3 | `pip install drt-core[clickhouse]` |
-| **Source** | MySQL | ✅ v0.5 | `pip install drt-core[mysql]` |
-| **Destination** | REST API | ✅ v0.1 | (core) |
-| **Destination** | Slack Incoming Webhook | ✅ v0.1 | (core) |
-| **Destination** | Discord Webhook | ✅ v0.4.2 | (core) |
-| **Destination** | GitHub Actions (workflow_dispatch) | ✅ v0.1 | (core) |
-| **Destination** | HubSpot (Contacts / Deals / Companies) | ✅ v0.1 | (core) |
-| **Destination** | Google Sheets | ✅ v0.4 | `pip install drt-core[sheets]` |
-| **Destination** | PostgreSQL (upsert) | ✅ v0.4 | `pip install drt-core[postgres]` |
-| **Destination** | MySQL (upsert) | ✅ v0.4 | `pip install drt-core[mysql]` |
-| **Destination** | ClickHouse | ✅ v0.5 | `pip install drt-core[clickhouse]` |
-| **Destination** | Parquet file | ✅ v0.5 | `pip install drt-core[parquet]` |
-| **Destination** | Microsoft Teams Webhook | ✅ v0.5 | (core) |
-| **Destination** | CSV / JSON / JSONL file | ✅ v0.5 | (core) |
-| **Destination** | Jira | ✅ v0.5 | (core) |
-| **Destination** | Linear | ✅ v0.5 | (core) |
-| **Destination** | SendGrid | ✅ v0.5 | (core) |
-| **Destination** | Salesforce | 🗓 v0.6 | `pip install drt-core[salesforce]` |
-| **Destination** | Notion | 🗓 planned | (core) |
-| **Integration** | Dagster | ✅ v0.4 | `pip install dagster-drt` |
-| **Integration** | Airflow | 🗓 v0.6 | `pip install airflow-drt` |
-| **Integration** | dbt manifest reader | ✅ v0.4 | (core) |
+### Sources
+
+| Connector | Status | Install | Auth |
+|-----------|--------|---------|------|
+| BigQuery | ✅ v0.1 | `pip install drt-core[bigquery]` | Application Default / Service Account Keyfile |
+| DuckDB | ✅ v0.1 | (core) | File path |
+| PostgreSQL | ✅ v0.1 | `pip install drt-core[postgres]` | Password (env var) |
+| Snowflake | ✅ v0.5 | `pip install drt-core[snowflake]` | Password (env var) |
+| SQLite | ✅ v0.4.2 | (core) | File path |
+| Redshift | ✅ v0.3.4 | `pip install drt-core[redshift]` | Password (env var) |
+| ClickHouse | ✅ v0.4.3 | `pip install drt-core[clickhouse]` | Password (env var) |
+| MySQL | ✅ v0.5 | `pip install drt-core[mysql]` | Password (env var) |
+
+### Destinations
+
+| Connector | Status | Install | Auth |
+|-----------|--------|---------|------|
+| REST API | ✅ v0.1 | (core) | Bearer / API Key / Basic / OAuth2 |
+| Slack Incoming Webhook | ✅ v0.1 | (core) | Webhook URL |
+| Discord Webhook | ✅ v0.4.2 | (core) | Webhook URL |
+| GitHub Actions | ✅ v0.1 | (core) | Token (env var) |
+| HubSpot | ✅ v0.1 | (core) | Token (env var) |
+| Google Sheets | ✅ v0.4 | `pip install drt-core[sheets]` | Service Account Keyfile |
+| PostgreSQL (upsert) | ✅ v0.4 | `pip install drt-core[postgres]` | Password (env var) |
+| MySQL (upsert) | ✅ v0.4 | `pip install drt-core[mysql]` | Password (env var) |
+| ClickHouse | ✅ v0.5 | `pip install drt-core[clickhouse]` | Password (env var) |
+| Parquet file | ✅ v0.5 | `pip install drt-core[parquet]` | File path |
+| Microsoft Teams Webhook | ✅ v0.5 | (core) | Webhook URL |
+| CSV / JSON / JSONL file | ✅ v0.5 | (core) | File path |
+| Jira | ✅ v0.5 | (core) | Basic (email + API token) |
+| Linear | ✅ v0.5 | (core) | API Key (env var) |
+| SendGrid | ✅ v0.5 | (core) | API Key (env var) |
+| Salesforce | 🗓 v0.6 | `pip install drt-core[salesforce]` | — |
+| Notion | 🗓 planned | (core) | — |
+
+### Integrations
+
+| Connector | Status | Install |
+|-----------|--------|---------|
+| Dagster | ✅ v0.4 | `pip install dagster-drt` |
+| Airflow | 🗓 v0.6 | `pip install airflow-drt` |
+| dbt manifest reader | ✅ v0.4 | (core) |
 
 ---
 
