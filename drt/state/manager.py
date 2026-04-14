@@ -68,3 +68,11 @@ class StateManager:
 
     def now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
+    
+    def restore(self, file: Path) -> None:
+        """Restore the state from a file."""
+        if not file.exists():
+            raise FileNotFoundError(f"State file not found: {file}")
+        with file.open() as f:
+            data = json.load(f)
+        self._save_all(data)

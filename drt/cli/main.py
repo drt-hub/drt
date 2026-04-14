@@ -220,6 +220,25 @@ def status(
     else:
         print_status_table(states)
 
+# ---------------------------------------------------------------------------
+# restore
+# ---------------------------------------------------------------------------
+
+@app.command()
+def restore(
+    file: Path = typer.Argument(..., help="Path to the state file to restore."),
+) -> None:
+    """Restore the state from a file."""
+    from drt.state.manager import StateManager
+
+    try:
+        state_mgr = StateManager(Path("."))
+        state_mgr.restore(file)
+        console.print(f"[green]Successfully restored state from {file}[/green]")
+    except Exception as e:
+        print_error(str(e))
+        raise typer.Exit(1)
+
 
 # ---------------------------------------------------------------------------
 # mcp
