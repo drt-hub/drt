@@ -20,6 +20,7 @@ if TYPE_CHECKING:
         RedshiftProfile,
         SnowflakeProfile,
         SQLiteProfile,
+        SQLServerProfile,
     )
     from drt.config.models import SyncConfig
     from drt.destinations.clickhouse import ClickHouseDestination
@@ -47,6 +48,7 @@ if TYPE_CHECKING:
     from drt.sources.redshift import RedshiftSource
     from drt.sources.snowflake import SnowflakeSource
     from drt.sources.sqlite import SQLiteSource
+    from drt.sources.sqlserver import SQLServerSource
 
 from drt import __version__
 from drt.cli.output import (
@@ -597,6 +599,7 @@ def _get_source(
         | MySQLProfile
         | SnowflakeProfile
         | DatabricksProfile
+        | SQLServerProfile
     ),
 ) -> (
     BigQuerySource
@@ -608,6 +611,7 @@ def _get_source(
     | MySQLSource
     | SnowflakeSource
     | DatabricksSource
+    | SQLServerSource
 ):
     from drt.config.credentials import (
         BigQueryProfile,
@@ -619,6 +623,7 @@ def _get_source(
         RedshiftProfile,
         SnowflakeProfile,
         SQLiteProfile,
+        SQLServerProfile,
     )
     from drt.sources.bigquery import BigQuerySource
     from drt.sources.duckdb import DuckDBSource
@@ -652,6 +657,10 @@ def _get_source(
         from drt.sources.databricks import DatabricksSource
 
         return DatabricksSource()
+    if isinstance(profile, SQLServerProfile):
+        from drt.sources.sqlserver import SQLServerSource
+
+        return SQLServerSource()
     raise ValueError(f"Unsupported source type: {type(profile)}")
 
 

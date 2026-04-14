@@ -226,6 +226,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | ClickHouse | ✅ v0.4.3 | `pip install drt-core[clickhouse]` | Password (env var) |
 | MySQL | ✅ v0.5 | `pip install drt-core[mysql]` | Password (env var) |
 | Databricks | ✅ v0.6 | `pip install drt-core[databricks]` | Access Token (env var) |
+| SQL Server | ✅ v0.6 | `pip install drt-core[sqlserver]` | Password (env var) |
 
 ### Destinations
 

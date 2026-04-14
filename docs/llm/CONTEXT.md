@@ -62,6 +62,7 @@ my-project/
 | Snowflake | `drt-core[snowflake]` | Supports account, user, password_env, database, schema, warehouse, role |
 | MySQL | `drt-core[mysql]` | Uses pymysql. Supports host, port, dbname, user, password_env |
 | Databricks | `drt-core[databricks]` | SQL Warehouse via databricks-sql-connector. Supports Unity Catalog, access_token_env |
+| SQL Server | `drt-core[sqlserver]` | Microsoft SQL Server via pure-Python pymssql. Supports host, port, database, user, password_env |
 
 Source is configured in `~/.drt/profiles.yml` (dbt-style):
 

@@ -40,6 +40,7 @@ redshift = ["psycopg2-binary>=2.9"]  # Redshift uses PostgreSQL wire protocol
 clickhouse = ["clickhouse-connect>=0.7.0"]
 snowflake = ["snowflake-connector-python>=3.0"]
 databricks = ["databricks-sql-connector>=3.0"]
+sqlserver = ["pymssql>=2.3"]
 sheets = ["google-api-python-client>=2.0", "google-auth>=2.0"]
 mysql = ["pymysql>=1.1"]
 parquet = ["pandas>=2.0", "pyarrow>=12.0"]

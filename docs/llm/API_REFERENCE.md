@@ -19,7 +19,7 @@ profile: default          # optional, default: "default" — maps to ~/.drt/prof
 
 ```yaml
 default:
-  type: bigquery            # "bigquery" | "duckdb" | "sqlite" | "postgres" | "redshift" | "clickhouse" | "snowflake" | "mysql" | "databricks"
+  type: bigquery            # "bigquery" | "duckdb" | "sqlite" | "postgres" | "redshift" | "clickhouse" | "snowflake" | "mysql" | "databricks" | "sqlserver"
   project: my-gcp-project   # BigQuery: GCP project ID
   dataset: analytics        # BigQuery: dataset name
   location: US              # optional: "US" (default), "EU", "asia-northeast1", etc.
