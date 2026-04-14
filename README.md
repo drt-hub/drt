@@ -235,6 +235,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | Discord Webhook | ✅ v0.4.2 | (core) | Webhook URL |
 | GitHub Actions | ✅ v0.1 | (core) | Token (env var) |
 | HubSpot | ✅ v0.1 | (core) | Token (env var) |
+| Google Ads | ✅ v0.6 | (core) | OAuth2 Client Credentials |
 | Google Sheets | ✅ v0.4 | `pip install drt-core[sheets]` | Service Account Keyfile |
 | PostgreSQL (upsert) | ✅ v0.4 | `pip install drt-core[postgres]` | Password (env var) |
 | MySQL (upsert) | ✅ v0.4 | `pip install drt-core[mysql]` | Password (env var) |
@@ -253,7 +254,8 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | Connector | Status | Install |
 |-----------|--------|---------|
 | Dagster | ✅ v0.4 | `pip install dagster-drt` |
-| Airflow | 🗓 v0.6 | `pip install airflow-drt` |
+| Prefect | ✅ v0.6 | (core) |
+| Airflow | ✅ v0.6 | (core) |
 | dbt manifest reader | ✅ v0.4 | (core) |
 
 ---
