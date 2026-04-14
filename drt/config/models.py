@@ -154,6 +154,28 @@ class HubSpotDestinationConfig(BaseModel):
         return f"{self.type} ({self.object_type})"
 
 
+class NotionDestinationConfig(BaseModel):
+    type: Literal["notion"]
+
+    database_id: str | None = None
+    database_id_env: str | None = None
+
+    properties_template: str | None = None
+
+    auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
+
+    def describe(self) -> str:
+        return "notion (database)"
+
+    @model_validator(mode="after")
+    def _check_database(self) -> "NotionDestinationConfig":
+        if not self.database_id and not self.database_id_env:
+            raise ValueError(
+                "Either database_id or database_id_env is required."
+            )
+        return self
+    
+    
 class SendGridDestinationConfig(BaseModel):
     type: Literal["sendgrid"]
     from_email: str
@@ -363,7 +385,8 @@ DestinationConfig = Annotated[
     | ClickHouseDestinationConfig
     | ParquetDestinationConfig
     | GoogleAdsDestinationConfig
-    | FileDestinationConfig,
+    | FileDestinationConfig
+    | NotionDestinationConfig,
     Field(discriminator="type"),
 ]
 
