@@ -179,6 +179,34 @@ class TestMySQLDestinationLoad:
         conn.close.assert_called_once()
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
+    def test_dict_and_list_values_are_json_serialized(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """dict/list values (e.g. from BigQuery JSON columns) must be
+        serialized to JSON strings before being passed to pymysql."""
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        records = [
+            {
+                "user_id": 1,
+                "company_id": 5,
+                "profile": {"lang": "日本語", "level": "N1"},
+                "tags": ["a", "b"],
+                "score": 0.9,
+            },
+        ]
+        result = MySQLDestination().load(records, _config(), _options())
+
+        assert result.success == 1
+        args, _ = cur.execute.call_args
+        _sql, values = args
+        assert values[2] == '{"lang": "日本語", "level": "N1"}'
+        assert values[3] == '["a", "b"]'
+        assert values[4] == 0.9
+
+    @patch("drt.destinations.mysql.MySQLDestination._connect")
     def test_connection_closed_on_error(self, mock_connect: MagicMock) -> None:
         conn = _fake_connection()
         conn.cursor().execute.side_effect = Exception("fail")

@@ -48,6 +48,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **MCP Server: improved `drt_validate`** (#262): Per-file error reporting via `load_syncs_safe()`.
 - **BigQuery → Discord example** (#266): Alert pipeline that queries BigQuery for recent error rows and posts a Discord notification per row via Incoming Webhook using incremental sync. Includes `examples/bigquery_to_discord/`.
 
+### Fixed
+
+- **MySQL destination**: auto-serialize `dict`/`list` values to JSON strings before passing to pymysql (#311). Also shipped in [0.5.1](#051---2026-04-14).
+
+## [0.5.1] - 2026-04-14
+
+### Fixed
+
+- **MySQL destination**: auto-serialize `dict`/`list` values to JSON strings before passing to pymysql (#311). Fixes BigQuery → MySQL reverse ETL where BigQuery JSON columns come back as Python `dict`/`list`. Backward compatible — strings, ints, and other types pass through unchanged.
+
 ## [0.5.0] - 2026-04-13
 
 ### Added
