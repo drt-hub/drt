@@ -9,6 +9,7 @@ import pytest
 from drt.sources.base import Source
 from drt.sources.bigquery import BigQuerySource
 from drt.sources.clickhouse import ClickHouseSource
+from drt.sources.databricks import DatabricksSource
 from drt.sources.duckdb import DuckDBSource
 from drt.sources.mysql import MySQLSource
 from drt.sources.postgres import PostgresSource
@@ -19,6 +20,7 @@ from drt.sources.sqlite import SQLiteSource
 ALL_SOURCES = [
     BigQuerySource,
     ClickHouseSource,
+    DatabricksSource,
     DuckDBSource,
     MySQLSource,
     PostgresSource,

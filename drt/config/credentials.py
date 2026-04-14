@@ -171,6 +171,23 @@ class SnowflakeProfile:
         return f"{self.type} ({self.account}/{self.database}.{self.schema})"
 
 
+@dataclass
+class DatabricksProfile:
+    """Databricks SQL Warehouse profile using databricks-sql-connector."""
+
+    type: Literal["databricks"]
+    server_hostname: str = ""  # e.g. "dbc-abc.cloud.databricks.com"
+    http_path: str = ""  # e.g. "/sql/1.0/warehouses/xxxxxx"
+    access_token_env: str | None = None
+    access_token: str | None = None
+    catalog: str | None = None  # Unity Catalog (optional)
+    schema: str = "default"
+
+    def describe(self) -> str:
+        path = f"{self.catalog}.{self.schema}" if self.catalog else self.schema
+        return f"{self.type} ({self.server_hostname}/{path})"
+
+
 # Union type — used throughout the codebase
 ProfileConfig = (
     BigQueryProfile
@@ -181,6 +198,7 @@ ProfileConfig = (
     | ClickHouseProfile
     | MySQLProfile
     | SnowflakeProfile
+    | DatabricksProfile
 )
 
 
@@ -365,9 +383,27 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             role=raw.get("role"),
         )
 
+    if source_type == "databricks":
+        _host = raw.get("server_hostname", "")
+        _path = raw.get("http_path", "")
+        if not _host or not _path:
+            raise ValueError(
+                "Databricks profile requires 'server_hostname' and 'http_path'."
+            )
+        return DatabricksProfile(
+            type="databricks",
+            server_hostname=_host,
+            http_path=_path,
+            access_token_env=raw.get("access_token_env"),
+            access_token=raw.get("access_token"),
+            catalog=raw.get("catalog"),
+            schema=raw.get("schema") or "default",
+        )
+
     raise ValueError(
         f"Unsupported source type '{source_type}'. "
-        "Supported: bigquery, duckdb, sqlite, postgres, redshift, clickhouse, mysql, snowflake"
+        "Supported: bigquery, duckdb, sqlite, postgres, redshift, clickhouse, "
+        "mysql, snowflake, databricks"
     )
 
 
@@ -453,6 +489,17 @@ def save_profile(
             entry["password_env"] = profile.password_env
         if profile.role:
             entry["role"] = profile.role
+    elif isinstance(profile, DatabricksProfile):
+        entry = {
+            "type": "databricks",
+            "server_hostname": profile.server_hostname,
+            "http_path": profile.http_path,
+            "schema": profile.schema,
+        }
+        if profile.access_token_env:
+            entry["access_token_env"] = profile.access_token_env
+        if profile.catalog:
+            entry["catalog"] = profile.catalog
     else:
         raise ValueError(f"Unknown profile type: {type(profile)}")
 

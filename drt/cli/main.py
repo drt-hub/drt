@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from drt.config.credentials import (
         BigQueryProfile,
         ClickHouseProfile,
+        DatabricksProfile,
         DuckDBProfile,
         MySQLProfile,
         PostgresProfile,
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
     from drt.destinations.teams import TeamsDestination
     from drt.sources.bigquery import BigQuerySource
     from drt.sources.clickhouse import ClickHouseSource
+    from drt.sources.databricks import DatabricksSource
     from drt.sources.duckdb import DuckDBSource
     from drt.sources.mysql import MySQLSource
     from drt.sources.postgres import PostgresSource
@@ -594,6 +596,7 @@ def _get_source(
         | ClickHouseProfile
         | MySQLProfile
         | SnowflakeProfile
+        | DatabricksProfile
     ),
 ) -> (
     BigQuerySource
@@ -604,10 +607,12 @@ def _get_source(
     | ClickHouseSource
     | MySQLSource
     | SnowflakeSource
+    | DatabricksSource
 ):
     from drt.config.credentials import (
         BigQueryProfile,
         ClickHouseProfile,
+        DatabricksProfile,
         DuckDBProfile,
         MySQLProfile,
         PostgresProfile,
@@ -643,6 +648,10 @@ def _get_source(
         from drt.sources.snowflake import SnowflakeSource
 
         return SnowflakeSource()
+    if isinstance(profile, DatabricksProfile):
+        from drt.sources.databricks import DatabricksSource
+
+        return DatabricksSource()
     raise ValueError(f"Unsupported source type: {type(profile)}")
 
 

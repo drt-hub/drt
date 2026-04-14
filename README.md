@@ -225,6 +225,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | Redshift | ✅ v0.3.4 | `pip install drt-core[redshift]` | Password (env var) |
 | ClickHouse | ✅ v0.4.3 | `pip install drt-core[clickhouse]` | Password (env var) |
 | MySQL | ✅ v0.5 | `pip install drt-core[mysql]` | Password (env var) |
+| Databricks | ✅ v0.6 | `pip install drt-core[databricks]` | Access Token (env var) |
 
 ### Destinations
 

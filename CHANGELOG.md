@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Databricks source connector** (#88): Extract data from Databricks SQL Warehouse using `databricks-sql-connector`. Supports Unity Catalog, access token auth. Install: `pip install drt-core[databricks]`.
 - **Prefect integration** (#213): Built-in `run_drt_sync()` helper and `drt_sync_task` for Prefect 2.x/3.x. No extra package needed — included in drt-core. Shares the runner with Airflow integration via `drt.integrations._runner`.
 - **Airflow integration** (#70): Built-in `run_drt_sync()` helper and `DrtRunOperator` for Apache Airflow. No extra package needed — included in drt-core.
 - **Google Ads destination** (#217): Upload offline click conversions. Supports partial failure handling and OAuth2 auth.

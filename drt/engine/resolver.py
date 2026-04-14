@@ -16,6 +16,7 @@ from pathlib import Path
 
 from drt.config.credentials import (
     BigQueryProfile,
+    DatabricksProfile,
     DuckDBProfile,
     MySQLProfile,
     PostgresProfile,
@@ -88,6 +89,12 @@ def resolve_model_ref(
                 base_sql = f'SELECT * FROM "{profile.database}"."{profile.schema}"."{table_name}"'
             else:
                 base_sql = f'SELECT * FROM "{table_name}"'
+        elif isinstance(profile, DatabricksProfile):
+            # Unity Catalog: catalog.schema.table, else schema.table
+            if profile.catalog:
+                base_sql = f"SELECT * FROM {profile.catalog}.{profile.schema}.{table_name}"
+            else:
+                base_sql = f"SELECT * FROM {profile.schema}.{table_name}"
         else:
             base_sql = f"SELECT * FROM {table_name}"
     else:
