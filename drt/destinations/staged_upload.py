@@ -99,6 +99,7 @@ class StagedUploadDestination:
         assert isinstance(config, StagedUploadDestinationConfig)
         result = SyncResult()
         context: dict[str, str] = {}
+        record_count = len(self._records)
 
         try:
             # Phase 1: Stage — serialize and upload file
@@ -120,8 +121,9 @@ class StagedUploadDestination:
             if config.poll is not None:
                 self._poll(config.poll, context)
 
+            result.success = record_count
         except Exception as e:
-            result.failed = len(self._records)
+            result.failed = record_count
             result.errors.append(str(e))
         finally:
             self._records.clear()

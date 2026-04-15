@@ -128,6 +128,7 @@ def test_finalize_stage_trigger_poll(httpserver: HTTPServer) -> None:
     dest._records = [{"id": 1, "name": "test"}]
     result = dest.finalize(config, _options())
 
+    assert result.success == 1
     assert result.failed == 0
     assert result.errors == []
 
@@ -160,6 +161,7 @@ def test_finalize_without_poll(httpserver: HTTPServer) -> None:
     dest._records = [{"x": 1}]
     result = dest.finalize(config, _options())
 
+    assert result.success == 1
     assert result.failed == 0
 
 
@@ -198,6 +200,7 @@ def test_finalize_poll_failure(httpserver: HTTPServer) -> None:
     dest._records = [{"x": 1}]
     result = dest.finalize(config, _options())
 
+    assert result.success == 0
     assert result.failed == 1
     assert any("failed" in e.lower() for e in result.errors)
 
@@ -220,6 +223,7 @@ def test_finalize_stage_error(httpserver: HTTPServer) -> None:
     dest._records = [{"x": 1}]
     result = dest.finalize(config, _options())
 
+    assert result.success == 0
     assert result.failed == 1
     assert len(result.errors) == 1
 

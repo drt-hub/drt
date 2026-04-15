@@ -83,6 +83,7 @@ def run_sync(
     total_result = SyncResult()
     new_cursor_value: str | None = last_cursor_value
     is_staged = isinstance(destination, StagedDestination)
+    staged_count = 0
 
     for record_batch in batch(records_iter, sync.sync.batch_size):
         # Track max cursor value seen across all batches
@@ -101,7 +102,7 @@ def run_sync(
         if is_staged:
             assert isinstance(destination, StagedDestination)
             destination.stage(record_batch, sync.destination, sync.sync)
-            total_result.success += len(record_batch)
+            staged_count += len(record_batch)
         else:
             assert isinstance(destination, Destination)
             result = destination.load(record_batch, sync.destination, sync.sync)
@@ -114,10 +115,13 @@ def run_sync(
             if sync.sync.on_error == "fail" and result.failed > 0:
                 break
 
-    # Finalize staged destinations (upload file, trigger job, poll)
-    if is_staged and not dry_run and total_result.success > 0:
+    # Finalize staged destinations (upload file, trigger job, poll).
+    # finalize() is authoritative for staged success/failed counts —
+    # stage() only buffers, so records aren't "successful" until finalize.
+    if is_staged and not dry_run and staged_count > 0:
         assert isinstance(destination, StagedDestination)
         finalize_result = destination.finalize(sync.destination, sync.sync)
+        total_result.success += finalize_result.success
         total_result.failed += finalize_result.failed
         total_result.errors.extend(finalize_result.errors)
         total_result.row_errors.extend(
