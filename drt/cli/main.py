@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from drt.destinations.jira import JiraDestination
     from drt.destinations.linear import LinearDestination
     from drt.destinations.mysql import MySQLDestination
+    from drt.destinations.notion import NotionDestination
     from drt.destinations.parquet import ParquetDestination
     from drt.destinations.postgres import PostgresDestination
     from drt.destinations.rest_api import RestApiDestination
@@ -683,6 +684,7 @@ def _get_destination(
     | FileDestination
     | LinearDestination
     | GoogleAdsDestination
+    | NotionDestination
 ):
     from drt.config.models import (
         ClickHouseDestinationConfig,
@@ -695,6 +697,7 @@ def _get_destination(
         JiraDestinationConfig,
         LinearDestinationConfig,
         MySQLDestinationConfig,
+        NotionDestinationConfig,
         ParquetDestinationConfig,
         PostgresDestinationConfig,
         RestApiDestinationConfig,
@@ -709,6 +712,7 @@ def _get_destination(
     from drt.destinations.jira import JiraDestination
     from drt.destinations.linear import LinearDestination
     from drt.destinations.mysql import MySQLDestination
+    from drt.destinations.notion import NotionDestination
     from drt.destinations.postgres import PostgresDestination
     from drt.destinations.rest_api import RestApiDestination
     from drt.destinations.sendgrid import SendGridDestination
@@ -757,4 +761,6 @@ def _get_destination(
         from drt.destinations.google_ads import GoogleAdsDestination
 
         return GoogleAdsDestination()
+    if isinstance(dest, NotionDestinationConfig):
+        return NotionDestination()
     raise ValueError(f"Unsupported destination type: {dest.type}")

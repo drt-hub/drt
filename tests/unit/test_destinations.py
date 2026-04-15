@@ -13,12 +13,14 @@ from drt.config.models import (
     DiscordDestinationConfig,
     GitHubActionsDestinationConfig,
     HubSpotDestinationConfig,
+    NotionDestinationConfig,
     SlackDestinationConfig,
     SyncOptions,
 )
 from drt.destinations.discord import DiscordDestination
 from drt.destinations.github_actions import GitHubActionsDestination
 from drt.destinations.hubspot import HubSpotDestination
+from drt.destinations.notion import NotionDestination
 from drt.destinations.slack import SlackDestination
 
 # ---------------------------------------------------------------------------
@@ -247,3 +249,106 @@ class TestGitHubActionsDestination:
         result = GitHubActionsDestination().load([{"env": "prod"}], config, _options())
         assert result.failed == 1
         assert result.success == 0
+
+
+# ---------------------------------------------------------------------------
+# NotionDestination
+# ---------------------------------------------------------------------------
+
+
+class TestNotionDestination:
+    def test_success(self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("NOTION_TOKEN", "test-token")
+        httpserver.expect_request("/v1/pages").respond_with_data(
+            '{"id": "page-1", "url": "https://notion.so/page-1"}',
+            status=200,
+            content_type="application/json",
+        )
+        config = NotionDestinationConfig(
+            type="notion",
+            database_id="db-abc123",
+            properties_template='{"Name": {"title": [{"text": {"content": "{{ row.name }}"}}]}}',
+            auth=BearerAuth(type="bearer", token_env="NOTION_TOKEN"),
+        )
+        import drt.destinations.notion as notion_mod
+        monkeypatch.setattr(notion_mod, "_NOTION_API", httpserver.url_for("/v1"))
+        result = NotionDestination().load(
+            [{"name": "Alice"}], config, _options()
+        )
+        assert result.success == 1
+        assert result.failed == 0
+
+    def test_missing_token_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("NOTION_TOKEN", raising=False)
+        config = NotionDestinationConfig(
+            type="notion",
+            database_id="db-abc123",
+            auth=BearerAuth(type="bearer", token_env="NOTION_TOKEN"),
+        )
+        with pytest.raises(ValueError, match="NOTION_TOKEN"):
+            NotionDestination().load([{"name": "x"}], config, _options())
+
+    def test_template_error_skipped(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NOTION_TOKEN", "test-token")
+        config = NotionDestinationConfig(
+            type="notion",
+            database_id="db-abc123",
+            properties_template="not valid json {{ row.name }}",
+            auth=BearerAuth(type="bearer", token_env="NOTION_TOKEN"),
+        )
+        import drt.destinations.notion as notion_mod
+        monkeypatch.setattr(notion_mod, "_NOTION_API", httpserver.url_for("/v1"))
+        result = NotionDestination().load(
+            [{"name": "x"}], config, _options()
+        )
+        assert result.failed == 1
+        assert result.success == 0
+
+    def test_on_error_skip(self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("NOTION_TOKEN", "test-token")
+        httpserver.expect_ordered_request("/v1/pages").respond_with_data("", status=500)
+        httpserver.expect_ordered_request("/v1/pages").respond_with_data(
+            '{"id": "page-2"}', status=200, content_type="application/json"
+        )
+        config = NotionDestinationConfig(
+            type="notion",
+            database_id="db-abc123",
+            properties_template='{"Name": {"title": [{"text": {"content": "{{ row.name }}"}}]}}',
+            auth=BearerAuth(type="bearer", token_env="NOTION_TOKEN"),
+        )
+        import drt.destinations.notion as notion_mod
+        monkeypatch.setattr(notion_mod, "_NOTION_API", httpserver.url_for("/v1"))
+        opts = SyncOptions(on_error="skip")
+        result = NotionDestination().load(
+            [{"name": "a"}, {"name": "b"}], config, opts
+        )
+        assert result.failed == 1
+        assert result.success == 1
+
+    def test_notion_version_header_sent(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from werkzeug.wrappers import Response
+
+        monkeypatch.setenv("NOTION_TOKEN", "test-token")
+
+        def handler(request):
+            assert request.headers["Notion-Version"] == "2022-06-28"
+            assert request.headers["Authorization"] == "Bearer test-token"
+            return Response('{"id": "page-1"}', content_type="application/json")
+
+        httpserver.expect_request("/v1/pages").respond_with_handler(handler)
+        config = NotionDestinationConfig(
+            type="notion",
+            database_id="db-abc123",
+            properties_template='{"Name": {"title": [{"text": {"content": "{{ row.name }}"}}]}}',
+            auth=BearerAuth(type="bearer", token_env="NOTION_TOKEN"),
+        )
+        import drt.destinations.notion as notion_mod
+        monkeypatch.setattr(notion_mod, "_NOTION_API", httpserver.url_for("/v1"))
+        result = NotionDestination().load(
+            [{"name": "Alice"}], config, _options()
+        )
+        assert result.success == 1

@@ -14,6 +14,7 @@ from drt.destinations.github_actions import GitHubActionsDestination
 from drt.destinations.google_sheets import GoogleSheetsDestination
 from drt.destinations.hubspot import HubSpotDestination
 from drt.destinations.mysql import MySQLDestination
+from drt.destinations.notion import NotionDestination
 from drt.destinations.parquet import ParquetDestination
 from drt.destinations.postgres import PostgresDestination
 from drt.destinations.rest_api import RestApiDestination
@@ -28,6 +29,7 @@ ALL_DESTINATIONS = [
     GoogleSheetsDestination,
     HubSpotDestination,
     MySQLDestination,
+    NotionDestination,
     ParquetDestination,
     PostgresDestination,
     RestApiDestination,
