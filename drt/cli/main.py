@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -74,6 +77,38 @@ app = typer.Typer(
     help="Reverse ETL for the code-first data stack.",
     no_args_is_help=True,
 )
+
+
+# ---------------------------------------------------------------------------
+# JSON logging
+# ---------------------------------------------------------------------------
+
+
+class _JsonFormatter(logging.Formatter):
+    """Emit each log record as a single JSON object (JSON Lines format)."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        ts = datetime.fromtimestamp(record.created, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        payload: dict[str, object] = {
+            "ts": ts,
+            "level": record.levelname,
+            "msg": record.getMessage(),
+        }
+        # Merge any extra fields passed via the `extra` kwarg
+        for key, value in record.__dict__.items():
+            if key not in logging.LogRecord.__dict__ and not key.startswith("_"):
+                payload[key] = value
+        return json.dumps(payload)
+
+
+def _configure_json_logging() -> None:
+    """Replace root logger handlers with a stderr JSON handler."""
+    handler = logging.StreamHandler()
+    handler.setFormatter(_JsonFormatter())
+    logging.root.handlers = [handler]
+    logging.root.setLevel(logging.DEBUG)
 
 
 def _resolve_profile_name(cli_flag: str | None, project_profile: str) -> str:
@@ -222,6 +257,9 @@ def run(
     profile_name: str = typer.Option(
         None, "--profile", "-p", help="Override profile (default: drt_project.yml or DRT_PROFILE)."
     ),
+    log_format: str = typer.Option(
+        "text", "--log-format", help="Log format: text or json (structured JSON lines)."
+    ),
 ) -> None:
     """Run sync(s) defined in the project."""
     import json as json_mod
@@ -230,6 +268,9 @@ def run(
     from drt.config.parser import load_project, load_syncs
     from drt.engine.sync import run_sync
     from drt.state.manager import StateManager
+
+    if log_format == "json":
+        _configure_json_logging()
 
     json_mode = output == "json"
 
@@ -269,10 +310,22 @@ def run(
         if not json_mode and not dry_run:
             print_sync_start(sync.name, dry_run)
         t0 = time.monotonic()
+        if log_format == "json":
+            logging.info("sync_started", extra={"sync": sync.name})
         try:
             result = run_sync(sync, source, dest, profile, Path("."), dry_run, state_mgr)
         except Exception as e:
             elapsed = round(time.monotonic() - t0, 2)
+            if log_format == "json":
+                logging.error(
+                    "sync_complete",
+                    extra={
+                        "sync": sync.name,
+                        "rows": 0,
+                        "duration_ms": round(elapsed * 1000),
+                        "status": "failed",
+                    },
+                )
             if json_mode:
                 json_results.append(
                     {
@@ -290,6 +343,23 @@ def run(
             had_errors = True
             continue
         elapsed = round(time.monotonic() - t0, 2)
+        if log_format == "json":
+            status_str = (
+                "success"
+                if result.failed == 0
+                else "partial"
+                if result.success > 0
+                else "failed"
+            )
+            logging.info(
+                "sync_complete",
+                extra={
+                    "sync": sync.name,
+                    "rows": result.success,
+                    "duration_ms": round(elapsed * 1000),
+                    "status": status_str,
+                },
+            )
         if json_mode:
             json_results.append(
                 {
