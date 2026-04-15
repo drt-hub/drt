@@ -112,6 +112,7 @@ drt test --select <sync-name>     # test a specific sync
 drt status                        # show recent sync results
 drt status --output json          # JSON output for status
 drt mcp run                       # start MCP server (requires drt-core[mcp])
+drt serve --port 8080             # start HTTP webhook endpoint (POST /sync/<name>)
 ```
 
 ## MCP Server
