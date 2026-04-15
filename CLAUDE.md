@@ -50,12 +50,12 @@ make fmt      # ruff format + fix
 
 ## Current Status
 
-- **v0.5 in progress** — Snowflake source, ClickHouse / Parquet / Teams / CSV+JSON destinations, Docker, test coverage
+- **v0.5.0 released** — Snowflake/MySQL sources, ClickHouse/Parquet/Teams/CSV+JSON/Jira/Linear/SendGrid destinations, `drt test`, `--output json`, `--profile`, `${VAR}` env substitution, dbt manifest resolution, secrets.toml, Docker
 - CLI fully wired: `init`, `run`, `list`, `validate`, `status`, `test`, `mcp run`
-- Sources: BigQuery, DuckDB, PostgreSQL, Redshift, SQLite, ClickHouse
-- Destinations: REST API, Slack, Discord, GitHub Actions, HubSpot, Google Sheets, PostgreSQL, MySQL, ClickHouse, Parquet, Microsoft Teams, CSV/JSON/JSONL
+- Sources: BigQuery, DuckDB, PostgreSQL, Redshift, SQLite, ClickHouse, Snowflake, MySQL
+- Destinations: REST API, Slack, Discord, Microsoft Teams, GitHub Actions, HubSpot, Google Sheets, PostgreSQL, MySQL, ClickHouse, Parquet, CSV/JSON/JSONL, Jira, Linear, SendGrid
 - Integrations: MCP Server (`drt-core[mcp]`), dagster-drt, dbt manifest reader
-- 220+ tests, integration tests use `pytest-httpserver`
+- 382+ tests, integration tests use `pytest-httpserver`
 
 ## What NOT to do
 
@@ -72,7 +72,7 @@ make fmt      # ruff format + fix
 - v0.2 ✅: Incremental sync + retry from config
 - v0.3 ✅: MCP Server + AI Skills for Claude Code + LLM-readable docs + row-level errors + security hardening + Redshift source
 - v0.4 ✅: Google Sheets / PostgreSQL / MySQL destinations + dagster-drt + dbt manifest reader + type safety overhaul
-- [v0.5](https://github.com/drt-hub/drt/milestone/2): Snowflake source + CSV/JSON + Parquet destinations + test coverage + Docker
+- v0.5 ✅: Snowflake/MySQL sources + ClickHouse/Parquet/CSV+JSON/Jira/Linear/SendGrid destinations + `drt test` + multi-environment + Docker
 - [v0.6](https://github.com/drt-hub/drt/milestone/3): Salesforce + Airflow integration + Jira / Twilio / Intercom destinations
 - [v0.7](https://github.com/drt-hub/drt/milestone/4): DWH destinations (Snowflake / BigQuery / ClickHouse / Databricks) + Cloud storage (S3 / GCS / Azure Blob)
 - [v0.8](https://github.com/drt-hub/drt/milestone/5): Lakehouse sources (Delta Lake / Apache Iceberg)

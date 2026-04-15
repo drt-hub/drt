@@ -14,7 +14,7 @@ dlt (load into DWH) → dbt (transform) → drt (activate out of DWH)
 - **Tagline:** "Reverse ETL for the code-first data stack"
 - **Install:** `pip install drt-core` or `uv add drt-core`
 - **Package name:** `drt-core` (PyPI) — CLI command is `drt`
-- **Current version:** v0.4.3
+- **Current version:** v0.5.0
 
 ## What drt is NOT
 
@@ -59,6 +59,10 @@ my-project/
 | PostgreSQL | `drt-core[postgres]` | Connection string via env |
 | Redshift | `drt-core[redshift]` | PostgreSQL wire protocol via psycopg2. Supports `schema` (search_path). Port defaults to 5439. |
 | ClickHouse | `drt-core[clickhouse]` | HTTP interface via `clickhouse-connect`. Supports host, port, database, user, password_env. |
+| Snowflake | `drt-core[snowflake]` | Supports account, user, password_env, database, schema, warehouse, role |
+| MySQL | `drt-core[mysql]` | Uses pymysql. Supports host, port, dbname, user, password_env |
+| Databricks | `drt-core[databricks]` | SQL Warehouse via databricks-sql-connector. Supports Unity Catalog, access_token_env |
+| SQL Server | `drt-core[sqlserver]` | Microsoft SQL Server via pure-Python pymssql. Supports host, port, database, user, password_env |
 
 Source is configured in `~/.drt/profiles.yml` (dbt-style):
 
@@ -75,13 +79,21 @@ default:
 | Destination | `type` value | Notes |
 |-------------|-------------|-------|
 | REST API (generic) | `rest_api` | Any HTTP endpoint |
-| Slack Webhook | `slack` | Incoming webhook |
+| Slack Webhook | `slack` | Incoming webhook, Block Kit support |
 | Discord Webhook | `discord` | Plain text or rich embeds via webhook URL |
+| Microsoft Teams | `teams` | Incoming Webhook, Adaptive Card support |
 | GitHub Actions | `github_actions` | workflow_dispatch trigger |
 | HubSpot CRM | `hubspot` | Contacts / Deals / Companies upsert |
 | Google Sheets | `google_sheets` | Overwrite or append. Requires `drt-core[sheets]` |
 | PostgreSQL (upsert) | `postgres` | INSERT ... ON CONFLICT DO UPDATE. Requires `drt-core[postgres]` |
 | MySQL (upsert) | `mysql` | INSERT ... ON DUPLICATE KEY UPDATE. Requires `drt-core[mysql]` |
+| ClickHouse | `clickhouse` | HTTP client via clickhouse-connect. Requires `drt-core[clickhouse]` |
+| Parquet file | `parquet` | Local Parquet files. Requires `drt-core[parquet]` |
+| CSV/JSON/JSONL file | `file` | Local files, no extra dependencies |
+| Jira | `jira` | Create/update issues via REST API v3 |
+| Linear | `linear` | Create issues via GraphQL API |
+| SendGrid | `sendgrid` | Transactional emails via v3 Mail Send API |
+| Google Ads | `google_ads` | Offline click conversion upload |
 
 ## CLI Commands
 
@@ -93,9 +105,14 @@ drt run                           # run all syncs
 drt run --select <sync-name>      # run one sync
 drt run --dry-run                 # preview without writing data
 drt run --verbose                 # show row-level error details on failure
+drt run --output json             # structured JSON output for CI/scripting
+drt run --profile prd             # override profile (or DRT_PROFILE env var)
+drt test                          # run post-sync validation tests
+drt test --select <sync-name>     # test a specific sync
 drt status                        # show recent sync results
-drt status --verbose              # show per-row error details
+drt status --output json          # JSON output for status
 drt mcp run                       # start MCP server (requires drt-core[mcp])
+drt serve --port 8080             # start HTTP webhook endpoint (POST /sync/<name>)
 ```
 
 ## MCP Server
@@ -118,6 +135,14 @@ drt mcp run   # starts stdio MCP server
 | `drt_get_schema(schema_type="sync")` | Returns JSON Schema for "sync" or "project" config |
 
 The MCP server reads from the current working directory (the drt project root).
+
+## Orchestration
+
+drt provides built-in helpers for Airflow and Prefect (no separate package needed), plus a first-class Dagster integration (`dagster-drt` on PyPI).
+
+- **Airflow**: `drt.integrations.airflow` — `run_drt_sync()` + `DrtRunOperator`. See `docs/guides/using-with-airflow.md`.
+- **Prefect**: `drt.integrations.prefect` — `run_drt_sync()` + `drt_sync_task`. See `docs/guides/using-with-prefect.md`.
+- **Dagster**: `pip install dagster-drt`. See below.
 
 ## Orchestration: dagster-drt
 

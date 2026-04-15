@@ -10,6 +10,7 @@ Single-file reference for all configuration fields. Optimized for LLM use — us
 name: my-project          # required: project identifier
 version: "0.1"            # optional, default: "0.1"
 profile: default          # optional, default: "default" — maps to ~/.drt/profiles.yml
+                          # Override at runtime: drt run --profile prd  or  DRT_PROFILE=prd drt run
 ```
 
 ---
@@ -18,7 +19,7 @@ profile: default          # optional, default: "default" — maps to ~/.drt/prof
 
 ```yaml
 default:
-  type: bigquery            # "bigquery" | "duckdb" | "sqlite" | "postgres" | "redshift" | "clickhouse"
+  type: bigquery            # "bigquery" | "duckdb" | "sqlite" | "postgres" | "redshift" | "clickhouse" | "snowflake" | "mysql" | "databricks" | "sqlserver"
   project: my-gcp-project   # BigQuery: GCP project ID
   dataset: analytics        # BigQuery: dataset name
   location: US              # optional: "US" (default), "EU", "asia-northeast1", etc.
@@ -61,6 +62,37 @@ ch_prod:
   user: default
   password_env: CLICKHOUSE_PASSWORD
 ```
+
+---
+
+## `.drt/secrets.toml` (optional)
+
+Local secret store for development. Gitignored by default.
+
+Resolution order: explicit YAML value > environment variable > secrets.toml
+
+```toml
+[destinations.mysql]
+MYSQL_PASSWORD = "local-dev-password"
+
+[destinations.github_actions]
+GH_TOKEN = "ghp_xxxx"
+
+[sources.snowflake]
+SNOWFLAKE_PASSWORD = "dev-password"
+```
+
+---
+
+## Environment variable substitution in `model:`
+
+Use `${VAR}` syntax for environment-specific SQL:
+
+```yaml
+model: SELECT * FROM `${GCP_PROJECT}.${BQ_DATASET}.users`
+```
+
+Raises an error if the variable is not set.
 
 ---
 
@@ -210,6 +242,23 @@ destination:
     token_env: HUBSPOT_TOKEN      # Private App token with CRM write scope
 ```
 
+### `type: jira`
+
+```yaml
+destination:
+  type: jira
+  base_url_env: JIRA_BASE_URL           # env var → e.g. https://myorg.atlassian.net
+  email_env: JIRA_EMAIL                 # env var → Jira account email
+  token_env: JIRA_API_TOKEN             # env var → Jira API token
+  project_key: "PROJ"                   # Jira project key (supports Jinja2)
+  issue_type: "Task"                    # default: "Task" (supports Jinja2)
+  summary_template: "Alert: {{ row.title }}"         # required: Jinja2 template
+  description_template: "Details: {{ row.body }}"    # required: Jinja2 template
+  issue_id_field: issue_id              # default: "issue_id" — if present in row, updates the issue; otherwise creates
+```
+
+> **Create vs Update:** If the row contains the `issue_id_field` column (default: `issue_id`), the destination updates that Jira issue (PUT). Otherwise, it creates a new issue (POST). Description is rendered as Atlassian Document Format (ADF) for Jira REST API v3.
+
 ### `type: google_sheets`
 
 ```yaml
@@ -284,6 +333,78 @@ destination:
 > Uses `INSERT ... ON DUPLICATE KEY UPDATE ...` for idempotent writes.
 > `connection_string_env` takes precedence over individual parameters when both are set.
 
+### `type: clickhouse` (destination)
+
+```yaml
+destination:
+  type: clickhouse
+  host: localhost                      # or host_env
+  port: 8123                           # default: 8123 (HTTP)
+  database: default                    # required
+  user: default                        # or user_env
+  password_env: CH_PASSWORD            # env var for password
+  table: analytics.scores             # required: target table
+  upsert_key: [id]                     # optional: deduplication via ReplacingMergeTree
+  secure: false                        # true = HTTPS
+  connection_string_env: CH_CONN       # alternative: full connection string
+```
+
+### `type: teams`
+
+```yaml
+destination:
+  type: teams
+  webhook_url_env: TEAMS_WEBHOOK_URL   # env var for Incoming Webhook URL
+  message_template: "New alert: {{ row.message }}"  # Jinja2 plain text
+  adaptive_card: false                 # true = message_template is Adaptive Card JSON
+```
+
+### `type: parquet`
+
+```yaml
+destination:
+  type: parquet
+  path: output/data.parquet            # required: output file path
+  compression: snappy                  # "snappy" (default) | "gzip" | "zstd" | "none"
+  partition_by: [region, date]         # optional: partition columns
+```
+
+> Requires: `pip install drt-core[parquet]`
+
+### `type: file`
+
+```yaml
+destination:
+  type: file
+  path: output/data.csv               # required: output file path
+  format: csv                          # "csv" | "json" | "jsonl"
+```
+
+> No extra dependencies — uses stdlib csv and json.
+
+### `type: linear`
+
+```yaml
+destination:
+  type: linear
+  token_env: LINEAR_API_KEY            # env var for Linear API key
+  team_id: "TEAM-ID"                   # required: Linear team ID
+  title_template: "{{ row.title }}"    # Jinja2 template for issue title
+  description_template: "{{ row.body }}"  # Jinja2 template for description
+```
+
+### `type: sendgrid`
+
+```yaml
+destination:
+  type: sendgrid
+  api_key_env: SENDGRID_API_KEY        # env var for SendGrid API key
+  from_email: alerts@example.com       # required: sender email
+  to_field: email                      # row field for recipient email
+  subject_template: "Alert: {{ row.title }}"  # Jinja2 template
+  body_template: "{{ row.message }}"   # Jinja2 template for email body
+```
+
 ---
 
 ## Auth Configs
@@ -323,6 +444,44 @@ auth:
 ```
 
 → Sends `Authorization: Basic <base64(username:password)>` header.
+
+### `type: google_ads`
+
+```yaml
+destination:
+  type: google_ads
+  customer_id: "1234567890"            # required: Google Ads customer ID (no hyphens)
+  conversion_action: "customers/1234567890/conversionActions/987"  # required
+  gclid_field: gclid                   # row field for click ID (default: "gclid")
+  conversion_time_field: conversion_time  # row field for timestamp
+  conversion_value_field: revenue      # optional: row field for conversion value
+  currency_code: JPY                   # default: USD
+  developer_token_env: GOOGLE_ADS_DEVELOPER_TOKEN
+  auth:
+    type: oauth2_client_credentials
+    token_url: "https://oauth2.googleapis.com/token"
+    client_id_env: GOOGLE_ADS_CLIENT_ID
+    client_secret_env: GOOGLE_ADS_CLIENT_SECRET
+```
+
+---
+
+## Auth Configs
+
+Auth configs are used inside destination configs under the `auth:` key.
+
+### OAuth2 Client Credentials
+
+```yaml
+auth:
+  type: oauth2_client_credentials
+  token_url: "https://auth.example.com/oauth/token"  # required
+  client_id_env: OAUTH_CLIENT_ID       # required: env var name
+  client_secret_env: OAUTH_CLIENT_SECRET  # required: env var name
+  scope: "contacts.write"             # optional
+```
+
+→ Exchanges client credentials for an access token, caches until expiry. Sends `Authorization: Bearer <access_token>` header.
 
 ---
 

@@ -104,6 +104,8 @@ def test_run_sync_all_success(tmp_path: Path) -> None:
     assert result.success == 5
     assert result.failed == 0
     assert len(dest.calls) == 2  # batches: [0,1,2] + [3,4]
+    assert result.duration_seconds is not None
+    assert result.duration_seconds >= 0
 
 
 def test_run_sync_dry_run(tmp_path: Path) -> None:

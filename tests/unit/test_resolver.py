@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from drt.config.credentials import BigQueryProfile
 from drt.engine.resolver import parse_ref, resolve_model_ref
 
@@ -92,6 +94,62 @@ def test_resolve_no_cursor_returns_base_sql(tmp_path: Path) -> None:
     assert "WHERE" not in sql
 
 
+# ---------------------------------------------------------------------------
+# dbt manifest resolution
+# ---------------------------------------------------------------------------
+
+def test_resolve_ref_from_dbt_manifest(tmp_path: Path) -> None:
+    """ref() should resolve from dbt manifest.json when available."""
+    import json
+
+    target = tmp_path / "target"
+    target.mkdir()
+    manifest = {
+        "nodes": {
+            "model.my_project.users": {
+                "name": "users",
+                "relation_name": '"analytics"."public"."users"',
+            }
+        }
+    }
+    (target / "manifest.json").write_text(json.dumps(manifest))
+
+    sql = resolve_model_ref("ref('users')", tmp_path, _profile())
+    assert sql == 'SELECT * FROM "analytics"."public"."users"'
+
+
+def test_resolve_ref_dbt_manifest_not_found_falls_back(tmp_path: Path) -> None:
+    """Without manifest.json, ref() falls back to profile-based resolution."""
+    sql = resolve_model_ref("ref('users')", tmp_path, _profile("ds"))
+    assert sql == "SELECT * FROM `ds`.`users`"
+
+
+def test_resolve_ref_sql_file_beats_dbt_manifest(tmp_path: Path) -> None:
+    """SQL file should take priority over dbt manifest."""
+    import json
+
+    # Create SQL file
+    models = tmp_path / "syncs" / "models"
+    models.mkdir(parents=True)
+    (models / "users.sql").write_text("SELECT id, name FROM raw.users")
+
+    # Create dbt manifest
+    target = tmp_path / "target"
+    target.mkdir()
+    manifest = {
+        "nodes": {
+            "model.proj.users": {
+                "name": "users",
+                "relation_name": '"analytics"."users"',
+            }
+        }
+    }
+    (target / "manifest.json").write_text(json.dumps(manifest))
+
+    sql = resolve_model_ref("ref('users')", tmp_path, _profile())
+    assert sql == "SELECT id, name FROM raw.users"
+
+
 def test_resolve_incremental_raw_sql(tmp_path: Path) -> None:
     raw = "SELECT * FROM events WHERE active = true"
     sql = resolve_model_ref(
@@ -103,3 +161,50 @@ def test_resolve_incremental_raw_sql(tmp_path: Path) -> None:
     )
     assert "WHERE updated_at > '2024-06-01'" in sql
     assert raw in sql
+
+
+# ---------------------------------------------------------------------------
+# environment variable substitution
+# ---------------------------------------------------------------------------
+
+def test_env_var_substitution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BQ_DATASET", "analytics")
+    sql = resolve_model_ref(
+        "SELECT * FROM `${BQ_DATASET}`.users",
+        tmp_path,
+        _profile(),
+    )
+    assert sql == "SELECT * FROM `analytics`.users"
+
+
+def test_env_var_multiple(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GCP_PROJECT", "my-proj")
+    monkeypatch.setenv("BQ_DATASET", "raw")
+    sql = resolve_model_ref(
+        "SELECT * FROM `${GCP_PROJECT}.${BQ_DATASET}.users`",
+        tmp_path,
+        _profile(),
+    )
+    assert sql == "SELECT * FROM `my-proj.raw.users`"
+
+
+def test_env_var_missing_raises(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="NONEXISTENT_VAR"):
+        resolve_model_ref(
+            "SELECT * FROM ${NONEXISTENT_VAR}.users",
+            tmp_path,
+            _profile(),
+        )
+
+
+def test_env_var_no_expansion_without_syntax(tmp_path: Path) -> None:
+    sql = resolve_model_ref(
+        "SELECT * FROM users",
+        tmp_path,
+        _profile(),
+    )
+    assert sql == "SELECT * FROM users"

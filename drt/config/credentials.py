@@ -47,17 +47,26 @@ class BigQueryProfile:
     keyfile: str | None = None
     location: str = "US"  # e.g. "US", "EU", "asia-northeast1"
 
+    def describe(self) -> str:
+        return f"{self.type} ({self.project}.{self.dataset})"
+
 
 @dataclass
 class DuckDBProfile:
     type: Literal["duckdb"]
     database: str = ":memory:"  # path or :memory:
 
+    def describe(self) -> str:
+        return f"{self.type} ({self.database})"
+
 
 @dataclass
 class SQLiteProfile:
     type: Literal["sqlite"]
     database: str = ":memory:"  # path or :memory:
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.database})"
 
 
 @dataclass
@@ -69,6 +78,9 @@ class PostgresProfile:
     user: str = ""
     password_env: str | None = None  # env var name
     password: str | None = None  # explicit (non-recommended)
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.host}:{self.port}/{self.dbname})"
 
 
 @dataclass
@@ -95,6 +107,9 @@ class RedshiftProfile:
     password: str | None = None  # explicit (non-recommended)
     schema: str = "public"  # Redshift schema
 
+    def describe(self) -> str:
+        return f"{self.type} ({self.host}:{self.port}/{self.dbname})"
+
 
 @dataclass
 class ClickHouseProfile:
@@ -107,6 +122,35 @@ class ClickHouseProfile:
     user: str = "default"
     password_env: str | None = None  # env var name
     password: str | None = None  # explicit (non-recommended)
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.host}:{self.port}/{self.database})"
+
+
+@dataclass
+class MySQLProfile:
+    """MySQL profile for extracting data from MySQL databases.
+
+    Example ~/.drt/profiles.yml:
+        mysql:
+          type: mysql
+          host: localhost
+          port: 3306
+          dbname: analytics
+          user: analyst
+          password_env: MYSQL_PASSWORD
+    """
+
+    type: Literal["mysql"]
+    host: str = "localhost"
+    port: int = 3306
+    dbname: str = ""
+    user: str = ""
+    password_env: str | None = None
+    password: str | None = None
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.host}:{self.port}/{self.dbname})"
 
 
 @dataclass
@@ -123,6 +167,44 @@ class SnowflakeProfile:
     warehouse: str = ""
     role: str | None = None
 
+    def describe(self) -> str:
+        return f"{self.type} ({self.account}/{self.database}.{self.schema})"
+
+
+@dataclass
+class SQLServerProfile:
+    """SQL Server profile using pymssql."""
+
+    type: Literal["sqlserver"]
+    host: str = ""
+    port: int = 1433
+    database: str = ""
+    user: str = ""
+    password_env: str | None = None
+    password: str | None = None
+    schema: str = "dbo"
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.host}/{self.database}.{self.schema})"
+
+
+@dataclass
+class DatabricksProfile:
+    """Databricks SQL Warehouse profile using databricks-sql-connector."""
+
+    type: Literal["databricks"]
+    server_hostname: str = ""  # e.g. "dbc-abc.cloud.databricks.com"
+    http_path: str = ""  # e.g. "/sql/1.0/warehouses/xxxxxx"
+    access_token_env: str | None = None
+    access_token: str | None = None
+    catalog: str | None = None  # Unity Catalog (optional)
+    schema: str = "default"
+
+    def describe(self) -> str:
+        path = f"{self.catalog}.{self.schema}" if self.catalog else self.schema
+        return f"{self.type} ({self.server_hostname}/{path})"
+
+
 # Union type — used throughout the codebase
 ProfileConfig = (
     BigQueryProfile
@@ -131,7 +213,10 @@ ProfileConfig = (
     | PostgresProfile
     | RedshiftProfile
     | ClickHouseProfile
+    | MySQLProfile
     | SnowflakeProfile
+    | DatabricksProfile
+    | SQLServerProfile
 )
 
 
@@ -144,12 +229,55 @@ def _config_dir(override: Path | None = None) -> Path:
     return override if override is not None else Path.home() / ".drt"
 
 
+def _load_secrets(project_dir: Path | None = None) -> dict[str, Any]:
+    """Load .drt/secrets.toml if it exists.
+
+    Returns a nested dict matching the TOML structure.
+    """
+    secrets_path = (project_dir or Path(".")) / ".drt" / "secrets.toml"
+    if not secrets_path.exists():
+        return {}
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10
+        try:
+            import tomli as tomllib  # type: ignore[no-redef]
+        except ModuleNotFoundError:
+            return {}
+    with secrets_path.open("rb") as f:
+        data: dict[str, Any] = tomllib.load(f)
+    return data
+
+
+def _lookup_secrets_toml(env_var: str) -> str | None:
+    """Look up an env-var-style key in secrets.toml.
+
+    Walks all nested dicts searching for a matching key.
+    """
+    secrets = _load_secrets()
+
+    def _search(d: dict[str, Any]) -> str | None:
+        for k, v in d.items():
+            if k == env_var and isinstance(v, str):
+                return v
+            if isinstance(v, dict):
+                found = _search(v)
+                if found is not None:
+                    return found
+        return None
+
+    return _search(secrets)
+
+
 def resolve_env(value: str | None, env_var: str | None) -> str | None:
-    """Resolve a secret value: explicit value → env var → None."""
+    """Resolve a secret value: explicit value → env var → secrets.toml → None."""
     if value is not None:
         return value
     if env_var is not None:
-        return os.environ.get(env_var)
+        env_val = os.environ.get(env_var)
+        if env_val is not None:
+            return env_val
+        return _lookup_secrets_toml(env_var)
     return None
 
 
@@ -243,6 +371,17 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             password=raw.get("password"),
         )
 
+    if source_type == "mysql":
+        return MySQLProfile(
+            type="mysql",
+            host=raw.get("host", "localhost"),
+            port=int(raw.get("port", 3306)),
+            dbname=raw.get("dbname", ""),
+            user=raw.get("user", ""),
+            password_env=raw.get("password_env"),
+            password=raw.get("password"),
+        )
+
     if source_type == "snowflake":
         _db = raw.get("database", "")
         if not _db:
@@ -262,9 +401,44 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             role=raw.get("role"),
         )
 
+    if source_type == "sqlserver":
+        _db = raw.get("database", "")
+        if not _db:
+            raise ValueError(
+                "SQL Server profile requires 'database'."
+            )
+        return SQLServerProfile(
+            type="sqlserver",
+            host=raw.get("host", ""),
+            port=int(raw.get("port", 1433)),
+            database=_db,
+            user=raw.get("user", ""),
+            password_env=raw.get("password_env"),
+            password=raw.get("password"),
+            schema=raw.get("schema") or "dbo",
+        )
+
+    if source_type == "databricks":
+        _host = raw.get("server_hostname", "")
+        _path = raw.get("http_path", "")
+        if not _host or not _path:
+            raise ValueError(
+                "Databricks profile requires 'server_hostname' and 'http_path'."
+            )
+        return DatabricksProfile(
+            type="databricks",
+            server_hostname=_host,
+            http_path=_path,
+            access_token_env=raw.get("access_token_env"),
+            access_token=raw.get("access_token"),
+            catalog=raw.get("catalog"),
+            schema=raw.get("schema") or "default",
+        )
+
     raise ValueError(
         f"Unsupported source type '{source_type}'. "
-        "Supported: bigquery, duckdb, sqlite, postgres, redshift, clickhouse, snowflake"
+        "Supported: bigquery, duckdb, sqlite, postgres, redshift, clickhouse, "
+        "mysql, snowflake, databricks, sqlserver"
     )
 
 
@@ -327,6 +501,16 @@ def save_profile(
         }
         if profile.password_env:
             entry["password_env"] = profile.password_env
+    elif isinstance(profile, MySQLProfile):
+        entry = {
+            "type": "mysql",
+            "host": profile.host,
+            "port": profile.port,
+            "dbname": profile.dbname,
+            "user": profile.user,
+        }
+        if profile.password_env:
+            entry["password_env"] = profile.password_env
     elif isinstance(profile, SnowflakeProfile):
         entry = {
             "type": "snowflake",
@@ -340,6 +524,28 @@ def save_profile(
             entry["password_env"] = profile.password_env
         if profile.role:
             entry["role"] = profile.role
+    elif isinstance(profile, SQLServerProfile):
+        entry = {
+            "type": "sqlserver",
+            "host": profile.host,
+            "port": profile.port,
+            "database": profile.database,
+            "user": profile.user,
+            "schema": profile.schema,
+        }
+        if profile.password_env:
+            entry["password_env"] = profile.password_env
+    elif isinstance(profile, DatabricksProfile):
+        entry = {
+            "type": "databricks",
+            "server_hostname": profile.server_hostname,
+            "http_path": profile.http_path,
+            "schema": profile.schema,
+        }
+        if profile.access_token_env:
+            entry["access_token_env"] = profile.access_token_env
+        if profile.catalog:
+            entry["catalog"] = profile.catalog
     else:
         raise ValueError(f"Unknown profile type: {type(profile)}")
 

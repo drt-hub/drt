@@ -28,8 +28,16 @@ class BasicAuth(BaseModel):
     password_env: str
 
 
+class OAuth2ClientCredentialsAuth(BaseModel):
+    type: Literal["oauth2_client_credentials"]
+    token_url: str
+    client_id_env: str
+    client_secret_env: str
+    scope: str | None = None
+
+
 AuthConfig = Annotated[
-    BearerAuth | ApiKeyAuth | BasicAuth,
+    BearerAuth | ApiKeyAuth | BasicAuth | OAuth2ClientCredentialsAuth,
     Field(discriminator="type"),
 ]
 
@@ -71,6 +79,9 @@ class RestApiDestinationConfig(BaseModel):
     body_template: str | None = None
     auth: AuthConfig | None = None
 
+    def describe(self) -> str:
+        return f"{self.type} ({self.url})"
+
 
 class SlackDestinationConfig(BaseModel):
     type: Literal["slack"]
@@ -82,6 +93,9 @@ class SlackDestinationConfig(BaseModel):
     message_template: str = "{{ row }}"
     # If True, treat message_template as a Block Kit JSON payload
     block_kit: bool = False
+
+    def describe(self) -> str:
+        return f"{self.type} (webhook)"
 
 
 class DiscordDestinationConfig(BaseModel):
@@ -95,6 +109,9 @@ class DiscordDestinationConfig(BaseModel):
     # If True, treat message_template as a JSON payload with embeds
     embeds: bool = False
 
+    def describe(self) -> str:
+        return f"{self.type} (webhook)"
+
 
 class GitHubActionsDestinationConfig(BaseModel):
     type: Literal["github_actions"]
@@ -107,6 +124,9 @@ class GitHubActionsDestinationConfig(BaseModel):
     inputs_template: str | None = None
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
 
+    def describe(self) -> str:
+        return f"{self.type} ({self.owner}/{self.repo})"
+
 
 class GoogleSheetsDestinationConfig(BaseModel):
     type: Literal["google_sheets"]
@@ -115,6 +135,9 @@ class GoogleSheetsDestinationConfig(BaseModel):
     mode: Literal["overwrite", "append"] = "overwrite"
     credentials_path: str | None = None
     credentials_env: str | None = None
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.sheet})"
 
 
 class HubSpotDestinationConfig(BaseModel):
@@ -126,6 +149,37 @@ class HubSpotDestinationConfig(BaseModel):
     # Example: '{"email": "{{ row.email }}", "firstname": "{{ row.name }}"}'
     properties_template: str | None = None
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.object_type})"
+
+
+class SendGridDestinationConfig(BaseModel):
+    type: Literal["sendgrid"]
+    from_email: str
+    from_name: str | None = None
+    subject_template: str
+    body_template: str
+    to_email_field: str = "email"
+    list_ids: list[str] | None = None
+    auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
+
+    def describe(self) -> str:
+        return f"sendgrid ({self.from_email})"
+
+
+class LinearDestinationConfig(BaseModel):
+    type: Literal["linear"]
+    team_id: str | None = None
+    team_id_env: str | None = None
+    title_template: str
+    description_template: str
+    label_ids: list[str] = []
+    assignee_id: str | None = None
+    auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
+
+    def describe(self) -> str:
+        return "linear (issue)"
 
 
 class SslConfig(BaseModel):
@@ -152,6 +206,9 @@ class PostgresDestinationConfig(BaseModel):
     table: str  # e.g. "public.analytics_scores"
     upsert_key: list[str]  # columns for ON CONFLICT
     ssl: SslConfig | None = None
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.table})"
 
     @model_validator(mode="after")
     def _check_connection(self) -> "PostgresDestinationConfig":
@@ -180,6 +237,9 @@ class MySQLDestinationConfig(BaseModel):
     upsert_key: list[str]  # columns for ON DUPLICATE KEY
     ssl: SslConfig | None = None
 
+    def describe(self) -> str:
+        return f"{self.type} ({self.table})"
+
     @model_validator(mode="after")
     def _check_connection(self) -> "MySQLDestinationConfig":
         if self.connection_string_env:
@@ -199,6 +259,24 @@ class TeamsDestinationConfig(BaseModel):
     message_template: str = "{{ row }}"
     # If True, treat message_template as an Adaptive Card JSON payload
     adaptive_card: bool = False
+
+    def describe(self) -> str:
+        return f"{self.type} (webhook)"
+
+
+class JiraDestinationConfig(BaseModel):
+    type: Literal["jira"]
+    base_url_env: str  # e.g. JIRA_BASE_URL -> https://myorg.atlassian.net
+    email_env: str  # Jira account email env var
+    token_env: str  # Jira API token env var
+    project_key: str  # can include Jinja2 template syntax
+    issue_type: str = "Task"  # can include Jinja2 template syntax
+    summary_template: str
+    description_template: str
+    issue_id_field: str = "issue_id"  # row key that indicates update mode
+
+    def describe(self) -> str:
+        return f"jira ({self.project_key})"
 
 
 class ClickHouseDestinationConfig(BaseModel):
@@ -220,6 +298,9 @@ class ClickHouseDestinationConfig(BaseModel):
     upsert_key: list[str] | None = None
     secure: bool = False  # use HTTPS/TLS; set port explicitly for your deployment (commonly 8443)
 
+    def describe(self) -> str:
+        return f"{self.type} ({self.table})"
+
     @model_validator(mode="after")
     def _check_connection(self) -> "ClickHouseDestinationConfig":
         if self.connection_string_env:
@@ -237,11 +318,32 @@ class ParquetDestinationConfig(BaseModel):
     partition_by: list[str] | None = None  # optional partition columns
     compression: Literal["snappy", "gzip", "zstd", "none"] = "snappy"
 
+    def describe(self) -> str:
+        return f"{self.type} ({self.path})"
+
 
 class FileDestinationConfig(BaseModel):
     type: Literal["file"]
     path: str  # output file path, e.g. "output/data.csv"
     format: Literal["csv", "json", "jsonl"] = "csv"
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.path})"
+
+
+class GoogleAdsDestinationConfig(BaseModel):
+    type: Literal["google_ads"]
+    customer_id: str  # Google Ads customer ID (without hyphens)
+    conversion_action: str  # e.g. "customers/123/conversionActions/456"
+    gclid_field: str = "gclid"  # row field containing the click ID
+    conversion_time_field: str = "conversion_time"  # row field for timestamp
+    conversion_value_field: str | None = None  # optional: row field for value
+    currency_code: str = "USD"
+    developer_token_env: str = "GOOGLE_ADS_DEVELOPER_TOKEN"
+    auth: AuthConfig | None = None  # typically oauth2_client_credentials
+
+    def describe(self) -> str:
+        return f"google_ads ({self.customer_id})"
 
 
 class EmailSmtpDestinationConfig(BaseModel):
@@ -266,14 +368,19 @@ DestinationConfig = Annotated[
     | DiscordDestinationConfig
     | GitHubActionsDestinationConfig
     | HubSpotDestinationConfig
+    | SendGridDestinationConfig
+    | LinearDestinationConfig
     | GoogleSheetsDestinationConfig
     | PostgresDestinationConfig
     | MySQLDestinationConfig
     | TeamsDestinationConfig
+    | JiraDestinationConfig
     | ClickHouseDestinationConfig
     | ParquetDestinationConfig
     | FileDestinationConfig
     | EmailSmtpDestinationConfig,
+    | GoogleAdsDestinationConfig
+    | FileDestinationConfig,
     Field(discriminator="type"),
 ]
 

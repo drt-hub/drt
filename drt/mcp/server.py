@@ -5,11 +5,12 @@ Start with:
     drt mcp run                         # if drt-core[mcp] is installed
 
 Tools:
-    drt_list_syncs   — list all sync definitions
-    drt_run_sync     — run a specific sync (dry_run supported)
-    drt_get_status   — get last sync result for a sync
-    drt_validate     — validate all sync YAML configs
-    drt_get_schema   — return JSON Schema for drt_project.yml / sync.yml
+    drt_list_syncs      — list all sync definitions
+    drt_run_sync        — run a specific sync (dry_run supported)
+    drt_get_status      — get last sync result for a sync
+    drt_validate        — validate all sync YAML configs (per-file errors)
+    drt_get_schema      — return JSON Schema for drt_project.yml / sync.yml
+    drt_list_connectors — list available source and destination connectors
 """
 
 from __future__ import annotations
@@ -167,21 +168,15 @@ def create_server(project_dir: Path | None = None) -> Any:
 
         Returns:
             Dict with 'valid' list of sync names and 'errors' dict of
-            sync_name → error message for any invalid configs.
+            sync_name → list of error messages for any invalid configs.
         """
-        from drt.config.parser import load_syncs
+        from drt.config.parser import load_syncs_safe
 
-        try:
-            syncs = load_syncs(_project_dir)
-            return {
-                "valid": [s.name for s in syncs],
-                "errors": {},
-            }
-        except Exception as e:
-            return {
-                "valid": [],
-                "errors": {"_project": str(e)},
-            }
+        result = load_syncs_safe(_project_dir)
+        return {
+            "valid": [s.name for s in result.syncs],
+            "errors": result.errors,
+        }
 
     # -----------------------------------------------------------------------
     # drt_get_schema
@@ -203,6 +198,48 @@ def create_server(project_dir: Path | None = None) -> Any:
         if schema_type == "project":
             return generate_project_schema()
         return generate_sync_schema()
+
+    # -----------------------------------------------------------------------
+    # drt_list_connectors
+    # -----------------------------------------------------------------------
+
+    @mcp.tool()
+    def drt_list_connectors() -> dict[str, list[dict[str, str]]]:
+        """List all available source and destination connectors.
+
+        Returns:
+            Dict with 'sources' and 'destinations' lists, each containing
+            connector name, type key, and install extras (if any).
+        """
+        return {
+            "sources": [
+                {"name": "BigQuery", "type": "bigquery", "install": "drt-core[bigquery]"},
+                {"name": "DuckDB", "type": "duckdb", "install": "(core)"},
+                {"name": "SQLite", "type": "sqlite", "install": "(core)"},
+                {"name": "PostgreSQL", "type": "postgres", "install": "drt-core[postgres]"},
+                {"name": "Redshift", "type": "redshift", "install": "drt-core[redshift]"},
+                {"name": "ClickHouse", "type": "clickhouse", "install": "drt-core[clickhouse]"},
+                {"name": "Snowflake", "type": "snowflake", "install": "drt-core[snowflake]"},
+                {"name": "MySQL", "type": "mysql", "install": "drt-core[mysql]"},
+            ],
+            "destinations": [
+                {"name": "REST API", "type": "rest_api", "install": "(core)"},
+                {"name": "Slack", "type": "slack", "install": "(core)"},
+                {"name": "Discord", "type": "discord", "install": "(core)"},
+                {"name": "Microsoft Teams", "type": "teams", "install": "(core)"},
+                {"name": "GitHub Actions", "type": "github_actions", "install": "(core)"},
+                {"name": "HubSpot", "type": "hubspot", "install": "(core)"},
+                {"name": "Google Sheets", "type": "google_sheets", "install": "drt-core[sheets]"},
+                {"name": "PostgreSQL", "type": "postgres", "install": "drt-core[postgres]"},
+                {"name": "MySQL", "type": "mysql", "install": "drt-core[mysql]"},
+                {"name": "ClickHouse", "type": "clickhouse", "install": "drt-core[clickhouse]"},
+                {"name": "Parquet", "type": "parquet", "install": "drt-core[parquet]"},
+                {"name": "CSV/JSON/JSONL", "type": "file", "install": "(core)"},
+                {"name": "Jira", "type": "jira", "install": "(core)"},
+                {"name": "Linear", "type": "linear", "install": "(core)"},
+                {"name": "SendGrid", "type": "sendgrid", "install": "(core)"},
+            ],
+        }
 
     return mcp
 

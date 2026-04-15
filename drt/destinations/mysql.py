@@ -26,6 +26,18 @@ from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 
 
+def _serialize_value(value: Any) -> Any:
+    """Serialize dict/list values to JSON strings for pymysql.
+
+    pymysql does not auto-serialize complex Python types, so values
+    bound for JSON columns (common when sourcing from BigQuery) must
+    be converted to strings before execute().
+    """
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return value
+
+
 class MySQLDestination:
     """Upsert records into a MySQL table."""
 
@@ -51,7 +63,7 @@ class MySQLDestination:
 
             for i, record in enumerate(records):
                 try:
-                    values = [record.get(c) for c in columns]
+                    values = [_serialize_value(record.get(c)) for c in columns]
                     cur.execute(sql, values)
                     result.success += 1
                 except Exception as e:

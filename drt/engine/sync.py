@@ -7,6 +7,7 @@ CLI owns all console output; engine only returns SyncResult.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,6 +65,7 @@ def run_sync(
         Aggregated SyncResult across all batches.
     """
     started_at = datetime.now(timezone.utc).isoformat()
+    t0 = time.perf_counter()
 
     # Load last cursor value for incremental syncs
     cursor_field = sync.sync.cursor_field if sync.sync.mode == "incremental" else None
@@ -104,6 +106,8 @@ def run_sync(
 
         if sync.sync.on_error == "fail" and result.failed > 0:
             break
+
+    total_result.duration_seconds = round(time.perf_counter() - t0, 3)
 
     if state_manager is not None:
         status = (

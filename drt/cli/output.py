@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from drt.config.credentials import ProfileConfig
 from drt.config.models import SyncConfig
 from drt.destinations.base import SyncResult
 from drt.state.manager import SyncState
@@ -46,6 +47,23 @@ def print_init_success(paths: list[str]) -> None:
 def print_sync_start(sync_name: str, dry_run: bool) -> None:
     tag = " [dim](dry-run)[/dim]" if dry_run else ""
     console.print(f"\n[bold]→ {sync_name}[/bold]{tag}")
+
+
+def print_dry_run_summary(sync: SyncConfig, profile: ProfileConfig, rows: int) -> None:
+    """Print a summary of what would be synced during a dry run."""
+    from drt.engine.resolver import parse_ref
+    
+    source_desc = profile.describe()
+    model_name = parse_ref(sync.model)
+    if model_name:
+        # bigquery (project.dataset.table)
+        source_desc = source_desc.replace(")", f".{model_name})")
+
+    console.print("Dry run summary:")
+    console.print(f"  Source: {source_desc}")
+    console.print(f"  Destination: {sync.destination.describe()}")
+    console.print(f"  Rows to sync: {rows}")
+    console.print(f"  Sync mode: {sync.sync.mode}")
 
 
 def print_sync_result(sync_name: str, result: SyncResult, elapsed: float) -> None:
