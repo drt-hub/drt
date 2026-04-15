@@ -154,6 +154,17 @@ class HubSpotDestinationConfig(BaseModel):
         return f"{self.type} ({self.object_type})"
 
 
+class NotionDestinationConfig(BaseModel):
+    type: Literal["notion"]
+    database_id: str | None = None
+    database_id_env: str | None = None
+    properties_template: str
+    auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
+
+    def describe(self) -> str:
+        return f"notion (db:{self.database_id})"
+
+
 class SendGridDestinationConfig(BaseModel):
     type: Literal["sendgrid"]
     from_email: str
@@ -353,6 +364,7 @@ DestinationConfig = Annotated[
     | DiscordDestinationConfig
     | GitHubActionsDestinationConfig
     | HubSpotDestinationConfig
+    | NotionDestinationConfig
     | SendGridDestinationConfig
     | LinearDestinationConfig
     | GoogleSheetsDestinationConfig
