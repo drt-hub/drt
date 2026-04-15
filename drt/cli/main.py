@@ -554,6 +554,98 @@ def _test_display_name(test_def: object) -> str:
 # mcp
 # ---------------------------------------------------------------------------
 
+@app.command()
+def doctor() -> None:
+    """Check environment and report potential issues.
+
+    Verifies Python version, drt installation, project configuration,
+    optional dependencies, and environment variables.
+    """
+    import sys
+    import importlib
+
+    from drt.config.parser import load_project
+
+    console.print("\n[bold]drt doctor[/bold]\n")
+
+    # Version
+    console.print(f"  drt version:    {__version__}")
+
+    # Python version
+    py_major, py_minor = sys.version_info[:2]
+    py_ok = (py_major, py_minor) >= (3, 10)
+    py_icon = "✅" if py_ok else "❌"
+    console.print(f"  Python version: {sys.version.split()[0]} {py_icon}")
+    if not py_ok:
+        console.print("    [yellow]drt requires Python >= 3.10[/yellow]")
+
+    # Project file
+    project_file = Path("drt_project.yml")
+    if not project_file.exists():
+        project_file = Path("drt_project.yaml")
+    project_ok = project_file.exists()
+    proj_icon = "✅" if project_ok else "❌"
+    console.print(f"  Project found:   {'drt_project.yml' if Path('drt_project.yml').exists() else ('drt_project.yaml' if project_file.exists() else 'none')} {proj_icon}")
+
+    # Profile
+    profile_name = os.environ.get("DRT_PROFILE", "default")
+    console.print(f"  Profile:         {profile_name}")
+
+    # Syncs
+    if project_ok:
+        try:
+            project = load_project(project_file)
+            syncs = project.syncs or []
+            console.print(f"  Syncs found:     {len(syncs)} ✅")
+        except Exception as exc:
+            console.print(f"  Syncs found:     ❌ ({exc})")
+            syncs = []
+    else:
+        syncs = []
+        console.print(f"  Syncs found:     ⚠️ (no project file)")
+
+    # Optional dependencies
+    console.print("\n  Extras installed:")
+    extras = {
+        "bigquery": ("google.cloud.bigquery", "google-cloud-bigquery"),
+        "postgres": ("psycopg2", "psycopg2-binary"),
+        "mysql": ("pymysql", "pymysql"),
+        "snowflake": ("snowflake.connector", "snowflake-connector-python"),
+        "clickhouse": ("clickhouse_connect", "clickhouse-connect"),
+        "duckdb": ("duckdb", "duckdb"),
+        "databricks": ("databricks.sql", "databricks-sql-connector"),
+        "sheets": ("googleapiclient", "google-api-python-client"),
+        "parquet": ("pandas", "pandas"),
+    }
+    for extra_name, (import_module, pip_package) in extras.items():
+        try:
+            importlib.import_module(import_module)
+            # Try to get version
+            mod = sys.modules.get(import_module)
+            ver = getattr(mod, "__version__', "?")
+            console.print(f"    {extra_name:<12} ✅ {pip_package} {ver}")
+        except ImportError:
+            console.print(f"    {extra_name:<12} ❌ {pip_package} not installed")
+            console.print(f"      [dim](pip install drt-core[{extra_name}])[/dim]")
+
+    # Environment variables
+    env_vars = {
+        "GOOGLE_APPLICATION_CREDENTIALS": "GCP service account key path",
+        "DRT_PROFILE": "Active profile name",
+        "DATABASE_URL": "Database connection URL",
+    }
+    console.print("\n  Environment variables:")
+    for var, desc in env_vars.items():
+        val = os.environ.get(var)
+        if val is not None:
+            display = val if len(val) <= 40 else val[:37] + "..."
+            console.print(f"    {var:<40} ✅ {display}")
+        else:
+            console.print(f"    {var:<40} ⚠️ not set ({desc})")
+
+    console.print()
+
+
 mcp_app = typer.Typer(name="mcp", help="MCP server commands.", no_args_is_help=True)
 app.add_typer(mcp_app)
 
