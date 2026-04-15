@@ -98,7 +98,7 @@ def test_json_formatter_each_line_is_valid_json() -> None:
     logger.info("sync_started", extra={"sync": "s1"})
     logger.info("sync_complete", extra={"sync": "s1", "rows": 10, "duration_ms": 200, "status": "success"})
 
-    lines = [l for l in stream.getvalue().splitlines() if l.strip()]
+    lines = [line for line in stream.getvalue().splitlines() if line.strip()]
     assert len(lines) == 2, f"Expected 2 log lines, got {len(lines)}"
     for line in lines:
         obj = json.loads(line)  # must not raise
