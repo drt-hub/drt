@@ -88,9 +88,7 @@ class _JsonFormatter(logging.Formatter):
     """Emit each log record as a single JSON object (JSON Lines format)."""
 
     def format(self, record: logging.LogRecord) -> str:
-        ts = datetime.fromtimestamp(record.created, tz=timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        )
+        ts = datetime.fromtimestamp(record.created, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         payload: dict[str, object] = {
             "ts": ts,
             "level": record.levelname,
@@ -108,7 +106,7 @@ def _configure_json_logging() -> None:
     handler = logging.StreamHandler()
     handler.setFormatter(_JsonFormatter())
     logging.root.handlers = [handler]
-    logging.root.setLevel(logging.DEBUG)
+    logging.root.setLevel(logging.INFO)
 
 
 def _resolve_profile_name(cli_flag: str | None, project_profile: str) -> str:
@@ -258,8 +256,13 @@ def run(
         None, "--profile", "-p", help="Override profile (default: drt_project.yml or DRT_PROFILE)."
     ),
     log_format: str = typer.Option(
-        "text", "--log-format", help="Log format: text or json (structured JSON lines)."
+    "text",
+    "--log-format",
+    help=(
+        "Log format: text or json (structured JSON lines for each sync event"
+        " — separate from --output json which controls the final result)."
     ),
+),
 ) -> None:
     """Run sync(s) defined in the project."""
     import json as json_mod
@@ -345,11 +348,7 @@ def run(
         elapsed = round(time.monotonic() - t0, 2)
         if log_format == "json":
             status_str = (
-                "success"
-                if result.failed == 0
-                else "partial"
-                if result.success > 0
-                else "failed"
+                "success" if result.failed == 0 else "partial" if result.success > 0 else "failed"
             )
             logging.info(
                 "sync_complete",
@@ -409,9 +408,7 @@ def run(
 
 @app.command(name="list")
 def list_syncs(
-    output: str = typer.Option(
-        "text", "--output", "-o", help="Output format: text or json."
-    ),
+    output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
 ) -> None:
     """List all sync definitions in the project."""
     import json as json_mod
@@ -421,17 +418,22 @@ def list_syncs(
     syncs = load_syncs(Path("."))
 
     if output == "json":
-        print(json_mod.dumps({
-            "syncs": [
+        print(
+            json_mod.dumps(
                 {
-                    "name": s.name,
-                    "destination_type": s.destination.type,
-                    "mode": s.sync.mode,
-                    "description": s.description,
-                }
-                for s in syncs
-            ],
-        }, indent=2))
+                    "syncs": [
+                        {
+                            "name": s.name,
+                            "destination_type": s.destination.type,
+                            "mode": s.sync.mode,
+                            "description": s.description,
+                        }
+                        for s in syncs
+                    ],
+                },
+                indent=2,
+            )
+        )
         return
 
     print_sync_table(syncs)
@@ -447,9 +449,7 @@ def validate(
     emit_schema: bool = typer.Option(  # noqa: E501
         False, "--emit-schema", help="Write JSON Schemas to .drt/schemas/."
     ),
-    output: str = typer.Option(
-        "text", "--output", "-o", help="Output format: text or json."
-    ),
+    output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
 ) -> None:
     """Validate sync definitions against the JSON Schema."""
     import json as json_mod
@@ -460,15 +460,18 @@ def validate(
     result = load_syncs_safe(Path("."))
 
     if output == "json":
-        print(json_mod.dumps({
-            "results": [
-                {"name": s.name, "valid": True}
-                for s in result.syncs
-            ] + [
-                {"name": name, "valid": False, "errors": errs}
-                for name, errs in result.errors.items()
-            ],
-        }, indent=2))
+        print(
+            json_mod.dumps(
+                {
+                    "results": [{"name": s.name, "valid": True} for s in result.syncs]
+                    + [
+                        {"name": name, "valid": False, "errors": errs}
+                        for name, errs in result.errors.items()
+                    ],
+                },
+                indent=2,
+            )
+        )
         if result.errors:
             raise typer.Exit(code=1)
         return

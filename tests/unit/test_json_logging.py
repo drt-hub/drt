@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
+import io
 import json
 import logging
-import io
 
-import pytest
-
-from drt.cli.main import _JsonFormatter, _configure_json_logging
-
+from drt.cli.main import _configure_json_logging, _JsonFormatter
 
 # ---------------------------------------------------------------------------
 # Test 1: _configure_json_logging() produces valid JSON with required fields
@@ -96,7 +93,10 @@ def test_json_formatter_each_line_is_valid_json() -> None:
     logger.setLevel(logging.DEBUG)
 
     logger.info("sync_started", extra={"sync": "s1"})
-    logger.info("sync_complete", extra={"sync": "s1", "rows": 10, "duration_ms": 200, "status": "success"})
+    logger.info(
+    "sync_complete",
+    extra={"sync": "s1", "rows": 10, "duration_ms": 200, "status": "success"},
+    )
 
     lines = [line for line in stream.getvalue().splitlines() if line.strip()]
     assert len(lines) == 2, f"Expected 2 log lines, got {len(lines)}"
@@ -114,14 +114,16 @@ def test_json_formatter_each_line_is_valid_json() -> None:
 
 def test_configure_json_logging_replaces_handlers() -> None:
     """_configure_json_logging() sets exactly one handler on the root logger."""
+    old_handlers = logging.root.handlers[:]
+    old_level = logging.root.level
     # Add a dummy handler first to verify replacement
     dummy = logging.StreamHandler(io.StringIO())
     logging.root.addHandler(dummy)
+    try:
+        _configure_json_logging()
 
-    _configure_json_logging()
-
-    assert len(logging.root.handlers) == 1
-    assert isinstance(logging.root.handlers[0].formatter, _JsonFormatter)
-
-    # Cleanup: restore a sane state
-    logging.root.handlers = []
+        assert len(logging.root.handlers) == 1
+        assert isinstance(logging.root.handlers[0].formatter, _JsonFormatter)
+    finally:
+        logging.root.handlers = old_handlers
+        logging.root.setLevel(old_level)
