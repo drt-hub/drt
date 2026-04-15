@@ -244,6 +244,21 @@ class FileDestinationConfig(BaseModel):
     format: Literal["csv", "json", "jsonl"] = "csv"
 
 
+class EmailSmtpDestinationConfig(BaseModel):
+    type: Literal["email_smtp"]
+    host: str
+    port: int = 587
+    username: str | None = None
+    username_env: str | None = None
+    password: str | None = None
+    password_env: str | None = None
+    sender: str  # e.g. "Alerts <noreply@example.com>"
+    recipients: list[str]  # e.g. ["admin@example.com"]
+    subject_template: str = "drt notification"
+    body_template: str = "{{ row }}"
+    use_tls: bool = True  # STARTTLS on the port; set False for plain/SSL-wrapped
+
+
 # Discriminated union — add new destination types here
 DestinationConfig = Annotated[
     RestApiDestinationConfig
@@ -257,7 +272,8 @@ DestinationConfig = Annotated[
     | TeamsDestinationConfig
     | ClickHouseDestinationConfig
     | ParquetDestinationConfig
-    | FileDestinationConfig,
+    | FileDestinationConfig
+    | EmailSmtpDestinationConfig,
     Field(discriminator="type"),
 ]
 
