@@ -363,6 +363,18 @@ class FileDestinationConfig(BaseModel):
         return f"{self.type} ({self.path})"
 
 
+class NotionDestinationConfig(BaseModel):
+    type: Literal["notion"]
+    database_id: str
+    # Jinja2 template → JSON object of Notion page properties
+    # Example: see https://developers.notion.com/reference/post-page for template format
+    properties_template: str | None = None
+    auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
+
+    def describe(self) -> str:
+        return f"{self.type} (database {self.database_id})"
+
+
 class GoogleAdsDestinationConfig(BaseModel):
     type: Literal["google_ads"]
     customer_id: str  # Google Ads customer ID (without hyphens)
@@ -428,6 +440,7 @@ DestinationConfig = Annotated[
     | ParquetDestinationConfig
     | GoogleAdsDestinationConfig
     | FileDestinationConfig
+    | NotionDestinationConfig
     | StagedUploadDestinationConfig,
     Field(discriminator="type"),
 ]
