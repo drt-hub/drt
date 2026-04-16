@@ -333,7 +333,7 @@ def run(
     succeeded = 0
     failed = 0
 
-    def _run_one(sync):
+    def _run_one(sync: SyncConfig) -> tuple[str, dict[str, object], bool]:
         """Execute a single sync and return (name, result_dict, had_error)."""
         dest = _get_destination(sync)
         wm_storage = _get_watermark_storage(sync, Path("."))
