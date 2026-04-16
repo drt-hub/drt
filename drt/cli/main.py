@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import click
 import typer
 
 if TYPE_CHECKING:
@@ -83,6 +84,8 @@ app = typer.Typer(
 # JSON logging
 # ---------------------------------------------------------------------------
 
+_STANDARD_LOG_FIELDS = frozenset(vars(logging.LogRecord("", 0, "", 0, "", (), None)))
+
 
 class _JsonFormatter(logging.Formatter):
     """Emit each log record as a single JSON object (JSON Lines format)."""
@@ -96,7 +99,7 @@ class _JsonFormatter(logging.Formatter):
         }
         # Merge any extra fields passed via the `extra` kwarg
         for key, value in record.__dict__.items():
-            if key not in logging.LogRecord.__dict__ and not key.startswith("_"):
+            if key not in _STANDARD_LOG_FIELDS and not key.startswith("_"):
                 payload[key] = value
         return json.dumps(payload)
 
@@ -256,13 +259,14 @@ def run(
         None, "--profile", "-p", help="Override profile (default: drt_project.yml or DRT_PROFILE)."
     ),
     log_format: str = typer.Option(
-    "text",
-    "--log-format",
-    help=(
-        "Log format: text or json (structured JSON lines for each sync event"
-        " — separate from --output json which controls the final result)."
+        "text",
+        "--log-format",
+        help=(
+            "Log format: 'text' (default) or 'json' (structured JSON Lines,"
+            " separate from --output json)."
+        ),
+        click_type=click.Choice(["text", "json"]),
     ),
-),
 ) -> None:
     """Run sync(s) defined in the project."""
     import json as json_mod

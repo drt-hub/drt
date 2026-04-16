@@ -15,28 +15,34 @@ from drt.cli.main import _configure_json_logging, _JsonFormatter
 
 def test_json_formatter_basic_fields() -> None:
     """_JsonFormatter emits valid JSON with ts, level, and msg fields."""
-    stream = io.StringIO()
-    handler = logging.StreamHandler(stream)
-    handler.setFormatter(_JsonFormatter())
+    original_handlers = logging.root.handlers[:]
+    original_level = logging.root.level
+    try:
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(_JsonFormatter())
 
-    logger = logging.getLogger("test_json_logging.basic")
-    logger.handlers = [handler]
-    logger.propagate = False
-    logger.setLevel(logging.DEBUG)
+        logger = logging.getLogger("test_json_logging.basic")
+        logger.handlers = [handler]
+        logger.propagate = False
+        logger.setLevel(logging.DEBUG)
 
-    logger.info("hello world")
+        logger.info("hello world")
 
-    output = stream.getvalue().strip()
-    assert output, "Expected log output but got nothing"
+        output = stream.getvalue().strip()
+        assert output, "Expected log output but got nothing"
 
-    data = json.loads(output)
-    assert "ts" in data, "Missing 'ts' field"
-    assert "level" in data, "Missing 'level' field"
-    assert "msg" in data, "Missing 'msg' field"
-    assert data["level"] == "INFO"
-    assert data["msg"] == "hello world"
-    # ts must be ISO 8601 ending in Z
-    assert data["ts"].endswith("Z"), f"Expected ISO 8601 UTC timestamp, got: {data['ts']}"
+        data = json.loads(output)
+        assert "ts" in data, "Missing 'ts' field"
+        assert "level" in data, "Missing 'level' field"
+        assert "msg" in data, "Missing 'msg' field"
+        assert data["level"] == "INFO"
+        assert data["msg"] == "hello world"
+        # ts must be ISO 8601 ending in Z
+        assert data["ts"].endswith("Z"), f"Expected ISO 8601 UTC timestamp, got: {data['ts']}"
+    finally:
+        logging.root.handlers = original_handlers
+        logging.root.level = original_level
 
 
 # ---------------------------------------------------------------------------
@@ -46,34 +52,40 @@ def test_json_formatter_basic_fields() -> None:
 
 def test_json_formatter_sync_complete_fields() -> None:
     """sync_complete log line includes rows, duration_ms, and status fields."""
-    stream = io.StringIO()
-    handler = logging.StreamHandler(stream)
-    handler.setFormatter(_JsonFormatter())
+    original_handlers = logging.root.handlers[:]
+    original_level = logging.root.level
+    try:
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(_JsonFormatter())
 
-    logger = logging.getLogger("test_json_logging.sync_complete")
-    logger.handlers = [handler]
-    logger.propagate = False
-    logger.setLevel(logging.DEBUG)
+        logger = logging.getLogger("test_json_logging.sync_complete")
+        logger.handlers = [handler]
+        logger.propagate = False
+        logger.setLevel(logging.DEBUG)
 
-    logger.info(
-        "sync_complete",
-        extra={
-            "sync": "my_sync",
-            "rows": 42,
-            "duration_ms": 1500,
-            "status": "success",
-        },
-    )
+        logger.info(
+            "sync_complete",
+            extra={
+                "sync": "my_sync",
+                "rows": 42,
+                "duration_ms": 1500,
+                "status": "success",
+            },
+        )
 
-    output = stream.getvalue().strip()
-    data = json.loads(output)
+        output = stream.getvalue().strip()
+        data = json.loads(output)
 
-    assert data["msg"] == "sync_complete"
-    assert data["sync"] == "my_sync"
-    assert data["rows"] == 42
-    assert data["duration_ms"] == 1500
-    assert data["status"] == "success"
-    assert data["level"] == "INFO"
+        assert data["msg"] == "sync_complete"
+        assert data["sync"] == "my_sync"
+        assert data["rows"] == 42
+        assert data["duration_ms"] == 1500
+        assert data["status"] == "success"
+        assert data["level"] == "INFO"
+    finally:
+        logging.root.handlers = original_handlers
+        logging.root.level = original_level
 
 
 # ---------------------------------------------------------------------------
@@ -83,28 +95,34 @@ def test_json_formatter_sync_complete_fields() -> None:
 
 def test_json_formatter_each_line_is_valid_json() -> None:
     """Multiple log calls each produce a separate valid JSON line."""
-    stream = io.StringIO()
-    handler = logging.StreamHandler(stream)
-    handler.setFormatter(_JsonFormatter())
+    original_handlers = logging.root.handlers[:]
+    original_level = logging.root.level
+    try:
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(_JsonFormatter())
 
-    logger = logging.getLogger("test_json_logging.multiline")
-    logger.handlers = [handler]
-    logger.propagate = False
-    logger.setLevel(logging.DEBUG)
+        logger = logging.getLogger("test_json_logging.multiline")
+        logger.handlers = [handler]
+        logger.propagate = False
+        logger.setLevel(logging.DEBUG)
 
-    logger.info("sync_started", extra={"sync": "s1"})
-    logger.info(
-    "sync_complete",
-    extra={"sync": "s1", "rows": 10, "duration_ms": 200, "status": "success"},
-    )
+        logger.info("sync_started", extra={"sync": "s1"})
+        logger.info(
+            "sync_complete",
+            extra={"sync": "s1", "rows": 10, "duration_ms": 200, "status": "success"},
+        )
 
-    lines = [line for line in stream.getvalue().splitlines() if line.strip()]
-    assert len(lines) == 2, f"Expected 2 log lines, got {len(lines)}"
-    for line in lines:
-        obj = json.loads(line)  # must not raise
-        assert "ts" in obj
-        assert "level" in obj
-        assert "msg" in obj
+        lines = [line for line in stream.getvalue().splitlines() if line.strip()]
+        assert len(lines) == 2, f"Expected 2 log lines, got {len(lines)}"
+        for line in lines:
+            obj = json.loads(line)  # must not raise
+            assert "ts" in obj
+            assert "level" in obj
+            assert "msg" in obj
+    finally:
+        logging.root.handlers = original_handlers
+        logging.root.level = original_level
 
 
 # ---------------------------------------------------------------------------
