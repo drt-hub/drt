@@ -57,6 +57,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **MySQL destination**: auto-serialize `dict`/`list` values to JSON strings before passing to pymysql (#311). Also shipped in [0.5.1](#051---2026-04-14).
 
+## [0.5.4] - 2026-04-16
+
+### Added
+
+- **`destination_lookup`** (#345): Resolve foreign key values by querying the destination database during sync. When syncing related tables, child tables can now reference parent table auto-increment IDs without triggers or denormalized schemas. Supports MySQL, PostgreSQL, and ClickHouse destinations. Configure via `lookups` field in destination YAML with `on_miss: skip | fail | null`. Guide: `docs/guides/destination-lookup.md`.
+
 ## [0.5.1] - 2026-04-14
 
 ### Fixed
