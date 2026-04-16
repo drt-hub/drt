@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 from drt.state.watermark import LocalWatermarkStorage
@@ -78,3 +79,46 @@ class TestGCSWatermarkStorage:
             bucket="my-bucket", key="watermarks/sync.json",
         )
         assert storage.get("my_sync") == "2026-04-15"
+
+
+class TestBigQueryWatermarkStorage:
+    def _make_storage(self) -> Any:
+        from drt.state.watermark import BigQueryWatermarkStorage
+
+        storage = BigQueryWatermarkStorage(
+            project="my-project", dataset="my_dataset",
+        )
+        # Bypass _query_config which needs google.cloud.bigquery
+        storage._query_config = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
+        return storage
+
+    @patch("drt.state.watermark._bq_client")
+    def test_get_returns_none_when_no_row(
+        self, mock_client: MagicMock,
+    ) -> None:
+        mock_client.return_value.query.return_value.result.return_value = (
+            iter([])
+        )
+        storage = self._make_storage()
+        assert storage.get("my_sync") is None
+
+    @patch("drt.state.watermark._bq_client")
+    def test_get_returns_value_when_row_exists(
+        self, mock_client: MagicMock,
+    ) -> None:
+        row = MagicMock()
+        row.watermark_value = "2026-04-15T10:00:00"
+        mock_client.return_value.query.return_value.result.return_value = (
+            iter([row])
+        )
+        storage = self._make_storage()
+        assert storage.get("my_sync") == "2026-04-15T10:00:00"
+
+    @patch("drt.state.watermark._bq_client")
+    def test_save_executes_merge(self, mock_client: MagicMock) -> None:
+        storage = self._make_storage()
+        storage.save("my_sync", "2026-04-15T10:00:00")
+
+        call_args = mock_client.return_value.query.call_args_list
+        merge_sql = call_args[-1][0][0]
+        assert "MERGE" in merge_sql

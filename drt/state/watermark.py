@@ -94,3 +94,87 @@ class GCSWatermarkStorage:
         self._blob().upload_from_string(
             json.dumps(data, indent=2), content_type="application/json",
         )
+
+
+def _bq_client(project: str | None = None) -> Any:
+    """Lazy BigQuery client — import only when needed."""
+    try:
+        from google.cloud import bigquery  # type: ignore[import-untyped]
+    except ImportError as e:
+        raise ImportError(
+            "BigQuery watermark storage requires: pip install drt-core[bigquery]"
+        ) from e
+    return bigquery.Client(project=project)
+
+
+class BigQueryWatermarkStorage:
+    """BigQuery watermark backend.
+
+    Stores watermarks in a ``_drt_watermarks`` table within the specified dataset.
+    Table is auto-created on first write.
+    """
+
+    def __init__(self, project: str, dataset: str) -> None:
+        self._project = project
+        self._dataset = dataset
+        self._table = f"`{project}`.`{dataset}`._drt_watermarks"
+        self._table_ensured = False
+
+    def _client(self) -> Any:
+        return _bq_client(self._project)
+
+    def _ensure_table(self) -> None:
+        if self._table_ensured:
+            return
+        ddl = (
+            f"CREATE TABLE IF NOT EXISTS {self._table} ("
+            "  sync_name STRING NOT NULL,"
+            "  watermark_value STRING NOT NULL,"
+            "  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()"
+            ")"
+        )
+        self._client().query(ddl).result()
+        self._table_ensured = True
+
+    def _query_config(self, params: list[tuple[str, str, str]]) -> Any:
+        """Build a QueryJobConfig with parameterized query parameters."""
+        from google.cloud.bigquery import QueryJobConfig, ScalarQueryParameter  # type: ignore[import-untyped]
+
+        return QueryJobConfig(
+            query_parameters=[
+                ScalarQueryParameter(name, type_, val)
+                for name, type_, val in params
+            ]
+        )
+
+    def get(self, sync_name: str) -> str | None:
+        client = self._client()
+        query = (
+            f"SELECT watermark_value FROM {self._table} "
+            "WHERE sync_name = @sync_name"
+        )
+        job_config = self._query_config([("sync_name", "STRING", sync_name)])
+        rows = list(client.query(query, job_config=job_config).result())
+        if not rows:
+            return None
+        return str(rows[0].watermark_value)
+
+    def save(self, sync_name: str, value: str) -> None:
+        self._ensure_table()
+        client = self._client()
+        merge = (
+            f"MERGE {self._table} AS t "
+            "USING (SELECT @sync_name AS sync_name, "
+            "@value AS watermark_value) AS s "
+            "ON t.sync_name = s.sync_name "
+            "WHEN MATCHED THEN UPDATE SET "
+            "  watermark_value = s.watermark_value, "
+            "  updated_at = CURRENT_TIMESTAMP() "
+            "WHEN NOT MATCHED THEN INSERT (sync_name, watermark_value) "
+            "  VALUES (s.sync_name, s.watermark_value)"
+        )
+        job_config = self._query_config([
+            ("sync_name", "STRING", sync_name),
+            ("value", "STRING", value),
+        ])
+        client.query(merge, job_config=job_config).result()
