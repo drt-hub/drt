@@ -19,6 +19,7 @@ from drt.destinations.base import Destination, StagedDestination, SyncResult
 from drt.engine.resolver import resolve_model_ref
 from drt.sources.base import Source
 from drt.state.manager import StateManager, SyncState
+from drt.state.watermark import WatermarkStorage
 
 
 def _cursor_gt(new: str, current: str) -> bool:
@@ -49,6 +50,7 @@ def run_sync(
     project_dir: Path,
     dry_run: bool = False,
     state_manager: StateManager | None = None,
+    watermark_storage: WatermarkStorage | None = None,
 ) -> SyncResult:
     """Run a single sync: extract from source, load to destination.
 
@@ -70,7 +72,9 @@ def run_sync(
     # Load last cursor value for incremental syncs
     cursor_field = sync.sync.cursor_field if sync.sync.mode == "incremental" else None
     last_cursor_value: str | None = None
-    if cursor_field and state_manager:
+    if cursor_field and watermark_storage:
+        last_cursor_value = watermark_storage.get(sync.name)
+    elif cursor_field and state_manager:
         prev = state_manager.get_last_sync(sync.name)
         if prev:
             last_cursor_value = prev.last_cursor_value
@@ -146,5 +150,9 @@ def run_sync(
                 last_cursor_value=new_cursor_value if cursor_field else None,
             )
         )
+
+    # Persist watermark to external storage if configured
+    if watermark_storage is not None and cursor_field and new_cursor_value:
+        watermark_storage.save(sync.name, new_cursor_value)
 
     return total_result

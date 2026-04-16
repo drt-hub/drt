@@ -226,6 +226,45 @@ def test_incremental_uses_saved_cursor(tmp_path: Path) -> None:
     assert "WHERE updated_at > '2024-01-01'" in captured_queries[0]
 
 
+def test_watermark_storage_used_when_configured(tmp_path: Path) -> None:
+    """When watermark config is set, engine uses WatermarkStorage."""
+    from drt.state.watermark import LocalWatermarkStorage
+
+    wm_storage = LocalWatermarkStorage(tmp_path)
+    wm_storage.save("wm_sync", "2024-01-01")
+
+    captured_queries: list[str] = []
+
+    class CapturingSource:
+        def extract(self, query: str, config: object) -> list[dict]:
+            captured_queries.append(query)
+            return [{"id": 1, "ts": "2024-01-05"}]
+
+        def test_connection(self, config: object) -> bool:
+            return True
+
+    sync = SyncConfig.model_validate({
+        "name": "wm_sync",
+        "model": "SELECT * FROM events WHERE ts >= '{{ cursor_value }}'",
+        "destination": {"type": "rest_api", "url": "https://example.com"},
+        "sync": {
+            "mode": "incremental",
+            "cursor_field": "ts",
+            "watermark": {"storage": "local"},
+        },
+    })
+    dest = FakeDestination()
+    result = run_sync(
+        sync, CapturingSource(), dest, _make_profile(), tmp_path,
+        watermark_storage=wm_storage,
+    )
+
+    assert result.success == 1
+    assert "2024-01-01" in captured_queries[0]
+    # Watermark should be updated
+    assert wm_storage.get("wm_sync") == "2024-01-05"
+
+
 def test_full_sync_no_cursor_saved(tmp_path: Path) -> None:
     from drt.state.manager import StateManager
 
