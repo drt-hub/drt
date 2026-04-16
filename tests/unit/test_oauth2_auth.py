@@ -15,9 +15,7 @@ def _clear_cache() -> None:
     _oauth2_cache.clear()
 
 
-def test_oauth2_token_exchange(
-    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_oauth2_token_exchange(httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MY_CLIENT_ID", "test-id")
     monkeypatch.setenv("MY_CLIENT_SECRET", "test-secret")
 
@@ -35,9 +33,7 @@ def test_oauth2_token_exchange(
     assert headers == {"Authorization": "Bearer tok_abc123"}
 
 
-def test_oauth2_with_scope(
-    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_oauth2_with_scope(httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CID", "id")
     monkeypatch.setenv("CSEC", "secret")
 
@@ -60,9 +56,7 @@ def test_oauth2_with_scope(
     assert b"scope=contacts.write" in req.data
 
 
-def test_oauth2_caches_token(
-    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_oauth2_caches_token(httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CID", "id")
     monkeypatch.setenv("CSEC", "secret")
 

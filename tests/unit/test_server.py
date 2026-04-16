@@ -41,9 +41,7 @@ def _get(url: str, token: str | None = None) -> tuple[int, dict[str, Any]]:
         return e.code, json.loads(e.read())
 
 
-def _post(
-    url: str, token: str | None = None
-) -> tuple[int, dict[str, Any]]:
+def _post(url: str, token: str | None = None) -> tuple[int, dict[str, Any]]:
     req = urllib.request.Request(url, method="POST")
     if token:
         req.add_header("Authorization", f"Bearer {token}")
@@ -87,9 +85,7 @@ def test_post_without_auth_when_required_returns_401() -> None:
 def test_post_with_wrong_token_returns_401() -> None:
     server, _, port = _run_server(token="secret123")
     try:
-        status, _ = _post(
-            f"http://127.0.0.1:{port}/sync/my_sync", token="wrong"
-        )
+        status, _ = _post(f"http://127.0.0.1:{port}/sync/my_sync", token="wrong")
         assert status == 401
     finally:
         server.shutdown()
@@ -105,9 +101,7 @@ def test_post_missing_sync_name_returns_400() -> None:
         server.shutdown()
 
 
-def test_post_sync_not_found_returns_404(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_post_sync_not_found_returns_404(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """run_drt_sync raises ValueError for unknown sync → 404."""
     # Create minimal project setup so load_project works
     import yaml

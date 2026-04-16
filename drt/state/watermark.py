@@ -5,6 +5,7 @@ Provides pluggable storage for cursor/watermark values:
 - GCSWatermarkStorage: Google Cloud Storage blob
 - BigQueryWatermarkStorage: BigQuery _drt_watermarks table
 """
+
 from __future__ import annotations
 
 import json
@@ -55,9 +56,7 @@ def _gcs_client() -> Any:
     try:
         from google.cloud import storage  # type: ignore[import-untyped]
     except ImportError as e:
-        raise ImportError(
-            "GCS watermark storage requires: pip install drt-core[gcs]"
-        ) from e
+        raise ImportError("GCS watermark storage requires: pip install drt-core[gcs]") from e
     return storage.Client()
 
 
@@ -92,7 +91,8 @@ class GCSWatermarkStorage:
         data = self._load()
         data[sync_name] = value
         self._blob().upload_from_string(
-            json.dumps(data, indent=2), content_type="application/json",
+            json.dumps(data, indent=2),
+            content_type="application/json",
         )
 
 
@@ -144,18 +144,12 @@ class BigQueryWatermarkStorage:
         )
 
         return QueryJobConfig(
-            query_parameters=[
-                ScalarQueryParameter(name, type_, val)
-                for name, type_, val in params
-            ]
+            query_parameters=[ScalarQueryParameter(name, type_, val) for name, type_, val in params]
         )
 
     def get(self, sync_name: str) -> str | None:
         client = self._client()
-        query = (
-            f"SELECT watermark_value FROM {self._table} "
-            "WHERE sync_name = @sync_name"
-        )
+        query = f"SELECT watermark_value FROM {self._table} WHERE sync_name = @sync_name"
         job_config = self._query_config([("sync_name", "STRING", sync_name)])
         rows = list(client.query(query, job_config=job_config).result())
         if not rows:
@@ -176,8 +170,10 @@ class BigQueryWatermarkStorage:
             "WHEN NOT MATCHED THEN INSERT (sync_name, watermark_value) "
             "  VALUES (s.sync_name, s.watermark_value)"
         )
-        job_config = self._query_config([
-            ("sync_name", "STRING", sync_name),
-            ("value", "STRING", value),
-        ])
+        job_config = self._query_config(
+            [
+                ("sync_name", "STRING", sync_name),
+                ("value", "STRING", value),
+            ]
+        )
         client.query(merge, job_config=job_config).result()

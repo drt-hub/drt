@@ -179,9 +179,7 @@ class TestMySQLDestinationLoad:
         conn.close.assert_called_once()
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
-    def test_dict_and_list_values_are_json_serialized(
-        self, mock_connect: MagicMock
-    ) -> None:
+    def test_dict_and_list_values_are_json_serialized(self, mock_connect: MagicMock) -> None:
         """dict/list values (e.g. from BigQuery JSON columns) must be
         serialized to JSON strings before being passed to pymysql."""
         conn = _fake_connection()
@@ -266,15 +264,17 @@ class TestMySQLReplaceMode:
         dest = MySQLDestination()
         opts = _options(mode="replace")
         dest.load(
-            [{"user_id": 1, "company_id": 5, "score": 0.5}], _config(), opts,
+            [{"user_id": 1, "company_id": 5, "score": 0.5}],
+            _config(),
+            opts,
         )
         dest.load(
-            [{"user_id": 2, "company_id": 5, "score": 0.9}], _config(), opts,
+            [{"user_id": 2, "company_id": 5, "score": 0.9}],
+            _config(),
+            opts,
         )
 
-        all_sqls = [
-            call[0][0] for call in conn.cursor().execute.call_args_list
-        ]
+        all_sqls = [call[0][0] for call in conn.cursor().execute.call_args_list]
         truncate_count = sum(1 for sql in all_sqls if "TRUNCATE" in sql)
         assert truncate_count == 1
 

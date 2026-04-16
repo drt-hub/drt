@@ -27,6 +27,7 @@ console = Console()
 # init
 # ---------------------------------------------------------------------------
 
+
 def print_init_success(paths: list[str]) -> None:
     console.print()
     console.print("[bold green]✓ drt project initialized[/bold green]")
@@ -44,6 +45,7 @@ def print_init_success(paths: list[str]) -> None:
 # run
 # ---------------------------------------------------------------------------
 
+
 def print_sync_start(sync_name: str, dry_run: bool) -> None:
     tag = " [dim](dry-run)[/dim]" if dry_run else ""
     console.print(f"\n[bold]→ {sync_name}[/bold]{tag}")
@@ -52,7 +54,7 @@ def print_sync_start(sync_name: str, dry_run: bool) -> None:
 def print_dry_run_summary(sync: SyncConfig, profile: ProfileConfig, rows: int) -> None:
     """Print a summary of what would be synced during a dry run."""
     from drt.engine.resolver import parse_ref
-    
+
     source_desc = profile.describe()
     model_name = parse_ref(sync.model)
     if model_name:
@@ -80,9 +82,7 @@ def print_sync_result(sync_name: str, result: SyncResult, elapsed: float) -> Non
         status = "[red]✗[/red]"
 
     if result.rows_extracted == 0 and result.failed == 0:
-        console.print(
-            f"  {status} 0 rows [dim](no rows)[/dim]  [dim]({elapsed:.1f}s)[/dim]"
-        )
+        console.print(f"  {status} 0 rows [dim](no rows)[/dim]  [dim]({elapsed:.1f}s)[/dim]")
         return
 
     console.print(
@@ -100,6 +100,7 @@ def print_sync_result(sync_name: str, result: SyncResult, elapsed: float) -> Non
 # ---------------------------------------------------------------------------
 # list
 # ---------------------------------------------------------------------------
+
 
 def print_sync_table(syncs: list[SyncConfig]) -> None:
     if not syncs:
@@ -129,6 +130,7 @@ def print_sync_table(syncs: list[SyncConfig]) -> None:
 # validate
 # ---------------------------------------------------------------------------
 
+
 def print_validation_ok(sync_name: str) -> None:
     console.print(f"[green]✓[/green] {sync_name}")
 
@@ -143,13 +145,12 @@ def print_validation_error(sync_name: str, errors: list[str]) -> None:
 # test
 # ---------------------------------------------------------------------------
 
+
 def print_test_header(sync_name: str) -> None:
     console.print(f"\n[bold]{sync_name}[/bold]")
 
 
-def print_test_result(
-    test_name: str, passed: bool, message: str
-) -> None:
+def print_test_result(test_name: str, passed: bool, message: str) -> None:
     mark = "[green]✓[/green]" if passed else "[red]✗[/red]"
     console.print(f"  {mark} {test_name}: {message}")
 
@@ -161,6 +162,7 @@ def print_test_skip(sync_name: str, reason: str) -> None:
 # ---------------------------------------------------------------------------
 # status
 # ---------------------------------------------------------------------------
+
 
 def print_status_table(states: dict[str, SyncState]) -> None:
     if not states:
@@ -196,13 +198,13 @@ def print_status_table(states: dict[str, SyncState]) -> None:
 # verbose row errors
 # ---------------------------------------------------------------------------
 
+
 def print_row_errors(row_errors: list[RowError]) -> None:
     """Print per-row error details (used with --verbose flag)."""
     for re in row_errors:
         http_part = f"HTTP {re.http_status} " if re.http_status is not None else ""
         console.print(
-            f"  [dim]row {re.batch_index}:[/dim] "
-            f"[red]{http_part}{re.error_message[:120]}[/red]"
+            f"  [dim]row {re.batch_index}:[/dim] [red]{http_part}{re.error_message[:120]}[/red]"
         )
 
 
@@ -233,14 +235,14 @@ def print_status_verbose(
         for re in row_errs:
             http_part = f"HTTP {re.http_status} " if re.http_status is not None else ""
             console.print(
-                f"  [dim]row {re.batch_index}:[/dim] "
-                f"[red]{http_part}{re.error_message[:120]}[/red]"
+                f"  [dim]row {re.batch_index}:[/dim] [red]{http_part}{re.error_message[:120]}[/red]"
             )
 
 
 # ---------------------------------------------------------------------------
 # errors
 # ---------------------------------------------------------------------------
+
 
 def print_error(message: str) -> None:
     console.print(f"[bold red]Error:[/bold red] {message}")

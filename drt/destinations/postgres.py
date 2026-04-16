@@ -52,11 +52,21 @@ class PostgresDestination:
 
             if sync_options.mode == "replace":
                 result = self._load_replace(
-                    conn, cur, records, columns, config.table, sync_options,
+                    conn,
+                    cur,
+                    records,
+                    columns,
+                    config.table,
+                    sync_options,
                 )
             else:
                 result = self._load_upsert(
-                    conn, cur, records, columns, config, sync_options,
+                    conn,
+                    cur,
+                    records,
+                    columns,
+                    config,
+                    sync_options,
                 )
         finally:
             conn.close()
@@ -121,7 +131,10 @@ class PostgresDestination:
         result = SyncResult()
         update_cols = [c for c in columns if c not in config.upsert_key]
         sql = PostgresDestination._build_upsert_sql(
-            config.table, columns, config.upsert_key, update_cols,
+            config.table,
+            columns,
+            config.upsert_key,
+            update_cols,
         )
 
         for i, record in enumerate(records):

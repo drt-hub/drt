@@ -64,11 +64,21 @@ class MySQLDestination:
 
             if sync_options.mode == "replace":
                 result = self._load_replace(
-                    conn, cur, records, columns, config.table, sync_options,
+                    conn,
+                    cur,
+                    records,
+                    columns,
+                    config.table,
+                    sync_options,
                 )
             else:
                 result = self._load_upsert(
-                    conn, cur, records, columns, config, sync_options,
+                    conn,
+                    cur,
+                    records,
+                    columns,
+                    config,
+                    sync_options,
                 )
         finally:
             conn.close()

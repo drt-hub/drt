@@ -10,9 +10,7 @@ import yaml
 from drt.integrations.airflow import DrtRunOperator, run_drt_sync
 
 
-def test_run_drt_sync_not_found(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_run_drt_sync_not_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """run_drt_sync raises ValueError for unknown sync."""
     # Create minimal project
     (tmp_path / "drt_project.yml").write_text(

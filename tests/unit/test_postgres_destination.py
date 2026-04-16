@@ -239,9 +239,7 @@ class TestPostgresReplaceMode:
         # Second batch — should NOT truncate again
         dest.load([{"id": 2, "score": 0.9}], _config(), _options(mode="replace"))
 
-        all_sqls = [
-            call[0][0] for call in conn.cursor().execute.call_args_list
-        ]
+        all_sqls = [call[0][0] for call in conn.cursor().execute.call_args_list]
         truncate_count = sum(1 for sql in all_sqls if "TRUNCATE" in sql)
         assert truncate_count == 1
 

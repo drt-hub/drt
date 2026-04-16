@@ -19,6 +19,7 @@ from drt.destinations.rest_api import RestApiDestination
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _sync_options(max_attempts: int = 1) -> SyncOptions:
     return SyncOptions(
         batch_size=10,
@@ -56,6 +57,7 @@ def _make_response(status_code: int, text: str = "") -> httpx.Response:
 # Success cases
 # ---------------------------------------------------------------------------
 
+
 class TestRestApiDestinationSuccess:
     def test_all_records_succeed(self) -> None:
         records = [{"id": 1}, {"id": 2}, {"id": 3}]
@@ -92,6 +94,7 @@ class TestRestApiDestinationSuccess:
 # ---------------------------------------------------------------------------
 # Failure cases — row_errors populated
 # ---------------------------------------------------------------------------
+
 
 class TestRestApiDestinationRowErrors:
     def test_http_422_creates_row_error(self) -> None:

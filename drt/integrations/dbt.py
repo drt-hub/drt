@@ -9,6 +9,7 @@ Usage:
     table = resolve_ref_from_manifest("my_model", project_dir)
     # Returns: '"analytics"."public"."my_model"' or None
 """
+
 from __future__ import annotations
 
 import json

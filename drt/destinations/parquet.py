@@ -40,9 +40,7 @@ class ParquetDestination:
             import pandas as pd  # type: ignore[import-untyped]
             import pyarrow  # type: ignore[import-untyped]  # noqa: F401
         except ImportError as e:
-            raise ImportError(
-                "Parquet destination requires: pip install drt-core[parquet]"
-            ) from e
+            raise ImportError("Parquet destination requires: pip install drt-core[parquet]") from e
 
         result = SyncResult()
 

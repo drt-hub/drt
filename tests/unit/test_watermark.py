@@ -1,4 +1,5 @@
 """Tests for watermark storage backends."""
+
 from __future__ import annotations
 
 import json
@@ -36,7 +37,8 @@ class TestLocalWatermarkStorage:
 class TestGCSWatermarkStorage:
     @patch("drt.state.watermark._gcs_client")
     def test_get_returns_none_when_blob_missing(
-        self, mock_client: MagicMock,
+        self,
+        mock_client: MagicMock,
     ) -> None:
         from drt.state.watermark import GCSWatermarkStorage
 
@@ -45,7 +47,8 @@ class TestGCSWatermarkStorage:
         blob.exists.return_value = False
 
         storage = GCSWatermarkStorage(
-            bucket="my-bucket", key="watermarks/sync.json",
+            bucket="my-bucket",
+            key="watermarks/sync.json",
         )
         assert storage.get("my_sync") is None
 
@@ -58,7 +61,8 @@ class TestGCSWatermarkStorage:
         blob.exists.return_value = False
 
         storage = GCSWatermarkStorage(
-            bucket="my-bucket", key="watermarks/sync.json",
+            bucket="my-bucket",
+            key="watermarks/sync.json",
         )
         storage.save("my_sync", "2026-04-15T10:00:00")
 
@@ -76,7 +80,8 @@ class TestGCSWatermarkStorage:
         blob.download_as_text.return_value = '{"my_sync": "2026-04-15"}'
 
         storage = GCSWatermarkStorage(
-            bucket="my-bucket", key="watermarks/sync.json",
+            bucket="my-bucket",
+            key="watermarks/sync.json",
         )
         assert storage.get("my_sync") == "2026-04-15"
 
@@ -86,7 +91,8 @@ class TestBigQueryWatermarkStorage:
         from drt.state.watermark import BigQueryWatermarkStorage
 
         storage = BigQueryWatermarkStorage(
-            project="my-project", dataset="my_dataset",
+            project="my-project",
+            dataset="my_dataset",
         )
         # Bypass _query_config which needs google.cloud.bigquery
         storage._query_config = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
@@ -94,23 +100,21 @@ class TestBigQueryWatermarkStorage:
 
     @patch("drt.state.watermark._bq_client")
     def test_get_returns_none_when_no_row(
-        self, mock_client: MagicMock,
+        self,
+        mock_client: MagicMock,
     ) -> None:
-        mock_client.return_value.query.return_value.result.return_value = (
-            iter([])
-        )
+        mock_client.return_value.query.return_value.result.return_value = iter([])
         storage = self._make_storage()
         assert storage.get("my_sync") is None
 
     @patch("drt.state.watermark._bq_client")
     def test_get_returns_value_when_row_exists(
-        self, mock_client: MagicMock,
+        self,
+        mock_client: MagicMock,
     ) -> None:
         row = MagicMock()
         row.watermark_value = "2026-04-15T10:00:00"
-        mock_client.return_value.query.return_value.result.return_value = (
-            iter([row])
-        )
+        mock_client.return_value.query.return_value.result.return_value = iter([row])
         storage = self._make_storage()
         assert storage.get("my_sync") == "2026-04-15T10:00:00"
 

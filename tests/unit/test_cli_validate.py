@@ -145,9 +145,7 @@ def test_cli_validate_invalid_sync_shows_errors(
     assert result.exit_code == 1
 
 
-def test_cli_validate_mixed_shows_both(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cli_validate_mixed_shows_both(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_sync(tmp_path / "syncs", "a_good", VALID_SYNC)
     _write_sync(tmp_path / "syncs", "b_bad", {"name": "bad"})
     monkeypatch.chdir(tmp_path)

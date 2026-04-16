@@ -23,9 +23,7 @@ def _safe_table(table: str) -> str:
     return table
 
 
-def build_test_query(
-    test: SyncTest, table: str
-) -> tuple[str, Callable[[int], bool]]:
+def build_test_query(test: SyncTest, table: str) -> tuple[str, Callable[[int], bool]]:
     """Return (SQL query, check_function) for a test.
 
     The query returns a single integer.

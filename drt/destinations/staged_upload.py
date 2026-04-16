@@ -104,18 +104,12 @@ class StagedUploadDestination:
         try:
             # Phase 1: Stage — serialize and upload file
             file_bytes = self._serialize(config.format)
-            stage_resp = self._http_phase(
-                config.stage, context, file_bytes=file_bytes
-            )
-            self._extract_values(
-                stage_resp, config.stage.response_extract, context
-            )
+            stage_resp = self._http_phase(config.stage, context, file_bytes=file_bytes)
+            self._extract_values(stage_resp, config.stage.response_extract, context)
 
             # Phase 2: Trigger — kick off server-side job
             trigger_resp = self._http_phase(config.trigger, context)
-            self._extract_values(
-                trigger_resp, config.trigger.response_extract, context
-            )
+            self._extract_values(trigger_resp, config.trigger.response_extract, context)
 
             # Phase 3: Poll — wait for completion (optional)
             if config.poll is not None:
@@ -208,11 +202,7 @@ class StagedUploadDestination:
         context: dict[str, str],
     ) -> None:
         """Poll for job completion."""
-        url = (
-            _render(poll_config.url, context)
-            if "{{" in poll_config.url
-            else poll_config.url
-        )
+        url = _render(poll_config.url, context) if "{{" in poll_config.url else poll_config.url
         headers: dict[str, str] = dict(poll_config.headers or {})
         if poll_config.auth:
             headers.update(AuthHandler(poll_config.auth).get_headers())
@@ -221,9 +211,7 @@ class StagedUploadDestination:
 
         with httpx.Client(timeout=60.0) as client:
             while True:
-                response = client.request(
-                    poll_config.method, url, headers=headers
-                )
+                response = client.request(poll_config.method, url, headers=headers)
                 response.raise_for_status()
                 data = response.json()
 
@@ -232,9 +220,7 @@ class StagedUploadDestination:
                 if status in poll_config.success_values:
                     return
                 if status in poll_config.failure_values:
-                    raise RuntimeError(
-                        f"Job failed with status: {status}"
-                    )
+                    raise RuntimeError(f"Job failed with status: {status}")
                 if time.monotonic() > deadline:
                     raise TimeoutError(
                         f"Poll timed out after {poll_config.timeout_seconds}s"

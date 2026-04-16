@@ -41,17 +41,13 @@ def test_resolve_env_from_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
     assert resolve_env(None, "MY_SECRET") == "from_env"
 
 
-def test_resolve_env_from_secrets_toml(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_resolve_env_from_secrets_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TOML_SECRET", raising=False)
     monkeypatch.chdir(tmp_path)
 
     secrets_dir = tmp_path / ".drt"
     secrets_dir.mkdir()
-    (secrets_dir / "secrets.toml").write_text(
-        '[destinations]\nTOML_SECRET = "from_toml"\n'
-    )
+    (secrets_dir / "secrets.toml").write_text('[destinations]\nTOML_SECRET = "from_toml"\n')
 
     result = resolve_env(None, "TOML_SECRET")
     assert result == "from_toml"
@@ -65,9 +61,7 @@ def test_resolve_env_env_var_beats_secrets_toml(
 
     secrets_dir = tmp_path / ".drt"
     secrets_dir.mkdir()
-    (secrets_dir / "secrets.toml").write_text(
-        '[destinations]\nMY_VAR = "from_toml"\n'
-    )
+    (secrets_dir / "secrets.toml").write_text('[destinations]\nMY_VAR = "from_toml"\n')
 
     result = resolve_env(None, "MY_VAR")
     assert result == "from_env"

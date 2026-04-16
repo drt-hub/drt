@@ -80,7 +80,7 @@ def make_handler(
                 self._json(404, {"error": "not found"})
                 return
 
-            sync_name = path[len("/sync/"):].strip("/")
+            sync_name = path[len("/sync/") :].strip("/")
             if not sync_name:
                 self._json(400, {"error": "sync name required"})
                 return
@@ -128,16 +128,11 @@ def serve(
     handler = make_handler(token, sync_lock, project_dir)
     server = ThreadingHTTPServer((host, port), handler)
     auth_note = (
-        "with bearer token auth"
-        if token
-        else "[yellow]without auth (local dev only)[/yellow]"
+        "with bearer token auth" if token else "[yellow]without auth (local dev only)[/yellow]"
     )
     from drt.cli.output import console
 
-    console.print(
-        f"[bold]drt webhook server[/bold] listening on "
-        f"http://{host}:{port} {auth_note}"
-    )
+    console.print(f"[bold]drt webhook server[/bold] listening on http://{host}:{port} {auth_note}")
     console.print("  POST /sync/<name>[?dry_run=true]  → trigger sync")
     console.print("  GET  /health                       → status")
     try:

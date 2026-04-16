@@ -85,19 +85,17 @@ def test_serialize_json() -> None:
 def test_finalize_stage_trigger_poll(httpserver: HTTPServer) -> None:
     """Full flow: stage upload → trigger job → poll success."""
     # Stage endpoint: accept file upload, return upload_id
-    httpserver.expect_ordered_request(
-        "/upload", method="POST"
-    ).respond_with_json({"uploadId": "u-123"})
+    httpserver.expect_ordered_request("/upload", method="POST").respond_with_json(
+        {"uploadId": "u-123"}
+    )
 
     # Trigger endpoint: start job, return job_id
-    httpserver.expect_ordered_request(
-        "/jobs", method="POST"
-    ).respond_with_json({"jobId": "j-456"})
+    httpserver.expect_ordered_request("/jobs", method="POST").respond_with_json({"jobId": "j-456"})
 
     # Poll endpoint: return success
-    httpserver.expect_ordered_request(
-        "/jobs/j-456", method="GET"
-    ).respond_with_json({"status": "SUCCEEDED"})
+    httpserver.expect_ordered_request("/jobs/j-456", method="GET").respond_with_json(
+        {"status": "SUCCEEDED"}
+    )
 
     config = StagedUploadDestinationConfig(
         type="staged_upload",
@@ -135,13 +133,11 @@ def test_finalize_stage_trigger_poll(httpserver: HTTPServer) -> None:
 
 def test_finalize_without_poll(httpserver: HTTPServer) -> None:
     """Stage + Trigger only (poll is optional)."""
-    httpserver.expect_ordered_request(
-        "/upload", method="POST"
-    ).respond_with_json({"uploadId": "u-1"})
+    httpserver.expect_ordered_request("/upload", method="POST").respond_with_json(
+        {"uploadId": "u-1"}
+    )
 
-    httpserver.expect_ordered_request(
-        "/jobs", method="POST"
-    ).respond_with_json({"ok": True})
+    httpserver.expect_ordered_request("/jobs", method="POST").respond_with_json({"ok": True})
 
     config = StagedUploadDestinationConfig(
         type="staged_upload",
@@ -167,15 +163,9 @@ def test_finalize_without_poll(httpserver: HTTPServer) -> None:
 
 def test_finalize_poll_failure(httpserver: HTTPServer) -> None:
     """Poll returns failure status."""
-    httpserver.expect_ordered_request(
-        "/upload"
-    ).respond_with_json({"uploadId": "u-1"})
-    httpserver.expect_ordered_request(
-        "/jobs"
-    ).respond_with_json({"jobId": "j-1"})
-    httpserver.expect_ordered_request(
-        "/jobs/j-1"
-    ).respond_with_json({"status": "FAILED"})
+    httpserver.expect_ordered_request("/upload").respond_with_json({"uploadId": "u-1"})
+    httpserver.expect_ordered_request("/jobs").respond_with_json({"jobId": "j-1"})
+    httpserver.expect_ordered_request("/jobs/j-1").respond_with_json({"status": "FAILED"})
 
     config = StagedUploadDestinationConfig(
         type="staged_upload",
@@ -207,9 +197,7 @@ def test_finalize_poll_failure(httpserver: HTTPServer) -> None:
 
 def test_finalize_stage_error(httpserver: HTTPServer) -> None:
     """Stage endpoint returns 500."""
-    httpserver.expect_request("/upload").respond_with_data(
-        "error", status=500
-    )
+    httpserver.expect_request("/upload").respond_with_data("error", status=500)
 
     config = StagedUploadDestinationConfig(
         type="staged_upload",
@@ -230,9 +218,7 @@ def test_finalize_stage_error(httpserver: HTTPServer) -> None:
 
 def test_records_cleared_after_finalize(httpserver: HTTPServer) -> None:
     """Records are cleared even on failure."""
-    httpserver.expect_request("/upload").respond_with_data(
-        "error", status=500
-    )
+    httpserver.expect_request("/upload").respond_with_data("error", status=500)
 
     config = StagedUploadDestinationConfig(
         type="staged_upload",

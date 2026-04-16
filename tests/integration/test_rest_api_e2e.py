@@ -26,7 +26,10 @@ from tests.integration.conftest import FakeSource
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _dest_config(httpserver, body_template: str | None = None, auth=None) -> RestApiDestinationConfig:  # noqa: E501
+
+def _dest_config(
+    httpserver, body_template: str | None = None, auth=None
+) -> RestApiDestinationConfig:  # noqa: E501
     return RestApiDestinationConfig(
         type="rest_api",
         url=httpserver.url_for("/webhook"),
@@ -64,6 +67,7 @@ def _profile() -> BigQueryProfile:
 # Basic success
 # ---------------------------------------------------------------------------
 
+
 def test_full_sync_all_success(httpserver, fake_source, tmp_path):
     httpserver.expect_ordered_request("/webhook", method="POST").respond_with_data("OK", status=200)
     httpserver.expect_ordered_request("/webhook", method="POST").respond_with_data("OK", status=200)
@@ -84,6 +88,7 @@ def test_body_template_rendered(httpserver, tmp_path):
     def handler(request):
         received.append(json.loads(request.data))
         from werkzeug.wrappers import Response
+
         return Response("OK", status=200)
 
     httpserver.expect_request("/webhook", method="POST").respond_with_handler(handler)
@@ -105,6 +110,7 @@ def test_body_template_rendered(httpserver, tmp_path):
 # Auth
 # ---------------------------------------------------------------------------
 
+
 def test_bearer_auth_header_sent(httpserver, tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_TOKEN", "sk-secret123")
     received_headers = {}
@@ -112,11 +118,13 @@ def test_bearer_auth_header_sent(httpserver, tmp_path, monkeypatch):
     def handler(request):
         received_headers.update(dict(request.headers))
         from werkzeug.wrappers import Response
+
         return Response("OK", status=200)
 
     httpserver.expect_request("/webhook").respond_with_handler(handler)
 
     from drt.config.models import BearerAuth
+
     source = FakeSource([{"id": 1}])
     auth = BearerAuth(type="bearer", token_env="TEST_TOKEN")
     dest_cfg = _dest_config(httpserver, auth=auth)
@@ -132,11 +140,13 @@ def test_api_key_auth_header_sent(httpserver, tmp_path, monkeypatch):
     def handler(request):
         received_headers.update(dict(request.headers))
         from werkzeug.wrappers import Response
+
         return Response("OK", status=200)
 
     httpserver.expect_request("/webhook").respond_with_handler(handler)
 
     from drt.config.models import ApiKeyAuth
+
     source = FakeSource([{"id": 1}])
     auth = ApiKeyAuth(type="api_key", header="X-API-Key", value_env="MY_KEY")
     dest_cfg = _dest_config(httpserver, auth=auth)
@@ -148,6 +158,7 @@ def test_api_key_auth_header_sent(httpserver, tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # Error handling
 # ---------------------------------------------------------------------------
+
 
 def test_on_error_skip_continues(httpserver, tmp_path):
     # First request fails, rest succeed
@@ -168,6 +179,7 @@ def test_on_error_skip_continues(httpserver, tmp_path):
 # ---------------------------------------------------------------------------
 # Retry
 # ---------------------------------------------------------------------------
+
 
 def test_retry_on_500_succeeds_on_third(httpserver, tmp_path):
     httpserver.expect_ordered_request("/webhook").respond_with_data("err", status=500)
@@ -190,6 +202,7 @@ def test_retry_on_500_succeeds_on_third(httpserver, tmp_path):
 # ---------------------------------------------------------------------------
 # Rate limiting (timing-based — uses small rps for fast test)
 # ---------------------------------------------------------------------------
+
 
 def test_rate_limiting_enforces_delay(httpserver, tmp_path):
     for _ in range(3):
