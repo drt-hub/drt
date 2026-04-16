@@ -61,9 +61,7 @@ class SnowflakeSource:
         try:
             import snowflake.connector
         except ImportError as e:
-            raise ImportError(
-                "Snowflake support requires: pip install drt-core[snowflake]"
-            ) from e
+            raise ImportError("Snowflake support requires: pip install drt-core[snowflake]") from e
 
         password = resolve_env(config.password, config.password_env) or ""
 

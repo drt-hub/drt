@@ -25,9 +25,7 @@ def _config(httpserver: HTTPServer, **overrides: str) -> GoogleAdsDestinationCon
 
 
 class TestGoogleAdsDestination:
-    def test_success(
-        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_success(self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
 
         httpserver.expect_request(
@@ -47,9 +45,7 @@ class TestGoogleAdsDestination:
         assert result.success == 1
         assert result.failed == 0
 
-    def test_missing_gclid(
-        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_missing_gclid(self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
         config = _config(httpserver)
         records = [{"conversion_time": "2024-01-01 12:00:00"}]
@@ -69,18 +65,18 @@ class TestGoogleAdsDestination:
                 _options(),
             )
 
-    def test_partial_failure(
-        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_partial_failure(self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
 
         httpserver.expect_request(
             "/v17/customers/1234567890:uploadClickConversions",
-        ).respond_with_json({
-            "partialFailureError": {
-                "details": [{"message": "Invalid gclid"}],
-            },
-        })
+        ).respond_with_json(
+            {
+                "partialFailureError": {
+                    "details": [{"message": "Invalid gclid"}],
+                },
+            }
+        )
 
         from drt.destinations import google_ads
 

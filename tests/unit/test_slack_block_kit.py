@@ -181,9 +181,7 @@ class TestBlockKitErrors:
             block_kit=True,
             message_template=template,
         )
-        result = SlackDestination().load(
-            [{"count": 42, "active": True}], config, _options()
-        )
+        result = SlackDestination().load([{"count": 42, "active": True}], config, _options())
         assert result.success == 1
 
         req = httpserver.log[0][0]

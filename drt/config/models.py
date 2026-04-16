@@ -335,7 +335,7 @@ class NotionDestinationConfig(BaseModel):
     type: Literal["notion"]
     database_id: str
     # Jinja2 template → JSON object of Notion page properties
-    # Example: '{"Name": {"title": [{"text": {"content": "{{ row.name }}"}}]}, "Email": {"email": "{{ row.email }}"}}'
+    # Example: see https://developers.notion.com/reference/post-page for template format
     properties_template: str | None = None
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
 

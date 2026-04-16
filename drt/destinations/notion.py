@@ -31,7 +31,6 @@ import httpx
 
 from drt.config.credentials import resolve_env
 from drt.config.models import (
-    BearerAuth,
     DestinationConfig,
     NotionDestinationConfig,
     RetryConfig,
@@ -77,9 +76,7 @@ class NotionDestination:
         pages_url = f"{_NOTION_API}/pages"
         result = SyncResult()
         # Notion rate limit: ~3 req/s for integrations
-        rate_limiter = RateLimiter(
-            min(sync_options.rate_limit.requests_per_second, 3)
-        )
+        rate_limiter = RateLimiter(min(sync_options.rate_limit.requests_per_second, 3))
 
         with httpx.Client(timeout=30.0) as client:
             for i, record in enumerate(records):

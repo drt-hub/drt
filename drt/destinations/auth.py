@@ -54,13 +54,9 @@ class AuthHandler:
             username = os.environ.get(auth.username_env, "")
             password = os.environ.get(auth.password_env, "")
             if not username:
-                raise ValueError(
-                    f"BasicAuth: env var '{auth.username_env}' is not set."
-                )
+                raise ValueError(f"BasicAuth: env var '{auth.username_env}' is not set.")
             if not password:
-                raise ValueError(
-                    f"BasicAuth: env var '{auth.password_env}' is not set."
-                )
+                raise ValueError(f"BasicAuth: env var '{auth.password_env}' is not set.")
             encoded = base64.b64encode(f"{username}:{password}".encode()).decode()
             return {"Authorization": f"Basic {encoded}"}
 
@@ -92,13 +88,9 @@ def _get_oauth2_token(auth: OAuth2ClientCredentialsAuth) -> dict[str, str]:
     client_id = resolve_env(None, auth.client_id_env)
     client_secret = resolve_env(None, auth.client_secret_env)
     if not client_id:
-        raise ValueError(
-            f"OAuth2: env var '{auth.client_id_env}' is not set."
-        )
+        raise ValueError(f"OAuth2: env var '{auth.client_id_env}' is not set.")
     if not client_secret:
-        raise ValueError(
-            f"OAuth2: env var '{auth.client_secret_env}' is not set."
-        )
+        raise ValueError(f"OAuth2: env var '{auth.client_secret_env}' is not set.")
 
     data: dict[str, str] = {
         "grant_type": "client_credentials",

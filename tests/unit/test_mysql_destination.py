@@ -179,9 +179,7 @@ class TestMySQLDestinationLoad:
         conn.close.assert_called_once()
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
-    def test_dict_and_list_values_are_json_serialized(
-        self, mock_connect: MagicMock
-    ) -> None:
+    def test_dict_and_list_values_are_json_serialized(self, mock_connect: MagicMock) -> None:
         """dict/list values (e.g. from BigQuery JSON columns) must be
         serialized to JSON strings before being passed to pymysql."""
         conn = _fake_connection()

@@ -194,8 +194,6 @@ class TestClickHouseDestinationLoad:
         mock_connect.return_value = client
 
         big_record = {"id": 1, "data": "x" * 500}
-        result = ClickHouseDestination().load(
-            [big_record], _config(), _options(on_error="skip")
-        )
+        result = ClickHouseDestination().load([big_record], _config(), _options(on_error="skip"))
 
         assert len(result.row_errors[0].record_preview) <= 200

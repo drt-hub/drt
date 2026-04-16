@@ -42,6 +42,7 @@ class DuckDBSource:
         assert isinstance(config, DuckDBProfile)
         try:
             import duckdb
+
             conn = duckdb.connect(config.database)
             conn.execute("SELECT 1").fetchall()
             conn.close()

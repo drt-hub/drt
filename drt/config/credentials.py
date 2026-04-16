@@ -404,9 +404,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
     if source_type == "sqlserver":
         _db = raw.get("database", "")
         if not _db:
-            raise ValueError(
-                "SQL Server profile requires 'database'."
-            )
+            raise ValueError("SQL Server profile requires 'database'.")
         return SQLServerProfile(
             type="sqlserver",
             host=raw.get("host", ""),
@@ -422,9 +420,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
         _host = raw.get("server_hostname", "")
         _path = raw.get("http_path", "")
         if not _host or not _path:
-            raise ValueError(
-                "Databricks profile requires 'server_hostname' and 'http_path'."
-            )
+            raise ValueError("Databricks profile requires 'server_hostname' and 'http_path'.")
         return DatabricksProfile(
             type="databricks",
             server_hostname=_host,

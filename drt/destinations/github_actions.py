@@ -86,9 +86,7 @@ class GitHubActionsDestination:
 
         result = SyncResult()
         # GitHub rate limit: 1000 workflow_dispatch/hour per repo — be conservative
-        rate_limiter = RateLimiter(
-            min(sync_options.rate_limit.requests_per_second, 5)
-        )
+        rate_limiter = RateLimiter(min(sync_options.rate_limit.requests_per_second, 5))
 
         with httpx.Client(timeout=30.0) as client:
             for i, record in enumerate(records):

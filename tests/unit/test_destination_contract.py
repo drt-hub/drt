@@ -38,25 +38,19 @@ ALL_DESTINATIONS = [
 ]
 
 
-@pytest.mark.parametrize(
-    "cls", ALL_DESTINATIONS, ids=lambda c: c.__name__
-)
+@pytest.mark.parametrize("cls", ALL_DESTINATIONS, ids=lambda c: c.__name__)
 def test_implements_destination_protocol(cls: type) -> None:
     assert isinstance(cls(), Destination)
 
 
-@pytest.mark.parametrize(
-    "cls", ALL_DESTINATIONS, ids=lambda c: c.__name__
-)
+@pytest.mark.parametrize("cls", ALL_DESTINATIONS, ids=lambda c: c.__name__)
 def test_load_method_signature(cls: type) -> None:
     sig = inspect.signature(cls.load)
     params = list(sig.parameters.keys())
     assert params == ["self", "records", "config", "sync_options"]
 
 
-@pytest.mark.parametrize(
-    "cls", ALL_DESTINATIONS, ids=lambda c: c.__name__
-)
+@pytest.mark.parametrize("cls", ALL_DESTINATIONS, ids=lambda c: c.__name__)
 def test_load_return_annotation(cls: type) -> None:
     sig = inspect.signature(cls.load)
     ann = sig.return_annotation

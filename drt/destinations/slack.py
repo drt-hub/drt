@@ -68,9 +68,7 @@ class SlackDestination:
             os.environ.get(config.webhook_url_env) if config.webhook_url_env else None
         )
         if not webhook_url:
-            raise ValueError(
-                "Slack destination: provide 'webhook_url' or set 'webhook_url_env'."
-            )
+            raise ValueError("Slack destination: provide 'webhook_url' or set 'webhook_url_env'.")
 
         result = SyncResult()
         rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)

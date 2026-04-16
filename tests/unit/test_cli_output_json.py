@@ -35,9 +35,7 @@ def test_status_json_empty(tmp_path: Path, monkeypatch: object) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_run_json_no_project(
-    tmp_path: Path, monkeypatch: object
-) -> None:
+def test_run_json_no_project(tmp_path: Path, monkeypatch: object) -> None:
     """run --output json without drt_project.yml should exit 1."""
     import pytest
 
@@ -48,9 +46,7 @@ def test_run_json_no_project(
     mp.undo()
 
 
-def test_run_json_no_syncs(
-    tmp_path: Path, monkeypatch: object
-) -> None:
+def test_run_json_no_syncs(tmp_path: Path, monkeypatch: object) -> None:
     """run --output json with no syncs should not print rich output."""
     import pytest
     import yaml
@@ -59,9 +55,7 @@ def test_run_json_no_syncs(
     mp.chdir(tmp_path)
 
     # Create minimal project file
-    (tmp_path / "drt_project.yml").write_text(
-        yaml.dump({"version": "0.1", "profile": "default"})
-    )
+    (tmp_path / "drt_project.yml").write_text(yaml.dump({"version": "0.1", "profile": "default"}))
     # Create empty credentials
     creds_dir = tmp_path / ".drt"
     creds_dir.mkdir()
@@ -80,9 +74,7 @@ def test_run_json_no_syncs(
 # ---------------------------------------------------------------------------
 
 
-def test_status_json_with_state(
-    tmp_path: Path, monkeypatch: object
-) -> None:
+def test_status_json_with_state(tmp_path: Path, monkeypatch: object) -> None:
     import pytest
 
     mp = pytest.MonkeyPatch()
@@ -92,8 +84,12 @@ def test_status_json_with_state(
     mgr.save_sync(SyncState("sync_a", TS, 42, "success"))
     mgr.save_sync(
         SyncState(
-            "sync_b", TS, 5, "partial",
-            error="row 3 failed", last_cursor_value="100",
+            "sync_b",
+            TS,
+            5,
+            "partial",
+            error="row 3 failed",
+            last_cursor_value="100",
         )
     )
 
@@ -116,9 +112,7 @@ def test_status_json_with_state(
     mp.undo()
 
 
-def test_status_json_no_rich_markup(
-    tmp_path: Path, monkeypatch: object
-) -> None:
+def test_status_json_no_rich_markup(tmp_path: Path, monkeypatch: object) -> None:
     """JSON output should not contain Rich markup like [green]."""
     import pytest
 
@@ -142,9 +136,7 @@ def test_status_json_no_rich_markup(
 # ---------------------------------------------------------------------------
 
 
-def test_list_json(
-    tmp_path: Path, monkeypatch: object
-) -> None:
+def test_list_json(tmp_path: Path, monkeypatch: object) -> None:
     import pytest
     import yaml
 
@@ -154,15 +146,18 @@ def test_list_json(
     syncs_dir = tmp_path / "syncs"
     syncs_dir.mkdir()
     with (syncs_dir / "test.yml").open("w") as f:
-        yaml.dump({
-            "name": "my-sync",
-            "model": "SELECT 1",
-            "destination": {
-                "type": "rest_api",
-                "url": "http://example.com",
-                "method": "POST",
+        yaml.dump(
+            {
+                "name": "my-sync",
+                "model": "SELECT 1",
+                "destination": {
+                    "type": "rest_api",
+                    "url": "http://example.com",
+                    "method": "POST",
+                },
             },
-        }, f)
+            f,
+        )
 
     result = runner.invoke(app, ["list", "--output", "json"])
     data = json.loads(result.output)
@@ -179,9 +174,7 @@ def test_list_json(
 # ---------------------------------------------------------------------------
 
 
-def test_validate_json_valid(
-    tmp_path: Path, monkeypatch: object
-) -> None:
+def test_validate_json_valid(tmp_path: Path, monkeypatch: object) -> None:
     import pytest
     import yaml
 
@@ -191,15 +184,18 @@ def test_validate_json_valid(
     syncs_dir = tmp_path / "syncs"
     syncs_dir.mkdir()
     with (syncs_dir / "ok.yml").open("w") as f:
-        yaml.dump({
-            "name": "good",
-            "model": "SELECT 1",
-            "destination": {
-                "type": "rest_api",
-                "url": "http://example.com",
-                "method": "POST",
+        yaml.dump(
+            {
+                "name": "good",
+                "model": "SELECT 1",
+                "destination": {
+                    "type": "rest_api",
+                    "url": "http://example.com",
+                    "method": "POST",
+                },
             },
-        }, f)
+            f,
+        )
 
     result = runner.invoke(app, ["validate", "--output", "json"])
     data = json.loads(result.output)
@@ -210,9 +206,7 @@ def test_validate_json_valid(
     mp.undo()
 
 
-def test_validate_json_invalid(
-    tmp_path: Path, monkeypatch: object
-) -> None:
+def test_validate_json_invalid(tmp_path: Path, monkeypatch: object) -> None:
     import pytest
     import yaml
 

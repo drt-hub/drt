@@ -61,9 +61,7 @@ class SQLServerSource:
         try:
             import pymssql
         except ImportError as e:
-            raise ImportError(
-                "SQL Server support requires: pip install drt-core[sqlserver]"
-            ) from e
+            raise ImportError("SQL Server support requires: pip install drt-core[sqlserver]") from e
 
         return pymssql.connect(
             server=config.host,

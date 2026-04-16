@@ -22,6 +22,7 @@ from drt.mcp.server import create_server  # noqa: E402
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 async def call(server: FastMCP, tool_name: str, **kwargs: Any) -> Any:
     """Call an MCP tool and return the structured result.
 
@@ -39,6 +40,7 @@ async def call(server: FastMCP, tool_name: str, **kwargs: Any) -> Any:
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture()
 def project_dir(tmp_path: Path) -> Path:
@@ -64,8 +66,10 @@ def server(project_dir: Path) -> FastMCP:
 # Server creation
 # ---------------------------------------------------------------------------
 
+
 def test_create_server_returns_fastmcp_instance() -> None:
     from fastmcp import FastMCP
+
     assert isinstance(create_server(), FastMCP)
 
 
@@ -75,7 +79,11 @@ async def test_server_has_expected_tools() -> None:
     tools = await srv._local_provider._list_tools()
     tool_names = {t.name for t in tools}
     expected = {
-        "drt_list_syncs", "drt_run_sync", "drt_get_status", "drt_validate", "drt_get_schema"
+        "drt_list_syncs",
+        "drt_run_sync",
+        "drt_get_status",
+        "drt_validate",
+        "drt_get_schema",
     }
     assert expected <= tool_names
 
@@ -83,6 +91,7 @@ async def test_server_has_expected_tools() -> None:
 # ---------------------------------------------------------------------------
 # drt_list_syncs
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_list_syncs_returns_sync(server: FastMCP) -> None:
@@ -105,6 +114,7 @@ async def test_list_syncs_empty_project(tmp_path: Path) -> None:
 # drt_validate
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_validate_returns_valid_syncs(server: FastMCP) -> None:
     result = await call(server, "drt_validate")
@@ -115,6 +125,7 @@ async def test_validate_returns_valid_syncs(server: FastMCP) -> None:
 # ---------------------------------------------------------------------------
 # drt_get_status
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_get_status_no_history(server: FastMCP) -> None:
@@ -148,6 +159,7 @@ async def test_get_status_after_state_saved(server, project_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 # drt_get_schema
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_get_schema_sync(server: FastMCP) -> None:

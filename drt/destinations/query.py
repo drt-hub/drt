@@ -31,9 +31,7 @@ def get_table_name(config: DestinationConfig) -> str:
         return config.table
     if isinstance(config, ClickHouseDestinationConfig):
         return config.table
-    raise TypeError(
-        f"Cannot get table name from {type(config).__name__}"
-    )
+    raise TypeError(f"Cannot get table name from {type(config).__name__}")
 
 
 def execute_test_query(config: DestinationConfig, query: str) -> int:
@@ -47,9 +45,7 @@ def execute_test_query(config: DestinationConfig, query: str) -> int:
     raise TypeError(f"Cannot query {type(config).__name__}")
 
 
-def _query_postgres(
-    config: PostgresDestinationConfig, query: str
-) -> int:
+def _query_postgres(config: PostgresDestinationConfig, query: str) -> int:
     from drt.destinations.postgres import PostgresDestination
 
     conn = PostgresDestination._connect(config)
@@ -70,17 +66,13 @@ def _query_mysql(config: MySQLDestinationConfig, query: str) -> int:
         cur = conn.cursor()
         cur.execute(query)
         row = cur.fetchone()
-        val: Any = (
-            row[0] if isinstance(row, tuple) else list(row.values())[0]
-        )
+        val: Any = row[0] if isinstance(row, tuple) else list(row.values())[0]
         return int(val)
     finally:
         conn.close()
 
 
-def _query_clickhouse(
-    config: ClickHouseDestinationConfig, query: str
-) -> int:
+def _query_clickhouse(config: ClickHouseDestinationConfig, query: str) -> int:
     from drt.destinations.clickhouse import ClickHouseDestination
 
     client = ClickHouseDestination._connect(config)

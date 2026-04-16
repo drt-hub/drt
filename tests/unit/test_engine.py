@@ -14,6 +14,7 @@ from drt.engine.sync import batch, run_sync
 # Fakes (prefer over MagicMock — they document the Protocol)
 # ---------------------------------------------------------------------------
 
+
 class FakeSource:
     def __init__(self, rows: list[dict]) -> None:
         self._rows = rows
@@ -53,17 +54,20 @@ def _make_profile() -> BigQueryProfile:
 
 
 def _make_sync(batch_size: int = 10, on_error: str = "fail") -> SyncConfig:
-    return SyncConfig.model_validate({
-        "name": "test_sync",
-        "model": "ref('table')",
-        "destination": {"type": "rest_api", "url": "https://example.com"},
-        "sync": {"batch_size": batch_size, "on_error": on_error},
-    })
+    return SyncConfig.model_validate(
+        {
+            "name": "test_sync",
+            "model": "ref('table')",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {"batch_size": batch_size, "on_error": on_error},
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
 # batch() helper
 # ---------------------------------------------------------------------------
+
 
 def test_batch_exact_multiple() -> None:
     result = list(batch(iter([1, 2, 3, 4]), 2))
@@ -92,6 +96,7 @@ def test_batch_larger_than_size() -> None:
 # ---------------------------------------------------------------------------
 # run_sync()
 # ---------------------------------------------------------------------------
+
 
 def test_run_sync_all_success(tmp_path: Path) -> None:
     rows = [{"id": i} for i in range(5)]
@@ -166,13 +171,16 @@ def test_run_sync_saves_state(tmp_path: Path) -> None:
 # incremental sync
 # ---------------------------------------------------------------------------
 
+
 def _make_incremental_sync(cursor_field: str = "updated_at") -> SyncConfig:
-    return SyncConfig.model_validate({
-        "name": "inc_sync",
-        "model": "ref('events')",
-        "destination": {"type": "rest_api", "url": "https://example.com"},
-        "sync": {"mode": "incremental", "cursor_field": cursor_field, "batch_size": 10},
-    })
+    return SyncConfig.model_validate(
+        {
+            "name": "inc_sync",
+            "model": "ref('events')",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {"mode": "incremental", "cursor_field": cursor_field, "batch_size": 10},
+        }
+    )
 
 
 def test_incremental_saves_max_cursor(tmp_path: Path) -> None:
@@ -199,13 +207,15 @@ def test_incremental_uses_saved_cursor(tmp_path: Path) -> None:
     from drt.state.manager import StateManager, SyncState
 
     state_mgr = StateManager(tmp_path)
-    state_mgr.save_sync(SyncState(
-        sync_name="inc_sync",
-        last_run_at="2024-01-01T00:00:00",
-        records_synced=5,
-        status="success",
-        last_cursor_value="2024-01-01",
-    ))
+    state_mgr.save_sync(
+        SyncState(
+            sync_name="inc_sync",
+            last_run_at="2024-01-01T00:00:00",
+            records_synced=5,
+            status="success",
+            last_cursor_value="2024-01-01",
+        )
+    )
 
     captured_queries: list[str] = []
 

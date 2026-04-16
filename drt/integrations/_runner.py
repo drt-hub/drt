@@ -57,11 +57,7 @@ def run_drt_sync(
 
     result = run_sync(sync, source, dest, prof, pdir, dry_run, state_mgr)
 
-    status = (
-        "success" if result.failed == 0
-        else "partial" if result.success > 0
-        else "failed"
-    )
+    status = "success" if result.failed == 0 else "partial" if result.success > 0 else "failed"
 
     return {
         "sync_name": sync_name,

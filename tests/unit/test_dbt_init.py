@@ -29,10 +29,12 @@ def _manifest(models: list[dict]) -> dict:
 
 
 def test_list_models(tmp_path: Path) -> None:
-    manifest = _manifest([
-        {"name": "users", "relation_name": '"analytics"."users"'},
-        {"name": "orders", "relation_name": '"analytics"."orders"'},
-    ])
+    manifest = _manifest(
+        [
+            {"name": "users", "relation_name": '"analytics"."users"'},
+            {"name": "orders", "relation_name": '"analytics"."orders"'},
+        ]
+    )
     path = tmp_path / "manifest.json"
     path.write_text(json.dumps(manifest))
 
@@ -86,13 +88,15 @@ def test_list_models_file_not_found(tmp_path: Path) -> None:
 
 
 def test_list_models_with_description(tmp_path: Path) -> None:
-    manifest = _manifest([
-        {
-            "name": "users",
-            "relation_name": '"users"',
-            "description": "All active users",
-        },
-    ])
+    manifest = _manifest(
+        [
+            {
+                "name": "users",
+                "relation_name": '"users"',
+                "description": "All active users",
+            },
+        ]
+    )
     path = tmp_path / "manifest.json"
     path.write_text(json.dumps(manifest))
 
@@ -106,10 +110,12 @@ def test_list_models_with_description(tmp_path: Path) -> None:
 
 
 def test_init_from_dbt_generates_syncs(tmp_path: Path) -> None:
-    manifest = _manifest([
-        {"name": "users", "relation_name": '"analytics"."users"'},
-        {"name": "orders", "relation_name": '"analytics"."orders"'},
-    ])
+    manifest = _manifest(
+        [
+            {"name": "users", "relation_name": '"analytics"."users"'},
+            {"name": "orders", "relation_name": '"analytics"."orders"'},
+        ]
+    )
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps(manifest))
 
@@ -133,11 +139,13 @@ def test_init_from_dbt_missing_manifest(tmp_path: Path) -> None:
 
 
 def test_init_from_dbt_select_specific(tmp_path: Path) -> None:
-    manifest = _manifest([
-        {"name": "users", "relation_name": '"users"'},
-        {"name": "orders", "relation_name": '"orders"'},
-        {"name": "products", "relation_name": '"products"'},
-    ])
+    manifest = _manifest(
+        [
+            {"name": "users", "relation_name": '"users"'},
+            {"name": "orders", "relation_name": '"orders"'},
+            {"name": "products", "relation_name": '"products"'},
+        ]
+    )
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps(manifest))
 

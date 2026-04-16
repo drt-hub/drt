@@ -72,9 +72,7 @@ class TestDiscordDestination:
         mock_response.status_code = 401
         mock_response.text = "Unauthorized"
         mock_response.raise_for_status = MagicMock(
-            side_effect=httpx.HTTPStatusError(
-                "401", request=MagicMock(), response=mock_response
-            )
+            side_effect=httpx.HTTPStatusError("401", request=MagicMock(), response=mock_response)
         )
 
         dest = DiscordDestination()

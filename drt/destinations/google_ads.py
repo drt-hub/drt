@@ -58,9 +58,7 @@ class GoogleAdsDestination:
 
         developer_token = os.environ.get(config.developer_token_env, "")
         if not developer_token:
-            raise ValueError(
-                f"Google Ads: env var '{config.developer_token_env}' is not set."
-            )
+            raise ValueError(f"Google Ads: env var '{config.developer_token_env}' is not set.")
 
         auth_headers = AuthHandler(config.auth).get_headers()
         headers = {
@@ -106,11 +104,7 @@ class GoogleAdsDestination:
         if not conversions:
             return result
 
-        url = (
-            f"{_BASE_URL}/{_API_VERSION}"
-            f"/customers/{config.customer_id}"
-            f":uploadClickConversions"
-        )
+        url = f"{_BASE_URL}/{_API_VERSION}/customers/{config.customer_id}:uploadClickConversions"
         payload = {
             "conversions": conversions,
             "partialFailure": True,
@@ -137,8 +131,7 @@ class GoogleAdsDestination:
         except httpx.HTTPStatusError as e:
             result.failed += len(conversions)
             result.errors.append(
-                f"Google Ads API error: {e.response.status_code} "
-                f"{e.response.text[:500]}"
+                f"Google Ads API error: {e.response.status_code} {e.response.text[:500]}"
             )
         except Exception as e:
             result.failed += len(conversions)
