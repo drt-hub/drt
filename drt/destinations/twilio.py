@@ -21,7 +21,6 @@ Example sync YAML:
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from typing import Any
@@ -80,7 +79,8 @@ class TwilioDestination:
         # Validate from_number early
         if not _is_valid_e164(config.from_number):
             raise ValueError(
-                f"Invalid from_number '{config.from_number}'. Must be E.164 format (e.g. +1234567890)."
+                f"Invalid from_number '{config.from_number}'."
+                " Must be E.164 format (e.g. +1234567890)."
             )
 
         url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"

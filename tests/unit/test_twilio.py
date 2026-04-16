@@ -3,7 +3,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-from drt.config.models import SyncOptions, TwilioDestinationConfig, RetryConfig
+from drt.config.models import RetryConfig, SyncOptions, TwilioDestinationConfig
 from drt.destinations.twilio import TwilioDestination
 
 
