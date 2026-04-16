@@ -138,7 +138,10 @@ class BigQueryWatermarkStorage:
 
     def _query_config(self, params: list[tuple[str, str, str]]) -> Any:
         """Build a QueryJobConfig with parameterized query parameters."""
-        from google.cloud.bigquery import QueryJobConfig, ScalarQueryParameter  # type: ignore[import-untyped]
+        from google.cloud.bigquery import (  # type: ignore[import-untyped]
+            QueryJobConfig,
+            ScalarQueryParameter,
+        )
 
         return QueryJobConfig(
             query_parameters=[

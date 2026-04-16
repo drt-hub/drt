@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import typer
 
@@ -701,13 +701,12 @@ def _get_source(
 
 def _get_watermark_storage(
     sync: SyncConfig, project_dir: Path,
-) -> "WatermarkStorage | None":
+) -> Any:
     """Build watermark storage from sync config, or None if not configured."""
     from drt.state.watermark import (
         BigQueryWatermarkStorage,
         GCSWatermarkStorage,
         LocalWatermarkStorage,
-        WatermarkStorage,
     )
 
     wm = sync.sync.watermark
