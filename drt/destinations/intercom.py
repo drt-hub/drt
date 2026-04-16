@@ -59,6 +59,9 @@ class IntercomDestination:
     ) -> SyncResult:
         assert isinstance(config, IntercomDestinationConfig)
 
+        from drt.config.models import BearerAuth
+
+        assert isinstance(config.auth, BearerAuth)
         token = config.auth.token or (
             os.environ.get(config.auth.token_env) if config.auth.token_env else None
         )

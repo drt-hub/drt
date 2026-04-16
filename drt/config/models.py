@@ -164,8 +164,8 @@ class IntercomDestinationConfig(BaseModel):
 
     def describe(self) -> str:
         return f"{self.type} (contacts)"
-    
-    
+
+
 class SendGridDestinationConfig(BaseModel):
     type: Literal["sendgrid"]
     from_email: str
@@ -456,7 +456,6 @@ DestinationConfig = Annotated[
     | NotionDestinationConfig
     | IntercomDestinationConfig
     | StagedUploadDestinationConfig,
-    
     Field(discriminator="type"),
 ]
 

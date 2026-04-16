@@ -846,7 +846,6 @@ def _get_destination(
         GoogleAdsDestinationConfig,
         GoogleSheetsDestinationConfig,
         HubSpotDestinationConfig,
-        IntercomDestinationConfig,
         JiraDestinationConfig,
         LinearDestinationConfig,
         MySQLDestinationConfig,

@@ -3,9 +3,8 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-from drt.config.models import IntercomDestinationConfig, SyncOptions, BearerAuth
+from drt.config.models import BearerAuth, IntercomDestinationConfig, SyncOptions
 from drt.destinations.intercom import IntercomDestination
-from drt.templates.renderer import render_template
 
 
 class DummyResponse:
