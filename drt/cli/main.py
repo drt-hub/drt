@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from drt.destinations.rest_api import RestApiDestination
     from drt.destinations.sendgrid import SendGridDestination
     from drt.destinations.slack import SlackDestination
+    from drt.destinations.snowflake import SnowflakeDestination
     from drt.destinations.staged_upload import StagedUploadDestination
     from drt.destinations.teams import TeamsDestination
     from drt.sources.bigquery import BigQuerySource
@@ -835,6 +836,7 @@ def _get_destination(
     | GoogleAdsDestination
     | NotionDestination
     | StagedUploadDestination
+    | SnowflakeDestination
 ):
     from drt.config.models import (
         ClickHouseDestinationConfig,
@@ -853,6 +855,7 @@ def _get_destination(
         RestApiDestinationConfig,
         SendGridDestinationConfig,
         SlackDestinationConfig,
+        SnowflakeDestinationConfig,
         StagedUploadDestinationConfig,
         TeamsDestinationConfig,
     )
@@ -868,6 +871,7 @@ def _get_destination(
     from drt.destinations.rest_api import RestApiDestination
     from drt.destinations.sendgrid import SendGridDestination
     from drt.destinations.slack import SlackDestination
+    from drt.destinations.snowflake import SnowflakeDestination
 
     dest = sync.destination
     if isinstance(dest, RestApiDestinationConfig):
@@ -884,6 +888,8 @@ def _get_destination(
         return JiraDestination()
     if isinstance(dest, SendGridDestinationConfig):
         return SendGridDestination()
+    if isinstance(dest, SnowflakeDestinationConfig):
+        return SnowflakeDestination()
     if isinstance(dest, GoogleSheetsDestinationConfig):
         from drt.destinations.google_sheets import GoogleSheetsDestination
 

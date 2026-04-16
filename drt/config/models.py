@@ -168,6 +168,27 @@ class SendGridDestinationConfig(BaseModel):
         return f"sendgrid ({self.from_email})"
 
 
+class SnowflakeDestinationConfig(BaseModel):
+    type: Literal["snowflake"]
+
+    account_env: str
+    user_env: str
+    password_env: str
+
+    database: str
+    schema: str
+    table: str
+
+    warehouse: str
+
+    mode: Literal["insert", "merge"] = "insert"
+
+    upsert_key: list[str] | None = None
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.database}.{self.schema}.{self.table})"
+    
+    
 class LinearDestinationConfig(BaseModel):
     type: Literal["linear"]
     team_id: str | None = None
@@ -442,7 +463,8 @@ DestinationConfig = Annotated[
     | GoogleAdsDestinationConfig
     | FileDestinationConfig
     | NotionDestinationConfig
-    | StagedUploadDestinationConfig,
+    | StagedUploadDestinationConfig
+    | SnowflakeDestinationConfig,
     Field(discriminator="type"),
 ]
 
