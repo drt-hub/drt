@@ -1,6 +1,7 @@
-"""PostgreSQL destination — upsert rows into a PostgreSQL table.
+"""PostgreSQL destination — upsert or replace rows into a PostgreSQL table.
 
 Uses INSERT ... ON CONFLICT (upsert_key) DO UPDATE SET ... for idempotent writes.
+Supports ``sync.mode: replace`` (TRUNCATE → INSERT within a single transaction).
 Requires: pip install drt-core[postgres]
 
 Example sync YAML:
@@ -27,7 +28,10 @@ from drt.destinations.row_errors import RowError
 
 
 class PostgresDestination:
-    """Upsert records into a PostgreSQL table."""
+    """Upsert or replace records into a PostgreSQL table."""
+
+    def __init__(self) -> None:
+        self._replace_truncated: bool = False
 
     def load(
         self,
@@ -45,39 +49,125 @@ class PostgresDestination:
         try:
             cur = conn.cursor()
             columns = list(records[0].keys())
-            update_cols = [c for c in columns if c not in config.upsert_key]
 
-            sql = self._build_upsert_sql(config.table, columns, config.upsert_key, update_cols)
-
-            for i, record in enumerate(records):
-                try:
-                    values = [record.get(c) for c in columns]
-                    cur.execute(sql, values)
-                    result.success += 1
-                except Exception as e:
-                    result.failed += 1
-                    result.row_errors.append(
-                        RowError(
-                            batch_index=i,
-                            record_preview=json.dumps(record, default=str)[:200],
-                            http_status=None,
-                            error_message=str(e),
-                        )
-                    )
-                    if sync_options.on_error == "fail":
-                        conn.rollback()
-                        return result
-                    # on_error == "skip": rollback this row, continue
-                    conn.rollback()
-                    # Re-open transaction for next rows
-                    cur = conn.cursor()
-                    continue
-
-            conn.commit()
+            if sync_options.mode == "replace":
+                result = self._load_replace(
+                    conn,
+                    cur,
+                    records,
+                    columns,
+                    config.table,
+                    sync_options,
+                )
+            else:
+                result = self._load_upsert(
+                    conn,
+                    cur,
+                    records,
+                    columns,
+                    config,
+                    sync_options,
+                )
         finally:
             conn.close()
 
         return result
+
+    def _load_replace(
+        self,
+        conn: Any,
+        cur: Any,
+        records: list[dict[str, Any]],
+        columns: list[str],
+        table: str,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        """TRUNCATE (once) → INSERT within a transaction."""
+        result = SyncResult()
+
+        if not self._replace_truncated:
+            cur.execute(f"TRUNCATE TABLE {table}")
+            self._replace_truncated = True
+
+        sql = self._build_insert_sql(table, columns)
+
+        for i, record in enumerate(records):
+            try:
+                values = [record.get(c) for c in columns]
+                cur.execute(sql, values)
+                result.success += 1
+            except Exception as e:
+                result.failed += 1
+                result.row_errors.append(
+                    RowError(
+                        batch_index=i,
+                        record_preview=json.dumps(record, default=str)[:200],
+                        http_status=None,
+                        error_message=str(e),
+                    )
+                )
+                if sync_options.on_error == "fail":
+                    conn.rollback()
+                    return result
+                conn.rollback()
+                cur = conn.cursor()
+                if not self._replace_truncated:
+                    cur.execute(f"TRUNCATE TABLE {table}")
+                    self._replace_truncated = True
+                continue
+
+        conn.commit()
+        return result
+
+    @staticmethod
+    def _load_upsert(
+        conn: Any,
+        cur: Any,
+        records: list[dict[str, Any]],
+        columns: list[str],
+        config: PostgresDestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        result = SyncResult()
+        update_cols = [c for c in columns if c not in config.upsert_key]
+        sql = PostgresDestination._build_upsert_sql(
+            config.table,
+            columns,
+            config.upsert_key,
+            update_cols,
+        )
+
+        for i, record in enumerate(records):
+            try:
+                values = [record.get(c) for c in columns]
+                cur.execute(sql, values)
+                result.success += 1
+            except Exception as e:
+                result.failed += 1
+                result.row_errors.append(
+                    RowError(
+                        batch_index=i,
+                        record_preview=json.dumps(record, default=str)[:200],
+                        http_status=None,
+                        error_message=str(e),
+                    )
+                )
+                if sync_options.on_error == "fail":
+                    conn.rollback()
+                    return result
+                conn.rollback()
+                cur = conn.cursor()
+                continue
+
+        conn.commit()
+        return result
+
+    @staticmethod
+    def _build_insert_sql(table: str, columns: list[str]) -> str:
+        """Build plain INSERT SQL (no conflict handling)."""
+        cols_str = ", ".join(f'"{c}"' for c in columns)
+        placeholders = ", ".join(["%s"] * len(columns))
+        return f"INSERT INTO {table} ({cols_str}) VALUES ({placeholders})"
 
     @staticmethod
     def _build_upsert_sql(

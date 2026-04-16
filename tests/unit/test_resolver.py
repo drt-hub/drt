@@ -209,3 +209,59 @@ def test_env_var_no_expansion_without_syntax(tmp_path: Path) -> None:
         _profile(),
     )
     assert sql == "SELECT * FROM users"
+
+
+# ---------------------------------------------------------------------------
+# cursor_value template variable
+# ---------------------------------------------------------------------------
+
+
+def test_cursor_value_template_resolved(tmp_path: Path) -> None:
+    sql = resolve_model_ref(
+        "SELECT * FROM events WHERE ts >= '{{ cursor_value }}'",
+        tmp_path,
+        _profile(),
+        cursor_field="ts",
+        last_cursor_value="2026-04-15T10:00:00",
+    )
+    assert "2026-04-15T10:00:00" in sql
+    assert "{{ cursor_value }}" not in sql
+    # Should NOT add automatic WHERE wrapping when template is used
+    assert "_drt_base" not in sql
+
+
+def test_watermark_alias_resolved(tmp_path: Path) -> None:
+    sql = resolve_model_ref(
+        "SELECT * FROM events WHERE ts >= '{{ watermark }}'",
+        tmp_path,
+        _profile(),
+        cursor_field="ts",
+        last_cursor_value="2026-04-15",
+    )
+    assert "2026-04-15" in sql
+    assert "{{ watermark }}" not in sql
+
+
+def test_cursor_value_first_run_default(tmp_path: Path) -> None:
+    """First run (no last_cursor_value) should resolve to empty string."""
+    sql = resolve_model_ref(
+        "SELECT * FROM events WHERE ts >= '{{ cursor_value }}'",
+        tmp_path,
+        _profile(),
+        cursor_field="ts",
+        last_cursor_value=None,
+    )
+    assert "WHERE ts >= ''" in sql
+
+
+def test_no_template_still_uses_auto_inject(tmp_path: Path) -> None:
+    """Without template variable, existing auto-inject behavior unchanged."""
+    sql = resolve_model_ref(
+        "ref('events')",
+        tmp_path,
+        _profile("ds"),
+        cursor_field="updated_at",
+        last_cursor_value="2024-01-01",
+    )
+    assert "_drt_base" in sql
+    assert "WHERE updated_at > '2024-01-01'" in sql

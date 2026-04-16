@@ -14,7 +14,7 @@ dlt (load into DWH) → dbt (transform) → drt (activate out of DWH)
 - **Tagline:** "Reverse ETL for the code-first data stack"
 - **Install:** `pip install drt-core` or `uv add drt-core`
 - **Package name:** `drt-core` (PyPI) — CLI command is `drt`
-- **Current version:** v0.5.0
+- **Current version:** v0.5.4
 
 ## What drt is NOT
 
@@ -94,6 +94,7 @@ default:
 | Linear | `linear` | Create issues via GraphQL API |
 | SendGrid | `sendgrid` | Transactional emails via v3 Mail Send API |
 | Google Ads | `google_ads` | Offline click conversion upload |
+| Staged Upload | `staged_upload` | Async bulk APIs: file upload → job trigger → poll |
 
 ## CLI Commands
 
@@ -112,6 +113,7 @@ drt test --select <sync-name>     # test a specific sync
 drt status                        # show recent sync results
 drt status --output json          # JSON output for status
 drt mcp run                       # start MCP server (requires drt-core[mcp])
+drt serve --port 8080             # start HTTP webhook endpoint (POST /sync/<name>)
 ```
 
 ## MCP Server
@@ -198,9 +200,18 @@ Slash command versions also available in `.claude/commands/` for manual installa
 - drt saves `last_cursor_value` in `.drt/state.json` after each run
 - Next run automatically injects `WHERE <cursor_field> > '<last_value>'`
 - Cursor comparison uses numeric ordering when possible (handles integer/float cursors correctly)
+- **Template variable**: Use `{{ cursor_value }}` (or `{{ watermark }}`) in model SQL for flexible WHERE placement. When present, auto-injection is skipped.
+- **Remote watermark storage**: For stateless environments (e.g., Cloud Run Jobs), set `sync.watermark.storage` to `gcs` or `bigquery` to persist cursor values externally instead of `.drt/state.json`.
 
 **Upsert mode**: Semantic alias for `mode: full` when `upsert_key` is set. Makes YAML intent explicit.
 - Set `sync.mode: upsert` — behaves identically to `mode: full`
+
+**Replace mode**: TRUNCATE the destination table, then INSERT all rows (full table refresh).
+- Set `sync.mode: replace`
+- `upsert_key` is not required (no conflict resolution needed)
+- Useful for junction/mapping tables where deleted source rows must be removed from destination
+- PostgreSQL/MySQL: wrapped in a transaction for safety
+- ClickHouse: `TRUNCATE TABLE` then INSERT
 
 ### Model Reference
 

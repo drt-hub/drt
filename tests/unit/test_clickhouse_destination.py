@@ -197,3 +197,49 @@ class TestClickHouseDestinationLoad:
         result = ClickHouseDestination().load([big_record], _config(), _options(on_error="skip"))
 
         assert len(result.row_errors[0].record_preview) <= 200
+
+
+# ---------------------------------------------------------------------------
+# Replace mode
+# ---------------------------------------------------------------------------
+
+
+class TestClickHouseReplaceMode:
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_replace_truncates_then_inserts(self, mock_connect: MagicMock) -> None:
+        client = _fake_client()
+        mock_connect.return_value = client
+
+        records = [
+            {"id": 1, "score": 0.95},
+            {"id": 2, "score": 0.80},
+        ]
+        dest = ClickHouseDestination()
+        result = dest.load(records, _config(), _options(mode="replace"))
+
+        assert result.success == 2
+        assert result.failed == 0
+        client.command.assert_called_once_with("TRUNCATE TABLE analytics_scores")
+        assert client.insert.call_count == 2
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_replace_truncates_only_once_across_batches(self, mock_connect: MagicMock) -> None:
+        client = _fake_client()
+        mock_connect.return_value = client
+
+        dest = ClickHouseDestination()
+        dest.load([{"id": 1, "score": 0.5}], _config(), _options(mode="replace"))
+        dest.load([{"id": 2, "score": 0.9}], _config(), _options(mode="replace"))
+
+        # TRUNCATE should be called exactly once
+        client.command.assert_called_once()
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_replace_no_truncate_on_normal_mode(self, mock_connect: MagicMock) -> None:
+        client = _fake_client()
+        mock_connect.return_value = client
+
+        dest = ClickHouseDestination()
+        dest.load([{"id": 1, "score": 0.5}], _config(), _options(mode="full"))
+
+        client.command.assert_not_called()

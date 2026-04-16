@@ -108,8 +108,14 @@ destination:                # required: see Destination Configs below
   # ... destination-specific fields
 
 sync:                       # optional: all fields have defaults
-  mode: full                # "full" (default) | "incremental" | "upsert"  # "upsert" is a semantic alias for "full" when upsert_key is set
+  mode: full                # "full" (default) | "incremental" | "upsert" | "replace"  # "upsert" is alias for "full" when upsert_key is set; "replace" does TRUNCATE + INSERT
   cursor_field: updated_at  # required when mode=incremental — column name for watermark
+  watermark:                # optional: remote watermark storage for stateless environments
+    storage: local          # "local" (default) | "gcs" | "bigquery"
+    bucket: my-bucket       # GCS only
+    key: watermarks/s.json  # GCS only
+    project: my-project     # BigQuery only
+    dataset: my_dataset     # BigQuery only
   batch_size: 100           # default: 100 — rows per destination call
   on_error: fail            # "fail" (default) | "skip"
   rate_limit:
@@ -349,6 +355,36 @@ destination:
   connection_string_env: CH_CONN       # alternative: full connection string
 ```
 
+### `lookups` (DB destinations: postgres, mysql, clickhouse)
+
+Resolve foreign key values by querying the destination DB during sync.
+Available on all database destination types.
+
+```yaml
+destination:
+  type: mysql                          # or postgres, clickhouse
+  # ... connection fields ...
+  table: child_table
+  upsert_key: [parent_id, code]
+  lookups:                             # optional: FK resolution via destination DB
+    parent_id:                         # column to populate in the destination
+      table: parent_table              # destination DB table to query
+      match:                           # { destination_column: source_column }
+        user_id: user_id
+      select: id                       # column to fetch from the lookup table
+      on_miss: skip                    # "skip" (default) | "fail" | "null"
+```
+
+- **`table`** (required): destination DB table to look up
+- **`match`** (required): mapping of `{ destination_column: source_column }` — supports composite keys
+- **`select`** (required): column to fetch from the lookup table
+- **`on_miss`** (optional, default `"skip"`):
+  - `skip` — skip the row and log a warning
+  - `fail` — treat as an error (respects `sync.on_error`)
+  - `null` — set the target column to NULL
+
+Multiple lookups can be defined per sync. Each executes one SELECT query before the batch loop.
+
 ### `type: teams`
 
 ```yaml
@@ -403,6 +439,45 @@ destination:
   to_field: email                      # row field for recipient email
   subject_template: "Alert: {{ row.title }}"  # Jinja2 template
   body_template: "{{ row.message }}"   # Jinja2 template for email body
+```
+
+### `type: staged_upload`
+
+For APIs that require file upload → job trigger → poll for completion
+(e.g. Amazon Marketing Cloud, Salesforce Bulk API 2.0).
+
+```yaml
+destination:
+  type: staged_upload
+  format: csv                          # "csv" | "json" | "jsonl"
+  stage:
+    url: "https://upload.example.com/files"
+    method: POST
+    auth:
+      type: bearer
+      token_env: API_TOKEN
+    response_extract:
+      upload_id: "uploadId"            # extract from response JSON
+  trigger:
+    url: "https://api.example.com/jobs"
+    method: POST
+    body_template: '{"uploadId": "{{ upload_id }}"}'
+    auth:
+      type: bearer
+      token_env: API_TOKEN
+    response_extract:
+      job_id: "jobId"
+  poll:                                # optional — omit for fire-and-forget
+    url: "https://api.example.com/jobs/{{ job_id }}"
+    method: GET
+    auth:
+      type: bearer
+      token_env: API_TOKEN
+    status_field: "status"
+    success_values: ["SUCCEEDED"]
+    failure_values: ["FAILED"]
+    interval_seconds: 30               # default: 30
+    timeout_seconds: 3600              # default: 3600
 ```
 
 ---

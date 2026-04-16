@@ -182,6 +182,35 @@ class LinearDestinationConfig(BaseModel):
         return "linear (issue)"
 
 
+class LookupConfig(BaseModel):
+    """Resolve a column value by querying the destination DB.
+
+    Used to resolve foreign key values when syncing related tables.
+    The destination DB is queried once per lookup to build an in-memory
+    mapping, then each source row is enriched with the resolved value.
+
+    Example YAML::
+
+        lookups:
+          interviewer_profile_id:
+            table: interviewer_profiles
+            match: { user_id: user_id }
+            select: id
+            on_miss: skip
+    """
+
+    table: str  # destination DB table to query
+    match: dict[str, str]  # { destination_column: source_column }
+    select: str  # column to fetch from the lookup table
+    on_miss: Literal["skip", "fail", "null"] = "skip"
+
+    @model_validator(mode="after")
+    def _check_match_not_empty(self) -> "LookupConfig":
+        if not self.match:
+            raise ValueError("lookups.match must contain at least one mapping.")
+        return self
+
+
 class SslConfig(BaseModel):
     """SSL/TLS connection options for DB destinations."""
 
@@ -206,6 +235,7 @@ class PostgresDestinationConfig(BaseModel):
     table: str  # e.g. "public.analytics_scores"
     upsert_key: list[str]  # columns for ON CONFLICT
     ssl: SslConfig | None = None
+    lookups: dict[str, LookupConfig] | None = None
 
     def describe(self) -> str:
         return f"{self.type} ({self.table})"
@@ -236,6 +266,7 @@ class MySQLDestinationConfig(BaseModel):
     table: str  # e.g. "interviewer_learning_profiles"
     upsert_key: list[str]  # columns for ON DUPLICATE KEY
     ssl: SslConfig | None = None
+    lookups: dict[str, LookupConfig] | None = None
 
     def describe(self) -> str:
         return f"{self.type} ({self.table})"
@@ -297,6 +328,7 @@ class ClickHouseDestinationConfig(BaseModel):
     # ReplacingMergeTree tables or apply upsert semantics from this field.
     upsert_key: list[str] | None = None
     secure: bool = False  # use HTTPS/TLS; set port explicitly for your deployment (commonly 8443)
+    lookups: dict[str, LookupConfig] | None = None
 
     def describe(self) -> str:
         return f"{self.type} ({self.table})"
@@ -358,6 +390,38 @@ class GoogleAdsDestinationConfig(BaseModel):
         return f"google_ads ({self.customer_id})"
 
 
+class StagedUploadPhaseConfig(BaseModel):
+    url: str
+    method: str = "POST"
+    headers: dict[str, str] | None = None
+    auth: AuthConfig | None = None
+    body_template: str | None = None
+    response_extract: dict[str, str] | None = None
+
+
+class StagedUploadPollConfig(BaseModel):
+    url: str
+    method: str = "GET"
+    headers: dict[str, str] | None = None
+    auth: AuthConfig | None = None
+    status_field: str = "status"
+    success_values: list[str] = ["SUCCEEDED", "COMPLETED"]
+    failure_values: list[str] = ["FAILED", "ERROR"]
+    interval_seconds: int = 30
+    timeout_seconds: int = 3600
+
+
+class StagedUploadDestinationConfig(BaseModel):
+    type: Literal["staged_upload"]
+    stage: StagedUploadPhaseConfig
+    trigger: StagedUploadPhaseConfig
+    poll: StagedUploadPollConfig | None = None
+    format: Literal["csv", "json", "jsonl"] = "csv"
+
+    def describe(self) -> str:
+        return "staged_upload"
+
+
 # Discriminated union — add new destination types here
 DestinationConfig = Annotated[
     RestApiDestinationConfig
@@ -376,7 +440,8 @@ DestinationConfig = Annotated[
     | ParquetDestinationConfig
     | GoogleAdsDestinationConfig
     | FileDestinationConfig
-    | NotionDestinationConfig,
+    | NotionDestinationConfig
+    | StagedUploadDestinationConfig,
     Field(discriminator="type"),
 ]
 
@@ -398,9 +463,34 @@ class RetryConfig(BaseModel):
     retryable_status_codes: tuple[int, ...] = (429, 500, 502, 503, 504)
 
 
+class WatermarkConfig(BaseModel):
+    """Configuration for remote watermark storage."""
+
+    storage: Literal["local", "gcs", "bigquery"] = "local"
+    # GCS
+    bucket: str | None = None
+    key: str | None = None
+    # BigQuery
+    project: str | None = None
+    dataset: str | None = None
+
+    @model_validator(mode="after")
+    def _check_backend_fields(self) -> "WatermarkConfig":
+        if self.storage == "gcs" and not self.bucket:
+            raise ValueError("watermark.bucket is required when storage is 'gcs'.")
+        if self.storage == "gcs" and not self.key:
+            raise ValueError("watermark.key is required when storage is 'gcs'.")
+        if self.storage == "bigquery" and not self.project:
+            raise ValueError("watermark.project is required when storage is 'bigquery'.")
+        if self.storage == "bigquery" and not self.dataset:
+            raise ValueError("watermark.dataset is required when storage is 'bigquery'.")
+        return self
+
+
 class SyncOptions(BaseModel):
-    mode: Literal["full", "incremental", "upsert"] = "full"
+    mode: Literal["full", "incremental", "upsert", "replace"] = "full"
     cursor_field: str | None = None  # required when mode=incremental
+    watermark: WatermarkConfig | None = None
     batch_size: int = 100
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
     retry: RetryConfig = Field(default_factory=RetryConfig)

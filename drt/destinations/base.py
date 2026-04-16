@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 class SyncResult:
     """Result of a single sync batch."""
 
+    rows_extracted: int = 0
     success: int = 0
     failed: int = 0
     skipped: int = 0
@@ -42,4 +43,32 @@ class Destination(Protocol):
         sync_options: SyncOptions,
     ) -> SyncResult:
         """Send a batch of records to the destination."""
+        ...
+
+
+@runtime_checkable
+class StagedDestination(Protocol):
+    """Destination that accumulates records, then uploads as a batch job.
+
+    Used for APIs that require file upload → job trigger → poll for completion
+    (e.g. Salesforce Bulk API, Amazon Marketing Cloud).
+
+    Engine calls stage() per batch, then finalize() once after all batches.
+    """
+
+    def stage(
+        self,
+        records: list[dict[str, Any]],
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> None:
+        """Accumulate records for later upload."""
+        ...
+
+    def finalize(
+        self,
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        """Upload staged file, trigger job, poll for completion."""
         ...

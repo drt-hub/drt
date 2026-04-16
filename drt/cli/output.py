@@ -66,6 +66,11 @@ def print_dry_run_summary(sync: SyncConfig, profile: ProfileConfig, rows: int) -
     console.print(f"  Destination: {sync.destination.describe()}")
     console.print(f"  Rows to sync: {rows}")
     console.print(f"  Sync mode: {sync.sync.mode}")
+    if sync.sync.mode == "replace":
+        console.print(
+            "  [yellow]⚠ replace mode will TRUNCATE the destination table"
+            " before inserting rows[/yellow]"
+        )
 
 
 def print_sync_result(sync_name: str, result: SyncResult, elapsed: float) -> None:
@@ -75,6 +80,10 @@ def print_sync_result(sync_name: str, result: SyncResult, elapsed: float) -> Non
         status = "[yellow]⚠[/yellow]"
     else:
         status = "[red]✗[/red]"
+
+    if result.rows_extracted == 0 and result.failed == 0:
+        console.print(f"  {status} 0 rows [dim](no rows)[/dim]  [dim]({elapsed:.1f}s)[/dim]")
+        return
 
     console.print(
         f"  {status} {result.success} synced"

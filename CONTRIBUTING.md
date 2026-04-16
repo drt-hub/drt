@@ -4,6 +4,8 @@
 
 Thank you for your interest in contributing!
 
+> **Want to grow with the project?** drt has a [contributor ladder](./GOVERNANCE.md#roles): every merged PR builds toward becoming a Triage Collaborator, and from there to Owner. Roles are earned by sustained, quality contribution — and the criteria are public.
+
 ## Development Setup
 
 ### Prerequisites
@@ -110,6 +112,18 @@ Then add the same key as a **Signing Key** on [GitHub SSH settings](https://gith
 5. Open a Pull Request and fill out the PR template
 
 > **Merge strategy:** All PRs are merged with **Squash & merge**. Your branch commits are squashed into a single commit on `main`, so individual WIP commits don't need to be cleaned up. GitHub signs the squash commit automatically.
+
+## Picking up an Issue
+
+drt uses a lightweight **soft assignment** model so contributors don't step on each other:
+
+- Comment on the issue saying you'd like to work on it. A maintainer will assign it to you.
+- **Limit: 1–2 issues at a time per contributor.** Finish (or open a draft PR) before grabbing more.
+- **Stale rule: 14 days of no progress → unassigned.** A friendly nudge will come first. Pick it back up anytime by commenting again.
+- **Larger features** (new integrations, extensions, big refactors): post a short design comment first and wait for maintainer feedback before implementing — saves rework.
+- **Small/quick issues** (typos, single-line fixes): no need to ask — open the PR directly. First PR wins.
+
+This is to keep momentum, not to gatekeep. If you're unsure, just ask in the issue.
 
 ## Pull Request Checklist
 

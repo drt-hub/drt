@@ -16,6 +16,7 @@
 [![dagster-drt downloads](https://img.shields.io/pepy/dt/dagster-drt?label=dagster-drt%20downloads)](https://pepy.tech/projects/dagster-drt)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Python](https://img.shields.io/pypi/pyversions/drt-core)](https://pypi.org/project/drt-core/)
+[![GitHub Sponsors](https://img.shields.io/static/v1?label=Sponsor&message=%E2%9D%A4&logo=GitHub&color=%23fe8e86)](https://github.com/sponsors/masukai)
 
 **drt** syncs data from your data warehouse to external services — declaratively, via YAML and CLI.
 Think `dbt run` → `drt run`. Same developer experience, opposite data direction.
@@ -274,6 +275,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | **v0.3** ✅ | MCP Server (`drt mcp run`) · AI Skills for Claude Code · LLM-readable docs · row-level errors · security hardening · Redshift source |
 | **v0.4** ✅ | Google Sheets / PostgreSQL / MySQL destinations · dagster-drt · dbt manifest reader · type safety overhaul |
 | **v0.5** ✅ | Snowflake / MySQL sources · ClickHouse / Parquet / Teams / CSV+JSON / Jira / Linear / SendGrid destinations · `drt test` · `--output json` · `--profile` · `${VAR}` substitution · dbt manifest · secrets.toml · Docker |
+| **v0.5.4** ✅ | `destination_lookup` — resolve FK values by querying destination DB during sync (MySQL / Postgres / ClickHouse) |
 | [v0.6](https://github.com/drt-hub/drt/milestone/3) | Salesforce · Airflow integration · Twilio / Intercom destinations |
 | [v0.7](https://github.com/drt-hub/drt/milestone/4) | DWH destinations (Snowflake / BigQuery / ClickHouse / Databricks) · Cloud storage (S3 / GCS / Azure Blob) |
 | [v0.8](https://github.com/drt-hub/drt/milestone/5) | Lakehouse sources (Delta Lake / Apache Iceberg) |
@@ -319,7 +321,11 @@ drt is designed to work alongside, not against, the modern data stack:
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+We welcome contributions of all sizes — from typo fixes to new connectors. drt has a transparent [contributor ladder](GOVERNANCE.md#roles) so your work builds toward greater trust and responsibility over time.
+
+- **Get started:** [CONTRIBUTING.md](CONTRIBUTING.md) — setup, workflow, and your first connector tutorial
+- **Pick something to work on:** [Good First Issues](https://github.com/drt-hub/drt/issues?q=is%3Aopen+label%3A%22good+first+issue%22)
+- **Understand how decisions are made:** [GOVERNANCE.md](GOVERNANCE.md)
 
 ## Disclaimer
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from drt.config.credentials import BigQueryProfile, ProfileConfig
 from drt.config.models import DestinationConfig, SyncConfig, SyncOptions
@@ -234,6 +235,213 @@ def test_incremental_uses_saved_cursor(tmp_path: Path) -> None:
 
     assert len(captured_queries) == 1
     assert "WHERE updated_at > '2024-01-01'" in captured_queries[0]
+
+
+def test_watermark_storage_used_when_configured(tmp_path: Path) -> None:
+    """When watermark config is set, engine uses WatermarkStorage."""
+    from drt.state.watermark import LocalWatermarkStorage
+
+    wm_storage = LocalWatermarkStorage(tmp_path)
+    wm_storage.save("wm_sync", "2024-01-01")
+
+    captured_queries: list[str] = []
+
+    class CapturingSource:
+        def extract(self, query: str, config: object) -> list[dict]:
+            captured_queries.append(query)
+            return [{"id": 1, "ts": "2024-01-05"}]
+
+        def test_connection(self, config: object) -> bool:
+            return True
+
+    sync = SyncConfig.model_validate(
+        {
+            "name": "wm_sync",
+            "model": "SELECT * FROM events WHERE ts >= '{{ cursor_value }}'",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {
+                "mode": "incremental",
+                "cursor_field": "ts",
+                "watermark": {"storage": "local"},
+            },
+        }
+    )
+    dest = FakeDestination()
+    result = run_sync(
+        sync,
+        CapturingSource(),
+        dest,
+        _make_profile(),
+        tmp_path,
+        watermark_storage=wm_storage,
+    )
+
+    assert result.success == 1
+    assert "2024-01-01" in captured_queries[0]
+    # Watermark should be updated
+    assert wm_storage.get("wm_sync") == "2024-01-05"
+
+
+# ---------------------------------------------------------------------------
+# rows_extracted tracking (#342)
+# ---------------------------------------------------------------------------
+
+
+def test_rows_extracted_counts_source_rows(tmp_path: Path) -> None:
+    rows = [{"id": i} for i in range(5)]
+    source = FakeSource(rows)
+    dest = FakeDestination()
+    sync = _make_sync()
+
+    result = run_sync(sync, source, dest, _make_profile(), tmp_path)
+    assert result.rows_extracted == 5
+
+
+def test_rows_extracted_with_failures(tmp_path: Path) -> None:
+    rows = [{"id": i} for i in range(5)]
+    source = FakeSource(rows)
+    dest = FakeDestination(fail_indices={0, 2})
+    sync = _make_sync(on_error="skip")
+
+    result = run_sync(sync, source, dest, _make_profile(), tmp_path)
+    assert result.rows_extracted == 5
+    assert result.success == 3
+    assert result.failed == 2
+
+
+def test_rows_extracted_zero_rows(tmp_path: Path) -> None:
+    source = FakeSource([])
+    dest = FakeDestination()
+    sync = _make_sync()
+
+    result = run_sync(sync, source, dest, _make_profile(), tmp_path)
+    assert result.rows_extracted == 0
+    assert result.success == 0
+
+
+def test_rows_extracted_dry_run(tmp_path: Path) -> None:
+    rows = [{"id": i} for i in range(3)]
+    source = FakeSource(rows)
+    dest = FakeDestination()
+    sync = _make_sync()
+
+    result = run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        dry_run=True,
+    )
+    assert result.rows_extracted == 3
+
+
+# ---------------------------------------------------------------------------
+# destination_lookup integration (#345)
+# ---------------------------------------------------------------------------
+
+
+def _make_lookup_sync() -> SyncConfig:
+    return SyncConfig.model_validate(
+        {
+            "name": "lookup_sync",
+            "model": "ref('child_table')",
+            "destination": {
+                "type": "mysql",
+                "host": "localhost",
+                "dbname": "testdb",
+                "table": "child_table",
+                "upsert_key": ["parent_id", "code"],
+                "lookups": {
+                    "parent_id": {
+                        "table": "parent_table",
+                        "match": {"user_id": "user_id"},
+                        "select": "id",
+                        "on_miss": "skip",
+                    },
+                },
+            },
+            "sync": {"batch_size": 10},
+        }
+    )
+
+
+@patch(
+    "drt.engine.sync.build_lookup_map",
+    return_value={("u1",): 10, ("u2",): 20},
+)
+def test_run_sync_with_lookup_all_match(
+    mock_build: MagicMock,
+    tmp_path: Path,
+) -> None:
+    rows = [
+        {"user_id": "u1", "code": "a"},
+        {"user_id": "u2", "code": "b"},
+    ]
+    source = FakeSource(rows)
+    dest = FakeDestination()
+    sync = _make_lookup_sync()
+
+    result = run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+    assert result.rows_extracted == 2
+    assert result.success == 2
+    assert result.skipped == 0
+    # Verify lookup values were injected
+    loaded = dest.calls[0]
+    assert loaded[0]["parent_id"] == 10
+    assert loaded[1]["parent_id"] == 20
+
+
+@patch(
+    "drt.engine.sync.build_lookup_map",
+    return_value={("u1",): 10},
+)
+def test_run_sync_with_lookup_skip_miss(
+    mock_build: MagicMock,
+    tmp_path: Path,
+) -> None:
+    rows = [
+        {"user_id": "u1", "code": "a"},
+        {"user_id": "unknown", "code": "b"},
+    ]
+    source = FakeSource(rows)
+    dest = FakeDestination()
+    sync = _make_lookup_sync()
+
+    result = run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+    assert result.rows_extracted == 2
+    assert result.success == 1
+    assert result.skipped == 1
+    assert len(result.row_errors) == 1
+
+
+@patch(
+    "drt.engine.sync.build_lookup_map",
+    return_value={("u1",): 10, ("u2",): 20},
+)
+def test_run_sync_with_lookup_dry_run(
+    mock_build: MagicMock,
+    tmp_path: Path,
+) -> None:
+    rows = [{"user_id": "u1", "code": "a"}]
+    source = FakeSource(rows)
+    dest = FakeDestination()
+    sync = _make_lookup_sync()
+
+    result = run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        dry_run=True,
+    )
+
+    assert result.rows_extracted == 1
+    assert result.success == 1
+    assert dest.calls == []  # destination never called
 
 
 def test_full_sync_no_cursor_saved(tmp_path: Path) -> None:

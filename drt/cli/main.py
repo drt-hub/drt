@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import typer
 
@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from drt.destinations.rest_api import RestApiDestination
     from drt.destinations.sendgrid import SendGridDestination
     from drt.destinations.slack import SlackDestination
+    from drt.destinations.staged_upload import StagedUploadDestination
     from drt.destinations.teams import TeamsDestination
     from drt.sources.bigquery import BigQuerySource
     from drt.sources.clickhouse import ClickHouseSource
@@ -267,11 +268,21 @@ def run(
 
     for sync in syncs:
         dest = _get_destination(sync)
+        wm_storage = _get_watermark_storage(sync, Path("."))
         if not json_mode and not dry_run:
             print_sync_start(sync.name, dry_run)
         t0 = time.monotonic()
         try:
-            result = run_sync(sync, source, dest, profile, Path("."), dry_run, state_mgr)
+            result = run_sync(
+                sync,
+                source,
+                dest,
+                profile,
+                Path("."),
+                dry_run,
+                state_mgr,
+                watermark_storage=wm_storage,
+            )
         except Exception as e:
             elapsed = round(time.monotonic() - t0, 2)
             if json_mode:
@@ -302,6 +313,7 @@ def run(
                         if result.success > 0
                         else "failed"
                     ),
+                    "rows_extracted": result.rows_extracted,
                     "rows_synced": result.success,
                     "rows_failed": result.failed,
                     "duration_seconds": elapsed,
@@ -556,6 +568,35 @@ def _test_display_name(test_def: object) -> str:
 
 
 # ---------------------------------------------------------------------------
+# serve (webhook trigger)
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host", help="Host to bind."),
+    port: int = typer.Option(8080, "--port", "-p", help="Port to bind."),
+    token_env: str = typer.Option(
+        "DRT_WEBHOOK_TOKEN",
+        "--token-env",
+        help="Env var holding bearer token for auth. Empty/unset = no auth.",
+    ),
+) -> None:
+    """Start an HTTP endpoint that triggers drt syncs on demand.
+
+    Example:
+        drt serve --port 8080 --token-env DRT_WEBHOOK_TOKEN
+
+        curl -X POST http://localhost:8080/sync/my_sync \\
+          -H "Authorization: Bearer $DRT_WEBHOOK_TOKEN"
+    """
+    from drt.cli.server import serve as serve_impl
+
+    token = os.environ.get(token_env) or None
+    serve_impl(host=host, port=port, token=token, project_dir=".")
+
+
+# ---------------------------------------------------------------------------
 # mcp
 # ---------------------------------------------------------------------------
 
@@ -669,6 +710,37 @@ def _get_source(
     raise ValueError(f"Unsupported source type: {type(profile)}")
 
 
+def _get_watermark_storage(
+    sync: SyncConfig,
+    project_dir: Path,
+) -> Any:
+    """Build watermark storage from sync config, or None if not configured."""
+    from drt.state.watermark import (
+        BigQueryWatermarkStorage,
+        GCSWatermarkStorage,
+        LocalWatermarkStorage,
+    )
+
+    wm = sync.sync.watermark
+    if wm is None:
+        return None
+
+    if wm.storage == "local":
+        return LocalWatermarkStorage(project_dir)
+    elif wm.storage == "gcs":
+        assert wm.bucket is not None
+        assert wm.key is not None
+        return GCSWatermarkStorage(bucket=wm.bucket, key=wm.key)
+    elif wm.storage == "bigquery":
+        assert wm.project is not None
+        assert wm.dataset is not None
+        return BigQueryWatermarkStorage(
+            project=wm.project,
+            dataset=wm.dataset,
+        )
+    return None
+
+
 def _get_destination(
     sync: SyncConfig,
 ) -> (
@@ -689,6 +761,7 @@ def _get_destination(
     | LinearDestination
     | GoogleAdsDestination
     | NotionDestination
+    | StagedUploadDestination
 ):
     from drt.config.models import (
         ClickHouseDestinationConfig,
@@ -707,6 +780,7 @@ def _get_destination(
         RestApiDestinationConfig,
         SendGridDestinationConfig,
         SlackDestinationConfig,
+        StagedUploadDestinationConfig,
         TeamsDestinationConfig,
     )
     from drt.destinations.clickhouse import ClickHouseDestination
@@ -767,4 +841,8 @@ def _get_destination(
         return GoogleAdsDestination()
     if isinstance(dest, NotionDestinationConfig):
         return NotionDestination()
+    if isinstance(dest, StagedUploadDestinationConfig):
+        from drt.destinations.staged_upload import StagedUploadDestination
+
+        return StagedUploadDestination()
     raise ValueError(f"Unsupported destination type: {dest.type}")

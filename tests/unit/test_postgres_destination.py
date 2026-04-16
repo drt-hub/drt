@@ -188,3 +188,71 @@ class TestPostgresDestinationLoad:
 
         PostgresDestination().load([{"id": 1, "score": 0.5}], _config(), _options(on_error="fail"))
         conn.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Replace mode
+# ---------------------------------------------------------------------------
+
+
+class TestInsertSql:
+    def test_basic_insert(self) -> None:
+        sql = PostgresDestination._build_insert_sql(
+            table="public.scores",
+            columns=["id", "score", "updated_at"],
+        )
+        assert 'INSERT INTO public.scores ("id", "score", "updated_at")' in sql
+        assert "ON CONFLICT" not in sql
+        assert "VALUES (%s, %s, %s)" in sql
+
+
+class TestPostgresReplaceMode:
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_replace_truncates_then_inserts(self, mock_connect: MagicMock) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        records = [
+            {"id": 1, "score": 0.95},
+            {"id": 2, "score": 0.80},
+        ]
+        dest = PostgresDestination()
+        result = dest.load(records, _config(), _options(mode="replace"))
+
+        assert result.success == 2
+        assert result.failed == 0
+        # TRUNCATE + 2 INSERTs = 3 execute calls
+        assert cur.execute.call_count == 3
+        first_call_sql = cur.execute.call_args_list[0][0][0]
+        assert "TRUNCATE TABLE" in first_call_sql
+        conn.commit.assert_called_once()
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_replace_truncates_only_once_across_batches(self, mock_connect: MagicMock) -> None:
+        conn = _fake_connection()
+        mock_connect.return_value = conn
+
+        dest = PostgresDestination()
+        # First batch
+        dest.load([{"id": 1, "score": 0.5}], _config(), _options(mode="replace"))
+        # Second batch — should NOT truncate again
+        dest.load([{"id": 2, "score": 0.9}], _config(), _options(mode="replace"))
+
+        all_sqls = [call[0][0] for call in conn.cursor().execute.call_args_list]
+        truncate_count = sum(1 for sql in all_sqls if "TRUNCATE" in sql)
+        assert truncate_count == 1
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_replace_uses_plain_insert(self, mock_connect: MagicMock) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        dest = PostgresDestination()
+        dest.load([{"id": 1, "score": 0.5}], _config(), _options(mode="replace"))
+
+        # The INSERT call (second execute, after TRUNCATE)
+        insert_sql = cur.execute.call_args_list[1][0][0]
+        assert "ON CONFLICT" not in insert_sql
+        assert "INSERT INTO" in insert_sql

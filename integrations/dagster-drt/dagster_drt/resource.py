@@ -75,7 +75,7 @@ class DagsterDrtResource(ConfigurableResource):
             dry_run: Override dry-run mode for this run. If None, uses
                 the resource-level default.
         """
-        from drt.cli.main import _get_destination, _get_source
+        from drt.cli.main import _get_destination, _get_source, _get_watermark_storage
         from drt.config.credentials import load_profile
         from drt.config.parser import load_project, load_syncs
         from drt.engine.sync import run_sync
@@ -107,6 +107,7 @@ class DagsterDrtResource(ConfigurableResource):
 
             sync_config = all_syncs[sync_name]
             destination = _get_destination(sync_config)
+            wm_storage = _get_watermark_storage(sync_config, project_path)
 
             result = run_sync(
                 sync_config,
@@ -116,10 +117,12 @@ class DagsterDrtResource(ConfigurableResource):
                 project_path,
                 dry_run=effective_dry_run,
                 state_manager=state_mgr,
+                watermark_storage=wm_storage,
             )
 
             context.log.info(
                 f"drt sync '{sync_name}': "
+                f"{result.rows_extracted} extracted, "
                 f"{result.success} synced, {result.failed} failed, "
                 f"{result.skipped} skipped (dry_run={effective_dry_run})"
             )
@@ -130,9 +133,13 @@ class DagsterDrtResource(ConfigurableResource):
                 asset_key=key,
                 metadata={
                     "sync_name": MetadataValue.text(sync_name),
+                    "rows_extracted": MetadataValue.int(result.rows_extracted),
                     "rows_synced": MetadataValue.int(result.success),
                     "rows_failed": MetadataValue.int(result.failed),
                     "rows_skipped": MetadataValue.int(result.skipped),
+                    "duration_seconds": MetadataValue.float(
+                        result.duration_seconds or 0.0,
+                    ),
                     "dry_run": MetadataValue.bool(effective_dry_run),
                     "row_errors_count": MetadataValue.int(len(result.row_errors)),
                 },

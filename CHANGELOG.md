@@ -41,9 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **SQL Server source connector** (#91): Extract data from Microsoft SQL Server using pure-Python `pymssql`. Supports host, port, database, user, password_env, schema. Install: `pip install drt-core[sqlserver]`.
 - **Databricks source connector** (#88): Extract data from Databricks SQL Warehouse using `databricks-sql-connector`. Supports Unity Catalog, access token auth. Install: `pip install drt-core[databricks]`.
+- **Webhook trigger endpoint** (#218): New `drt serve` command starts a lightweight HTTP server (stdlib `http.server`) so you can trigger syncs via `POST /sync/<name>`. Includes health check, bearer token auth, and single-sync concurrency control (423 on parallel requests). Guide: `docs/guides/using-webhook-trigger.md`.
 - **Prefect integration** (#213): Built-in `run_drt_sync()` helper and `drt_sync_task` for Prefect 2.x/3.x. No extra package needed — included in drt-core. Shares the runner with Airflow integration via `drt.integrations._runner`.
 - **Airflow integration** (#70): Built-in `run_drt_sync()` helper and `DrtRunOperator` for Apache Airflow. No extra package needed — included in drt-core.
 - **Google Ads destination** (#217): Upload offline click conversions. Supports partial failure handling and OAuth2 auth.
+- **Staged Upload destination** (#258): Async bulk-upload APIs (e.g. Amazon Marketing Cloud, Salesforce Bulk API). Declarative 3-phase YAML config: Stage (file upload) → Trigger (job kick) → Poll (completion wait). Supports CSV, JSON, JSONL. New `StagedDestination` Protocol.
 - **OAuth2 Client Credentials auth** (#259): Token exchange with caching for REST API destination.
 - **`drt init --from-dbt`** (#215): Generate sync YAML scaffolds from dbt `manifest.json`.
 - **`--output json` for validate/list** (#230): Structured JSON output for `drt validate` and `drt list`.
@@ -54,6 +56,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **MySQL destination**: auto-serialize `dict`/`list` values to JSON strings before passing to pymysql (#311). Also shipped in [0.5.1](#051---2026-04-14).
+
+## [0.5.4] - 2026-04-16
+
+### Added
+
+- **`destination_lookup`** (#345): Resolve foreign key values by querying the destination database during sync. When syncing related tables, child tables can now reference parent table auto-increment IDs without triggers or denormalized schemas. Supports MySQL, PostgreSQL, and ClickHouse destinations. Configure via `lookups` field in destination YAML with `on_miss: skip | fail | null`. Guide: `docs/guides/destination-lookup.md`.
 
 ## [0.5.1] - 2026-04-14
 

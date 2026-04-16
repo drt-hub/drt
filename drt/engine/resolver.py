@@ -14,6 +14,8 @@ import os
 import re
 from pathlib import Path
 
+from jinja2 import BaseLoader, Environment
+
 from drt.config.credentials import (
     BigQueryProfile,
     DatabricksProfile,
@@ -107,6 +109,10 @@ def resolve_model_ref(
     # Expand environment variables: ${VAR} syntax
     base_sql = _expand_env_vars(base_sql)
 
+    # Render {{ cursor_value }} / {{ watermark }} template if present
+    if _has_cursor_template(base_sql):
+        return _render_cursor_template(base_sql, last_cursor_value or "")
+
     # Inject incremental WHERE clause when cursor info is available
     if cursor_field and last_cursor_value:
         safe_field = _validate_cursor_field(cursor_field)
@@ -114,6 +120,25 @@ def resolve_model_ref(
         return f"SELECT * FROM ({base_sql}) AS _drt_base WHERE {safe_field} > '{safe_value}'"
 
     return base_sql
+
+
+# ---------------------------------------------------------------------------
+# Cursor template helpers
+# ---------------------------------------------------------------------------
+
+_CURSOR_TEMPLATE_PATTERN = re.compile(r"\{\{\s*(cursor_value|watermark)\s*\}\}")
+
+
+def _has_cursor_template(sql: str) -> bool:
+    """Check if SQL contains {{ cursor_value }} or {{ watermark }}."""
+    return bool(_CURSOR_TEMPLATE_PATTERN.search(sql))
+
+
+def _render_cursor_template(sql: str, cursor_value: str) -> str:
+    """Render {{ cursor_value }} and {{ watermark }} in SQL."""
+    env = Environment(loader=BaseLoader())
+    tmpl = env.from_string(sql)
+    return tmpl.render(cursor_value=cursor_value, watermark=cursor_value)
 
 
 # ---------------------------------------------------------------------------

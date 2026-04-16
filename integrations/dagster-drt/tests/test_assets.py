@@ -433,11 +433,13 @@ class TestTranslatorLegacyKinds:
 class _FakeSyncResult:
     """Minimal SyncResult stand-in for testing."""
 
+    rows_extracted: int = 10
     success: int = 10
     failed: int = 0
     skipped: int = 0
     errors: list[str] = field(default_factory=list)
     row_errors: list = field(default_factory=list)
+    duration_seconds: float | None = 1.23
 
     @property
     def total(self) -> int:
@@ -649,6 +651,77 @@ class TestDagsterDrtResourceRun:
 
         with pytest.raises(ValueError, match="project_dir must be set"):
             list(resource.run(context=ctx))
+
+    def test_run_includes_rows_extracted(self, tmp_path: Path) -> None:
+        """MaterializeResult should include rows_extracted for skip detection."""
+        project = _setup_project(tmp_path)
+        from dagster_drt.assets import drt_assets
+        from dagster_drt.resource import DagsterDrtResource
+
+        @drt_assets(project_dir=project)
+        def my_syncs(context, drt: DagsterDrtResource):
+            yield from drt.run(context=context)
+
+        ctx = _make_mock_context(my_syncs)
+        resource = DagsterDrtResource(project_dir=str(project))
+
+        with (
+            patch(_P_LOAD_PROJECT) as mock_proj,
+            patch(_P_LOAD_PROFILE),
+            patch(_P_GET_SOURCE),
+            patch(_P_GET_DEST),
+            patch(_P_RUN_SYNC) as mock_run,
+            patch(_P_STATE_MGR),
+            patch(_P_LOAD_SYNCS) as mock_load_syncs,
+        ):
+            mock_proj.return_value = MagicMock(profile="local")
+            mock_sync = MagicMock()
+            mock_sync.name = "test_sync"
+            mock_load_syncs.return_value = [mock_sync]
+            mock_run.return_value = _FakeSyncResult(
+                rows_extracted=100, success=95, failed=5,
+            )
+
+            results = list(resource.run(context=ctx))
+
+        assert results[0].metadata["rows_extracted"].value == 100
+        assert results[0].metadata["rows_synced"].value == 95
+        assert results[0].metadata["duration_seconds"].value is not None
+
+    def test_run_passes_watermark_storage(self, tmp_path: Path) -> None:
+        """Resource.run() should pass watermark_storage to run_sync."""
+        project = _setup_project(tmp_path)
+        from dagster_drt.assets import drt_assets
+        from dagster_drt.resource import DagsterDrtResource
+
+        @drt_assets(project_dir=project)
+        def my_syncs(context, drt: DagsterDrtResource):
+            yield from drt.run(context=context)
+
+        ctx = _make_mock_context(my_syncs)
+        resource = DagsterDrtResource(project_dir=str(project))
+
+        with (
+            patch(_P_LOAD_PROJECT) as mock_proj,
+            patch(_P_LOAD_PROFILE),
+            patch(_P_GET_SOURCE),
+            patch(_P_GET_DEST),
+            patch(_P_RUN_SYNC) as mock_run,
+            patch(_P_STATE_MGR),
+            patch(_P_LOAD_SYNCS) as mock_load_syncs,
+            patch("drt.cli.main._get_watermark_storage") as mock_wm,
+        ):
+            mock_proj.return_value = MagicMock(profile="local")
+            mock_sync = MagicMock()
+            mock_sync.name = "test_sync"
+            mock_load_syncs.return_value = [mock_sync]
+            mock_run.return_value = _FakeSyncResult()
+            mock_wm.return_value = MagicMock()
+
+            list(resource.run(context=ctx))
+
+        call_kwargs = mock_run.call_args
+        assert "watermark_storage" in call_kwargs.kwargs
 
 
 # ===================================================================
