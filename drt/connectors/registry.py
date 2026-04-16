@@ -159,6 +159,7 @@ def _register_all_connectors() -> None:
         SalesforceBulkDestinationConfig,
         SendGridDestinationConfig,
         SlackDestinationConfig,
+        SnowflakeDestinationConfig,
         StagedUploadDestinationConfig,
         TeamsDestinationConfig,
         TwilioDestinationConfig,
@@ -184,6 +185,7 @@ def _register_all_connectors() -> None:
     from drt.destinations.salesforce_bulk import SalesforceBulkDestination
     from drt.destinations.sendgrid import SendGridDestination
     from drt.destinations.slack import SlackDestination
+    from drt.destinations.snowflake import SnowflakeDestination
     from drt.destinations.staged_upload import StagedUploadDestination
     from drt.destinations.teams import TeamsDestination
     from drt.destinations.twilio import TwilioDestination
@@ -225,6 +227,7 @@ def _register_all_connectors() -> None:
     )
     register_destination("staged_upload", StagedUploadDestinationConfig, StagedUploadDestination)
     register_destination("intercom", IntercomDestinationConfig, IntercomDestination)
+    register_destination("snowflake", SnowflakeDestinationConfig, SnowflakeDestination)
 
     # Register all sources
     register_source("bigquery", BigQueryProfile, BigQuerySource)
