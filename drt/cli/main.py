@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from drt.destinations.slack import SlackDestination
     from drt.destinations.staged_upload import StagedUploadDestination
     from drt.destinations.teams import TeamsDestination
+    from drt.destinations.twilio import TwilioDestination
     from drt.sources.bigquery import BigQuerySource
     from drt.sources.clickhouse import ClickHouseSource
     from drt.sources.databricks import DatabricksSource
@@ -835,6 +836,7 @@ def _get_destination(
     | GoogleAdsDestination
     | NotionDestination
     | StagedUploadDestination
+    | TwilioDestination
 ):
     from drt.config.models import (
         ClickHouseDestinationConfig,
@@ -855,6 +857,7 @@ def _get_destination(
         SlackDestinationConfig,
         StagedUploadDestinationConfig,
         TeamsDestinationConfig,
+        TwilioDestinationConfig,
     )
     from drt.destinations.clickhouse import ClickHouseDestination
     from drt.destinations.discord import DiscordDestination
@@ -868,12 +871,15 @@ def _get_destination(
     from drt.destinations.rest_api import RestApiDestination
     from drt.destinations.sendgrid import SendGridDestination
     from drt.destinations.slack import SlackDestination
+    from drt.destinations.twilio import TwilioDestination
 
     dest = sync.destination
     if isinstance(dest, RestApiDestinationConfig):
         return RestApiDestination()
     if isinstance(dest, SlackDestinationConfig):
         return SlackDestination()
+    if isinstance(dest, TwilioDestinationConfig):
+        return TwilioDestination()
     if isinstance(dest, DiscordDestinationConfig):
         return DiscordDestination()
     if isinstance(dest, GitHubActionsDestinationConfig):
