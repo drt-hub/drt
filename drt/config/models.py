@@ -98,6 +98,35 @@ class SlackDestinationConfig(BaseModel):
         return f"{self.type} (webhook)"
 
 
+class TwilioDestinationConfig(BaseModel):
+    type: Literal["twilio"]
+
+    account_sid: str | None = None
+    account_sid_env: str | None = None
+
+    auth_token: str | None = None
+    auth_token_env: str | None = None
+
+    from_number: str  # Twilio phone number (E.164 format)
+
+    # Jinja2 template → destination phone number
+    to_template: str  # e.g. "{{ row.phone }}"
+
+    # Jinja2 template → SMS body
+    message_template: str
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.from_number})"
+
+    @model_validator(mode="after")
+    def _check_auth(self) -> "TwilioDestinationConfig":
+        if not (self.account_sid or self.account_sid_env):
+            raise ValueError("account_sid or account_sid_env is required.")
+        if not (self.auth_token or self.auth_token_env):
+            raise ValueError("auth_token or auth_token_env is required.")
+        return self
+    
+    
 class DiscordDestinationConfig(BaseModel):
     type: Literal["discord"]
     webhook_url: str | None = None
@@ -455,7 +484,8 @@ DestinationConfig = Annotated[
     | FileDestinationConfig
     | NotionDestinationConfig
     | IntercomDestinationConfig
-    | StagedUploadDestinationConfig,
+    | StagedUploadDestinationConfig
+    | TwilioDestinationConfig,
     Field(discriminator="type"),
 ]
 
