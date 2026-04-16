@@ -154,6 +154,22 @@ class HubSpotDestinationConfig(BaseModel):
         return f"{self.type} ({self.object_type})"
 
 
+class SalesforceDestinationConfig(BaseModel):
+    type: Literal["salesforce"]
+    object: str  # e.g. "Contact", "Lead", "Account", "Opportunity", "CustomObject__c"
+    mode: Literal["upsert"] = "upsert"
+    external_id_field: str  # e.g. "Email", "External_Id__c"
+
+    # API selection threshold
+    bulk_threshold: int = 200  # switch to Bulk API when record count exceeds this
+
+    # OAuth2 config (JWT bearer or client credentials)
+    auth: AuthConfig
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.object})"
+    
+    
 class SendGridDestinationConfig(BaseModel):
     type: Literal["sendgrid"]
     from_email: str
@@ -363,7 +379,8 @@ DestinationConfig = Annotated[
     | ClickHouseDestinationConfig
     | ParquetDestinationConfig
     | GoogleAdsDestinationConfig
-    | FileDestinationConfig,
+    | FileDestinationConfig
+    | SalesforceDestinationConfig,
     Field(discriminator="type"),
 ]
 

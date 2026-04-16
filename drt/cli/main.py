@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from drt.destinations.sendgrid import SendGridDestination
     from drt.destinations.slack import SlackDestination
     from drt.destinations.teams import TeamsDestination
+    from drt.destinations.salesforce import SalesforceDestination
     from drt.sources.bigquery import BigQuerySource
     from drt.sources.clickhouse import ClickHouseSource
     from drt.sources.databricks import DatabricksSource
@@ -683,6 +684,7 @@ def _get_destination(
     | FileDestination
     | LinearDestination
     | GoogleAdsDestination
+    | SalesforceDestination
 ):
     from drt.config.models import (
         ClickHouseDestinationConfig,
@@ -701,6 +703,7 @@ def _get_destination(
         SendGridDestinationConfig,
         SlackDestinationConfig,
         TeamsDestinationConfig,
+        SalesforceDestinationConfig,
     )
     from drt.destinations.clickhouse import ClickHouseDestination
     from drt.destinations.discord import DiscordDestination
@@ -713,6 +716,7 @@ def _get_destination(
     from drt.destinations.rest_api import RestApiDestination
     from drt.destinations.sendgrid import SendGridDestination
     from drt.destinations.slack import SlackDestination
+    from drt.destinations.salesforce import SalesforceDestination
 
     dest = sync.destination
     if isinstance(dest, RestApiDestinationConfig):
@@ -727,6 +731,8 @@ def _get_destination(
         return HubSpotDestination()
     if isinstance(dest, JiraDestinationConfig):
         return JiraDestination()
+    if isinstance(dest, SalesforceDestinationConfig):
+        return SalesforceDestination()
     if isinstance(dest, SendGridDestinationConfig):
         return SendGridDestination()
     if isinstance(dest, GoogleSheetsDestinationConfig):
