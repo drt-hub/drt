@@ -203,6 +203,7 @@ class LookupConfig(BaseModel):
     match: dict[str, str]  # { destination_column: source_column }
     select: str  # column to fetch from the lookup table
     on_miss: Literal["skip", "fail", "null"] = "skip"
+    drop_match_columns: bool = True  # remove match source columns from INSERT
 
     @model_validator(mode="after")
     def _check_match_not_empty(self) -> "LookupConfig":

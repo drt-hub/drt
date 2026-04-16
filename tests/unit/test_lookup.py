@@ -267,6 +267,7 @@ class TestApplyLookups:
         assert len(enriched) == 2
         assert enriched[0]["parent_id"] == 10
         assert enriched[1]["parent_id"] == 20
+        assert "user_id" not in enriched[0]  # match col dropped by default
         assert errors == []
 
     def test_on_miss_skip(self) -> None:
@@ -397,3 +398,78 @@ class TestApplyLookups:
 
         assert len(errors) == 1
         assert len(errors[0].record_preview) <= 200
+
+    def test_drop_match_columns_default(self) -> None:
+        """Match columns are dropped by default after lookup resolution."""
+        records = [{"user_id": "u1", "name": "Alice"}]
+        enriched, errors = apply_lookups(records, self._make_maps(), "fail")
+
+        assert len(enriched) == 1
+        assert enriched[0]["parent_id"] == 10
+        assert "user_id" not in enriched[0]  # dropped
+        assert enriched[0]["name"] == "Alice"  # non-match col preserved
+
+    def test_drop_match_columns_false(self) -> None:
+        """Match columns are kept when drop_match_columns=False."""
+        lk = LookupConfig(
+            table="parent",
+            match={"user_id": "user_id"},
+            select="id",
+            drop_match_columns=False,
+        )
+        maps: dict[str, tuple[LookupConfig, dict]] = {
+            "parent_id": (lk, {("u1",): 10}),
+        }
+        records = [{"user_id": "u1", "name": "Alice"}]
+        enriched, errors = apply_lookups(records, maps, "fail")
+
+        assert len(enriched) == 1
+        assert enriched[0]["parent_id"] == 10
+        assert enriched[0]["user_id"] == "u1"  # kept
+
+    def test_drop_match_columns_preserves_target_col(self) -> None:
+        """Don't drop a source col if it's also a target col of another lookup."""
+        lk1 = LookupConfig(
+            table="parents",
+            match={"user_id": "user_id"},
+            select="id",
+        )
+        lk2 = LookupConfig(
+            table="teams",
+            match={"team_code": "user_id"},
+            select="team_id",
+        )
+        maps: dict[str, tuple[LookupConfig, dict]] = {
+            "parent_id": (lk1, {("u1",): 10}),
+            "user_id": (lk2, {("u1",): 99}),  # user_id is also a target
+        }
+        records = [{"user_id": "u1", "name": "Alice"}]
+        enriched, errors = apply_lookups(records, maps, "fail")
+
+        assert len(enriched) == 1
+        assert enriched[0]["parent_id"] == 10
+        assert enriched[0]["user_id"] == 99  # overwritten by lk2, not dropped
+
+    def test_drop_match_columns_multiple_lookups(self) -> None:
+        """Each lookup's match columns are dropped independently."""
+        lk1 = LookupConfig(
+            table="parents",
+            match={"user_id": "user_id"},
+            select="id",
+        )
+        lk2 = LookupConfig(
+            table="companies",
+            match={"company_code": "company_code"},
+            select="id",
+            drop_match_columns=False,
+        )
+        maps: dict[str, tuple[LookupConfig, dict]] = {
+            "parent_id": (lk1, {("u1",): 10}),
+            "company_id": (lk2, {("acme",): 100}),
+        }
+        records = [{"user_id": "u1", "company_code": "acme", "name": "A"}]
+        enriched, errors = apply_lookups(records, maps, "fail")
+
+        assert len(enriched) == 1
+        assert "user_id" not in enriched[0]  # dropped (lk1 default)
+        assert enriched[0]["company_code"] == "acme"  # kept (lk2 opt-out)
