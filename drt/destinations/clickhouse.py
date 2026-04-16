@@ -7,6 +7,8 @@ PostgreSQL and MySQL destination pattern).
 Deduplication is handled by ClickHouse's ReplacingMergeTree engine at merge
 time — the destination performs simple INSERTs.
 
+Supports ``sync.mode: replace`` (TRUNCATE TABLE → INSERT).
+
 Requires: pip install drt-core[clickhouse]
 
 Example sync YAML:
@@ -34,6 +36,9 @@ from drt.destinations.row_errors import RowError
 class ClickHouseDestination:
     """Insert records into a ClickHouse table."""
 
+    def __init__(self) -> None:
+        self._replace_truncated: bool = False
+
     def load(
         self,
         records: list[dict[str, Any]],
@@ -49,6 +54,10 @@ class ClickHouseDestination:
 
         try:
             columns = list(records[0].keys())
+
+            if sync_options.mode == "replace" and not self._replace_truncated:
+                client.command(f"TRUNCATE TABLE {config.table}")
+                self._replace_truncated = True
 
             # TODO: batch insert with fallback to row-by-row on error
             for i, record in enumerate(records):

@@ -87,9 +87,7 @@ class HubSpotDestination:
         upsert_url = f"{_HUBSPOT_API}/{config.object_type}"
         result = SyncResult()
         # HubSpot rate limit: 100 req/10s for private apps
-        rate_limiter = RateLimiter(
-            min(sync_options.rate_limit.requests_per_second, 9)
-        )
+        rate_limiter = RateLimiter(min(sync_options.rate_limit.requests_per_second, 9))
 
         with httpx.Client(timeout=30.0) as client:
             for i, record in enumerate(records):

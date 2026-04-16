@@ -13,6 +13,7 @@ from drt.config.models import (
     BasicAuth,
     BearerAuth,
     GoogleSheetsDestinationConfig,
+    JiraDestinationConfig,
     MySQLDestinationConfig,
     PostgresDestinationConfig,
     ProjectConfig,
@@ -27,46 +28,56 @@ from drt.config.parser import load_project, load_syncs
 # Auth model discrimination
 # ---------------------------------------------------------------------------
 
+
 def test_bearer_auth_discriminated() -> None:
-    config = RestApiDestinationConfig.model_validate({
-        "type": "rest_api",
-        "url": "https://example.com",
-        "auth": {"type": "bearer", "token_env": "MY_TOKEN"},
-    })
+    config = RestApiDestinationConfig.model_validate(
+        {
+            "type": "rest_api",
+            "url": "https://example.com",
+            "auth": {"type": "bearer", "token_env": "MY_TOKEN"},
+        }
+    )
     assert isinstance(config.auth, BearerAuth)
     assert config.auth.token_env == "MY_TOKEN"
 
 
 def test_api_key_auth_discriminated() -> None:
-    config = RestApiDestinationConfig.model_validate({
-        "type": "rest_api",
-        "url": "https://example.com",
-        "auth": {"type": "api_key", "header": "X-Custom-Key", "value": "secret"},
-    })
+    config = RestApiDestinationConfig.model_validate(
+        {
+            "type": "rest_api",
+            "url": "https://example.com",
+            "auth": {"type": "api_key", "header": "X-Custom-Key", "value": "secret"},
+        }
+    )
     assert isinstance(config.auth, ApiKeyAuth)
     assert config.auth.header == "X-Custom-Key"
 
 
 def test_basic_auth_discriminated() -> None:
-    config = RestApiDestinationConfig.model_validate({
-        "type": "rest_api",
-        "url": "https://example.com",
-        "auth": {"type": "basic", "username_env": "USER", "password_env": "PASS"},
-    })
+    config = RestApiDestinationConfig.model_validate(
+        {
+            "type": "rest_api",
+            "url": "https://example.com",
+            "auth": {"type": "basic", "username_env": "USER", "password_env": "PASS"},
+        }
+    )
     assert isinstance(config.auth, BasicAuth)
 
 
 def test_no_auth() -> None:
-    config = RestApiDestinationConfig.model_validate({
-        "type": "rest_api",
-        "url": "https://example.com",
-    })
+    config = RestApiDestinationConfig.model_validate(
+        {
+            "type": "rest_api",
+            "url": "https://example.com",
+        }
+    )
     assert config.auth is None
 
 
 # ---------------------------------------------------------------------------
 # ProjectConfig
 # ---------------------------------------------------------------------------
+
 
 def test_project_config_defaults() -> None:
     p = ProjectConfig(name="test")
@@ -83,6 +94,7 @@ def test_project_config_profile_field() -> None:
 # ---------------------------------------------------------------------------
 # Parser — load_project
 # ---------------------------------------------------------------------------
+
 
 def test_load_project(tmp_path: Path) -> None:
     config_file = tmp_path / "drt_project.yml"
@@ -101,6 +113,7 @@ def test_load_project_missing(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Parser — load_syncs
 # ---------------------------------------------------------------------------
+
 
 def _write_sync(syncs_dir: Path, name: str) -> None:
     syncs_dir.mkdir(exist_ok=True)
@@ -131,6 +144,7 @@ def test_load_syncs(tmp_path: Path) -> None:
 # Credentials — load_profile / save_profile
 # ---------------------------------------------------------------------------
 
+
 def test_save_and_load_profile(tmp_path: Path) -> None:
     profile = BigQueryProfile(
         type="bigquery",
@@ -155,9 +169,7 @@ def test_load_profile_bigquery_location(tmp_path: Path) -> None:
 
 
 def test_load_profile_bigquery_location_default(tmp_path: Path) -> None:
-    (tmp_path / "profiles.yml").write_text(
-        "dev:\n  type: bigquery\n  project: p\n  dataset: d\n"
-    )
+    (tmp_path / "profiles.yml").write_text("dev:\n  type: bigquery\n  project: p\n  dataset: d\n")
     loaded = load_profile("dev", config_dir=tmp_path)
     assert loaded.location == "US"
 
@@ -190,6 +202,7 @@ def test_save_profile_appends(tmp_path: Path) -> None:
 # Google Sheets destination config
 # ---------------------------------------------------------------------------
 
+
 def test_google_sheets_destination_config_parses() -> None:
     raw = {
         "name": "export_to_sheets",
@@ -211,6 +224,7 @@ def test_google_sheets_destination_config_parses() -> None:
 # ---------------------------------------------------------------------------
 # SyncOptions — upsert mode
 # ---------------------------------------------------------------------------
+
 
 def test_sync_options_upsert_mode_accepted() -> None:
     """mode='upsert' is valid and behaves like 'full' (no cursor_field required)."""
@@ -238,6 +252,72 @@ def test_sync_options_upsert_in_sync_config() -> None:
     }
     cfg = SyncConfig(**raw)
     assert cfg.sync.mode == "upsert"
+
+
+def test_sync_options_replace_mode_accepted() -> None:
+    """mode='replace' is valid and does not require cursor_field or upsert_key."""
+    opts = SyncOptions(mode="replace")
+    assert opts.mode == "replace"
+    assert opts.cursor_field is None
+
+
+def test_sync_options_replace_in_sync_config() -> None:
+    """mode='replace' works end-to-end inside a SyncConfig."""
+    raw = {
+        "name": "replace_sync",
+        "model": "ref('sessions')",
+        "destination": {
+            "type": "rest_api",
+            "url": "https://example.com/api",
+        },
+        "sync": {"mode": "replace"},
+    }
+    cfg = SyncConfig(**raw)
+    assert cfg.sync.mode == "replace"
+
+
+def test_watermark_config_gcs() -> None:
+    opts = SyncOptions(
+        mode="incremental",
+        cursor_field="updated_at",
+        watermark={
+            "storage": "gcs",
+            "bucket": "my-bucket",
+            "key": "wm/sync.json",
+        },
+    )
+    assert opts.watermark is not None
+    assert opts.watermark.storage == "gcs"
+    assert opts.watermark.bucket == "my-bucket"
+
+
+def test_watermark_config_bigquery() -> None:
+    opts = SyncOptions(
+        mode="incremental",
+        cursor_field="updated_at",
+        watermark={
+            "storage": "bigquery",
+            "project": "my-proj",
+            "dataset": "my_ds",
+        },
+    )
+    assert opts.watermark is not None
+    assert opts.watermark.storage == "bigquery"
+
+
+def test_watermark_config_local_default() -> None:
+    opts = SyncOptions(
+        mode="incremental",
+        cursor_field="updated_at",
+        watermark={"storage": "local"},
+    )
+    assert opts.watermark is not None
+    assert opts.watermark.storage == "local"
+
+
+def test_watermark_config_none_by_default() -> None:
+    opts = SyncOptions(mode="full")
+    assert opts.watermark is None
 
 
 def test_ssl_config_defaults() -> None:
@@ -304,9 +384,25 @@ def test_google_sheets_destination_defaults() -> None:
     assert cfg.credentials_env is None
 
 
+def test_jira_destination_defaults() -> None:
+    cfg = JiraDestinationConfig(
+        type="jira",
+        base_url_env="JIRA_BASE_URL",
+        email_env="JIRA_EMAIL",
+        token_env="JIRA_API_TOKEN",
+        project_key="ENG",
+        summary_template="Alert: {{ row.metric }}",
+        description_template="Value: {{ row.value }}",
+    )
+    assert cfg.type == "jira"
+    assert cfg.issue_type == "Task"
+    assert cfg.issue_id_field == "issue_id"
+
+
 # ---------------------------------------------------------------------------
 # PostgresDestinationConfig — connection_string_env
 # ---------------------------------------------------------------------------
+
 
 def test_postgres_config_connection_string_env() -> None:
     """connection_string_env should be accepted without host/dbname."""
@@ -348,6 +444,7 @@ def test_postgres_config_no_connection_method_raises() -> None:
 # ---------------------------------------------------------------------------
 # MySQLDestinationConfig — connection_string_env
 # ---------------------------------------------------------------------------
+
 
 def test_mysql_config_connection_string_env() -> None:
     """connection_string_env should be accepted without host/dbname."""

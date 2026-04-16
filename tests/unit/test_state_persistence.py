@@ -49,12 +49,8 @@ def test_cursor_none_for_full_sync(tmp_path: Path) -> None:
 
 def test_cursor_updated_on_subsequent_run(tmp_path: Path) -> None:
     mgr = StateManager(tmp_path)
-    mgr.save_sync(
-        SyncState("s", TS1, 10, "success", last_cursor_value="100")
-    )
-    mgr.save_sync(
-        SyncState("s", TS2, 20, "success", last_cursor_value="200")
-    )
+    mgr.save_sync(SyncState("s", TS1, 10, "success", last_cursor_value="100"))
+    mgr.save_sync(SyncState("s", TS2, 20, "success", last_cursor_value="200"))
 
     loaded = mgr.get_last_sync("s")
     assert loaded is not None
@@ -63,12 +59,8 @@ def test_cursor_updated_on_subsequent_run(tmp_path: Path) -> None:
 
 def test_cursor_preserved_across_different_syncs(tmp_path: Path) -> None:
     mgr = StateManager(tmp_path)
-    mgr.save_sync(
-        SyncState("sync_a", TS1, 10, "success", last_cursor_value="100")
-    )
-    mgr.save_sync(
-        SyncState("sync_b", TS1, 20, "success", last_cursor_value="200")
-    )
+    mgr.save_sync(SyncState("sync_a", TS1, 10, "success", last_cursor_value="100"))
+    mgr.save_sync(SyncState("sync_b", TS1, 20, "success", last_cursor_value="200"))
 
     a = mgr.get_last_sync("sync_a")
     b = mgr.get_last_sync("sync_b")
@@ -103,12 +95,8 @@ def test_partial_failure_state(tmp_path: Path) -> None:
 def test_failed_state_preserves_cursor(tmp_path: Path) -> None:
     """Even on failure, the previous cursor is overwritten by the new state."""
     mgr = StateManager(tmp_path)
-    mgr.save_sync(
-        SyncState("s", TS1, 10, "success", last_cursor_value="100")
-    )
-    mgr.save_sync(
-        SyncState("s", TS2, 0, "failed", error="timeout")
-    )
+    mgr.save_sync(SyncState("s", TS1, 10, "success", last_cursor_value="100"))
+    mgr.save_sync(SyncState("s", TS2, 0, "failed", error="timeout"))
 
     loaded = mgr.get_last_sync("s")
     assert loaded is not None
@@ -156,9 +144,7 @@ def test_null_state_file(tmp_path: Path) -> None:
 
 def test_state_file_is_valid_json(tmp_path: Path) -> None:
     mgr = StateManager(tmp_path)
-    mgr.save_sync(
-        SyncState("s", TS1, 10, "success", last_cursor_value="42")
-    )
+    mgr.save_sync(SyncState("s", TS1, 10, "success", last_cursor_value="42"))
 
     raw = json.loads((tmp_path / ".drt" / "state.json").read_text())
     assert "s" in raw
@@ -169,12 +155,8 @@ def test_state_file_is_valid_json(tmp_path: Path) -> None:
 def test_save_does_not_corrupt_other_syncs(tmp_path: Path) -> None:
     """Saving one sync must not lose or alter other syncs."""
     mgr = StateManager(tmp_path)
-    mgr.save_sync(
-        SyncState("first", TS1, 10, "success", last_cursor_value="A")
-    )
-    mgr.save_sync(
-        SyncState("second", TS2, 20, "success", last_cursor_value="B")
-    )
+    mgr.save_sync(SyncState("first", TS1, 10, "success", last_cursor_value="A"))
+    mgr.save_sync(SyncState("second", TS2, 20, "success", last_cursor_value="B"))
 
     first = mgr.get_last_sync("first")
     assert first is not None
@@ -185,9 +167,7 @@ def test_save_does_not_corrupt_other_syncs(tmp_path: Path) -> None:
 def test_state_deleted_starts_fresh(tmp_path: Path) -> None:
     """If state.json is deleted between runs, next run starts fresh."""
     mgr = StateManager(tmp_path)
-    mgr.save_sync(
-        SyncState("s", TS1, 10, "success", last_cursor_value="100")
-    )
+    mgr.save_sync(SyncState("s", TS1, 10, "success", last_cursor_value="100"))
 
     (tmp_path / ".drt" / "state.json").unlink()
     assert mgr.get_last_sync("s") is None

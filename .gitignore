@@ -28,9 +28,10 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 
-# IDE
+# IDE / tools
 .vscode/
 .idea/
+.serena/
 *.swp
 *.swo
 
@@ -45,4 +46,6 @@ Thumbs.db
 *.pem
 *.key
 credentials.json
+secrets.toml
 service_account.json
+docs/plans/

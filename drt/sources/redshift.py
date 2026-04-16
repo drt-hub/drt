@@ -68,9 +68,7 @@ class RedshiftSource:
         try:
             import psycopg2
         except ImportError as e:
-            raise ImportError(
-                "Redshift support requires: pip install drt-core[redshift]"
-            ) from e
+            raise ImportError("Redshift support requires: pip install drt-core[redshift]") from e
 
         password = config.password or (
             os.environ.get(config.password_env) if config.password_env else None

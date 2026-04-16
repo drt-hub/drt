@@ -7,17 +7,20 @@ CLI owns all console output; engine only returns SyncResult.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from drt.config.credentials import ProfileConfig
-from drt.config.models import SyncConfig
-from drt.destinations.base import Destination, SyncResult
+from drt.config.models import LookupConfig, SyncConfig
+from drt.destinations.base import Destination, StagedDestination, SyncResult
+from drt.destinations.lookup import apply_lookups, build_lookup_map
 from drt.engine.resolver import resolve_model_ref
 from drt.sources.base import Source
 from drt.state.manager import StateManager, SyncState
+from drt.state.watermark import WatermarkStorage
 
 
 def _cursor_gt(new: str, current: str) -> bool:
@@ -43,11 +46,12 @@ def batch(iterable: Iterator[Any], size: int) -> Iterator[list[Any]]:
 def run_sync(
     sync: SyncConfig,
     source: Source,
-    destination: Destination,
+    destination: Destination | StagedDestination,
     profile: ProfileConfig,
     project_dir: Path,
     dry_run: bool = False,
     state_manager: StateManager | None = None,
+    watermark_storage: WatermarkStorage | None = None,
 ) -> SyncResult:
     """Run a single sync: extract from source, load to destination.
 
@@ -64,24 +68,41 @@ def run_sync(
         Aggregated SyncResult across all batches.
     """
     started_at = datetime.now(timezone.utc).isoformat()
+    t0 = time.perf_counter()
 
     # Load last cursor value for incremental syncs
     cursor_field = sync.sync.cursor_field if sync.sync.mode == "incremental" else None
     last_cursor_value: str | None = None
-    if cursor_field and state_manager:
+    if cursor_field and watermark_storage:
+        last_cursor_value = watermark_storage.get(sync.name)
+    elif cursor_field and state_manager:
         prev = state_manager.get_last_sync(sync.name)
         if prev:
             last_cursor_value = prev.last_cursor_value
 
-    query = resolve_model_ref(
-        sync.model, project_dir, profile, cursor_field, last_cursor_value
-    )
+    query = resolve_model_ref(sync.model, project_dir, profile, cursor_field, last_cursor_value)
 
     records_iter = source.extract(query, profile)
     total_result = SyncResult()
     new_cursor_value: str | None = last_cursor_value
+    is_staged = isinstance(destination, StagedDestination)
+    staged_count = 0
+
+    # Build lookup maps (one query per lookup, before the batch loop)
+    lookup_maps: dict[str, tuple[LookupConfig, dict[tuple[Any, ...], Any]]] = {}
+    lookups: dict[str, LookupConfig] | None = getattr(
+        sync.destination,
+        "lookups",
+        None,
+    )
+    if lookups:
+        for col_name, lk_config in lookups.items():
+            mapping = build_lookup_map(sync.destination, lk_config)
+            lookup_maps[col_name] = (lk_config, mapping)
 
     for record_batch in batch(records_iter, sync.sync.batch_size):
+        total_result.rows_extracted += len(record_batch)
+
         # Track max cursor value seen across all batches
         if cursor_field:
             for row in record_batch:
@@ -91,24 +112,58 @@ def run_sync(
                     if new_cursor_value is None or _cursor_gt(str_val, new_cursor_value):
                         new_cursor_value = str_val
 
+        # Apply destination lookups (FK resolution)
+        if lookup_maps:
+            batch_len_before = len(record_batch)
+            record_batch, lookup_errors = apply_lookups(
+                record_batch,
+                lookup_maps,
+                sync.sync.on_error,
+            )
+            total_result.row_errors.extend(lookup_errors)
+            total_result.skipped += batch_len_before - len(record_batch)
+            if not record_batch:
+                continue
+
         if dry_run:
             total_result.success += len(record_batch)
             continue
 
-        result = destination.load(record_batch, sync.destination, sync.sync)
-        total_result.success += result.success
-        total_result.failed += result.failed
-        total_result.skipped += result.skipped
-        total_result.errors.extend(result.errors)
-        total_result.row_errors.extend(getattr(result, "row_errors", []))
+        if is_staged:
+            assert isinstance(destination, StagedDestination)
+            destination.stage(record_batch, sync.destination, sync.sync)
+            staged_count += len(record_batch)
+        else:
+            assert isinstance(destination, Destination)
+            result = destination.load(record_batch, sync.destination, sync.sync)
+            total_result.success += result.success
+            total_result.failed += result.failed
+            total_result.skipped += result.skipped
+            total_result.errors.extend(result.errors)
+            total_result.row_errors.extend(getattr(result, "row_errors", []))
 
-        if sync.sync.on_error == "fail" and result.failed > 0:
-            break
+            if sync.sync.on_error == "fail" and result.failed > 0:
+                break
+
+    # Finalize staged destinations (upload file, trigger job, poll).
+    # finalize() is authoritative for staged success/failed counts —
+    # stage() only buffers, so records aren't "successful" until finalize.
+    if is_staged and not dry_run and staged_count > 0:
+        assert isinstance(destination, StagedDestination)
+        finalize_result = destination.finalize(sync.destination, sync.sync)
+        total_result.success += finalize_result.success
+        total_result.failed += finalize_result.failed
+        total_result.errors.extend(finalize_result.errors)
+        total_result.row_errors.extend(getattr(finalize_result, "row_errors", []))
+
+    total_result.duration_seconds = round(time.perf_counter() - t0, 3)
 
     if state_manager is not None:
         status = (
-            "success" if total_result.failed == 0
-            else "partial" if total_result.success > 0
+            "success"
+            if total_result.failed == 0
+            else "partial"
+            if total_result.success > 0
             else "failed"
         )
         state_manager.save_sync(
@@ -121,5 +176,9 @@ def run_sync(
                 last_cursor_value=new_cursor_value if cursor_field else None,
             )
         )
+
+    # Persist watermark to external storage if configured
+    if watermark_storage is not None and cursor_field and new_cursor_value:
+        watermark_storage.save(sync.name, new_cursor_value)
 
     return total_result

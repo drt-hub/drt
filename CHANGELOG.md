@@ -39,12 +39,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Microsoft Teams destination** (#85): Send messages to Teams channels via Incoming Webhook. Supports plain text and Adaptive Card payloads via Jinja2 templates. 10 unit tests. No extra dependencies.
-- **ClickHouse destination connector** (#166): Insert rows into ClickHouse tables using `clickhouse-connect` (HTTP client). Supports host, database, user, password (with `_env` variants), connection string, table, and HTTPS via `secure` flag. Deduplication relies on ClickHouse's ReplacingMergeTree engine. 16 unit tests. Install: `pip install drt-core[clickhouse]`.
-- **Parquet file destination** (#171): Write sync results to local Parquet files using pandas + pyarrow. Supports snappy/gzip/zstd compression and partition columns. 11 unit tests. Install: `pip install drt-core[parquet]`.
-- **CSV/JSON/JSONL file destination** (#67): Write sync results to local CSV, JSON, or JSONL files. No extra dependencies — uses stdlib csv and json. 12 unit tests.
-- **Snowflake source connector** (#162): Extract data from Snowflake using `snowflake-connector-python`. Supports account, user, password/password_env, database, schema, warehouse, and optional role. Install: `pip install drt-core[snowflake]`.
-- **Dockerfile and docker-compose example** (#161): Lightweight `python:3.12-slim` image with configurable `DRT_EXTRAS` build arg, non-root user, and pinned version. Includes `docker-compose.yml` and `.dockerignore`.
+- **SQL Server source connector** (#91): Extract data from Microsoft SQL Server using pure-Python `pymssql`. Supports host, port, database, user, password_env, schema. Install: `pip install drt-core[sqlserver]`.
+- **Databricks source connector** (#88): Extract data from Databricks SQL Warehouse using `databricks-sql-connector`. Supports Unity Catalog, access token auth. Install: `pip install drt-core[databricks]`.
+- **Webhook trigger endpoint** (#218): New `drt serve` command starts a lightweight HTTP server (stdlib `http.server`) so you can trigger syncs via `POST /sync/<name>`. Includes health check, bearer token auth, and single-sync concurrency control (423 on parallel requests). Guide: `docs/guides/using-webhook-trigger.md`.
+- **Prefect integration** (#213): Built-in `run_drt_sync()` helper and `drt_sync_task` for Prefect 2.x/3.x. No extra package needed — included in drt-core. Shares the runner with Airflow integration via `drt.integrations._runner`.
+- **Airflow integration** (#70): Built-in `run_drt_sync()` helper and `DrtRunOperator` for Apache Airflow. No extra package needed — included in drt-core.
+- **Google Ads destination** (#217): Upload offline click conversions. Supports partial failure handling and OAuth2 auth.
+- **Staged Upload destination** (#258): Async bulk-upload APIs (e.g. Amazon Marketing Cloud, Salesforce Bulk API). Declarative 3-phase YAML config: Stage (file upload) → Trigger (job kick) → Poll (completion wait). Supports CSV, JSON, JSONL. New `StagedDestination` Protocol.
+- **OAuth2 Client Credentials auth** (#259): Token exchange with caching for REST API destination.
+- **`drt init --from-dbt`** (#215): Generate sync YAML scaffolds from dbt `manifest.json`.
+- **`--output json` for validate/list** (#230): Structured JSON output for `drt validate` and `drt list`.
+- **MCP Server: `drt_list_connectors`** (#262): New tool listing all available sources and destinations.
+- **MCP Server: improved `drt_validate`** (#262): Per-file error reporting via `load_syncs_safe()`.
+- **BigQuery → Discord example** (#266): Alert pipeline that queries BigQuery for recent error rows and posts a Discord notification per row via Incoming Webhook using incremental sync. Includes `examples/bigquery_to_discord/`.
+
+### Fixed
+
+- **MySQL destination**: auto-serialize `dict`/`list` values to JSON strings before passing to pymysql (#311). Also shipped in [0.5.1](#051---2026-04-14).
+
+## [0.5.4] - 2026-04-16
+
+### Added
+
+- **`destination_lookup`** (#345): Resolve foreign key values by querying the destination database during sync. When syncing related tables, child tables can now reference parent table auto-increment IDs without triggers or denormalized schemas. Supports MySQL, PostgreSQL, and ClickHouse destinations. Configure via `lookups` field in destination YAML with `on_miss: skip | fail | null`. Guide: `docs/guides/destination-lookup.md`.
+
+## [0.5.1] - 2026-04-14
+
+### Fixed
+
+- **MySQL destination**: auto-serialize `dict`/`list` values to JSON strings before passing to pymysql (#311). Fixes BigQuery → MySQL reverse ETL where BigQuery JSON columns come back as Python `dict`/`list`. Backward compatible — strings, ints, and other types pass through unchanged.
+
+## [0.5.0] - 2026-04-13
+
+### Added
+
+#### Sources
+- **Snowflake source connector** (#162): Extract data from Snowflake using `snowflake-connector-python`. Supports account, user, password/password_env, database, schema, warehouse, and optional role. Install: `pip install drt-core[snowflake]`
+- **MySQL source connector** (#19): Extract data from MySQL databases using pymysql. Supports host, port, dbname, user, password via env var. Backtick quoting for table names. Install: `pip install drt-core[mysql]`
+
+#### Destinations
+- **ClickHouse destination** (#166): Insert rows via `clickhouse-connect` (HTTP). Supports connection string, HTTPS via `secure` flag. Install: `pip install drt-core[clickhouse]`
+- **Parquet file destination** (#171): Write to local Parquet files with snappy/gzip/zstd compression and partition columns. Install: `pip install drt-core[parquet]`
+- **CSV/JSON/JSONL file destination** (#67): Write to local files using stdlib csv/json. No extra dependencies
+- **Microsoft Teams destination** (#85): Incoming Webhook with plain text and Adaptive Card payloads
+- **Jira destination** (#158): Create/update Jira issues via REST API v3 with Jinja2 templates
+- **Linear destination** (#195): Create Linear issues via GraphQL API with Jinja2 templates
+- **SendGrid email destination** (#194): Transactional emails via SendGrid v3 Mail Send API
+
+#### CLI
+- **`drt test` command** (#141): Post-sync data validation. Supports `row_count` (min/max) and `not_null` (columns) tests for DB destinations (PostgreSQL, MySQL, ClickHouse)
+- **`--output json` flag** (#142): Structured JSON output for `drt run` and `drt status`. Designed for CI/scripting use
+- **`--profile` CLI override** (#238): Runtime profile switching via `--profile` flag or `DRT_PROFILE` env var. Precedence: flag > env var > drt_project.yml
+- **Improved `drt validate` errors** (#104): User-friendly error messages with YAML field paths instead of raw Pydantic tracebacks. Shows ✓/✗ per sync file
+- **Dry-run summary** (#219): Enhanced `--dry-run` shows Source, Destination, Rows to sync, and Sync mode
+
+#### Multi-environment support
+- **`${VAR}` env var substitution** (#240): Use `${VAR}` syntax in `model:` field for environment-specific SQL queries
+- **dbt manifest resolution** (#239): `ref('model')` now resolves from dbt `target/manifest.json` when available. Resolution order: SQL file > dbt manifest > profile-based expansion
+- **`secrets.toml`** (#143): Local secret management via `.drt/secrets.toml` (dlt-like pattern). Resolution order: explicit value > env var > secrets.toml
+
+#### Infrastructure
+- **Dockerfile and docker-compose** (#161): `python:3.12-slim` image with `DRT_EXTRAS` build arg, non-root user
+- **Codecov integration** (#103): Coverage badge, PR reports. Patch checks set to informational
+- **Pre-commit hooks** (#105): ruff + mypy
+- **Python 3.13 support** (#225): Added to CI matrix and classifiers
+- **`duration_seconds` in SyncResult** (#226): Track sync execution time
+
+### Tests
+- 382+ tests (up from 170+ in v0.4.3)
+- Source and destination protocol contract tests (#209, #210)
+- Slack Block Kit tests (#97), state persistence tests (#100)
+- CLI validate error case tests (#98)
+- Codecov coverage at 64%
 
 ## [0.4.3] - 2026-04-02
 
@@ -163,26 +229,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 #### MCP Server
+
 - `drt mcp run` — start a FastMCP server (stdio transport) for Claude Desktop, Cursor, and any MCP-compatible client
 - 5 MCP tools: `drt_list_syncs`, `drt_run_sync`, `drt_get_status`, `drt_validate`, `drt_get_schema`
 - Install: `pip install drt-core[mcp]`
 
 #### AI Skills for Claude Code
+
 - `.claude/commands/drt-create-sync.md` — `/drt-create-sync` skill: generate sync YAML from user intent
 - `.claude/commands/drt-debug.md` — `/drt-debug` skill: diagnose and fix failing syncs
 - `.claude/commands/drt-init.md` — `/drt-init` skill: guide through project initialization
 - `.claude/commands/drt-migrate.md` — `/drt-migrate` skill: migrate from Census/Hightouch to drt
 
 #### LLM-readable Docs
+
 - `docs/llm/CONTEXT.md` — architecture, key concepts, state file format (optimized for LLM consumption)
 - `docs/llm/API_REFERENCE.md` — all config fields with types, defaults, and full YAML examples
 
 #### Row-level Error Details
+
 - `RowError` dataclass: `batch_index`, `record_preview` (200-char PII-safe), `http_status`, `error_message`, `timestamp`
 - `drt run --verbose` and `drt status --verbose` show per-row error details
 - `RestApiDestination` now populates `row_errors` on each failure
 
 ### Tests
+
 - 82 tests total (up from 53 in v0.2)
 - MCP server tests auto-skip when `fastmcp` not installed
 
@@ -191,19 +262,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 #### Incremental Sync
+
 - `sync.mode: incremental` — watermark-based incremental sync using a `cursor_field`
 - Saves `last_cursor_value` in `.drt/state.json` after each run
 - Injects `WHERE {cursor_field} > '{last_cursor_value}'` automatically on next run
 - Works with both `ref('table')` and raw SQL models
 
 #### Retry Configuration
+
 - `sync.retry` is now fully configurable per-sync in YAML (`max_attempts`, `initial_backoff`, `backoff_multiplier`, `max_backoff`, `retryable_status_codes`)
 - Previously used a hardcoded default; now reads from `SyncOptions.retry`
 
 ### Fixed
+
 - Removed duplicate `RetryConfig` dataclass from `destinations/retry.py` (was shadowing the Pydantic model in `config/models.py`)
 
 ### Tests
+
 - 6 new unit tests for incremental sync (resolver + engine)
 - Integration test suite cleaned up: removed monkey-patching of internal `_DEFAULT_RETRY`
 
@@ -218,6 +293,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 #### CLI
+
 - `drt init` — interactive project wizard (supports BigQuery, DuckDB, PostgreSQL)
 - `drt run` — run all syncs or a specific sync (`--select`)
 - `drt run --dry-run` — preview without writing data
@@ -226,17 +302,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `drt status` — show recent sync run results
 
 #### Sources
+
 - BigQuery (`pip install drt-core[bigquery]`)
 - DuckDB (`pip install drt-core[duckdb]`)
 - PostgreSQL (`pip install drt-core[postgres]`)
 
 #### Destinations
+
 - REST API (core) — generic HTTP with Jinja2 body templates, auth, rate limiting, retry
 - Slack Incoming Webhook (core)
 - GitHub Actions `workflow_dispatch` trigger (core)
 - HubSpot Contacts / Deals / Companies upsert (core)
 
 #### Configuration
+
 - `profiles.yml` credential management (dbt-style, stored in `~/.drt/`)
 - Declarative sync YAML with Jinja2 templating
 - Auth: Bearer token, API key, Basic auth

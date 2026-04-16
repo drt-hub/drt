@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import typer
 
@@ -12,11 +13,14 @@ if TYPE_CHECKING:
     from drt.config.credentials import (
         BigQueryProfile,
         ClickHouseProfile,
+        DatabricksProfile,
         DuckDBProfile,
+        MySQLProfile,
         PostgresProfile,
         RedshiftProfile,
         SnowflakeProfile,
         SQLiteProfile,
+        SQLServerProfile,
     )
     from drt.config.models import SyncConfig
     from drt.destinations.clickhouse import ClickHouseDestination
@@ -24,25 +28,34 @@ if TYPE_CHECKING:
     from drt.destinations.email_smtp import EmailSmtpDestination
     from drt.destinations.file import FileDestination
     from drt.destinations.github_actions import GitHubActionsDestination
+    from drt.destinations.google_ads import GoogleAdsDestination
     from drt.destinations.google_sheets import GoogleSheetsDestination
     from drt.destinations.hubspot import HubSpotDestination
+    from drt.destinations.jira import JiraDestination
+    from drt.destinations.linear import LinearDestination
     from drt.destinations.mysql import MySQLDestination
     from drt.destinations.parquet import ParquetDestination
     from drt.destinations.postgres import PostgresDestination
     from drt.destinations.rest_api import RestApiDestination
+    from drt.destinations.sendgrid import SendGridDestination
     from drt.destinations.slack import SlackDestination
+    from drt.destinations.staged_upload import StagedUploadDestination
     from drt.destinations.teams import TeamsDestination
     from drt.sources.bigquery import BigQuerySource
     from drt.sources.clickhouse import ClickHouseSource
+    from drt.sources.databricks import DatabricksSource
     from drt.sources.duckdb import DuckDBSource
+    from drt.sources.mysql import MySQLSource
     from drt.sources.postgres import PostgresSource
     from drt.sources.redshift import RedshiftSource
     from drt.sources.snowflake import SnowflakeSource
     from drt.sources.sqlite import SQLiteSource
+    from drt.sources.sqlserver import SQLServerSource
 
 from drt import __version__
 from drt.cli.output import (
     console,
+    print_dry_run_summary,
     print_error,
     print_init_success,
     print_row_errors,
@@ -63,6 +76,19 @@ app = typer.Typer(
     help="Reverse ETL for the code-first data stack.",
     no_args_is_help=True,
 )
+
+
+def _resolve_profile_name(cli_flag: str | None, project_profile: str) -> str:
+    """Resolve which profile to use.
+
+    Precedence: --profile flag > DRT_PROFILE env var > drt_project.yml
+    """
+    if cli_flag:
+        return cli_flag
+    env = os.environ.get("DRT_PROFILE")
+    if env:
+        return env
+    return project_profile
 
 
 def version_callback(value: bool) -> None:
@@ -86,8 +112,18 @@ def main(
 
 
 @app.command()
-def init() -> None:
+def init(
+    from_dbt: str = typer.Option(
+        None,
+        "--from-dbt",
+        help="Path to dbt manifest.json — generate sync YAMLs from dbt models.",
+    ),
+) -> None:
     """Initialize a new drt project in the current directory."""
+    if from_dbt:
+        _init_from_dbt(Path(from_dbt))
+        return
+
     from drt.cli.init_wizard import run_wizard, scaffold_project
 
     try:
@@ -102,6 +138,78 @@ def init() -> None:
         raise typer.Exit(1)
 
 
+def _init_from_dbt(manifest_path: Path) -> None:
+    """Generate sync YAML scaffolds from dbt manifest.json."""
+    import yaml
+
+    from drt.integrations.dbt import list_models_from_manifest
+
+    try:
+        models = list_models_from_manifest(manifest_path)
+    except FileNotFoundError as e:
+        print_error(str(e))
+        raise typer.Exit(1)
+
+    if not models:
+        console.print("[dim]No models found in manifest.[/dim]")
+        return
+
+    console.print(f"\n[bold]Found {len(models)} dbt models:[/bold]\n")
+    for i, m in enumerate(models):
+        desc = f" — {m.description}" if m.description else ""
+        console.print(f"  {i + 1}. {m.name}{desc}")
+
+    console.print("")
+    raw = typer.prompt(
+        "Select models (comma-separated numbers, or 'all')",
+        default="all",
+    )
+
+    if raw.strip().lower() == "all":
+        selected = models
+    else:
+        indices = [int(x.strip()) - 1 for x in raw.split(",") if x.strip().isdigit()]
+        selected = [models[i] for i in indices if 0 <= i < len(models)]
+
+    if not selected:
+        console.print("[dim]No models selected.[/dim]")
+        return
+
+    syncs_dir = Path(".") / "syncs"
+    syncs_dir.mkdir(exist_ok=True)
+    created: list[str] = []
+
+    for model in selected:
+        sync_data = {
+            "name": f"sync_{model.name}",
+            "description": model.description or f"Sync {model.name} to destination",
+            "model": f"ref('{model.name}')",
+            "destination": {
+                "type": "rest_api",
+                "url": "https://example.com/api",
+                "method": "POST",
+            },
+        }
+        path = syncs_dir / f"sync_{model.name}.yml"
+        if path.exists():
+            console.print(f"  [dim]skip[/dim] {path} (already exists)")
+            continue
+        with path.open("w") as f:
+            yaml.dump(sync_data, f, default_flow_style=False, sort_keys=False)
+        created.append(str(path))
+
+    if created:
+        console.print(f"\n[green]Created {len(created)} sync file(s):[/green]")
+        for c in created:
+            console.print(f"  {c}")
+        console.print(
+            "\n[dim]Edit the destination config in each file,"
+            " then run: drt validate && drt run --dry-run[/dim]"
+        )
+    else:
+        console.print("[dim]No new sync files created.[/dim]")
+
+
 # ---------------------------------------------------------------------------
 # run
 # ---------------------------------------------------------------------------
@@ -112,8 +220,9 @@ def run(
     select: str = typer.Option(None, "--select", "-s", help="Run a specific sync by name."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without writing data."),
     verbose: bool = typer.Option(False, "--verbose", help="Show row-level error details."),
-    output: str = typer.Option(
-        "text", "--output", "-o", help="Output format: text or json."
+    output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
+    profile_name: str = typer.Option(
+        None, "--profile", "-p", help="Override profile (default: drt_project.yml or DRT_PROFILE)."
     ),
 ) -> None:
     """Run sync(s) defined in the project."""
@@ -132,8 +241,9 @@ def run(
         print_error(str(e))
         raise typer.Exit(1)
 
+    resolved = _resolve_profile_name(profile_name, project.profile)
     try:
-        profile = load_profile(project.profile)
+        profile = load_profile(resolved)
     except (FileNotFoundError, KeyError, ValueError) as e:
         print_error(str(e))
         raise typer.Exit(1)
@@ -141,10 +251,7 @@ def run(
     syncs = load_syncs(Path("."))
     if not syncs:
         if not json_mode:
-            console.print(
-                "[dim]No syncs found in syncs/."
-                " Add .yml files to get started.[/dim]"
-            )
+            console.print("[dim]No syncs found in syncs/. Add .yml files to get started.[/dim]")
         raise typer.Exit()
 
     if select:
@@ -161,57 +268,78 @@ def run(
 
     for sync in syncs:
         dest = _get_destination(sync)
-        if not json_mode:
+        wm_storage = _get_watermark_storage(sync, Path("."))
+        if not json_mode and not dry_run:
             print_sync_start(sync.name, dry_run)
         t0 = time.monotonic()
         try:
             result = run_sync(
-                sync, source, dest, profile, Path("."), dry_run, state_mgr
+                sync,
+                source,
+                dest,
+                profile,
+                Path("."),
+                dry_run,
+                state_mgr,
+                watermark_storage=wm_storage,
             )
         except Exception as e:
             elapsed = round(time.monotonic() - t0, 2)
             if json_mode:
-                json_results.append({
-                    "name": sync.name,
-                    "status": "failed",
-                    "rows_synced": 0,
-                    "rows_failed": 0,
-                    "duration_seconds": elapsed,
-                    "dry_run": dry_run,
-                    "error": str(e),
-                })
+                json_results.append(
+                    {
+                        "name": sync.name,
+                        "status": "failed",
+                        "rows_synced": 0,
+                        "rows_failed": 0,
+                        "duration_seconds": elapsed,
+                        "dry_run": dry_run,
+                        "error": str(e),
+                    }
+                )
             else:
                 print_error(f"[{sync.name}] Unexpected error: {e}")
             had_errors = True
             continue
         elapsed = round(time.monotonic() - t0, 2)
         if json_mode:
-            json_results.append({
-                "name": sync.name,
-                "status": (
-                    "success" if result.failed == 0
-                    else "partial" if result.success > 0
-                    else "failed"
-                ),
-                "rows_synced": result.success,
-                "rows_failed": result.failed,
-                "duration_seconds": elapsed,
-                "dry_run": dry_run,
-            })
+            json_results.append(
+                {
+                    "name": sync.name,
+                    "status": (
+                        "success"
+                        if result.failed == 0
+                        else "partial"
+                        if result.success > 0
+                        else "failed"
+                    ),
+                    "rows_extracted": result.rows_extracted,
+                    "rows_synced": result.success,
+                    "rows_failed": result.failed,
+                    "duration_seconds": elapsed,
+                    "dry_run": dry_run,
+                }
+            )
         else:
-            print_sync_result(sync.name, result, elapsed)
+            if dry_run:
+                print_dry_run_summary(sync, profile, result.success)
+            else:
+                print_sync_result(sync.name, result, elapsed)
         if result.failed > 0:
             had_errors = True
             if not json_mode and verbose and result.row_errors:
                 print_row_errors(result.row_errors)
 
     if json_mode:
-        print(json_mod.dumps({
-            "syncs": json_results,
-            "total_duration_seconds": round(
-                time.monotonic() - t_total, 2
-            ),
-        }, indent=2))
+        print(
+            json_mod.dumps(
+                {
+                    "syncs": json_results,
+                    "total_duration_seconds": round(time.monotonic() - t_total, 2),
+                },
+                indent=2,
+            )
+        )
 
     if had_errors:
         raise typer.Exit(1)
@@ -223,11 +351,35 @@ def run(
 
 
 @app.command(name="list")
-def list_syncs() -> None:
+def list_syncs(
+    output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
+) -> None:
     """List all sync definitions in the project."""
+    import json as json_mod
+
     from drt.config.parser import load_syncs
 
     syncs = load_syncs(Path("."))
+
+    if output == "json":
+        print(
+            json_mod.dumps(
+                {
+                    "syncs": [
+                        {
+                            "name": s.name,
+                            "destination_type": s.destination.type,
+                            "mode": s.sync.mode,
+                            "description": s.description,
+                        }
+                        for s in syncs
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return
+
     print_sync_table(syncs)
 
 
@@ -241,12 +393,33 @@ def validate(
     emit_schema: bool = typer.Option(  # noqa: E501
         False, "--emit-schema", help="Write JSON Schemas to .drt/schemas/."
     ),
+    output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
 ) -> None:
     """Validate sync definitions against the JSON Schema."""
+    import json as json_mod
+
     from drt.config.parser import load_syncs_safe
     from drt.config.schema import write_schemas
 
     result = load_syncs_safe(Path("."))
+
+    if output == "json":
+        print(
+            json_mod.dumps(
+                {
+                    "results": [{"name": s.name, "valid": True} for s in result.syncs]
+                    + [
+                        {"name": name, "valid": False, "errors": errs}
+                        for name, errs in result.errors.items()
+                    ],
+                },
+                indent=2,
+            )
+        )
+        if result.errors:
+            raise typer.Exit(code=1)
+        return
+
     if not result.syncs and not result.errors:
         console.print("[dim]No syncs found.[/dim]")
         return
@@ -276,9 +449,7 @@ def validate(
 @app.command()
 def status(
     verbose: bool = typer.Option(False, "--verbose", help="Show row-level error details."),
-    output: str = typer.Option(
-        "text", "--output", "-o", help="Output format: text or json."
-    ),
+    output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
 ) -> None:
     """Show the status of the most recent sync runs."""
     import json as json_mod
@@ -288,19 +459,24 @@ def status(
     states = StateManager(Path(".")).get_all()
 
     if output == "json":
-        print(json_mod.dumps({
-            "syncs": [
+        print(
+            json_mod.dumps(
                 {
-                    "name": name,
-                    "status": state.status,
-                    "last_run_at": state.last_run_at,
-                    "records_synced": state.records_synced,
-                    "last_cursor_value": state.last_cursor_value,
-                    "error": state.error,
-                }
-                for name, state in sorted(states.items())
-            ],
-        }, indent=2))
+                    "syncs": [
+                        {
+                            "name": name,
+                            "status": state.status,
+                            "last_run_at": state.last_run_at,
+                            "records_synced": state.records_synced,
+                            "last_cursor_value": state.last_cursor_value,
+                            "error": state.error,
+                        }
+                        for name, state in sorted(states.items())
+                    ],
+                },
+                indent=2,
+            )
+        )
         return
 
     if verbose:
@@ -316,9 +492,7 @@ def status(
 
 @app.command(name="test")
 def test_syncs(
-    select: str = typer.Option(
-        None, "--select", "-s", help="Test a specific sync by name."
-    ),
+    select: str = typer.Option(None, "--select", "-s", help="Test a specific sync by name."),
 ) -> None:
     """Run post-sync validation tests."""
     from drt.config.parser import load_syncs
@@ -353,8 +527,7 @@ def test_syncs(
         if not is_queryable(sync.destination):
             print_test_skip(
                 sync.name,
-                f"tests not supported for {sync.destination.type}"
-                " destinations",
+                f"tests not supported for {sync.destination.type} destinations",
             )
             continue
 
@@ -363,13 +536,9 @@ def test_syncs(
             test_name = _test_display_name(test_def)
             try:
                 query, check = build_test_query(test_def, table)
-                result_val = execute_test_query(
-                    sync.destination, query
-                )
+                result_val = execute_test_query(sync.destination, query)
                 passed = check(result_val)
-                print_test_result(
-                    test_name, passed, str(result_val)
-                )
+                print_test_result(test_name, passed, str(result_val))
                 if not passed:
                     had_failures = True
             except Exception as e:
@@ -396,6 +565,35 @@ def _test_display_name(test_def: object) -> str:
         cols = ", ".join(test_def.not_null.columns)
         return f"not_null({cols})"
     return "unknown"
+
+
+# ---------------------------------------------------------------------------
+# serve (webhook trigger)
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host", help="Host to bind."),
+    port: int = typer.Option(8080, "--port", "-p", help="Port to bind."),
+    token_env: str = typer.Option(
+        "DRT_WEBHOOK_TOKEN",
+        "--token-env",
+        help="Env var holding bearer token for auth. Empty/unset = no auth.",
+    ),
+) -> None:
+    """Start an HTTP endpoint that triggers drt syncs on demand.
+
+    Example:
+        drt serve --port 8080 --token-env DRT_WEBHOOK_TOKEN
+
+        curl -X POST http://localhost:8080/sync/my_sync \\
+          -H "Authorization: Bearer $DRT_WEBHOOK_TOKEN"
+    """
+    from drt.cli.server import serve as serve_impl
+
+    token = os.environ.get(token_env) or None
+    serve_impl(host=host, port=port, token=token, project_dir=".")
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +642,10 @@ def _get_source(
         | PostgresProfile
         | RedshiftProfile
         | ClickHouseProfile
+        | MySQLProfile
         | SnowflakeProfile
+        | DatabricksProfile
+        | SQLServerProfile
     ),
 ) -> (
     BigQuerySource
@@ -453,19 +654,26 @@ def _get_source(
     | PostgresSource
     | RedshiftSource
     | ClickHouseSource
+    | MySQLSource
     | SnowflakeSource
+    | DatabricksSource
+    | SQLServerSource
 ):
     from drt.config.credentials import (
         BigQueryProfile,
         ClickHouseProfile,
+        DatabricksProfile,
         DuckDBProfile,
+        MySQLProfile,
         PostgresProfile,
         RedshiftProfile,
         SnowflakeProfile,
         SQLiteProfile,
+        SQLServerProfile,
     )
     from drt.sources.bigquery import BigQuerySource
     from drt.sources.duckdb import DuckDBSource
+    from drt.sources.mysql import MySQLSource
     from drt.sources.postgres import PostgresSource
     from drt.sources.sqlite import SQLiteSource
 
@@ -477,6 +685,8 @@ def _get_source(
         return SQLiteSource()
     if isinstance(profile, PostgresProfile):
         return PostgresSource()
+    if isinstance(profile, MySQLProfile):
+        return MySQLSource()
     if isinstance(profile, RedshiftProfile):
         from drt.sources.redshift import RedshiftSource
 
@@ -489,7 +699,46 @@ def _get_source(
         from drt.sources.snowflake import SnowflakeSource
 
         return SnowflakeSource()
+    if isinstance(profile, DatabricksProfile):
+        from drt.sources.databricks import DatabricksSource
+
+        return DatabricksSource()
+    if isinstance(profile, SQLServerProfile):
+        from drt.sources.sqlserver import SQLServerSource
+
+        return SQLServerSource()
     raise ValueError(f"Unsupported source type: {type(profile)}")
+
+
+def _get_watermark_storage(
+    sync: SyncConfig,
+    project_dir: Path,
+) -> Any:
+    """Build watermark storage from sync config, or None if not configured."""
+    from drt.state.watermark import (
+        BigQueryWatermarkStorage,
+        GCSWatermarkStorage,
+        LocalWatermarkStorage,
+    )
+
+    wm = sync.sync.watermark
+    if wm is None:
+        return None
+
+    if wm.storage == "local":
+        return LocalWatermarkStorage(project_dir)
+    elif wm.storage == "gcs":
+        assert wm.bucket is not None
+        assert wm.key is not None
+        return GCSWatermarkStorage(bucket=wm.bucket, key=wm.key)
+    elif wm.storage == "bigquery":
+        assert wm.project is not None
+        assert wm.dataset is not None
+        return BigQueryWatermarkStorage(
+            project=wm.project,
+            dataset=wm.dataset,
+        )
+    return None
 
 
 def _get_destination(
@@ -500,6 +749,8 @@ def _get_destination(
     | DiscordDestination
     | GitHubActionsDestination
     | HubSpotDestination
+    | JiraDestination
+    | SendGridDestination
     | GoogleSheetsDestination
     | PostgresDestination
     | MySQLDestination
@@ -508,6 +759,9 @@ def _get_destination(
     | ParquetDestination
     | FileDestination
     | EmailSmtpDestination
+    | LinearDestination
+    | GoogleAdsDestination
+    | StagedUploadDestination
 ):
     from drt.config.models import (
         ClickHouseDestinationConfig,
@@ -515,22 +769,30 @@ def _get_destination(
         EmailSmtpDestinationConfig,
         FileDestinationConfig,
         GitHubActionsDestinationConfig,
+        GoogleAdsDestinationConfig,
         GoogleSheetsDestinationConfig,
         HubSpotDestinationConfig,
+        JiraDestinationConfig,
+        LinearDestinationConfig,
         MySQLDestinationConfig,
         ParquetDestinationConfig,
         PostgresDestinationConfig,
         RestApiDestinationConfig,
+        SendGridDestinationConfig,
         SlackDestinationConfig,
+        StagedUploadDestinationConfig,
         TeamsDestinationConfig,
     )
     from drt.destinations.clickhouse import ClickHouseDestination
     from drt.destinations.discord import DiscordDestination
     from drt.destinations.github_actions import GitHubActionsDestination
     from drt.destinations.hubspot import HubSpotDestination
+    from drt.destinations.jira import JiraDestination
+    from drt.destinations.linear import LinearDestination
     from drt.destinations.mysql import MySQLDestination
     from drt.destinations.postgres import PostgresDestination
     from drt.destinations.rest_api import RestApiDestination
+    from drt.destinations.sendgrid import SendGridDestination
     from drt.destinations.slack import SlackDestination
 
     dest = sync.destination
@@ -544,6 +806,10 @@ def _get_destination(
         return GitHubActionsDestination()
     if isinstance(dest, HubSpotDestinationConfig):
         return HubSpotDestination()
+    if isinstance(dest, JiraDestinationConfig):
+        return JiraDestination()
+    if isinstance(dest, SendGridDestinationConfig):
+        return SendGridDestination()
     if isinstance(dest, GoogleSheetsDestinationConfig):
         from drt.destinations.google_sheets import GoogleSheetsDestination
 
@@ -571,6 +837,16 @@ def _get_destination(
         from drt.destinations.email_smtp import EmailSmtpDestination
         return EmailSmtpDestination()
     
+    if isinstance(dest, LinearDestinationConfig):
+        return LinearDestination()
+    if isinstance(dest, GoogleAdsDestinationConfig):
+        from drt.destinations.google_ads import GoogleAdsDestination
+
+        return GoogleAdsDestination()
+    if isinstance(dest, StagedUploadDestinationConfig):
+        from drt.destinations.staged_upload import StagedUploadDestination
+
+        return StagedUploadDestination()
     raise ValueError(f"Unsupported destination type: {dest.type}")
 
     

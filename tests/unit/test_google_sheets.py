@@ -61,9 +61,7 @@ class TestGoogleSheetsDestination:
         mock_service = MagicMock()
         mock_sheets = mock_service.spreadsheets.return_value
         mock_values = mock_sheets.values.return_value
-        mock_values.append.return_value.execute.return_value = {
-            "updates": {"updatedRows": 1}
-        }
+        mock_values.append.return_value.execute.return_value = {"updates": {"updatedRows": 1}}
 
         with patch(
             "drt.destinations.google_sheets._build_sheets_service",

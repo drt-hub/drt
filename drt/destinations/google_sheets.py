@@ -36,9 +36,7 @@ def _build_sheets_service(config: GoogleSheetsDestinationConfig) -> Any:
     else:
         import google.auth
 
-        creds, _ = google.auth.default(
-            scopes=["https://www.googleapis.com/auth/spreadsheets"]
-        )
+        creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/spreadsheets"])
 
     return build("sheets", "v4", credentials=creds)
 
@@ -64,9 +62,7 @@ class GoogleSheetsDestination:
             range_name = config.sheet
 
             headers = list(records[0].keys())
-            rows = [headers] + [
-                [str(row.get(h, "")) for h in headers] for row in records
-            ]
+            rows = [headers] + [[str(row.get(h, "")) for h in headers] for row in records]
             body = {"values": rows}
 
             if config.mode == "overwrite":

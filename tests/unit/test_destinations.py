@@ -25,6 +25,7 @@ from drt.destinations.slack import SlackDestination
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _options() -> SyncOptions:
     return SyncOptions()
 
@@ -55,9 +56,7 @@ class TestSlackDestination:
             message_template="{{ row.msg }}",
         )
         opts = SyncOptions(on_error="skip")
-        result = SlackDestination().load(
-            [{"msg": "a"}, {"msg": "b"}], config, opts
-        )
+        result = SlackDestination().load([{"msg": "a"}, {"msg": "b"}], config, opts)
         assert result.failed == 1
         assert result.success == 1
 
@@ -107,9 +106,7 @@ class TestDiscordDestination:
             message_template="{{ row.msg }}",
         )
         opts = SyncOptions(on_error="skip")
-        result = DiscordDestination().load(
-            [{"msg": "a"}, {"msg": "b"}], config, opts
-        )
+        result = DiscordDestination().load([{"msg": "a"}, {"msg": "b"}], config, opts)
         assert result.failed == 1
         assert result.success == 1
 
@@ -155,10 +152,9 @@ class TestHubSpotDestination:
         )
         # Patch API base URL to point at test server
         import drt.destinations.hubspot as hs_mod
+
         monkeypatch.setattr(hs_mod, "_HUBSPOT_API", httpserver.url_for("/crm/v3/objects"))
-        result = HubSpotDestination().load(
-            [{"email": "alice@example.com"}], config, _options()
-        )
+        result = HubSpotDestination().load([{"email": "alice@example.com"}], config, _options())
         assert result.success == 1
         assert result.failed == 0
 
@@ -183,10 +179,9 @@ class TestHubSpotDestination:
             auth=BearerAuth(type="bearer", token_env="HUBSPOT_TOKEN"),
         )
         import drt.destinations.hubspot as hs_mod
+
         monkeypatch.setattr(hs_mod, "_HUBSPOT_API", httpserver.url_for("/crm/v3/objects"))
-        result = HubSpotDestination().load(
-            [{"email": "x@x.com"}], config, _options()
-        )
+        result = HubSpotDestination().load([{"email": "x@x.com"}], config, _options())
         assert result.failed == 1
         assert result.success == 0
 
@@ -211,6 +206,7 @@ class TestGitHubActionsDestination:
             auth=BearerAuth(type="bearer", token_env="GITHUB_TOKEN"),
         )
         import drt.destinations.github_actions as ga_mod
+
         monkeypatch.setattr(ga_mod, "_GITHUB_API", httpserver.url_for(""))
         result = GitHubActionsDestination().load(
             [{"env": "prod", "version": "1.0"}], config, _options()
@@ -243,6 +239,7 @@ class TestGitHubActionsDestination:
             auth=BearerAuth(type="bearer", token_env="GITHUB_TOKEN"),
         )
         import drt.destinations.github_actions as ga_mod
+
         monkeypatch.setattr(ga_mod, "_GITHUB_API", httpserver.url_for(""))
         result = GitHubActionsDestination().load([{"env": "prod"}], config, _options())
         assert result.failed == 1

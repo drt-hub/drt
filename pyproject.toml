@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "drt-core"
-version = "0.4.3"
+version = "0.5.4"
 description = "Reverse ETL for the code-first data stack"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -39,6 +39,9 @@ postgres = ["psycopg2-binary>=2.9"]
 redshift = ["psycopg2-binary>=2.9"]  # Redshift uses PostgreSQL wire protocol
 clickhouse = ["clickhouse-connect>=0.7.0"]
 snowflake = ["snowflake-connector-python>=3.0"]
+databricks = ["databricks-sql-connector>=3.0"]
+sqlserver = ["pymssql>=2.3"]
+gcs = ["google-cloud-storage>=2.0"]
 sheets = ["google-api-python-client>=2.0", "google-auth>=2.0"]
 mysql = ["pymysql>=1.1"]
 parquet = ["pandas>=2.0", "pyarrow>=12.0"]

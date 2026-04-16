@@ -128,16 +128,49 @@ def my_drt_assets(context, pipes: PipesCloudRunJobClient):
 
 This is the same pattern as dagster-dlt's `build_dlt_asset_specs()`.
 
+#### Reporting results from Cloud Run Jobs
+
+When running drt inside a Cloud Run Job via Pipes, parse `drt run --output json` and report to the Pipes context:
+
+```python
+# entrypoint_wrapper.py (runs inside CRJ container)
+import json
+import subprocess
+
+from dagster_pipes import open_dagster_pipes
+
+with open_dagster_pipes() as context:
+    proc = subprocess.run(
+        ["drt", "run", "--select", "my_sync", "--output", "json"],
+        capture_output=True, text=True, check=True,
+    )
+    for sync in json.loads(proc.stdout)["syncs"]:
+        context.report_asset_materialization(
+            metadata={
+                "rows_extracted": sync["rows_extracted"],
+                "rows_synced": sync["rows_synced"],
+                "rows_failed": sync["rows_failed"],
+                "duration_seconds": sync["duration_seconds"],
+            }
+        )
+```
+
+CRJ container only needs `drt-core` and `dagster-pipes` — `dagster-drt` is not required on the remote side.
+
 ### MaterializeResult Metadata
 
 Assets return `MaterializeResult` with structured metadata visible in the Dagster UI:
 
-- `sync_name` — sync identifier
-- `rows_synced` — successful row count
-- `rows_failed` — failed row count
-- `rows_skipped` — skipped row count
-- `dry_run` — whether dry-run was active
-- `row_errors_count` — number of row-level errors (details in logs)
+| Field | Type | Description |
+|---|---|---|
+| `sync_name` | text | Sync identifier |
+| `rows_extracted` | int | Source query row count (for skip detection) |
+| `rows_synced` | int | Destination success count |
+| `rows_failed` | int | Destination failure count |
+| `rows_skipped` | int | Skipped row count |
+| `duration_seconds` | float | Sync execution time |
+| `dry_run` | bool | Whether dry-run was active |
+| `row_errors_count` | int | Row-level error count (details in logs) |
 
 ### Asset Kinds
 

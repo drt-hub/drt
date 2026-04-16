@@ -39,6 +39,7 @@ class StateManager:
                 return result
         except (json.JSONDecodeError, ValueError):
             import sys
+
             print(
                 f"Warning: {self._state_file} is corrupted and will be reset.",
                 file=sys.stderr,

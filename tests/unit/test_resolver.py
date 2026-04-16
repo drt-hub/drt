@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from drt.config.credentials import BigQueryProfile
 from drt.engine.resolver import parse_ref, resolve_model_ref
 
@@ -15,6 +17,7 @@ def _profile(dataset: str = "my_dataset") -> BigQueryProfile:
 # ---------------------------------------------------------------------------
 # parse_ref
 # ---------------------------------------------------------------------------
+
 
 def test_parse_ref_single_quotes() -> None:
     assert parse_ref("ref('new_users')") == "new_users"
@@ -39,6 +42,7 @@ def test_parse_ref_none_for_table_name() -> None:
 # ---------------------------------------------------------------------------
 # resolve_model_ref
 # ---------------------------------------------------------------------------
+
 
 def test_resolve_ref_to_select(tmp_path: Path) -> None:
     sql = resolve_model_ref("ref('orders')", tmp_path, _profile("sales"))
@@ -68,6 +72,7 @@ def test_resolve_non_ref_string_passthrough(tmp_path: Path) -> None:
 # incremental cursor injection
 # ---------------------------------------------------------------------------
 
+
 def test_resolve_incremental_injects_where(tmp_path: Path) -> None:
     sql = resolve_model_ref(
         "ref('events')",
@@ -92,6 +97,63 @@ def test_resolve_no_cursor_returns_base_sql(tmp_path: Path) -> None:
     assert "WHERE" not in sql
 
 
+# ---------------------------------------------------------------------------
+# dbt manifest resolution
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_ref_from_dbt_manifest(tmp_path: Path) -> None:
+    """ref() should resolve from dbt manifest.json when available."""
+    import json
+
+    target = tmp_path / "target"
+    target.mkdir()
+    manifest = {
+        "nodes": {
+            "model.my_project.users": {
+                "name": "users",
+                "relation_name": '"analytics"."public"."users"',
+            }
+        }
+    }
+    (target / "manifest.json").write_text(json.dumps(manifest))
+
+    sql = resolve_model_ref("ref('users')", tmp_path, _profile())
+    assert sql == 'SELECT * FROM "analytics"."public"."users"'
+
+
+def test_resolve_ref_dbt_manifest_not_found_falls_back(tmp_path: Path) -> None:
+    """Without manifest.json, ref() falls back to profile-based resolution."""
+    sql = resolve_model_ref("ref('users')", tmp_path, _profile("ds"))
+    assert sql == "SELECT * FROM `ds`.`users`"
+
+
+def test_resolve_ref_sql_file_beats_dbt_manifest(tmp_path: Path) -> None:
+    """SQL file should take priority over dbt manifest."""
+    import json
+
+    # Create SQL file
+    models = tmp_path / "syncs" / "models"
+    models.mkdir(parents=True)
+    (models / "users.sql").write_text("SELECT id, name FROM raw.users")
+
+    # Create dbt manifest
+    target = tmp_path / "target"
+    target.mkdir()
+    manifest = {
+        "nodes": {
+            "model.proj.users": {
+                "name": "users",
+                "relation_name": '"analytics"."users"',
+            }
+        }
+    }
+    (target / "manifest.json").write_text(json.dumps(manifest))
+
+    sql = resolve_model_ref("ref('users')", tmp_path, _profile())
+    assert sql == "SELECT id, name FROM raw.users"
+
+
 def test_resolve_incremental_raw_sql(tmp_path: Path) -> None:
     raw = "SELECT * FROM events WHERE active = true"
     sql = resolve_model_ref(
@@ -103,3 +165,103 @@ def test_resolve_incremental_raw_sql(tmp_path: Path) -> None:
     )
     assert "WHERE updated_at > '2024-06-01'" in sql
     assert raw in sql
+
+
+# ---------------------------------------------------------------------------
+# environment variable substitution
+# ---------------------------------------------------------------------------
+
+
+def test_env_var_substitution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BQ_DATASET", "analytics")
+    sql = resolve_model_ref(
+        "SELECT * FROM `${BQ_DATASET}`.users",
+        tmp_path,
+        _profile(),
+    )
+    assert sql == "SELECT * FROM `analytics`.users"
+
+
+def test_env_var_multiple(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GCP_PROJECT", "my-proj")
+    monkeypatch.setenv("BQ_DATASET", "raw")
+    sql = resolve_model_ref(
+        "SELECT * FROM `${GCP_PROJECT}.${BQ_DATASET}.users`",
+        tmp_path,
+        _profile(),
+    )
+    assert sql == "SELECT * FROM `my-proj.raw.users`"
+
+
+def test_env_var_missing_raises(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="NONEXISTENT_VAR"):
+        resolve_model_ref(
+            "SELECT * FROM ${NONEXISTENT_VAR}.users",
+            tmp_path,
+            _profile(),
+        )
+
+
+def test_env_var_no_expansion_without_syntax(tmp_path: Path) -> None:
+    sql = resolve_model_ref(
+        "SELECT * FROM users",
+        tmp_path,
+        _profile(),
+    )
+    assert sql == "SELECT * FROM users"
+
+
+# ---------------------------------------------------------------------------
+# cursor_value template variable
+# ---------------------------------------------------------------------------
+
+
+def test_cursor_value_template_resolved(tmp_path: Path) -> None:
+    sql = resolve_model_ref(
+        "SELECT * FROM events WHERE ts >= '{{ cursor_value }}'",
+        tmp_path,
+        _profile(),
+        cursor_field="ts",
+        last_cursor_value="2026-04-15T10:00:00",
+    )
+    assert "2026-04-15T10:00:00" in sql
+    assert "{{ cursor_value }}" not in sql
+    # Should NOT add automatic WHERE wrapping when template is used
+    assert "_drt_base" not in sql
+
+
+def test_watermark_alias_resolved(tmp_path: Path) -> None:
+    sql = resolve_model_ref(
+        "SELECT * FROM events WHERE ts >= '{{ watermark }}'",
+        tmp_path,
+        _profile(),
+        cursor_field="ts",
+        last_cursor_value="2026-04-15",
+    )
+    assert "2026-04-15" in sql
+    assert "{{ watermark }}" not in sql
+
+
+def test_cursor_value_first_run_default(tmp_path: Path) -> None:
+    """First run (no last_cursor_value) should resolve to empty string."""
+    sql = resolve_model_ref(
+        "SELECT * FROM events WHERE ts >= '{{ cursor_value }}'",
+        tmp_path,
+        _profile(),
+        cursor_field="ts",
+        last_cursor_value=None,
+    )
+    assert "WHERE ts >= ''" in sql
+
+
+def test_no_template_still_uses_auto_inject(tmp_path: Path) -> None:
+    """Without template variable, existing auto-inject behavior unchanged."""
+    sql = resolve_model_ref(
+        "ref('events')",
+        tmp_path,
+        _profile("ds"),
+        cursor_field="updated_at",
+        last_cursor_value="2024-01-01",
+    )
+    assert "_drt_base" in sql
+    assert "WHERE updated_at > '2024-01-01'" in sql

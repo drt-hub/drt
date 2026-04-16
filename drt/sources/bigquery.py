@@ -41,9 +41,7 @@ class BigQuerySource:
         try:
             from google.cloud import bigquery
         except ImportError as e:
-            raise ImportError(
-                "BigQuery support requires: pip install drt-core[bigquery]"
-            ) from e
+            raise ImportError("BigQuery support requires: pip install drt-core[bigquery]") from e
 
         if config.method == "keyfile" and config.keyfile:
             from google.oauth2 import service_account

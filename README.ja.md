@@ -20,6 +20,7 @@
 [![dagster-drt downloads](https://img.shields.io/pepy/dt/dagster-drt?label=dagster-drt%20downloads)](https://pepy.tech/projects/dagster-drt)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Python](https://img.shields.io/pypi/pyversions/drt-core)](https://pypi.org/project/drt-core/)
+[![GitHub Sponsors](https://img.shields.io/static/v1?label=Sponsor&message=%E2%9D%A4&logo=GitHub&color=%23fe8e86)](https://github.com/sponsors/masukai)
 
 **drt** は、YAMLとCLIを使って、データウェアハウスから外部サービスへデータを同期します（宣言的に設定可能）。
 `dbt run` → `drt run`のイメージです。同じ開発体験で、データの流れが逆になります。
@@ -198,24 +199,28 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | **Source** | BigQuery | ✅ v0.1 | `pip install drt-core[bigquery]` |
 | **Source** | DuckDB | ✅ v0.1 | (core) |
 | **Source** | PostgreSQL | ✅ v0.1 | `pip install drt-core[postgres]` |
-| **Source** | Snowflake | 🗓 planned | `pip install drt-core[snowflake]` |
+| **Source** | Snowflake | ✅ v0.5 | `pip install drt-core[snowflake]` |
 | **Source** | SQLite | ✅ v0.4.2 | (core) |
 | **Source** | Redshift | ✅ v0.3.4 | `pip install drt-core[redshift]` |
 | **Source** | ClickHouse | ✅ v0.4.3 | `pip install drt-core[clickhouse]` |
-| **Source** | MySQL | 🗓 planned | `pip install drt-core[mysql]` |
+| **Source** | MySQL | ✅ v0.5 | `pip install drt-core[mysql]` |
 | **Destination** | REST API | ✅ v0.1 | (core) |
 | **Destination** | Slack Incoming Webhook | ✅ v0.1 | (core) |
 | **Destination** | Discord Webhook | ✅ v0.4.2 | (core) |
+| **Destination** | Microsoft Teams Webhook | ✅ v0.5 | (core) |
 | **Destination** | GitHub Actions (workflow_dispatch) | ✅ v0.1 | (core) |
 | **Destination** | HubSpot (Contacts / Deals / Companies) | ✅ v0.1 | (core) |
 | **Destination** | Google Sheets | ✅ v0.4 | `pip install drt-core[sheets]` |
 | **Destination** | PostgreSQL (upsert) | ✅ v0.4 | `pip install drt-core[postgres]` |
 | **Destination** | MySQL (upsert) | ✅ v0.4 | `pip install drt-core[mysql]` |
-| **Destination** | CSV / JSON file | 🗓 v0.5 | (core) |
+| **Destination** | ClickHouse | ✅ v0.5 | `pip install drt-core[clickhouse]` |
+| **Destination** | Parquet file | ✅ v0.5 | `pip install drt-core[parquet]` |
+| **Destination** | CSV / JSON / JSONL file | ✅ v0.5 | (core) |
+| **Destination** | Jira | ✅ v0.5 | (core) |
+| **Destination** | Linear | ✅ v0.5 | (core) |
+| **Destination** | SendGrid | ✅ v0.5 | (core) |
 | **Destination** | Salesforce | 🗓 v0.6 | `pip install drt-core[salesforce]` |
 | **Destination** | Notion | 🗓 planned | (core) |
-| **Destination** | Linear | 🗓 planned | (core) |
-| **Destination** | SendGrid | 🗓 planned | (core) |
 | **Integration** | Dagster | ✅ v0.4 | `pip install dagster-drt` |
 | **Integration** | Airflow | 🗓 v0.6 | `pip install airflow-drt` |
 | **Integration** | dbt manifest reader | ✅ v0.4 | (core) |
@@ -233,8 +238,8 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | **v0.2** ✅ | Incremental sync (`cursor_field` watermark) · retry config per-sync |
 | **v0.3** ✅ | MCP Server (`drt mcp run`) · AI Skills for Claude Code · LLM-readable docs · row-level errors · security hardening · Redshift source |
 | **v0.4** ✅ | Google Sheets / PostgreSQL / MySQL destinations · dagster-drt · dbt manifest reader · type safety overhaul |
-| [v0.5](https://github.com/drt-hub/drt/milestone/2) | Snowflake source · CSV/JSON + Parquet destinations · test coverage · Docker |
-| [v0.6](https://github.com/drt-hub/drt/milestone/3) | Salesforce · Airflow integration · Jira / Twilio / Intercom destinations |
+| **v0.5** ✅ | Snowflake / MySQL sources · ClickHouse / Parquet / Teams / CSV+JSON / Jira / Linear / SendGrid destinations · `drt test` · `--output json` · `--profile` · Docker |
+| [v0.6](https://github.com/drt-hub/drt/milestone/3) | Salesforce · Airflow integration · Twilio / Intercom destinations |
 | [v0.7](https://github.com/drt-hub/drt/milestone/4) | DWH destinations (Snowflake / BigQuery / ClickHouse / Databricks) · Cloud storage (S3 / GCS / Azure Blob) |
 | [v0.8](https://github.com/drt-hub/drt/milestone/5) | Lakehouse sources (Delta Lake / Apache Iceberg) |
 | v1.x | Rust engine (PyO3) |
@@ -279,7 +284,11 @@ drtは最新のデータスタックと競合するのではなく、共存す�
 
 ## コントリビュート
 
-[CONTRIBUTING.md](CONTRIBUTING.md)を参照してください。
+typo修正から新しいコネクタの追加まで、あらゆる規模のコントリビューションを歓迎します。drt には透明性のある [コントリビューターラダー](GOVERNANCE.ja.md#ロール) があり、あなたの貢献が信頼と責任の段階的な拡大につながります。
+
+- **始め方:** [CONTRIBUTING.ja.md](CONTRIBUTING.ja.md) — セットアップ、ワークフロー、初めてのコネクタチュートリアル
+- **取り組む issue を探す:** [Good First Issues](https://github.com/drt-hub/drt/issues?q=is%3Aopen+label%3A%22good+first+issue%22)
+- **意思決定の仕組みを理解する:** [GOVERNANCE.ja.md](GOVERNANCE.ja.md)
 
 ## 免責事項
 
