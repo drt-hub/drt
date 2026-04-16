@@ -183,6 +183,18 @@ class HubSpotDestinationConfig(BaseModel):
         return f"{self.type} ({self.object_type})"
 
 
+class IntercomDestinationConfig(BaseModel):
+    type: Literal["intercom"]
+
+    auth: AuthConfig
+
+    # Jinja2 JSON template for contact payload
+    properties_template: str
+
+    def describe(self) -> str:
+        return f"{self.type} (contacts)"
+
+
 class SendGridDestinationConfig(BaseModel):
     type: Literal["sendgrid"]
     from_email: str
@@ -471,6 +483,7 @@ DestinationConfig = Annotated[
     | GoogleAdsDestinationConfig
     | FileDestinationConfig
     | NotionDestinationConfig
+    | IntercomDestinationConfig
     | StagedUploadDestinationConfig
     | TwilioDestinationConfig,
     Field(discriminator="type"),

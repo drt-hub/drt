@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from drt.destinations.google_ads import GoogleAdsDestination
     from drt.destinations.google_sheets import GoogleSheetsDestination
     from drt.destinations.hubspot import HubSpotDestination
+    from drt.destinations.intercom import IntercomDestination
     from drt.destinations.jira import JiraDestination
     from drt.destinations.linear import LinearDestination
     from drt.destinations.mysql import MySQLDestination
@@ -836,6 +837,7 @@ def _get_destination(
     | GoogleAdsDestination
     | NotionDestination
     | StagedUploadDestination
+    | IntercomDestination
     | TwilioDestination
 ):
     from drt.config.models import (
