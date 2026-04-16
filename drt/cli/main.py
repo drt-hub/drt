@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from drt.config.models import SyncConfig
     from drt.destinations.clickhouse import ClickHouseDestination
     from drt.destinations.discord import DiscordDestination
+    from drt.destinations.email_smtp import EmailSmtpDestination
     from drt.destinations.file import FileDestination
     from drt.destinations.github_actions import GitHubActionsDestination
     from drt.destinations.google_sheets import GoogleSheetsDestination
@@ -506,10 +507,12 @@ def _get_destination(
     | ClickHouseDestination
     | ParquetDestination
     | FileDestination
+    | EmailSmtpDestination
 ):
     from drt.config.models import (
         ClickHouseDestinationConfig,
         DiscordDestinationConfig,
+        EmailSmtpDestinationConfig,
         FileDestinationConfig,
         GitHubActionsDestinationConfig,
         GoogleSheetsDestinationConfig,
@@ -563,4 +566,11 @@ def _get_destination(
         from drt.destinations.file import FileDestination
 
         return FileDestination()
+    
+    if isinstance(dest, EmailSmtpDestinationConfig):
+        from drt.destinations.email_smtp import EmailSmtpDestination
+        return EmailSmtpDestination()
+    
     raise ValueError(f"Unsupported destination type: {dest.type}")
+
+    

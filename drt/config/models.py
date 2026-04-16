@@ -1,6 +1,6 @@
 """Pydantic models for drt project and sync configuration."""
 
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -243,6 +243,20 @@ class FileDestinationConfig(BaseModel):
     path: str  # output file path, e.g. "output/data.csv"
     format: Literal["csv", "json", "jsonl"] = "csv"
 
+class EmailSmtpDestinationConfig(BaseModel):
+    type: Literal["email_smtp"] = "email_smtp"
+    host: str
+    port: int = 587
+    sender: str
+    recipients: list[str]
+    subject_template: str
+    body_template: str
+    use_tls: bool = True
+    username: Optional[str] = None
+    username_env: Optional[str] = None
+    password: Optional[str] = None
+    password_env: Optional[str] = None
+
 
 # Discriminated union — add new destination types here
 DestinationConfig = Annotated[
@@ -257,7 +271,8 @@ DestinationConfig = Annotated[
     | TeamsDestinationConfig
     | ClickHouseDestinationConfig
     | ParquetDestinationConfig
-    | FileDestinationConfig,
+    | FileDestinationConfig
+    | EmailSmtpDestinationConfig,
     Field(discriminator="type"),
 ]
 
