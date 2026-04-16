@@ -355,6 +355,36 @@ destination:
   connection_string_env: CH_CONN       # alternative: full connection string
 ```
 
+### `lookups` (DB destinations: postgres, mysql, clickhouse)
+
+Resolve foreign key values by querying the destination DB during sync.
+Available on all database destination types.
+
+```yaml
+destination:
+  type: mysql                          # or postgres, clickhouse
+  # ... connection fields ...
+  table: child_table
+  upsert_key: [parent_id, code]
+  lookups:                             # optional: FK resolution via destination DB
+    parent_id:                         # column to populate in the destination
+      table: parent_table              # destination DB table to query
+      match:                           # { destination_column: source_column }
+        user_id: user_id
+      select: id                       # column to fetch from the lookup table
+      on_miss: skip                    # "skip" (default) | "fail" | "null"
+```
+
+- **`table`** (required): destination DB table to look up
+- **`match`** (required): mapping of `{ destination_column: source_column }` — supports composite keys
+- **`select`** (required): column to fetch from the lookup table
+- **`on_miss`** (optional, default `"skip"`):
+  - `skip` — skip the row and log a warning
+  - `fail` — treat as an error (respects `sync.on_error`)
+  - `null` — set the target column to NULL
+
+Multiple lookups can be defined per sync. Each executes one SELECT query before the batch loop.
+
 ### `type: teams`
 
 ```yaml
