@@ -121,13 +121,12 @@ def build_test_query(test: SyncTest, table: str) -> tuple[str, Callable[[int], b
     if test.unique is not None:
         uniq = test.unique
         cols = ", ".join(_safe_column(col) for col in uniq.columns)
-        # Use portable GROUP BY + HAVING pattern (works on PostgreSQL, MySQL, BigQuery, ClickHouse)
+        # Count duplicate groups directly so the table is only scanned once.
         query = (
-            f"SELECT COUNT(*) FROM {safe_table} "
-            f"WHERE ({cols}) IN ("
+            f"SELECT COUNT(*) FROM ("
             f"  SELECT {cols} FROM {safe_table} "
             f"  GROUP BY {cols} HAVING COUNT(*) > 1"
-            f")"
+            f") t"
         )
 
         def check_unique(val: int) -> bool:
