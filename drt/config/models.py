@@ -575,9 +575,26 @@ class NotNullTest(BaseModel):
     columns: list[str]
 
 
+class FreshnessTest(BaseModel):
+    column: str
+    max_age: str  # e.g., "7 days", "1 hour", "30 minutes"
+
+
+class UniqueTest(BaseModel):
+    columns: list[str]
+
+
+class AcceptedValuesTest(BaseModel):
+    column: str
+    values: list[str]
+
+
 class SyncTest(BaseModel):
     row_count: RowCountTest | None = None
     not_null: NotNullTest | None = None
+    freshness: FreshnessTest | None = None
+    unique: UniqueTest | None = None
+    accepted_values: AcceptedValuesTest | None = None
 
 
 class SyncConfig(BaseModel):
