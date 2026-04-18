@@ -98,6 +98,35 @@ class SlackDestinationConfig(BaseModel):
         return f"{self.type} (webhook)"
 
 
+class TwilioDestinationConfig(BaseModel):
+    type: Literal["twilio"]
+
+    account_sid: str | None = None
+    account_sid_env: str | None = None
+
+    auth_token: str | None = None
+    auth_token_env: str | None = None
+
+    from_number: str  # Twilio phone number (E.164 format)
+
+    # Jinja2 template → destination phone number
+    to_template: str  # e.g. "{{ row.phone }}"
+
+    # Jinja2 template → SMS body
+    message_template: str
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.from_number})"
+
+    @model_validator(mode="after")
+    def _check_auth(self) -> "TwilioDestinationConfig":
+        if not (self.account_sid or self.account_sid_env):
+            raise ValueError("account_sid or account_sid_env is required.")
+        if not (self.auth_token or self.auth_token_env):
+            raise ValueError("auth_token or auth_token_env is required.")
+        return self
+    
+    
 class DiscordDestinationConfig(BaseModel):
     type: Literal["discord"]
     webhook_url: str | None = None
@@ -154,6 +183,18 @@ class HubSpotDestinationConfig(BaseModel):
         return f"{self.type} ({self.object_type})"
 
 
+class IntercomDestinationConfig(BaseModel):
+    type: Literal["intercom"]
+
+    auth: AuthConfig
+
+    # Jinja2 JSON template for contact payload
+    properties_template: str
+
+    def describe(self) -> str:
+        return f"{self.type} (contacts)"
+
+
 class SendGridDestinationConfig(BaseModel):
     type: Literal["sendgrid"]
     from_email: str
@@ -203,6 +244,7 @@ class LookupConfig(BaseModel):
     match: dict[str, str]  # { destination_column: source_column }
     select: str  # column to fetch from the lookup table
     on_miss: Literal["skip", "fail", "null"] = "skip"
+    drop_match_columns: bool = True  # remove match source columns from INSERT
 
     @model_validator(mode="after")
     def _check_match_not_empty(self) -> "LookupConfig":
@@ -381,6 +423,18 @@ class EmailSmtpDestinationConfig(BaseModel):
         return f"{self.type} ({self.host})"
 
 
+class NotionDestinationConfig(BaseModel):
+    type: Literal["notion"]
+    database_id: str
+    # Jinja2 template → JSON object of Notion page properties
+    # Example: see https://developers.notion.com/reference/post-page for template format
+    properties_template: str | None = None
+    auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
+
+    def describe(self) -> str:
+        return f"{self.type} (database {self.database_id})"
+
+
 class GoogleAdsDestinationConfig(BaseModel):
     type: Literal["google_ads"]
     customer_id: str  # Google Ads customer ID (without hyphens)
@@ -447,7 +501,10 @@ DestinationConfig = Annotated[
     | GoogleAdsDestinationConfig
     | FileDestinationConfig
     | EmailSmtpDestinationConfig
-    | StagedUploadDestinationConfig,
+    | NotionDestinationConfig
+    | IntercomDestinationConfig
+    | StagedUploadDestinationConfig
+    | TwilioDestinationConfig,
     Field(discriminator="type"),
 ]
 

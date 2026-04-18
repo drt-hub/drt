@@ -238,6 +238,7 @@ def create_server(project_dir: Path | None = None) -> Any:
                 {"name": "Jira", "type": "jira", "install": "(core)"},
                 {"name": "Linear", "type": "linear", "install": "(core)"},
                 {"name": "SendGrid", "type": "sendgrid", "install": "(core)"},
+                {"name": "Notion", "type": "notion", "install": "(core)"},
             ],
         }
 

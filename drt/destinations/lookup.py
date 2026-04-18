@@ -119,6 +119,17 @@ def apply_lookups(
         if skip:
             continue
 
+        # Drop match columns that were only used for lookup resolution
+        cols_to_drop: set[str] = set()
+        all_target_cols = set(lookup_maps.keys())
+        for target_col, (lk_config, _mapping) in lookup_maps.items():
+            if lk_config.drop_match_columns:
+                for source_col in lk_config.match.values():
+                    if source_col != target_col and source_col not in all_target_cols:
+                        cols_to_drop.add(source_col)
+        for col in cols_to_drop:
+            record.pop(col, None)
+
         enriched.append(record)
 
     return enriched, errors

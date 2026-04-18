@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import click
 import typer
 
 if TYPE_CHECKING:
@@ -31,9 +35,11 @@ if TYPE_CHECKING:
     from drt.destinations.google_ads import GoogleAdsDestination
     from drt.destinations.google_sheets import GoogleSheetsDestination
     from drt.destinations.hubspot import HubSpotDestination
+    from drt.destinations.intercom import IntercomDestination
     from drt.destinations.jira import JiraDestination
     from drt.destinations.linear import LinearDestination
     from drt.destinations.mysql import MySQLDestination
+    from drt.destinations.notion import NotionDestination
     from drt.destinations.parquet import ParquetDestination
     from drt.destinations.postgres import PostgresDestination
     from drt.destinations.rest_api import RestApiDestination
@@ -41,6 +47,7 @@ if TYPE_CHECKING:
     from drt.destinations.slack import SlackDestination
     from drt.destinations.staged_upload import StagedUploadDestination
     from drt.destinations.teams import TeamsDestination
+    from drt.destinations.twilio import TwilioDestination
     from drt.sources.bigquery import BigQuerySource
     from drt.sources.clickhouse import ClickHouseSource
     from drt.sources.databricks import DatabricksSource
@@ -76,6 +83,38 @@ app = typer.Typer(
     help="Reverse ETL for the code-first data stack.",
     no_args_is_help=True,
 )
+
+
+# ---------------------------------------------------------------------------
+# JSON logging
+# ---------------------------------------------------------------------------
+
+_STANDARD_LOG_FIELDS = frozenset(vars(logging.LogRecord("", 0, "", 0, "", (), None)))
+
+
+class _JsonFormatter(logging.Formatter):
+    """Emit each log record as a single JSON object (JSON Lines format)."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        ts = datetime.fromtimestamp(record.created, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        payload: dict[str, object] = {
+            "ts": ts,
+            "level": record.levelname,
+            "msg": record.getMessage(),
+        }
+        # Merge any extra fields passed via the `extra` kwarg
+        for key, value in record.__dict__.items():
+            if key not in _STANDARD_LOG_FIELDS and not key.startswith("_"):
+                payload[key] = value
+        return json.dumps(payload)
+
+
+def _configure_json_logging() -> None:
+    """Replace root logger handlers with a stderr JSON handler."""
+    handler = logging.StreamHandler()
+    handler.setFormatter(_JsonFormatter())
+    logging.root.handlers = [handler]
+    logging.root.setLevel(logging.INFO)
 
 
 def _resolve_profile_name(cli_flag: str | None, project_profile: str) -> str:
@@ -224,6 +263,15 @@ def run(
     profile_name: str = typer.Option(
         None, "--profile", "-p", help="Override profile (default: drt_project.yml or DRT_PROFILE)."
     ),
+    log_format: str = typer.Option(
+        "text",
+        "--log-format",
+        help=(
+            "Log format: 'text' (default) or 'json' (structured JSON Lines,"
+            " separate from --output json)."
+        ),
+        click_type=click.Choice(["text", "json"]),
+    ),
 ) -> None:
     """Run sync(s) defined in the project."""
     import json as json_mod
@@ -232,6 +280,9 @@ def run(
     from drt.config.parser import load_project, load_syncs
     from drt.engine.sync import run_sync
     from drt.state.manager import StateManager
+
+    if log_format == "json":
+        _configure_json_logging()
 
     json_mode = output == "json"
 
@@ -272,6 +323,8 @@ def run(
         if not json_mode and not dry_run:
             print_sync_start(sync.name, dry_run)
         t0 = time.monotonic()
+        if log_format == "json":
+            logging.info("sync_started", extra={"sync": sync.name})
         try:
             result = run_sync(
                 sync,
@@ -285,6 +338,16 @@ def run(
             )
         except Exception as e:
             elapsed = round(time.monotonic() - t0, 2)
+            if log_format == "json":
+                logging.error(
+                    "sync_complete",
+                    extra={
+                        "sync": sync.name,
+                        "rows": 0,
+                        "duration_ms": round(elapsed * 1000),
+                        "status": "failed",
+                    },
+                )
             if json_mode:
                 json_results.append(
                     {
@@ -302,6 +365,19 @@ def run(
             had_errors = True
             continue
         elapsed = round(time.monotonic() - t0, 2)
+        if log_format == "json":
+            status_str = (
+                "success" if result.failed == 0 else "partial" if result.success > 0 else "failed"
+            )
+            logging.info(
+                "sync_complete",
+                extra={
+                    "sync": sync.name,
+                    "rows": result.success,
+                    "duration_ms": round(elapsed * 1000),
+                    "status": status_str,
+                },
+            )
         if json_mode:
             json_results.append(
                 {
@@ -761,7 +837,10 @@ def _get_destination(
     | EmailSmtpDestination
     | LinearDestination
     | GoogleAdsDestination
+    | NotionDestination
     | StagedUploadDestination
+    | IntercomDestination
+    | TwilioDestination
 ):
     from drt.config.models import (
         ClickHouseDestinationConfig,
@@ -775,6 +854,7 @@ def _get_destination(
         JiraDestinationConfig,
         LinearDestinationConfig,
         MySQLDestinationConfig,
+        NotionDestinationConfig,
         ParquetDestinationConfig,
         PostgresDestinationConfig,
         RestApiDestinationConfig,
@@ -782,6 +862,7 @@ def _get_destination(
         SlackDestinationConfig,
         StagedUploadDestinationConfig,
         TeamsDestinationConfig,
+        TwilioDestinationConfig,
     )
     from drt.destinations.clickhouse import ClickHouseDestination
     from drt.destinations.discord import DiscordDestination
@@ -790,16 +871,20 @@ def _get_destination(
     from drt.destinations.jira import JiraDestination
     from drt.destinations.linear import LinearDestination
     from drt.destinations.mysql import MySQLDestination
+    from drt.destinations.notion import NotionDestination
     from drt.destinations.postgres import PostgresDestination
     from drt.destinations.rest_api import RestApiDestination
     from drt.destinations.sendgrid import SendGridDestination
     from drt.destinations.slack import SlackDestination
+    from drt.destinations.twilio import TwilioDestination
 
     dest = sync.destination
     if isinstance(dest, RestApiDestinationConfig):
         return RestApiDestination()
     if isinstance(dest, SlackDestinationConfig):
         return SlackDestination()
+    if isinstance(dest, TwilioDestinationConfig):
+        return TwilioDestination()
     if isinstance(dest, DiscordDestinationConfig):
         return DiscordDestination()
     if isinstance(dest, GitHubActionsDestinationConfig):
@@ -844,6 +929,8 @@ def _get_destination(
         from drt.destinations.google_ads import GoogleAdsDestination
 
         return GoogleAdsDestination()
+    if isinstance(dest, NotionDestinationConfig):
+        return NotionDestination()
     if isinstance(dest, StagedUploadDestinationConfig):
         from drt.destinations.staged_upload import StagedUploadDestination
 

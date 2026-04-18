@@ -48,6 +48,22 @@ lookups:
       <dest_col>: <src_col>
     select: <string>        # column to fetch from the lookup table
     on_miss: skip           # what to do when no match is found
+    drop_match_columns: true  # remove match source columns from INSERT
+```
+
+### `drop_match_columns`
+
+By default (`true`), match source columns are removed from the record after FK resolution. This prevents `Unknown column` errors when the destination table doesn't have those columns.
+
+Set to `false` if the match columns also need to be written to the destination table:
+
+```yaml
+lookups:
+  parent_id:
+    table: parents
+    match: { user_id: user_id }
+    select: id
+    drop_match_columns: false  # keep user_id in the INSERT
 ```
 
 ### `on_miss` Options

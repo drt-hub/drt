@@ -74,6 +74,7 @@ make fmt      # ruff format + fix
 - v0.4 ✅: Google Sheets / PostgreSQL / MySQL destinations + dagster-drt + dbt manifest reader + type safety overhaul
 - v0.5 ✅: Snowflake/MySQL sources + ClickHouse/Parquet/CSV+JSON/Jira/Linear/SendGrid destinations + `drt test` + multi-environment + Docker
 - v0.5.4 ✅: `destination_lookup` — resolve FK values by querying destination DB during sync (MySQL / Postgres / ClickHouse)
+- v0.5.5 ✅: `drop_match_columns` — auto-remove lookup match columns from INSERT after FK resolution
 - [v0.6](https://github.com/drt-hub/drt/milestone/3): Salesforce + Airflow integration + Jira / Twilio / Intercom destinations
 - [v0.7](https://github.com/drt-hub/drt/milestone/4): DWH destinations (Snowflake / BigQuery / ClickHouse / Databricks) + Cloud storage (S3 / GCS / Azure Blob)
 - [v0.8](https://github.com/drt-hub/drt/milestone/5): Lakehouse sources (Delta Lake / Apache Iceberg)

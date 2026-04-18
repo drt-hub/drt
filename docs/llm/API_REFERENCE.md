@@ -382,6 +382,7 @@ destination:
   - `skip` — skip the row and log a warning
   - `fail` — treat as an error (respects `sync.on_error`)
   - `null` — set the target column to NULL
+- **`drop_match_columns`** (optional, default `true`): remove match source columns from the INSERT after FK resolution. Set to `false` if the match columns also exist in the destination table.
 
 Multiple lookups can be defined per sync. Each executes one SELECT query before the batch loop.
 

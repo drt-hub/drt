@@ -52,10 +52,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **MCP Server: `drt_list_connectors`** (#262): New tool listing all available sources and destinations.
 - **MCP Server: improved `drt_validate`** (#262): Per-file error reporting via `load_syncs_safe()`.
 - **BigQuery → Discord example** (#266): Alert pipeline that queries BigQuery for recent error rows and posts a Discord notification per row via Incoming Webhook using incremental sync. Includes `examples/bigquery_to_discord/`.
+- **Notion destination** (#38): Append rows to a Notion database via the Notion API. Supports `properties_template` (Jinja2 → JSON for page properties), `rich_text` fallback for records without a template, retry with backoff, rate limiting (3 req/s). Contributed by @armorbreak001, with credit to @PFCAaron12 and @pureqin.
+- **Twilio SMS destination** (#159): Send SMS per row via Twilio Messages API. Basic auth (Account SID + Auth Token), Jinja2 templates for message body and per-row phone number (`to_template`), E.164 format validation. Contributed by @PFCAaron12.
+- **Intercom destination** (#163): Create/update contacts via Intercom REST API v2. Bearer token auth, Jinja2 `properties_template` for flexible contact attribute mapping. Contributed by @PFCAaron12.
+- **`--log-format json` flag** (#275): Structured JSON logging for `drt run`. Emits one JSON object per sync event (start, complete, error) to stderr. Separate from `--output json` (final result). Contributed by @Khush-domadia.
+- **GOVERNANCE.md** (#310): Formalized contributor ladder (Contributor → Triage Collaborator → Owner), soft-assignment policy (first-PR-wins), lazy consensus decision model, and 14-day stale rule.
 
 ### Fixed
 
 - **MySQL destination**: auto-serialize `dict`/`list` values to JSON strings before passing to pymysql (#311). Also shipped in [0.5.1](#051---2026-04-14).
+
+## [0.5.5] - 2026-04-16
+
+### Added
+
+- **`drop_match_columns`** (#347): Automatically remove lookup match columns from INSERT after FK resolution. Prevents `Unknown column` errors when the destination table doesn't have the match columns. Enabled by default; set `drop_match_columns: false` to opt out.
 
 ## [0.5.4] - 2026-04-16
 
