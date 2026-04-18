@@ -84,11 +84,23 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 class _FakeResult:
-    """Shape-compatible stand-in for engine.sync.run_sync's return value."""
+    """Shape-compatible stand-in for engine.sync.run_sync's return value.
 
-    def __init__(self, success: int = 1, failed: int = 0) -> None:
+    Mirrors the real ``SyncResult`` surface that ``cli.main.run`` reads:
+    ``success``, ``failed``, ``row_errors``, and — since PR #345/#347 —
+    ``rows_extracted``. Keeping the fake in lockstep with the real shape
+    is cheaper than monkey-patching each attribute per test.
+    """
+
+    def __init__(
+        self,
+        success: int = 1,
+        failed: int = 0,
+        rows_extracted: int | None = None,
+    ) -> None:
         self.success = success
         self.failed = failed
+        self.rows_extracted = success if rows_extracted is None else rows_extracted
         self.row_errors: list[Any] = []
 
 
