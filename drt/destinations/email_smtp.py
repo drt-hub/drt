@@ -32,7 +32,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any
 
-from drt.config.models import EmailSmtpDestinationConfig, SyncOptions
+from drt.config.models import DestinationConfig, EmailSmtpDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
 from drt.destinations.row_errors import RowError
@@ -45,7 +45,7 @@ class EmailSmtpDestination:
     def load(
         self,
         records: list[dict[str, Any]],
-        config: EmailSmtpDestinationConfig,
+        config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult:
         assert isinstance(config, EmailSmtpDestinationConfig)

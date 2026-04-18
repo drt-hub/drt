@@ -1,6 +1,6 @@
 """Pydantic models for drt project and sync configuration."""
 
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -359,6 +359,10 @@ class FileDestinationConfig(BaseModel):
     path: str  # output file path, e.g. "output/data.csv"
     format: Literal["csv", "json", "jsonl"] = "csv"
 
+    def describe(self) -> str:
+        return f"{self.type} ({self.path})"
+
+
 class EmailSmtpDestinationConfig(BaseModel):
     type: Literal["email_smtp"] = "email_smtp"
     host: str
@@ -368,12 +372,13 @@ class EmailSmtpDestinationConfig(BaseModel):
     subject_template: str
     body_template: str
     use_tls: bool = True
-    username: Optional[str] = None
-    username_env: Optional[str] = None
-    password: Optional[str] = None
-    password_env: Optional[str] = None
+    username: str | None = None
+    username_env: str | None = None
+    password: str | None = None
+    password_env: str | None = None
+
     def describe(self) -> str:
-        return f"{self.type} ({self.path})"
+        return f"{self.type} ({self.host})"
 
 
 class GoogleAdsDestinationConfig(BaseModel):
@@ -439,10 +444,9 @@ DestinationConfig = Annotated[
     | JiraDestinationConfig
     | ClickHouseDestinationConfig
     | ParquetDestinationConfig
-    | FileDestinationConfig
-    | EmailSmtpDestinationConfig,
     | GoogleAdsDestinationConfig
     | FileDestinationConfig
+    | EmailSmtpDestinationConfig
     | StagedUploadDestinationConfig,
     Field(discriminator="type"),
 ]

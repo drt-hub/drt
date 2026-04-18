@@ -116,7 +116,12 @@ class TestEmailSmtpDestination:
     def test_credentials_from_env(self, mock_smtp):
         _, server = mock_smtp
         dest = EmailSmtpDestination()
-        config = _config(username=None, username_env="SMTP_USER", password=None, password_env="SMTP_PASS")
+        config = _config(
+            username=None,
+            username_env="SMTP_USER",
+            password=None,
+            password_env="SMTP_PASS",
+        )
 
         with patch.dict("os.environ", {"SMTP_USER": "env_user", "SMTP_PASS": "env_pass"}):
             result = dest.load([{"name": "Grace"}], config, _sync_options())

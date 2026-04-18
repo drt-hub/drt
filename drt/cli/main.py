@@ -832,11 +832,12 @@ def _get_destination(
         from drt.destinations.file import FileDestination
 
         return FileDestination()
-    
+
     if isinstance(dest, EmailSmtpDestinationConfig):
         from drt.destinations.email_smtp import EmailSmtpDestination
+
         return EmailSmtpDestination()
-    
+
     if isinstance(dest, LinearDestinationConfig):
         return LinearDestination()
     if isinstance(dest, GoogleAdsDestinationConfig):
@@ -848,5 +849,3 @@ def _get_destination(
 
         return StagedUploadDestination()
     raise ValueError(f"Unsupported destination type: {dest.type}")
-
-    
