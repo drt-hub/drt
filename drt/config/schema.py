@@ -8,8 +8,10 @@ Used for:
 import json
 from pathlib import Path
 from typing import Any
+
 import yaml
-from jsonschema import Draft7Validator
+from jsonschema import validators
+
 from drt.config.models import ProjectConfig, SyncConfig
 
 JSON_SCHEMA_DRAFT_07 = "http://json-schema.org/draft-07/schema#"
@@ -56,12 +58,24 @@ def validate_yaml_against_schema(yaml_path: Path, schema: dict[str, Any]) -> lis
     Returns:
         List of error messages. Empty list if validation passes.
     """
-    with open(yaml_path) as f:
-        data = yaml.safe_load(f)
+    try:
+        with open(yaml_path) as f:
+            data = yaml.safe_load(f)
+    except yaml.YAMLError as exc:
+        return [f"(root): {exc}"]
 
     errors: list[str] = []
-    validator = Draft7Validator(schema)
-    for error in validator.iter_errors(data):
+    validator_cls = validators.validator_for(schema)
+    validator = validator_cls(schema)
+
+    for error in sorted(
+        validator.iter_errors(data),
+        key=lambda err: (
+            tuple(str(part) for part in err.path),
+            tuple(str(part) for part in err.schema_path),
+            err.message,
+        ),
+    ):
         # Format: path → key: message (e.g., "destination → type: 'rest_api' is not one of...")
         path = " → ".join(str(part) for part in error.path) if error.path else "(root)"
         errors.append(f"{path}: {error.message}")
