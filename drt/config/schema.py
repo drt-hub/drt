@@ -8,8 +8,10 @@ Used for:
 import json
 from pathlib import Path
 from typing import Any
+
 import yaml
 from jsonschema import Draft7Validator
+
 from drt.config.models import ProjectConfig, SyncConfig
 
 JSON_SCHEMA_DRAFT_07 = "http://json-schema.org/draft-07/schema#"
