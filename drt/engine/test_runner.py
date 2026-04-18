@@ -110,7 +110,12 @@ def build_test_query(test: SyncTest, table: str) -> tuple[str, Callable[[int], b
         threshold = datetime.now(timezone.utc) - max_age_delta
         
         # Count rows where column is older than max_age (stale data)
-        query = f"SELECT COUNT(*) FROM {safe_table} WHERE {safe_col} < '{threshold.isoformat()}'"
+        # Use CAST for portability across PostgreSQL, MySQL, ClickHouse
+        threshold_str = threshold.isoformat()
+        query = (
+            f"SELECT COUNT(*) FROM {safe_table} "
+            f"WHERE CAST({safe_col} AS TEXT) < '{threshold_str}'"
+        )
 
         def check_freshness(val: int) -> bool:
             # Test passes if there are no stale rows
@@ -121,13 +126,12 @@ def build_test_query(test: SyncTest, table: str) -> tuple[str, Callable[[int], b
     if test.unique is not None:
         uniq = test.unique
         cols = ", ".join(_safe_column(col) for col in uniq.columns)
-        # Use portable GROUP BY + HAVING pattern (works on PostgreSQL, MySQL, BigQuery, ClickHouse)
+        # Count duplicate groups directly (single table scan for efficiency)
         query = (
-            f"SELECT COUNT(*) FROM {safe_table} "
-            f"WHERE ({cols}) IN ("
+            f"SELECT COUNT(*) FROM ("
             f"  SELECT {cols} FROM {safe_table} "
             f"  GROUP BY {cols} HAVING COUNT(*) > 1"
-            f")"
+            f") t"
         )
 
         def check_unique(val: int) -> bool:

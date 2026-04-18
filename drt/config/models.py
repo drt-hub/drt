@@ -572,12 +572,18 @@ class RowCountTest(BaseModel):
 
 
 class NotNullTest(BaseModel):
-    columns: list[str]
+    columns: list[str] = Field(min_length=1)
 
 
 class FreshnessTest(BaseModel):
     column: str
-    max_age: str  # e.g., "7 days", "1 hour", "30 minutes"
+    max_age: Annotated[
+        str,
+        Field(
+            pattern=r"^[1-9]\d*\s+(second|seconds|minute|minutes|hour|hours|day|days|week|weeks)$",
+            description="Duration string like '7 days', '1 hour', or '30 minutes'.",
+        ),
+    ]
 
 
 class UniqueTest(BaseModel):
