@@ -5,9 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-import yaml
-
 from drt.config.schema import (
     generate_project_schema,
     generate_sync_schema,
