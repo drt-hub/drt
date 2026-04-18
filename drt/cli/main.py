@@ -706,6 +706,70 @@ def mcp_run() -> None:
 
 
 # ---------------------------------------------------------------------------
+# sources / destinations
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def sources() -> None:
+    """List all available source connectors."""
+    # Manually maintained list of supported sources
+    sources_list = [
+        ("bigquery", "BigQuery (SQL query)"),
+        ("clickhouse", "ClickHouse (SQL query)"),
+        ("databricks", "Databricks (SQL query)"),
+        ("duckdb", "DuckDB (local/remote)"),
+        ("mysql", "MySQL (SQL query)"),
+        ("postgres", "PostgreSQL (SQL query)"),
+        ("redshift", "Redshift (SQL query)"),
+        ("snowflake", "Snowflake (SQL query)"),
+        ("sqlite", "SQLite (local)"),
+        ("sqlserver", "SQL Server (SQL query)"),
+    ]
+
+    console.print()
+    console.print("[bold]Available sources:[/bold]")
+    for source_type, description in sources_list:
+        console.print(f"  [cyan]{source_type:<15}[/cyan] {description}")
+    console.print()
+
+
+@app.command()
+def destinations() -> None:
+    """List all available destination connectors."""
+    # Manually maintained list of supported destinations
+    destinations_list = [
+        ("clickhouse", "ClickHouse (SQL insert)"),
+        ("discord", "Discord (Webhook)"),
+        ("email_smtp", "Email (SMTP)"),
+        ("file", "File (CSV, JSON, Parquet)"),
+        ("github_actions", "GitHub Actions (Workflow dispatch)"),
+        ("google_ads", "Google Ads (Customer Match)"),
+        ("google_sheets", "Google Sheets (Append/Update)"),
+        ("hubspot", "HubSpot (Contacts/Deals)"),
+        ("intercom", "Intercom (Contacts)"),
+        ("jira", "Jira (Create/Update issues)"),
+        ("linear", "Linear (Create/Update issues)"),
+        ("mysql", "MySQL (SQL insert)"),
+        ("notion", "Notion (Add/Update rows)"),
+        ("parquet", "Parquet (Cloud/local)"),
+        ("postgres", "PostgreSQL (SQL insert)"),
+        ("rest_api", "REST API (generic)"),
+        ("sendgrid", "SendGrid (Send email)"),
+        ("slack", "Slack (Incoming Webhook)"),
+        ("staged_upload", "Staged Upload (S3/GCS via temporary tables)"),
+        ("teams", "Microsoft Teams (Incoming Webhook)"),
+        ("twilio", "Twilio (Send SMS/WhatsApp)"),
+    ]
+
+    console.print()
+    console.print("[bold]Available destinations:[/bold]")
+    for dest_type, description in destinations_list:
+        console.print(f"  [cyan]{dest_type:<15}[/cyan] {description}")
+    console.print()
+
+
+# ---------------------------------------------------------------------------
 # Source / Destination factories
 # ---------------------------------------------------------------------------
 

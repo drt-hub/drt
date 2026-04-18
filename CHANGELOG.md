@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`drt sources` and `drt destinations` commands** (#223): New CLI commands to list all available source and destination connectors with descriptions. Helps users discover available integrations. Usage: `drt sources` | `drt destinations`.
 - **SQL Server source connector** (#91): Extract data from Microsoft SQL Server using pure-Python `pymssql`. Supports host, port, database, user, password_env, schema. Install: `pip install drt-core[sqlserver]`.
 - **Databricks source connector** (#88): Extract data from Databricks SQL Warehouse using `databricks-sql-connector`. Supports Unity Catalog, access token auth. Install: `pip install drt-core[databricks]`.
 - **Webhook trigger endpoint** (#218): New `drt serve` command starts a lightweight HTTP server (stdlib `http.server`) so you can trigger syncs via `POST /sync/<name>`. Includes health check, bearer token auth, and single-sync concurrency control (423 on parallel requests). Guide: `docs/guides/using-webhook-trigger.md`.
