@@ -256,8 +256,12 @@ def _init_from_dbt(manifest_path: Path) -> None:
 
 @app.command()
 def run(
-    select: str = typer.Option(None, "--select", "-s", help="Run sync by name or tag (tag:crm)."),
-    all_syncs: bool = typer.Option(False, "--all", help="Explicitly run all syncs."),
+    select: str = typer.Option(
+        None,
+        "--select",
+        "-s",
+        help='Run sync by name, tag (tag:crm), or "*" / "all" for every sync.',
+    ),
     threads: int = typer.Option(1, "--threads", "-t", help="Parallel execution threads."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without writing data."),
     verbose: bool = typer.Option(False, "--verbose", help="Show row-level error details."),
@@ -277,8 +281,9 @@ def run(
 ) -> None:
     """Run sync(s) defined in the project.
 
-    Without --select or --all, runs all syncs sequentially (existing behaviour).
+    Without --select, runs all syncs sequentially (existing behaviour).
     Use --select to filter by name or tag (e.g. --select tag:crm).
+    Use --select "*" or --select all to be explicit about running every sync.
     Use --threads N for parallel execution.
     """
     import json as json_mod
@@ -314,7 +319,10 @@ def run(
         raise typer.Exit()
 
     if select:
-        if select.startswith("tag:"):
+        if select in ("*", "all"):
+            # Explicit "run every sync" sentinel — no filtering.
+            pass
+        elif select.startswith("tag:"):
             tag = select[4:]
             syncs = [s for s in syncs if tag in getattr(s, "tags", [])]
             if not syncs:
