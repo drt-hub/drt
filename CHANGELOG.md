@@ -51,7 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`--output json` for validate/list** (#230): Structured JSON output for `drt validate` and `drt list`.
 - **MCP Server: `drt_list_connectors`** (#262): New tool listing all available sources and destinations.
 - **MCP Server: improved `drt_validate`** (#262): Per-file error reporting via `load_syncs_safe()`.
-- **`drt test` — freshness, unique, accepted_values validators** (#233): New test types for post-sync validation. `freshness` validates data recency (e.g., `max_age: "7 days"`), `unique` prevents duplicates, `accepted_values` enforces whitelists. Supports human-readable time formats, timezone-aware comparison, multi-column validation. Follow-up to #141 (row_count, not_null tests).
+- **`drt test` — freshness, unique, accepted_values validators** (#233): New test types for post-sync validation. `freshness` validates data recency (e.g., `max_age: "7 days"`), `unique` prevents duplicates, `accepted_values` enforces column whitelists. Supports human-readable time formats ("7 days", "24 hours", etc). Follow-up to #141 (row_count, not_null tests).
 - **BigQuery → Discord example** (#266): Alert pipeline that queries BigQuery for recent error rows and posts a Discord notification per row via Incoming Webhook using incremental sync. Includes `examples/bigquery_to_discord/`.
 - **Notion destination** (#38): Append rows to a Notion database via the Notion API. Supports `properties_template` (Jinja2 → JSON for page properties), `rich_text` fallback for records without a template, retry with backoff, rate limiting (3 req/s). Contributed by @armorbreak001, with credit to @PFCAaron12 and @pureqin.
 - **Twilio SMS destination** (#159): Send SMS per row via Twilio Messages API. Basic auth (Account SID + Auth Token), Jinja2 templates for message body and per-row phone number (`to_template`), E.164 format validation. Contributed by @PFCAaron12.
@@ -86,10 +86,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 #### Sources
+
 - **Snowflake source connector** (#162): Extract data from Snowflake using `snowflake-connector-python`. Supports account, user, password/password_env, database, schema, warehouse, and optional role. Install: `pip install drt-core[snowflake]`
 - **MySQL source connector** (#19): Extract data from MySQL databases using pymysql. Supports host, port, dbname, user, password via env var. Backtick quoting for table names. Install: `pip install drt-core[mysql]`
 
 #### Destinations
+
 - **ClickHouse destination** (#166): Insert rows via `clickhouse-connect` (HTTP). Supports connection string, HTTPS via `secure` flag. Install: `pip install drt-core[clickhouse]`
 - **Parquet file destination** (#171): Write to local Parquet files with snappy/gzip/zstd compression and partition columns. Install: `pip install drt-core[parquet]`
 - **CSV/JSON/JSONL file destination** (#67): Write to local files using stdlib csv/json. No extra dependencies
@@ -99,6 +101,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SendGrid email destination** (#194): Transactional emails via SendGrid v3 Mail Send API
 
 #### CLI
+
 - **`drt test` command** (#141): Post-sync data validation. Supports `row_count` (min/max) and `not_null` (columns) tests for DB destinations (PostgreSQL, MySQL, ClickHouse)
 - **`--output json` flag** (#142): Structured JSON output for `drt run` and `drt status`. Designed for CI/scripting use
 - **`--profile` CLI override** (#238): Runtime profile switching via `--profile` flag or `DRT_PROFILE` env var. Precedence: flag > env var > drt_project.yml
@@ -106,11 +109,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Dry-run summary** (#219): Enhanced `--dry-run` shows Source, Destination, Rows to sync, and Sync mode
 
 #### Multi-environment support
+
 - **`${VAR}` env var substitution** (#240): Use `${VAR}` syntax in `model:` field for environment-specific SQL queries
 - **dbt manifest resolution** (#239): `ref('model')` now resolves from dbt `target/manifest.json` when available. Resolution order: SQL file > dbt manifest > profile-based expansion
 - **`secrets.toml`** (#143): Local secret management via `.drt/secrets.toml` (dlt-like pattern). Resolution order: explicit value > env var > secrets.toml
 
 #### Infrastructure
+
 - **Dockerfile and docker-compose** (#161): `python:3.12-slim` image with `DRT_EXTRAS` build arg, non-root user
 - **Codecov integration** (#103): Coverage badge, PR reports. Patch checks set to informational
 - **Pre-commit hooks** (#105): ruff + mypy
@@ -118,6 +123,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`duration_seconds` in SyncResult** (#226): Track sync execution time
 
 ### Tests
+
 - 382+ tests (up from 170+ in v0.4.3)
 - Source and destination protocol contract tests (#209, #210)
 - Slack Block Kit tests (#97), state persistence tests (#100)

@@ -581,12 +581,12 @@ class FreshnessTest(BaseModel):
 
 
 class UniqueTest(BaseModel):
-    columns: list[str]
+    columns: list[str] = Field(min_length=1)
 
 
 class AcceptedValuesTest(BaseModel):
     column: str
-    values: list[str]
+    values: list[str] = Field(min_length=1)
 
 
 class SyncTest(BaseModel):
@@ -595,6 +595,22 @@ class SyncTest(BaseModel):
     freshness: FreshnessTest | None = None
     unique: UniqueTest | None = None
     accepted_values: AcceptedValuesTest | None = None
+
+    @model_validator(mode="after")
+    def _check_exactly_one_test(self) -> "SyncTest":
+        configured_tests = [
+            self.row_count,
+            self.not_null,
+            self.freshness,
+            self.unique,
+            self.accepted_values,
+        ]
+        configured_count = sum(test is not None for test in configured_tests)
+        if configured_count != 1:
+            raise ValueError(
+                "Exactly one sync test must be configured in each tests entry."
+            )
+        return self
 
 
 class SyncConfig(BaseModel):

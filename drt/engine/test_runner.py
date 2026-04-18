@@ -47,6 +47,10 @@ def _parse_max_age(max_age_str: str) -> timedelta:
         value = int(value_str)
     except ValueError:
         raise ValueError(f"Invalid max_age value: {value_str!r}. Must be an integer.")
+    if value <= 0:
+        raise ValueError(
+            f"Invalid max_age value: {value_str!r}. Must be a positive integer."
+        )
     
     unit_lower = unit.lower()
     if unit_lower in ("day", "days"):
@@ -90,7 +94,8 @@ def build_test_query(test: SyncTest, table: str) -> tuple[str, Callable[[int], b
 
     if test.not_null is not None:
         nn = test.not_null
-        conditions = " OR ".join(f"{col} IS NULL" for col in nn.columns)
+        safe_cols = [_safe_column(col) for col in nn.columns]
+        conditions = " OR ".join(f"{col} IS NULL" for col in safe_cols)
         query = f"SELECT COUNT(*) FROM {safe_table} WHERE {conditions}"
 
         def check_not_null(val: int) -> bool:
@@ -116,12 +121,17 @@ def build_test_query(test: SyncTest, table: str) -> tuple[str, Callable[[int], b
     if test.unique is not None:
         uniq = test.unique
         cols = ", ".join(_safe_column(col) for col in uniq.columns)
+        # Use portable GROUP BY + HAVING pattern (works on PostgreSQL, MySQL, BigQuery, ClickHouse)
         query = (
-            f"SELECT COUNT(*) - COUNT(DISTINCT {cols}) FROM {safe_table}"
+            f"SELECT COUNT(*) FROM {safe_table} "
+            f"WHERE ({cols}) IN ("
+            f"  SELECT {cols} FROM {safe_table} "
+            f"  GROUP BY {cols} HAVING COUNT(*) > 1"
+            f")"
         )
 
         def check_unique(val: int) -> bool:
-            # Test passes if duplicate count is 0
+            # Test passes if no duplicate rows exist
             return val == 0
 
         return query, check_unique
@@ -129,7 +139,9 @@ def build_test_query(test: SyncTest, table: str) -> tuple[str, Callable[[int], b
     if test.accepted_values is not None:
         av = test.accepted_values
         safe_col = _safe_column(av.column)
-        placeholders = ", ".join(f"'{val}'" for val in av.values)
+        # Escape single quotes in values to prevent SQL injection
+        escaped_values = [val.replace("'", "''") for val in av.values]
+        placeholders = ", ".join(f"'{val}'" for val in escaped_values)
         query = f"SELECT COUNT(*) FROM {safe_table} WHERE {safe_col} NOT IN ({placeholders})"
 
         def check_accepted_values(val: int) -> bool:

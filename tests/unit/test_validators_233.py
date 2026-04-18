@@ -63,6 +63,16 @@ class TestParseMaxAge:
         with pytest.raises(ValueError, match="Unknown time unit"):
             _parse_max_age("7 months")
 
+    def test_parse_zero_value(self) -> None:
+        """Reject zero max_age value."""
+        with pytest.raises(ValueError, match="Must be a positive integer"):
+            _parse_max_age("0 days")
+
+    def test_parse_negative_value(self) -> None:
+        """Reject negative max_age value."""
+        with pytest.raises(ValueError, match="Must be a positive integer"):
+            _parse_max_age("-7 days")
+
 
 class TestFreshnessTest:
     """Test freshness validator query generation."""
@@ -112,8 +122,9 @@ class TestUniqueTest:
         test = SyncTest(unique=UniqueTest(columns=["id"]))
         query, _ = build_test_query(test, "products")
         
-        assert "SELECT" in query
-        assert "COUNT(*) - COUNT(DISTINCT id)" in query
+        # Should use portable GROUP BY + HAVING pattern
+        assert "GROUP BY id" in query
+        assert "HAVING COUNT(*) > 1" in query
         assert "products" in query
 
     def test_unique_multiple_columns_query(self) -> None:
@@ -121,7 +132,9 @@ class TestUniqueTest:
         test = SyncTest(unique=UniqueTest(columns=["tenant_id", "user_id"]))
         query, _ = build_test_query(test, "subscriptions")
         
-        assert "DISTINCT tenant_id, user_id" in query
+        # Should use portable GROUP BY + HAVING pattern
+        assert "GROUP BY tenant_id, user_id" in query
+        assert "HAVING COUNT(*) > 1" in query
         assert "subscriptions" in query
 
     def test_unique_check_passes_on_no_duplicates(self) -> None:
@@ -199,43 +212,25 @@ class TestAcceptedValuesTest:
 
 
 class TestMultipleTestTypes:
-    """Test that only one test type should be used at a time."""
+    """Test that each test type generates correct SQL when used alone."""
 
-    def test_row_count_takes_precedence(self) -> None:
-        """If row_count is set, it takes precedence."""
-        test = SyncTest(
-            row_count={"min": 1, "max": 100},
-            unique=UniqueTest(columns=["id"])
-        )
+    def test_row_count_alone(self) -> None:
+        """Row count test generates correct SQL."""
+        test = SyncTest(row_count={"min": 1, "max": 100})
         query, _ = build_test_query(test, "users")
-        
-        # Should be row count query, not unique query
         assert "COUNT(*)" in query
-        assert "DISTINCT" not in query
 
-    def test_not_null_takes_second_precedence(self) -> None:
-        """If row_count not set, not_null takes precedence."""
-        test = SyncTest(
-            not_null={"columns": ["email"]},
-            freshness=FreshnessTest(column="updated_at", max_age="1 day")
-        )
+    def test_not_null_alone(self) -> None:
+        """Not null test generates correct SQL."""
+        test = SyncTest(not_null={"columns": ["email"]})
         query, _ = build_test_query(test, "users")
-        
-        # Should be not_null query
         assert "IS NULL" in query
-        assert "updated_at" not in query
 
-    def test_freshness_takes_third_precedence(self) -> None:
-        """If row_count/not_null not set, freshness takes precedence."""
-        test = SyncTest(
-            freshness=FreshnessTest(column="updated_at", max_age="1 day"),
-            unique=UniqueTest(columns=["id"])
-        )
+    def test_freshness_alone(self) -> None:
+        """Freshness test generates correct SQL."""
+        test = SyncTest(freshness=FreshnessTest(column="updated_at", max_age="1 day"))
         query, _ = build_test_query(test, "users")
-        
-        # Should be freshness query
         assert "updated_at" in query
-        assert "DISTINCT" not in query
 
 
 class TestInvalidTableNames:
@@ -254,3 +249,46 @@ class TestInvalidTableNames:
         
         with pytest.raises(ValueError, match="Invalid character"):
             build_test_query(test, "users")
+
+
+class TestValidationRules:
+    """Test model validation rules."""
+
+    def test_unique_columns_cannot_be_empty(self) -> None:
+        """UniqueTest requires at least one column."""
+        with pytest.raises(ValueError, match="at least"):
+            SyncTest(unique=UniqueTest(columns=[]))
+
+    def test_accepted_values_cannot_be_empty(self) -> None:
+        """AcceptedValuesTest requires at least one value."""
+        with pytest.raises(ValueError, match="at least"):
+            SyncTest(
+                accepted_values=AcceptedValuesTest(column="status", values=[])
+            )
+
+    def test_sync_test_must_have_exactly_one_test(self) -> None:
+        """SyncTest requires exactly one test type."""
+        with pytest.raises(ValueError, match="Exactly one"):
+            SyncTest(
+                row_count={"min": 1},
+                unique=UniqueTest(columns=["id"])
+            )
+
+    def test_sync_test_cannot_have_zero_tests(self) -> None:
+        """SyncTest cannot have no test types."""
+        with pytest.raises(ValueError, match="Exactly one"):
+            SyncTest()
+
+    def test_accepted_values_escapes_single_quotes(self) -> None:
+        """Accepted values should escape single quotes to prevent SQL injection."""
+        test = SyncTest(
+            accepted_values=AcceptedValuesTest(
+                column="name",
+                values=["O'Brien", "O'Connor"]
+            )
+        )
+        query, _ = build_test_query(test, "users")
+        
+        # Single quotes should be doubled (SQL standard escaping)
+        assert "O''Brien" in query
+        assert "O''Connor" in query
