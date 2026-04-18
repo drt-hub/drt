@@ -8,16 +8,23 @@ Used for:
 import json
 from pathlib import Path
 from typing import Any
-
+import yaml
+from jsonschema import Draft7Validator
 from drt.config.models import ProjectConfig, SyncConfig
+
+JSON_SCHEMA_DRAFT_07 = "http://json-schema.org/draft-07/schema#"
 
 
 def generate_project_schema() -> dict[str, Any]:
-    return ProjectConfig.model_json_schema()
+    schema = ProjectConfig.model_json_schema()
+    schema["$schema"] = JSON_SCHEMA_DRAFT_07
+    return schema
 
 
 def generate_sync_schema() -> dict[str, Any]:
-    return SyncConfig.model_json_schema()
+    schema = SyncConfig.model_json_schema()
+    schema["$schema"] = JSON_SCHEMA_DRAFT_07
+    return schema
 
 
 def write_schemas(output_dir: Path) -> list[Path]:
@@ -37,3 +44,26 @@ def write_schemas(output_dir: Path) -> list[Path]:
     written.append(sync_path)
 
     return written
+
+
+def validate_yaml_against_schema(yaml_path: Path, schema: dict[str, Any]) -> list[str]:
+    """Validate a YAML file against a JSON schema.
+
+    Args:
+        yaml_path: Path to the YAML file to validate.
+        schema: The JSON schema to validate against.
+
+    Returns:
+        List of error messages. Empty list if validation passes.
+    """
+    with open(yaml_path) as f:
+        data = yaml.safe_load(f)
+
+    errors: list[str] = []
+    validator = Draft7Validator(schema)
+    for error in validator.iter_errors(data):
+        # Format: path → key: message (e.g., "destination → type: 'rest_api' is not one of...")
+        path = " → ".join(str(part) for part in error.path) if error.path else "(root)"
+        errors.append(f"{path}: {error.message}")
+
+    return errors
