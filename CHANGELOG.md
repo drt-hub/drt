@@ -47,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Google Ads destination** (#217): Upload offline click conversions. Supports partial failure handling and OAuth2 auth.
 - **Staged Upload destination** (#258): Async bulk-upload APIs (e.g. Amazon Marketing Cloud, Salesforce Bulk API). Declarative 3-phase YAML config: Stage (file upload) → Trigger (job kick) → Poll (completion wait). Supports CSV, JSON, JSONL. New `StagedDestination` Protocol.
 - **OAuth2 Client Credentials auth** (#259): Token exchange with caching for REST API destination.
+- **REST API destination pagination** (#260): Fetch data from paginated APIs before processing. Supports 3 strategies: offset/limit, cursor-based, and HTTP Link headers. Extractable via `fetch_paginated()` for read-before-write upsert patterns.
 - **`drt init --from-dbt`** (#215): Generate sync YAML scaffolds from dbt `manifest.json`.
 - **`--output json` for validate/list** (#230): Structured JSON output for `drt validate` and `drt list`.
 - **MCP Server: `drt_list_connectors`** (#262): New tool listing all available sources and destinations.

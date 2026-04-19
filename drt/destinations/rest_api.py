@@ -198,7 +198,6 @@ class RestApiDestination:
                         page_count = len(all_records) - (page * pagination.limit)
                         if page_count < pagination.limit:
                             break
-                        page += 1
                     elif isinstance(pagination, CursorPaginationConfig):
                         # Extract next cursor from response
                         if isinstance(data, dict):
@@ -226,7 +225,7 @@ class RestApiDestination:
     def _extract_next_link(link_header: str) -> str | None:
         """Extract next URL from Link header.
 
-        Example: <https://api.example.com?page=2>; rel="next", <https://api.example.com?page=50>; rel="last"
+        RFC 5988 format: <https://api.example.com?page=2>; rel="next"
         Returns the URL with rel="next".
         """
         links = link_header.split(",")
