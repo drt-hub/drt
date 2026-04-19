@@ -85,11 +85,16 @@ class PostgresDestination:
         Raises:
             Exception: If connection or query fails.
         """
+        from psycopg2 import sql
+
         assert isinstance(config, PostgresDestinationConfig)
         conn = self._connect(config)
         try:
             cur = conn.cursor()
-            cur.execute(f"SELECT COUNT(*) FROM {config.table}")
+            query = sql.SQL("SELECT COUNT(*) FROM {}").format(
+                sql.Identifier(config.table)
+            )
+            cur.execute(query)
             row = cur.fetchone()
             return row[0] if row else 0
         finally:

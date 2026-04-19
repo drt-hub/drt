@@ -84,7 +84,7 @@ def print_dry_run_summary(
             " before inserting rows[/yellow]"
         )
         # Show row count diff if destination is provided
-        if destination:
+        if destination is not None:
             _print_row_count_diff(sync, destination, rows)
 
 
@@ -104,15 +104,15 @@ def _print_row_count_diff(sync: SyncConfig, destination: object, new_rows: int) 
             diff = new_rows - current_rows
             diff_str = f"{diff:+d}" if diff != 0 else "0"
             if diff > 0:
-                diff_color = "[green]"
+                diff_color = "green"
             elif diff < 0:
-                diff_color = "[red]"
+                diff_color = "red"
             else:
-                diff_color = "[dim]"
+                diff_color = "dim"
             console.print(
                 f"  Current destination rows: {current_rows} "
                 f"→ New: {new_rows} "
-                f"({diff_color}{diff_str}[/{diff_color}])"
+                f"([{diff_color}]{diff_str}[/{diff_color}])"
             )
     except Exception as e:
         # Silently skip row count if unable to connect (not a blocking error)

@@ -34,7 +34,7 @@ def _serialize_value(value: Any) -> Any:
     bound for JSON columns (common when sourcing from BigQuery) must
     be converted to strings before execute().
     """
-    if isinstance(value, dict | list):
+    if isinstance(value, (dict, list)):  # noqa: UP038 (tuple required for Py3.10)
         return json.dumps(value, ensure_ascii=False)
     return value
 
@@ -101,7 +101,13 @@ class MySQLDestination:
         conn = self._connect(config)
         try:
             cur = conn.cursor()
-            cur.execute(f"SELECT COUNT(*) FROM `{config.table}`")
+            # Escape table name with backticks for safety
+            escaped_table = (
+                "`.`".join(config.table.split("."))
+                if "." in config.table
+                else config.table
+            )
+            cur.execute(f"SELECT COUNT(*) FROM `{escaped_table}`")
             row = cur.fetchone()
             return row[0] if row else 0
         finally:

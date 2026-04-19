@@ -32,10 +32,10 @@ def get_row_count_for_destination(
         Exception: If connection or query fails (should be caught by caller).
     """
     if isinstance(config, PostgresDestinationConfig):
-        return destination.get_row_count(config)
+        return int(destination.get_row_count(config))
     elif isinstance(config, MySQLDestinationConfig):
-        return destination.get_row_count(config)
+        return int(destination.get_row_count(config))
     elif isinstance(config, ClickHouseDestinationConfig):
-        return destination.get_row_count(config)
+        return int(destination.get_row_count(config))
     # Non-SQL destinations (REST API, Slack, etc.) don't support row count
     return None
