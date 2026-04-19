@@ -164,10 +164,15 @@ def print_sync_table(syncs: list[SyncConfig]) -> None:
     table.add_column("description", style="dim")
 
     for sync in syncs:
+        dest_label = (
+            sync.destination.describe()
+            if hasattr(sync.destination, "describe")
+            else sync.destination.type
+        )
         table.add_row(
             sync.name,
             sync.model,
-            f"{sync.destination.type}",
+            dest_label,
             sync.sync.mode,
             sync.description or "",
         )

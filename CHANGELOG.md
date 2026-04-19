@@ -39,7 +39,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`--dry-run` row count diff for replace mode** (#339): Prevents accidental data loss by showing before/after row-count comparison for SQL destinations (PostgreSQL, MySQL, ClickHouse) during dry-run preview. Highlights dangerous scenarios (e.g., replacing 1,000 rows with 0) in red. Gracefully handles connection errors.
 - **`drt sources` and `drt destinations` CLI commands** (#223): List available source and destination connectors with descriptions. Rich table formatting for clean terminal output. Foundation for future auto-discovery features.
 - **SQL Server source connector** (#91): Extract data from Microsoft SQL Server using pure-Python `pymssql`. Supports host, port, database, user, password_env, schema. Install: `pip install drt-core[sqlserver]`.
 - **Databricks source connector** (#88): Extract data from Databricks SQL Warehouse using `databricks-sql-connector`. Supports Unity Catalog, access token auth. Install: `pip install drt-core[databricks]`.
@@ -53,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`--output json` for validate/list** (#230): Structured JSON output for `drt validate` and `drt list`.
 - **MCP Server: `drt_list_connectors`** (#262): New tool listing all available sources and destinations.
 - **MCP Server: improved `drt_validate`** (#262): Per-file error reporting via `load_syncs_safe()`.
+- **`drt test` — freshness, unique, accepted_values validators** (#233): New test types for post-sync validation. `freshness` validates data recency (e.g., `max_age: "7 days"`), `unique` prevents duplicates, `accepted_values` enforces column whitelists. Supports human-readable time formats ("7 days", "24 hours", etc). Follow-up to #141 (row_count, not_null tests).
 - **BigQuery → Discord example** (#266): Alert pipeline that queries BigQuery for recent error rows and posts a Discord notification per row via Incoming Webhook using incremental sync. Includes `examples/bigquery_to_discord/`.
 - **Notion destination** (#38): Append rows to a Notion database via the Notion API. Supports `properties_template` (Jinja2 → JSON for page properties), `rich_text` fallback for records without a template, retry with backoff, rate limiting (3 req/s). Contributed by @armorbreak001, with credit to @PFCAaron12 and @pureqin.
 - **Twilio SMS destination** (#159): Send SMS per row via Twilio Messages API. Basic auth (Account SID + Auth Token), Jinja2 templates for message body and per-row phone number (`to_template`), E.164 format validation. Contributed by @PFCAaron12.
