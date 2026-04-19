@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
 from drt.cli.output import _print_row_count_diff, print_dry_run_summary
 from drt.config.credentials import PostgresProfile
 from drt.config.models import (
+    ClickHouseDestinationConfig,
     DestinationConfig,
     MySQLDestinationConfig,
     PostgresDestinationConfig,
     SyncConfig,
     SyncOptions,
 )
+from drt.destinations.sql_utils import get_row_count_for_destination
 
 
 @pytest.fixture
@@ -229,3 +231,241 @@ def test_print_dry_run_summary_full_output(
     assert "Current destination rows: 100" in captured.out
     assert "→ New: 150" in captured.out
     assert "+50" in captured.out
+
+
+# Tests for actual destination get_row_count() methods
+
+
+def test_postgres_destination_get_row_count() -> None:
+    """Test PostgresDestination.get_row_count() with mocked connection."""
+    from drt.destinations.postgres import PostgresDestination
+
+    config = PostgresDestinationConfig(
+        type="postgres",
+        host="localhost",
+        dbname="testdb",
+        user="testuser",
+        table="public.test_table",
+        upsert_key=["id"],
+    )
+
+    # Mock the _connect and cursor methods
+    destination = PostgresDestination()
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = (42,)
+    mock_conn.cursor.return_value = mock_cursor
+
+    with patch.object(destination, "_connect", return_value=mock_conn):
+        result = destination.get_row_count(config)
+
+    assert result == 42
+    mock_cursor.execute.assert_called_once()
+    mock_conn.close.assert_called_once()
+
+
+def test_postgres_destination_get_row_count_empty_table() -> None:
+    """Test PostgresDestination.get_row_count() with empty result."""
+    from drt.destinations.postgres import PostgresDestination
+
+    config = PostgresDestinationConfig(
+        type="postgres",
+        host="localhost",
+        dbname="testdb",
+        user="testuser",
+        table="public.test_table",
+        upsert_key=["id"],
+    )
+
+    destination = PostgresDestination()
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = None
+    mock_conn.cursor.return_value = mock_cursor
+
+    with patch.object(destination, "_connect", return_value=mock_conn):
+        result = destination.get_row_count(config)
+
+    assert result == 0
+    mock_conn.close.assert_called_once()
+
+
+def test_mysql_destination_get_row_count() -> None:
+    """Test MySQLDestination.get_row_count() with mocked connection."""
+    from drt.destinations.mysql import MySQLDestination
+
+    config = MySQLDestinationConfig(
+        type="mysql",
+        host="localhost",
+        dbname="testdb",
+        user="testuser",
+        table="test_table",
+        upsert_key=["id"],
+    )
+
+    destination = MySQLDestination()
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = (123,)
+    mock_conn.cursor.return_value = mock_cursor
+
+    with patch.object(destination, "_connect", return_value=mock_conn):
+        result = destination.get_row_count(config)
+
+    assert result == 123
+    mock_cursor.execute.assert_called_once()
+    mock_conn.close.assert_called_once()
+
+
+def test_mysql_destination_get_row_count_with_schema() -> None:
+    """Test MySQLDestination.get_row_count() with schema.table format."""
+    from drt.destinations.mysql import MySQLDestination
+
+    config = MySQLDestinationConfig(
+        type="mysql",
+        host="localhost",
+        dbname="testdb",
+        user="testuser",
+        table="myschema.test_table",
+        upsert_key=["id"],
+    )
+
+    destination = MySQLDestination()
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = (456,)
+    mock_conn.cursor.return_value = mock_cursor
+
+    with patch.object(destination, "_connect", return_value=mock_conn):
+        result = destination.get_row_count(config)
+
+    assert result == 456
+    # Verify the query used backtick escaping
+    call_args = mock_cursor.execute.call_args[0][0]
+    assert "`myschema`.`test_table`" in call_args or "`.`" in call_args
+
+
+def test_clickhouse_destination_get_row_count() -> None:
+    """Test ClickHouseDestination.get_row_count() with mocked client."""
+    from drt.destinations.clickhouse import ClickHouseDestination
+
+    config = ClickHouseDestinationConfig(
+        type="clickhouse",
+        host="localhost",
+        database="default",
+        user="default",
+        table="test_table",
+        upsert_key=["id"],
+    )
+
+    destination = ClickHouseDestination()
+    mock_client = MagicMock()
+    mock_result = MagicMock()
+    mock_result.result_rows = [(789,)]
+    mock_client.query.return_value = mock_result
+
+    with patch.object(destination, "_connect", return_value=mock_client):
+        result = destination.get_row_count(config)
+
+    assert result == 789
+    mock_client.query.assert_called_once()
+    mock_client.close.assert_called_once()
+
+
+def test_clickhouse_destination_get_row_count_empty_table() -> None:
+    """Test ClickHouseDestination.get_row_count() with empty result."""
+    from drt.destinations.clickhouse import ClickHouseDestination
+
+    config = ClickHouseDestinationConfig(
+        type="clickhouse",
+        host="localhost",
+        database="default",
+        user="default",
+        table="test_table",
+        upsert_key=["id"],
+    )
+
+    destination = ClickHouseDestination()
+    mock_client = MagicMock()
+    mock_result = MagicMock()
+    mock_result.result_rows = []
+    mock_client.query.return_value = mock_result
+
+    with patch.object(destination, "_connect", return_value=mock_client):
+        result = destination.get_row_count(config)
+
+    assert result == 0
+    mock_client.close.assert_called_once()
+
+
+def test_get_row_count_for_destination_postgres() -> None:
+    """Test get_row_count_for_destination() with Postgres config."""
+    postgres_config = PostgresDestinationConfig(
+        type="postgres",
+        host="localhost",
+        dbname="testdb",
+        user="testuser",
+        table="public.test_table",
+        upsert_key=["id"],
+    )
+
+    mock_destination = Mock()
+    mock_destination.get_row_count.return_value = 100
+
+    result = get_row_count_for_destination(mock_destination, postgres_config)
+
+    assert result == 100
+    mock_destination.get_row_count.assert_called_once_with(postgres_config)
+
+
+def test_get_row_count_for_destination_mysql() -> None:
+    """Test get_row_count_for_destination() with MySQL config."""
+    mysql_config = MySQLDestinationConfig(
+        type="mysql",
+        host="localhost",
+        dbname="testdb",
+        user="testuser",
+        table="test_table",
+        upsert_key=["id"],
+    )
+
+    mock_destination = Mock()
+    mock_destination.get_row_count.return_value = 200
+
+    result = get_row_count_for_destination(mock_destination, mysql_config)
+
+    assert result == 200
+    mock_destination.get_row_count.assert_called_once_with(mysql_config)
+
+
+def test_get_row_count_for_destination_clickhouse() -> None:
+    """Test get_row_count_for_destination() with ClickHouse config."""
+    clickhouse_config = ClickHouseDestinationConfig(
+        type="clickhouse",
+        host="localhost",
+        database="default",
+        user="default",
+        table="test_table",
+        upsert_key=["id"],
+    )
+
+    mock_destination = Mock()
+    mock_destination.get_row_count.return_value = 300
+
+    result = get_row_count_for_destination(mock_destination, clickhouse_config)
+
+    assert result == 300
+    mock_destination.get_row_count.assert_called_once_with(clickhouse_config)
+
+
+def test_get_row_count_for_destination_non_sql_returns_none() -> None:
+    """Test get_row_count_for_destination() returns None for non-SQL destination."""
+    # Use a mock config that's not a SQL destination type
+    mock_config = Mock(spec=DestinationConfig)
+    mock_destination = Mock()
+
+    result = get_row_count_for_destination(mock_destination, mock_config)
+
+    assert result is None
+    # Should not call get_row_count on non-SQL destination
+    mock_destination.get_row_count.assert_not_called()
