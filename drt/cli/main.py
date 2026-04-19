@@ -273,19 +273,9 @@ def _print_connectors_table(title: str, connectors: list[tuple[str, str]]) -> No
 @app.command()
 def sources() -> None:
     """List available source connectors."""
-    sources_list = [
-        ("bigquery", "BigQuery"),
-        ("clickhouse", "ClickHouse"),
-        ("databricks", "Databricks"),
-        ("duckdb", "DuckDB"),
-        ("mysql", "MySQL"),
-        ("postgres", "PostgreSQL"),
-        ("redshift", "Redshift"),
-        ("snowflake", "Snowflake"),
-        ("sqlite", "SQLite"),
-        ("sqlserver", "SQL Server"),
-    ]
-    _print_connectors_table("Available sources:", sources_list)
+    from drt.config.connectors import SOURCES
+
+    _print_connectors_table("Available sources:", SOURCES)
 
 
 # ---------------------------------------------------------------------------
@@ -296,30 +286,9 @@ def sources() -> None:
 @app.command()
 def destinations() -> None:
     """List available destination connectors."""
-    destinations_list = [
-        ("clickhouse", "ClickHouse"),
-        ("discord", "Discord"),
-        ("email_smtp", "Email"),
-        ("file", "File"),
-        ("github_actions", "GitHub Actions"),
-        ("google_ads", "Google Ads"),
-        ("google_sheets", "Google Sheets"),
-        ("hubspot", "HubSpot"),
-        ("intercom", "Intercom"),
-        ("jira", "Jira"),
-        ("linear", "Linear"),
-        ("mysql", "MySQL"),
-        ("notion", "Notion"),
-        ("parquet", "Parquet"),
-        ("postgres", "PostgreSQL"),
-        ("rest_api", "REST API"),
-        ("sendgrid", "SendGrid"),
-        ("slack", "Slack"),
-        ("staged_upload", "Staged Upload"),
-        ("teams", "Microsoft Teams"),
-        ("twilio", "Twilio"),
-    ]
-    _print_connectors_table("Available destinations:", destinations_list)
+    from drt.config.connectors import DESTINATIONS
+
+    _print_connectors_table("Available destinations:", DESTINATIONS)
 
 
 # ---------------------------------------------------------------------------
