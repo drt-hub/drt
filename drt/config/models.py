@@ -616,6 +616,7 @@ class SyncTest(BaseModel):
 class SyncConfig(BaseModel):
     name: str
     description: str = ""
+    tags: list[str] = Field(default_factory=list)
     model: str
     destination: DestinationConfig
     sync: SyncOptions = Field(default_factory=SyncOptions)
