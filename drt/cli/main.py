@@ -250,6 +250,48 @@ def _init_from_dbt(manifest_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# sources
+# ---------------------------------------------------------------------------
+
+
+def _print_connectors_table(title: str, connectors: list[tuple[str, str]]) -> None:
+    """Print connectors in a rich table."""
+    from rich.table import Table
+
+    console.print(f"\n[bold]{title}[/bold]\n")
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("Type", style="cyan")
+    table.add_column("Description", style="green")
+
+    for connector_type, description in connectors:
+        table.add_row(connector_type, description)
+
+    console.print(table)
+    console.print()
+
+
+@app.command()
+def sources() -> None:
+    """List available source connectors."""
+    from drt.config.connectors import SOURCES
+
+    _print_connectors_table("Available sources:", SOURCES)
+
+
+# ---------------------------------------------------------------------------
+# destinations
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def destinations() -> None:
+    """List available destination connectors."""
+    from drt.config.connectors import DESTINATIONS
+
+    _print_connectors_table("Available destinations:", DESTINATIONS)
+
+
+# ---------------------------------------------------------------------------
 # run
 # ---------------------------------------------------------------------------
 
