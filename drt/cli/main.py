@@ -250,6 +250,87 @@ def _init_from_dbt(manifest_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# sources
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def sources() -> None:
+    """List available source connectors."""
+    from rich.table import Table
+
+    sources_list = [
+        ("bigquery", "BigQuery"),
+        ("clickhouse", "ClickHouse"),
+        ("databricks", "Databricks"),
+        ("duckdb", "DuckDB"),
+        ("mysql", "MySQL"),
+        ("postgres", "PostgreSQL"),
+        ("redshift", "Redshift"),
+        ("snowflake", "Snowflake"),
+        ("sqlite", "SQLite"),
+        ("sqlserver", "SQL Server"),
+    ]
+
+    console.print("\n[bold]Available sources:[/bold]\n")
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("Type", style="cyan")
+    table.add_column("Description", style="green")
+
+    for source_type, description in sources_list:
+        table.add_row(source_type, description)
+
+    console.print(table)
+    console.print()
+
+
+# ---------------------------------------------------------------------------
+# destinations
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def destinations() -> None:
+    """List available destination connectors."""
+    from rich.table import Table
+
+    destinations_list = [
+        ("clickhouse", "ClickHouse"),
+        ("discord", "Discord"),
+        ("email_smtp", "Email"),
+        ("file", "File"),
+        ("github_actions", "GitHub Actions"),
+        ("google_ads", "Google Ads"),
+        ("google_sheets", "Google Sheets"),
+        ("hubspot", "HubSpot"),
+        ("intercom", "Intercom"),
+        ("jira", "Jira"),
+        ("linear", "Linear"),
+        ("mysql", "MySQL"),
+        ("notion", "Notion"),
+        ("parquet", "Parquet"),
+        ("postgres", "PostgreSQL"),
+        ("rest_api", "REST API"),
+        ("sendgrid", "SendGrid"),
+        ("slack", "Slack"),
+        ("staged_upload", "Staged Upload"),
+        ("teams", "Microsoft Teams"),
+        ("twilio", "Twilio"),
+    ]
+
+    console.print("\n[bold]Available destinations:[/bold]\n")
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("Type", style="cyan")
+    table.add_column("Description", style="green")
+
+    for dest_type, description in destinations_list:
+        table.add_row(dest_type, description)
+
+    console.print(table)
+    console.print()
+
+
+# ---------------------------------------------------------------------------
 # run
 # ---------------------------------------------------------------------------
 
