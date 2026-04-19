@@ -72,6 +72,7 @@ class SlackDestination:
 
         result = SyncResult()
         rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)
+        retry_config = sync_options.retry or _DEFAULT_RETRY
 
         with httpx.Client(timeout=30.0) as client:
             for i, record in enumerate(records):
@@ -91,27 +92,31 @@ class SlackDestination:
                         response.raise_for_status()
                         return response
 
-                    with_retry(do_post, _DEFAULT_RETRY)
+                    with_retry(do_post, retry_config)
                     result.success += 1
                 except httpx.HTTPStatusError as e:
                     result.failed += 1
                     result.row_errors.append(
                         RowError(
                             batch_index=i,
-                            record_preview=json.dumps(record)[:200],
+                            record_preview=json.dumps(record, default=str)[:200],
                             http_status=e.response.status_code,
                             error_message=e.response.text[:500],
                         )
                     )
+                    if sync_options.on_error == "fail":
+                        break
                 except Exception as e:
                     result.failed += 1
                     result.row_errors.append(
                         RowError(
                             batch_index=i,
-                            record_preview=json.dumps(record)[:200],
+                            record_preview=json.dumps(record, default=str)[:200],
                             http_status=None,
                             error_message=str(e),
                         )
                     )
+                    if sync_options.on_error == "fail":
+                        break
 
         return result

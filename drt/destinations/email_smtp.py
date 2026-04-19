@@ -89,7 +89,7 @@ class EmailSmtpDestination:
                 result.row_errors.append(
                     RowError(
                         batch_index=i,
-                        record_preview=json.dumps(record)[:200],
+                        record_preview=json.dumps(record, default=str)[:200],
                         http_status=None,
                         error_message=str(e)[:500],
                     )
@@ -99,7 +99,7 @@ class EmailSmtpDestination:
                 result.row_errors.append(
                     RowError(
                         batch_index=i,
-                        record_preview=json.dumps(record)[:200],
+                        record_preview=json.dumps(record, default=str)[:200],
                         http_status=None,
                         error_message=str(e),
                     )

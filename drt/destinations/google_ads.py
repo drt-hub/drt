@@ -33,14 +33,25 @@ from typing import Any
 
 import httpx
 
-from drt.config.models import DestinationConfig, GoogleAdsDestinationConfig, SyncOptions
+from drt.config.models import (
+    DestinationConfig,
+    GoogleAdsDestinationConfig,
+    RetryConfig,
+    SyncOptions,
+)
 from drt.destinations.auth import AuthHandler
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
+from drt.destinations.retry import with_retry
 from drt.destinations.row_errors import RowError
 
 _API_VERSION = "v17"
 _BASE_URL = "https://googleads.googleapis.com"
+_DEFAULT_RETRY = RetryConfig(
+    max_attempts=3,
+    initial_backoff=1.0,
+    retryable_status_codes=(429, 500, 502, 503, 504),
+)
 
 
 class GoogleAdsDestination:
@@ -55,6 +66,7 @@ class GoogleAdsDestination:
         assert isinstance(config, GoogleAdsDestinationConfig)
         result = SyncResult()
         rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)
+        retry_config = sync_options.retry or _DEFAULT_RETRY
 
         developer_token = os.environ.get(config.developer_token_env, "")
         if not developer_token:
@@ -77,7 +89,7 @@ class GoogleAdsDestination:
                 result.row_errors.append(
                     RowError(
                         batch_index=i,
-                        record_preview=json.dumps(record)[:200],
+                        record_preview=json.dumps(record, default=str)[:200],
                         http_status=None,
                         error_message=(
                             f"Missing required field: "
@@ -86,6 +98,8 @@ class GoogleAdsDestination:
                         ),
                     )
                 )
+                if sync_options.on_error == "fail":
+                    break
                 continue
 
             conversion: dict[str, Any] = {
@@ -113,8 +127,13 @@ class GoogleAdsDestination:
         rate_limiter.acquire()
         try:
             with httpx.Client(timeout=60.0) as client:
-                response = client.post(url, json=payload, headers=headers)
-                response.raise_for_status()
+
+                def do_upload() -> httpx.Response:
+                    resp = client.post(url, json=payload, headers=headers)
+                    resp.raise_for_status()
+                    return resp
+
+                response = with_retry(do_upload, retry_config)
 
             resp_data = response.json()
             # Count partial failures
