@@ -1,0 +1,18 @@
+name: alert_failed_orders
+description: "Notify Slack when orders fail in MySQL"
+model: ref('failed_orders')
+destination:
+  type: slack
+  webhook_url_env: SLACK_WEBHOOK_URL
+  message_template: |
+    :rotating_light: *Failed Order #{{ row.id }}*
+    Customer: {{ row.customer_name }}
+    Amount: ${{ row.order_total }}
+    Reason: {{ row.error_reason }}
+sync:
+  mode: incremental
+  cursor_field: created_at
+  batch_size: 1
+  rate_limit:
+    requests_per_second: 1
+  on_error: skip
