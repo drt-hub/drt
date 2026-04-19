@@ -53,6 +53,10 @@ def test_run_dry_run_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
             self.skipped = 0
             self.errors = []
             self.row_errors = []
+            # Added by PR #345/#347 to SyncResult — keeping the fake in
+            # lockstep with the real shape so future refactors that read
+            # ``rows_extracted`` unconditionally don't fail this test.
+            self.rows_extracted = self.success
 
     def mock_run_sync(*args, **kwargs):
         return FakeResult()
