@@ -238,56 +238,69 @@ def test_print_dry_run_summary_full_output(
 
 def test_postgres_destination_get_row_count() -> None:
     """Test PostgresDestination.get_row_count() with mocked connection."""
-    from drt.destinations.postgres import PostgresDestination
+    import sys
 
-    config = PostgresDestinationConfig(
-        type="postgres",
-        host="localhost",
-        dbname="testdb",
-        user="testuser",
-        table="public.test_table",
-        upsert_key=["id"],
-    )
+    # Mock psycopg2 module if not available
+    mock_psycopg2 = MagicMock()
+    mock_psycopg2.sql.SQL.return_value.format.return_value = "SELECT COUNT(*) FROM ..."
 
-    # Mock the _connect and cursor methods
-    destination = PostgresDestination()
-    mock_conn = MagicMock()
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = (42,)
-    mock_conn.cursor.return_value = mock_cursor
+    with patch.dict(sys.modules, {"psycopg2": mock_psycopg2}):
+        from drt.destinations.postgres import PostgresDestination
 
-    with patch.object(destination, "_connect", return_value=mock_conn):
-        result = destination.get_row_count(config)
+        config = PostgresDestinationConfig(
+            type="postgres",
+            host="localhost",
+            dbname="testdb",
+            user="testuser",
+            table="public.test_table",
+            upsert_key=["id"],
+        )
 
-    assert result == 42
-    mock_cursor.execute.assert_called_once()
-    mock_conn.close.assert_called_once()
+        destination = PostgresDestination()
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = (42,)
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(destination, "_connect", return_value=mock_conn):
+            result = destination.get_row_count(config)
+
+        assert result == 42
+        mock_cursor.execute.assert_called_once()
+        mock_conn.close.assert_called_once()
 
 
 def test_postgres_destination_get_row_count_empty_table() -> None:
     """Test PostgresDestination.get_row_count() with empty result."""
-    from drt.destinations.postgres import PostgresDestination
+    import sys
 
-    config = PostgresDestinationConfig(
-        type="postgres",
-        host="localhost",
-        dbname="testdb",
-        user="testuser",
-        table="public.test_table",
-        upsert_key=["id"],
-    )
+    # Mock psycopg2 module if not available
+    mock_psycopg2 = MagicMock()
+    mock_psycopg2.sql.SQL.return_value.format.return_value = "SELECT COUNT(*) FROM ..."
 
-    destination = PostgresDestination()
-    mock_conn = MagicMock()
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = None
-    mock_conn.cursor.return_value = mock_cursor
+    with patch.dict(sys.modules, {"psycopg2": mock_psycopg2}):
+        from drt.destinations.postgres import PostgresDestination
 
-    with patch.object(destination, "_connect", return_value=mock_conn):
-        result = destination.get_row_count(config)
+        config = PostgresDestinationConfig(
+            type="postgres",
+            host="localhost",
+            dbname="testdb",
+            user="testuser",
+            table="public.test_table",
+            upsert_key=["id"],
+        )
 
-    assert result == 0
-    mock_conn.close.assert_called_once()
+        destination = PostgresDestination()
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = None
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(destination, "_connect", return_value=mock_conn):
+            result = destination.get_row_count(config)
+
+        assert result == 0
+        mock_conn.close.assert_called_once()
 
 
 def test_mysql_destination_get_row_count() -> None:
