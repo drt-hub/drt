@@ -34,7 +34,7 @@ def _serialize_value(value: Any) -> Any:
     bound for JSON columns (common when sourcing from BigQuery) must
     be converted to strings before execute().
     """
-    if isinstance(value, (dict, list)):
+    if isinstance(value, dict | list):
         return json.dumps(value, ensure_ascii=False)
     return value
 
@@ -84,6 +84,28 @@ class MySQLDestination:
             conn.close()
 
         return result
+
+    def get_row_count(self, config: DestinationConfig) -> int:
+        """Get the current row count from the destination table.
+
+        Args:
+            config: Destination configuration (must be MySQLDestinationConfig).
+
+        Returns:
+            Row count as integer.
+
+        Raises:
+            Exception: If connection or query fails.
+        """
+        assert isinstance(config, MySQLDestinationConfig)
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            cur.execute(f"SELECT COUNT(*) FROM `{config.table}`")
+            row = cur.fetchone()
+            return row[0] if row else 0
+        finally:
+            conn.close()
 
     def _load_replace(
         self,

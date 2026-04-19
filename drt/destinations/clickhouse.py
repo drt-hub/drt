@@ -83,6 +83,30 @@ class ClickHouseDestination:
 
         return result
 
+    def get_row_count(self, config: DestinationConfig) -> int:
+        """Get the current row count from the destination table.
+
+        Args:
+            config: Destination configuration (must be ClickHouseDestinationConfig).
+
+        Returns:
+            Row count as integer.
+
+        Raises:
+            Exception: If connection or query fails.
+        """
+        assert isinstance(config, ClickHouseDestinationConfig)
+        client = self._connect(config)
+        try:
+            result = client.query(f"SELECT COUNT(*) FROM {config.table}")
+            # clickhouse_connect returns a QueryResult object
+            # result.result_rows is a list of tuples
+            if result.result_rows:
+                return result.result_rows[0][0]
+            return 0
+        finally:
+            client.close()
+
     @staticmethod
     def _connect(config: ClickHouseDestinationConfig) -> Any:
         try:

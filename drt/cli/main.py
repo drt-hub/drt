@@ -398,7 +398,7 @@ def run(
             )
         else:
             if dry_run:
-                print_dry_run_summary(sync, profile, result.success)
+                print_dry_run_summary(sync, profile, result.success, dest)
             else:
                 print_sync_result(sync.name, result, elapsed)
         if result.failed > 0:
