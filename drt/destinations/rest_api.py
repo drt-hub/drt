@@ -136,7 +136,7 @@ class RestApiDestination:
 
         with httpx.Client(timeout=30.0) as client:
             page = 0
-            next_url = config.url
+            next_url: str | None = config.url
             next_cursor: str | None = None
 
             while page < pagination.max_pages and (next_url or next_cursor or page == 0):
@@ -146,8 +146,8 @@ class RestApiDestination:
                 if isinstance(pagination, OffsetPaginationConfig):
                     offset = page * pagination.limit
                     params = {
-                        pagination.offset_param: offset,
-                        pagination.limit_param: pagination.limit,
+                        pagination.offset_param: str(offset),
+                        pagination.limit_param: str(pagination.limit),
                     }
                     url_with_params = f"{config.url}?" + "&".join(
                         f"{k}={v}" for k, v in params.items()
@@ -156,10 +156,13 @@ class RestApiDestination:
                     if page == 0:
                         url_with_params = config.url
                     else:
-                        params = {pagination.cursor_param: next_cursor}
-                        url_with_params = f"{config.url}?" + "&".join(
-                            f"{k}={v}" for k, v in params.items()
-                        )
+                        if next_cursor:
+                            params = {pagination.cursor_param: next_cursor}
+                            url_with_params = f"{config.url}?" + "&".join(
+                                f"{k}={v}" for k, v in params.items()
+                            )
+                        else:
+                            break
                 elif isinstance(pagination, LinkHeaderPaginationConfig):
                     url_with_params = next_url or config.url
                 else:
