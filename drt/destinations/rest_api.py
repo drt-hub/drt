@@ -143,28 +143,27 @@ class RestApiDestination:
                 rate_limiter.acquire()
 
                 # Build URL with pagination params
+                request_params: dict[str, str] | None = None
                 if isinstance(pagination, OffsetPaginationConfig):
                     offset = page * pagination.limit
-                    params = {
+                    request_params = {
                         pagination.offset_param: str(offset),
                         pagination.limit_param: str(pagination.limit),
                     }
-                    url_with_params = f"{config.url}?" + "&".join(
-                        f"{k}={v}" for k, v in params.items()
-                    )
+                    url_with_params = config.url
                 elif isinstance(pagination, CursorPaginationConfig):
-                    if page == 0:
-                        url_with_params = config.url
-                    else:
+                    url_with_params = config.url
+                    request_params = {
+                        pagination.limit_param: str(pagination.limit),
+                    }
+                    if page > 0:
                         if next_cursor:
-                            params = {pagination.cursor_param: next_cursor}
-                            url_with_params = f"{config.url}?" + "&".join(
-                                f"{k}={v}" for k, v in params.items()
-                            )
+                            request_params[pagination.cursor_param] = next_cursor
                         else:
                             break
                 elif isinstance(pagination, LinkHeaderPaginationConfig):
                     url_with_params = next_url or config.url
+                    request_params = None
                 else:
                     break
 
@@ -173,11 +172,14 @@ class RestApiDestination:
                     def do_request(
                         _url: str = url_with_params,
                         _headers: dict[str, Any] = headers,
+                        _method: str = config.method,
+                        _params: dict[str, str] | None = request_params,
                     ) -> httpx.Response:
                         response = client.request(
-                            method="GET",
+                            method=_method,
                             url=_url,
                             headers=_headers,
+                            params=_params,
                         )
                         response.raise_for_status()
                         return response
@@ -233,7 +235,7 @@ class RestApiDestination:
         """
         links = link_header.split(",")
         for link in links:
-            if 'rel="next"' in link or "rel='next'" in link:
+            if re.search(r'rel\s*=\s*["\']next["\']', link, re.IGNORECASE):
                 # Extract URL between < and >
                 match = re.search(r"<([^>]+)>", link)
                 if match:

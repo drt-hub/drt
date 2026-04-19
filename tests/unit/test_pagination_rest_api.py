@@ -1,5 +1,7 @@
 """Tests for REST API destination pagination support (feature #260)."""
 
+from __future__ import annotations
+
 import json
 from unittest.mock import MagicMock, patch
 
@@ -36,8 +38,8 @@ def base_config():
 
 @pytest.fixture
 def sync_options():
-    """Create a sync options instance."""
-    return SyncOptions(mode="full")
+    """Create a sync options instance with rate limiting disabled for tests."""
+    return SyncOptions(mode="full", rate_limit={"requests_per_second": 0})
 
 
 class TestExtractNextLink:

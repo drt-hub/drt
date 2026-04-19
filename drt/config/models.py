@@ -59,6 +59,7 @@ class CursorPaginationConfig(BaseModel):
     type: Literal["cursor"]
     limit: int = 100
     cursor_param: str = "cursor"
+    limit_param: str = "limit"
     cursor_field: str
     max_pages: int = 100
 
