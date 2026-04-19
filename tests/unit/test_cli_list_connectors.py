@@ -44,48 +44,6 @@ def test_sources_command_contains_connector(source_type: str, description: str) 
     assert description in result.output
 
 
-def test_sources_command_contains_mysql() -> None:
-    """drt sources should list MySQL."""
-    result = runner.invoke(app, ["sources"])
-    assert "mysql" in result.output
-    assert "MySQL" in result.output
-
-
-def test_sources_command_contains_redshift() -> None:
-    """drt sources should list Redshift."""
-    result = runner.invoke(app, ["sources"])
-    assert "redshift" in result.output
-    assert "Redshift" in result.output
-
-
-def test_sources_command_contains_clickhouse() -> None:
-    """drt sources should list ClickHouse."""
-    result = runner.invoke(app, ["sources"])
-    assert "clickhouse" in result.output
-    assert "ClickHouse" in result.output
-
-
-def test_sources_command_contains_sqlite() -> None:
-    """drt sources should list SQLite."""
-    result = runner.invoke(app, ["sources"])
-    assert "sqlite" in result.output
-    assert "SQLite" in result.output
-
-
-def test_sources_command_contains_databricks() -> None:
-    """drt sources should list Databricks."""
-    result = runner.invoke(app, ["sources"])
-    assert "databricks" in result.output
-    assert "Databricks" in result.output
-
-
-def test_sources_command_contains_sqlserver() -> None:
-    """drt sources should list SQL Server."""
-    result = runner.invoke(app, ["sources"])
-    assert "sqlserver" in result.output
-    assert "SQL Server" in result.output
-
-
 def test_sources_command_header() -> None:
     """drt sources should have a header."""
     result = runner.invoke(app, ["sources"])

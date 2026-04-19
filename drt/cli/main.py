@@ -254,11 +254,25 @@ def _init_from_dbt(manifest_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _print_connectors_table(title: str, connectors: list[tuple[str, str]]) -> None:
+    """Print connectors in a rich table."""
+    from rich.table import Table
+
+    console.print(f"\n[bold]{title}[/bold]\n")
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("Type", style="cyan")
+    table.add_column("Description", style="green")
+
+    for connector_type, description in connectors:
+        table.add_row(connector_type, description)
+
+    console.print(table)
+    console.print()
+
+
 @app.command()
 def sources() -> None:
     """List available source connectors."""
-    from rich.table import Table
-
     sources_list = [
         ("bigquery", "BigQuery"),
         ("clickhouse", "ClickHouse"),
@@ -271,17 +285,7 @@ def sources() -> None:
         ("sqlite", "SQLite"),
         ("sqlserver", "SQL Server"),
     ]
-
-    console.print("\n[bold]Available sources:[/bold]\n")
-    table = Table(show_header=True, header_style="bold magenta")
-    table.add_column("Type", style="cyan")
-    table.add_column("Description", style="green")
-
-    for source_type, description in sources_list:
-        table.add_row(source_type, description)
-
-    console.print(table)
-    console.print()
+    _print_connectors_table("Available sources:", sources_list)
 
 
 # ---------------------------------------------------------------------------
@@ -292,8 +296,6 @@ def sources() -> None:
 @app.command()
 def destinations() -> None:
     """List available destination connectors."""
-    from rich.table import Table
-
     destinations_list = [
         ("clickhouse", "ClickHouse"),
         ("discord", "Discord"),
@@ -317,17 +319,7 @@ def destinations() -> None:
         ("teams", "Microsoft Teams"),
         ("twilio", "Twilio"),
     ]
-
-    console.print("\n[bold]Available destinations:[/bold]\n")
-    table = Table(show_header=True, header_style="bold magenta")
-    table.add_column("Type", style="cyan")
-    table.add_column("Description", style="green")
-
-    for dest_type, description in destinations_list:
-        table.add_row(dest_type, description)
-
-    console.print(table)
-    console.print()
+    _print_connectors_table("Available destinations:", destinations_list)
 
 
 # ---------------------------------------------------------------------------
