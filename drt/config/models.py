@@ -482,6 +482,30 @@ class StagedUploadDestinationConfig(BaseModel):
         return "staged_upload"
 
 
+class SalesforceBulkDestinationConfig(BaseModel):
+    type: Literal["salesforce_bulk"]
+    instance_url: str | None = None
+    instance_url_env: str | None = None
+    object_name: str  # e.g. "Contact", "Account"
+    operation: Literal["insert", "update", "upsert", "delete"] = "upsert"
+    external_id_field: str = "Id"
+    poll_timeout_seconds: int = 3600
+    poll_interval_seconds: int = 30
+    client_id_env: str
+    client_secret_env: str
+    username_env: str
+    password_env: str
+
+    def describe(self) -> str:
+        return f"salesforce_bulk ({self.object_name})"
+
+    @model_validator(mode="after")
+    def _check_instance_url(self) -> "SalesforceBulkDestinationConfig":
+        if not self.instance_url and not self.instance_url_env:
+            raise ValueError("Either instance_url or instance_url_env is required.")
+        return self
+
+
 # Discriminated union — add new destination types here
 DestinationConfig = Annotated[
     RestApiDestinationConfig
@@ -504,6 +528,7 @@ DestinationConfig = Annotated[
     | NotionDestinationConfig
     | IntercomDestinationConfig
     | StagedUploadDestinationConfig
+    | SalesforceBulkDestinationConfig
     | TwilioDestinationConfig,
     Field(discriminator="type"),
 ]

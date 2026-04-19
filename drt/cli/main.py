@@ -905,6 +905,7 @@ def _get_destination(
         ParquetDestinationConfig,
         PostgresDestinationConfig,
         RestApiDestinationConfig,
+        SalesforceBulkDestinationConfig,
         SendGridDestinationConfig,
         SlackDestinationConfig,
         StagedUploadDestinationConfig,
@@ -982,4 +983,8 @@ def _get_destination(
         from drt.destinations.staged_upload import StagedUploadDestination
 
         return StagedUploadDestination()
+    if isinstance(dest, SalesforceBulkDestinationConfig):
+        from drt.destinations.salesforce_bulk import SalesforceBulkDestination
+
+        return SalesforceBulkDestination()
     raise ValueError(f"Unsupported destination type: {dest.type}")
