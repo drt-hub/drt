@@ -42,9 +42,8 @@ def test_build_not_null() -> None:
 
 
 def test_build_unknown_test_raises() -> None:
-    t = SyncTest()
-    with pytest.raises(ValueError, match="No test type"):
-        build_test_query(t, "public.users")
+    with pytest.raises(ValueError, match="Exactly one sync test must be configured"):
+        SyncTest()
 
 
 def test_safe_table_rejects_injection() -> None:

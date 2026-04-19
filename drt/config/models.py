@@ -575,14 +575,48 @@ class NotNullTest(BaseModel):
     columns: list[str]
 
 
+class FreshnessTest(BaseModel):
+    column: str
+    max_age: str  # e.g., "7 days", "1 hour", "30 minutes"
+
+
+class UniqueTest(BaseModel):
+    columns: list[str] = Field(min_length=1)
+
+
+class AcceptedValuesTest(BaseModel):
+    column: str
+    values: list[str] = Field(min_length=1)
+
+
 class SyncTest(BaseModel):
     row_count: RowCountTest | None = None
     not_null: NotNullTest | None = None
+    freshness: FreshnessTest | None = None
+    unique: UniqueTest | None = None
+    accepted_values: AcceptedValuesTest | None = None
+
+    @model_validator(mode="after")
+    def _check_exactly_one_test(self) -> "SyncTest":
+        configured_tests = [
+            self.row_count,
+            self.not_null,
+            self.freshness,
+            self.unique,
+            self.accepted_values,
+        ]
+        configured_count = sum(test is not None for test in configured_tests)
+        if configured_count != 1:
+            raise ValueError(
+                "Exactly one sync test must be configured in each tests entry."
+            )
+        return self
 
 
 class SyncConfig(BaseModel):
     name: str
     description: str = ""
+    tags: list[str] = Field(default_factory=list)
     model: str
     destination: DestinationConfig
     sync: SyncOptions = Field(default_factory=SyncOptions)
