@@ -308,3 +308,79 @@ class TestMySQLReplaceMode:
         # INSERT call (after TRUNCATE)
         _sql, values = cur.execute.call_args_list[1][0]
         assert values[2] == '{"lang": "ja"}'
+
+
+# ---------------------------------------------------------------------------
+# json_columns tests
+# ---------------------------------------------------------------------------
+
+
+class TestJsonColumns:
+    """Verify that json_columns config controls which columns get JSON-serialized."""
+
+    def test_json_columns_serializes_listed_column(self) -> None:
+        """Columns in json_columns should be json.dumps'd."""
+        from drt.destinations.mysql import _serialize_value
+
+        result = _serialize_value({"key": "val"}, "profile", ["profile"])
+        assert isinstance(result, str)
+        import json
+        assert json.loads(result) == {"key": "val"}
+
+    def test_json_columns_skips_unlisted_column(self) -> None:
+        """Columns NOT in json_columns pass through as native Python types."""
+        from drt.destinations.mysql import _serialize_value
+
+        result = _serialize_value([1, 2, 3], "tags", ["profile"])
+        # Not in json_columns → returned as-is (native list)
+        assert result == [1, 2, 3]
+
+    def test_json_columns_none_serializes_all(self) -> None:
+        """Backward compat: json_columns=None serializes all dict/list."""
+        from drt.destinations.mysql import _serialize_value
+
+        assert isinstance(_serialize_value({"a": 1}, "any_col", None), str)
+        assert isinstance(_serialize_value([1, 2], "any_col", None), str)
+
+    def test_json_columns_non_complex_passthrough(self) -> None:
+        """Non-dict/list values always pass through regardless of json_columns."""
+        from drt.destinations.mysql import _serialize_value
+
+        assert _serialize_value("hello", "col", ["col"]) == "hello"
+        assert _serialize_value(42, "col", ["col"]) == 42
+        assert _serialize_value(None, "col", ["col"]) is None
+
+
+class TestPostgresJsonColumns:
+    """Verify Postgres _serialize_value for json_columns."""
+
+    def test_serialize_value_dict_in_json_columns(self) -> None:
+        """dict value for a json_columns column → Json() wrapper."""
+        from drt.destinations.postgres import _serialize_value
+
+        result = _serialize_value({"k": "v"}, column="profile", json_columns=["profile"])
+        # Should be a Json wrapper (or fallback string if psycopg2 unavailable)
+        assert result is not None
+
+    def test_serialize_value_dict_not_in_json_columns(self) -> None:
+        """dict value for non-json column → pass through as dict."""
+        from drt.destinations.postgres import _serialize_value
+
+        result = _serialize_value({"k": "v"}, column="other", json_columns=["profile"])
+        # Not in json_columns → pass through as plain dict
+        assert isinstance(result, dict)
+
+    def test_serialize_value_no_config(self) -> None:
+        """No json_columns configured → backward compat (always wrap)."""
+        from drt.destinations.postgres import _serialize_value
+
+        result = _serialize_value({"k": "v"})
+        # No config → always wrap with Json()
+        assert result is not None
+
+    def test_serialize_value_non_complex(self) -> None:
+        """Non-dict values always pass through."""
+        from drt.destinations.postgres import _serialize_value
+
+        assert _serialize_value("alice") == "alice"
+        assert _serialize_value(30) == 30

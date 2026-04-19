@@ -312,6 +312,7 @@ class PostgresDestinationConfig(BaseModel):
     upsert_key: list[str]  # columns for ON CONFLICT
     ssl: SslConfig | None = None
     lookups: dict[str, LookupConfig] | None = None
+    json_columns: list[str] | None = None  # columns that hold JSON/JSONB data
 
     def describe(self) -> str:
         return f"{self.type} ({self.table})"
@@ -343,6 +344,7 @@ class MySQLDestinationConfig(BaseModel):
     upsert_key: list[str]  # columns for ON DUPLICATE KEY
     ssl: SslConfig | None = None
     lookups: dict[str, LookupConfig] | None = None
+    json_columns: list[str] | None = None  # columns that hold JSON data
 
     def describe(self) -> str:
         return f"{self.type} ({self.table})"
