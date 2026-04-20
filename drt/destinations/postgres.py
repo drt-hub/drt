@@ -21,8 +21,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from psycopg2.extras import Json
-
 from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, PostgresDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
@@ -41,6 +39,7 @@ def _serialize_value(value: Any) -> Any:
     psycopg2's built-in adapters handle those correctly.
     """
     if isinstance(value, dict):
+        from psycopg2.extras import Json  # lazy: psycopg2 is optional
         return Json(value)
     return value
 

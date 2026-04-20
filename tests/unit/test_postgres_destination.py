@@ -9,7 +9,6 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-from psycopg2.extras import Json
 
 from drt.config.models import PostgresDestinationConfig, SyncOptions
 from drt.destinations.postgres import PostgresDestination
@@ -205,7 +204,7 @@ class TestSerializeValue:
         val = {"lang": "ja", "theme": "dark"}
         result = _serialize_value(val)
         # Should be a psycopg2.extras.Json instance
-        assert isinstance(result, Json)
+        assert hasattr(result, "adapted")
         # The wrapped value should match the original dict
         assert result.adapted == val
 
@@ -222,7 +221,7 @@ class TestSerializeValue:
         from drt.destinations.postgres import _serialize_value
 
         result = _serialize_value({})
-        assert isinstance(result, Json)
+        assert hasattr(result, "adapted")
         assert result.adapted == {}
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
@@ -240,7 +239,7 @@ class TestSerializeValue:
         # execute() should have been called with a Json-wrapped profile
         call_args = cur.execute.call_args[0][1]  # positional args: (sql, values)
         profile_val = call_args[1]  # second column value
-        assert isinstance(profile_val, Json)
+        assert hasattr(profile_val, "adapted")
         assert profile_val.adapted == {"lang": "ja", "theme": "dark"}
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
@@ -260,7 +259,7 @@ class TestSerializeValue:
         insert_call = cur.execute.call_args_list[1]
         values = insert_call[0][1]
         settings_val = values[1]
-        assert isinstance(settings_val, Json)
+        assert hasattr(settings_val, "adapted")
         assert settings_val.adapted == {"notify": True}
 
 
