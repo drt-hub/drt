@@ -198,7 +198,12 @@ class TestPostgresDestinationLoad:
 class TestSerializeValue:
     """Tests for _serialize_value — dict→Json wrapping for JSONB columns."""
 
+    @staticmethod
+    def _require_psycopg2() -> None:
+        pytest.importorskip("psycopg2")
+
     def test_dict_wrapped_as_json(self) -> None:
+        self._require_psycopg2()
         from drt.destinations.postgres import _serialize_value
 
         val = {"lang": "ja", "theme": "dark"}
@@ -218,6 +223,7 @@ class TestSerializeValue:
         assert _serialize_value([1, 2, 3]) == [1, 2, 3]
 
     def test_empty_dict_wrapped(self) -> None:
+        self._require_psycopg2()
         from drt.destinations.postgres import _serialize_value
 
         result = _serialize_value({})
@@ -226,6 +232,7 @@ class TestSerializeValue:
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
     def test_dict_value_in_upsert_is_serialized(self, mock_connect: MagicMock) -> None:
+        self._require_psycopg2()
         """Integration: a record with a dict column passes Json to execute()."""
         conn = _fake_connection()
         cur = conn.cursor()
@@ -245,6 +252,7 @@ class TestSerializeValue:
     @patch("drt.destinations.postgres.PostgresDestination._connect")
     def test_dict_value_in_replace_is_serialized(self, mock_connect: MagicMock) -> None:
         """Integration: replace mode also wraps dict values with Json."""
+        self._require_psycopg2()
         conn = _fake_connection()
         cur = conn.cursor()
         mock_connect.return_value = conn
