@@ -50,12 +50,13 @@ make fmt      # ruff format + fix
 
 ## Current Status
 
-- **v0.6.0 released** — Notion/Twilio/Intercom/Email SMTP/Salesforce Bulk/Google Ads destinations, `--threads` parallel execution, `--log-format json`, `--select tag:`, JSON Schema validation, freshness/unique/accepted_values tests, `drt sources`/`drt destinations`, `--dry-run` row count diff, StagedDestination Protocol, destination_lookup, GOVERNANCE.md
+- **v0.6.1 released** — `${VAR}` env substitution in all sync YAML string fields (#385)
+- **v0.6.0** — Notion/Twilio/Intercom/Email SMTP/Salesforce Bulk/Google Ads destinations, `--threads` parallel execution, `--log-format json`, `--select tag:`, JSON Schema validation, freshness/unique/accepted_values tests, `drt sources`/`drt destinations`, `--dry-run` row count diff, StagedDestination Protocol, destination_lookup, GOVERNANCE.md
 - CLI fully wired: `init`, `run`, `list`, `validate`, `status`, `test`, `mcp run`, `serve`, `sources`, `destinations`
 - Sources: BigQuery, DuckDB, PostgreSQL, Redshift, SQLite, ClickHouse, Snowflake, MySQL, Databricks, SQL Server
 - Destinations: REST API, Slack, Discord, Microsoft Teams, GitHub Actions, HubSpot, Google Sheets, PostgreSQL, MySQL, ClickHouse, Parquet, CSV/JSON/JSONL, Jira, Linear, SendGrid, Notion, Twilio, Intercom, Email SMTP, Salesforce Bulk, Google Ads, Staged Upload
 - Integrations: MCP Server (`drt-core[mcp]`), dagster-drt, Airflow, Prefect, dbt manifest reader
-- 648+ tests, integration tests use `pytest-httpserver`
+- 659+ tests, integration tests use `pytest-httpserver`
 
 ## What NOT to do
 

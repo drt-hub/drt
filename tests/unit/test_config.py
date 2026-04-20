@@ -22,7 +22,7 @@ from drt.config.models import (
     SyncConfig,
     SyncOptions,
 )
-from drt.config.parser import load_project, load_syncs
+from drt.config.parser import expand_env_vars, load_project, load_syncs
 
 # ---------------------------------------------------------------------------
 # Auth model discrimination
@@ -138,6 +138,81 @@ def test_load_syncs(tmp_path: Path) -> None:
     syncs = load_syncs(tmp_path)
     assert len(syncs) == 2
     assert [s.name for s in syncs] == ["alpha", "beta"]
+
+
+# ---------------------------------------------------------------------------
+# expand_env_vars — generic ${VAR} expansion in YAML data
+# ---------------------------------------------------------------------------
+
+
+def test_expand_env_vars_simple_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MY_BUCKET", "prod-bucket")
+    assert expand_env_vars("${MY_BUCKET}") == "prod-bucket"
+
+
+def test_expand_env_vars_embedded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PROJECT", "analytics")
+    assert expand_env_vars("gs://${PROJECT}/data") == "gs://analytics/data"
+
+
+def test_expand_env_vars_multiple(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOST", "db.example.com")
+    monkeypatch.setenv("PORT", "5432")
+    assert expand_env_vars("${HOST}:${PORT}") == "db.example.com:5432"
+
+
+def test_expand_env_vars_nested_dict(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BUCKET", "my-bucket")
+    monkeypatch.setenv("API_URL", "https://api.example.com")
+    data = {
+        "name": "test",
+        "sync": {"watermark": {"bucket": "${BUCKET}"}},
+        "destination": {"url": "${API_URL}"},
+    }
+    result = expand_env_vars(data)
+    assert result["sync"]["watermark"]["bucket"] == "my-bucket"
+    assert result["destination"]["url"] == "https://api.example.com"
+    assert result["name"] == "test"  # no substitution needed
+
+
+def test_expand_env_vars_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TAG", "production")
+    data = {"tags": ["static", "${TAG}"]}
+    result = expand_env_vars(data)
+    assert result["tags"] == ["static", "production"]
+
+
+def test_expand_env_vars_non_string_unchanged() -> None:
+    data = {"batch_size": 100, "enabled": True, "ratio": 0.5, "empty": None}
+    assert expand_env_vars(data) == data
+
+
+def test_expand_env_vars_missing_raises() -> None:
+    with pytest.raises(ValueError, match="NONEXISTENT_VAR"):
+        expand_env_vars("${NONEXISTENT_VAR}")
+
+
+def test_expand_env_vars_no_placeholders() -> None:
+    assert expand_env_vars("plain string") == "plain string"
+
+
+def test_load_syncs_expands_env_vars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Environment variables in sync YAML are expanded before validation."""
+    monkeypatch.setenv("TEST_API_URL", "https://expanded.example.com")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "env_sync.yml").write_text(
+        "name: env-sync\n"
+        "model: SELECT 1\n"
+        "destination:\n"
+        "  type: rest_api\n"
+        "  url: ${TEST_API_URL}\n"
+    )
+    syncs = load_syncs(tmp_path)
+    assert len(syncs) == 1
+    assert syncs[0].destination.url == "https://expanded.example.com"  # type: ignore[union-attr]
 
 
 # ---------------------------------------------------------------------------

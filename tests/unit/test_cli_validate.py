@@ -96,6 +96,33 @@ def test_load_syncs_safe_incremental_missing_cursor(tmp_path: Path) -> None:
     assert any("cursor_field" in e for e in result.errors["no-cursor"])
 
 
+def test_load_syncs_safe_expands_env_vars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SAFE_URL", "https://safe.example.com")
+    _write_sync(
+        tmp_path / "syncs",
+        "env",
+        {**VALID_SYNC, "destination": {**VALID_SYNC["destination"], "url": "${SAFE_URL}"}},
+    )
+    result = load_syncs_safe(tmp_path)
+    assert len(result.syncs) == 1
+    assert result.syncs[0].destination.url == "https://safe.example.com"  # type: ignore[union-attr]
+    assert not result.errors
+
+
+def test_load_syncs_safe_missing_env_var_collected(tmp_path: Path) -> None:
+    _write_sync(
+        tmp_path / "syncs",
+        "bad-env",
+        {**VALID_SYNC, "destination": {**VALID_SYNC["destination"], "url": "${MISSING_VAR}"}},
+    )
+    result = load_syncs_safe(tmp_path)
+    assert not result.syncs
+    assert "bad-env" in result.errors
+    assert any("MISSING_VAR" in e for e in result.errors["bad-env"])
+
+
 # ---------------------------------------------------------------------------
 # _format_validation_errors
 # ---------------------------------------------------------------------------
