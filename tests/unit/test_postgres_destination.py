@@ -337,3 +337,26 @@ class TestPostgresReplaceMode:
         insert_sql = cur.execute.call_args_list[1][0][0]
         assert "ON CONFLICT" not in insert_sql
         assert "INSERT INTO" in insert_sql
+
+    def test_list_passes_through(self) -> None:
+        """Non-dict types (including list) must pass through unchanged."""
+        from drt.destinations.postgres import _serialize_value
+
+        assert _serialize_value([1, 2, 3]) == [1, 2, 3]
+        assert _serialize_value(True) is True
+        assert _serialize_value(0) == 0
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_non_dict_record_no_json_wrap(self, mock_connect: MagicMock) -> None:
+        """Integration: records without dict columns don't call Json at all."""
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        records = [{"id": 1, "name": "alice", "score": 99}]
+        PostgresDestination().load(records, _config(), _options())
+
+        # All values should be plain Python types, no Json wrapping
+        call_args = cur.execute.call_args[0][1]
+        for val in call_args:
+            assert not hasattr(val, "adapted"), f"Expected plain value, got Json: {val}"
