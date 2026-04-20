@@ -22,6 +22,19 @@ import json
 from typing import Any
 
 from drt.config.credentials import resolve_env
+
+
+def _serialize_value(value: Any) -> Any:
+    """Wrap dict values with psycopg2 Json adapter for JSONB columns.
+
+    psycopg2 has no default adapter for dict, so bare dict values cause
+    ``ProgrammingError: can't adapt type 'dict'`` when bound to JSONB columns.
+    """
+    from psycopg2.extras import Json
+
+    if isinstance(value, dict):
+        return Json(value)
+    return value
 from drt.config.models import DestinationConfig, PostgresDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
@@ -120,7 +133,7 @@ class PostgresDestination:
 
         for i, record in enumerate(records):
             try:
-                values = [record.get(c) for c in columns]
+                values = [_serialize_value(record.get(c)) for c in columns]
                 cur.execute(sql, values)
                 result.success += 1
             except Exception as e:
@@ -166,7 +179,7 @@ class PostgresDestination:
 
         for i, record in enumerate(records):
             try:
-                values = [record.get(c) for c in columns]
+                values = [_serialize_value(record.get(c)) for c in columns]
                 cur.execute(sql, values)
                 result.success += 1
             except Exception as e:

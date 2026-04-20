@@ -189,6 +189,30 @@ class TestPostgresDestinationLoad:
         PostgresDestination().load([{"id": 1, "score": 0.5}], _config(), _options(on_error="fail"))
         conn.close.assert_called_once()
 
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_dict_value_wrapped_as_json_for_jsonb(self, mock_connect: MagicMock) -> None:
+        """dict values must be wrapped with psycopg2.extras.Json for JSONB columns."""
+        from unittest.mock import call
+        from psycopg2.extras import Json
+
+        conn = _fake_connection()
+        mock_connect.return_value = conn
+
+        records = [
+            {"id": 1, "profile": {"lang": "ja", "level": 5}},
+            {"id": 2, "profile": {"lang": "en"}},
+        ]
+        result = PostgresDestination().load(records, _config(), _options())
+
+        assert result.success == 2
+        assert result.failed == 0
+        # Verify dict values were wrapped with Json adapter
+        execute_calls = conn.cursor().execute.call_args_list
+        for call_item in execute_calls:
+            values = call_item[0][1]  # second positional arg = values tuple/list
+            profile_val = values[1]  # profile column (index 1 after id)
+            assert isinstance(profile_val, Json), f"Expected Json adapter, got {type(profile_val)}"
+
 
 # ---------------------------------------------------------------------------
 # Replace mode
