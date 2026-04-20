@@ -14,50 +14,10 @@ import click
 import typer
 
 if TYPE_CHECKING:
-    from drt.config.credentials import (
-        BigQueryProfile,
-        ClickHouseProfile,
-        DatabricksProfile,
-        DuckDBProfile,
-        MySQLProfile,
-        PostgresProfile,
-        RedshiftProfile,
-        SnowflakeProfile,
-        SQLiteProfile,
-        SQLServerProfile,
-    )
+    from drt.config.credentials import ProfileConfig
     from drt.config.models import SyncConfig
-    from drt.destinations.clickhouse import ClickHouseDestination
-    from drt.destinations.discord import DiscordDestination
-    from drt.destinations.email_smtp import EmailSmtpDestination
-    from drt.destinations.file import FileDestination
-    from drt.destinations.github_actions import GitHubActionsDestination
-    from drt.destinations.google_ads import GoogleAdsDestination
-    from drt.destinations.google_sheets import GoogleSheetsDestination
-    from drt.destinations.hubspot import HubSpotDestination
-    from drt.destinations.intercom import IntercomDestination
-    from drt.destinations.jira import JiraDestination
-    from drt.destinations.linear import LinearDestination
-    from drt.destinations.mysql import MySQLDestination
-    from drt.destinations.notion import NotionDestination
-    from drt.destinations.parquet import ParquetDestination
-    from drt.destinations.postgres import PostgresDestination
-    from drt.destinations.rest_api import RestApiDestination
-    from drt.destinations.sendgrid import SendGridDestination
-    from drt.destinations.slack import SlackDestination
-    from drt.destinations.staged_upload import StagedUploadDestination
-    from drt.destinations.teams import TeamsDestination
-    from drt.destinations.twilio import TwilioDestination
-    from drt.sources.bigquery import BigQuerySource
-    from drt.sources.clickhouse import ClickHouseSource
-    from drt.sources.databricks import DatabricksSource
-    from drt.sources.duckdb import DuckDBSource
-    from drt.sources.mysql import MySQLSource
-    from drt.sources.postgres import PostgresSource
-    from drt.sources.redshift import RedshiftSource
-    from drt.sources.snowflake import SnowflakeSource
-    from drt.sources.sqlite import SQLiteSource
-    from drt.sources.sqlserver import SQLServerSource
+    from drt.destinations.base import Destination
+    from drt.sources.base import Source
 
 from drt import __version__
 from drt.cli.output import (
