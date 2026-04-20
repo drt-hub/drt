@@ -9,6 +9,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from psycopg2.extras import Json
 
 from drt.config.models import PostgresDestinationConfig, SyncOptions
 from drt.destinations.postgres import PostgresDestination
@@ -188,6 +189,79 @@ class TestPostgresDestinationLoad:
 
         PostgresDestination().load([{"id": 1, "score": 0.5}], _config(), _options(on_error="fail"))
         conn.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Value serialization
+# ---------------------------------------------------------------------------
+
+
+class TestSerializeValue:
+    """Tests for _serialize_value — dict→Json wrapping for JSONB columns."""
+
+    def test_dict_wrapped_as_json(self) -> None:
+        from drt.destinations.postgres import _serialize_value
+
+        val = {"lang": "ja", "theme": "dark"}
+        result = _serialize_value(val)
+        # Should be a psycopg2.extras.Json instance
+        assert isinstance(result, Json)
+        # The wrapped value should match the original dict
+        assert result.adapted == val
+
+    def test_non_dict_passes_through(self) -> None:
+        from drt.destinations.postgres import _serialize_value
+
+        assert _serialize_value("hello") == "hello"
+        assert _serialize_value(42) == 42
+        assert _serialize_value(3.14) == 3.14
+        assert _serialize_value(None) is None
+        assert _serialize_value([1, 2, 3]) == [1, 2, 3]
+
+    def test_empty_dict_wrapped(self) -> None:
+        from drt.destinations.postgres import _serialize_value
+
+        result = _serialize_value({})
+        assert isinstance(result, Json)
+        assert result.adapted == {}
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_dict_value_in_upsert_is_serialized(self, mock_connect: MagicMock) -> None:
+        """Integration: a record with a dict column passes Json to execute()."""
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        records = [
+            {"id": 1, "profile": {"lang": "ja", "theme": "dark"}},
+        ]
+        PostgresDestination().load(records, _config(), _options())
+
+        # execute() should have been called with a Json-wrapped profile
+        call_args = cur.execute.call_args[0][1]  # positional args: (sql, values)
+        profile_val = call_args[1]  # second column value
+        assert isinstance(profile_val, Json)
+        assert profile_val.adapted == {"lang": "ja", "theme": "dark"}
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_dict_value_in_replace_is_serialized(self, mock_connect: MagicMock) -> None:
+        """Integration: replace mode also wraps dict values with Json."""
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        records = [
+            {"id": 1, "settings": {"notify": True}},
+        ]
+        dest = PostgresDestination()
+        dest.load(records, _config(), _options(mode="replace"))
+
+        # Find the INSERT call (after TRUNCATE)
+        insert_call = cur.execute.call_args_list[1]
+        values = insert_call[0][1]
+        settings_val = values[1]
+        assert isinstance(settings_val, Json)
+        assert settings_val.adapted == {"notify": True}
 
 
 # ---------------------------------------------------------------------------

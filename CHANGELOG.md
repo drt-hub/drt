@@ -39,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **PostgreSQL destination**: crash on `dict` values bound for JSONB columns — dict values are now wrapped with `psycopg2.extras.Json` before binding (#315)
+
 - **`${VAR}` env substitution in sync YAML** (#385): Environment variable placeholders now work in all string fields of sync YAML (e.g. `watermark.bucket`, `destination.url`), not just `model:` SQL. Also shipped in [0.6.1](#061---2026-04-20).
 
 ## [0.6.1] - 2026-04-20

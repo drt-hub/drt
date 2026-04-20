@@ -21,10 +21,28 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from psycopg2.extras import Json
+
 from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, PostgresDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
+
+
+def _serialize_value(value: Any) -> Any:
+    """Wrap dict values with psycopg2.extras.Json for JSONB columns.
+
+    psycopg2 has no default adapter for ``dict``, so any dict value
+    bound for a JSONB column (e.g. from a BigQuery JSON source) causes
+    ``ProgrammingError: can't adapt type 'dict'``. Wrapping with
+    ``Json`` produces the correct wire format for PostgreSQL JSONB.
+
+    Other types (str, int, float, list, None) pass through unchanged —
+    psycopg2's built-in adapters handle those correctly.
+    """
+    if isinstance(value, dict):
+        return Json(value)
+    return value
 
 
 class PostgresDestination:
@@ -120,7 +138,7 @@ class PostgresDestination:
 
         for i, record in enumerate(records):
             try:
-                values = [record.get(c) for c in columns]
+                values = [_serialize_value(record.get(c)) for c in columns]
                 cur.execute(sql, values)
                 result.success += 1
             except Exception as e:
@@ -166,7 +184,7 @@ class PostgresDestination:
 
         for i, record in enumerate(records):
             try:
-                values = [record.get(c) for c in columns]
+                values = [_serialize_value(record.get(c)) for c in columns]
                 cur.execute(sql, values)
                 result.success += 1
             except Exception as e:
