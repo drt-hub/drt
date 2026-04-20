@@ -125,13 +125,20 @@ drt run --dry-run           # ドライラン
 drt run --verbose           # 行レベルのエラー詳細を表示
 drt run --output json       # CI/スクリプト向け構造化JSON出力
 drt run --profile prd       # プロファイル切り替え（DRT_PROFILE環境変数でも可）
+drt sources                 # 利用可能なソースコネクタを一覧
+drt destinations            # 利用可能なデスティネーションコネクタを一覧
+drt run --all               # 全同期を検出して実行
+drt run --select tag:<tag>  # タグに一致する同期を実行
+drt run --threads 4         # 並列同期実行
+drt run --log-format json   # 構造化JSONログをstderrに出力
+drt run --cursor-value '…'  # バックフィル用にウォーターマークカーソルを上書き
 drt test                    # 同期後の検証テストを実行
 drt test --select <name>    # 特定の同期テストを実行
 drt validate                # 同期YAML設定を検証
 drt status                  # 直近の同期ステータスを表示
 drt status --output json    # JSON形式でステータスを出力
-drt mcp run                 # MCPサーバーを起動（drt-core[mcp]が必要）
 drt serve                   # HTTPウェブフックエンドポイントを起動
+drt mcp run                 # MCPサーバーを起動（drt-core[mcp]が必要）
 drt --install-completion    # シェル補完をインストール（bash/zsh/fish）
 drt --show-completion       # 補完スクリプトを表示
 ```
@@ -187,6 +194,7 @@ drt mcp run
 | `drt_get_status` | 前回の実行結果を取得 |
 | `drt_validate` | 同期YAML設定を検証 |
 | `drt_get_schema` | 設定ファイルのJSONスキーマを返す |
+| `drt_list_connectors` | 利用可能なソースとデスティネーションを一覧 |
 
 ---
 
@@ -258,7 +266,8 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | Twilio SMS | ✅ v0.6 | (core) | Basic（Account SID + Auth Token） |
 | Intercom | ✅ v0.6 | (core) | Bearer Token（環境変数） |
 | Email SMTP | ✅ v0.6 | (core) | ユーザー名/パスワード（環境変数） |
-| Salesforce | 🗓 v0.6 | `pip install drt-core[salesforce]` | — |
+| Salesforce Bulk API 2.0 | ✅ v0.6 | (core) | OAuth2（username-password） |
+| Staged Upload | ✅ v0.6 | (core) | プロバイダーごとに設定 |
 
 ### インテグレーション
 
@@ -284,7 +293,7 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | **v0.4** ✅ | Google Sheets / PostgreSQL / MySQL destinations · dagster-drt · dbt manifest reader · type safety overhaul |
 | **v0.5** ✅ | Snowflake / MySQL sources · ClickHouse / Parquet / Teams / CSV+JSON / Jira / Linear / SendGrid destinations · `drt test` · `--output json` · `--profile` · `${VAR}` 環境変数展開 · dbt manifest · secrets.toml · Docker |
 | **v0.5.4** ✅ | `destination_lookup` — 同期中にデスティネーションDBからFK値を解決（MySQL / Postgres / ClickHouse） |
-| [v0.6](https://github.com/drt-hub/drt/milestone/3) | Salesforce · Airflow integration · Twilio / Intercom destinations |
+| **v0.6** ✅ | Databricks / SQL Server sources · Notion / Twilio / Intercom / Email SMTP / Salesforce Bulk / Staged Upload destinations · Airflow / Prefect integrations · `drt serve` · `drt sources` / `drt destinations` · `--threads` 並列実行 · `--log-format json` · `--cursor-value` · `watermark.default_value` · テストバリデータ（freshness, unique, accepted_values） · JSON Schema validation · GOVERNANCE.md |
 | [v0.7](https://github.com/drt-hub/drt/milestone/4) | DWH destinations (Snowflake / BigQuery / ClickHouse / Databricks) · Cloud storage (S3 / GCS / Azure Blob) |
 | [v0.8](https://github.com/drt-hub/drt/milestone/5) | Lakehouse sources (Delta Lake / Apache Iceberg) |
 | v1.x | Rust engine (PyO3) |
