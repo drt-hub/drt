@@ -59,7 +59,7 @@ class RestApiDestination:
                         result.row_errors.append(
                             RowError(
                                 batch_index=i,
-                                record_preview=json.dumps(record)[:200],
+                                record_preview=json.dumps(record, default=str)[:200],
                                 http_status=None,
                                 error_message=f"Template error: {e}",
                             )
@@ -90,7 +90,7 @@ class RestApiDestination:
                     result.row_errors.append(
                         RowError(
                             batch_index=i,
-                            record_preview=json.dumps(record)[:200],
+                            record_preview=json.dumps(record, default=str)[:200],
                             http_status=e.response.status_code,
                             error_message=e.response.text[:500],
                         )
@@ -100,7 +100,7 @@ class RestApiDestination:
                     result.row_errors.append(
                         RowError(
                             batch_index=i,
-                            record_preview=json.dumps(record)[:200],
+                            record_preview=json.dumps(record, default=str)[:200],
                             http_status=None,
                             error_message=str(e),
                         )

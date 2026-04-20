@@ -516,6 +516,30 @@ class StagedUploadDestinationConfig(BaseModel):
         return "staged_upload"
 
 
+class SalesforceBulkDestinationConfig(BaseModel):
+    type: Literal["salesforce_bulk"]
+    instance_url: str | None = None
+    instance_url_env: str | None = None
+    object_name: str  # e.g. "Contact", "Account"
+    operation: Literal["insert", "update", "upsert", "delete"] = "upsert"
+    external_id_field: str = "Id"
+    poll_timeout_seconds: int = 3600
+    poll_interval_seconds: int = 30
+    client_id_env: str
+    client_secret_env: str
+    username_env: str
+    password_env: str
+
+    def describe(self) -> str:
+        return f"salesforce_bulk ({self.object_name})"
+
+    @model_validator(mode="after")
+    def _check_instance_url(self) -> "SalesforceBulkDestinationConfig":
+        if not self.instance_url and not self.instance_url_env:
+            raise ValueError("Either instance_url or instance_url_env is required.")
+        return self
+
+
 # Discriminated union — add new destination types here
 DestinationConfig = Annotated[
     RestApiDestinationConfig
@@ -538,6 +562,7 @@ DestinationConfig = Annotated[
     | NotionDestinationConfig
     | IntercomDestinationConfig
     | StagedUploadDestinationConfig
+    | SalesforceBulkDestinationConfig
     | TwilioDestinationConfig,
     Field(discriminator="type"),
 ]
@@ -570,6 +595,8 @@ class WatermarkConfig(BaseModel):
     # BigQuery
     project: str | None = None
     dataset: str | None = None
+    # Fallback value used when no watermark exists yet (first run)
+    default_value: str | None = None
 
     @model_validator(mode="after")
     def _check_backend_fields(self) -> "WatermarkConfig":
@@ -609,14 +636,48 @@ class NotNullTest(BaseModel):
     columns: list[str]
 
 
+class FreshnessTest(BaseModel):
+    column: str
+    max_age: str  # e.g., "7 days", "1 hour", "30 minutes"
+
+
+class UniqueTest(BaseModel):
+    columns: list[str] = Field(min_length=1)
+
+
+class AcceptedValuesTest(BaseModel):
+    column: str
+    values: list[str] = Field(min_length=1)
+
+
 class SyncTest(BaseModel):
     row_count: RowCountTest | None = None
     not_null: NotNullTest | None = None
+    freshness: FreshnessTest | None = None
+    unique: UniqueTest | None = None
+    accepted_values: AcceptedValuesTest | None = None
+
+    @model_validator(mode="after")
+    def _check_exactly_one_test(self) -> "SyncTest":
+        configured_tests = [
+            self.row_count,
+            self.not_null,
+            self.freshness,
+            self.unique,
+            self.accepted_values,
+        ]
+        configured_count = sum(test is not None for test in configured_tests)
+        if configured_count != 1:
+            raise ValueError(
+                "Exactly one sync test must be configured in each tests entry."
+            )
+        return self
 
 
 class SyncConfig(BaseModel):
     name: str
     description: str = ""
+    tags: list[str] = Field(default_factory=list)
     model: str
     destination: DestinationConfig
     sync: SyncOptions = Field(default_factory=SyncOptions)

@@ -6,6 +6,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from drt.config.credentials import BigQueryProfile, ProfileConfig
 from drt.config.models import DestinationConfig, SyncConfig, SyncOptions
 from drt.destinations.base import SyncResult
@@ -458,3 +460,155 @@ def test_full_sync_no_cursor_saved(tmp_path: Path) -> None:
     state = state_mgr.get_last_sync("test_sync")
     assert state is not None
     assert state.last_cursor_value is None
+
+
+# ---------------------------------------------------------------------------
+# watermark default_value (#390) & observability (#391)
+# ---------------------------------------------------------------------------
+
+
+def _make_incremental_template_sync(
+    *,
+    default_value: str | None = None,
+) -> SyncConfig:
+    """Incremental sync using {{ cursor_value }} template."""
+    watermark: dict = {"storage": "local"}
+    if default_value is not None:
+        watermark["default_value"] = default_value
+    return SyncConfig.model_validate(
+        {
+            "name": "tmpl_sync",
+            "model": "SELECT * FROM events WHERE ts >= '{{ cursor_value }}'",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {
+                "mode": "incremental",
+                "cursor_field": "ts",
+                "watermark": watermark,
+            },
+        }
+    )
+
+
+def test_incremental_first_run_raises_without_default(tmp_path: Path) -> None:
+    """Cursor template + no watermark + no default_value → ValueError."""
+    from drt.state.watermark import LocalWatermarkStorage
+
+    source = FakeSource([])
+    dest = FakeDestination()
+    sync = _make_incremental_template_sync()
+    wm_storage = LocalWatermarkStorage(tmp_path)
+
+    with pytest.raises(ValueError, match="no cursor value provided"):
+        run_sync(
+            sync,
+            source,
+            dest,
+            _make_profile(),
+            tmp_path,
+            watermark_storage=wm_storage,
+        )
+
+
+def test_incremental_first_run_uses_default_value(tmp_path: Path) -> None:
+    """Cursor template + no watermark + default_value → uses default."""
+    from drt.state.watermark import LocalWatermarkStorage
+
+    captured_queries: list[str] = []
+
+    class CapturingSource:
+        def extract(self, query: str, config: object) -> list[dict]:
+            captured_queries.append(query)
+            return [{"id": 1, "ts": "2026-05-01"}]
+
+        def test_connection(self, config: object) -> bool:
+            return True
+
+    sync = _make_incremental_template_sync(default_value="2026-04-20 00:00:00")
+    wm_storage = LocalWatermarkStorage(tmp_path)
+    dest = FakeDestination()
+
+    result = run_sync(
+        sync,
+        CapturingSource(),
+        dest,
+        _make_profile(),
+        tmp_path,
+        watermark_storage=wm_storage,
+    )
+
+    assert result.success == 1
+    assert "2026-04-20 00:00:00" in captured_queries[0]
+    assert result.watermark_source == "default_value"
+    assert result.cursor_value_used == "2026-04-20 00:00:00"
+
+
+def test_cursor_value_override_takes_priority(tmp_path: Path) -> None:
+    """--cursor-value overrides stored watermark."""
+    from drt.state.watermark import LocalWatermarkStorage
+
+    wm_storage = LocalWatermarkStorage(tmp_path)
+    wm_storage.save("tmpl_sync", "2026-01-01")
+
+    captured_queries: list[str] = []
+
+    class CapturingSource:
+        def extract(self, query: str, config: object) -> list[dict]:
+            captured_queries.append(query)
+            return []
+
+        def test_connection(self, config: object) -> bool:
+            return True
+
+    sync = _make_incremental_template_sync()
+    dest = FakeDestination()
+
+    result = run_sync(
+        sync,
+        CapturingSource(),
+        dest,
+        _make_profile(),
+        tmp_path,
+        watermark_storage=wm_storage,
+        cursor_value_override="2026-03-15",
+    )
+
+    assert "2026-03-15" in captured_queries[0]
+    assert "2026-01-01" not in captured_queries[0]
+    assert result.watermark_source == "cli_override"
+    assert result.cursor_value_used == "2026-03-15"
+
+
+def test_watermark_source_storage(tmp_path: Path) -> None:
+    """Normal incremental with stored watermark → source='storage'."""
+    from drt.state.watermark import LocalWatermarkStorage
+
+    wm_storage = LocalWatermarkStorage(tmp_path)
+    wm_storage.save("tmpl_sync", "2026-04-01")
+
+    source = FakeSource([])
+    dest = FakeDestination()
+    sync = _make_incremental_template_sync()
+
+    result = run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        watermark_storage=wm_storage,
+    )
+
+    assert result.watermark_source == "storage"
+    assert result.cursor_value_used == "2026-04-01"
+
+
+def test_auto_injection_first_run_no_error(tmp_path: Path) -> None:
+    """Auto-injection (no cursor template) + first run → full extract, no error."""
+    source = FakeSource([{"id": 1, "updated_at": "2024-01-01"}])
+    dest = FakeDestination()
+    sync = _make_incremental_sync()  # uses ref('events'), no template
+
+    result = run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+    assert result.success == 1
+    assert result.watermark_source is None

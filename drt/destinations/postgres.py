@@ -73,6 +73,33 @@ class PostgresDestination:
 
         return result
 
+    def get_row_count(self, config: DestinationConfig) -> int:
+        """Get the current row count from the destination table.
+
+        Args:
+            config: Destination configuration (must be PostgresDestinationConfig).
+
+        Returns:
+            Row count as integer.
+
+        Raises:
+            Exception: If connection or query fails.
+        """
+        from psycopg2 import sql
+
+        assert isinstance(config, PostgresDestinationConfig)
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            query = sql.SQL("SELECT COUNT(*) FROM {}").format(
+                sql.Identifier(config.table)
+            )
+            cur.execute(query)
+            row = cur.fetchone()
+            return row[0] if row else 0
+        finally:
+            conn.close()
+
     def _load_replace(
         self,
         conn: Any,

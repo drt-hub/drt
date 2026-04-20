@@ -133,5 +133,6 @@ After merging a PR, always:
 3. Run `ruff check --fix && ruff format` on changed files
 4. Run `mypy drt` — check for type signature gaps (e.g. new profiles not added to `_get_source`)
 5. Run `pytest` on affected test files
-6. Commit with `chore: clean up [feature] (#PR follow-up)`
-7. Push and verify CI passes
+6. Run `make check-i18n` — if stale, sync Japanese translations and update the hash marker
+7. Commit with `chore: clean up [feature] (#PR follow-up)`
+8. Push and verify CI passes

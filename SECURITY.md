@@ -6,16 +6,16 @@
 
 | Version | Supported |
 |---------|-----------|
+| 0.6.x   | ✅        |
 | 0.5.x   | ✅        |
-| 0.4.x   | ✅        |
-| < 0.4   | ❌        |
+| < 0.5   | ❌        |
 
 ### dagster-drt
 
 | Version | Supported |
 |---------|-----------|
+| 0.3.x   | ✅        |
 | 0.2.x   | ✅        |
-| 0.1.x   | ✅        |
 
 ## Branch Protection
 

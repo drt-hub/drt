@@ -39,6 +39,7 @@ def _serialize_value(value: Any) -> Any:
     return value
 
 
+
 class MySQLDestination:
     """Upsert or replace records into a MySQL table."""
 
@@ -84,6 +85,34 @@ class MySQLDestination:
             conn.close()
 
         return result
+
+    def get_row_count(self, config: DestinationConfig) -> int:
+        """Get the current row count from the destination table.
+
+        Args:
+            config: Destination configuration (must be MySQLDestinationConfig).
+
+        Returns:
+            Row count as integer.
+
+        Raises:
+            Exception: If connection or query fails.
+        """
+        assert isinstance(config, MySQLDestinationConfig)
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            # Escape table name with backticks for safety
+            escaped_table = (
+                "`.`".join(config.table.split("."))
+                if "." in config.table
+                else config.table
+            )
+            cur.execute(f"SELECT COUNT(*) FROM `{escaped_table}`")
+            row = cur.fetchone()
+            return row[0] if row else 0
+        finally:
+            conn.close()
 
     def _load_replace(
         self,
