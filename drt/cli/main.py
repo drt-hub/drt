@@ -710,80 +710,14 @@ def mcp_run() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _get_source(
-    profile: (
-        BigQueryProfile
-        | DuckDBProfile
-        | SQLiteProfile
-        | PostgresProfile
-        | RedshiftProfile
-        | ClickHouseProfile
-        | MySQLProfile
-        | SnowflakeProfile
-        | DatabricksProfile
-        | SQLServerProfile
-    ),
-) -> (
-    BigQuerySource
-    | DuckDBSource
-    | SQLiteSource
-    | PostgresSource
-    | RedshiftSource
-    | ClickHouseSource
-    | MySQLSource
-    | SnowflakeSource
-    | DatabricksSource
-    | SQLServerSource
-):
-    from drt.config.credentials import (
-        BigQueryProfile,
-        ClickHouseProfile,
-        DatabricksProfile,
-        DuckDBProfile,
-        MySQLProfile,
-        PostgresProfile,
-        RedshiftProfile,
-        SnowflakeProfile,
-        SQLiteProfile,
-        SQLServerProfile,
-    )
-    from drt.sources.bigquery import BigQuerySource
-    from drt.sources.duckdb import DuckDBSource
-    from drt.sources.mysql import MySQLSource
-    from drt.sources.postgres import PostgresSource
-    from drt.sources.sqlite import SQLiteSource
+def _get_source(profile: ProfileConfig) -> Source:
+    """Get a source instance for the profile configuration.
 
-    if isinstance(profile, BigQueryProfile):
-        return BigQuerySource()
-    if isinstance(profile, DuckDBProfile):
-        return DuckDBSource()
-    if isinstance(profile, SQLiteProfile):
-        return SQLiteSource()
-    if isinstance(profile, PostgresProfile):
-        return PostgresSource()
-    if isinstance(profile, MySQLProfile):
-        return MySQLSource()
-    if isinstance(profile, RedshiftProfile):
-        from drt.sources.redshift import RedshiftSource
+    Uses the connector registry for automatic connector discovery and instantiation.
+    """
+    from drt.connectors import get_source
 
-        return RedshiftSource()
-    if isinstance(profile, ClickHouseProfile):
-        from drt.sources.clickhouse import ClickHouseSource
-
-        return ClickHouseSource()
-    if isinstance(profile, SnowflakeProfile):
-        from drt.sources.snowflake import SnowflakeSource
-
-        return SnowflakeSource()
-    if isinstance(profile, DatabricksProfile):
-        from drt.sources.databricks import DatabricksSource
-
-        return DatabricksSource()
-    if isinstance(profile, SQLServerProfile):
-        from drt.sources.sqlserver import SQLServerSource
-
-        return SQLServerSource()
-    raise ValueError(f"Unsupported source type: {type(profile)}")
+    return get_source(profile)
 
 
 def _get_watermark_storage(
@@ -817,122 +751,11 @@ def _get_watermark_storage(
     return None
 
 
-def _get_destination(
-    sync: SyncConfig,
-) -> (
-    RestApiDestination
-    | SlackDestination
-    | DiscordDestination
-    | GitHubActionsDestination
-    | HubSpotDestination
-    | JiraDestination
-    | SendGridDestination
-    | GoogleSheetsDestination
-    | PostgresDestination
-    | MySQLDestination
-    | TeamsDestination
-    | ClickHouseDestination
-    | ParquetDestination
-    | FileDestination
-    | EmailSmtpDestination
-    | LinearDestination
-    | GoogleAdsDestination
-    | NotionDestination
-    | StagedUploadDestination
-    | IntercomDestination
-    | TwilioDestination
-):
-    from drt.config.models import (
-        ClickHouseDestinationConfig,
-        DiscordDestinationConfig,
-        EmailSmtpDestinationConfig,
-        FileDestinationConfig,
-        GitHubActionsDestinationConfig,
-        GoogleAdsDestinationConfig,
-        GoogleSheetsDestinationConfig,
-        HubSpotDestinationConfig,
-        JiraDestinationConfig,
-        LinearDestinationConfig,
-        MySQLDestinationConfig,
-        NotionDestinationConfig,
-        ParquetDestinationConfig,
-        PostgresDestinationConfig,
-        RestApiDestinationConfig,
-        SendGridDestinationConfig,
-        SlackDestinationConfig,
-        StagedUploadDestinationConfig,
-        TeamsDestinationConfig,
-        TwilioDestinationConfig,
-    )
-    from drt.destinations.clickhouse import ClickHouseDestination
-    from drt.destinations.discord import DiscordDestination
-    from drt.destinations.github_actions import GitHubActionsDestination
-    from drt.destinations.hubspot import HubSpotDestination
-    from drt.destinations.jira import JiraDestination
-    from drt.destinations.linear import LinearDestination
-    from drt.destinations.mysql import MySQLDestination
-    from drt.destinations.notion import NotionDestination
-    from drt.destinations.postgres import PostgresDestination
-    from drt.destinations.rest_api import RestApiDestination
-    from drt.destinations.sendgrid import SendGridDestination
-    from drt.destinations.slack import SlackDestination
-    from drt.destinations.twilio import TwilioDestination
+def _get_destination(sync: SyncConfig) -> Destination:
+    """Get a destination instance for the sync configuration.
 
-    dest = sync.destination
-    if isinstance(dest, RestApiDestinationConfig):
-        return RestApiDestination()
-    if isinstance(dest, SlackDestinationConfig):
-        return SlackDestination()
-    if isinstance(dest, TwilioDestinationConfig):
-        return TwilioDestination()
-    if isinstance(dest, DiscordDestinationConfig):
-        return DiscordDestination()
-    if isinstance(dest, GitHubActionsDestinationConfig):
-        return GitHubActionsDestination()
-    if isinstance(dest, HubSpotDestinationConfig):
-        return HubSpotDestination()
-    if isinstance(dest, JiraDestinationConfig):
-        return JiraDestination()
-    if isinstance(dest, SendGridDestinationConfig):
-        return SendGridDestination()
-    if isinstance(dest, GoogleSheetsDestinationConfig):
-        from drt.destinations.google_sheets import GoogleSheetsDestination
+    Uses the connector registry for automatic connector discovery and instantiation.
+    """
+    from drt.connectors import get_destination
 
-        return GoogleSheetsDestination()
-    if isinstance(dest, PostgresDestinationConfig):
-        return PostgresDestination()
-    if isinstance(dest, MySQLDestinationConfig):
-        return MySQLDestination()
-    if isinstance(dest, TeamsDestinationConfig):
-        from drt.destinations.teams import TeamsDestination
-
-        return TeamsDestination()
-    if isinstance(dest, ClickHouseDestinationConfig):
-        return ClickHouseDestination()
-    if isinstance(dest, ParquetDestinationConfig):
-        from drt.destinations.parquet import ParquetDestination
-
-        return ParquetDestination()
-    if isinstance(dest, FileDestinationConfig):
-        from drt.destinations.file import FileDestination
-
-        return FileDestination()
-
-    if isinstance(dest, EmailSmtpDestinationConfig):
-        from drt.destinations.email_smtp import EmailSmtpDestination
-
-        return EmailSmtpDestination()
-
-    if isinstance(dest, LinearDestinationConfig):
-        return LinearDestination()
-    if isinstance(dest, GoogleAdsDestinationConfig):
-        from drt.destinations.google_ads import GoogleAdsDestination
-
-        return GoogleAdsDestination()
-    if isinstance(dest, NotionDestinationConfig):
-        return NotionDestination()
-    if isinstance(dest, StagedUploadDestinationConfig):
-        from drt.destinations.staged_upload import StagedUploadDestination
-
-        return StagedUploadDestination()
-    raise ValueError(f"Unsupported destination type: {dest.type}")
+    return get_destination(sync.destination)
