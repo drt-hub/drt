@@ -37,6 +37,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`${VAR}` env substitution in sync YAML** (#385): Environment variable placeholders now work in all string fields of sync YAML (e.g. `watermark.bucket`, `destination.url`), not just `model:` SQL. Also shipped in [0.6.1](#061---2026-04-20).
+
+## [0.6.1] - 2026-04-20
+
+### Fixed
+
+- **`${VAR}` env substitution in sync YAML** (#385): Environment variable placeholders like `${PIPES_GCS_BUCKET}` are now expanded in **all string fields** of sync YAML config — not just the `model:` SQL. This enables multi-environment setups (DEV/PRD) without duplicating sync files. Common use cases: `sync.watermark.bucket`, `destination.url`, `destination.host`. Missing variables raise `ValueError` consistently with the existing SQL expansion behaviour.
+
 ## [0.6.0] - 2026-04-19
 
 ### Added

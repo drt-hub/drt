@@ -160,6 +160,10 @@ def _expand_env_vars(sql: str) -> str:
     """Expand ``${VAR}`` placeholders with environment variable values.
 
     Raises ``ValueError`` if a referenced variable is not set.
+
+    .. note::
+        For generic (non-SQL) expansion across YAML config trees,
+        see :func:`drt.config.parser.expand_env_vars`.
     """
 
     def _replace(match: re.Match[str]) -> str:
