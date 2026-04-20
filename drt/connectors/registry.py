@@ -12,7 +12,7 @@ The registry enables:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from drt.destinations.base import Destination
 from drt.sources.base import Source
@@ -22,14 +22,14 @@ if TYPE_CHECKING:
     from drt.config.models import DestinationConfig
 
 # Registry mappings: type_name -> (ConfigClass, ImplementationClass)
-_destination_registry: dict[str, tuple[type, type]] = {}
-_source_registry: dict[str, tuple[type, type]] = {}
+_destination_registry: dict[str, tuple[type[Any], type[Any]]] = {}
+_source_registry: dict[str, tuple[type[Any], type[Any]]] = {}
 
 
 def register_destination(
     type_name: str,
-    config_class: type,
-    destination_class: type,
+    config_class: type[Any],
+    destination_class: type[Any],
 ) -> None:
     """Register a destination connector.
 
@@ -37,14 +37,22 @@ def register_destination(
         type_name: The type identifier (e.g., 'slack', 'rest_api')
         config_class: The Pydantic config class (e.g., SlackDestinationConfig)
         destination_class: The destination implementation class (e.g., SlackDestination)
+
+    Raises:
+        ValueError: If type_name is already registered
     """
+    if type_name in _destination_registry:
+        raise ValueError(
+            f"Destination type '{type_name}' already registered. "
+            f"Each connector type must be unique."
+        )
     _destination_registry[type_name] = (config_class, destination_class)
 
 
 def register_source(
     type_name: str,
-    profile_class: type,
-    source_class: type,
+    profile_class: type[Any],
+    source_class: type[Any],
 ) -> None:
     """Register a source connector.
 
@@ -52,7 +60,15 @@ def register_source(
         type_name: The type identifier (e.g., 'postgres', 'bigquery')
         profile_class: The credentials profile class (e.g., PostgresProfile)
         source_class: The source implementation class (e.g., PostgresSource)
+
+    Raises:
+        ValueError: If type_name is already registered
     """
+    if type_name in _source_registry:
+        raise ValueError(
+            f"Source type '{type_name}' already registered. "
+            f"Each connector type must be unique."
+        )
     _source_registry[type_name] = (profile_class, source_class)
 
 
@@ -68,10 +84,9 @@ def get_destination(config: DestinationConfig) -> Destination:
     Raises:
         ValueError: If the destination type is not registered
     """
-    # Find the registered destination for this config type
-    for type_name, (registered_config_class, destination_class) in _destination_registry.items():
-        if isinstance(config, registered_config_class):
-            return destination_class()  # type: ignore[no-any-return]
+    if config.type in _destination_registry:
+        _, destination_class = _destination_registry[config.type]
+        return destination_class()  # type: ignore[no-any-return]
 
     # If not found, provide helpful error message
     available = sorted(_destination_registry.keys())
@@ -93,10 +108,9 @@ def get_source(profile: ProfileConfig) -> Source:
     Raises:
         ValueError: If the source type is not registered
     """
-    # Find the registered source for this profile type
-    for type_name, (registered_profile_class, source_class) in _source_registry.items():
-        if isinstance(profile, registered_profile_class):
-            return source_class()  # type: ignore[no-any-return]
+    if profile.type in _source_registry:
+        _, source_class = _source_registry[profile.type]
+        return source_class()  # type: ignore[no-any-return]
 
     # If not found, provide helpful error message
     available = sorted(_source_registry.keys())
