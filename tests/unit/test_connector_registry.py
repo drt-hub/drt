@@ -5,8 +5,7 @@ from __future__ import annotations
 import pytest
 
 from drt.config.credentials import DuckDBProfile, PostgresProfile
-from drt.config.models import RestApiDestinationConfig, SlackDestinationConfig
-from drt.config.models import SyncConfig
+from drt.config.models import RestApiDestinationConfig, SlackDestinationConfig, SyncConfig
 from drt.connectors import get_destination, get_source
 
 
