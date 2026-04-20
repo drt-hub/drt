@@ -5,16 +5,25 @@ Features:
   - Token-bucket rate limiting via RateLimiter
   - Exponential backoff retry via with_retry
   - Row-level error tracking via SyncResult
+  - Pagination support (offset, cursor, link header)
 """
 
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import httpx
 
-from drt.config.models import DestinationConfig, RestApiDestinationConfig, SyncOptions
+from drt.config.models import (
+    CursorPaginationConfig,
+    DestinationConfig,
+    LinkHeaderPaginationConfig,
+    OffsetPaginationConfig,
+    RestApiDestinationConfig,
+    SyncOptions,
+)
 from drt.destinations.auth import AuthHandler
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
@@ -100,3 +109,136 @@ class RestApiDestination:
 
         # Return as SyncResult-compatible object
         return result
+
+    def fetch_paginated(
+        self,
+        config: RestApiDestinationConfig,
+        auth_headers: dict[str, str],
+        sync_options: SyncOptions,
+    ) -> list[dict[str, Any]]:
+        """Fetch all pages of data from a paginated REST API endpoint.
+
+        Args:
+            config: REST API destination config with pagination settings.
+            auth_headers: Authorization headers from AuthHandler.
+            sync_options: Sync options for retry and rate limiting.
+
+        Returns:
+            Flattened list of all records from all pages.
+        """
+        if not config.pagination:
+            return []
+
+        all_records: list[dict[str, Any]] = []
+        headers = {**config.headers, **auth_headers}
+        rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)
+        pagination = config.pagination
+
+        with httpx.Client(timeout=30.0) as client:
+            page = 0
+            next_url: str | None = config.url
+            next_cursor: str | None = None
+
+            while page < pagination.max_pages and (next_url or next_cursor or page == 0):
+                rate_limiter.acquire()
+
+                # Build URL with pagination params
+                request_params: dict[str, str] | None = None
+                if isinstance(pagination, OffsetPaginationConfig):
+                    offset = page * pagination.limit
+                    request_params = {
+                        pagination.offset_param: str(offset),
+                        pagination.limit_param: str(pagination.limit),
+                    }
+                    url_with_params = config.url
+                elif isinstance(pagination, CursorPaginationConfig):
+                    url_with_params = config.url
+                    request_params = {
+                        pagination.limit_param: str(pagination.limit),
+                    }
+                    if page > 0:
+                        if next_cursor:
+                            request_params[pagination.cursor_param] = next_cursor
+                        else:
+                            break
+                elif isinstance(pagination, LinkHeaderPaginationConfig):
+                    url_with_params = next_url or config.url
+                    request_params = None
+                else:
+                    break
+
+                try:
+
+                    def do_request(
+                        _url: str = url_with_params,
+                        _headers: dict[str, Any] = headers,
+                        _method: str = config.method,
+                        _params: dict[str, str] | None = request_params,
+                    ) -> httpx.Response:
+                        response = client.request(
+                            method=_method,
+                            url=_url,
+                            headers=_headers,
+                            params=_params,
+                        )
+                        response.raise_for_status()
+                        return response
+
+                    response = with_retry(do_request, sync_options.retry)
+
+                    # Extract records from response
+                    records_count_before = len(all_records)
+                    data = response.json()
+                    if isinstance(data, list):
+                        all_records.extend(data)
+                    elif isinstance(data, dict) and "records" in data:
+                        all_records.extend(data["records"])
+                    elif isinstance(data, dict) and "data" in data:
+                        items = data["data"]
+                        if isinstance(items, list):
+                            all_records.extend(items)
+
+                    # Determine next page
+                    if isinstance(pagination, OffsetPaginationConfig):
+                        # Stop if fewer records than limit (no next page)
+                        page_record_count = len(all_records) - records_count_before
+                        if page_record_count < pagination.limit:
+                            break
+                    elif isinstance(pagination, CursorPaginationConfig):
+                        # Extract next cursor from response
+                        if isinstance(data, dict):
+                            next_cursor = data.get(pagination.cursor_field)
+                            if not next_cursor:
+                                break
+                        else:
+                            break
+                    elif isinstance(pagination, LinkHeaderPaginationConfig):
+                        # Parse Link header for next URL
+                        link_header = response.headers.get("link", "")
+                        next_url = self._extract_next_link(link_header)
+                        if not next_url:
+                            break
+
+                    page += 1
+
+                except (httpx.HTTPStatusError, json.JSONDecodeError, KeyError):
+                    # Stop pagination on error
+                    break
+
+        return all_records
+
+    @staticmethod
+    def _extract_next_link(link_header: str) -> str | None:
+        """Extract next URL from Link header.
+
+        RFC 5988 format: <https://api.example.com?page=2>; rel="next"
+        Returns the URL with rel="next".
+        """
+        links = link_header.split(",")
+        for link in links:
+            if re.search(r'rel\s*=\s*["\']next["\']', link, re.IGNORECASE):
+                # Extract URL between < and >
+                match = re.search(r"<([^>]+)>", link)
+                if match:
+                    return match.group(1)
+        return None
