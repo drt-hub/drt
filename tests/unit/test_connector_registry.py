@@ -6,6 +6,7 @@ import pytest
 
 from drt.config.credentials import DuckDBProfile, PostgresProfile
 from drt.config.models import RestApiDestinationConfig, SlackDestinationConfig
+from drt.config.models import SyncConfig
 from drt.connectors import get_destination, get_source
 
 
@@ -86,3 +87,74 @@ class TestConnectorRegistry:
         assert "Unknown source type" in error_msg
         assert "postgres" in error_msg
         assert "duckdb" in error_msg
+
+    def test_duplicate_destination_registration(self):
+        """Registering a destination with duplicate type raises ValueError."""
+        from drt.connectors.registry import register_destination
+
+        # Try to register a destination with an existing type
+        class FakeConfig:
+            pass
+
+        class FakeDestination:
+            pass
+
+        with pytest.raises(ValueError) as exc_info:
+            register_destination("slack", FakeConfig, FakeDestination)
+
+        error_msg = str(exc_info.value)
+        assert "already registered" in error_msg
+        assert "slack" in error_msg
+
+    def test_duplicate_source_registration(self):
+        """Registering a source with duplicate type raises ValueError."""
+        from drt.connectors.registry import register_source
+
+        # Try to register a source with an existing type
+        class FakeProfile:
+            pass
+
+        class FakeSource:
+            pass
+
+        with pytest.raises(ValueError) as exc_info:
+            register_source("postgres", FakeProfile, FakeSource)
+
+        error_msg = str(exc_info.value)
+        assert "already registered" in error_msg
+        assert "postgres" in error_msg
+
+    def test_cli_get_destination_dispatcher(self):
+        """Test CLI dispatcher function for getting destinations."""
+        from drt.cli.main import _get_destination
+
+        # Create a minimal sync config with a slack destination
+        sync = SyncConfig(
+            name="test_sync",
+            model="test_model",
+            destination={
+                "type": "slack",
+                "webhook_url_env": "SLACK_WEBHOOK_URL",
+            },
+        )
+
+        destination = _get_destination(sync)
+        assert destination is not None
+        assert type(destination).__name__ == "SlackDestination"
+
+    def test_cli_get_source_dispatcher(self):
+        """Test CLI dispatcher function for getting sources."""
+        from drt.cli.main import _get_source
+
+        # Create a postgres profile
+        profile = PostgresProfile(
+            type="postgres",
+            host="localhost",
+            port=5432,
+            dbname="test",
+            user="test",
+        )
+
+        source = _get_source(profile)
+        assert source is not None
+        assert type(source).__name__ == "PostgresSource"
