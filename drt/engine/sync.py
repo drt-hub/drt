@@ -7,6 +7,7 @@ CLI owns all console output; engine only returns SyncResult.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Iterator
 from datetime import datetime, timezone
@@ -21,6 +22,8 @@ from drt.engine.resolver import resolve_model_ref
 from drt.sources.base import Source
 from drt.state.manager import StateManager, SyncState
 from drt.state.watermark import WatermarkStorage
+
+logger = logging.getLogger("drt")
 
 
 def _cursor_gt(new: str, current: str) -> bool:
@@ -52,6 +55,7 @@ def run_sync(
     dry_run: bool = False,
     state_manager: StateManager | None = None,
     watermark_storage: WatermarkStorage | None = None,
+    cursor_value_override: str | None = None,
 ) -> SyncResult:
     """Run a single sync: extract from source, load to destination.
 
@@ -70,15 +74,50 @@ def run_sync(
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.perf_counter()
 
-    # Load last cursor value for incremental syncs
+    # Load last cursor value for incremental syncs (fallback chain)
     cursor_field = sync.sync.cursor_field if sync.sync.mode == "incremental" else None
     last_cursor_value: str | None = None
-    if cursor_field and watermark_storage:
-        last_cursor_value = watermark_storage.get(sync.name)
-    elif cursor_field and state_manager:
-        prev = state_manager.get_last_sync(sync.name)
-        if prev:
-            last_cursor_value = prev.last_cursor_value
+    watermark_source: str | None = None  # "cli_override" | "storage" | "default_value"
+
+    if cursor_field:
+        # 1. CLI override (highest priority — backfill / recovery)
+        if cursor_value_override is not None:
+            last_cursor_value = cursor_value_override
+            watermark_source = "cli_override"
+            logger.info(
+                "sync='%s' watermark_source=cli_override cursor_value='%s'",
+                sync.name,
+                last_cursor_value,
+            )
+        # 2. Watermark storage (GCS / BigQuery / local)
+        elif watermark_storage:
+            stored = watermark_storage.get(sync.name)
+            if stored is not None:
+                last_cursor_value = stored
+                watermark_source = "storage"
+                logger.info(
+                    "sync='%s' watermark_source=storage cursor_value='%s'",
+                    sync.name,
+                    last_cursor_value,
+                )
+        # 3. State manager fallback (local .drt/state.json)
+        elif state_manager:
+            prev = state_manager.get_last_sync(sync.name)
+            if prev and prev.last_cursor_value is not None:
+                last_cursor_value = prev.last_cursor_value
+                watermark_source = "storage"
+
+        # 4. default_value from watermark config
+        wm = sync.sync.watermark
+        if last_cursor_value is None and wm and wm.default_value is not None:
+            last_cursor_value = wm.default_value
+            watermark_source = "default_value"
+            logger.info(
+                "sync='%s' watermark_source=default_value cursor_value='%s' "
+                "reason='no existing watermark'",
+                sync.name,
+                last_cursor_value,
+            )
 
     query = resolve_model_ref(sync.model, project_dir, profile, cursor_field, last_cursor_value)
 
@@ -157,6 +196,8 @@ def run_sync(
         total_result.row_errors.extend(getattr(finalize_result, "row_errors", []))
 
     total_result.duration_seconds = round(time.perf_counter() - t0, 3)
+    total_result.watermark_source = watermark_source
+    total_result.cursor_value_used = last_cursor_value
 
     if state_manager is not None:
         status = (

@@ -57,6 +57,8 @@ def test_run_dry_run_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
             # lockstep with the real shape so future refactors that read
             # ``rows_extracted`` unconditionally don't fail this test.
             self.rows_extracted = self.success
+            self.watermark_source = None
+            self.cursor_value_used = None
 
     def mock_run_sync(*args, **kwargs):
         return FakeResult()

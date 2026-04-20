@@ -561,6 +561,8 @@ class WatermarkConfig(BaseModel):
     # BigQuery
     project: str | None = None
     dataset: str | None = None
+    # Fallback value used when no watermark exists yet (first run)
+    default_value: str | None = None
 
     @model_validator(mode="after")
     def _check_backend_fields(self) -> "WatermarkConfig":

@@ -242,16 +242,16 @@ def test_watermark_alias_resolved(tmp_path: Path) -> None:
     assert "{{ watermark }}" not in sql
 
 
-def test_cursor_value_first_run_default(tmp_path: Path) -> None:
-    """First run (no last_cursor_value) should resolve to empty string."""
-    sql = resolve_model_ref(
-        "SELECT * FROM events WHERE ts >= '{{ cursor_value }}'",
-        tmp_path,
-        _profile(),
-        cursor_field="ts",
-        last_cursor_value=None,
-    )
-    assert "WHERE ts >= ''" in sql
+def test_cursor_value_first_run_raises_on_none(tmp_path: Path) -> None:
+    """First run (no last_cursor_value) should raise ValueError, not render empty string."""
+    with pytest.raises(ValueError, match="no cursor value provided"):
+        resolve_model_ref(
+            "SELECT * FROM events WHERE ts >= '{{ cursor_value }}'",
+            tmp_path,
+            _profile(),
+            cursor_field="ts",
+            last_cursor_value=None,
+        )
 
 
 def test_no_template_still_uses_auto_inject(tmp_path: Path) -> None:

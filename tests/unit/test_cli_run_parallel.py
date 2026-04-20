@@ -102,6 +102,8 @@ class _FakeResult:
         self.failed = failed
         self.rows_extracted = success if rows_extracted is None else rows_extracted
         self.row_errors: list[Any] = []
+        self.watermark_source: str | None = None
+        self.cursor_value_used: str | None = None
 
 
 @pytest.fixture

@@ -321,6 +321,11 @@ def run(
         ),
         click_type=click.Choice(["text", "json"]),
     ),
+    cursor_value: str = typer.Option(
+        None,
+        "--cursor-value",
+        help="Override cursor/watermark value for incremental syncs (backfill/recovery).",
+    ),
 ) -> None:
     """Run sync(s) defined in the project.
 
@@ -377,6 +382,21 @@ def run(
                 print_error(f"No sync named '{select}' found.")
                 raise typer.Exit(1)
 
+    if cursor_value is not None:
+        incremental = [s for s in syncs if s.sync.mode == "incremental"]
+        if not incremental:
+            print_error(
+                "--cursor-value is only valid for incremental syncs,"
+                " but no selected syncs are incremental."
+            )
+            raise typer.Exit(1)
+        non_incremental = [s for s in syncs if s.sync.mode != "incremental"]
+        if non_incremental and not json_mode:
+            console.print(
+                f"[yellow]Warning: --cursor-value will be ignored for non-incremental "
+                f"syncs: {', '.join(s.name for s in non_incremental)}[/yellow]"
+            )
+
     source = _get_source(profile)
     state_mgr = StateManager(Path("."))
     json_results: list[dict[str, object]] = []
@@ -403,6 +423,7 @@ def run(
                 dry_run,
                 state_mgr,
                 watermark_storage=wm_storage,
+                cursor_value_override=cursor_value if sync.sync.mode == "incremental" else None,
             )
         except Exception as e:
             elapsed = round(time.monotonic() - t0, 2)
@@ -446,6 +467,10 @@ def run(
             "duration_seconds": elapsed,
             "dry_run": dry_run,
         }
+        if result.watermark_source:
+            entry["watermark_source"] = result.watermark_source
+        if result.cursor_value_used is not None:
+            entry["cursor_value_used"] = result.cursor_value_used
         if log_format == "json":
             logging.info(
                 "sync_complete",
@@ -493,6 +518,27 @@ def run(
     if not json_mode and len(syncs) > 1:
         console.print(f"\n[bold]Summary:[/bold] {succeeded} succeeded, {failed} failed, "
                        f"{total_duration}s total")
+
+    # Watermark source summary (#391)
+    if not json_mode:
+        default_syncs = [
+            e for e in json_results if e.get("watermark_source") == "default_value"
+        ]
+        override_syncs = [
+            e for e in json_results if e.get("watermark_source") == "cli_override"
+        ]
+        if default_syncs:
+            names = ", ".join(str(e["name"]) for e in default_syncs)
+            console.print(
+                f"\n[yellow]Note: {len(default_syncs)} sync(s) used watermark.default_value "
+                f"(first run): {names}[/yellow]"
+            )
+        if override_syncs:
+            names = ", ".join(str(e["name"]) for e in override_syncs)
+            console.print(
+                f"\n[cyan]Note: {len(override_syncs)} sync(s) used --cursor-value "
+                f"override: {names}[/cyan]"
+            )
 
     if json_mode:
         print(
