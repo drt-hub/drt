@@ -116,6 +116,7 @@ class RestApiDestinationConfig(BaseModel):
     def describe(self) -> str:
         return f"{self.type} ({self.url})"
 
+
 class SlackDestinationConfig(BaseModel):
     type: Literal["slack"]
     webhook_url: str | None = None

@@ -187,6 +187,7 @@ class RestApiDestination:
                     response = with_retry(do_request, sync_options.retry)
 
                     # Extract records from response
+                    records_count_before = len(all_records)
                     data = response.json()
                     if isinstance(data, list):
                         all_records.extend(data)
@@ -200,8 +201,8 @@ class RestApiDestination:
                     # Determine next page
                     if isinstance(pagination, OffsetPaginationConfig):
                         # Stop if fewer records than limit (no next page)
-                        page_count = len(all_records) - (page * pagination.limit)
-                        if page_count < pagination.limit:
+                        page_record_count = len(all_records) - records_count_before
+                        if page_record_count < pagination.limit:
                             break
                     elif isinstance(pagination, CursorPaginationConfig):
                         # Extract next cursor from response
