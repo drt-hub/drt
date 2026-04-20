@@ -21,6 +21,15 @@ from __future__ import annotations
 import json
 from typing import Any
 
+
+def _serialize_value(value: Any) -> Any:
+    """Wrap dict values so psycopg2 can adapt them for JSONB columns."""
+    if isinstance(value, dict):
+        from psycopg2.extras import Json
+
+        return Json(value)
+    return value
+
 from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, PostgresDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
@@ -120,7 +129,7 @@ class PostgresDestination:
 
         for i, record in enumerate(records):
             try:
-                values = [record.get(c) for c in columns]
+                values = [_serialize_value(record.get(c)) for c in columns]
                 cur.execute(sql, values)
                 result.success += 1
             except Exception as e:
@@ -166,7 +175,7 @@ class PostgresDestination:
 
         for i, record in enumerate(records):
             try:
-                values = [record.get(c) for c in columns]
+                values = [_serialize_value(record.get(c)) for c in columns]
                 cur.execute(sql, values)
                 result.success += 1
             except Exception as e:

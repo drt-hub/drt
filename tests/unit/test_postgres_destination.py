@@ -191,6 +191,65 @@ class TestPostgresDestinationLoad:
 
 
 # ---------------------------------------------------------------------------
+# Value serialization
+# ---------------------------------------------------------------------------
+
+
+class TestSerializeValue:
+    def test_dict_wrapped_as_json(self) -> None:
+        from drt.destinations.postgres import _serialize_value
+        from unittest.mock import patch
+
+        val = {"lang": "ja"}
+        with patch("psycopg2.extras.Json") as MockJson:
+            mock_json = MockJson.return_value
+            result = _serialize_value(val)
+            MockJson.assert_called_once_with(val)
+            assert result is mock_json
+
+    def test_non_dict_passthrough(self) -> None:
+        from drt.destinations.postgres import _serialize_value
+
+        assert _serialize_value("hello") == "hello"
+        assert _serialize_value(42) == 42
+        assert _serialize_value(None) is None
+        assert _serialize_value([1, 2, 3]) == [1, 2, 3]
+
+
+class TestPostgresDestinationDictValues:
+    """Regression test: dict values bound to JSONB columns must not crash."""
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_dict_value_serialized_in_upsert(self, mock_connect: MagicMock) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        records = [{"id": 1, "profile": {"lang": "ja"}}]
+        result = PostgresDestination().load(records, _config(), _options())
+
+        assert result.success == 1
+        # Verify the value passed to execute is a Json wrapper, not a raw dict
+        call_args = cur.execute.call_args[0][1]
+        assert call_args[1].__class__.__name__ == "Json"
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_dict_value_serialized_in_replace(self, mock_connect: MagicMock) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        records = [{"id": 1, "profile": {"lang": "ja"}}]
+        result = PostgresDestination().load(
+            records, _config(), _options(mode="replace")
+        )
+
+        assert result.success == 1
+        call_args = cur.execute.call_args_list[1][0][1]  # second execute (after TRUNCATE)
+        assert call_args[1].__class__.__name__ == "Json"
+
+
+# ---------------------------------------------------------------------------
 # Replace mode
 # ---------------------------------------------------------------------------
 
