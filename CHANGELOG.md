@@ -37,9 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+## [0.6.2] - 2026-04-20
 
-- **`${VAR}` env substitution in sync YAML** (#385): Environment variable placeholders now work in all string fields of sync YAML (e.g. `watermark.bucket`, `destination.url`), not just `model:` SQL. Also shipped in [0.6.1](#061---2026-04-20).
+### Added
+
+- **`watermark.default_value`** (#390): Configure a fallback cursor value for first-run incremental syncs. Prevents broken SQL (e.g. `WHERE TIMESTAMP(...) >= TIMESTAMP('')`) when no watermark file exists yet. Without a default, drt now raises a clear error with actionable guidance instead of silently rendering an empty string.
+- **`--cursor-value` CLI option** (#390): Override the cursor/watermark value at runtime for backfill and recovery scenarios. The override takes highest priority in the fallback chain and the resulting watermark is persisted on success.
+- **Watermark source observability** (#391): Operators can now see *where* the cursor value came from — `storage`, `default_value`, or `cli_override` — via structured INFO logs, `--output json` fields (`watermark_source`, `cursor_value_used`), and an end-of-run summary in text mode.
 
 ## [0.6.1] - 2026-04-20
 

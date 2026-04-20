@@ -115,17 +115,25 @@ drt status          # check results
 ```bash
 drt init                    # initialize project
 drt list                    # list sync definitions
+drt sources                 # list available source connectors
+drt destinations            # list available destination connectors
 drt run                     # run all syncs
 drt run --select <name>     # run a specific sync
+drt run --all               # discover and run all syncs
+drt run --select tag:<tag>  # run syncs matching a tag
+drt run --threads 4         # parallel sync execution
 drt run --dry-run           # dry run
 drt run --verbose           # show row-level error details
 drt run --output json       # structured JSON output for CI/scripting
+drt run --log-format json   # structured JSON logging to stderr
 drt run --profile prd       # override profile (or DRT_PROFILE env var)
+drt run --cursor-value '…'  # override watermark cursor for backfill
 drt test                    # run post-sync validation tests
 drt test --select <name>    # test a specific sync
 drt validate                # validate sync YAML configs
 drt status                  # show recent sync status
 drt status --output json    # JSON output for status
+drt serve                   # start HTTP webhook endpoint
 drt mcp run                 # start MCP server (requires drt-core[mcp])
 drt --install-completion    # install shell completion (bash/zsh/fish)
 drt --show-completion       # show completion script
@@ -182,6 +190,7 @@ drt mcp run
 | `drt_get_status` | Get last run result(s) |
 | `drt_validate` | Validate sync YAML configs |
 | `drt_get_schema` | Return JSON Schema for config files |
+| `drt_list_connectors` | List available sources and destinations |
 
 ---
 
@@ -249,8 +258,12 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | Jira | ✅ v0.5 | (core) | Basic (email + API token) |
 | Linear | ✅ v0.5 | (core) | API Key (env var) |
 | SendGrid | ✅ v0.5 | (core) | API Key (env var) |
-| Salesforce | 🗓 v0.6 | `pip install drt-core[salesforce]` | — |
-| Notion | 🗓 planned | (core) | — |
+| Notion | ✅ v0.6 | (core) | Bearer Token (env var) |
+| Twilio SMS | ✅ v0.6 | (core) | Basic (Account SID + Auth Token) |
+| Intercom | ✅ v0.6 | (core) | Bearer Token (env var) |
+| Email SMTP | ✅ v0.6 | (core) | Username / Password (env var) |
+| Salesforce Bulk API 2.0 | ✅ v0.6 | (core) | OAuth2 (username-password) |
+| Staged Upload | ✅ v0.6 | (core) | Configurable per provider |
 
 ### Integrations
 
@@ -276,7 +289,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | **v0.4** ✅ | Google Sheets / PostgreSQL / MySQL destinations · dagster-drt · dbt manifest reader · type safety overhaul |
 | **v0.5** ✅ | Snowflake / MySQL sources · ClickHouse / Parquet / Teams / CSV+JSON / Jira / Linear / SendGrid destinations · `drt test` · `--output json` · `--profile` · `${VAR}` substitution · dbt manifest · secrets.toml · Docker |
 | **v0.5.4** ✅ | `destination_lookup` — resolve FK values by querying destination DB during sync (MySQL / Postgres / ClickHouse) |
-| [v0.6](https://github.com/drt-hub/drt/milestone/3) | Salesforce · Airflow integration · Twilio / Intercom destinations |
+| **v0.6** ✅ | Databricks / SQL Server sources · Notion / Twilio / Intercom / Email SMTP / Salesforce Bulk / Staged Upload destinations · Airflow / Prefect integrations · `drt serve` · `drt sources` / `drt destinations` · `--threads` parallel execution · `--log-format json` · `--cursor-value` · `watermark.default_value` · test validators (freshness, unique, accepted_values) · JSON Schema validation · GOVERNANCE.md |
 | [v0.7](https://github.com/drt-hub/drt/milestone/4) | DWH destinations (Snowflake / BigQuery / ClickHouse / Databricks) · Cloud storage (S3 / GCS / Azure Blob) |
 | [v0.8](https://github.com/drt-hub/drt/milestone/5) | Lakehouse sources (Delta Lake / Apache Iceberg) |
 | v1.x | Rust engine (PyO3) |
