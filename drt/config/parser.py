@@ -2,13 +2,49 @@
 
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import yaml
 from pydantic import ValidationError
 
 from drt.config.models import ProjectConfig, SyncConfig
+
+_ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
+
+
+def _expand_env_vars_in_str(value: str) -> str:
+    """Expand ``${VAR}`` placeholders in a single string.
+
+    Raises ``ValueError`` if a referenced variable is not set.
+    """
+
+    def _replace(match: re.Match[str]) -> str:
+        var = match.group(1)
+        val = os.environ.get(var)
+        if val is None:
+            raise ValueError(f"Environment variable ${{{var}}} is not set")
+        return val
+
+    return _ENV_VAR_PATTERN.sub(_replace, value)
+
+
+def expand_env_vars(data: Any) -> Any:
+    """Recursively expand ``${VAR}`` in all string values of a parsed YAML tree.
+
+    Dicts, lists, and nested structures are walked. Non-string leaves
+    are returned unchanged.  Raises ``ValueError`` for unset variables.
+    """
+    if isinstance(data, str):
+        return _expand_env_vars_in_str(data)
+    if isinstance(data, dict):
+        return {k: expand_env_vars(v) for k, v in data.items()}
+    if isinstance(data, list):
+        return [expand_env_vars(item) for item in data]
+    return data
 
 
 @dataclass
@@ -52,6 +88,7 @@ def load_syncs(project_dir: Path = Path(".")) -> list[SyncConfig]:
     for path in sorted(syncs_dir.glob("*.yml")):
         with path.open() as f:
             data = yaml.safe_load(f)
+        data = expand_env_vars(data)
         syncs.append(SyncConfig.model_validate(data))
     return syncs
 
@@ -66,7 +103,11 @@ def load_syncs_safe(project_dir: Path = Path(".")) -> SyncLoadResult:
         with path.open() as f:
             data = yaml.safe_load(f)
         try:
+            data = expand_env_vars(data)
             result.syncs.append(SyncConfig.model_validate(data))
-        except ValidationError as e:
-            result.errors[path.stem] = _format_validation_errors(e)
+        except (ValidationError, ValueError) as e:
+            if isinstance(e, ValidationError):
+                result.errors[path.stem] = _format_validation_errors(e)
+            else:
+                result.errors[path.stem] = [str(e)]
     return result
