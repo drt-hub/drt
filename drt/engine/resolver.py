@@ -110,8 +110,13 @@ def resolve_model_ref(
     base_sql = _expand_env_vars(base_sql)
 
     # Render {{ cursor_value }} / {{ watermark }} template if present
-    if _has_cursor_template(base_sql):
-        return _render_cursor_template(base_sql, last_cursor_value or "")
+    if has_cursor_template(base_sql):
+        if last_cursor_value is None:
+            raise ValueError(
+                "Cannot render cursor template: no cursor value provided. "
+                "Set watermark.default_value in your sync config or use --cursor-value."
+            )
+        return _render_cursor_template(base_sql, last_cursor_value)
 
     # Inject incremental WHERE clause when cursor info is available
     if cursor_field and last_cursor_value:
@@ -129,7 +134,7 @@ def resolve_model_ref(
 _CURSOR_TEMPLATE_PATTERN = re.compile(r"\{\{\s*(cursor_value|watermark)\s*\}\}")
 
 
-def _has_cursor_template(sql: str) -> bool:
+def has_cursor_template(sql: str) -> bool:
     """Check if SQL contains {{ cursor_value }} or {{ watermark }}."""
     return bool(_CURSOR_TEMPLATE_PATTERN.search(sql))
 
@@ -160,6 +165,10 @@ def _expand_env_vars(sql: str) -> str:
     """Expand ``${VAR}`` placeholders with environment variable values.
 
     Raises ``ValueError`` if a referenced variable is not set.
+
+    .. note::
+        For generic (non-SQL) expansion across YAML config trees,
+        see :func:`drt.config.parser.expand_env_vars`.
     """
 
     def _replace(match: re.Match[str]) -> str:

@@ -51,8 +51,20 @@ def print_sync_start(sync_name: str, dry_run: bool) -> None:
     console.print(f"\n[bold]→ {sync_name}[/bold]{tag}")
 
 
-def print_dry_run_summary(sync: SyncConfig, profile: ProfileConfig, rows: int) -> None:
-    """Print a summary of what would be synced during a dry run."""
+def print_dry_run_summary(
+    sync: SyncConfig,
+    profile: ProfileConfig,
+    rows: int,
+    destination: object | None = None,
+) -> None:
+    """Print a summary of what would be synced during a dry run.
+
+    Args:
+        sync: Sync configuration.
+        profile: Source profile configuration.
+        rows: Number of rows that would be synced from source.
+        destination: Destination instance (optional, used for row count in replace mode).
+    """
     from drt.engine.resolver import parse_ref
 
     source_desc = profile.describe()
@@ -71,6 +83,43 @@ def print_dry_run_summary(sync: SyncConfig, profile: ProfileConfig, rows: int) -
             "  [yellow]⚠ replace mode will TRUNCATE the destination table"
             " before inserting rows[/yellow]"
         )
+        # Show row count diff if destination is provided
+        if destination is not None:
+            _print_row_count_diff(sync, destination, rows)
+
+
+def _print_row_count_diff(sync: SyncConfig, destination: object, new_rows: int) -> None:
+    """Print current vs new row count for replace mode.
+
+    Args:
+        sync: Sync configuration.
+        destination: Destination instance.
+        new_rows: Number of new rows from source.
+    """
+    from drt.destinations.sql_utils import get_row_count_for_destination
+
+    try:
+        current_rows = get_row_count_for_destination(destination, sync.destination)
+        if current_rows is not None:
+            diff = new_rows - current_rows
+            diff_str = f"{diff:+d}" if diff != 0 else "0"
+            if diff > 0:
+                diff_color = "green"
+            elif diff < 0:
+                diff_color = "red"
+            else:
+                diff_color = "dim"
+            console.print(
+                f"  Current destination rows: {current_rows} "
+                f"→ New: {new_rows} "
+                f"([{diff_color}]{diff_str}[/{diff_color}])"
+            )
+    except Exception as e:
+        # Silently skip row count if unable to connect (not a blocking error)
+        console.print(
+            f"  [dim](Could not retrieve current row count: {type(e).__name__})[/dim]"
+        )
+
 
 
 def print_sync_result(sync_name: str, result: SyncResult, elapsed: float) -> None:
@@ -115,10 +164,15 @@ def print_sync_table(syncs: list[SyncConfig]) -> None:
     table.add_column("description", style="dim")
 
     for sync in syncs:
+        dest_label = (
+            sync.destination.describe()
+            if hasattr(sync.destination, "describe")
+            else sync.destination.type
+        )
         table.add_row(
             sync.name,
             sync.model,
-            f"{sync.destination.type}",
+            dest_label,
             sync.sync.mode,
             sync.description or "",
         )

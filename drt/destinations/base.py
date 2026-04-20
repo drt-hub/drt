@@ -26,6 +26,9 @@ class SyncResult:
     row_errors: list[RowError] = field(default_factory=list)
     # Populated by run_sync(); covers full sync, not individual batches.
     duration_seconds: float | None = None
+    # Watermark observability (#390 / #391)
+    watermark_source: str | None = None  # "cli_override" | "storage" | "default_value"
+    cursor_value_used: str | None = None
 
     @property
     def total(self) -> int:
