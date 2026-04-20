@@ -535,3 +535,36 @@ class TestFetchPaginatedErrorHandling:
 
             # Should return empty list on error
             assert result == []
+
+    def test_fetch_paginated_keyerror_stops(
+        self, rest_api_destination, base_config, sync_options
+    ):
+        """Stop pagination gracefully on KeyError during response processing."""
+        config = RestApiDestinationConfig(
+            **{
+                **base_config.model_dump(),
+                "pagination": CursorPaginationConfig(
+                    type="cursor",
+                    limit=10,
+                    cursor_param="cursor",
+                    limit_param="limit",
+                    cursor_field="next_cursor",
+                    max_pages=100,
+                ),
+            }
+        )
+
+        # Response missing the cursor_field
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"data": [{"id": 1}]}  # No cursor_field
+        mock_response.headers = {}
+
+        with patch("drt.destinations.rest_api.httpx.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client_class.return_value.__enter__.return_value = mock_client
+            mock_client.request.return_value = mock_response
+
+            result = rest_api_destination.fetch_paginated(config, {}, sync_options)
+
+            # Should return first page and stop
+            assert len(result) == 1
