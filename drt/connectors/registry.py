@@ -156,6 +156,7 @@ def _register_all_connectors() -> None:
         ParquetDestinationConfig,
         PostgresDestinationConfig,
         RestApiDestinationConfig,
+        SalesforceBulkDestinationConfig,
         SendGridDestinationConfig,
         SlackDestinationConfig,
         StagedUploadDestinationConfig,
@@ -180,6 +181,7 @@ def _register_all_connectors() -> None:
     from drt.destinations.parquet import ParquetDestination
     from drt.destinations.postgres import PostgresDestination
     from drt.destinations.rest_api import RestApiDestination
+    from drt.destinations.salesforce_bulk import SalesforceBulkDestination
     from drt.destinations.sendgrid import SendGridDestination
     from drt.destinations.slack import SlackDestination
     from drt.destinations.staged_upload import StagedUploadDestination
@@ -218,6 +220,7 @@ def _register_all_connectors() -> None:
     register_destination("linear", LinearDestinationConfig, LinearDestination)
     register_destination("google_ads", GoogleAdsDestinationConfig, GoogleAdsDestination)
     register_destination("notion", NotionDestinationConfig, NotionDestination)
+    register_destination("salesforce_bulk", SalesforceBulkDestinationConfig, SalesforceBulkDestination)
     register_destination("staged_upload", StagedUploadDestinationConfig, StagedUploadDestination)
     register_destination("intercom", IntercomDestinationConfig, IntercomDestination)
 
