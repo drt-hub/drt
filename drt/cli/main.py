@@ -717,6 +717,7 @@ def test_syncs(
 ) -> None:
     """Run post-sync validation tests."""
     import json as json_mod
+
     from drt.config.parser import load_syncs
     from drt.destinations.query import (
         execute_test_query,
@@ -777,19 +778,27 @@ def test_syncs(
                 passed = check(result_val)
                 if not json_mode:
                     print_test_result(test_name, passed, str(result_val))
-                sync_results["tests"].append({"name": test_name, "passed": passed, "value": str(result_val)})
+                sync_results["tests"].append(
+                    {"name": test_name, "passed": passed, "value": str(result_val)}
+                )
                 if not passed:
                     had_failures = True
             except Exception as e:
                 if not json_mode:
                     print_test_result(test_name, False, str(e))
-                sync_results["tests"].append({"name": test_name, "passed": False, "error": str(e)})
+                sync_results["tests"].append(
+                    {"name": test_name, "passed": False, "error": str(e)}
+                )
                 had_failures = True
         
         results.append(sync_results)
 
     if json_mode:
-        print(json_mod.dumps({"status": "failed" if had_failures else "passed", "results": results}))
+        print(
+            json_mod.dumps(
+                {"status": "failed" if had_failures else "passed", "results": results}
+            )
+        )
     if had_failures:
         raise typer.Exit(1)
 
