@@ -8,7 +8,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import click
 import typer
@@ -710,6 +710,15 @@ def status(
 # ---------------------------------------------------------------------------
 
 
+class _SyncTestResult(TypedDict, total=False):
+    """Type hint for test result dict in JSON output."""
+
+    sync: str
+    tests: list[dict[str, object]]
+    skipped: bool
+    reason: str
+
+
 @app.command(name="test")
 def test_syncs(
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
@@ -727,7 +736,7 @@ def test_syncs(
     from drt.engine.test_runner import build_test_query
 
     json_mode = output == "json"
-    results = []
+    results: list[_SyncTestResult] = []
 
     syncs = load_syncs(Path("."))
     if not syncs:
@@ -756,7 +765,7 @@ def test_syncs(
     for sync in syncs_with_tests:
         if not json_mode:
             print_test_header(sync.name)
-        sync_results = {"sync": sync.name, "tests": []}
+        sync_results: _SyncTestResult = {"sync": sync.name, "tests": []}
 
         if not is_queryable(sync.destination):
             if not json_mode:
