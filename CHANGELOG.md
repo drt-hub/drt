@@ -37,6 +37,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Connector registry** (#381): Replaced hardcoded `isinstance` chains in `_get_destination()` / `_get_source()` with a centralized registry (`drt/connectors/registry.py`). Adding a new connector no longer requires editing `main.py`. Error messages now list available connectors on typo. Contributed by @Muawiya-contact.
+- **REST API destination pagination** (#260): Fetch data from paginated APIs. 3 strategies: offset/limit, cursor-based, HTTP Link headers. Contributed by @Muawiya-contact.
+
+### Fixed
+
+- **PostgreSQL destination**: crash on `dict` values bound for JSONB columns — wrapped with `psycopg2.extras.Json` (#315). Contributed by @armorbreak001.
+
 ## [0.6.2] - 2026-04-20
 
 ### Added

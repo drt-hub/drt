@@ -24,6 +24,7 @@ Key design principle: **module boundaries are drawn for future Rust rewrite (PyO
 drt/
 ├── cli/          # Typer CLI commands
 ├── config/       # Pydantic models + YAML parser
+├── connectors/   # Connector registry — auto-discovery of sources/destinations
 ├── sources/      # Source Protocol + BigQuery impl
 ├── destinations/ # Destination Protocol + REST API impl
 ├── engine/       # Sync orchestration (future Rust core)
@@ -37,7 +38,7 @@ drt/
 - `Destination.load(records: list[dict], config: DestinationConfig, sync_options: SyncOptions) -> SyncResult`
 - `StateManager.get_last_sync / save_sync`
 
-Implementations use `assert isinstance(config, SpecificConfig)` for type narrowing. `type: ignore` is only allowed for external library issues.
+Connector dispatch uses a centralized registry (`drt/connectors/registry.py`) — adding a new connector requires registering it there, not editing `main.py`. Implementations use `assert isinstance(config, SpecificConfig)` for type narrowing. `type: ignore` is only allowed for external library issues.
 
 ## Development Commands
 
