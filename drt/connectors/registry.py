@@ -220,7 +220,9 @@ def _register_all_connectors() -> None:
     register_destination("linear", LinearDestinationConfig, LinearDestination)
     register_destination("google_ads", GoogleAdsDestinationConfig, GoogleAdsDestination)
     register_destination("notion", NotionDestinationConfig, NotionDestination)
-    register_destination("salesforce_bulk", SalesforceBulkDestinationConfig, SalesforceBulkDestination)
+    register_destination(
+        "salesforce_bulk", SalesforceBulkDestinationConfig, SalesforceBulkDestination
+    )
     register_destination("staged_upload", StagedUploadDestinationConfig, StagedUploadDestination)
     register_destination("intercom", IntercomDestinationConfig, IntercomDestination)
 
