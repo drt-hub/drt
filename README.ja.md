@@ -1,4 +1,4 @@
-<!-- i18n-sync: base=README.md, hash=da09e7fded81c276bc17449c8eae4feea3a4afe4 -->
+<!-- i18n-sync: base=README.md, hash=0babbe59b23c1d1fc0a0936e4446b7b25fd01bff -->
 
 [English](./README.md) | [日本語](./README.ja.md)
 
@@ -117,17 +117,42 @@ drt status          # check results
 ## CLIリファレンス
 
 ```bash
-drt init                    # initialize project
-drt list                    # list sync definitions
-drt run                     # run all syncs
-drt run --select <name>     # run a specific sync
-drt run --dry-run           # dry run
-drt run --verbose           # show row-level error details
-drt validate                # validate sync YAML configs
-drt status                  # show recent sync status
-drt status --verbose        # show per-row error details
-drt mcp run                 # start MCP server (requires drt-core[mcp])
+drt init                    # プロジェクトの初期化
+drt list                    # 同期定義の一覧
+drt run                     # 全同期を実行
+drt run --select <name>     # 特定の同期を実行
+drt run --dry-run           # ドライラン
+drt run --verbose           # 行レベルのエラー詳細を表示
+drt run --output json       # CI/スクリプト向け構造化JSON出力
+drt run --profile prd       # プロファイル切り替え（DRT_PROFILE環境変数でも可）
+drt test                    # 同期後の検証テストを実行
+drt test --select <name>    # 特定の同期テストを実行
+drt validate                # 同期YAML設定を検証
+drt status                  # 直近の同期ステータスを表示
+drt status --output json    # JSON形式でステータスを出力
+drt mcp run                 # MCPサーバーを起動（drt-core[mcp]が必要）
+drt serve                   # HTTPウェブフックエンドポイントを起動
+drt --install-completion    # シェル補完をインストール（bash/zsh/fish）
+drt --show-completion       # 補完スクリプトを表示
 ```
+
+### シェル補完
+
+bash、zsh、fishのシェル補完に対応しています：
+
+```bash
+# 推奨：現在のシェルに自動インストール（冪等）
+drt --install-completion
+
+# 手動でシェル設定に追加（対象シェルから一度だけ実行）
+drt --show-completion >> ~/.bashrc   # bash
+drt --show-completion >> ~/.zshrc    # zsh
+drt --show-completion > ~/.config/fish/completions/drt.fish  # fish
+```
+
+> **注意:** `--show-completion` は*現在のシェル*用のスクリプトを出力します。設定したいシェルから実行してください。手動の `>>` 追記は冪等ではありません — 一度だけ実行してください。
+
+インストール後、シェルを再起動するとコマンドやオプションのタブ補完が利用可能になります。
 
 ---
 
@@ -194,36 +219,55 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 
 ## コネクタ
 
-| 種類 | 名前 | ステータス | インストール |
-|------|------|--------|---------|
-| **Source** | BigQuery | ✅ v0.1 | `pip install drt-core[bigquery]` |
-| **Source** | DuckDB | ✅ v0.1 | (core) |
-| **Source** | PostgreSQL | ✅ v0.1 | `pip install drt-core[postgres]` |
-| **Source** | Snowflake | ✅ v0.5 | `pip install drt-core[snowflake]` |
-| **Source** | SQLite | ✅ v0.4.2 | (core) |
-| **Source** | Redshift | ✅ v0.3.4 | `pip install drt-core[redshift]` |
-| **Source** | ClickHouse | ✅ v0.4.3 | `pip install drt-core[clickhouse]` |
-| **Source** | MySQL | ✅ v0.5 | `pip install drt-core[mysql]` |
-| **Destination** | REST API | ✅ v0.1 | (core) |
-| **Destination** | Slack Incoming Webhook | ✅ v0.1 | (core) |
-| **Destination** | Discord Webhook | ✅ v0.4.2 | (core) |
-| **Destination** | Microsoft Teams Webhook | ✅ v0.5 | (core) |
-| **Destination** | GitHub Actions (workflow_dispatch) | ✅ v0.1 | (core) |
-| **Destination** | HubSpot (Contacts / Deals / Companies) | ✅ v0.1 | (core) |
-| **Destination** | Google Sheets | ✅ v0.4 | `pip install drt-core[sheets]` |
-| **Destination** | PostgreSQL (upsert) | ✅ v0.4 | `pip install drt-core[postgres]` |
-| **Destination** | MySQL (upsert) | ✅ v0.4 | `pip install drt-core[mysql]` |
-| **Destination** | ClickHouse | ✅ v0.5 | `pip install drt-core[clickhouse]` |
-| **Destination** | Parquet file | ✅ v0.5 | `pip install drt-core[parquet]` |
-| **Destination** | CSV / JSON / JSONL file | ✅ v0.5 | (core) |
-| **Destination** | Jira | ✅ v0.5 | (core) |
-| **Destination** | Linear | ✅ v0.5 | (core) |
-| **Destination** | SendGrid | ✅ v0.5 | (core) |
-| **Destination** | Salesforce | 🗓 v0.6 | `pip install drt-core[salesforce]` |
-| **Destination** | Notion | 🗓 planned | (core) |
-| **Integration** | Dagster | ✅ v0.4 | `pip install dagster-drt` |
-| **Integration** | Airflow | 🗓 v0.6 | `pip install airflow-drt` |
-| **Integration** | dbt manifest reader | ✅ v0.4 | (core) |
+### ソース
+
+| コネクタ | ステータス | インストール | 認証 |
+|-----------|--------|---------|------|
+| BigQuery | ✅ v0.1 | `pip install drt-core[bigquery]` | Application Default / Service Account Keyfile |
+| DuckDB | ✅ v0.1 | (core) | ファイルパス |
+| PostgreSQL | ✅ v0.1 | `pip install drt-core[postgres]` | パスワード（環境変数） |
+| Snowflake | ✅ v0.5 | `pip install drt-core[snowflake]` | パスワード（環境変数） |
+| SQLite | ✅ v0.4.2 | (core) | ファイルパス |
+| Redshift | ✅ v0.3.4 | `pip install drt-core[redshift]` | パスワード（環境変数） |
+| ClickHouse | ✅ v0.4.3 | `pip install drt-core[clickhouse]` | パスワード（環境変数） |
+| MySQL | ✅ v0.5 | `pip install drt-core[mysql]` | パスワード（環境変数） |
+| Databricks | ✅ v0.6 | `pip install drt-core[databricks]` | Access Token（環境変数） |
+| SQL Server | ✅ v0.6 | `pip install drt-core[sqlserver]` | パスワード（環境変数） |
+
+### デスティネーション
+
+| コネクタ | ステータス | インストール | 認証 |
+|-----------|--------|---------|------|
+| REST API | ✅ v0.1 | (core) | Bearer / API Key / Basic / OAuth2 |
+| Slack Incoming Webhook | ✅ v0.1 | (core) | Webhook URL |
+| Discord Webhook | ✅ v0.4.2 | (core) | Webhook URL |
+| GitHub Actions | ✅ v0.1 | (core) | Token（環境変数） |
+| HubSpot | ✅ v0.1 | (core) | Token（環境変数） |
+| Google Ads | ✅ v0.6 | (core) | OAuth2 Client Credentials |
+| Google Sheets | ✅ v0.4 | `pip install drt-core[sheets]` | Service Account Keyfile |
+| PostgreSQL (upsert) | ✅ v0.4 | `pip install drt-core[postgres]` | パスワード（環境変数） |
+| MySQL (upsert) | ✅ v0.4 | `pip install drt-core[mysql]` | パスワード（環境変数） |
+| ClickHouse | ✅ v0.5 | `pip install drt-core[clickhouse]` | パスワード（環境変数） |
+| Parquet file | ✅ v0.5 | `pip install drt-core[parquet]` | ファイルパス |
+| Microsoft Teams Webhook | ✅ v0.5 | (core) | Webhook URL |
+| CSV / JSON / JSONL file | ✅ v0.5 | (core) | ファイルパス |
+| Jira | ✅ v0.5 | (core) | Basic（メール + APIトークン） |
+| Linear | ✅ v0.5 | (core) | API Key（環境変数） |
+| SendGrid | ✅ v0.5 | (core) | API Key（環境変数） |
+| Notion | ✅ v0.6 | (core) | Bearer Token（環境変数） |
+| Twilio SMS | ✅ v0.6 | (core) | Basic（Account SID + Auth Token） |
+| Intercom | ✅ v0.6 | (core) | Bearer Token（環境変数） |
+| Email SMTP | ✅ v0.6 | (core) | ユーザー名/パスワード（環境変数） |
+| Salesforce | 🗓 v0.6 | `pip install drt-core[salesforce]` | — |
+
+### インテグレーション
+
+| コネクタ | ステータス | インストール |
+|-----------|--------|---------|
+| Dagster | ✅ v0.4 | `pip install dagster-drt` |
+| Prefect | ✅ v0.6 | (core) |
+| Airflow | ✅ v0.6 | (core) |
+| dbt manifest reader | ✅ v0.4 | (core) |
 
 ---
 
@@ -238,7 +282,8 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | **v0.2** ✅ | Incremental sync (`cursor_field` watermark) · retry config per-sync |
 | **v0.3** ✅ | MCP Server (`drt mcp run`) · AI Skills for Claude Code · LLM-readable docs · row-level errors · security hardening · Redshift source |
 | **v0.4** ✅ | Google Sheets / PostgreSQL / MySQL destinations · dagster-drt · dbt manifest reader · type safety overhaul |
-| **v0.5** ✅ | Snowflake / MySQL sources · ClickHouse / Parquet / Teams / CSV+JSON / Jira / Linear / SendGrid destinations · `drt test` · `--output json` · `--profile` · Docker |
+| **v0.5** ✅ | Snowflake / MySQL sources · ClickHouse / Parquet / Teams / CSV+JSON / Jira / Linear / SendGrid destinations · `drt test` · `--output json` · `--profile` · `${VAR}` 環境変数展開 · dbt manifest · secrets.toml · Docker |
+| **v0.5.4** ✅ | `destination_lookup` — 同期中にデスティネーションDBからFK値を解決（MySQL / Postgres / ClickHouse） |
 | [v0.6](https://github.com/drt-hub/drt/milestone/3) | Salesforce · Airflow integration · Twilio / Intercom destinations |
 | [v0.7](https://github.com/drt-hub/drt/milestone/4) | DWH destinations (Snowflake / BigQuery / ClickHouse / Databricks) · Cloud storage (S3 / GCS / Azure Blob) |
 | [v0.8](https://github.com/drt-hub/drt/milestone/5) | Lakehouse sources (Delta Lake / Apache Iceberg) |

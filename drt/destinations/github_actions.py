@@ -87,6 +87,7 @@ class GitHubActionsDestination:
         result = SyncResult()
         # GitHub rate limit: 1000 workflow_dispatch/hour per repo — be conservative
         rate_limiter = RateLimiter(min(sync_options.rate_limit.requests_per_second, 5))
+        retry_config = sync_options.retry or _DEFAULT_RETRY
 
         with httpx.Client(timeout=30.0) as client:
             for i, record in enumerate(records):
@@ -102,7 +103,7 @@ class GitHubActionsDestination:
                         result.row_errors.append(
                             RowError(
                                 batch_index=i,
-                                record_preview=json.dumps(record)[:200],
+                                record_preview=json.dumps(record, default=str)[:200],
                                 http_status=None,
                                 error_message=f"inputs_template error: {e}",
                             )
@@ -123,27 +124,31 @@ class GitHubActionsDestination:
                     return response
 
                 try:
-                    with_retry(do_request, _DEFAULT_RETRY)
+                    with_retry(do_request, retry_config)
                     result.success += 1
                 except httpx.HTTPStatusError as e:
                     result.failed += 1
                     result.row_errors.append(
                         RowError(
                             batch_index=i,
-                            record_preview=json.dumps(record)[:200],
+                            record_preview=json.dumps(record, default=str)[:200],
                             http_status=e.response.status_code,
                             error_message=e.response.text[:500],
                         )
                     )
+                    if sync_options.on_error == "fail":
+                        break
                 except Exception as e:
                     result.failed += 1
                     result.row_errors.append(
                         RowError(
                             batch_index=i,
-                            record_preview=json.dumps(record)[:200],
+                            record_preview=json.dumps(record, default=str)[:200],
                             http_status=None,
                             error_message=str(e),
                         )
                     )
+                    if sync_options.on_error == "fail":
+                        break
 
         return result
