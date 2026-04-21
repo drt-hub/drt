@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from drt.config.models import DestinationConfig
 
 # Registry mappings: type_name -> (ConfigClass, ImplementationClass)
+# ConfigClass stored for future plugin validation — not used in lookup yet
 _destination_registry: dict[str, tuple[type[Any], type[Any]]] = {}
 _source_registry: dict[str, tuple[type[Any], type[Any]]] = {}
 
