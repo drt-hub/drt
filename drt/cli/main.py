@@ -681,8 +681,6 @@ def test_syncs(
     select: str = typer.Option(None, "--select", "-s", help="Test a specific sync by name."),
 ) -> None:
     """Run post-sync validation tests."""
-    import json as json_mod
-
     from drt.config.parser import load_syncs
     from drt.destinations.query import (
         execute_test_query,
@@ -699,7 +697,7 @@ def test_syncs(
         if not json_mode:
             console.print("[dim]No syncs found.[/dim]")
         else:
-            print(json_mod.dumps({"status": "no_syncs", "results": []}))
+            print(json.dumps({"status": "no_syncs", "results": []}))
         return
 
     if select:
@@ -713,7 +711,7 @@ def test_syncs(
         if not json_mode:
             console.print("[dim]No tests defined in any sync.[/dim]")
         else:
-            print(json_mod.dumps({"status": "no_tests", "results": []}))
+            print(json.dumps({"status": "no_tests", "results": []}))
         return
 
     had_failures = False
@@ -760,7 +758,7 @@ def test_syncs(
 
     if json_mode:
         print(
-            json_mod.dumps(
+            json.dumps(
                 {"status": "failed" if had_failures else "passed", "results": results}
             )
         )
