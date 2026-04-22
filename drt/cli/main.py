@@ -8,7 +8,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import click
 import typer
@@ -666,11 +666,23 @@ def status(
 # ---------------------------------------------------------------------------
 
 
+class _SyncTestResult(TypedDict, total=False):
+    """Type hint for test result dict in JSON output."""
+
+    sync: str
+    tests: list[dict[str, object]]
+    skipped: bool
+    reason: str
+
+
 @app.command(name="test")
 def test_syncs(
+    output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
     select: str = typer.Option(None, "--select", "-s", help="Test a specific sync by name."),
 ) -> None:
     """Run post-sync validation tests."""
+    import json as json_mod
+
     from drt.config.parser import load_syncs
     from drt.destinations.query import (
         execute_test_query,
@@ -679,9 +691,15 @@ def test_syncs(
     )
     from drt.engine.test_runner import build_test_query
 
+    json_mode = output == "json"
+    results: list[_SyncTestResult] = []
+
     syncs = load_syncs(Path("."))
     if not syncs:
-        console.print("[dim]No syncs found.[/dim]")
+        if not json_mode:
+            console.print("[dim]No syncs found.[/dim]")
+        else:
+            print(json_mod.dumps({"status": "no_syncs", "results": []}))
         return
 
     if select:
@@ -692,19 +710,28 @@ def test_syncs(
 
     syncs_with_tests = [s for s in syncs if s.tests]
     if not syncs_with_tests:
-        console.print("[dim]No tests defined in any sync.[/dim]")
+        if not json_mode:
+            console.print("[dim]No tests defined in any sync.[/dim]")
+        else:
+            print(json_mod.dumps({"status": "no_tests", "results": []}))
         return
 
     had_failures = False
 
     for sync in syncs_with_tests:
-        print_test_header(sync.name)
+        if not json_mode:
+            print_test_header(sync.name)
+        sync_results: _SyncTestResult = {"sync": sync.name, "tests": []}
 
         if not is_queryable(sync.destination):
-            print_test_skip(
-                sync.name,
-                f"tests not supported for {sync.destination.type} destinations",
-            )
+            if not json_mode:
+                print_test_skip(
+                    sync.name,
+                    f"tests not supported for {sync.destination.type} destinations",
+                )
+            sync_results["skipped"] = True
+            sync_results["reason"] = f"tests not supported for {sync.destination.type}"
+            results.append(sync_results)
             continue
 
         table = get_table_name(sync.destination)
@@ -714,13 +741,29 @@ def test_syncs(
                 query, check = build_test_query(test_def, table)
                 result_val = execute_test_query(sync.destination, query)
                 passed = check(result_val)
-                print_test_result(test_name, passed, str(result_val))
+                if not json_mode:
+                    print_test_result(test_name, passed, str(result_val))
+                sync_results["tests"].append(
+                    {"name": test_name, "passed": passed, "value": str(result_val)}
+                )
                 if not passed:
                     had_failures = True
             except Exception as e:
-                print_test_result(test_name, False, str(e))
+                if not json_mode:
+                    print_test_result(test_name, False, str(e))
+                sync_results["tests"].append(
+                    {"name": test_name, "passed": False, "error": str(e)}
+                )
                 had_failures = True
+        
+        results.append(sync_results)
 
+    if json_mode:
+        print(
+            json_mod.dumps(
+                {"status": "failed" if had_failures else "passed", "results": results}
+            )
+        )
     if had_failures:
         raise typer.Exit(1)
 
