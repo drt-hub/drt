@@ -294,7 +294,6 @@ def run(
     Use --select "*" or --select all to be explicit about running every sync.
     Use --threads N for parallel execution.
     """
-    import json as json_mod
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     from drt.config.credentials import load_profile
@@ -502,7 +501,7 @@ def run(
 
     if json_mode:
         print(
-            json_mod.dumps(
+            json.dumps(
                 {
                     "syncs": json_results,
                     "succeeded": succeeded,
@@ -527,7 +526,6 @@ def list_syncs(
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
 ) -> None:
     """List all sync definitions in the project."""
-    import json as json_mod
 
     from drt.config.parser import load_syncs
 
@@ -535,7 +533,7 @@ def list_syncs(
 
     if output == "json":
         print(
-            json_mod.dumps(
+            json.dumps(
                 {
                     "syncs": [
                         {
@@ -569,7 +567,6 @@ def validate(
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
 ) -> None:
     """Validate sync definitions against the JSON Schema."""
-    import json as json_mod
 
     from drt.config.parser import load_syncs_safe
     from drt.config.schema import write_schemas
@@ -585,7 +582,7 @@ def validate(
 
     if output == "json":
         print(
-            json_mod.dumps(
+            json.dumps(
                 {
                     "results": [{"name": s.name, "valid": True} for s in result.syncs]
                     + [
@@ -632,7 +629,6 @@ def status(
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
 ) -> None:
     """Show the status of the most recent sync runs."""
-    import json as json_mod
 
     from drt.state.manager import StateManager
 
@@ -640,7 +636,7 @@ def status(
 
     if output == "json":
         print(
-            json_mod.dumps(
+            json.dumps(
                 {
                     "syncs": [
                         {
