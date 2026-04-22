@@ -781,6 +781,14 @@ def _test_display_name(test_def: object) -> str:
     if test_def.not_null is not None:
         cols = ", ".join(test_def.not_null.columns)
         return f"not_null({cols})"
+    if test_def.freshness is not None:
+        return f"freshness({test_def.freshness.column}, max_age={test_def.freshness.max_age})"
+    if test_def.unique is not None:
+        cols = ", ".join(test_def.unique.columns)
+        return f"unique({cols})"
+    if test_def.accepted_values is not None:
+        vals = ", ".join(test_def.accepted_values.values)
+        return f"accepted_values({test_def.accepted_values.column}: {vals})"
     return "unknown"
 
 
