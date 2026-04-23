@@ -106,7 +106,8 @@ def test_drt_test_dry_run_shows_plan(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 
 def test_drt_test_dry_run_skips_non_queryable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test dry-run shows skip message for non-queryable destinations."""
     monkeypatch.chdir(tmp_path)
@@ -129,7 +130,8 @@ def test_drt_test_dry_run_skips_non_queryable(
 
 
 def test_drt_test_dry_run_json_output(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test dry-run with --output json produces valid JSON."""
     monkeypatch.chdir(tmp_path)
@@ -150,6 +152,7 @@ def test_drt_test_dry_run_json_output(
     result = runner.invoke(app, ["test", "--dry-run", "--output", "json"])
     assert result.exit_code == 0
     import json
+
     data = json.loads(result.output)
     assert data["dry_run"] is True
     assert len(data["results"]) == 1
@@ -157,7 +160,8 @@ def test_drt_test_dry_run_json_output(
 
 
 def test_drt_test_dry_run_not_null(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test dry-run with not_null test type shows correct label."""
     monkeypatch.chdir(tmp_path)
@@ -181,7 +185,8 @@ def test_drt_test_dry_run_not_null(
 
 
 def test_drt_test_dry_run_freshness(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test dry-run with freshness test type shows correct label."""
     monkeypatch.chdir(tmp_path)
@@ -205,7 +210,8 @@ def test_drt_test_dry_run_freshness(
 
 
 def test_drt_test_dry_run_unique(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test dry-run with unique test type shows correct label."""
     monkeypatch.chdir(tmp_path)
@@ -229,7 +235,8 @@ def test_drt_test_dry_run_unique(
 
 
 def test_drt_test_dry_run_accepted_values(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test dry-run with accepted_values test type."""
     monkeypatch.chdir(tmp_path)
@@ -253,7 +260,8 @@ def test_drt_test_dry_run_accepted_values(
 
 
 def test_drt_test_dry_run_summary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test dry-run shows summary line at the end."""
     monkeypatch.chdir(tmp_path)
