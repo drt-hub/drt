@@ -712,8 +712,13 @@ class _SyncTestResult(TypedDict, total=False):
 def test_syncs(
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
     select: str = typer.Option(None, "--select", "-s", help="Test a specific sync by name."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview without running tests."),
 ) -> None:
-    """Run post-sync validation tests."""
+    """Run post-sync validation tests.
+    
+    With --dry-run, shows what tests would be executed without actually
+    connecting to the destination or running queries.
+    """
     from drt.config.parser import load_syncs
     from drt.destinations.query import (
         execute_test_query,
@@ -756,10 +761,17 @@ def test_syncs(
 
         if not is_queryable(sync.destination):
             if not json_mode:
-                print_test_skip(
-                    sync.name,
-                    f"tests not supported for {sync.destination.type} destinations",
-                )
+                if dry_run:
+                    console.print(
+                        f"  [dim]⏭ {sync.name}: would be skipped"
+                        f" (tests not supported for"
+                        f" {sync.destination.type} destinations)[/dim]"
+                    )
+                else:
+                    print_test_skip(
+                        sync.name,
+                        f"tests not supported for {sync.destination.type} destinations",
+                    )
             sync_results["skipped"] = True
             sync_results["reason"] = f"tests not supported for {sync.destination.type}"
             results.append(sync_results)
@@ -768,33 +780,46 @@ def test_syncs(
         table = get_table_name(sync.destination)
         for test_def in sync.tests:
             test_name = _test_display_name(test_def)
-            try:
-                query, check = build_test_query(test_def, table)
-                result_val = execute_test_query(sync.destination, query)
-                passed = check(result_val)
+            if dry_run:
                 if not json_mode:
-                    print_test_result(test_name, passed, str(result_val))
+                    console.print(f"  [dim](dry-run)[/dim] {test_name}")
                 sync_results["tests"].append(
-                    {"name": test_name, "passed": passed, "value": str(result_val)}
+                    {"name": test_name, "dry_run": True}
                 )
-                if not passed:
+            else:
+                try:
+                    query, check = build_test_query(test_def, table)
+                    result_val = execute_test_query(sync.destination, query)
+                    passed = check(result_val)
+                    if not json_mode:
+                        print_test_result(test_name, passed, str(result_val))
+                    sync_results["tests"].append(
+                        {"name": test_name, "passed": passed, "value": str(result_val)}
+                    )
+                    if not passed:
+                        had_failures = True
+                except Exception as e:
+                    if not json_mode:
+                        print_test_result(test_name, False, str(e))
+                    sync_results["tests"].append(
+                        {"name": test_name, "passed": False, "error": str(e)}
+                    )
                     had_failures = True
-            except Exception as e:
-                if not json_mode:
-                    print_test_result(test_name, False, str(e))
-                sync_results["tests"].append(
-                    {"name": test_name, "passed": False, "error": str(e)}
-                )
-                had_failures = True
         
         results.append(sync_results)
 
     if json_mode:
         print(
             json.dumps(
-                {"status": "failed" if had_failures else "passed", "results": results}
+                {
+                    "status": "failed" if had_failures else "passed",
+                    "results": results,
+                    "dry_run": dry_run,
+                }
             )
         )
+    elif dry_run:
+        console.print("\n[dry-run] Preview of tests that would be executed")
     if had_failures:
         raise typer.Exit(1)
 
