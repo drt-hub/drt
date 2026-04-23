@@ -69,18 +69,10 @@ make fmt      # ruff format + fix
 
 ## Roadmap Reference
 
-**SSoT: [GitHub Milestones](https://github.com/drt-hub/drt/milestones)** — all issues are tracked there.
+**SSoT for upcoming releases: [ROADMAP.md](ROADMAP.md)** — each version has Theme / Scope / Out of scope / Target / Progress link.
 
-- v0.1 ✅: BigQuery → REST API working end-to-end
-- v0.2 ✅: Incremental sync + retry from config
-- v0.3 ✅: MCP Server + AI Skills for Claude Code + LLM-readable docs + row-level errors + security hardening + Redshift source
-- v0.4 ✅: Google Sheets / PostgreSQL / MySQL destinations + dagster-drt + dbt manifest reader + type safety overhaul
-- v0.5 ✅: Snowflake/MySQL sources + ClickHouse/Parquet/CSV+JSON/Jira/Linear/SendGrid destinations + `drt test` + multi-environment + Docker
-- v0.5.4 ✅: `destination_lookup` — resolve FK values by querying destination DB during sync (MySQL / Postgres / ClickHouse)
-- v0.5.5 ✅: `drop_match_columns` — auto-remove lookup match columns from INSERT after FK resolution
-- v0.6 ✅: Databricks/SQL Server sources · Notion/Twilio/Intercom/Email SMTP/Salesforce Bulk/Staged Upload destinations · Airflow/Prefect integrations · `drt serve` · `drt sources`/`drt destinations` · `--threads` · `--log-format json` · `--cursor-value` · `watermark.default_value` · test validators · JSON Schema validation · GOVERNANCE.md
-- [v0.7](https://github.com/drt-hub/drt/milestone/4): DWH destinations (Snowflake / BigQuery / ClickHouse / Databricks) + Cloud storage (S3 / GCS / Azure Blob)
-- [v0.8](https://github.com/drt-hub/drt/milestone/5): Lakehouse sources (Delta Lake / Apache Iceberg)
-- v1.x: Rust engine via PyO3
+- **Shipped releases:** see [CHANGELOG.md](CHANGELOG.md) or [GitHub Releases](https://github.com/drt-hub/drt/releases)
+- **Issue-level tracking:** [GitHub Milestones](https://github.com/drt-hub/drt/milestones)
+- **Good First Issues:** https://github.com/drt-hub/drt/issues?q=is%3Aopen+label%3A%22good+first+issue%22
 
-**Good First Issues:** https://github.com/drt-hub/drt/issues?q=is%3Aopen+label%3A%22good+first+issue%22
+When scope shifts between versions, update ROADMAP.md first, then re-label issues to match.
