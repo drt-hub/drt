@@ -1,4 +1,4 @@
-<!-- i18n-sync: base=README.md, hash=0babbe59b23c1d1fc0a0936e4446b7b25fd01bff -->
+<!-- i18n-sync: base=README.md, hash=a81922aeba9795158b43afb86a38886d2259a5a2 -->
 
 [English](./README.md) | [日本語](./README.ja.md)
 
@@ -282,8 +282,11 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 
 ## ロードマップ
 
-> **詳細な計画と進捗 → [GitHub Milestones](https://github.com/drt-hub/drt/milestones)**
+> **今後のリリース → [ROADMAP.md](ROADMAP.md)** （スコープ・テーマ・目標時期）
+> **Issue 単位の追跡 → [GitHub Milestones](https://github.com/drt-hub/drt/milestones)**
 > **貢献したい方はこちら → [Good First Issues](https://github.com/drt-hub/drt/issues?q=is%3Aopen+label%3A%22good+first+issue%22)**
+
+**リリース済み:**
 
 | バージョン | 内容 |
 |---------|-------|
@@ -294,9 +297,8 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | **v0.5** ✅ | Snowflake / MySQL sources · ClickHouse / Parquet / Teams / CSV+JSON / Jira / Linear / SendGrid destinations · `drt test` · `--output json` · `--profile` · `${VAR}` 環境変数展開 · dbt manifest · secrets.toml · Docker |
 | **v0.5.4** ✅ | `destination_lookup` — 同期中にデスティネーションDBからFK値を解決（MySQL / Postgres / ClickHouse） |
 | **v0.6** ✅ | Databricks / SQL Server sources · Notion / Twilio / Intercom / Email SMTP / Salesforce Bulk / Staged Upload destinations · Airflow / Prefect integrations · `drt serve` · `drt sources` / `drt destinations` · `--threads` 並列実行 · `--log-format json` · `--cursor-value` · `watermark.default_value` · テストバリデータ（freshness, unique, accepted_values） · JSON Schema validation · GOVERNANCE.md |
-| [v0.7](https://github.com/drt-hub/drt/milestone/4) | DWH destinations (Snowflake / BigQuery / ClickHouse / Databricks) · Cloud storage (S3 / GCS / Azure Blob) |
-| [v0.8](https://github.com/drt-hub/drt/milestone/5) | Lakehouse sources (Delta Lake / Apache Iceberg) |
-| v1.x | Rust engine (PyO3) |
+
+**次のリリース:** [v0.7 Production Ready](ROADMAP.md#v07--production-ready) → [v0.8 Cloud Destinations & Growth](ROADMAP.md#v08--cloud-destinations--growth) → [v0.9 Enterprise Foundation](ROADMAP.md#v09--enterprise-foundation) → [v1.0 Stable Release](ROADMAP.md#v10--stable-release) → [v1.x Rust Engine](ROADMAP.md#v1x--rust-engine)
 
 ---
 
