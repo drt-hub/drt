@@ -89,6 +89,7 @@ class _RunContext:
     json_mode: bool
     dry_run: bool
     verbose: bool
+    quiet: bool
     log_json: bool
     cursor_value: str | None
 
@@ -103,7 +104,7 @@ def _run_one(
 
     dest = _get_destination(sync)
     wm_storage = _get_watermark_storage(sync, Path("."))
-    if not ctx.json_mode and not ctx.dry_run:
+    if not ctx.json_mode and not ctx.dry_run and not ctx.quiet:
         print_sync_start(sync.name, ctx.dry_run)
     t0 = time.monotonic()
     if ctx.log_json:
@@ -178,12 +179,12 @@ def _run_one(
                 "status": status_str,
             },
         )
-    if not ctx.json_mode:
+    if not ctx.json_mode and not ctx.quiet:
         if ctx.dry_run:
             print_dry_run_summary(sync, profile, result.success, dest)
         else:
             print_sync_result(sync.name, result, elapsed)
-    if not ctx.json_mode and ctx.verbose and result.row_errors:
+    if not ctx.json_mode and ctx.verbose and not ctx.quiet and result.row_errors:
         print_row_errors(result.row_errors)
     return sync.name, entry, result.failed > 0
 
@@ -396,6 +397,12 @@ def run(
     threads: int = typer.Option(1, "--threads", "-t", help="Parallel execution threads."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without writing data."),
     verbose: bool = typer.Option(False, "--verbose", help="Show row-level error details."),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        help="Suppress output except errors. Wins over --verbose.",
+    ),
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
     profile_name: str = typer.Option(
         None, "--profile", "-p", help="Override profile (default: drt_project.yml or DRT_PROFILE)."
@@ -496,13 +503,14 @@ def run(
         json_mode=json_mode,
         dry_run=dry_run,
         verbose=verbose,
+        quiet=quiet,
         log_json=log_format == "json",
         cursor_value=cursor_value,
     )
 
     # Execute syncs — parallel if threads > 1, sequential otherwise
     if threads > 1 and len(syncs) > 1:
-        if not json_mode:
+        if not json_mode and not quiet:
             console.print(f"[dim]Running {len(syncs)} syncs with {threads} threads[/dim]\n")
         with ThreadPoolExecutor(max_workers=threads) as pool:
             futures = {pool.submit(_run_one, s, ctx, profile): s for s in syncs}
@@ -525,11 +533,11 @@ def run(
     total_duration = round(time.monotonic() - t_total, 2)
 
     # Summary report
-    if not json_mode and len(syncs) > 1:
+    if not json_mode and not quiet and len(syncs) > 1:
         console.print(f"\n[bold]Summary:[/bold] {succeeded} succeeded, {failed} failed, "
                        f"{total_duration}s total")
 
-    if not json_mode:
+    if not json_mode and not quiet:
         _print_watermark_summary(json_results)
 
     if json_mode:
