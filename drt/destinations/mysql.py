@@ -36,6 +36,10 @@ def _serialize_value(value: Any, column: str | None = None, json_columns: list[s
 
     When json_columns is None (backward compat), all dict/list values are
     serialized — matching the pre-#316 heuristic behavior.
+
+    Raises:
+        ValueError: If *json_columns* is set and an unlisted column receives
+            a dict or list value.
     """
     if not isinstance(value, (dict, list)):  # noqa: UP038
         return value
@@ -43,7 +47,12 @@ def _serialize_value(value: Any, column: str | None = None, json_columns: list[s
     if json_columns is not None:
         if column and column in json_columns:
             return json.dumps(value, ensure_ascii=False)
-        return value
+        # Unlisted dict/list column with explicit json_columns → fail early
+        raise ValueError(
+            f"Column '{column}' contains a {type(value).__name__} value but "
+            f"is not listed in json_columns={json_columns}. "
+            f"Add '{column}' to json_columns or remove the value."
+        )
     # Backward compat: no config → serialize all complex types
     return json.dumps(value, ensure_ascii=False)
 

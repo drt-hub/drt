@@ -26,6 +26,11 @@ from drt.config.models import DestinationConfig, PostgresDestinationConfig, Sync
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 
+try:
+    from psycopg2.extras import Json as _Psycopg2Json
+except ImportError:
+    _Psycopg2Json = None  # type: ignore[assignment,misc]
+
 
 def _serialize_value(value: Any, column: str | None = None, json_columns: list[str] | None = None) -> Any:
     """Wrap dict values with psycopg2.extras.Json for JSONB columns.
@@ -36,20 +41,40 @@ def _serialize_value(value: Any, column: str | None = None, json_columns: list[s
     ``Json`` produces the correct wire format for PostgreSQL JSONB.
 
     When *json_columns* is specified, only columns in that list are wrapped
-    with ``Json()`` — other dict columns pass through as plain dicts.
+    with ``Json()`` — other dict columns raise an early :class:`ValueError`
+    pointing at the missing column, rather than failing deep inside the driver
+    with a confusing ``can't adapt type 'dict'`` error.
     When *json_columns* is ``None`` (backward compat), all dicts are wrapped.
 
     Other types (str, int, float, list, None) pass through unchanged —
     psycopg2's built-in adapters handle those correctly.
+
+    Raises:
+        ValueError: If *json_columns* is set and an unlisted column receives
+            a dict or list value.
     """
     if isinstance(value, dict):
         if json_columns is not None:
             if column and column in json_columns:
-                from psycopg2.extras import Json  # lazy: psycopg2 is optional
-                return Json(value)
-            return value  # not in json_columns → pass through as dict
-        from psycopg2.extras import Json  # lazy: psycopg2 is optional
-        return Json(value)  # backward compat: no config → always wrap
+                if _Psycopg2Json is not None:
+                    return _Psycopg2Json(value)
+                return json.dumps(value, ensure_ascii=False)
+            # Unlisted dict column with explicit json_columns → fail early
+            raise ValueError(
+                f"Column '{column}' contains a dict value but "
+                f"is not listed in json_columns={json_columns}. "
+                f"Add '{column}' to json_columns or remove the value."
+            )
+        if _Psycopg2Json is not None:
+            return _Psycopg2Json(value)
+        return json.dumps(value, ensure_ascii=False)  # backward compat fallback
+    if isinstance(value, list) and json_columns is not None and column and column not in json_columns:
+        # Unlisted list column with explicit json_columns → fail early
+        raise ValueError(
+            f"Column '{column}' contains a list value but "
+            f"is not listed in json_columns={json_columns}. "
+            f"Add '{column}' to json_columns or remove the value."
+        )
     return value
 
 
