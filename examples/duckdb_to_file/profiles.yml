@@ -1,0 +1,3 @@
+local:
+  type: duckdb
+  database: ${DRT_DB_PATH}   # :memory: for in-memory

@@ -1,0 +1,13 @@
+name: export_to_csv
+description: Export data from duckdb to csv file
+model: ref('users')
+destination:
+  type: file
+  path: ${OUTPUT_PATH}
+  format: csv
+sync:
+  mode: full
+  batch_size: 1
+  rate_limit:
+    requests_per_second: 2
+  on_error: skip
