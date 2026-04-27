@@ -6,9 +6,10 @@ import json
 import logging
 import os
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import click
 import typer
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     from drt.config.models import SyncConfig
     from drt.destinations.base import Destination
     from drt.sources.base import Source
+    from drt.state.manager import StateManager
 
 
 from drt import __version__
@@ -76,6 +78,133 @@ def _configure_json_logging() -> None:
     handler.setFormatter(_JsonFormatter())
     logging.root.handlers = [handler]
     logging.root.setLevel(logging.INFO)
+
+
+@dataclass
+class _RunContext:
+    """Shared context for executing a single sync within ``run()``."""
+
+    source: Source
+    state_mgr: StateManager
+    json_mode: bool
+    dry_run: bool
+    verbose: bool
+    quiet: bool
+    log_json: bool
+    cursor_value: str | None
+
+
+def _run_one(
+    sync: SyncConfig,
+    ctx: _RunContext,
+    profile: ProfileConfig,
+) -> tuple[str, dict[str, object], bool]:
+    """Execute a single sync and return (name, result_dict, had_error)."""
+    from drt.engine.sync import run_sync
+
+    dest = _get_destination(sync)
+    wm_storage = _get_watermark_storage(sync, Path("."))
+    if not ctx.json_mode and not ctx.dry_run and not ctx.quiet:
+        print_sync_start(sync.name, ctx.dry_run)
+    t0 = time.monotonic()
+    if ctx.log_json:
+        logging.info("sync_started", extra={"sync": sync.name})
+    try:
+        result = run_sync(
+            sync,
+            ctx.source,
+            dest,
+            profile,
+            Path("."),
+            ctx.dry_run,
+            ctx.state_mgr,
+            watermark_storage=wm_storage,
+            cursor_value_override=(
+                ctx.cursor_value if sync.sync.mode == "incremental" else None
+            ),
+        )
+    except Exception as e:
+        elapsed = round(time.monotonic() - t0, 2)
+        entry: dict[str, object] = {
+            "name": sync.name,
+            "status": "failed",
+            "rows_synced": 0,
+            "rows_failed": 0,
+            "duration_seconds": elapsed,
+            "dry_run": ctx.dry_run,
+            "error": str(e),
+        }
+        if ctx.log_json:
+            logging.error(
+                "sync_complete",
+                extra={
+                    "sync": sync.name,
+                    "rows": 0,
+                    "duration_ms": round(elapsed * 1000),
+                    "status": "failed",
+                },
+            )
+        if not ctx.json_mode:
+            print_error(f"[{sync.name}] Unexpected error: {e}")
+        return sync.name, entry, True
+
+    elapsed = round(time.monotonic() - t0, 2)
+    status_str = (
+        "success"
+        if result.failed == 0
+        else "partial"
+        if result.success > 0
+        else "failed"
+    )
+    entry = {
+        "name": sync.name,
+        "status": status_str,
+        "rows_extracted": result.rows_extracted,
+        "rows_synced": result.success,
+        "rows_failed": result.failed,
+        "duration_seconds": elapsed,
+        "dry_run": ctx.dry_run,
+    }
+    if result.watermark_source:
+        entry["watermark_source"] = result.watermark_source
+    if result.cursor_value_used is not None:
+        entry["cursor_value_used"] = result.cursor_value_used
+    if ctx.log_json:
+        logging.info(
+            "sync_complete",
+            extra={
+                "sync": sync.name,
+                "rows": result.success,
+                "duration_ms": round(elapsed * 1000),
+                "status": status_str,
+            },
+        )
+    if not ctx.json_mode and not ctx.quiet:
+        if ctx.dry_run:
+            print_dry_run_summary(sync, profile, result.success, dest)
+        else:
+            print_sync_result(sync.name, result, elapsed)
+    if not ctx.json_mode and ctx.verbose and not ctx.quiet and result.row_errors:
+        print_row_errors(result.row_errors)
+    return sync.name, entry, result.failed > 0
+
+
+def _print_watermark_summary(results: list[dict[str, object]]) -> None:
+    """Print notes about watermark sources used during a run."""
+    default_syncs = [e for e in results if e.get("watermark_source") == "default_value"]
+    override_syncs = [e for e in results if e.get("watermark_source") == "cli_override"]
+    if default_syncs:
+        names = ", ".join(str(e["name"]) for e in default_syncs)
+        console.print(
+            f"\n[yellow]Note: {len(default_syncs)} sync(s) used watermark.default_value "
+            f"(first run): {names}[/yellow]"
+        )
+    if override_syncs:
+        names = ", ".join(str(e["name"]) for e in override_syncs)
+        console.print(
+            f"\n[cyan]Note: {len(override_syncs)} sync(s) used --cursor-value "
+            f"override: {names}[/cyan]"
+        )
 
 
 def _resolve_profile_name(cli_flag: str | None, project_profile: str) -> str:
@@ -268,6 +397,12 @@ def run(
     threads: int = typer.Option(1, "--threads", "-t", help="Parallel execution threads."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without writing data."),
     verbose: bool = typer.Option(False, "--verbose", help="Show row-level error details."),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        help="Suppress output except errors. Wins over --verbose.",
+    ),
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
     profile_name: str = typer.Option(
         None, "--profile", "-p", help="Override profile (default: drt_project.yml or DRT_PROFILE)."
@@ -294,12 +429,10 @@ def run(
     Use --select "*" or --select all to be explicit about running every sync.
     Use --threads N for parallel execution.
     """
-    import json as json_mod
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     from drt.config.credentials import load_profile
     from drt.config.parser import load_project, load_syncs
-    from drt.engine.sync import run_sync
     from drt.state.manager import StateManager
 
     if log_format == "json":
@@ -364,98 +497,23 @@ def run(
     succeeded = 0
     failed = 0
 
-    def _run_one(sync: SyncConfig) -> tuple[str, dict[str, object], bool]:
-        """Execute a single sync and return (name, result_dict, had_error)."""
-        dest = _get_destination(sync)
-        wm_storage = _get_watermark_storage(sync, Path("."))
-        if not json_mode and not dry_run:
-            print_sync_start(sync.name, dry_run)
-        t0 = time.monotonic()
-        if log_format == "json":
-            logging.info("sync_started", extra={"sync": sync.name})
-        try:
-            result = run_sync(
-                sync,
-                source,
-                dest,
-                profile,
-                Path("."),
-                dry_run,
-                state_mgr,
-                watermark_storage=wm_storage,
-                cursor_value_override=cursor_value if sync.sync.mode == "incremental" else None,
-            )
-        except Exception as e:
-            elapsed = round(time.monotonic() - t0, 2)
-            entry = {
-                "name": sync.name,
-                "status": "failed",
-                "rows_synced": 0,
-                "rows_failed": 0,
-                "duration_seconds": elapsed,
-                "dry_run": dry_run,
-                "error": str(e),
-            }
-            if log_format == "json":
-                logging.error(
-                    "sync_complete",
-                    extra={
-                        "sync": sync.name,
-                        "rows": 0,
-                        "duration_ms": round(elapsed * 1000),
-                        "status": "failed",
-                    },
-                )
-            if not json_mode:
-                print_error(f"[{sync.name}] Unexpected error: {e}")
-            return sync.name, entry, True
-
-        elapsed = round(time.monotonic() - t0, 2)
-        status_str = (
-            "success"
-            if result.failed == 0
-            else "partial"
-            if result.success > 0
-            else "failed"
-        )
-        entry = {
-            "name": sync.name,
-            "status": status_str,
-            "rows_extracted": result.rows_extracted,
-            "rows_synced": result.success,
-            "rows_failed": result.failed,
-            "duration_seconds": elapsed,
-            "dry_run": dry_run,
-        }
-        if result.watermark_source:
-            entry["watermark_source"] = result.watermark_source
-        if result.cursor_value_used is not None:
-            entry["cursor_value_used"] = result.cursor_value_used
-        if log_format == "json":
-            logging.info(
-                "sync_complete",
-                extra={
-                    "sync": sync.name,
-                    "rows": result.success,
-                    "duration_ms": round(elapsed * 1000),
-                    "status": status_str,
-                },
-            )
-        if not json_mode:
-            if dry_run:
-                print_dry_run_summary(sync, profile, result.success, dest)
-            else:
-                print_sync_result(sync.name, result, elapsed)
-        if not json_mode and verbose and result.row_errors:
-            print_row_errors(result.row_errors)
-        return sync.name, entry, result.failed > 0
+    ctx = _RunContext(
+        source=source,
+        state_mgr=state_mgr,
+        json_mode=json_mode,
+        dry_run=dry_run,
+        verbose=verbose,
+        quiet=quiet,
+        log_json=log_format == "json",
+        cursor_value=cursor_value,
+    )
 
     # Execute syncs — parallel if threads > 1, sequential otherwise
     if threads > 1 and len(syncs) > 1:
-        if not json_mode:
+        if not json_mode and not quiet:
             console.print(f"[dim]Running {len(syncs)} syncs with {threads} threads[/dim]\n")
         with ThreadPoolExecutor(max_workers=threads) as pool:
-            futures = {pool.submit(_run_one, s): s for s in syncs}
+            futures = {pool.submit(_run_one, s, ctx, profile): s for s in syncs}
             for future in as_completed(futures):
                 name, entry, had_err = future.result()
                 json_results.append(entry)
@@ -465,7 +523,7 @@ def run(
                     succeeded += 1
     else:
         for sync in syncs:
-            name, entry, had_err = _run_one(sync)
+            name, entry, had_err = _run_one(sync, ctx, profile)
             json_results.append(entry)
             if had_err:
                 failed += 1
@@ -475,34 +533,16 @@ def run(
     total_duration = round(time.monotonic() - t_total, 2)
 
     # Summary report
-    if not json_mode and len(syncs) > 1:
+    if not json_mode and not quiet and len(syncs) > 1:
         console.print(f"\n[bold]Summary:[/bold] {succeeded} succeeded, {failed} failed, "
                        f"{total_duration}s total")
 
-    # Watermark source summary (#391)
-    if not json_mode:
-        default_syncs = [
-            e for e in json_results if e.get("watermark_source") == "default_value"
-        ]
-        override_syncs = [
-            e for e in json_results if e.get("watermark_source") == "cli_override"
-        ]
-        if default_syncs:
-            names = ", ".join(str(e["name"]) for e in default_syncs)
-            console.print(
-                f"\n[yellow]Note: {len(default_syncs)} sync(s) used watermark.default_value "
-                f"(first run): {names}[/yellow]"
-            )
-        if override_syncs:
-            names = ", ".join(str(e["name"]) for e in override_syncs)
-            console.print(
-                f"\n[cyan]Note: {len(override_syncs)} sync(s) used --cursor-value "
-                f"override: {names}[/cyan]"
-            )
+    if not json_mode and not quiet:
+        _print_watermark_summary(json_results)
 
     if json_mode:
         print(
-            json_mod.dumps(
+            json.dumps(
                 {
                     "syncs": json_results,
                     "succeeded": succeeded,
@@ -527,7 +567,6 @@ def list_syncs(
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
 ) -> None:
     """List all sync definitions in the project."""
-    import json as json_mod
 
     from drt.config.parser import load_syncs
 
@@ -535,7 +574,7 @@ def list_syncs(
 
     if output == "json":
         print(
-            json_mod.dumps(
+            json.dumps(
                 {
                     "syncs": [
                         {
@@ -569,7 +608,6 @@ def validate(
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
 ) -> None:
     """Validate sync definitions against the JSON Schema."""
-    import json as json_mod
 
     from drt.config.parser import load_syncs_safe
     from drt.config.schema import write_schemas
@@ -585,7 +623,7 @@ def validate(
 
     if output == "json":
         print(
-            json_mod.dumps(
+            json.dumps(
                 {
                     "results": [{"name": s.name, "valid": True} for s in result.syncs]
                     + [
@@ -632,7 +670,6 @@ def status(
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
 ) -> None:
     """Show the status of the most recent sync runs."""
-    import json as json_mod
 
     from drt.state.manager import StateManager
 
@@ -640,7 +677,7 @@ def status(
 
     if output == "json":
         print(
-            json_mod.dumps(
+            json.dumps(
                 {
                     "syncs": [
                         {
@@ -666,15 +703,43 @@ def status(
 
 
 # ---------------------------------------------------------------------------
+# doctor
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def doctor() -> None:
+    """Check environment and report potential issues."""
+    from drt.cli.doctor import run_doctor
+
+    run_doctor()
+
+
+# ---------------------------------------------------------------------------
 # test
 # ---------------------------------------------------------------------------
 
 
+class _SyncTestResult(TypedDict, total=False):
+    """Type hint for test result dict in JSON output."""
+
+    sync: str
+    tests: list[dict[str, object]]
+    skipped: bool
+    reason: str
+
+
 @app.command(name="test")
 def test_syncs(
+    output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
     select: str = typer.Option(None, "--select", "-s", help="Test a specific sync by name."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview without running tests."),
 ) -> None:
-    """Run post-sync validation tests."""
+    """Run post-sync validation tests.
+    
+    With --dry-run, shows what tests would be executed without actually
+    connecting to the destination or running queries.
+    """
     from drt.config.parser import load_syncs
     from drt.destinations.query import (
         execute_test_query,
@@ -683,9 +748,15 @@ def test_syncs(
     )
     from drt.engine.test_runner import build_test_query
 
+    json_mode = output == "json"
+    results: list[_SyncTestResult] = []
+
     syncs = load_syncs(Path("."))
     if not syncs:
-        console.print("[dim]No syncs found.[/dim]")
+        if not json_mode:
+            console.print("[dim]No syncs found.[/dim]")
+        else:
+            print(json.dumps({"status": "no_syncs", "results": []}))
         return
 
     if select:
@@ -696,35 +767,80 @@ def test_syncs(
 
     syncs_with_tests = [s for s in syncs if s.tests]
     if not syncs_with_tests:
-        console.print("[dim]No tests defined in any sync.[/dim]")
+        if not json_mode:
+            console.print("[dim]No tests defined in any sync.[/dim]")
+        else:
+            print(json.dumps({"status": "no_tests", "results": []}))
         return
 
     had_failures = False
 
     for sync in syncs_with_tests:
-        print_test_header(sync.name)
+        if not json_mode:
+            print_test_header(sync.name)
+        sync_results: _SyncTestResult = {"sync": sync.name, "tests": []}
 
         if not is_queryable(sync.destination):
-            print_test_skip(
-                sync.name,
-                f"tests not supported for {sync.destination.type} destinations",
-            )
+            if not json_mode:
+                if dry_run:
+                    console.print(
+                        f"  [dim]⏭ {sync.name}: would be skipped"
+                        f" (tests not supported for"
+                        f" {sync.destination.type} destinations)[/dim]"
+                    )
+                else:
+                    print_test_skip(
+                        sync.name,
+                        f"tests not supported for {sync.destination.type} destinations",
+                    )
+            sync_results["skipped"] = True
+            sync_results["reason"] = f"tests not supported for {sync.destination.type}"
+            results.append(sync_results)
             continue
 
         table = get_table_name(sync.destination)
         for test_def in sync.tests:
             test_name = _test_display_name(test_def)
-            try:
-                query, check = build_test_query(test_def, table)
-                result_val = execute_test_query(sync.destination, query)
-                passed = check(result_val)
-                print_test_result(test_name, passed, str(result_val))
-                if not passed:
+            if dry_run:
+                if not json_mode:
+                    console.print(f"  [dim](dry-run)[/dim] {test_name}")
+                sync_results["tests"].append(
+                    {"name": test_name, "dry_run": True}
+                )
+            else:
+                try:
+                    query, check = build_test_query(test_def, table)
+                    result_val = execute_test_query(sync.destination, query)
+                    passed = check(result_val)
+                    if not json_mode:
+                        print_test_result(test_name, passed, str(result_val))
+                    sync_results["tests"].append(
+                        {"name": test_name, "passed": passed, "value": str(result_val)}
+                    )
+                    if not passed:
+                        had_failures = True
+                except Exception as e:
+                    if not json_mode:
+                        print_test_result(test_name, False, str(e))
+                    sync_results["tests"].append(
+                        {"name": test_name, "passed": False, "error": str(e)}
+                    )
                     had_failures = True
-            except Exception as e:
-                print_test_result(test_name, False, str(e))
-                had_failures = True
+        
+        results.append(sync_results)
 
+    if json_mode:
+        print(
+            json.dumps(
+                {
+                    "status": "failed" if had_failures else "passed",
+                    "results": results,
+                    "dry_run": dry_run,
+                }
+            )
+        )
+    elif dry_run:
+        console.print("\n[dry-run] Preview of tests that would be executed")
     if had_failures:
         raise typer.Exit(1)
 
@@ -744,6 +860,14 @@ def _test_display_name(test_def: object) -> str:
     if test_def.not_null is not None:
         cols = ", ".join(test_def.not_null.columns)
         return f"not_null({cols})"
+    if test_def.freshness is not None:
+        return f"freshness({test_def.freshness.column}, max_age={test_def.freshness.max_age})"
+    if test_def.unique is not None:
+        cols = ", ".join(test_def.unique.columns)
+        return f"unique({cols})"
+    if test_def.accepted_values is not None:
+        vals = ", ".join(test_def.accepted_values.values)
+        return f"accepted_values({test_def.accepted_values.column}: {vals})"
     return "unknown"
 
 
@@ -774,6 +898,23 @@ def serve(
 
     token = os.environ.get(token_env) or None
     serve_impl(host=host, port=port, token=token, project_dir=".")
+
+
+# ---------------------------------------------------------------------------
+# cloud (stub for future drt Cloud service)
+# ---------------------------------------------------------------------------
+
+cloud_app = typer.Typer(name="cloud", help="drt Cloud commands (stub).", no_args_is_help=True)
+app.add_typer(cloud_app)
+
+
+@cloud_app.command(name="push")
+def cloud_push() -> None:
+    """Push local project configuration to drt Cloud (stub)."""
+    console.print("\n[bold blue]🚀 drt Cloud[/bold blue]")
+    console.print("This is a stub for the future drt Cloud service.")
+    console.print("Project state would be pushed to your cloud dashboard here.")
+    console.print("\n[dim]Coming soon...[/dim]\n")
 
 
 # ---------------------------------------------------------------------------

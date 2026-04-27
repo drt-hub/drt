@@ -37,9 +37,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Connector registry** (#381): Replaced hardcoded `isinstance` chains in `_get_destination()` / `_get_source()` with a centralized registry (`drt/connectors/registry.py`). Adding a new connector no longer requires editing `main.py`. Error messages now list available connectors on typo. Contributed by @Muawiya-contact.
+- **REST API destination pagination** (#260): Fetch data from paginated APIs. 3 strategies: offset/limit, cursor-based, HTTP Link headers. Contributed by @Muawiya-contact.
+
 ### Fixed
 
-- **`${VAR}` env substitution in sync YAML** (#385): Environment variable placeholders now work in all string fields of sync YAML (e.g. `watermark.bucket`, `destination.url`), not just `model:` SQL. Also shipped in [0.6.1](#061---2026-04-20).
+- **PostgreSQL destination**: crash on `dict` values bound for JSONB columns — wrapped with `psycopg2.extras.Json` (#315). Contributed by @armorbreak001.
+
+## [0.6.2] - 2026-04-20
+
+### Added
+
+- **`watermark.default_value`** (#390): Configure a fallback cursor value for first-run incremental syncs. Prevents broken SQL (e.g. `WHERE TIMESTAMP(...) >= TIMESTAMP('')`) when no watermark file exists yet. Without a default, drt now raises a clear error with actionable guidance instead of silently rendering an empty string.
+- **`--cursor-value` CLI option** (#390): Override the cursor/watermark value at runtime for backfill and recovery scenarios. The override takes highest priority in the fallback chain and the resulting watermark is persisted on success.
+- **Watermark source observability** (#391): Operators can now see *where* the cursor value came from — `storage`, `default_value`, or `cli_override` — via structured INFO logs, `--output json` fields (`watermark_source`, `cursor_value_used`), and an end-of-run summary in text mode.
+
+### Fixed
+
+- **PostgreSQL destination**: crash on `dict` values bound for JSONB columns — dict values are now wrapped with `psycopg2.extras.Json` before binding (#315)
 
 ## [0.6.1] - 2026-04-20
 
@@ -60,6 +77,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Google Ads destination** (#217): Upload offline click conversions. Supports partial failure handling and OAuth2 auth.
 - **Staged Upload destination** (#258): Async bulk-upload APIs (e.g. Amazon Marketing Cloud, Salesforce Bulk API). Declarative 3-phase YAML config: Stage (file upload) → Trigger (job kick) → Poll (completion wait). Supports CSV, JSON, JSONL. New `StagedDestination` Protocol.
 - **OAuth2 Client Credentials auth** (#259): Token exchange with caching for REST API destination.
+- **REST API destination pagination** (#260): Fetch data from paginated APIs before processing. Supports 3 strategies: offset/limit, cursor-based, and HTTP Link headers. Extractable via `fetch_paginated()` for read-before-write upsert patterns.
 - **`drt init --from-dbt`** (#215): Generate sync YAML scaffolds from dbt `manifest.json`.
 - **`--output json` for validate/list** (#230): Structured JSON output for `drt validate` and `drt list`.
 - **MCP Server: `drt_list_connectors`** (#262): New tool listing all available sources and destinations.

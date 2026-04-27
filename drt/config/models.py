@@ -43,6 +43,39 @@ AuthConfig = Annotated[
 
 
 # ---------------------------------------------------------------------------
+# Pagination (REST API destination)
+# ---------------------------------------------------------------------------
+
+
+class OffsetPaginationConfig(BaseModel):
+    type: Literal["offset"]
+    limit: int = 100
+    offset_param: str = "offset"
+    limit_param: str = "limit"
+    max_pages: int = 100
+
+
+class CursorPaginationConfig(BaseModel):
+    type: Literal["cursor"]
+    limit: int = 100
+    cursor_param: str = "cursor"
+    limit_param: str = "limit"
+    cursor_field: str
+    max_pages: int = 100
+
+
+class LinkHeaderPaginationConfig(BaseModel):
+    type: Literal["link_header"]
+    max_pages: int = 100
+
+
+PaginationConfig = Annotated[
+    OffsetPaginationConfig | CursorPaginationConfig | LinkHeaderPaginationConfig,
+    Field(discriminator="type"),
+]
+
+
+# ---------------------------------------------------------------------------
 # Source config (inline — kept for backward compat; prefer profiles.yml)
 # ---------------------------------------------------------------------------
 
@@ -78,6 +111,7 @@ class RestApiDestinationConfig(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     body_template: str | None = None
     auth: AuthConfig | None = None
+    pagination: PaginationConfig | None = None
 
     def describe(self) -> str:
         return f"{self.type} ({self.url})"
