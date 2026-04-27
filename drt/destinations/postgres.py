@@ -26,8 +26,13 @@ from drt.config.models import DestinationConfig, PostgresDestinationConfig, Sync
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 
+try:
+    from psycopg2.extras import Json as _Psycopg2Json
+except ImportError:
+    _Psycopg2Json = None  # type: ignore[assignment,misc]
 
-def _serialize_value(value: Any) -> Any:
+
+def _serialize_value(value: Any, column: str | None = None, json_columns: list[str] | None = None) -> Any:
     """Wrap dict values with psycopg2.extras.Json for JSONB columns.
 
     psycopg2 has no default adapter for ``dict``, so any dict value
@@ -35,12 +40,41 @@ def _serialize_value(value: Any) -> Any:
     ``ProgrammingError: can't adapt type 'dict'``. Wrapping with
     ``Json`` produces the correct wire format for PostgreSQL JSONB.
 
+    When *json_columns* is specified, only columns in that list are wrapped
+    with ``Json()`` — other dict columns raise an early :class:`ValueError`
+    pointing at the missing column, rather than failing deep inside the driver
+    with a confusing ``can't adapt type 'dict'`` error.
+    When *json_columns* is ``None`` (backward compat), all dicts are wrapped.
+
     Other types (str, int, float, list, None) pass through unchanged —
     psycopg2's built-in adapters handle those correctly.
+
+    Raises:
+        ValueError: If *json_columns* is set and an unlisted column receives
+            a dict or list value.
     """
     if isinstance(value, dict):
-        from psycopg2.extras import Json  # lazy: psycopg2 is optional
-        return Json(value)
+        if json_columns is not None:
+            if column and column in json_columns:
+                if _Psycopg2Json is not None:
+                    return _Psycopg2Json(value)
+                return json.dumps(value, ensure_ascii=False)
+            # Unlisted dict column with explicit json_columns → fail early
+            raise ValueError(
+                f"Column '{column}' contains a dict value but "
+                f"is not listed in json_columns={json_columns}. "
+                f"Add '{column}' to json_columns or remove the value."
+            )
+        if _Psycopg2Json is not None:
+            return _Psycopg2Json(value)
+        return json.dumps(value, ensure_ascii=False)  # backward compat fallback
+    if isinstance(value, list) and json_columns is not None and column and column not in json_columns:
+        # Unlisted list column with explicit json_columns → fail early
+        raise ValueError(
+            f"Column '{column}' contains a list value but "
+            f"is not listed in json_columns={json_columns}. "
+            f"Add '{column}' to json_columns or remove the value."
+        )
     return value
 
 
@@ -75,6 +109,7 @@ class PostgresDestination:
                     columns,
                     config.table,
                     sync_options,
+                    config,
                 )
             else:
                 result = self._load_upsert(
@@ -125,6 +160,7 @@ class PostgresDestination:
         columns: list[str],
         table: str,
         sync_options: SyncOptions,
+        config: PostgresDestinationConfig,
     ) -> SyncResult:
         """TRUNCATE (once) → INSERT within a transaction."""
         result = SyncResult()
@@ -137,7 +173,7 @@ class PostgresDestination:
 
         for i, record in enumerate(records):
             try:
-                values = [_serialize_value(record.get(c)) for c in columns]
+                values = [_serialize_value(record.get(c), c, config.json_columns) for c in columns]
                 cur.execute(sql, values)
                 result.success += 1
             except Exception as e:
@@ -183,7 +219,7 @@ class PostgresDestination:
 
         for i, record in enumerate(records):
             try:
-                values = [_serialize_value(record.get(c)) for c in columns]
+                values = [_serialize_value(record.get(c), c, config.json_columns) for c in columns]
                 cur.execute(sql, values)
                 result.success += 1
             except Exception as e:

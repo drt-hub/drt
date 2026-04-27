@@ -279,3 +279,60 @@ class TestPostgresReplaceMode:
         call_args = cur.execute.call_args[0][1]
         for val in call_args:
             assert not hasattr(val, "adapted"), f"Expected plain value, got Json: {val}"
+
+
+class TestPostgresJsonColumns:
+    """Verify Postgres _serialize_value for json_columns config."""
+
+    def test_serialize_value_dict_in_json_columns(self) -> None:
+        """dict value for a json_columns column → Json() wrapper (or JSON string fallback)."""
+        from drt.destinations.postgres import _serialize_value
+
+        result = _serialize_value({"k": "v"}, column="profile", json_columns=["profile"])
+        # Should be a Json wrapper when psycopg2 is available, or JSON string fallback
+        try:
+            from psycopg2.extras import Json
+            assert isinstance(result, Json)
+        except ImportError:
+            assert isinstance(result, str)
+
+    def test_serialize_value_dict_not_in_json_columns_raises(self) -> None:
+        """dict value for non-json column with explicit json_columns → early ValueError."""
+        from drt.destinations.postgres import _serialize_value
+
+        with pytest.raises(ValueError, match="not listed in json_columns"):
+            _serialize_value({"k": "v"}, column="other", json_columns=["profile"])
+
+    def test_serialize_value_list_not_in_json_columns_raises(self) -> None:
+        """list value for non-json column with explicit json_columns → early ValueError."""
+        from drt.destinations.postgres import _serialize_value
+
+        with pytest.raises(ValueError, match="not listed in json_columns"):
+            _serialize_value([1, 2, 3], column="tags", json_columns=["profile"])
+
+    def test_serialize_value_no_config(self) -> None:
+        """No json_columns configured → backward compat (always wrap)."""
+        from drt.destinations.postgres import _serialize_value
+
+        result = _serialize_value({"k": "v"})
+        # No config → always wrap with Json() or JSON string
+        try:
+            from psycopg2.extras import Json
+            assert isinstance(result, Json)
+        except ImportError:
+            assert isinstance(result, str)
+
+    def test_serialize_value_non_complex(self) -> None:
+        """Non-dict/list values always pass through."""
+        from drt.destinations.postgres import _serialize_value
+
+        assert _serialize_value("alice") == "alice"
+        assert _serialize_value(30) == 30
+        assert _serialize_value(None) is None
+
+    def test_serialize_value_error_message_mentions_column(self) -> None:
+        """Error message includes the offending column name."""
+        from drt.destinations.postgres import _serialize_value
+
+        with pytest.raises(ValueError, match="'my_settings'"):
+            _serialize_value({"a": 1}, column="my_settings", json_columns=["profile"])

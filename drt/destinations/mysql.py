@@ -27,17 +27,34 @@ from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 
 
-def _serialize_value(value: Any) -> Any:
+def _serialize_value(value: Any, column: str | None = None, json_columns: list[str] | None = None) -> Any:
     """Serialize dict/list values to JSON strings for pymysql.
 
-    pymysql does not auto-serialize complex Python types, so values
-    bound for JSON columns (common when sourcing from BigQuery) must
-    be converted to strings before execute().
-    """
-    if isinstance(value, dict | list):
-        return json.dumps(value, ensure_ascii=False)
-    return value
+    If json_columns is specified, only columns in that list are JSON-serialized.
+    This allows non-JSON columns to receive native Python types (e.g. list →
+    ARRAY) when the driver supports it.
 
+    When json_columns is None (backward compat), all dict/list values are
+    serialized — matching the pre-#316 heuristic behavior.
+
+    Raises:
+        ValueError: If *json_columns* is set and an unlisted column receives
+            a dict or list value.
+    """
+    if not isinstance(value, (dict, list)):  # noqa: UP038
+        return value
+    # Explicit config: only serialize listed columns
+    if json_columns is not None:
+        if column and column in json_columns:
+            return json.dumps(value, ensure_ascii=False)
+        # Unlisted dict/list column with explicit json_columns → fail early
+        raise ValueError(
+            f"Column '{column}' contains a {type(value).__name__} value but "
+            f"is not listed in json_columns={json_columns}. "
+            f"Add '{column}' to json_columns or remove the value."
+        )
+    # Backward compat: no config → serialize all complex types
+    return json.dumps(value, ensure_ascii=False)
 
 
 class MySQLDestination:
@@ -71,6 +88,7 @@ class MySQLDestination:
                     columns,
                     config.table,
                     sync_options,
+                    config,
                 )
             else:
                 result = self._load_upsert(
@@ -122,6 +140,7 @@ class MySQLDestination:
         columns: list[str],
         table: str,
         sync_options: SyncOptions,
+        config: MySQLDestinationConfig,
     ) -> SyncResult:
         """TRUNCATE (once) → INSERT within a transaction."""
         result = SyncResult()
@@ -134,7 +153,7 @@ class MySQLDestination:
 
         for i, record in enumerate(records):
             try:
-                values = [_serialize_value(record.get(c)) for c in columns]
+                values = [_serialize_value(record.get(c), c, config.json_columns) for c in columns]
                 cur.execute(sql, values)
                 result.success += 1
             except Exception as e:
@@ -172,7 +191,7 @@ class MySQLDestination:
 
         for i, record in enumerate(records):
             try:
-                values = [_serialize_value(record.get(c)) for c in columns]
+                values = [_serialize_value(record.get(c), c, config.json_columns) for c in columns]
                 cur.execute(sql, values)
                 result.success += 1
             except Exception as e:
@@ -279,7 +298,7 @@ class MySQLDestination:
             ca = resolve_env(None, config.ssl.ca_env)
             if ca:
                 ssl_dict["ca"] = ca
-            cert = resolve_env(None, config.ssl.cert_env)
+            cert = resolve_env(None, config.config.cert_env)
             if cert:
                 ssl_dict["cert"] = cert
             key = resolve_env(None, config.ssl.key_env)
