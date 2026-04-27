@@ -893,6 +893,23 @@ def serve(
 
 
 # ---------------------------------------------------------------------------
+# cloud (stub for future drt Cloud service)
+# ---------------------------------------------------------------------------
+
+cloud_app = typer.Typer(name="cloud", help="drt Cloud commands (stub).", no_args_is_help=True)
+app.add_typer(cloud_app)
+
+
+@cloud_app.command(name="push")
+def cloud_push() -> None:
+    """Push local project configuration to drt Cloud (stub)."""
+    console.print("\n[bold blue]🚀 drt Cloud[/bold blue]")
+    console.print("This is a stub for the future drt Cloud service.")
+    console.print("Project state would be pushed to your cloud dashboard here.")
+    console.print("\n[dim]Coming soon...[/dim]\n")
+
+
+# ---------------------------------------------------------------------------
 # mcp
 # ---------------------------------------------------------------------------
 
