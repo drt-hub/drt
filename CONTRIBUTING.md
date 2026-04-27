@@ -71,11 +71,11 @@ uv run mypy drt
 
 ## Branch Naming Convention
 
-| Prefix | When to use |
-|--------|-------------|
-| `feat/` | New features or connectors |
-| `fix/` | Bug fixes |
-| `docs/` | Documentation changes |
+| Prefix   | When to use                                 |
+| -------- | ------------------------------------------- |
+| `feat/`  | New features or connectors                  |
+| `fix/`   | Bug fixes                                   |
+| `docs/`  | Documentation changes                       |
 | `chore/` | Maintenance, dependency updates, CI changes |
 
 Example: `feat/snowflake-source`, `fix/empty-batch-rest-api`, `docs/quickstart-update`
@@ -172,6 +172,7 @@ DestinationConfig = Annotated[
 ```
 
 **Key rules:**
+
 - `type` must be a `Literal` — this is how Pydantic discriminates between destination types
 - Use `_env` suffix fields for secrets (e.g. `api_key_env: str | None = None`)
 - Add a `@model_validator` if fields depend on each other (see `PostgresDestinationConfig` for an example)
@@ -229,6 +230,7 @@ class ConsoleDestination:
 ```
 
 **Key rules:**
+
 - The class does **not** inherit from anything — it implements the `Destination` Protocol
 - `load()` must accept `records`, `config`, and `sync_options` with exact signatures
 - Use `assert isinstance(config, YourConfig)` for type narrowing
@@ -334,6 +336,7 @@ class TestConsoleDestinationLoad:
 ```
 
 **Test patterns to follow:**
+
 - `_config()` helper with defaults — easy to override per test
 - `_options()` wraps `SyncOptions` with kwargs
 - Test config validation, success path, empty records, and error handling
@@ -374,6 +377,7 @@ git push origin feat/console-destination
 ```
 
 Open a PR with:
+
 - What it does (1-2 sentences)
 - `Closes #NNN`
 - Checklist items checked
@@ -411,3 +415,31 @@ drt ships Claude Code skills via the plugin marketplace (`skills/drt/`). When yo
 Keep the version in sync with `pyproject.toml` (e.g. if releasing `0.4.0`, set all plugin versions to `0.4.0`).
 
 If you add a **new skill**, also add an entry to `skills/drt/.claude-plugin/plugin.json` if needed, and document it in `README.md` and `docs/llm/CONTEXT.md`.
+
+## Contributor Recognition
+
+We recognize all types of contributions — code, documentation, design, ideas, reviews, and more — using the [all-contributors](https://allcontributors.org/) specification.
+
+**How to get recognized:**
+
+If you contribute code, documentation, organize discussions, or help in any way, you can be added to the contributors list by commenting on your Issue or PR:
+
+```
+@all-contributors please add @username for <contribution-type>
+```
+
+**Contribution types include:**
+
+- `code` — Pull requests with code changes
+- `doc` — Documentation, blog posts, tutorials
+- `review` — Code reviews and feedback
+- `ideas` — Feature suggestions and design discussions
+- `bug` — Bug reports and issue triage
+- `test` — Test creation and improvements
+- `maintenance` — Maintenance and DevOps
+
+See the [emoji key](https://allcontributors.org/docs/en/emoji-key) for the complete list of 33+ contribution types.
+
+**Note on bot PRs:** The all-contributors bot will automatically open a Pull Request to update the README contributors list. These PRs are safe to merge once CI passes and the visual grid layout is verified — no full review needed. Just verify the names and avatars look correct!
+
+All contributors are listed in the [README Contributors section](./README.md#contributors-) with an all-contributors badge tracking the total count.
