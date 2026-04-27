@@ -34,9 +34,10 @@ def _serialize_value(value: Any) -> Any:
     bound for JSON columns (common when sourcing from BigQuery) must
     be converted to strings before execute().
     """
-    if isinstance(value, (dict, list)):  # noqa: UP038 (tuple required for Py3.10)
+    if isinstance(value, dict | list):
         return json.dumps(value, ensure_ascii=False)
     return value
+
 
 
 class MySQLDestination:

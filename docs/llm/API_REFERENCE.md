@@ -84,15 +84,20 @@ SNOWFLAKE_PASSWORD = "dev-password"
 
 ---
 
-## Environment variable substitution in `model:`
+## Environment variable substitution
 
-Use `${VAR}` syntax for environment-specific SQL:
+Use `${VAR}` syntax in any string field of sync YAML (not just `model:`):
 
 ```yaml
 model: SELECT * FROM `${GCP_PROJECT}.${BQ_DATASET}.users`
+destination:
+  url: "https://${API_HOST}/api/v1/contacts"
+sync:
+  watermark:
+    bucket: ${PIPES_GCS_BUCKET}
 ```
 
-Raises an error if the variable is not set.
+Raises an error if the variable is not set. Supported since v0.6.1 for all string fields (previously only `model:`).
 
 ---
 
@@ -116,6 +121,7 @@ sync:                       # optional: all fields have defaults
     key: watermarks/s.json  # GCS only
     project: my-project     # BigQuery only
     dataset: my_dataset     # BigQuery only
+    default_value: "2026-01-01 00:00:00"  # optional: fallback cursor for first run (v0.6.2)
   batch_size: 100           # default: 100 — rows per destination call
   on_error: fail            # "fail" (default) | "skip"
   rate_limit:
@@ -133,6 +139,14 @@ tests:                      # optional: post-sync validation (DB destinations on
       max: 10000            # optional: maximum expected rows
   - not_null:
       columns: [id, name]   # required: columns that must not contain NULLs
+  - freshness:
+      column: updated_at    # required: timestamp column to check
+      max_age: "7 days"     # required: human-readable max age ("24 hours", "7 days", etc.)
+  - unique:
+      columns: [id]         # required: columns that must be unique
+  - accepted_values:
+      column: status        # required: column to check
+      values: [active, inactive, pending]  # required: allowed values
 ```
 
 ---
