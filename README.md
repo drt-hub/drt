@@ -1,28 +1,389 @@
-## Implement all-contributors workflow (#295)
+[English](./README.md) | [日本語](./README.ja.md)
+<!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
+[![All Contributors](https://img.shields.io/badge/all_contributors-11-orange.svg?style=flat-square)](#contributors-)
+<!-- ALL-CONTRIBUTORS-BADGE:END -->
 
-Sets up the all-contributors bot and recognition workflow to acknowledge all types of contributions across the drt project.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/drt-hub/.github/main/profile/assets/logo-dark.svg">
+  <img src="https://raw.githubusercontent.com/drt-hub/.github/main/profile/assets/logo.svg" alt="drt logo" width="200">
+</picture>
 
-### Changes
-- Initialize `.all-contributorsrc` with contributorsPerLine: 7 and commit: false for manual review
-- Bulk-import 4 initial code contributors from Git history (masukai, Muawiya-contact, Khush-domadia, Pawansingh3889)
-- Add Contributors section to README.md with all-contributors badge
-- Document contributor recognition workflow in CONTRIBUTING.md with command syntax and bot PR guidelines
+# drt — data reverse tool
 
-### Configuration
-- ✅ Validated JSON syntax (.all-contributorsrc)
-- ✅ Grid renders correctly (7 per row, 100px avatars)
-- ✅ Emoji key link active
-- ✅ README.ja.md untouched
+> Reverse ETL for the code-first data stack.
 
-### Related
-- Closes #295
-- Complements GOVERNANCE.md contributor ladder
-- GitHub App pre-installed and ready for bot integration
+[![CI](https://github.com/drt-hub/drt/actions/workflows/ci.yml/badge.svg)](https://github.com/drt-hub/drt/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/drt-hub/drt/graph/badge.svg)](https://codecov.io/gh/drt-hub/drt)
+[![PyPI](https://img.shields.io/pypi/v/drt-core)](https://pypi.org/project/drt-core/)
+[![drt-core downloads](https://img.shields.io/pepy/dt/drt-core?label=drt-core%20downloads)](https://pepy.tech/projects/drt-core)
+[![dagster-drt downloads](https://img.shields.io/pepy/dt/dagster-drt?label=dagster-drt%20downloads)](https://pepy.tech/projects/dagster-drt)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+[![Python](https://img.shields.io/pypi/pyversions/drt-core)](https://pypi.org/project/drt-core/)
+[![GitHub Sponsors](https://img.shields.io/static/v1?label=Sponsor&message=%E2%9D%A4&logo=GitHub&color=%23fe8e86)](https://github.com/sponsors/masukai)
 
-### Testing
-Once merged, the bot will respond to comments like:
+**drt** syncs data from your data warehouse to external services — declaratively, via YAML and CLI.
+Think `dbt run` → `drt run`. Same developer experience, opposite data direction.
+
+<p align="center">
+  <img src="docs/assets/quickstart.gif" alt="drt quickstart demo" width="700">
+</p>
+
+```bash
+pip install drt-core          # core (DuckDB included)
+drt init && drt run
 ```
-@all-contributors please add @username for <contribution-type>
+
+---
+
+## Why drt?
+
+| Problem | drt's answer |
+|---------|-------------|
+| Census/Hightouch are expensive SaaS | Free, self-hosted OSS |
+| GUI-first tools don't fit CI/CD | CLI + YAML, Git-native |
+| dbt/dlt ecosystem has no reverse leg | Same philosophy, same DX |
+| LLM/MCP era makes GUI SaaS overkill | LLM-native by design |
+
+---
+
+## Quickstart
+
+No cloud accounts needed — runs locally with DuckDB in about 5 minutes.
+
+### 1. Install
+
+```bash
+pip install drt-core
 ```
 
-These auto-generated contributor PRs are safe to merge once CI passes and visual layout is verified.
+> For cloud sources: `pip install drt-core[bigquery]`, `drt-core[postgres]`, etc.
+
+### 2. Set up a project
+
+```bash
+mkdir my-drt-project && cd my-drt-project
+drt init   # select "duckdb" as source
+```
+
+### 3. Create sample data
+
+```bash
+python -c "
+import duckdb
+c = duckdb.connect('warehouse.duckdb')
+c.execute('''CREATE TABLE IF NOT EXISTS users AS SELECT * FROM (VALUES
+  (1, 'Alice', 'alice@example.com'),
+  (2, 'Bob',   'bob@example.com'),
+  (3, 'Carol', 'carol@example.com')
+) t(id, name, email)''')
+c.close()
+"
+```
+
+### 4. Create a sync
+
+```yaml
+# syncs/post_users.yml
+name: post_users
+description: "POST user records to an API"
+model: ref('users')
+destination:
+  type: rest_api
+  url: "https://httpbin.org/post"
+  method: POST
+  headers:
+    Content-Type: "application/json"
+  body_template: |
+    { "id": {{ row.id }}, "name": "{{ row.name }}", "email": "{{ row.email }}" }
+sync:
+  mode: full
+  batch_size: 1
+  on_error: fail
+```
+
+### 5. Run
+
+```bash
+drt run --dry-run   # preview, no data sent
+drt run             # run for real
+drt status          # check results
+```
+
+> See [examples/](examples/) for more: Slack, Google Sheets, HubSpot, GitHub Actions, etc.
+
+---
+
+## CLI Reference
+
+```bash
+drt init                    # initialize project
+drt list                    # list sync definitions
+drt run                     # run all syncs
+drt run --select <name>     # run a specific sync
+drt run --dry-run           # dry run
+drt run --verbose           # show row-level error details
+drt run --output json       # structured JSON output for CI/scripting
+drt run --profile prd       # override profile (or DRT_PROFILE env var)
+drt test                    # run post-sync validation tests
+drt test --select <name>    # test a specific sync
+drt validate                # validate sync YAML configs
+drt status                  # show recent sync status
+drt status --output json    # JSON output for status
+drt mcp run                 # start MCP server (requires drt-core[mcp])
+drt --install-completion    # install shell completion (bash/zsh/fish)
+drt --show-completion       # show completion script
+```
+
+### Shell completion
+
+Shell completion is supported for bash, zsh, and fish:
+
+```bash
+# Recommended: auto-install for your current shell (idempotent)
+drt --install-completion
+
+# Or manually add to your shell config (run once from the target shell)
+drt --show-completion >> ~/.bashrc   # bash
+drt --show-completion >> ~/.zshrc    # zsh
+drt --show-completion > ~/.config/fish/completions/drt.fish  # fish
+```
+
+> **Note:** `--show-completion` outputs the script for your *current* shell. Run it from the shell you want to configure. The manual `>>` append is not idempotent — run it once only.
+
+After installation, restart your shell and tab-complete commands and options.
+
+---
+
+## MCP Server
+
+Connect drt to Claude, Cursor, or any MCP-compatible client so you can run syncs, check status, and validate configs without leaving your AI environment.
+
+```bash
+pip install drt-core[mcp]
+drt mcp run
+```
+
+**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "drt": {
+      "command": "drt",
+      "args": ["mcp", "run"]
+    }
+  }
+}
+```
+
+**Available MCP tools:**
+
+| Tool | What it does |
+|------|-------------|
+| `drt_list_syncs` | List all sync definitions |
+| `drt_run_sync` | Run a sync (supports `dry_run`) |
+| `drt_get_status` | Get last run result(s) |
+| `drt_validate` | Validate sync YAML configs |
+| `drt_get_schema` | Return JSON Schema for config files |
+
+---
+
+## AI Skills for Claude Code
+
+Install the official Claude Code skills to generate YAML, debug failures, and migrate from other tools — all from the chat interface.
+
+### Install via Plugin Marketplace (recommended)
+
+```bash
+/plugin marketplace add drt-hub/drt
+/plugin install drt@drt-hub
+```
+
+> **Tip:** Enable auto-update so you always get the latest skills when drt is updated:
+> `/plugin` → Marketplaces → drt-hub → Enable auto-update
+
+### Manual install (slash commands)
+
+Copy the files from `.claude/commands/` into your drt project's `.claude/commands/` directory.
+
+| Skill | Trigger | What it does |
+|-------|---------|-------------|
+| `/drt-create-sync` | "create a sync" | Generates valid sync YAML from your intent |
+| `/drt-debug` | "sync failed" | Diagnoses errors and suggests fixes |
+| `/drt-init` | "set up drt" | Guides through project initialization |
+| `/drt-migrate` | "migrate from Census" | Converts existing configs to drt YAML |
+
+---
+
+## Connectors
+
+### Sources
+
+| Connector | Status | Install | Auth |
+|-----------|--------|---------|------|
+| BigQuery | ✅ v0.1 | `pip install drt-core[bigquery]` | Application Default / Service Account Keyfile |
+| DuckDB | ✅ v0.1 | (core) | File path |
+| PostgreSQL | ✅ v0.1 | `pip install drt-core[postgres]` | Password (env var) |
+| Snowflake | ✅ v0.5 | `pip install drt-core[snowflake]` | Password (env var) |
+| SQLite | ✅ v0.4.2 | (core) | File path |
+| Redshift | ✅ v0.3.4 | `pip install drt-core[redshift]` | Password (env var) |
+| ClickHouse | ✅ v0.4.3 | `pip install drt-core[clickhouse]` | Password (env var) |
+| MySQL | ✅ v0.5 | `pip install drt-core[mysql]` | Password (env var) |
+| Databricks | ✅ v0.6 | `pip install drt-core[databricks]` | Access Token (env var) |
+| SQL Server | ✅ v0.6 | `pip install drt-core[sqlserver]` | Password (env var) |
+
+### Destinations
+
+| Connector | Status | Install | Auth |
+|-----------|--------|---------|------|
+| REST API | ✅ v0.1 | (core) | Bearer / API Key / Basic / OAuth2 |
+| Slack Incoming Webhook | ✅ v0.1 | (core) | Webhook URL |
+| Discord Webhook | ✅ v0.4.2 | (core) | Webhook URL |
+| GitHub Actions | ✅ v0.1 | (core) | Token (env var) |
+| HubSpot | ✅ v0.1 | (core) | Token (env var) |
+| Google Ads | ✅ v0.6 | (core) | OAuth2 Client Credentials |
+| Google Sheets | ✅ v0.4 | `pip install drt-core[sheets]` | Service Account Keyfile |
+| PostgreSQL (upsert) | ✅ v0.4 | `pip install drt-core[postgres]` | Password (env var) |
+| MySQL (upsert) | ✅ v0.4 | `pip install drt-core[mysql]` | Password (env var) |
+| ClickHouse | ✅ v0.5 | `pip install drt-core[clickhouse]` | Password (env var) |
+| Parquet file | ✅ v0.5 | `pip install drt-core[parquet]` | File path |
+| Microsoft Teams Webhook | ✅ v0.5 | (core) | Webhook URL |
+| CSV / JSON / JSONL file | ✅ v0.5 | (core) | File path |
+| Jira | ✅ v0.5 | (core) | Basic (email + API token) |
+| Linear | ✅ v0.5 | (core) | API Key (env var) |
+| SendGrid | ✅ v0.5 | (core) | API Key (env var) |
+| Salesforce | 🗓 v0.6 | `pip install drt-core[salesforce]` | — |
+| Notion | 🗓 planned | (core) | — |
+
+### Integrations
+
+| Connector | Status | Install |
+|-----------|--------|---------|
+| Dagster | ✅ v0.4 | `pip install dagster-drt` |
+| Prefect | ✅ v0.6 | (core) |
+| Airflow | ✅ v0.6 | (core) |
+| dbt manifest reader | ✅ v0.4 | (core) |
+
+---
+
+## Roadmap
+
+> **Detailed plans & progress → [GitHub Milestones](https://github.com/drt-hub/drt/milestones)**
+> **Looking to contribute? → [Good First Issues](https://github.com/drt-hub/drt/issues?q=is%3Aopen+label%3A%22good+first+issue%22)**
+
+| Version | Focus |
+|---------|-------|
+| **v0.1** ✅ | BigQuery / DuckDB / Postgres sources · REST API / Slack / GitHub Actions / HubSpot destinations · CLI · dry-run |
+| **v0.2** ✅ | Incremental sync (`cursor_field` watermark) · retry config per-sync |
+| **v0.3** ✅ | MCP Server (`drt mcp run`) · AI Skills for Claude Code · LLM-readable docs · row-level errors · security hardening · Redshift source |
+| **v0.4** ✅ | Google Sheets / PostgreSQL / MySQL destinations · dagster-drt · dbt manifest reader · type safety overhaul |
+| **v0.5** ✅ | Snowflake / MySQL sources · ClickHouse / Parquet / Teams / CSV+JSON / Jira / Linear / SendGrid destinations · `drt test` · `--output json` · `--profile` · `${VAR}` substitution · dbt manifest · secrets.toml · Docker |
+| **v0.5.4** ✅ | `destination_lookup` — resolve FK values by querying destination DB during sync (MySQL / Postgres / ClickHouse) |
+| [v0.6](https://github.com/drt-hub/drt/milestone/3) | Salesforce · Airflow integration · Twilio / Intercom destinations |
+| [v0.7](https://github.com/drt-hub/drt/milestone/4) | DWH destinations (Snowflake / BigQuery / ClickHouse / Databricks) · Cloud storage (S3 / GCS / Azure Blob) |
+| [v0.8](https://github.com/drt-hub/drt/milestone/5) | Lakehouse sources (Delta Lake / Apache Iceberg) |
+| v1.x | Rust engine (PyO3) |
+
+---
+
+## Orchestration: dagster-drt
+
+Community-maintained [Dagster](https://dagster.io/) integration. Expose drt syncs as Dagster assets with full observability.
+
+```bash
+pip install dagster-drt
+```
+
+```python
+from dagster import AssetExecutionContext, Definitions
+from dagster_drt import drt_assets, DagsterDrtResource
+
+@drt_assets(project_dir="path/to/drt-project")
+def my_syncs(context: AssetExecutionContext, drt: DagsterDrtResource):
+    yield from drt.run(context=context)
+
+defs = Definitions(
+    assets=[my_syncs],
+    resources={"drt": DagsterDrtResource(project_dir="path/to/drt-project")},
+)
+```
+
+See [dagster-drt README](integrations/dagster-drt/README.md) for full API docs (Translator, Pipes support, DrtConfig dry-run, MaterializeResult).
+
+---
+
+## Ecosystem
+
+drt is designed to work alongside, not against, the modern data stack:
+
+<p align="center">
+  <img src="docs/assets/ecosystem.png" alt="drt ecosystem — dlt load, dbt transform, drt activate" width="700">
+</p>
+
+---
+
+## Contributing
+
+We welcome contributions of all sizes — from typo fixes to new connectors. drt has a transparent [contributor ladder](GOVERNANCE.md#roles) so your work builds toward greater trust and responsibility over time.
+
+- **Get started:** [CONTRIBUTING.md](CONTRIBUTING.md) — setup, workflow, and your first connector tutorial
+- **Pick something to work on:** [Good First Issues](https://github.com/drt-hub/drt/issues?q=is%3Aopen+label%3A%22good+first+issue%22)
+- **Understand how decisions are made:** [GOVERNANCE.md](GOVERNANCE.md)
+
+## Contributors ✨
+
+Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
+
+<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
+<!-- prettier-ignore-start -->
+<!-- markdownlint-disable -->
+<table>
+  <tbody>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://masukai.github.io/portfolio/"><img src="https://avatars.githubusercontent.com/u/37993351?v=4&s=100" width="100px;" alt="K.Masuda"/><br /><sub><b>K.Masuda</b></sub></a><br /><a href="https://github.com/drt-hub/drt/commits?author=masukai" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://www.youtube.com/@Coding_Moves"><img src="https://avatars.githubusercontent.com/u/178013839?v=4&s=100" width="100px;" alt="Moavia Amir"/><br /><sub><b>Moavia Amir</b></sub></a><br /><a href="https://github.com/drt-hub/drt/commits?author=Muawiya-contact" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Khush-domadia"><img src="https://avatars.githubusercontent.com/u/188820207?v=4&s=100" width="100px;" alt="Khush Domadiya"/><br /><sub><b>Khush Domadiya</b></sub></a><br /><a href="https://github.com/drt-hub/drt/commits?author=Khush-domadia" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://pawansingh3889.github.io/"><img src="https://avatars.githubusercontent.com/u/42340841?v=4&s=100" width="100px;" alt="Pawan Singh Kapkoti"/><br /><sub><b>Pawan Singh Kapkoti</b></sub></a><br /><a href="https://github.com/drt-hub/drt/commits?author=Pawansingh3889" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/PFCAaron12"><img src="https://avatars.githubusercontent.com/u/64714302?v=4&s=100" width="100px;" alt="PFCAaron12"/><br /><sub><b>PFCAaron12</b></sub></a><br /><a href="https://github.com/drt-hub/drt/commits?author=PFCAaron12" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/armorbreak001"><img src="https://avatars.githubusercontent.com/u/274532465?v=4&s=100" width="100px;" alt="armorbreak001"/><br /><sub><b>armorbreak001</b></sub></a><br /><a href="https://github.com/drt-hub/drt/commits?author=armorbreak001" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/pureqin"><img src="https://avatars.githubusercontent.com/u/213101547?v=4&s=100" width="100px;" alt="pureqin"/><br /><sub><b>pureqin</b></sub></a><br /><a href="https://github.com/drt-hub/drt/commits?author=pureqin" title="Code">💻</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/wahajahmed010"><img src="https://avatars.githubusercontent.com/u/57330918?v=4&s=100" width="100px;" alt="Wahaj Ahmed"/><br /><sub><b>Wahaj Ahmed</b></sub></a><br /><a href="https://github.com/drt-hub/drt/commits?author=wahajahmed010" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/cian-ps"><img src="https://avatars.githubusercontent.com/u/231972213?v=4&s=100" width="100px;" alt="cian-ps"/><br /><sub><b>cian-ps</b></sub></a><br /><a href="https://github.com/drt-hub/drt/commits?author=cian-ps" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/xtreellaDev"><img src="https://avatars.githubusercontent.com/u/238762418?v=4&s=100" width="100px;" alt="Erik Estrella"/><br /><sub><b>Erik Estrella</b></sub></a><br /><a href="https://github.com/drt-hub/drt/commits?author=xtreellaDev" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Ai-chan-0411"><img src="https://avatars.githubusercontent.com/u/275152799?v=4&s=100" width="100px;" alt="Ai (藍)"/><br /><sub><b>Ai (藍)</b></sub></a><br /><a href="https://github.com/drt-hub/drt/commits?author=Ai-chan-0411" title="Code">💻</a></td>
+    </tr>
+  </tbody>
+  <tfoot>
+    <tr>
+      <td align="center" size="13px" colspan="7">
+        <img src="https://raw.githubusercontent.com/all-contributors/all-contributors-cli/1b8533af435da9854653492b1327a23a4dbd0a10/assets/logo-small.svg">
+          <a href="https://all-contributors.js.org/docs/en/bot/usage">Add your contributions</a>
+        </img>
+      </td>
+    </tr>
+  </tfoot>
+</table>
+
+<!-- markdownlint-restore -->
+<!-- prettier-ignore-end -->
+
+<!-- ALL-CONTRIBUTORS-LIST:END -->
+
+This project follows the [all-contributors](https://github.com/all-contributors/all-contributors) specification. Contributions of any kind welcome!
+
+## Disclaimer
+
+drt is an independent open-source project and is **not affiliated with,
+endorsed by, or sponsored by** dbt Labs, dlt-hub, or any other company.
+
+"dbt" is a registered trademark of dbt Labs, Inc.
+"dlt" is a project maintained by dlt-hub.
+
+drt is designed to complement these tools as part of the modern data stack,
+but is a separate project with its own codebase and maintainers.
+
+## License
+
+Apache 2.0 — see [LICENSE](LICENSE).

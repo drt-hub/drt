@@ -346,6 +346,49 @@ typo修正から新しいコネクタの追加まで、あらゆる規模のコ�
 - **取り組む issue を探す:** [Good First Issues](https://github.com/drt-hub/drt/issues?q=is%3Aopen+label%3A%22good+first+issue%22)
 - **意思決定の仕組みを理解する:** [GOVERNANCE.ja.md](GOVERNANCE.ja.md)
 
+## Contributors ✨
+
+このプロジェクトでは [emoji key](https://allcontributors.org/docs/en/emoji-key) に基づいて、素晴らしい貢献者のみなさんを紹介しています。
+
+<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
+<!-- prettier-ignore-start -->
+<!-- markdownlint-disable -->
+<table>
+  <tbody>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://masukai.github.io/portfolio/"><img src="https://avatars.githubusercontent.com/u/37993351?v=4&s=100" width="100px;" alt="K.Masuda"/><br /><sub><b>K.Masuda</b></sub></a><br /><a href="https://github.com/drt-hub/drt/commits?author=masukai" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://www.youtube.com/@Coding_Moves"><img src="https://avatars.githubusercontent.com/u/178013839?v=4&s=100" width="100px;" alt="Moavia Amir"/><br /><sub><b>Moavia Amir</b></sub></a><br /><a href="https://github.com/drt-hub/drt/commits?author=Muawiya-contact" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Khush-domadia"><img src="https://avatars.githubusercontent.com/u/188820207?v=4&s=100" width="100px;" alt="Khush Domadiya"/><br /><sub><b>Khush Domadiya</b></sub></a><br /><a href="https://github.com/drt-hub/drt/commits?author=Khush-domadia" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://pawansingh3889.github.io/"><img src="https://avatars.githubusercontent.com/u/42340841?v=4&s=100" width="100px;" alt="Pawan Singh Kapkoti"/><br /><sub><b>Pawan Singh Kapkoti</b></sub></a><br /><a href="https://github.com/drt-hub/drt/commits?author=Pawansingh3889" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/PFCAaron12"><img src="https://avatars.githubusercontent.com/u/64714302?v=4&s=100" width="100px;" alt="PFCAaron12"/><br /><sub><b>PFCAaron12</b></sub></a><br /><a href="https://github.com/drt-hub/drt/commits?author=PFCAaron12" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/armorbreak001"><img src="https://avatars.githubusercontent.com/u/274532465?v=4&s=100" width="100px;" alt="armorbreak001"/><br /><sub><b>armorbreak001</b></sub></a><br /><a href="https://github.com/drt-hub/drt/commits?author=armorbreak001" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/pureqin"><img src="https://avatars.githubusercontent.com/u/213101547?v=4&s=100" width="100px;" alt="pureqin"/><br /><sub><b>pureqin</b></sub></a><br /><a href="https://github.com/drt-hub/drt/commits?author=pureqin" title="Code">💻</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/wahajahmed010"><img src="https://avatars.githubusercontent.com/u/57330918?v=4&s=100" width="100px;" alt="Wahaj Ahmed"/><br /><sub><b>Wahaj Ahmed</b></sub></a><br /><a href="https://github.com/drt-hub/drt/commits?author=wahajahmed010" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/cian-ps"><img src="https://avatars.githubusercontent.com/u/231972213?v=4&s=100" width="100px;" alt="cian-ps"/><br /><sub><b>cian-ps</b></sub></a><br /><a href="https://github.com/drt-hub/drt/commits?author=cian-ps" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/xtreellaDev"><img src="https://avatars.githubusercontent.com/u/238762418?v=4&s=100" width="100px;" alt="Erik Estrella"/><br /><sub><b>Erik Estrella</b></sub></a><br /><a href="https://github.com/drt-hub/drt/commits?author=xtreellaDev" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Ai-chan-0411"><img src="https://avatars.githubusercontent.com/u/275152799?v=4&s=100" width="100px;" alt="Ai (藍)"/><br /><sub><b>Ai (藍)</b></sub></a><br /><a href="https://github.com/drt-hub/drt/commits?author=Ai-chan-0411" title="Code">💻</a></td>
+    </tr>
+  </tbody>
+  <tfoot>
+    <tr>
+      <td align="center" size="13px" colspan="7">
+        <img src="https://raw.githubusercontent.com/all-contributors/all-contributors-cli/1b8533af435da9854653492b1327a23a4dbd0a10/assets/logo-small.svg">
+          <a href="https://all-contributors.js.org/docs/en/bot/usage">Add your contributions</a>
+        </img>
+      </td>
+    </tr>
+  </tfoot>
+</table>
+
+<!-- markdownlint-restore -->
+<!-- prettier-ignore-end -->
+
+<!-- ALL-CONTRIBUTORS-LIST:END -->
+
+このプロジェクトは [all-contributors](https://github.com/all-contributors/all-contributors) 仕様に従っています。あらゆる種類の貢献を歓迎します。
+
 ## 免責事項
 
 drtは独立したオープンソースプロジェクトであり、dbt Labs、dlt-hub、またはその他のいかなる企業とも提携、承認、または後援関係にありません。

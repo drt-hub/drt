@@ -143,6 +143,33 @@ docs: update quickstart example
 chore: bump dependencies
 ```
 
+## Contributor Recognition
+
+We recognize all types of contributions using the [all-contributors](https://allcontributors.org/) specification.
+
+**How to get recognized:**
+
+If you contribute code, documentation, organize discussions, or help in any way, you can be added to the contributors list by commenting on your Issue or PR:
+
+```
+@all-contributors please add @username for <contribution-type>
+```
+
+**Contribution types include:**
+- `code` — Pull requests with code changes
+- `doc` — Documentation, blog posts, tutorials
+- `review` — Code reviews and feedback
+- `ideas` — Feature suggestions and design discussions
+- `bug` — Bug reports and issue triage
+- `test` — Test creation and improvements
+- `maintenance` — Maintenance and DevOps
+
+See the [emoji key](https://allcontributors.org/docs/en/emoji-key) for the complete list of 33+ contribution types.
+
+**Note on bot PRs:** The all-contributors bot will automatically open a Pull Request to update the README contributors list. These PRs are safe to merge once CI passes and the visual grid layout is verified — no full review needed. Just verify the names and avatars look correct!
+
+All contributors are listed in the [README Contributors section](./README.md#contributors-) with an all-contributors badge tracking the total count.
+
 ## Your First Connector — Step-by-Step Tutorial
 
 This walkthrough builds a complete destination connector from scratch. We'll create a simple **Console** destination that prints records to stdout — a useful debugging tool and a template for real connectors.
