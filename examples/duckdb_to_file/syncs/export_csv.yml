@@ -1,9 +1,9 @@
-name: export_to_csv
+name: export_csv
 description: Export data from duckdb to csv file
 model: ref('users')
 destination:
   type: file
-  path: ${OUTPUT_PATH}
+  path: ./output/users.csv
   format: csv
 sync:
   mode: full

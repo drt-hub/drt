@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -e
 
-mkdir -p data
+mkdir -p ~/.drt data
 
-export DRT_DB_PATH=$(pwd)/data/warehouse.duckdb
+cp -f profiles.yml.example ~/.drt/profiles.yml
 
 python scripts/init_db.py
 
-echo "✓ duckdb_to_rest ready"
+echo "✓ duckdb_to_rest ready. Try: drt run --select post_api"

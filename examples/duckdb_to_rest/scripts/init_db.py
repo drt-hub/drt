@@ -3,12 +3,7 @@
 import duckdb, os
 from pathlib import Path
 
-db_path = Path(
-    os.environ.get(
-        "DRT_DB_PATH",
-        Path(__file__).resolve().parent.parent / "data" / "warehouse.duckdb"
-    )
-)
+db_path = Path(__file__).resolve().parent.parent / "data" / "warehouse.duckdb"
 
 conn = duckdb.connect(db_path)
 conn.execute("""

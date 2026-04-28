@@ -5,7 +5,11 @@ destination:
   type: rest_api
   url: "https://httpbin.org/post"
   method: POST
-  body_template: { "name": "{{ row.name }}", "email": "{{ row.email }}" }
+  body_template: |
+    {
+      "name": "{{ row.name }}",
+      "email": "{{ row.email }}" 
+    }
 sync:
   mode: full
   batch_size: 5
