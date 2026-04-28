@@ -156,6 +156,7 @@ If you contribute code, documentation, organize discussions, or help in any way,
 ```
 
 **Contribution types include:**
+
 - `code` — Pull requests with code changes
 - `doc` — Documentation, blog posts, tutorials
 - `review` — Code reviews and feedback

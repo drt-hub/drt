@@ -1,6 +1,9 @@
 [English](./README.md) | [日本語](./README.ja.md)
+
 <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
+
 [![All Contributors](https://img.shields.io/badge/all_contributors-11-orange.svg?style=flat-square)](#contributors-)
+
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
 
 <picture>
@@ -37,12 +40,12 @@ drt init && drt run
 
 ## Why drt?
 
-| Problem | drt's answer |
-|---------|-------------|
-| Census/Hightouch are expensive SaaS | Free, self-hosted OSS |
-| GUI-first tools don't fit CI/CD | CLI + YAML, Git-native |
+| Problem                              | drt's answer             |
+| ------------------------------------ | ------------------------ |
+| Census/Hightouch are expensive SaaS  | Free, self-hosted OSS    |
+| GUI-first tools don't fit CI/CD      | CLI + YAML, Git-native   |
 | dbt/dlt ecosystem has no reverse leg | Same philosophy, same DX |
-| LLM/MCP era makes GUI SaaS overkill | LLM-native by design |
+| LLM/MCP era makes GUI SaaS overkill  | LLM-native by design     |
 
 ---
 
@@ -148,7 +151,7 @@ drt --show-completion >> ~/.zshrc    # zsh
 drt --show-completion > ~/.config/fish/completions/drt.fish  # fish
 ```
 
-> **Note:** `--show-completion` outputs the script for your *current* shell. Run it from the shell you want to configure. The manual `>>` append is not idempotent — run it once only.
+> **Note:** `--show-completion` outputs the script for your _current_ shell. Run it from the shell you want to configure. The manual `>>` append is not idempotent — run it once only.
 
 After installation, restart your shell and tab-complete commands and options.
 
@@ -178,12 +181,12 @@ drt mcp run
 
 **Available MCP tools:**
 
-| Tool | What it does |
-|------|-------------|
-| `drt_list_syncs` | List all sync definitions |
-| `drt_run_sync` | Run a sync (supports `dry_run`) |
-| `drt_get_status` | Get last run result(s) |
-| `drt_validate` | Validate sync YAML configs |
+| Tool             | What it does                        |
+| ---------------- | ----------------------------------- |
+| `drt_list_syncs` | List all sync definitions           |
+| `drt_run_sync`   | Run a sync (supports `dry_run`)     |
+| `drt_get_status` | Get last run result(s)              |
+| `drt_validate`   | Validate sync YAML configs          |
 | `drt_get_schema` | Return JSON Schema for config files |
 
 ---
@@ -206,12 +209,12 @@ Install the official Claude Code skills to generate YAML, debug failures, and mi
 
 Copy the files from `.claude/commands/` into your drt project's `.claude/commands/` directory.
 
-| Skill | Trigger | What it does |
-|-------|---------|-------------|
-| `/drt-create-sync` | "create a sync" | Generates valid sync YAML from your intent |
-| `/drt-debug` | "sync failed" | Diagnoses errors and suggests fixes |
-| `/drt-init` | "set up drt" | Guides through project initialization |
-| `/drt-migrate` | "migrate from Census" | Converts existing configs to drt YAML |
+| Skill              | Trigger               | What it does                               |
+| ------------------ | --------------------- | ------------------------------------------ |
+| `/drt-create-sync` | "create a sync"       | Generates valid sync YAML from your intent |
+| `/drt-debug`       | "sync failed"         | Diagnoses errors and suggests fixes        |
+| `/drt-init`        | "set up drt"          | Guides through project initialization      |
+| `/drt-migrate`     | "migrate from Census" | Converts existing configs to drt YAML      |
 
 ---
 
@@ -219,50 +222,50 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 
 ### Sources
 
-| Connector | Status | Install | Auth |
-|-----------|--------|---------|------|
-| BigQuery | ✅ v0.1 | `pip install drt-core[bigquery]` | Application Default / Service Account Keyfile |
-| DuckDB | ✅ v0.1 | (core) | File path |
-| PostgreSQL | ✅ v0.1 | `pip install drt-core[postgres]` | Password (env var) |
-| Snowflake | ✅ v0.5 | `pip install drt-core[snowflake]` | Password (env var) |
-| SQLite | ✅ v0.4.2 | (core) | File path |
-| Redshift | ✅ v0.3.4 | `pip install drt-core[redshift]` | Password (env var) |
-| ClickHouse | ✅ v0.4.3 | `pip install drt-core[clickhouse]` | Password (env var) |
-| MySQL | ✅ v0.5 | `pip install drt-core[mysql]` | Password (env var) |
-| Databricks | ✅ v0.6 | `pip install drt-core[databricks]` | Access Token (env var) |
-| SQL Server | ✅ v0.6 | `pip install drt-core[sqlserver]` | Password (env var) |
+| Connector  | Status    | Install                            | Auth                                          |
+| ---------- | --------- | ---------------------------------- | --------------------------------------------- |
+| BigQuery   | ✅ v0.1   | `pip install drt-core[bigquery]`   | Application Default / Service Account Keyfile |
+| DuckDB     | ✅ v0.1   | (core)                             | File path                                     |
+| PostgreSQL | ✅ v0.1   | `pip install drt-core[postgres]`   | Password (env var)                            |
+| Snowflake  | ✅ v0.5   | `pip install drt-core[snowflake]`  | Password (env var)                            |
+| SQLite     | ✅ v0.4.2 | (core)                             | File path                                     |
+| Redshift   | ✅ v0.3.4 | `pip install drt-core[redshift]`   | Password (env var)                            |
+| ClickHouse | ✅ v0.4.3 | `pip install drt-core[clickhouse]` | Password (env var)                            |
+| MySQL      | ✅ v0.5   | `pip install drt-core[mysql]`      | Password (env var)                            |
+| Databricks | ✅ v0.6   | `pip install drt-core[databricks]` | Access Token (env var)                        |
+| SQL Server | ✅ v0.6   | `pip install drt-core[sqlserver]`  | Password (env var)                            |
 
 ### Destinations
 
-| Connector | Status | Install | Auth |
-|-----------|--------|---------|------|
-| REST API | ✅ v0.1 | (core) | Bearer / API Key / Basic / OAuth2 |
-| Slack Incoming Webhook | ✅ v0.1 | (core) | Webhook URL |
-| Discord Webhook | ✅ v0.4.2 | (core) | Webhook URL |
-| GitHub Actions | ✅ v0.1 | (core) | Token (env var) |
-| HubSpot | ✅ v0.1 | (core) | Token (env var) |
-| Google Ads | ✅ v0.6 | (core) | OAuth2 Client Credentials |
-| Google Sheets | ✅ v0.4 | `pip install drt-core[sheets]` | Service Account Keyfile |
-| PostgreSQL (upsert) | ✅ v0.4 | `pip install drt-core[postgres]` | Password (env var) |
-| MySQL (upsert) | ✅ v0.4 | `pip install drt-core[mysql]` | Password (env var) |
-| ClickHouse | ✅ v0.5 | `pip install drt-core[clickhouse]` | Password (env var) |
-| Parquet file | ✅ v0.5 | `pip install drt-core[parquet]` | File path |
-| Microsoft Teams Webhook | ✅ v0.5 | (core) | Webhook URL |
-| CSV / JSON / JSONL file | ✅ v0.5 | (core) | File path |
-| Jira | ✅ v0.5 | (core) | Basic (email + API token) |
-| Linear | ✅ v0.5 | (core) | API Key (env var) |
-| SendGrid | ✅ v0.5 | (core) | API Key (env var) |
-| Salesforce | 🗓 v0.6 | `pip install drt-core[salesforce]` | — |
-| Notion | 🗓 planned | (core) | — |
+| Connector               | Status     | Install                            | Auth                              |
+| ----------------------- | ---------- | ---------------------------------- | --------------------------------- |
+| REST API                | ✅ v0.1    | (core)                             | Bearer / API Key / Basic / OAuth2 |
+| Slack Incoming Webhook  | ✅ v0.1    | (core)                             | Webhook URL                       |
+| Discord Webhook         | ✅ v0.4.2  | (core)                             | Webhook URL                       |
+| GitHub Actions          | ✅ v0.1    | (core)                             | Token (env var)                   |
+| HubSpot                 | ✅ v0.1    | (core)                             | Token (env var)                   |
+| Google Ads              | ✅ v0.6    | (core)                             | OAuth2 Client Credentials         |
+| Google Sheets           | ✅ v0.4    | `pip install drt-core[sheets]`     | Service Account Keyfile           |
+| PostgreSQL (upsert)     | ✅ v0.4    | `pip install drt-core[postgres]`   | Password (env var)                |
+| MySQL (upsert)          | ✅ v0.4    | `pip install drt-core[mysql]`      | Password (env var)                |
+| ClickHouse              | ✅ v0.5    | `pip install drt-core[clickhouse]` | Password (env var)                |
+| Parquet file            | ✅ v0.5    | `pip install drt-core[parquet]`    | File path                         |
+| Microsoft Teams Webhook | ✅ v0.5    | (core)                             | Webhook URL                       |
+| CSV / JSON / JSONL file | ✅ v0.5    | (core)                             | File path                         |
+| Jira                    | ✅ v0.5    | (core)                             | Basic (email + API token)         |
+| Linear                  | ✅ v0.5    | (core)                             | API Key (env var)                 |
+| SendGrid                | ✅ v0.5    | (core)                             | API Key (env var)                 |
+| Salesforce              | 🗓 v0.6    | `pip install drt-core[salesforce]` | —                                 |
+| Notion                  | 🗓 planned | (core)                             | —                                 |
 
 ### Integrations
 
-| Connector | Status | Install |
-|-----------|--------|---------|
-| Dagster | ✅ v0.4 | `pip install dagster-drt` |
-| Prefect | ✅ v0.6 | (core) |
-| Airflow | ✅ v0.6 | (core) |
-| dbt manifest reader | ✅ v0.4 | (core) |
+| Connector           | Status  | Install                   |
+| ------------------- | ------- | ------------------------- |
+| Dagster             | ✅ v0.4 | `pip install dagster-drt` |
+| Prefect             | ✅ v0.6 | (core)                    |
+| Airflow             | ✅ v0.6 | (core)                    |
+| dbt manifest reader | ✅ v0.4 | (core)                    |
 
 ---
 
@@ -271,18 +274,18 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 > **Detailed plans & progress → [GitHub Milestones](https://github.com/drt-hub/drt/milestones)**
 > **Looking to contribute? → [Good First Issues](https://github.com/drt-hub/drt/issues?q=is%3Aopen+label%3A%22good+first+issue%22)**
 
-| Version | Focus |
-|---------|-------|
-| **v0.1** ✅ | BigQuery / DuckDB / Postgres sources · REST API / Slack / GitHub Actions / HubSpot destinations · CLI · dry-run |
-| **v0.2** ✅ | Incremental sync (`cursor_field` watermark) · retry config per-sync |
-| **v0.3** ✅ | MCP Server (`drt mcp run`) · AI Skills for Claude Code · LLM-readable docs · row-level errors · security hardening · Redshift source |
-| **v0.4** ✅ | Google Sheets / PostgreSQL / MySQL destinations · dagster-drt · dbt manifest reader · type safety overhaul |
-| **v0.5** ✅ | Snowflake / MySQL sources · ClickHouse / Parquet / Teams / CSV+JSON / Jira / Linear / SendGrid destinations · `drt test` · `--output json` · `--profile` · `${VAR}` substitution · dbt manifest · secrets.toml · Docker |
-| **v0.5.4** ✅ | `destination_lookup` — resolve FK values by querying destination DB during sync (MySQL / Postgres / ClickHouse) |
-| [v0.6](https://github.com/drt-hub/drt/milestone/3) | Salesforce · Airflow integration · Twilio / Intercom destinations |
-| [v0.7](https://github.com/drt-hub/drt/milestone/4) | DWH destinations (Snowflake / BigQuery / ClickHouse / Databricks) · Cloud storage (S3 / GCS / Azure Blob) |
-| [v0.8](https://github.com/drt-hub/drt/milestone/5) | Lakehouse sources (Delta Lake / Apache Iceberg) |
-| v1.x | Rust engine (PyO3) |
+| Version                                            | Focus                                                                                                                                                                                                                   |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **v0.1** ✅                                        | BigQuery / DuckDB / Postgres sources · REST API / Slack / GitHub Actions / HubSpot destinations · CLI · dry-run                                                                                                         |
+| **v0.2** ✅                                        | Incremental sync (`cursor_field` watermark) · retry config per-sync                                                                                                                                                     |
+| **v0.3** ✅                                        | MCP Server (`drt mcp run`) · AI Skills for Claude Code · LLM-readable docs · row-level errors · security hardening · Redshift source                                                                                    |
+| **v0.4** ✅                                        | Google Sheets / PostgreSQL / MySQL destinations · dagster-drt · dbt manifest reader · type safety overhaul                                                                                                              |
+| **v0.5** ✅                                        | Snowflake / MySQL sources · ClickHouse / Parquet / Teams / CSV+JSON / Jira / Linear / SendGrid destinations · `drt test` · `--output json` · `--profile` · `${VAR}` substitution · dbt manifest · secrets.toml · Docker |
+| **v0.5.4** ✅                                      | `destination_lookup` — resolve FK values by querying destination DB during sync (MySQL / Postgres / ClickHouse)                                                                                                         |
+| [v0.6](https://github.com/drt-hub/drt/milestone/3) | Salesforce · Airflow integration · Twilio / Intercom destinations                                                                                                                                                       |
+| [v0.7](https://github.com/drt-hub/drt/milestone/4) | DWH destinations (Snowflake / BigQuery / ClickHouse / Databricks) · Cloud storage (S3 / GCS / Azure Blob)                                                                                                               |
+| [v0.8](https://github.com/drt-hub/drt/milestone/5) | Lakehouse sources (Delta Lake / Apache Iceberg)                                                                                                                                                                         |
+| v1.x                                               | Rust engine (PyO3)                                                                                                                                                                                                      |
 
 ---
 
