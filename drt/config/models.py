@@ -613,6 +613,7 @@ class WatermarkConfig(BaseModel):
 
 class SyncOptions(BaseModel):
     mode: Literal["full", "incremental", "upsert", "replace"] = "full"
+    replace_strategy: Literal["truncate", "swap"] = "truncate"
     cursor_field: str | None = None  # required when mode=incremental
     watermark: WatermarkConfig | None = None
     batch_size: int = 100
@@ -624,6 +625,12 @@ class SyncOptions(BaseModel):
     def _check_incremental_cursor(self) -> "SyncOptions":
         if self.mode == "incremental" and not self.cursor_field:
             raise ValueError("cursor_field is required when mode is 'incremental'.")
+        return self
+
+    @model_validator(mode="after")
+    def _check_replace_strategy(self) -> "SyncOptions":
+        if self.replace_strategy == "swap" and self.mode != "replace":
+            raise ValueError("replace_strategy='swap' requires mode='replace'.")
         return self
 
 

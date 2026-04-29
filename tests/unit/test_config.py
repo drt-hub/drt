@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from drt.config.credentials import BigQueryProfile, load_profile, save_profile
 from drt.config.models import (
@@ -595,3 +596,21 @@ def test_sync_config_without_tests() -> None:
     }
     sync = SyncConfig.model_validate(data)
     assert sync.tests == []
+
+
+class TestReplaceStrategy:
+    def test_default_replace_strategy_is_truncate(self) -> None:
+        opts = SyncOptions(mode="replace")
+        assert opts.replace_strategy == "truncate"
+
+    def test_replace_strategy_swap_accepted(self) -> None:
+        opts = SyncOptions(mode="replace", replace_strategy="swap")
+        assert opts.replace_strategy == "swap"
+
+    def test_replace_strategy_invalid_value_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            SyncOptions(mode="replace", replace_strategy="hotswap")  # type: ignore[arg-type]
+
+    def test_replace_strategy_swap_requires_replace_mode(self) -> None:
+        with pytest.raises(ValueError, match="replace_strategy"):
+            SyncOptions(mode="full", replace_strategy="swap")
