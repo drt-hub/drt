@@ -45,6 +45,8 @@ class MySQLDestination:
 
     def __init__(self) -> None:
         self._replace_truncated: bool = False
+        self._swap_shadow_created: bool = False
+        self._swap_table: str | None = None
 
     def load(
         self,
@@ -64,14 +66,24 @@ class MySQLDestination:
             columns = list(records[0].keys())
 
             if sync_options.mode == "replace":
-                result = self._load_replace(
-                    conn,
-                    cur,
-                    records,
-                    columns,
-                    config.table,
-                    sync_options,
-                )
+                if sync_options.replace_strategy == "swap":
+                    result = self._load_replace_swap(
+                        conn,
+                        cur,
+                        records,
+                        columns,
+                        config.table,
+                        sync_options,
+                    )
+                else:
+                    result = self._load_replace(
+                        conn,
+                        cur,
+                        records,
+                        columns,
+                        config.table,
+                        sync_options,
+                    )
             else:
                 result = self._load_upsert(
                     conn,
@@ -113,6 +125,17 @@ class MySQLDestination:
             return row[0] if row else 0
         finally:
             conn.close()
+
+    @staticmethod
+    def _quote_ident(table: str) -> str:
+        """Backtick-quote a (possibly schema-qualified) identifier.
+
+        ``mydb.scores`` -> ``\\`mydb\\`.\\`scores\\```
+        ``scores``      -> ``\\`scores\\```
+        """
+        if "." in table:
+            return "`" + "`.`".join(table.split(".")) + "`"
+        return f"`{table}`"
 
     def _load_replace(
         self,
@@ -156,6 +179,95 @@ class MySQLDestination:
 
         conn.commit()
         return result
+
+    def _load_replace_swap(
+        self,
+        conn: Any,
+        cur: Any,
+        records: list[dict[str, Any]],
+        columns: list[str],
+        table: str,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        """Build a shadow table per sync; atomic rename happens in finalize_sync."""
+        result = SyncResult()
+        shadow = f"{table}__drt_swap"
+        shadow_q = self._quote_ident(shadow)
+        table_q = self._quote_ident(table)
+
+        if not self._swap_shadow_created:
+            cur.execute(f"DROP TABLE IF EXISTS {shadow_q}")
+            # MySQL: CREATE TABLE ... LIKE ... copies columns + indexes
+            # + AUTO_INCREMENT default — no extra clause needed.
+            cur.execute(f"CREATE TABLE {shadow_q} LIKE {table_q}")
+            self._swap_shadow_created = True
+            self._swap_table = table
+
+        sql = self._build_insert_sql(shadow, columns)
+
+        for i, record in enumerate(records):
+            try:
+                values = [_serialize_value(record.get(c)) for c in columns]
+                cur.execute(sql, values)
+                result.success += 1
+            except Exception as e:
+                result.failed += 1
+                result.row_errors.append(
+                    RowError(
+                        batch_index=i,
+                        record_preview=json.dumps(record, default=str)[:200],
+                        http_status=None,
+                        error_message=str(e),
+                    )
+                )
+                if sync_options.on_error == "fail":
+                    conn.rollback()
+                    # Cleanup shadow on hard fail
+                    cur = conn.cursor()
+                    cur.execute(f"DROP TABLE IF EXISTS {shadow_q}")
+                    conn.commit()
+                    self._swap_shadow_created = False
+                    self._swap_table = None
+                    return result
+                # on_error=skip: keep going
+
+        conn.commit()
+        return result
+
+    def finalize_sync(
+        self,
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult | None:
+        """Atomic single-statement RENAME: original->old, shadow->original; drop old."""
+        if not self._swap_shadow_created or self._swap_table is None:
+            return None
+
+        assert isinstance(config, MySQLDestinationConfig)
+        table = self._swap_table
+        shadow = f"{table}__drt_swap"
+        old = f"{table}__drt_old"
+        table_q = self._quote_ident(table)
+        shadow_q = self._quote_ident(shadow)
+        old_q = self._quote_ident(old)
+
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            # MySQL's multi-table RENAME is atomic in a single statement.
+            cur.execute(
+                f"RENAME TABLE {table_q} TO {old_q}, {shadow_q} TO {table_q}"
+            )
+            conn.commit()
+            # DROP old in separate tx (failure here doesn't break the swap).
+            cur.execute(f"DROP TABLE {old_q}")
+            conn.commit()
+        finally:
+            conn.close()
+            self._swap_shadow_created = False
+            self._swap_table = None
+
+        return SyncResult()
 
     @staticmethod
     def _load_upsert(
