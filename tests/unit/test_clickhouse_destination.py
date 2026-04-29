@@ -243,3 +243,105 @@ class TestClickHouseReplaceMode:
         dest.load([{"id": 1, "score": 0.5}], _config(), _options(mode="full"))
 
         client.command.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Replace mode — swap strategy
+# ---------------------------------------------------------------------------
+
+
+class TestClickHouseReplaceSwap:
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_swap_creates_shadow_via_create_table_as(
+        self, mock_connect: MagicMock
+    ) -> None:
+        client = _fake_client()
+        mock_connect.return_value = client
+        records = [{"id": 1, "score": 0.95}]
+
+        dest = ClickHouseDestination()
+        dest.load(records, _config(), _options(mode="replace", replace_strategy="swap"))
+
+        commands = [c[0][0] for c in client.command.call_args_list]
+        assert any(
+            "DROP TABLE IF EXISTS" in s and "__drt_swap" in s for s in commands
+        )
+        assert any(
+            "CREATE TABLE" in s and "__drt_swap" in s and " AS " in s
+            for s in commands
+        )
+        # Insert goes to shadow, not the original table
+        assert client.insert.call_count == 1
+        assert client.insert.call_args[0][0].endswith("__drt_swap")
+        assert client.insert.call_args[1]["column_names"] == ["id", "score"]
+        # No EXCHANGE TABLES yet — that happens in finalize_sync
+        assert not any("EXCHANGE TABLES" in s for s in commands)
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_swap_finalize_uses_exchange_tables(
+        self, mock_connect: MagicMock
+    ) -> None:
+        client = _fake_client()
+        mock_connect.return_value = client
+
+        dest = ClickHouseDestination()
+        dest.load(
+            [{"id": 1, "score": 0.95}],
+            _config(),
+            _options(mode="replace", replace_strategy="swap"),
+        )
+        dest.finalize_sync(
+            _config(), _options(mode="replace", replace_strategy="swap")
+        )
+
+        commands = [c[0][0] for c in client.command.call_args_list]
+        # EXCHANGE TABLES original AND shadow
+        exchange_sqls = [
+            s
+            for s in commands
+            if "EXCHANGE TABLES" in s and "__drt_swap" in s
+        ]
+        assert len(exchange_sqls) >= 1
+        # Drop the (now-old) shadow table after exchange
+        drop_after_exchange = [
+            s
+            for s in commands
+            if s.startswith("DROP TABLE") and "IF EXISTS" not in s and "__drt_swap" in s
+        ]
+        assert len(drop_after_exchange) >= 1
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_swap_finalize_noop_when_no_swap_in_progress(
+        self, mock_connect: MagicMock
+    ) -> None:
+        dest = ClickHouseDestination()
+        result = dest.finalize_sync(_config(), _options(mode="full"))
+        assert result is None
+        mock_connect.assert_not_called()
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_swap_creates_shadow_only_once_across_batches(
+        self, mock_connect: MagicMock
+    ) -> None:
+        client = _fake_client()
+        mock_connect.return_value = client
+
+        dest = ClickHouseDestination()
+        dest.load(
+            [{"id": 1, "score": 0.5}],
+            _config(),
+            _options(mode="replace", replace_strategy="swap"),
+        )
+        dest.load(
+            [{"id": 2, "score": 0.9}],
+            _config(),
+            _options(mode="replace", replace_strategy="swap"),
+        )
+
+        commands = [c[0][0] for c in client.command.call_args_list]
+        create_count = sum(
+            1
+            for s in commands
+            if s.startswith("CREATE TABLE") and "__drt_swap" in s
+        )
+        assert create_count == 1

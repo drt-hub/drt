@@ -7,7 +7,10 @@ PostgreSQL and MySQL destination pattern).
 Deduplication is handled by ClickHouse's ReplacingMergeTree engine at merge
 time — the destination performs simple INSERTs.
 
-Supports ``sync.mode: replace`` (TRUNCATE TABLE → INSERT).
+Supports ``sync.mode: replace`` (TRUNCATE TABLE → INSERT) and
+``replace_strategy: swap`` (zero-downtime: build a shadow table via
+``CREATE TABLE ... AS ...``, INSERT into the shadow, then atomically
+``EXCHANGE TABLES`` in :meth:`finalize_sync`).
 
 Requires: pip install drt-core[clickhouse]
 
@@ -38,6 +41,8 @@ class ClickHouseDestination:
 
     def __init__(self) -> None:
         self._replace_truncated: bool = False
+        self._swap_shadow_created: bool = False
+        self._swap_table: str | None = None
 
     def load(
         self,
@@ -55,33 +60,119 @@ class ClickHouseDestination:
         try:
             columns = list(records[0].keys())
 
-            if sync_options.mode == "replace" and not self._replace_truncated:
-                client.command(f"TRUNCATE TABLE {config.table}")
-                self._replace_truncated = True
+            if (
+                sync_options.mode == "replace"
+                and sync_options.replace_strategy == "swap"
+            ):
+                result = self._load_replace_swap(
+                    client,
+                    records,
+                    columns,
+                    config.table,
+                    sync_options,
+                )
+            else:
+                if sync_options.mode == "replace" and not self._replace_truncated:
+                    client.command(f"TRUNCATE TABLE {config.table}")
+                    self._replace_truncated = True
 
-            # TODO: batch insert with fallback to row-by-row on error
-            for i, record in enumerate(records):
-                try:
-                    row = [[record.get(c) for c in columns]]
-                    client.insert(config.table, row, column_names=columns)
-                    result.success += 1
-                except Exception as e:
-                    result.failed += 1
-                    result.row_errors.append(
-                        RowError(
-                            batch_index=i,
-                            record_preview=json.dumps(record, default=str)[:200],
-                            http_status=None,
-                            error_message=str(e),
+                # TODO: batch insert with fallback to row-by-row on error
+                for i, record in enumerate(records):
+                    try:
+                        row = [[record.get(c) for c in columns]]
+                        client.insert(config.table, row, column_names=columns)
+                        result.success += 1
+                    except Exception as e:
+                        result.failed += 1
+                        result.row_errors.append(
+                            RowError(
+                                batch_index=i,
+                                record_preview=json.dumps(record, default=str)[:200],
+                                http_status=None,
+                                error_message=str(e),
+                            )
                         )
-                    )
-                    if sync_options.on_error == "fail":
-                        return result
-                    continue
+                        if sync_options.on_error == "fail":
+                            return result
+                        continue
         finally:
             client.close()
 
         return result
+
+    def _load_replace_swap(
+        self,
+        client: Any,
+        records: list[dict[str, Any]],
+        columns: list[str],
+        table: str,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        """Build a shadow table per sync; atomic EXCHANGE happens in finalize_sync.
+
+        ClickHouse's ``CREATE TABLE shadow AS original`` clones the engine,
+        partitioning, ORDER BY, and column definitions. INSERTs go to the shadow
+        until :meth:`finalize_sync` runs ``EXCHANGE TABLES`` (atomic since 21.8).
+        """
+        result = SyncResult()
+        shadow = f"{table}__drt_swap"
+
+        if not self._swap_shadow_created:
+            client.command(f"DROP TABLE IF EXISTS {shadow}")
+            client.command(f"CREATE TABLE {shadow} AS {table}")
+            self._swap_shadow_created = True
+            self._swap_table = table
+
+        for i, record in enumerate(records):
+            try:
+                row = [[record.get(c) for c in columns]]
+                client.insert(shadow, row, column_names=columns)
+                result.success += 1
+            except Exception as e:
+                result.failed += 1
+                result.row_errors.append(
+                    RowError(
+                        batch_index=i,
+                        record_preview=json.dumps(record, default=str)[:200],
+                        http_status=None,
+                        error_message=str(e),
+                    )
+                )
+                if sync_options.on_error == "fail":
+                    return result
+                continue
+
+        return result
+
+    def finalize_sync(
+        self,
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult | None:
+        """Atomic EXCHANGE: shadow contents become live; old data dropped.
+
+        After ``EXCHANGE TABLES original AND shadow``, the shadow table now
+        holds the OLD data, so we drop it. ``EXCHANGE TABLES`` is atomic in
+        ClickHouse 21.8+.
+        """
+        if not self._swap_shadow_created or self._swap_table is None:
+            return None
+
+        assert isinstance(config, ClickHouseDestinationConfig)
+        table = self._swap_table
+        shadow = f"{table}__drt_swap"
+
+        client = self._connect(config)
+        try:
+            client.command(f"EXCHANGE TABLES {table} AND {shadow}")
+            # Shadow now contains the OLD data — drop it.
+            client.command(f"DROP TABLE {shadow}")
+        finally:
+            client.close()
+            self._swap_shadow_created = False
+            self._swap_table = None
+
+        return SyncResult()
 
     def get_row_count(self, config: DestinationConfig) -> int:
         """Get the current row count from the destination table.
