@@ -1,0 +1,115 @@
+{
+  "projectName": "drt",
+  "projectOwner": "drt-hub",
+  "repoType": "github",
+  "repoHost": "https://github.com",
+  "files": [
+    "README.md"
+  ],
+  "imageSize": 100,
+  "commit": false,
+  "commitConvention": "angular",
+  "contributors": [
+    {
+      "login": "masukai",
+      "name": "K.Masuda",
+      "avatar_url": "https://avatars.githubusercontent.com/u/37993351?v=4",
+      "profile": "https://masukai.github.io/portfolio/",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "Muawiya-contact",
+      "name": "Moavia Amir",
+      "avatar_url": "https://avatars.githubusercontent.com/u/178013839?v=4",
+      "profile": "https://www.youtube.com/@Coding_Moves",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "Khush-domadia",
+      "name": "Khush Domadiya",
+      "avatar_url": "https://avatars.githubusercontent.com/u/188820207?v=4",
+      "profile": "https://github.com/Khush-domadia",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "Pawansingh3889",
+      "name": "Pawan Singh Kapkoti",
+      "avatar_url": "https://avatars.githubusercontent.com/u/42340841?v=4",
+      "profile": "https://pawansingh3889.github.io/",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "PFCAaron12",
+      "name": "PFCAaron12",
+      "avatar_url": "https://avatars.githubusercontent.com/u/64714302?v=4",
+      "profile": "https://github.com/PFCAaron12",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "armorbreak001",
+      "name": "armorbreak001",
+      "avatar_url": "https://avatars.githubusercontent.com/u/274532465?v=4",
+      "profile": "https://github.com/armorbreak001",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "pureqin",
+      "name": "pureqin",
+      "avatar_url": "https://avatars.githubusercontent.com/u/213101547?v=4",
+      "profile": "https://github.com/pureqin",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "wahajahmed010",
+      "name": "Wahaj Ahmed",
+      "avatar_url": "https://avatars.githubusercontent.com/u/57330918?v=4",
+      "profile": "https://github.com/wahajahmed010",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "cian-ps",
+      "name": "cian-ps",
+      "avatar_url": "https://avatars.githubusercontent.com/u/231972213?v=4",
+      "profile": "https://github.com/cian-ps",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "xtreellaDev",
+      "name": "Erik Estrella",
+      "avatar_url": "https://avatars.githubusercontent.com/u/238762418?v=4",
+      "profile": "https://github.com/xtreellaDev",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "Ai-chan-0411",
+      "name": "Ai (藍)",
+      "avatar_url": "https://avatars.githubusercontent.com/u/275152799?v=4",
+      "profile": "https://github.com/Ai-chan-0411",
+      "contributions": [
+        "code"
+      ]
+    }
+  ],
+  "contributorsPerLine": 7,
+  "linkToUsage": true
+}
