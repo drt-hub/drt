@@ -674,6 +674,44 @@ class SyncTest(BaseModel):
         return self
 
 
+class SlackAlertConfig(BaseModel):
+    type: Literal["slack"]
+    webhook_url: str | None = None
+    webhook_url_env: str | None = None
+    message: str = "drt sync `{sync_name}` failed: {error}"
+
+    @model_validator(mode="after")
+    def _check_url(self) -> "SlackAlertConfig":
+        if not self.webhook_url and not self.webhook_url_env:
+            raise ValueError("Either webhook_url or webhook_url_env is required.")
+        return self
+
+
+class WebhookAlertConfig(BaseModel):
+    type: Literal["webhook"]
+    url: str | None = None
+    url_env: str | None = None
+    method: Literal["POST", "PUT"] = "POST"
+    headers: dict[str, str] = Field(default_factory=dict)
+    body_template: str | None = None  # JSON template; None → default JSON payload
+
+    @model_validator(mode="after")
+    def _check_url(self) -> "WebhookAlertConfig":
+        if not self.url and not self.url_env:
+            raise ValueError("Either url or url_env is required.")
+        return self
+
+
+AlertItem = Annotated[
+    SlackAlertConfig | WebhookAlertConfig,
+    Field(discriminator="type"),
+]
+
+
+class AlertsConfig(BaseModel):
+    on_failure: list[AlertItem] = Field(default_factory=list)
+
+
 class SyncConfig(BaseModel):
     name: str
     description: str = ""
@@ -682,3 +720,4 @@ class SyncConfig(BaseModel):
     destination: DestinationConfig
     sync: SyncOptions = Field(default_factory=SyncOptions)
     tests: list[SyncTest] = Field(default_factory=list)
+    alerts: AlertsConfig | None = None
