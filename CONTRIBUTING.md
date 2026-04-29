@@ -444,30 +444,3 @@ Keep the version in sync with `pyproject.toml` (e.g. if releasing `0.4.0`, set a
 
 If you add a **new skill**, also add an entry to `skills/drt/.claude-plugin/plugin.json` if needed, and document it in `README.md` and `docs/llm/CONTEXT.md`.
 
-## Contributor Recognition
-
-We recognize all types of contributions — code, documentation, design, ideas, reviews, and more — using the [all-contributors](https://allcontributors.org/) specification.
-
-**How to get recognized:**
-
-If you contribute code, documentation, organize discussions, or help in any way, you can be added to the contributors list by commenting on your Issue or PR:
-
-```
-@all-contributors please add @username for <contribution-type>
-```
-
-**Contribution types include:**
-
-- `code` — Pull requests with code changes
-- `doc` — Documentation, blog posts, tutorials
-- `review` — Code reviews and feedback
-- `ideas` — Feature suggestions and design discussions
-- `bug` — Bug reports and issue triage
-- `test` — Test creation and improvements
-- `maintenance` — Maintenance and DevOps
-
-See the [emoji key](https://allcontributors.org/docs/en/emoji-key) for the complete list of 33+ contribution types.
-
-**Note on bot PRs:** The all-contributors bot will automatically open a Pull Request to update the README contributors list. These PRs are safe to merge once CI passes and the visual grid layout is verified — no full review needed. Just verify the names and avatars look correct!
-
-All contributors are listed in the [README Contributors section](./README.md#contributors-) with an all-contributors badge tracking the total count.
