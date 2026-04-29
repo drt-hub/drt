@@ -71,6 +71,23 @@ sync:
   mode: replace
 ```
 
+**Zero-downtime replace via staging swap:**
+```yaml
+sync:
+  mode: replace
+  replace_strategy: swap   # default: truncate
+```
+
+drt creates a shadow table `{table}__drt_swap`, populates it across batches, then atomically renames it to the original. Readers of the original table never see an empty state.
+
+Requirements: the destination user needs `CREATE TABLE`, `ALTER TABLE`, and `DROP TABLE` privileges.
+
+Caveats:
+- Tables with dependent views, materialized views, or triggers are **not recommended** for swap mode — the rename can break dependent objects.
+- If a sync is killed before completion, an orphan shadow may remain. Drop manually with `DROP TABLE {table}__drt_swap`. Auto-cleanup is tracked in [#433](https://github.com/drt-hub/drt/issues/433).
+
+Same `replace_strategy: swap` is supported on MySQL (atomic `RENAME TABLE`) and ClickHouse (atomic `EXCHANGE TABLES`, requires CH 21.8+).
+
 **FK resolution with destination_lookup:**
 ```yaml
 lookups:

@@ -279,3 +279,90 @@ class TestPostgresReplaceMode:
         call_args = cur.execute.call_args[0][1]
         for val in call_args:
             assert not hasattr(val, "adapted"), f"Expected plain value, got Json: {val}"
+
+
+# ---------------------------------------------------------------------------
+# Replace mode — swap strategy
+# ---------------------------------------------------------------------------
+
+
+class TestPostgresReplaceSwap:
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_swap_creates_shadow_then_inserts(self, mock_connect: MagicMock) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+        records = [{"id": 1, "score": 0.95}]
+
+        dest = PostgresDestination()
+        dest.load(records, _config(), _options(mode="replace", replace_strategy="swap"))
+
+        sqls = [c[0][0] for c in cur.execute.call_args_list]
+        assert any("DROP TABLE IF EXISTS" in s and "__drt_swap" in s for s in sqls)
+        assert any(
+            "CREATE TABLE" in s and "(LIKE " in s and "INCLUDING ALL" in s for s in sqls
+        )
+        assert any("INSERT INTO" in s and "__drt_swap" in s for s in sqls)
+        # No swap yet — happens in finalize_sync
+        assert not any("RENAME TO" in s for s in sqls)
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_swap_finalize_renames_atomically(self, mock_connect: MagicMock) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        dest = PostgresDestination()
+        dest.load(
+            [{"id": 1, "score": 0.95}],
+            _config(),
+            _options(mode="replace", replace_strategy="swap"),
+        )
+        dest.finalize_sync(
+            _config(), _options(mode="replace", replace_strategy="swap")
+        )
+
+        sqls = [c[0][0] for c in cur.execute.call_args_list]
+        # Two RENAME steps wrapped in a transaction
+        rename_sqls = [s for s in sqls if "RENAME TO" in s]
+        assert len(rename_sqls) >= 2
+        # Final DROP of old table
+        assert any("DROP TABLE" in s and "__drt_old" in s for s in sqls)
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_swap_finalize_noop_when_no_swap_in_progress(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _fake_connection()
+        mock_connect.return_value = conn
+
+        dest = PostgresDestination()
+        # finalize_sync without prior swap-mode load is a safe no-op
+        result = dest.finalize_sync(_config(), _options(mode="full"))
+        assert result is None or result.success == 0
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_swap_creates_shadow_only_once_across_batches(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        dest = PostgresDestination()
+        dest.load(
+            [{"id": 1, "score": 0.5}],
+            _config(),
+            _options(mode="replace", replace_strategy="swap"),
+        )
+        dest.load(
+            [{"id": 2, "score": 0.9}],
+            _config(),
+            _options(mode="replace", replace_strategy="swap"),
+        )
+
+        sqls = [c[0][0] for c in cur.execute.call_args_list]
+        create_count = sum(
+            1 for s in sqls if "CREATE TABLE" in s and "INCLUDING ALL" in s
+        )
+        assert create_count == 1

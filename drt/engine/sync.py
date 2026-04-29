@@ -195,6 +195,22 @@ def run_sync(
         total_result.errors.extend(finalize_result.errors)
         total_result.row_errors.extend(getattr(finalize_result, "row_errors", []))
 
+    # Duck-typed end-of-sync hook for non-staged destinations
+    # (e.g. swap-finalize for replace_strategy=swap on Postgres/MySQL/ClickHouse).
+    # The hook is intentionally NOT a Protocol — destinations opt in by simply
+    # defining a finalize_sync() method.
+    if not is_staged and not dry_run:
+        finalizer = getattr(destination, "finalize_sync", None)
+        if callable(finalizer):
+            finalize_result = finalizer(sync.destination, sync.sync)
+            if finalize_result is not None:
+                total_result.success += finalize_result.success
+                total_result.failed += finalize_result.failed
+                total_result.errors.extend(finalize_result.errors)
+                total_result.row_errors.extend(
+                    getattr(finalize_result, "row_errors", [])
+                )
+
     total_result.duration_seconds = round(time.perf_counter() - t0, 3)
     total_result.watermark_source = watermark_source
     total_result.cursor_value_used = last_cursor_value

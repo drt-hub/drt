@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Zero-downtime replace via staging table swap** (#338): `sync.replace_strategy: swap` enables truly atomic table replacement — drt writes to a shadow table (`{table}__drt_swap`) per batch and atomically renames it to the original at the end of the sync. Supported on PostgreSQL (transactional `ALTER TABLE RENAME`), MySQL (atomic `RENAME TABLE`), and ClickHouse (atomic `EXCHANGE TABLES`, requires 21.8+). Default remains `truncate` (existing TRUNCATE → INSERT behavior). Follow-ups tracked in #433 (orphan auto-cleanup) and #434 (Snowflake support).
+
 ### Changed
 
 - **Connector registry** (#381): Replaced hardcoded `isinstance` chains in `_get_destination()` / `_get_source()` with a centralized registry (`drt/connectors/registry.py`). Adding a new connector no longer requires editing `main.py`. Error messages now list available connectors on typo. Contributed by @Muawiya-contact.
