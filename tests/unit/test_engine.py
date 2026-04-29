@@ -612,3 +612,117 @@ def test_auto_injection_first_run_no_error(tmp_path: Path) -> None:
 
     assert result.success == 1
     assert result.watermark_source is None
+
+
+# ---------------------------------------------------------------------------
+# Alert dispatch integration
+# ---------------------------------------------------------------------------
+
+
+class _AlertingDestination:
+    """Destination that returns a configurable SyncResult or raises."""
+
+    def __init__(
+        self,
+        result: SyncResult | None = None,
+        raise_exc: BaseException | None = None,
+    ) -> None:
+        self._result = result
+        self._raise = raise_exc
+
+    def load(
+        self,
+        records: list[dict],
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        if self._raise is not None:
+            raise self._raise
+        assert self._result is not None
+        return self._result
+
+
+def _make_sync_with_alerts() -> SyncConfig:
+    return SyncConfig.model_validate(
+        {
+            "name": "alerting_sync",
+            "model": "ref('table')",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {"batch_size": 10, "on_error": "skip"},
+            "alerts": {
+                "on_failure": [
+                    {"type": "slack", "webhook_url": "https://hooks.example/x"}
+                ]
+            },
+        }
+    )
+
+
+class TestEngineAlertDispatch:
+    @patch("drt.alerts.dispatch_alerts")
+    def test_alerts_fired_when_failed_count_positive(
+        self, mock_dispatch: MagicMock, tmp_path: Path
+    ) -> None:
+        rows = [{"id": i} for i in range(3)]
+        source = FakeSource(rows)
+        result = SyncResult()
+        result.success = 1
+        result.failed = 2
+        result.errors = ["downstream 500"]
+        dest = _AlertingDestination(result=result)
+        sync = _make_sync_with_alerts()
+
+        run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+        assert mock_dispatch.called
+        args, kwargs = mock_dispatch.call_args
+        # Signature: dispatch_alerts(alerts, event, context)
+        event = args[1] if len(args) > 1 else kwargs.get("event")
+        assert event == "on_failure"
+
+    @patch("drt.alerts.dispatch_alerts")
+    def test_alerts_fired_on_exception_then_reraised(
+        self, mock_dispatch: MagicMock, tmp_path: Path
+    ) -> None:
+        rows = [{"id": 1}]
+        source = FakeSource(rows)
+        dest = _AlertingDestination(raise_exc=RuntimeError("boom"))
+        sync = _make_sync_with_alerts()
+
+        with pytest.raises(RuntimeError, match="boom"):
+            run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+        assert mock_dispatch.called
+        args, kwargs = mock_dispatch.call_args
+        event = args[1] if len(args) > 1 else kwargs.get("event")
+        assert event == "on_failure"
+
+    @patch("drt.alerts.dispatch_alerts")
+    def test_alerts_not_fired_on_success(
+        self, mock_dispatch: MagicMock, tmp_path: Path
+    ) -> None:
+        rows = [{"id": i} for i in range(10)]
+        source = FakeSource(rows)
+        result = SyncResult()
+        result.success = 10
+        result.failed = 0
+        dest = _AlertingDestination(result=result)
+        sync = _make_sync_with_alerts()
+
+        run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+        assert not mock_dispatch.called
+
+    @patch("drt.alerts.dispatch_alerts")
+    def test_alerts_not_fired_on_dry_run(
+        self, mock_dispatch: MagicMock, tmp_path: Path
+    ) -> None:
+        rows = [{"id": i} for i in range(3)]
+        source = FakeSource(rows)
+        # Result irrelevant — dry_run skips destination entirely.
+        dest = _AlertingDestination(result=SyncResult())
+        sync = _make_sync_with_alerts()
+
+        run_sync(sync, source, dest, _make_profile(), tmp_path, dry_run=True)
+
+        assert not mock_dispatch.called

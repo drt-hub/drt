@@ -73,7 +73,65 @@ def run_sync(
     """
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.perf_counter()
+    total_result = SyncResult()
+    raised: BaseException | None = None
 
+    try:
+        return _run_sync_body(
+            sync=sync,
+            source=source,
+            destination=destination,
+            profile=profile,
+            project_dir=project_dir,
+            dry_run=dry_run,
+            state_manager=state_manager,
+            watermark_storage=watermark_storage,
+            cursor_value_override=cursor_value_override,
+            started_at=started_at,
+            t0=t0,
+            total_result=total_result,
+        )
+    except BaseException as exc:
+        raised = exc
+        raise
+    finally:
+        if not dry_run and (raised is not None or total_result.failed > 0):
+            try:
+                from drt.alerts import build_context, dispatch_alerts
+
+                dispatch_alerts(
+                    sync.alerts,
+                    "on_failure",
+                    build_context(
+                        sync_name=sync.name,
+                        result=total_result,
+                        duration_s=round(time.perf_counter() - t0, 3),
+                        started_at=started_at,
+                        exception=raised,
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                logger.warning("Alert dispatch outer failure: %s", exc)
+
+
+def _run_sync_body(
+    *,
+    sync: SyncConfig,
+    source: Source,
+    destination: Destination | StagedDestination,
+    profile: ProfileConfig,
+    project_dir: Path,
+    dry_run: bool,
+    state_manager: StateManager | None,
+    watermark_storage: WatermarkStorage | None,
+    cursor_value_override: str | None,
+    started_at: str,
+    t0: float,
+    total_result: SyncResult,
+) -> SyncResult:
+    """Inner body of run_sync. Mutates `total_result` in place so the outer
+    finally-block can read partial results when an exception propagates.
+    """
     # Load last cursor value for incremental syncs (fallback chain)
     cursor_field = sync.sync.cursor_field if sync.sync.mode == "incremental" else None
     last_cursor_value: str | None = None
@@ -122,7 +180,6 @@ def run_sync(
     query = resolve_model_ref(sync.model, project_dir, profile, cursor_field, last_cursor_value)
 
     records_iter = source.extract(query, profile)
-    total_result = SyncResult()
     new_cursor_value: str | None = last_cursor_value
     is_staged = isinstance(destination, StagedDestination)
     staged_count = 0
