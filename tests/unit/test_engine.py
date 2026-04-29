@@ -612,3 +612,93 @@ def test_auto_injection_first_run_no_error(tmp_path: Path) -> None:
 
     assert result.success == 1
     assert result.watermark_source is None
+
+
+# ---------------------------------------------------------------------------
+# finalize_sync() duck-typed hook (#338)
+# ---------------------------------------------------------------------------
+
+
+class FakeDestinationWithFinalize:
+    """Non-staged destination that also implements duck-typed finalize_sync()."""
+
+    def __init__(self, finalize_result: SyncResult | None = None) -> None:
+        self.calls: list[list[dict]] = []
+        self.finalize_called = False
+        self.finalize_args: tuple[DestinationConfig, SyncOptions] | None = None
+        self._finalize_result = finalize_result if finalize_result is not None else SyncResult()
+
+    def load(
+        self,
+        records: list[dict],
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        self.calls.append(records)
+        result = SyncResult()
+        result.success = len(records)
+        return result
+
+    def finalize_sync(
+        self,
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        self.finalize_called = True
+        self.finalize_args = (config, sync_options)
+        return self._finalize_result
+
+
+def test_finalize_sync_called_when_destination_has_it(tmp_path: Path) -> None:
+    """Engine should call finalize_sync() if the destination implements it."""
+    rows = [{"id": i} for i in range(3)]
+    source = FakeSource(rows)
+    dest = FakeDestinationWithFinalize()
+    sync = _make_sync(batch_size=10)
+
+    run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+    assert dest.finalize_called is True
+    assert dest.finalize_args is not None
+
+
+def test_finalize_sync_absent_does_not_crash(tmp_path: Path) -> None:
+    """Engine should not crash when destination has no finalize_sync attr."""
+    rows = [{"id": i} for i in range(3)]
+    source = FakeSource(rows)
+    dest = FakeDestination()  # has only load(), no finalize_sync
+    sync = _make_sync(batch_size=10)
+
+    # Must not raise AttributeError
+    result = run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+    assert result.success == 3
+    assert not hasattr(dest, "finalize_called")
+
+
+def test_finalize_sync_result_accumulated_into_total(tmp_path: Path) -> None:
+    """finalize_sync's SyncResult should be merged into total_result."""
+    rows = [{"id": i} for i in range(2)]
+    source = FakeSource(rows)
+    finalize_result = SyncResult(success=5, failed=1, errors=["finalize warn"])
+    dest = FakeDestinationWithFinalize(finalize_result=finalize_result)
+    sync = _make_sync(batch_size=10)
+
+    result = run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+    # load() reported 2 success; finalize_sync adds 5 success + 1 failed.
+    assert result.success == 2 + 5
+    assert result.failed == 1
+    assert "finalize warn" in result.errors
+
+
+def test_finalize_sync_skipped_on_dry_run(tmp_path: Path) -> None:
+    """finalize_sync must NOT be called during dry_run (no side effects)."""
+    rows = [{"id": i} for i in range(2)]
+    source = FakeSource(rows)
+    dest = FakeDestinationWithFinalize()
+    sync = _make_sync(batch_size=10)
+
+    run_sync(sync, source, dest, _make_profile(), tmp_path, dry_run=True)
+
+    assert dest.finalize_called is False
