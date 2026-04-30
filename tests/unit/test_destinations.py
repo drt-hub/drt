@@ -14,6 +14,7 @@ from drt.config.models import (
     GitHubActionsDestinationConfig,
     HubSpotDestinationConfig,
     NotionDestinationConfig,
+    RetryConfig,
     SlackDestinationConfig,
     SyncOptions,
 )
@@ -345,3 +346,63 @@ class TestNotionDestination:
         monkeypatch.setattr(notion_mod, "_NOTION_API", httpserver.url_for("/v1"))
         result = NotionDestination().load([{"name": "Alice"}], config, _options())
         assert result.success == 1
+
+    def test_retry_override_honored(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from werkzeug.wrappers import Response
+
+        monkeypatch.setenv("NOTION_TOKEN", "test-token")
+        call_count = {"n": 0}
+
+        def handler(_request):  # type: ignore[no-untyped-def]
+            call_count["n"] += 1
+            return Response("Service Unavailable", status=503)
+
+        httpserver.expect_request("/v1/pages").respond_with_handler(handler)
+        config = NotionDestinationConfig(
+            type="notion",
+            database_id="db-abc123",
+            properties_template='{"Name": {"title": [{"text": {"content": "{{ row.name }}"}}]}}',
+            auth=BearerAuth(type="bearer", token_env="NOTION_TOKEN"),
+        )
+        import drt.destinations.notion as notion_mod
+
+        monkeypatch.setattr(notion_mod, "_NOTION_API", httpserver.url_for("/v1"))
+        opts = SyncOptions(
+            retry=RetryConfig(
+                max_attempts=5,
+                initial_backoff=0.0,
+                backoff_multiplier=1.0,
+                max_backoff=0.0,
+            ),
+            on_error="skip",
+        )
+        NotionDestination().load([{"name": "Alice"}], config, opts)
+        assert call_count["n"] == 5
+
+    def test_retry_default_used_when_options_default(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from werkzeug.wrappers import Response
+
+        monkeypatch.setenv("NOTION_TOKEN", "test-token")
+        call_count = {"n": 0}
+
+        def handler(_request):  # type: ignore[no-untyped-def]
+            call_count["n"] += 1
+            return Response("Service Unavailable", status=503)
+
+        httpserver.expect_request("/v1/pages").respond_with_handler(handler)
+        config = NotionDestinationConfig(
+            type="notion",
+            database_id="db-abc123",
+            properties_template='{"Name": {"title": [{"text": {"content": "{{ row.name }}"}}]}}',
+            auth=BearerAuth(type="bearer", token_env="NOTION_TOKEN"),
+        )
+        import drt.destinations.notion as notion_mod
+
+        monkeypatch.setattr(notion_mod, "_NOTION_API", httpserver.url_for("/v1"))
+        opts = SyncOptions(on_error="skip")
+        NotionDestination().load([{"name": "Alice"}], config, opts)
+        assert call_count["n"] == 3

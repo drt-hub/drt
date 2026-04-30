@@ -77,6 +77,7 @@ class NotionDestination:
         result = SyncResult()
         # Notion rate limit: ~3 req/s for integrations
         rate_limiter = RateLimiter(min(sync_options.rate_limit.requests_per_second, 3))
+        retry_config = sync_options.retry or _DEFAULT_RETRY
 
         with httpx.Client(timeout=30.0) as client:
             for i, record in enumerate(records):
@@ -121,7 +122,7 @@ class NotionDestination:
                     return response
 
                 try:
-                    with_retry(do_create, _DEFAULT_RETRY)
+                    with_retry(do_create, retry_config)
                     result.success += 1
                 except httpx.HTTPStatusError as e:
                     result.failed += 1
