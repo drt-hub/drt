@@ -12,8 +12,6 @@ from __future__ import annotations
 import os
 from typing import Any
 
-import snowflake.connector
-
 from drt.config.models import DestinationConfig, SnowflakeDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
@@ -31,6 +29,13 @@ class SnowflakeDestination:
         assert isinstance(config, SnowflakeDestinationConfig)
         if not records:
             return SyncResult()
+
+        try:
+            import snowflake.connector
+        except ImportError as e:
+            raise ImportError(
+                "Snowflake destination requires: pip install drt-core[snowflake]"
+            ) from e
 
         account = os.environ.get(config.account_env)
         user = os.environ.get(config.user_env)

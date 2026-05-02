@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Sync failure alerts** (#414): Configure `alerts.on_failure` in sync YAML to send Slack or generic HTTP webhook notifications when a sync ends with `failed > 0` or raises an exception. Two target types in v0.7: `slack` (Slack incoming webhook) and `webhook` (generic HTTP POST/PUT with optional `body_template`). Template variables: `sync_name`, `error`, `rows_processed`, `duration_s`, `started_at`. Dispatch is best-effort — alert failures are logged but never affect sync correctness or override the original exception.
+- **Snowflake destination** (#353): Write rows back to Snowflake tables. Supports `mode: insert` (append) and `mode: merge` (upsert via temp staging table + `MERGE` statement using `upsert_key`). Auth via `account_env` / `user_env` / `password_env`. Install: `pip install drt-core[snowflake]`. Contributed by @PFCAaron12.
 
 ### Changed
 
