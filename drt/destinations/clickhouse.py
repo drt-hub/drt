@@ -139,6 +139,15 @@ class ClickHouseDestination:
                     )
                 )
                 if sync_options.on_error == "fail":
+                    # Drop the partial shadow + reset state so finalize_sync()
+                    # cannot EXCHANGE partial data into the live table.
+                    # try/finally guarantees state reset even if DROP fails;
+                    # at worst we leave an orphan shadow (tracked by #433).
+                    try:
+                        client.command(f"DROP TABLE IF EXISTS {shadow}")
+                    finally:
+                        self._swap_shadow_created = False
+                        self._swap_table = None
                     return result
                 continue
 
