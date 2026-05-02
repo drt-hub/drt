@@ -184,6 +184,63 @@ class TestPayload:
 
 
 # ---------------------------------------------------------------------------
+# Resilience — corrupted config and OSError fallbacks
+# ---------------------------------------------------------------------------
+
+
+class TestResilience:
+    def test_corrupted_config_returns_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        user_dir = tmp_path / ".drt"
+        monkeypatch.setattr(telemetry, "_user_dir", lambda: user_dir)
+        user_dir.mkdir()
+        (user_dir / "telemetry.json").write_text("not json {{")
+        telemetry._load_config_cached.cache_clear()
+        assert telemetry._load_config_cached() == {}
+        monkeypatch.setenv("DRT_TELEMETRY_API_KEY", "phc_test")
+        assert telemetry.is_enabled() is False
+
+    def test_anonymous_id_read_failure_falls_back_to_new(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        user_dir = tmp_path / ".drt"
+        monkeypatch.setattr(telemetry, "_user_dir", lambda: user_dir)
+        user_dir.mkdir()
+        (user_dir / ".anonymous_id").write_text("seed-id\n")
+
+        original_read = Path.read_text
+
+        def boom(self: Path, *a: object, **k: object) -> str:
+            if self == user_dir / ".anonymous_id":
+                raise OSError("simulated read failure")
+            return original_read(self, *a, **k)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "read_text", boom)
+        new_id = telemetry.get_anonymous_id()
+        assert len(new_id) == 36
+        assert new_id != "seed-id"
+
+    def test_anonymous_id_write_failure_returns_uuid_anyway(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        user_dir = tmp_path / ".drt"
+        monkeypatch.setattr(telemetry, "_user_dir", lambda: user_dir)
+
+        original_write = Path.write_text
+
+        def boom(self: Path, *a: object, **k: object) -> int:
+            if self == user_dir / ".anonymous_id":
+                raise OSError("simulated write failure")
+            return original_write(self, *a, **k)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "write_text", boom)
+        got = telemetry.get_anonymous_id()
+        assert len(got) == 36
+        assert not (user_dir / ".anonymous_id").exists()
+
+
+# ---------------------------------------------------------------------------
 # track_sync_completed — end-to-end via httpserver
 # ---------------------------------------------------------------------------
 

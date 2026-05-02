@@ -52,6 +52,11 @@ def test_unset_telemetry_enabled() -> None:
     assert "enabled" not in telemetry._load_config_cached()
 
 
+def test_unset_unknown_key() -> None:
+    result = runner.invoke(app, ["config", "unset", "weird.key"])
+    assert result.exit_code == 2
+
+
 def test_show_telemetry_redacts_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DRT_TELEMETRY_API_KEY", "phc_secret")
     result = runner.invoke(app, ["config", "show-telemetry"])

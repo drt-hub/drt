@@ -149,3 +149,126 @@ def test_run_one_dry_run_does_not_emit(
 
     _run_one(sync, ctx, _fake_profile())
     assert captured_calls == []
+
+
+def _ctx(**overrides: Any) -> _RunContext:
+    base = {
+        "source": MagicMock(),
+        "state_mgr": MagicMock(),
+        "json_mode": True,
+        "dry_run": False,
+        "verbose": False,
+        "quiet": True,
+        "log_json": False,
+        "cursor_value": None,
+    }
+    base.update(overrides)
+    return _RunContext(**base)  # type: ignore[arg-type]
+
+
+def _wire_run_sync(monkeypatch: pytest.MonkeyPatch, fn: Any) -> None:
+    monkeypatch.setattr("drt.engine.sync.run_sync", fn)
+    monkeypatch.setattr("drt.cli.main._get_destination", lambda _s: MagicMock())
+    monkeypatch.setattr("drt.cli.main._get_watermark_storage", lambda _s, _d: None)
+
+
+def test_run_one_log_json_success_emits_info_log(
+    monkeypatch: pytest.MonkeyPatch,
+    captured_calls: list[dict[str, Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """log_json=True success path must emit a structured INFO sync_complete log."""
+    _wire_run_sync(
+        monkeypatch,
+        lambda *_a, **_k: SyncResult(rows_extracted=3, success=3, failed=0),
+    )
+    with caplog.at_level("INFO"):
+        _run_one(_fake_sync(), _ctx(log_json=True), _fake_profile())
+    assert any(r.message == "sync_complete" and r.levelname == "INFO" for r in caplog.records)
+
+
+def test_run_one_log_json_failed_emits_error_log(
+    monkeypatch: pytest.MonkeyPatch,
+    captured_calls: list[dict[str, Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """log_json=True error path must emit a structured ERROR sync_complete log."""
+
+    def boom(*_a: Any, **_k: Any) -> SyncResult:
+        raise RuntimeError("simulated failure")
+
+    _wire_run_sync(monkeypatch, boom)
+    with caplog.at_level("ERROR"):
+        _run_one(_fake_sync(), _ctx(log_json=True), _fake_profile())
+    assert any(r.message == "sync_complete" and r.levelname == "ERROR" for r in caplog.records)
+
+
+def test_run_one_failed_non_json_prints_error(
+    monkeypatch: pytest.MonkeyPatch,
+    captured_calls: list[dict[str, Any]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """json_mode=False error path must print to stderr via print_error."""
+
+    def boom(*_a: Any, **_k: Any) -> SyncResult:
+        raise RuntimeError("kaboom-message")
+
+    _wire_run_sync(monkeypatch, boom)
+    _run_one(_fake_sync(), _ctx(json_mode=False), _fake_profile())
+    out = capsys.readouterr().out + capsys.readouterr().err
+    assert "kaboom-message" in out
+
+
+def test_run_one_entry_includes_watermark_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    captured_calls: list[dict[str, Any]],
+) -> None:
+    """When SyncResult carries watermark fields, the entry dict surfaces them."""
+    _wire_run_sync(
+        monkeypatch,
+        lambda *_a, **_k: SyncResult(
+            rows_extracted=3,
+            success=3,
+            failed=0,
+            watermark_source="default_value",
+            cursor_value_used="2026-01-01",
+        ),
+    )
+    _name, entry, _err = _run_one(_fake_sync(), _ctx(), _fake_profile())
+    assert entry["watermark_source"] == "default_value"
+    assert entry["cursor_value_used"] == "2026-01-01"
+
+
+def test_run_one_rich_output_success(
+    monkeypatch: pytest.MonkeyPatch,
+    captured_calls: list[dict[str, Any]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """json_mode=False, quiet=False success path triggers rich print_sync_result."""
+    _wire_run_sync(
+        monkeypatch,
+        lambda *_a, **_k: SyncResult(rows_extracted=2, success=2, failed=0),
+    )
+    _run_one(_fake_sync(), _ctx(json_mode=False, quiet=False), _fake_profile())
+    captured = capsys.readouterr()
+    assert "fake" in (captured.out + captured.err)
+
+
+def test_run_one_verbose_prints_row_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    captured_calls: list[dict[str, Any]],
+) -> None:
+    """verbose=True with row_errors triggers print_row_errors branch."""
+    from drt.destinations.row_errors import RowError
+
+    rows = [RowError(batch_index=0, record_preview="x", http_status=500, error_message="boom")]
+    _wire_run_sync(
+        monkeypatch,
+        lambda *_a, **_k: SyncResult(
+            rows_extracted=2, success=1, failed=1, row_errors=rows
+        ),
+    )
+    called: list[Any] = []
+    monkeypatch.setattr("drt.cli.main.print_row_errors", lambda errs: called.append(errs))
+    _run_one(_fake_sync(), _ctx(json_mode=False, quiet=False, verbose=True), _fake_profile())
+    assert called == [rows]
