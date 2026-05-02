@@ -126,12 +126,20 @@ sync:                       # optional: all fields have defaults
   on_error: fail            # "fail" (default) | "skip"
   rate_limit:
     requests_per_second: 10 # default: 10 — set to 0 to disable rate limiting
-  retry:
+  retry:                    # sync-level retry (applied unless destination overrides)
     max_attempts: 3         # default: 3
     initial_backoff: 1.0    # default: 1.0 seconds
-    backoff_multiplier: 2.0 # default: 2.0
+    backoff_multiplier: 2.0 # default: 2.0 — set to 1.0 for linear/constant backoff
     max_backoff: 60.0       # default: 60.0 seconds
     retryable_status_codes: [429, 500, 502, 503, 504]  # default as shown
+
+# Per-destination retry override (#277): set `retry:` inside any HTTP
+# destination block to override `sync.retry` for that destination only.
+# Priority order: destination.retry > sync.retry > RetryConfig defaults.
+# destination:
+#   type: notion
+#   retry:
+#     max_attempts: 7       # only this destination retries 7 times
 
 tests:                      # optional: post-sync validation (DB destinations only)
   - row_count:

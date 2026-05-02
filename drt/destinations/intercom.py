@@ -41,7 +41,7 @@ from drt.config.models import (
 )
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
-from drt.destinations.retry import with_retry
+from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import RowError
 from drt.templates.renderer import render_template
 
@@ -79,7 +79,7 @@ class IntercomDestination:
 
         result = SyncResult()
         rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)
-        retry_config = sync_options.retry
+        retry_config = resolve_retry(config.retry, sync_options)
 
         with httpx.Client(timeout=30.0, headers=headers) as client:
             for i, record in enumerate(records):

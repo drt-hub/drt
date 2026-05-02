@@ -35,20 +35,14 @@ from typing import Any
 import httpx
 
 from drt.config.credentials import resolve_env
-from drt.config.models import DestinationConfig, RetryConfig, SendGridDestinationConfig, SyncOptions
+from drt.config.models import DestinationConfig, SendGridDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
-from drt.destinations.retry import with_retry
+from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import RowError
 from drt.templates.renderer import render_template
 
 logger = logging.getLogger(__name__)
-
-_DEFAULT_RETRY = RetryConfig(
-    max_attempts=3,
-    initial_backoff=1.0,
-    retryable_status_codes=(429, 500, 502, 503, 504),
-)
 
 _SENDGRID_API_URL = "https://api.sendgrid.com/v3/mail/send"
 
@@ -74,7 +68,7 @@ class SendGridDestination:
                 "SendGrid destination: missing API key via auth.token or auth.token_env."
             )
 
-        retry_config = sync_options.retry or _DEFAULT_RETRY
+        retry_config = resolve_retry(config.retry, sync_options)
         result = SyncResult()
         rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)
 

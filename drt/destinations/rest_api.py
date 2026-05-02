@@ -27,7 +27,7 @@ from drt.config.models import (
 from drt.destinations.auth import AuthHandler
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
-from drt.destinations.retry import with_retry
+from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import RowError
 from drt.templates.renderer import render_template
 
@@ -46,6 +46,7 @@ class RestApiDestination:
         auth_headers = AuthHandler(config.auth).get_headers()
         headers = {**config.headers, **auth_headers}
         rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)
+        retry_config = resolve_retry(config.retry, sync_options)
 
         with httpx.Client(timeout=30.0) as client:
             for i, record in enumerate(records):
@@ -84,7 +85,7 @@ class RestApiDestination:
                     return response
 
                 try:
-                    with_retry(do_request, sync_options.retry)
+                    with_retry(do_request, retry_config)
                     result.success += 1
                 except httpx.HTTPStatusError as e:
                     result.row_errors.append(
@@ -184,7 +185,7 @@ class RestApiDestination:
                         response.raise_for_status()
                         return response
 
-                    response = with_retry(do_request, sync_options.retry)
+                    response = with_retry(do_request, resolve_retry(config.retry, sync_options))
 
                     # Extract records from response
                     records_count_before = len(all_records)
