@@ -94,11 +94,20 @@ class SourceConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class HistoryConfig(BaseModel):
+    """Sync execution history retention (#276)."""
+
+    enabled: bool = True
+    retention_days: int = 30
+    # Future: max_entries, storage backend (sqlite), s3 upload, etc.
+
+
 class ProjectConfig(BaseModel):
     name: str
     version: str = "0.1"
     profile: str = "default"
     source: SourceConfig | None = None  # optional; profile is authoritative
+    history: HistoryConfig = Field(default_factory=HistoryConfig)
 
 
 # ---------------------------------------------------------------------------

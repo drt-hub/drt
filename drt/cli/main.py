@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from drt.config.models import SyncConfig
     from drt.destinations.base import Destination
     from drt.sources.base import Source
+    from drt.state.history import HistoryManager
     from drt.state.manager import StateManager
 
 
@@ -86,6 +87,8 @@ class _RunContext:
 
     source: Source
     state_mgr: StateManager
+    history_mgr: HistoryManager | None
+    history_retention_days: int
     json_mode: bool
     dry_run: bool
     verbose: bool
@@ -122,6 +125,8 @@ def _run_one(
             cursor_value_override=(
                 ctx.cursor_value if sync.sync.mode == "incremental" else None
             ),
+            history_manager=ctx.history_mgr,
+            history_retention_days=ctx.history_retention_days,
         )
     except Exception as e:
         elapsed = round(time.monotonic() - t0, 2)
@@ -492,6 +497,14 @@ def run(
 
     source = _get_source(profile)
     state_mgr = StateManager(Path("."))
+
+    # Resolve history config from project file (optional, defaults to enabled).
+    from drt.config.parser import load_project
+    from drt.state.history import HistoryManager
+
+    history_cfg = load_project(Path(".")).history
+    history_mgr = HistoryManager(Path(".")) if history_cfg.enabled else None
+
     json_results: list[dict[str, object]] = []
     t_total = time.monotonic()
     succeeded = 0
@@ -500,6 +513,8 @@ def run(
     ctx = _RunContext(
         source=source,
         state_mgr=state_mgr,
+        history_mgr=history_mgr,
+        history_retention_days=history_cfg.retention_days,
         json_mode=json_mode,
         dry_run=dry_run,
         verbose=verbose,
@@ -668,8 +683,23 @@ def validate(
 def status(
     verbose: bool = typer.Option(False, "--verbose", help="Show row-level error details."),
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
+    history: bool = typer.Option(
+        False,
+        "--history",
+        help="Show past execution history instead of just the most recent run.",
+    ),
+    sync_name: str | None = typer.Option(
+        None,
+        "--sync",
+        help="Only show entries for this sync (--history mode only).",
+    ),
+    limit: int = typer.Option(20, "--limit", help="Max entries to show in --history mode."),
 ) -> None:
     """Show the status of the most recent sync runs."""
+
+    if history:
+        _print_history(sync_name=sync_name, limit=limit, output=output)
+        return
 
     from drt.state.manager import StateManager
 
@@ -700,6 +730,65 @@ def status(
         print_status_verbose(states, {})
     else:
         print_status_table(states)
+
+
+def _print_history(*, sync_name: str | None, limit: int, output: str) -> None:
+    """Render ``drt status --history`` output for one or all syncs."""
+    from dataclasses import asdict
+
+    from drt.state.history import HistoryManager
+
+    entries = HistoryManager(Path(".")).read(sync_name=sync_name, limit=limit)
+
+    if output == "json":
+        print(
+            json.dumps(
+                {"entries": [asdict(e) for e in entries]},
+                indent=2,
+                default=str,
+            )
+        )
+        return
+
+    if not entries:
+        scope = f"sync='{sync_name}'" if sync_name else "any sync"
+        console.print(f"[yellow]No history found for {scope}.[/yellow]")
+        return
+
+    from rich.table import Table
+
+    table = Table(
+        title=(
+            f"Execution history — sync='{sync_name}'"
+            if sync_name
+            else "Execution history (all syncs)"
+        ),
+        show_lines=False,
+    )
+    table.add_column("Started", style="cyan", no_wrap=True)
+    table.add_column("Sync", style="magenta")
+    table.add_column("Status", justify="center")
+    table.add_column("Synced", justify="right")
+    table.add_column("Failed", justify="right")
+    table.add_column("Duration", justify="right")
+    table.add_column("Error", overflow="fold")
+
+    for e in entries:
+        status_style = {
+            "success": "green",
+            "partial": "yellow",
+            "failed": "red",
+        }.get(e.status, "white")
+        table.add_row(
+            e.started_at[:19].replace("T", " "),
+            e.sync_name,
+            f"[{status_style}]{e.status}[/{status_style}]",
+            str(e.records_synced),
+            str(e.records_failed),
+            f"{e.duration_seconds:.1f}s",
+            (e.errors[0] if e.errors else ""),
+        )
+    console.print(table)
 
 
 # ---------------------------------------------------------------------------

@@ -20,6 +20,7 @@ from drt.destinations.base import Destination, StagedDestination, SyncResult
 from drt.destinations.lookup import apply_lookups, build_lookup_map
 from drt.engine.resolver import resolve_model_ref
 from drt.sources.base import Source
+from drt.state.history import HistoryEntry, HistoryManager
 from drt.state.manager import StateManager, SyncState
 from drt.state.watermark import WatermarkStorage
 
@@ -56,6 +57,8 @@ def run_sync(
     state_manager: StateManager | None = None,
     watermark_storage: WatermarkStorage | None = None,
     cursor_value_override: str | None = None,
+    history_manager: HistoryManager | None = None,
+    history_retention_days: int = 30,
 ) -> SyncResult:
     """Run a single sync: extract from source, load to destination.
 
@@ -95,6 +98,7 @@ def run_sync(
         raised = exc
         raise
     finally:
+        duration_s = round(time.perf_counter() - t0, 3)
         if not dry_run and (raised is not None or total_result.failed > 0):
             try:
                 from drt.alerts import build_context, dispatch_alerts
@@ -105,13 +109,47 @@ def run_sync(
                     build_context(
                         sync_name=sync.name,
                         result=total_result,
-                        duration_s=round(time.perf_counter() - t0, 3),
+                        duration_s=duration_s,
                         started_at=started_at,
                         exception=raised,
                     ),
                 )
             except Exception as exc:  # noqa: BLE001 — best-effort
                 logger.warning("Alert dispatch outer failure: %s", exc)
+
+        # Append execution history (best-effort; never affects sync result).
+        # Skip dry-run so test/preview invocations don't pollute history.
+        if not dry_run and history_manager is not None:
+            try:
+                if raised is not None:
+                    status = "failed"
+                elif total_result.failed == 0:
+                    status = "success"
+                elif total_result.success > 0:
+                    status = "partial"
+                else:
+                    status = "failed"
+
+                error_strs: list[str] = list(total_result.errors)
+                if raised is not None and not error_strs:
+                    error_strs = [f"{type(raised).__name__}: {raised}"]
+
+                history_manager.append(
+                    HistoryEntry(
+                        sync_name=sync.name,
+                        started_at=started_at,
+                        completed_at=datetime.now(timezone.utc).isoformat(),
+                        duration_seconds=duration_s,
+                        status=status,
+                        records_synced=total_result.success,
+                        records_failed=total_result.failed,
+                        errors=error_strs,
+                        cursor_value_used=getattr(total_result, "cursor_value_used", None),
+                    )
+                )
+                history_manager.prune(sync.name, history_retention_days)
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                logger.warning("History append outer failure: %s", exc)
 
 
 def _run_sync_body(

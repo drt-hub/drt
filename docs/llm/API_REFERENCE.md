@@ -11,7 +11,13 @@ name: my-project          # required: project identifier
 version: "0.1"            # optional, default: "0.1"
 profile: default          # optional, default: "default" — maps to ~/.drt/profiles.yml
                           # Override at runtime: drt run --profile prd  or  DRT_PROFILE=prd drt run
+history:                  # optional: sync execution history (#276)
+  enabled: true           # default: true — set to false to disable history altogether
+  retention_days: 30      # default: 30 — entries older than this are pruned on each append
 ```
+
+History is stored under `.drt/history/<sync_name>.jsonl` (one file per sync, JSONL format).
+Inspect via `drt status --history` or the `drt_get_history` MCP tool.
 
 ---
 
