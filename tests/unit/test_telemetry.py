@@ -189,6 +189,13 @@ class TestPayload:
 
 
 class TestResilience:
+    def test_user_dir_default_is_home_dot_drt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.undo()
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        assert telemetry._user_dir() == tmp_path / ".drt"
+
     def test_corrupted_config_returns_empty(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
