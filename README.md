@@ -343,6 +343,21 @@ drt is designed to work alongside, not against, the modern data stack:
 
 ---
 
+## Telemetry
+
+drt collects **no telemetry by default**. Opting in helps us understand which sources / destinations / sync modes are actually used, so we can prioritise.
+
+```bash
+drt config set telemetry.enabled true     # opt in
+drt config show-telemetry                 # preview the exact payload that would be sent
+drt config set telemetry.enabled false    # opt out
+DO_NOT_TRACK=1 drt run                    # universal kill switch — overrides everything
+```
+
+When opted in, drt sends one `sync_completed` event per sync with **only** these fields: `drt_version`, `python_version`, `os`, `source_type`, `destination_type`, `sync_mode`, `rows_synced`, `duration_seconds`, `status`, plus a per-machine random UUID at `~/.drt/.anonymous_id`. Sync names, model SQL, destination URLs, credentials, and project paths are **never** transmitted — the allow-list is enforced at the function-signature level in [`drt/telemetry.py`](drt/telemetry.py).
+
+For full details see [docs/telemetry.md](docs/telemetry.md).
+
 ## Contributing
 
 We welcome contributions of all sizes — from typo fixes to new connectors. drt has a transparent [contributor ladder](GOVERNANCE.md#roles) so your work builds toward greater trust and responsibility over time.

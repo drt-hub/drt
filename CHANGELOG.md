@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in anonymous usage telemetry** (#263): a new `drt/telemetry.py` module sends a single anonymous `sync_completed` event per `drt run` when the user explicitly opts in. Off by default. Honors `DO_NOT_TRACK=1`. Allow-list payload (`drt_version`, `python_version`, `os`, `source_type`, `destination_type`, `sync_mode`, `rows_synced`, `duration_seconds`, `status`) — never sends sync names, model SQL, destination URLs, credentials, or project paths. Configure via `drt config set telemetry.enabled true` or `DRT_TELEMETRY=1`. Inspect what would be sent with `drt config show-telemetry`. Endpoint defaults to PostHog Cloud; override with `DRT_TELEMETRY_ENDPOINT` and `DRT_TELEMETRY_API_KEY` for self-hosted PostHog.
+
 ## [0.7.1] - 2026-05-07
 
 **Theme: Production Ready follow-up.** Tail of the v0.7 cycle — the `drt diff` dry-run preview (#413) that shipped as the original v0.7.1 DX feature, a watermark cursor correctness fix surfaced by a prod incident (#475), `on_error=fail` semantic alignment across the remaining HTTP destinations (#463), and the new `VERSIONING.md` policy doc (#457).
