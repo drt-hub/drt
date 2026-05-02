@@ -27,7 +27,11 @@ from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 
 
-def _serialize_value(value: Any, column: str | None = None, json_columns: list[str] | None = None) -> Any:
+def _serialize_value(
+    value: Any,
+    column: str | None = None,
+    json_columns: list[str] | None = None,
+) -> Any:
     """Serialize dict/list values to JSON strings for pymysql.
 
     If json_columns is specified, only columns in that list are JSON-serialized.
@@ -298,7 +302,7 @@ class MySQLDestination:
             ca = resolve_env(None, config.ssl.ca_env)
             if ca:
                 ssl_dict["ca"] = ca
-            cert = resolve_env(None, config.config.cert_env)
+            cert = resolve_env(None, config.ssl.cert_env)
             if cert:
                 ssl_dict["cert"] = cert
             key = resolve_env(None, config.ssl.key_env)

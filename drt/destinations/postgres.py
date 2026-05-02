@@ -32,7 +32,11 @@ except ImportError:
     _Psycopg2Json = None  # type: ignore[assignment,misc]
 
 
-def _serialize_value(value: Any, column: str | None = None, json_columns: list[str] | None = None) -> Any:
+def _serialize_value(
+    value: Any,
+    column: str | None = None,
+    json_columns: list[str] | None = None,
+) -> Any:
     """Wrap dict values with psycopg2.extras.Json for JSONB columns.
 
     psycopg2 has no default adapter for ``dict``, so any dict value
@@ -68,7 +72,12 @@ def _serialize_value(value: Any, column: str | None = None, json_columns: list[s
         if _Psycopg2Json is not None:
             return _Psycopg2Json(value)
         return json.dumps(value, ensure_ascii=False)  # backward compat fallback
-    if isinstance(value, list) and json_columns is not None and column and column not in json_columns:
+    if (
+        isinstance(value, list)
+        and json_columns is not None
+        and column
+        and column not in json_columns
+    ):
         # Unlisted list column with explicit json_columns → fail early
         raise ValueError(
             f"Column '{column}' contains a list value but "
