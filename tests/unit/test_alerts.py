@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from drt.alerts.dispatcher import build_context, dispatch_alerts
 from drt.config.models import AlertsConfig, SlackAlertConfig, WebhookAlertConfig
 from drt.destinations.base import SyncResult
@@ -64,6 +66,27 @@ class TestSlackSender:
         # Must not raise — alert dispatch is best-effort
         send_slack_alert(cfg, {"sync_name": "x", "error": "y"})
 
+    @patch("urllib.request.urlopen")
+    def test_slack_resolves_url_from_env(
+        self, mock_urlopen: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from drt.alerts.slack import send_slack_alert
+        monkeypatch.setenv("SLACK_HOOK_URL", "https://env.example/hook")
+        cfg = SlackAlertConfig(type="slack", webhook_url_env="SLACK_HOOK_URL")
+        send_slack_alert(cfg, {"sync_name": "x", "error": "y"})
+        req = mock_urlopen.call_args[0][0]
+        assert req.full_url == "https://env.example/hook"
+
+    @patch("urllib.request.urlopen")
+    def test_slack_skips_when_env_unset(
+        self, mock_urlopen: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from drt.alerts.slack import send_slack_alert
+        monkeypatch.delenv("SLACK_HOOK_UNSET", raising=False)
+        cfg = SlackAlertConfig(type="slack", webhook_url_env="SLACK_HOOK_UNSET")
+        send_slack_alert(cfg, {"sync_name": "x", "error": "y"})
+        mock_urlopen.assert_not_called()
+
 
 class TestWebhookSender:
     @patch("urllib.request.urlopen")
@@ -88,6 +111,34 @@ class TestWebhookSender:
         send_webhook_alert(cfg, {"sync_name": "x", "error": "y"})
         req = mock_urlopen.call_args[0][0]
         assert b'"text":"x broke"' in req.data
+
+    @patch("urllib.request.urlopen")
+    def test_webhook_resolves_url_from_env(
+        self, mock_urlopen: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from drt.alerts.webhook import send_webhook_alert
+        monkeypatch.setenv("WEBHOOK_URL", "https://env.example/hook")
+        cfg = WebhookAlertConfig(type="webhook", url_env="WEBHOOK_URL")
+        send_webhook_alert(cfg, {"sync_name": "x", "error": "y"})
+        req = mock_urlopen.call_args[0][0]
+        assert req.full_url == "https://env.example/hook"
+
+    @patch("urllib.request.urlopen")
+    def test_webhook_skips_when_url_unresolved(
+        self, mock_urlopen: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from drt.alerts.webhook import send_webhook_alert
+        monkeypatch.delenv("WEBHOOK_URL_UNSET", raising=False)
+        cfg = WebhookAlertConfig(type="webhook", url_env="WEBHOOK_URL_UNSET")
+        send_webhook_alert(cfg, {"sync_name": "x", "error": "y"})
+        mock_urlopen.assert_not_called()
+
+    @patch("urllib.request.urlopen", side_effect=OSError("network down"))
+    def test_webhook_failure_does_not_raise(self, mock_urlopen: MagicMock) -> None:
+        from drt.alerts.webhook import send_webhook_alert
+        cfg = WebhookAlertConfig(type="webhook", url="https://x")
+        # Must not raise — alert dispatch is best-effort
+        send_webhook_alert(cfg, {"sync_name": "x", "error": "y"})
 
 
 class TestDispatcher:
