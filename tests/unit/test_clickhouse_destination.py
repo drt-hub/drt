@@ -345,3 +345,77 @@ class TestClickHouseReplaceSwap:
             if s.startswith("CREATE TABLE") and "__drt_swap" in s
         )
         assert create_count == 1
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_swap_on_error_fail_drops_shadow_and_resets_state(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """Mid-batch failure with on_error=fail must drop shadow + reset state
+        so finalize_sync cannot EXCHANGE partial data into the live table.
+        """
+        client = _fake_client()
+        # Succeed on first row, then fail.
+        client.insert.side_effect = [None, Exception("type mismatch in batch 2")]
+        mock_connect.return_value = client
+
+        dest = ClickHouseDestination()
+        result = dest.load(
+            [{"id": 1, "score": 0.5}, {"id": 2, "score": "NaN"}],
+            _config(),
+            _options(mode="replace", replace_strategy="swap", on_error="fail"),
+        )
+
+        # Failure tracked
+        assert result.failed == 1
+        # Shadow was dropped on hard fail (DROP IF EXISTS issued AFTER the create)
+        commands = [c[0][0] for c in client.command.call_args_list]
+        drop_after_create = [
+            s for s in commands if "DROP TABLE IF EXISTS" in s and "__drt_swap" in s
+        ]
+        assert len(drop_after_create) >= 2  # one before CREATE, one on failure
+        # State reset → finalize_sync must be a no-op
+        finalize_result = dest.finalize_sync(
+            _config(), _options(mode="replace", replace_strategy="swap")
+        )
+        assert finalize_result is None
+        # Critically: no EXCHANGE TABLES was issued
+        assert not any("EXCHANGE TABLES" in s for s in commands)
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_swap_on_error_fail_resets_state_even_if_drop_fails(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """If the cleanup DROP itself fails, state must still be reset
+        (orphan shadow is acceptable and tracked by #433; partial-data
+        EXCHANGE is not).
+        """
+        client = _fake_client()
+        client.insert.side_effect = Exception("insert failed")
+
+        # Make the cleanup DROP itself raise — the initial DROP IF EXISTS at
+        # shadow setup must succeed; only the cleanup one fails.
+        drop_call_count = {"n": 0}
+
+        def command_side_effect(sql: str) -> None:
+            if "DROP TABLE IF EXISTS" in sql:
+                drop_call_count["n"] += 1
+                if drop_call_count["n"] >= 2:
+                    raise Exception("cluster busy")
+            return None
+
+        client.command.side_effect = command_side_effect
+        mock_connect.return_value = client
+
+        dest = ClickHouseDestination()
+        with pytest.raises(Exception, match="cluster busy"):
+            dest.load(
+                [{"id": 1, "score": 0.5}],
+                _config(),
+                _options(mode="replace", replace_strategy="swap", on_error="fail"),
+            )
+
+        # Even though DROP raised, state must be reset (try/finally)
+        finalize_result = dest.finalize_sync(
+            _config(), _options(mode="replace", replace_strategy="swap")
+        )
+        assert finalize_result is None

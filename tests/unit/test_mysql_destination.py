@@ -440,3 +440,50 @@ class TestMySQLReplaceSwap:
             1 for s in sqls if "CREATE TABLE" in s and " LIKE " in s
         )
         assert create_count == 1
+
+    @patch("drt.destinations.mysql.MySQLDestination._connect")
+    def test_swap_on_error_fail_drops_shadow_and_resets_state(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """Mid-batch failure with on_error=fail must rollback, drop shadow,
+        and reset state so finalize_sync cannot RENAME a partial shadow into
+        the live table.
+        """
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        insert_call_count = {"n": 0}
+
+        def execute_side_effect(sql: str, *args: Any) -> None:
+            if sql.startswith("INSERT INTO"):
+                insert_call_count["n"] += 1
+                if insert_call_count["n"] == 2:
+                    raise Exception("data too long for column")
+            return None
+
+        cur.execute.side_effect = execute_side_effect
+
+        dest = MySQLDestination()
+        result = dest.load(
+            [
+                {"user_id": 1, "company_id": 5, "score": 0.5},
+                {"user_id": 2, "company_id": 5, "score": 0.9},
+            ],
+            _config(),
+            _options(mode="replace", replace_strategy="swap", on_error="fail"),
+        )
+
+        assert result.failed == 1
+        assert result.success == 1
+        conn.rollback.assert_called()
+        sqls = [c[0][0] for c in cur.execute.call_args_list]
+        drops = [s for s in sqls if "DROP TABLE IF EXISTS" in s and "__drt_swap" in s]
+        assert len(drops) >= 2
+        # State reset → finalize_sync must be a no-op
+        finalize_result = dest.finalize_sync(
+            _config(), _options(mode="replace", replace_strategy="swap")
+        )
+        assert finalize_result is None
+        sqls_after = [c[0][0] for c in cur.execute.call_args_list]
+        assert not any("RENAME TABLE" in s for s in sqls_after)
