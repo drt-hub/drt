@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -95,6 +97,14 @@ class _RunContext:
     quiet: bool
     log_json: bool
     cursor_value: str | None
+    # Cooperative shutdown flag — set by SIGTERM/SIGINT handler in run().
+    # Each engine call checks this between batches and exits gracefully.
+    stop_event: threading.Event | None = None
+
+
+def _exit_code_for_signal(signum: int) -> int:
+    """POSIX convention: 128 + signal number (SIGINT=2 → 130, SIGTERM=15 → 143)."""
+    return 128 + signum
 
 
 def _run_one(
@@ -127,6 +137,7 @@ def _run_one(
             ),
             history_manager=ctx.history_mgr,
             history_retention_days=ctx.history_retention_days,
+            stop_event=ctx.stop_event,
         )
     except Exception as e:
         elapsed = round(time.monotonic() - t0, 2)
@@ -510,6 +521,36 @@ def run(
     succeeded = 0
     failed = 0
 
+    # Cooperative graceful shutdown for SIGTERM/SIGINT (#279).
+    # Signals are delivered to the main thread by Python; the engine checks
+    # stop_event between batches so the current batch always finishes cleanly,
+    # state is persisted, and then we exit. A 30s watchdog forces _exit if
+    # the current batch hangs (e.g. an unresponsive destination).
+    stop_event = threading.Event()
+    received_signal: dict[str, int | None] = {"sig": None}
+    force_timer: dict[str, threading.Timer | None] = {"t": None}
+
+    def _on_signal(signum: int, _frame: Any) -> None:
+        if received_signal["sig"] is not None:
+            return  # idempotent — second signal is a no-op
+        received_signal["sig"] = signum
+        stop_event.set()
+        if not json_mode and not quiet:
+            console.print(
+                f"\n[yellow]Graceful shutdown requested "
+                f"({signal.Signals(signum).name}). "
+                f"Finishing current batch — force-exit in 30s.[/yellow]"
+            )
+        # Watchdog: if shutdown takes > 30s, hard-exit.
+        timer = threading.Timer(30.0, lambda: os._exit(_exit_code_for_signal(signum)))
+        timer.daemon = True
+        timer.start()
+        force_timer["t"] = timer
+
+    signal.signal(signal.SIGINT, _on_signal)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _on_signal)
+
     ctx = _RunContext(
         source=source,
         state_mgr=state_mgr,
@@ -521,6 +562,7 @@ def run(
         quiet=quiet,
         log_json=log_format == "json",
         cursor_value=cursor_value,
+        stop_event=stop_event,
     )
 
     # Execute syncs — parallel if threads > 1, sequential otherwise
@@ -567,6 +609,20 @@ def run(
                 indent=2,
             )
         )
+
+    # Graceful shutdown path (#279) takes precedence over the failure exit
+    # code: even if some syncs reported failures before the signal arrived,
+    # the operator's intent was "stop now", and the SIGTERM/SIGINT exit code
+    # carries that information.
+    if received_signal["sig"] is not None:
+        if force_timer["t"] is not None:
+            force_timer["t"].cancel()
+        if not json_mode and not quiet:
+            console.print(
+                f"[yellow]Stopped after {succeeded + failed} sync(s). "
+                f"State persisted.[/yellow]"
+            )
+        raise typer.Exit(_exit_code_for_signal(received_signal["sig"]))
 
     if failed > 0:
         raise typer.Exit(1)

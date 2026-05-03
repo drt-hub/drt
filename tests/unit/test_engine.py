@@ -728,6 +728,8 @@ class TestEngineAlertDispatch:
         assert not mock_dispatch.called
 
 
+import threading  # noqa: E402  — keep near the test classes that use it
+
 # ---------------------------------------------------------------------------
 # finalize_sync() duck-typed hook (#338)
 # ---------------------------------------------------------------------------
@@ -816,3 +818,108 @@ def test_finalize_sync_skipped_on_dry_run(tmp_path: Path) -> None:
     run_sync(sync, source, dest, _make_profile(), tmp_path, dry_run=True)
 
     assert dest.finalize_called is False
+
+
+# ---------------------------------------------------------------------------
+# Graceful shutdown via stop_event (#279)
+# ---------------------------------------------------------------------------
+
+
+class _StopAfterBatchDestination:
+    """FakeDestination that sets stop_event after the Nth load() completes."""
+
+    def __init__(self, stop_after_batch: int, stop_event: threading.Event) -> None:
+        self.calls: list[list[dict]] = []
+        self._stop_after = stop_after_batch
+        self._event = stop_event
+
+    def load(
+        self,
+        records: list[dict],
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        self.calls.append(records)
+        result = SyncResult()
+        result.success = len(records)
+        if len(self.calls) >= self._stop_after:
+            self._event.set()
+        return result
+
+
+class TestGracefulShutdown:
+    def test_stop_event_set_before_first_batch_no_loads(
+        self, tmp_path: Path
+    ) -> None:
+        rows = [{"id": i} for i in range(10)]
+        source = FakeSource(rows)
+        dest = FakeDestination()
+        sync = _make_sync(batch_size=3)
+        stop_event = threading.Event()
+        stop_event.set()  # already cancelled
+
+        result = run_sync(
+            sync, source, dest, _make_profile(), tmp_path, stop_event=stop_event
+        )
+
+        assert dest.calls == []  # no batches loaded
+        assert result.interrupted is True
+        assert result.success == 0
+
+    def test_stop_event_set_mid_sync_finishes_current_batch(
+        self, tmp_path: Path
+    ) -> None:
+        rows = [{"id": i} for i in range(15)]
+        source = FakeSource(rows)
+        stop_event = threading.Event()
+        # Set stop after batch 1 completes — batch 2 should NOT run
+        dest = _StopAfterBatchDestination(stop_after_batch=1, stop_event=stop_event)
+        sync = _make_sync(batch_size=5)
+
+        result = run_sync(
+            sync, source, dest, _make_profile(), tmp_path, stop_event=stop_event
+        )
+
+        assert len(dest.calls) == 1  # only batch 1 processed
+        assert result.success == 5
+        assert result.interrupted is True
+
+    def test_stop_event_none_default_no_behavior_change(
+        self, tmp_path: Path
+    ) -> None:
+        """Backward compat: stop_event default (None) must not change behavior."""
+        rows = [{"id": i} for i in range(7)]
+        source = FakeSource(rows)
+        dest = FakeDestination()
+        sync = _make_sync(batch_size=3)
+
+        result = run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+        assert len(dest.calls) == 3  # [0,1,2] [3,4,5] [6]
+        assert result.success == 7
+        assert result.interrupted is False
+
+    def test_interrupted_state_saved(self, tmp_path: Path) -> None:
+        """State manager must persist partial result on graceful shutdown."""
+        from drt.state.manager import StateManager
+
+        rows = [{"id": i} for i in range(15)]
+        source = FakeSource(rows)
+        stop_event = threading.Event()
+        dest = _StopAfterBatchDestination(stop_after_batch=1, stop_event=stop_event)
+        sync = _make_sync(batch_size=5)
+        state_mgr = StateManager(tmp_path)
+
+        run_sync(
+            sync,
+            source,
+            dest,
+            _make_profile(),
+            tmp_path,
+            state_manager=state_mgr,
+            stop_event=stop_event,
+        )
+
+        saved = state_mgr.get_last_sync(sync.name)
+        assert saved is not None
+        assert saved.records_synced == 5  # partial
