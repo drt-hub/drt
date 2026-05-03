@@ -320,14 +320,29 @@ class LookupConfig(BaseModel):
 
     table: str  # destination DB table to query
     match: dict[str, str]  # { destination_column: source_column }
-    select: str  # column to fetch from the lookup table
+    select: str | None = None  # column to fetch; omitted when check_only=True
     on_miss: Literal["skip", "fail", "null"] = "skip"
     drop_match_columns: bool = True  # remove match source columns from INSERT
+    check_only: bool = False  # filter-only mode: existence check, no value resolution
 
     @model_validator(mode="after")
     def _check_match_not_empty(self) -> LookupConfig:
         if not self.match:
             raise ValueError("lookups.match must contain at least one mapping.")
+        return self
+
+    @model_validator(mode="after")
+    def _check_select_consistency(self) -> "LookupConfig":
+        if self.check_only and self.select is not None:
+            raise ValueError(
+                "lookups.select must be omitted when check_only=True "
+                "(check_only is filter-only — no value is resolved)."
+            )
+        if not self.check_only and self.select is None:
+            raise ValueError(
+                "lookups.select is required (or set check_only=true for "
+                "existence-only filtering)."
+            )
         return self
 
 
