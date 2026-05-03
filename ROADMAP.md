@@ -11,12 +11,19 @@ Targets are indicative, not guarantees. Scope may shift between versions — whe
 **Theme:** Reliability, observability, and correctness for real production use.
 
 **Scope:**
-- **Reliability** — retry policy in sync YAML (#277) · graceful shutdown on SIGTERM/SIGINT (#279) · sync execution history as local JSON log + `drt status --history` tail (#276, scope-reduced)
+- **Reliability** — retry policy in sync YAML (#277) · graceful shutdown on SIGTERM/SIGINT (#279) · sync execution history as local JSON log + `drt status --history` tail (#276, scope-reduced) · sync failure alerts (Slack / webhook) (#414)
 - **Correctness** — `json_columns` explicit JSON serialization (#316) · FK existence check without value resolution (#354) · zero-downtime replace via staging table swap (#338)
+- **Observability** — opt-in anonymous usage telemetry (#263, moved up from v0.8 — PR #446 in review)
 - **DX** — `drt doctor` environment diagnostics (#264) · `--quiet` flag for `drt run` (#265)
 - **Tests** — `on_error='fail'` and retry config tests across all destinations (#365)
 
-**Out of scope (→ v0.8):** Cloud destinations (Snowflake / BigQuery / Databricks / S3 / GCS / Azure), dead letter queue, opt-in telemetry, benchmark suite, Growth/README refresh items, schema-aware serialization epic.
+**Also shipped in v0.7 (originally scoped for later):**
+- **Snowflake destination** (#353, originally v0.8) — first DWH destination, ahead of the v0.8 cloud rollout
+- **Codespaces playground** (#283 → PR #407, originally v0.8 Growth)
+- **PyPI keywords / classifiers + `drt cloud push` stub** (#307 / #302 → PR #409, originally v0.8 / v0.9)
+- **all-contributors workflow** (#436) — community recognition, meta
+
+**Out of scope (→ v0.8):** Remaining cloud destinations (BigQuery / Databricks / S3 / GCS / Azure), dead letter queue, benchmark suite, remaining Growth/README refresh items, schema-aware serialization epic.
 
 **Target:** 2026-05 · **Progress:** [milestone/4](https://github.com/drt-hub/drt/milestone/4)
 
@@ -27,12 +34,12 @@ Targets are indicative, not guarantees. Scope may shift between versions — whe
 **Theme:** DWH/Lakehouse destinations + community growth push.
 
 **Scope:**
-- **Cloud destinations** — Snowflake (#164) · BigQuery (#165) · Databricks Delta Lake (#167) · S3 Parquet/CSV (#168) · GCS (#169) · Azure Blob (#170)
+- **Cloud destinations** — BigQuery (#165) · Databricks Delta Lake (#167) · S3 Parquet/CSV (#168) · GCS (#169) · Azure Blob (#170) — *Snowflake (#164) shipped early in v0.7 via PR #353*
 - **Lakehouse sources** — Delta Lake (#172) · Apache Iceberg (#173)
-- **Reliability follow-on** — dead letter queue (#278) · opt-in anonymous usage telemetry (#263)
+- **Reliability follow-on** — dead letter queue (#278) — *opt-in telemetry (#263) moved up to v0.7*
 - **Correctness epic** — schema-aware serialization via INFORMATION_SCHEMA (#317)
 - **Engine** — `sync.mode: mirror` differential delete (#340)
-- **Growth / README** — hero section redesign (#281) · Quickstart GIF/asciinema (#282) · Codespaces devcontainer (#283) · "Why OSS Reverse ETL" blog (#284) · production use case blog (#285) · Discord (#378) · X account link (#379) · PyPI keywords (#307) · Awesome lists (#290) · Reddit/HN launch (#289)
+- **Growth / README** — hero section redesign (#281) · Quickstart GIF/asciinema (#282) · "Why OSS Reverse ETL" blog (#284) · production use case blog (#285) · Discord (#378) · X account link (#379) · Awesome lists (#290) · Reddit/HN launch (#289) — *Codespaces devcontainer (#283) and PyPI keywords (#307) shipped early in v0.7*
 - **Ecosystem** — GitHub Action (#292) · VS Code extension (#293)
 - **Dev tooling** — FakeSource (#364) · `drt_run_test` MCP tool (#368) · `/drt-troubleshoot` skill (#369) · `/drt-changelog` repo skill (#372) · connection test in `drt validate` (#367)
 
@@ -48,7 +55,7 @@ Targets are indicative, not guarantees. Scope may shift between versions — whe
 
 **Scope:**
 - **Interfaces** — RBAC interface spec (#298) · audit log hooks (#299) · plugin system for third-party connectors (#297)
-- **Protocol stability** — review and freeze preparation (#300) · config encryption for secrets at rest (#303) · `drt cloud push` stub (#302)
+- **Protocol stability** — review and freeze preparation (#300) · config encryption for secrets at rest (#303) — *`drt cloud push` stub (#302) shipped early in v0.7 via PR #409*
 - **Performance** — benchmark suite (#280) + I/O vs CPU profiling for Rust migration decision (#301)
 
 **Out of scope:** Implementing RBAC/audit log in OSS, actual Cloud service backend, Rust migration itself.
