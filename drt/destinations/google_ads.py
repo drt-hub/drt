@@ -36,22 +36,16 @@ import httpx
 from drt.config.models import (
     DestinationConfig,
     GoogleAdsDestinationConfig,
-    RetryConfig,
     SyncOptions,
 )
 from drt.destinations.auth import AuthHandler
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
-from drt.destinations.retry import with_retry
+from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import RowError
 
 _API_VERSION = "v17"
 _BASE_URL = "https://googleads.googleapis.com"
-_DEFAULT_RETRY = RetryConfig(
-    max_attempts=3,
-    initial_backoff=1.0,
-    retryable_status_codes=(429, 500, 502, 503, 504),
-)
 
 
 class GoogleAdsDestination:
@@ -66,7 +60,7 @@ class GoogleAdsDestination:
         assert isinstance(config, GoogleAdsDestinationConfig)
         result = SyncResult()
         rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)
-        retry_config = sync_options.retry or _DEFAULT_RETRY
+        retry_config = resolve_retry(config.retry, sync_options)
 
         developer_token = os.environ.get(config.developer_token_env, "")
         if not developer_token:

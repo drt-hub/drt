@@ -1,4 +1,4 @@
-<!-- i18n-sync: base=CONTRIBUTING.md, hash=396f47a3853206889575bf0bde96e6a7b0c17e36 -->
+<!-- i18n-sync: base=CONTRIBUTING.md, hash=73436240f8a7aed9971bbd32b2aa250f4edbe796 -->
 
 [English](./CONTRIBUTING.md) | [日本語](./CONTRIBUTING.ja.md)
 
@@ -146,6 +146,34 @@ fix: handle empty batch in REST API destination
 docs: update quickstart example
 chore: bump dependencies
 ```
+
+## コントリビューターの認定
+
+[all-contributors](https://allcontributors.org/) の仕様に従って、あらゆる種類のコントリビューションを認定します。
+
+**認定の受け方:**
+
+コードを書いたり、ドキュメントを書いたり、ディスカッションを取りまとめたり、何らかの形で貢献していただいた場合、対象の Issue または PR に以下のコメントをすることでコントリビューターリストに追加できます：
+
+```
+@all-contributors please add @username for <contribution-type>
+```
+
+**コントリビューションの種類（例）:**
+
+- `code` — コード変更を含むプルリクエスト
+- `doc` — ドキュメント、ブログ記事、チュートリアル
+- `review` — コードレビューやフィードバック
+- `ideas` — 機能提案や設計ディスカッション
+- `bug` — バグ報告や issue triage
+- `test` — テストの作成・改善
+- `maintenance` — メンテナンスや DevOps
+
+33種類以上のコントリビューションタイプの一覧は [絵文字キー](https://allcontributors.org/docs/en/emoji-key) を参照してください。
+
+**bot PR について:** all-contributors bot は README のコントリビューターリストを更新するプルリクエストを自動で作成します。これらの PR は CI が通り、表示が崩れていなければ、フルレビュー無しでマージして問題ありません。名前とアバターが正しく表示されているかだけ確認してください！
+
+すべてのコントリビューターは [README のコントリビューターセクション](./README.ja.md#コントリビューター-) で all-contributors バッジ付きで表示されます。
 
 ## コネクタの追加
 

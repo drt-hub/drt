@@ -229,3 +229,54 @@ class TestRestApiDestinationRowErrors:
         row_err = result.row_errors[0]
         assert row_err.http_status is None
         assert "network unreachable" in row_err.error_message
+
+
+# ---------------------------------------------------------------------------
+# Per-destination retry override (#277)
+# ---------------------------------------------------------------------------
+
+
+class TestRestApiDestinationRetryOverride:
+    def test_destination_retry_overrides_sync_retry(self) -> None:
+        """destination.retry takes precedence over sync.retry."""
+        # destination.retry says 5 attempts; sync.retry says 2.
+        # On 503 → destination override should drive 5 attempts.
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/x",
+            method="POST",
+            retry=RetryConfig(
+                max_attempts=5, initial_backoff=0.0, backoff_multiplier=1.0
+            ),
+        )
+        options = SyncOptions(
+            rate_limit=RateLimitConfig(requests_per_second=1000),
+            retry=RetryConfig(
+                max_attempts=2, initial_backoff=0.0, backoff_multiplier=1.0
+            ),
+            on_error="skip",
+        )
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.return_value = _make_response(503, "busy")
+
+            RestApiDestination().load([{"id": 1}], config, options)
+
+        # 5 actual request calls (destination override), not 2 (sync default).
+        assert mock_client.request.call_count == 5
+
+    def test_sync_retry_used_when_no_destination_override(self) -> None:
+        """Without destination.retry, sync.retry is used as before."""
+        config = _dest_config()  # no retry field set
+        options = _sync_options(max_attempts=3)
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.return_value = _make_response(503, "busy")
+
+            RestApiDestination().load([{"id": 1}], config, options)
+
+        assert mock_client.request.call_count == 3

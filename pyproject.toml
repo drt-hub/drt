@@ -9,18 +9,38 @@ description = "Reverse ETL for the code-first data stack"
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "drt-hub", email = "masukai9612kf@gmail.com" }]
-keywords = ["reverse-etl", "data-engineering", "dbt", "bigquery", "cli"]
+keywords = [
+    "reverse-etl",
+    "data-engineering",
+    "data-activation",
+    "data-pipeline",
+    "data-stack",
+    "etl",
+    "dbt",
+    "bigquery",
+    "cli",
+    "automation",
+    "data-warehouse",
+    "sql",
+    "python-cli",
+    "open-source",
+    "mcp",
+    "llm-data",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
     "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 requires-python = ">=3.10"
 dependencies = [

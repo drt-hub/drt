@@ -243,3 +243,179 @@ class TestClickHouseReplaceMode:
         dest.load([{"id": 1, "score": 0.5}], _config(), _options(mode="full"))
 
         client.command.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Replace mode — swap strategy
+# ---------------------------------------------------------------------------
+
+
+class TestClickHouseReplaceSwap:
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_swap_creates_shadow_via_create_table_as(
+        self, mock_connect: MagicMock
+    ) -> None:
+        client = _fake_client()
+        mock_connect.return_value = client
+        records = [{"id": 1, "score": 0.95}]
+
+        dest = ClickHouseDestination()
+        dest.load(records, _config(), _options(mode="replace", replace_strategy="swap"))
+
+        commands = [c[0][0] for c in client.command.call_args_list]
+        assert any(
+            "DROP TABLE IF EXISTS" in s and "__drt_swap" in s for s in commands
+        )
+        assert any(
+            "CREATE TABLE" in s and "__drt_swap" in s and " AS " in s
+            for s in commands
+        )
+        # Insert goes to shadow, not the original table
+        assert client.insert.call_count == 1
+        assert client.insert.call_args[0][0].endswith("__drt_swap")
+        assert client.insert.call_args[1]["column_names"] == ["id", "score"]
+        # No EXCHANGE TABLES yet — that happens in finalize_sync
+        assert not any("EXCHANGE TABLES" in s for s in commands)
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_swap_finalize_uses_exchange_tables(
+        self, mock_connect: MagicMock
+    ) -> None:
+        client = _fake_client()
+        mock_connect.return_value = client
+
+        dest = ClickHouseDestination()
+        dest.load(
+            [{"id": 1, "score": 0.95}],
+            _config(),
+            _options(mode="replace", replace_strategy="swap"),
+        )
+        dest.finalize_sync(
+            _config(), _options(mode="replace", replace_strategy="swap")
+        )
+
+        commands = [c[0][0] for c in client.command.call_args_list]
+        # EXCHANGE TABLES original AND shadow
+        exchange_sqls = [
+            s
+            for s in commands
+            if "EXCHANGE TABLES" in s and "__drt_swap" in s
+        ]
+        assert len(exchange_sqls) >= 1
+        # Drop the (now-old) shadow table after exchange
+        drop_after_exchange = [
+            s
+            for s in commands
+            if s.startswith("DROP TABLE") and "IF EXISTS" not in s and "__drt_swap" in s
+        ]
+        assert len(drop_after_exchange) >= 1
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_swap_finalize_noop_when_no_swap_in_progress(
+        self, mock_connect: MagicMock
+    ) -> None:
+        dest = ClickHouseDestination()
+        result = dest.finalize_sync(_config(), _options(mode="full"))
+        assert result is None
+        mock_connect.assert_not_called()
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_swap_creates_shadow_only_once_across_batches(
+        self, mock_connect: MagicMock
+    ) -> None:
+        client = _fake_client()
+        mock_connect.return_value = client
+
+        dest = ClickHouseDestination()
+        dest.load(
+            [{"id": 1, "score": 0.5}],
+            _config(),
+            _options(mode="replace", replace_strategy="swap"),
+        )
+        dest.load(
+            [{"id": 2, "score": 0.9}],
+            _config(),
+            _options(mode="replace", replace_strategy="swap"),
+        )
+
+        commands = [c[0][0] for c in client.command.call_args_list]
+        create_count = sum(
+            1
+            for s in commands
+            if s.startswith("CREATE TABLE") and "__drt_swap" in s
+        )
+        assert create_count == 1
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_swap_on_error_fail_drops_shadow_and_resets_state(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """Mid-batch failure with on_error=fail must drop shadow + reset state
+        so finalize_sync cannot EXCHANGE partial data into the live table.
+        """
+        client = _fake_client()
+        # Succeed on first row, then fail.
+        client.insert.side_effect = [None, Exception("type mismatch in batch 2")]
+        mock_connect.return_value = client
+
+        dest = ClickHouseDestination()
+        result = dest.load(
+            [{"id": 1, "score": 0.5}, {"id": 2, "score": "NaN"}],
+            _config(),
+            _options(mode="replace", replace_strategy="swap", on_error="fail"),
+        )
+
+        # Failure tracked
+        assert result.failed == 1
+        # Shadow was dropped on hard fail (DROP IF EXISTS issued AFTER the create)
+        commands = [c[0][0] for c in client.command.call_args_list]
+        drop_after_create = [
+            s for s in commands if "DROP TABLE IF EXISTS" in s and "__drt_swap" in s
+        ]
+        assert len(drop_after_create) >= 2  # one before CREATE, one on failure
+        # State reset → finalize_sync must be a no-op
+        finalize_result = dest.finalize_sync(
+            _config(), _options(mode="replace", replace_strategy="swap")
+        )
+        assert finalize_result is None
+        # Critically: no EXCHANGE TABLES was issued
+        assert not any("EXCHANGE TABLES" in s for s in commands)
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_swap_on_error_fail_resets_state_even_if_drop_fails(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """If the cleanup DROP itself fails, state must still be reset
+        (orphan shadow is acceptable and tracked by #433; partial-data
+        EXCHANGE is not).
+        """
+        client = _fake_client()
+        client.insert.side_effect = Exception("insert failed")
+
+        # Make the cleanup DROP itself raise — the initial DROP IF EXISTS at
+        # shadow setup must succeed; only the cleanup one fails.
+        drop_call_count = {"n": 0}
+
+        def command_side_effect(sql: str) -> None:
+            if "DROP TABLE IF EXISTS" in sql:
+                drop_call_count["n"] += 1
+                if drop_call_count["n"] >= 2:
+                    raise Exception("cluster busy")
+            return None
+
+        client.command.side_effect = command_side_effect
+        mock_connect.return_value = client
+
+        dest = ClickHouseDestination()
+        with pytest.raises(Exception, match="cluster busy"):
+            dest.load(
+                [{"id": 1, "score": 0.5}],
+                _config(),
+                _options(mode="replace", replace_strategy="swap", on_error="fail"),
+            )
+
+        # Even though DROP raised, state must be reset (try/finally)
+        finalize_result = dest.finalize_sync(
+            _config(), _options(mode="replace", replace_strategy="swap")
+        )
+        assert finalize_result is None

@@ -29,6 +29,9 @@ class SyncResult:
     # Watermark observability (#390 / #391)
     watermark_source: str | None = None  # "cli_override" | "storage" | "default_value"
     cursor_value_used: str | None = None
+    # Graceful shutdown (#279) — True if the sync stopped early due to a
+    # cooperative cancellation signal (SIGTERM/SIGINT) between batches.
+    interrupted: bool = False
 
     @property
     def total(self) -> int:

@@ -159,6 +159,38 @@ def create_server(project_dir: Path | None = None) -> Any:
         }
 
     # -----------------------------------------------------------------------
+    # drt_get_history
+    # -----------------------------------------------------------------------
+
+    @mcp.tool()
+    def drt_get_history(
+        sync_name: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Get past sync execution entries (newest first).
+
+        Each entry corresponds to one ``drt run`` invocation against a sync.
+        Use this to answer questions like "did the daily user_sync run last
+        night and how many rows were transferred?".
+
+        Args:
+            sync_name: Restrict to one sync. If omitted, all syncs are merged
+                and re-sorted by start time.
+            limit: Maximum number of entries to return (default 20).
+
+        Returns:
+            Dict with ``entries`` list, each entry containing sync_name,
+            started_at, completed_at, duration_seconds, status, records_synced,
+            records_failed, errors (truncated), and cursor_value_used.
+        """
+        from dataclasses import asdict
+
+        from drt.state.history import HistoryManager
+
+        entries = HistoryManager(_project_dir).read(sync_name=sync_name, limit=limit)
+        return {"entries": [asdict(e) for e in entries]}
+
+    # -----------------------------------------------------------------------
     # drt_validate
     # -----------------------------------------------------------------------
 

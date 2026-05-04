@@ -11,9 +11,22 @@ from typing import TypeVar
 
 import httpx
 
-from drt.config.models import RetryConfig
+from drt.config.models import RetryConfig, SyncOptions
 
 T = TypeVar("T")
+
+
+def resolve_retry(
+    config_retry: RetryConfig | None,
+    sync_options: SyncOptions,
+) -> RetryConfig:
+    """Pick the retry config for this destination invocation.
+
+    Priority order: ``destination.retry`` > ``sync.retry`` > ``RetryConfig()``.
+    ``sync_options.retry`` is always populated (default_factory=RetryConfig),
+    so when no destination-level override is set the sync-level config wins.
+    """
+    return config_retry if config_retry is not None else sync_options.retry
 
 
 def with_retry(fn: Callable[[], T], config: RetryConfig) -> T:

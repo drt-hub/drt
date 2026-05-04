@@ -103,6 +103,22 @@
       "created_at": "2026-04-20T08:16:15Z",
       "repoId": 1193163237,
       "pullRequestNo": 384
+    },
+    {
+      "name": "kiwamizamurai",
+      "id": 24860100,
+      "comment_id": 4357551119,
+      "created_at": "2026-05-01T02:58:14Z",
+      "repoId": 1193163237,
+      "pullRequestNo": 439
+    },
+    {
+      "name": "yodakanohoshi",
+      "id": 25799234,
+      "comment_id": 4369213458,
+      "created_at": "2026-05-04T07:59:45Z",
+      "repoId": 1193163237,
+      "pullRequestNo": 440
     }
   ]
 }

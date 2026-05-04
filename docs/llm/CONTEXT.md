@@ -14,7 +14,7 @@ dlt (load into DWH) → dbt (transform) → drt (activate out of DWH)
 - **Tagline:** "Reverse ETL for the code-first data stack"
 - **Install:** `pip install drt-core` or `uv add drt-core`
 - **Package name:** `drt-core` (PyPI) — CLI command is `drt`
-- **Current version:** v0.6.1
+- **Current version:** v0.6.2
 
 ## What drt is NOT
 
@@ -95,6 +95,11 @@ default:
 | SendGrid | `sendgrid` | Transactional emails via v3 Mail Send API |
 | Google Ads | `google_ads` | Offline click conversion upload |
 | Staged Upload | `staged_upload` | Async bulk APIs: file upload → job trigger → poll |
+| Notion | `notion` | Append rows to Notion databases |
+| Twilio SMS | `twilio` | Send SMS per row via Twilio Messages API |
+| Intercom | `intercom` | Create/update contacts via Intercom REST API v2 |
+| Email SMTP | `email_smtp` | Send emails via SMTP (plain text or HTML) |
+| Salesforce Bulk API 2.0 | `salesforce_bulk` | Upsert via Bulk API 2.0 with CSV serialization |
 
 ## CLI Commands
 
@@ -107,9 +112,16 @@ drt run --select <sync-name>      # run one sync
 drt run --dry-run                 # preview without writing data
 drt run --verbose                 # show row-level error details on failure
 drt run --output json             # structured JSON output for CI/scripting
+drt run --log-format json         # structured JSON logging to stderr
 drt run --profile prd             # override profile (or DRT_PROFILE env var)
+drt run --all                     # discover and run all syncs
+drt run --select tag:<tag>        # run syncs matching a tag
+drt run --threads 4               # parallel sync execution
+drt run --cursor-value '2026-01-01 00:00:00'  # override watermark cursor for backfill
 drt test                          # run post-sync validation tests
 drt test --select <sync-name>     # test a specific sync
+drt sources                       # list available source connectors
+drt destinations                  # list available destination connectors
 drt status                        # show recent sync results
 drt status --output json          # JSON output for status
 drt mcp run                       # start MCP server (requires drt-core[mcp])
@@ -134,6 +146,7 @@ drt mcp run   # starts stdio MCP server
 | `drt_get_status(sync_name=None)` | Returns last run result(s); omit sync_name for all |
 | `drt_validate()` | Validates all sync YAMLs; returns valid list and errors dict |
 | `drt_get_schema(schema_type="sync")` | Returns JSON Schema for "sync" or "project" config |
+| `drt_list_connectors()` | Lists all available sources and destinations |
 
 The MCP server reads from the current working directory (the drt project root).
 

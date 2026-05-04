@@ -612,3 +612,314 @@ def test_auto_injection_first_run_no_error(tmp_path: Path) -> None:
 
     assert result.success == 1
     assert result.watermark_source is None
+
+
+# ---------------------------------------------------------------------------
+# Alert dispatch integration
+# ---------------------------------------------------------------------------
+
+
+class _AlertingDestination:
+    """Destination that returns a configurable SyncResult or raises."""
+
+    def __init__(
+        self,
+        result: SyncResult | None = None,
+        raise_exc: BaseException | None = None,
+    ) -> None:
+        self._result = result
+        self._raise = raise_exc
+
+    def load(
+        self,
+        records: list[dict],
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        if self._raise is not None:
+            raise self._raise
+        assert self._result is not None
+        return self._result
+
+
+def _make_sync_with_alerts() -> SyncConfig:
+    return SyncConfig.model_validate(
+        {
+            "name": "alerting_sync",
+            "model": "ref('table')",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {"batch_size": 10, "on_error": "skip"},
+            "alerts": {
+                "on_failure": [
+                    {"type": "slack", "webhook_url": "https://hooks.example/x"}
+                ]
+            },
+        }
+    )
+
+
+class TestEngineAlertDispatch:
+    @patch("drt.alerts.dispatch_alerts")
+    def test_alerts_fired_when_failed_count_positive(
+        self, mock_dispatch: MagicMock, tmp_path: Path
+    ) -> None:
+        rows = [{"id": i} for i in range(3)]
+        source = FakeSource(rows)
+        result = SyncResult()
+        result.success = 1
+        result.failed = 2
+        result.errors = ["downstream 500"]
+        dest = _AlertingDestination(result=result)
+        sync = _make_sync_with_alerts()
+
+        run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+        assert mock_dispatch.called
+        args, kwargs = mock_dispatch.call_args
+        # Signature: dispatch_alerts(alerts, event, context)
+        event = args[1] if len(args) > 1 else kwargs.get("event")
+        assert event == "on_failure"
+
+    @patch("drt.alerts.dispatch_alerts")
+    def test_alerts_fired_on_exception_then_reraised(
+        self, mock_dispatch: MagicMock, tmp_path: Path
+    ) -> None:
+        rows = [{"id": 1}]
+        source = FakeSource(rows)
+        dest = _AlertingDestination(raise_exc=RuntimeError("boom"))
+        sync = _make_sync_with_alerts()
+
+        with pytest.raises(RuntimeError, match="boom"):
+            run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+        assert mock_dispatch.called
+        args, kwargs = mock_dispatch.call_args
+        event = args[1] if len(args) > 1 else kwargs.get("event")
+        assert event == "on_failure"
+
+    @patch("drt.alerts.dispatch_alerts")
+    def test_alerts_not_fired_on_success(
+        self, mock_dispatch: MagicMock, tmp_path: Path
+    ) -> None:
+        rows = [{"id": i} for i in range(10)]
+        source = FakeSource(rows)
+        result = SyncResult()
+        result.success = 10
+        result.failed = 0
+        dest = _AlertingDestination(result=result)
+        sync = _make_sync_with_alerts()
+
+        run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+        assert not mock_dispatch.called
+
+    @patch("drt.alerts.dispatch_alerts")
+    def test_alerts_not_fired_on_dry_run(
+        self, mock_dispatch: MagicMock, tmp_path: Path
+    ) -> None:
+        rows = [{"id": i} for i in range(3)]
+        source = FakeSource(rows)
+        # Result irrelevant — dry_run skips destination entirely.
+        dest = _AlertingDestination(result=SyncResult())
+        sync = _make_sync_with_alerts()
+
+        run_sync(sync, source, dest, _make_profile(), tmp_path, dry_run=True)
+
+        assert not mock_dispatch.called
+
+
+import threading  # noqa: E402  — keep near the test classes that use it
+
+# ---------------------------------------------------------------------------
+# finalize_sync() duck-typed hook (#338)
+# ---------------------------------------------------------------------------
+
+
+class FakeDestinationWithFinalize:
+    """Non-staged destination that also implements duck-typed finalize_sync()."""
+
+    def __init__(self, finalize_result: SyncResult | None = None) -> None:
+        self.calls: list[list[dict]] = []
+        self.finalize_called = False
+        self.finalize_args: tuple[DestinationConfig, SyncOptions] | None = None
+        self._finalize_result = finalize_result if finalize_result is not None else SyncResult()
+
+    def load(
+        self,
+        records: list[dict],
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        self.calls.append(records)
+        result = SyncResult()
+        result.success = len(records)
+        return result
+
+    def finalize_sync(
+        self,
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        self.finalize_called = True
+        self.finalize_args = (config, sync_options)
+        return self._finalize_result
+
+
+def test_finalize_sync_called_when_destination_has_it(tmp_path: Path) -> None:
+    """Engine should call finalize_sync() if the destination implements it."""
+    rows = [{"id": i} for i in range(3)]
+    source = FakeSource(rows)
+    dest = FakeDestinationWithFinalize()
+    sync = _make_sync(batch_size=10)
+
+    run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+    assert dest.finalize_called is True
+    assert dest.finalize_args is not None
+
+
+def test_finalize_sync_absent_does_not_crash(tmp_path: Path) -> None:
+    """Engine should not crash when destination has no finalize_sync attr."""
+    rows = [{"id": i} for i in range(3)]
+    source = FakeSource(rows)
+    dest = FakeDestination()  # has only load(), no finalize_sync
+    sync = _make_sync(batch_size=10)
+
+    # Must not raise AttributeError
+    result = run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+    assert result.success == 3
+    assert not hasattr(dest, "finalize_called")
+
+
+def test_finalize_sync_result_accumulated_into_total(tmp_path: Path) -> None:
+    """finalize_sync's SyncResult should be merged into total_result."""
+    rows = [{"id": i} for i in range(2)]
+    source = FakeSource(rows)
+    finalize_result = SyncResult(success=5, failed=1, errors=["finalize warn"])
+    dest = FakeDestinationWithFinalize(finalize_result=finalize_result)
+    sync = _make_sync(batch_size=10)
+
+    result = run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+    # load() reported 2 success; finalize_sync adds 5 success + 1 failed.
+    assert result.success == 2 + 5
+    assert result.failed == 1
+    assert "finalize warn" in result.errors
+
+
+def test_finalize_sync_skipped_on_dry_run(tmp_path: Path) -> None:
+    """finalize_sync must NOT be called during dry_run (no side effects)."""
+    rows = [{"id": i} for i in range(2)]
+    source = FakeSource(rows)
+    dest = FakeDestinationWithFinalize()
+    sync = _make_sync(batch_size=10)
+
+    run_sync(sync, source, dest, _make_profile(), tmp_path, dry_run=True)
+
+    assert dest.finalize_called is False
+
+
+# ---------------------------------------------------------------------------
+# Graceful shutdown via stop_event (#279)
+# ---------------------------------------------------------------------------
+
+
+class _StopAfterBatchDestination:
+    """FakeDestination that sets stop_event after the Nth load() completes."""
+
+    def __init__(self, stop_after_batch: int, stop_event: threading.Event) -> None:
+        self.calls: list[list[dict]] = []
+        self._stop_after = stop_after_batch
+        self._event = stop_event
+
+    def load(
+        self,
+        records: list[dict],
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        self.calls.append(records)
+        result = SyncResult()
+        result.success = len(records)
+        if len(self.calls) >= self._stop_after:
+            self._event.set()
+        return result
+
+
+class TestGracefulShutdown:
+    def test_stop_event_set_before_first_batch_no_loads(
+        self, tmp_path: Path
+    ) -> None:
+        rows = [{"id": i} for i in range(10)]
+        source = FakeSource(rows)
+        dest = FakeDestination()
+        sync = _make_sync(batch_size=3)
+        stop_event = threading.Event()
+        stop_event.set()  # already cancelled
+
+        result = run_sync(
+            sync, source, dest, _make_profile(), tmp_path, stop_event=stop_event
+        )
+
+        assert dest.calls == []  # no batches loaded
+        assert result.interrupted is True
+        assert result.success == 0
+
+    def test_stop_event_set_mid_sync_finishes_current_batch(
+        self, tmp_path: Path
+    ) -> None:
+        rows = [{"id": i} for i in range(15)]
+        source = FakeSource(rows)
+        stop_event = threading.Event()
+        # Set stop after batch 1 completes — batch 2 should NOT run
+        dest = _StopAfterBatchDestination(stop_after_batch=1, stop_event=stop_event)
+        sync = _make_sync(batch_size=5)
+
+        result = run_sync(
+            sync, source, dest, _make_profile(), tmp_path, stop_event=stop_event
+        )
+
+        assert len(dest.calls) == 1  # only batch 1 processed
+        assert result.success == 5
+        assert result.interrupted is True
+
+    def test_stop_event_none_default_no_behavior_change(
+        self, tmp_path: Path
+    ) -> None:
+        """Backward compat: stop_event default (None) must not change behavior."""
+        rows = [{"id": i} for i in range(7)]
+        source = FakeSource(rows)
+        dest = FakeDestination()
+        sync = _make_sync(batch_size=3)
+
+        result = run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+        assert len(dest.calls) == 3  # [0,1,2] [3,4,5] [6]
+        assert result.success == 7
+        assert result.interrupted is False
+
+    def test_interrupted_state_saved(self, tmp_path: Path) -> None:
+        """State manager must persist partial result on graceful shutdown."""
+        from drt.state.manager import StateManager
+
+        rows = [{"id": i} for i in range(15)]
+        source = FakeSource(rows)
+        stop_event = threading.Event()
+        dest = _StopAfterBatchDestination(stop_after_batch=1, stop_event=stop_event)
+        sync = _make_sync(batch_size=5)
+        state_mgr = StateManager(tmp_path)
+
+        run_sync(
+            sync,
+            source,
+            dest,
+            _make_profile(),
+            tmp_path,
+            state_manager=state_mgr,
+            stop_event=stop_event,
+        )
+
+        saved = state_mgr.get_last_sync(sync.name)
+        assert saved is not None
+        assert saved.records_synced == 5  # partial

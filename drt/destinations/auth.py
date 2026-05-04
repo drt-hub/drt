@@ -7,7 +7,6 @@ and future Rust portability.
 from __future__ import annotations
 
 import base64
-import os
 
 from drt.config.credentials import resolve_env
 
@@ -51,8 +50,8 @@ class AuthHandler:
             return {auth.header: value}
 
         if isinstance(auth, BasicAuth):
-            username = os.environ.get(auth.username_env, "")
-            password = os.environ.get(auth.password_env, "")
+            username = resolve_env(None, auth.username_env)
+            password = resolve_env(None, auth.password_env)
             if not username:
                 raise ValueError(f"BasicAuth: env var '{auth.username_env}' is not set.")
             if not password:

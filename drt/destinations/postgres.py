@@ -26,12 +26,74 @@ from drt.config.models import DestinationConfig, PostgresDestinationConfig, Sync
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 
+try:
+    from psycopg2.extras import Json as _Psycopg2Json
+except ImportError:
+    _Psycopg2Json = None  # type: ignore[assignment,misc]
+
+
+def _serialize_value(
+    value: Any,
+    column: str | None = None,
+    json_columns: list[str] | None = None,
+) -> Any:
+    """Wrap dict values with psycopg2.extras.Json for JSONB columns.
+
+    psycopg2 has no default adapter for ``dict``, so any dict value
+    bound for a JSONB column (e.g. from a BigQuery JSON source) causes
+    ``ProgrammingError: can't adapt type 'dict'``. Wrapping with
+    ``Json`` produces the correct wire format for PostgreSQL JSONB.
+
+    When *json_columns* is specified, only columns in that list are wrapped
+    with ``Json()`` — other dict columns raise an early :class:`ValueError`
+    pointing at the missing column, rather than failing deep inside the driver
+    with a confusing ``can't adapt type 'dict'`` error.
+    When *json_columns* is ``None`` (backward compat), all dicts are wrapped.
+
+    Other types (str, int, float, list, None) pass through unchanged —
+    psycopg2's built-in adapters handle those correctly.
+
+    Raises:
+        ValueError: If *json_columns* is set and an unlisted column receives
+            a dict or list value.
+    """
+    if isinstance(value, dict):
+        if json_columns is not None:
+            if column and column in json_columns:
+                if _Psycopg2Json is not None:
+                    return _Psycopg2Json(value)
+                return json.dumps(value, ensure_ascii=False)
+            # Unlisted dict column with explicit json_columns → fail early
+            raise ValueError(
+                f"Column '{column}' contains a dict value but "
+                f"is not listed in json_columns={json_columns}. "
+                f"Add '{column}' to json_columns or remove the value."
+            )
+        if _Psycopg2Json is not None:
+            return _Psycopg2Json(value)
+        return json.dumps(value, ensure_ascii=False)  # backward compat fallback
+    if (
+        isinstance(value, list)
+        and json_columns is not None
+        and column
+        and column not in json_columns
+    ):
+        # Unlisted list column with explicit json_columns → fail early
+        raise ValueError(
+            f"Column '{column}' contains a list value but "
+            f"is not listed in json_columns={json_columns}. "
+            f"Add '{column}' to json_columns or remove the value."
+        )
+    return value
+
 
 class PostgresDestination:
     """Upsert or replace records into a PostgreSQL table."""
 
     def __init__(self) -> None:
         self._replace_truncated: bool = False
+        self._swap_shadow_created: bool = False
+        self._swap_table: str | None = None
 
     def load(
         self,
@@ -51,14 +113,25 @@ class PostgresDestination:
             columns = list(records[0].keys())
 
             if sync_options.mode == "replace":
-                result = self._load_replace(
-                    conn,
-                    cur,
-                    records,
-                    columns,
-                    config.table,
-                    sync_options,
-                )
+                if sync_options.replace_strategy == "swap":
+                    result = self._load_replace_swap(
+                        conn,
+                        cur,
+                        records,
+                        columns,
+                        config.table,
+                        sync_options,
+                    )
+                else:
+                    result = self._load_replace(
+                        conn,
+                        cur,
+                        records,
+                        columns,
+                        config.table,
+                        sync_options,
+                        config,
+                    )
             else:
                 result = self._load_upsert(
                     conn,
@@ -108,6 +181,7 @@ class PostgresDestination:
         columns: list[str],
         table: str,
         sync_options: SyncOptions,
+        config: PostgresDestinationConfig,
     ) -> SyncResult:
         """TRUNCATE (once) → INSERT within a transaction."""
         result = SyncResult()
@@ -120,7 +194,7 @@ class PostgresDestination:
 
         for i, record in enumerate(records):
             try:
-                values = [record.get(c) for c in columns]
+                values = [_serialize_value(record.get(c), c, config.json_columns) for c in columns]
                 cur.execute(sql, values)
                 result.success += 1
             except Exception as e:
@@ -146,6 +220,89 @@ class PostgresDestination:
         conn.commit()
         return result
 
+    def _load_replace_swap(
+        self,
+        conn: Any,
+        cur: Any,
+        records: list[dict[str, Any]],
+        columns: list[str],
+        table: str,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        """Build a shadow table per sync; atomic rename happens in finalize_sync."""
+        result = SyncResult()
+        shadow = f"{table}__drt_swap"
+
+        if not self._swap_shadow_created:
+            cur.execute(f"DROP TABLE IF EXISTS {shadow}")
+            cur.execute(f"CREATE TABLE {shadow} (LIKE {table} INCLUDING ALL)")
+            self._swap_shadow_created = True
+            self._swap_table = table
+
+        sql = self._build_insert_sql(shadow, columns)
+
+        for i, record in enumerate(records):
+            try:
+                values = [_serialize_value(record.get(c)) for c in columns]
+                cur.execute(sql, values)
+                result.success += 1
+            except Exception as e:
+                result.failed += 1
+                result.row_errors.append(
+                    RowError(
+                        batch_index=i,
+                        record_preview=json.dumps(record, default=str)[:200],
+                        http_status=None,
+                        error_message=str(e),
+                    )
+                )
+                if sync_options.on_error == "fail":
+                    conn.rollback()
+                    # Cleanup shadow on hard fail
+                    cur = conn.cursor()
+                    cur.execute(f"DROP TABLE IF EXISTS {shadow}")
+                    conn.commit()
+                    self._swap_shadow_created = False
+                    self._swap_table = None
+                    return result
+                # on_error=skip: keep going
+
+        conn.commit()
+        return result
+
+    def finalize_sync(
+        self,
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult | None:
+        """Atomic rename: original->old, shadow->original, drop old."""
+        if not self._swap_shadow_created or self._swap_table is None:
+            return None
+
+        assert isinstance(config, PostgresDestinationConfig)
+        table = self._swap_table
+        shadow = f"{table}__drt_swap"
+        old = f"{table}__drt_old"
+
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            # Single transaction: original->old, shadow->original.
+            # ALTER TABLE ... RENAME TO takes a bare relation name on the RHS;
+            # the schema is preserved automatically.
+            cur.execute(f"ALTER TABLE {table} RENAME TO {old.split('.')[-1]}")
+            cur.execute(f"ALTER TABLE {shadow} RENAME TO {table.split('.')[-1]}")
+            conn.commit()
+            # DROP old in separate tx (failure here doesn't break the swap).
+            cur.execute(f"DROP TABLE {old}")
+            conn.commit()
+        finally:
+            conn.close()
+            self._swap_shadow_created = False
+            self._swap_table = None
+
+        return SyncResult()
+
     @staticmethod
     def _load_upsert(
         conn: Any,
@@ -166,7 +323,7 @@ class PostgresDestination:
 
         for i, record in enumerate(records):
             try:
-                values = [record.get(c) for c in columns]
+                values = [_serialize_value(record.get(c), c, config.json_columns) for c in columns]
                 cur.execute(sql, values)
                 result.success += 1
             except Exception as e:
