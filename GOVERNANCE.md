@@ -92,6 +92,12 @@ Roles are voluntary. If a Triage Collaborator or Owner needs to step back:
 
 No explanation needed. Re-joining later is welcome.
 
+## Open Core Model
+
+See [OPEN_CORE.md](./OPEN_CORE.md) for details on what's always free (connectors, CLI, sync engine, MCP server) and what defines the enterprise boundary (RBAC, audit logging, plugin system, cloud hosting).
+
+The boundary is decided using the principles outlined in that document and ratified through lazy consensus (see "How Decisions Are Made" above).
+
 ## Changing this Document
 
 Governance changes (criteria, role definitions, processes) require:
