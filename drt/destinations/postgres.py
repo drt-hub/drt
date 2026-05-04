@@ -121,6 +121,7 @@ class PostgresDestination:
                         columns,
                         config.table,
                         sync_options,
+                        config,
                     )
                 else:
                     result = self._load_replace(
@@ -228,6 +229,7 @@ class PostgresDestination:
         columns: list[str],
         table: str,
         sync_options: SyncOptions,
+        config: PostgresDestinationConfig,
     ) -> SyncResult:
         """Build a shadow table per sync; atomic rename happens in finalize_sync."""
         result = SyncResult()
@@ -243,7 +245,7 @@ class PostgresDestination:
 
         for i, record in enumerate(records):
             try:
-                values = [_serialize_value(record.get(c)) for c in columns]
+                values = [_serialize_value(record.get(c), c, config.json_columns) for c in columns]
                 cur.execute(sql, values)
                 result.success += 1
             except Exception as e:
