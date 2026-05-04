@@ -1,5 +1,3 @@
-[English](./OPEN_CORE.md) | [日本語](./OPEN_CORE.ja.md)
-
 # Open Core Model
 
 drt follows an **open core model**. This document explains what's always free, what defines the enterprise boundary, and how we make these decisions.
