@@ -8,6 +8,7 @@ CLI owns all console output; engine only returns SyncResult.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections.abc import Iterator
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ from drt.destinations.base import Destination, StagedDestination, SyncResult
 from drt.destinations.lookup import apply_lookups, build_lookup_map
 from drt.engine.resolver import resolve_model_ref
 from drt.sources.base import Source
+from drt.state.history import HistoryEntry, HistoryManager
 from drt.state.manager import StateManager, SyncState
 from drt.state.watermark import WatermarkStorage
 
@@ -56,6 +58,9 @@ def run_sync(
     state_manager: StateManager | None = None,
     watermark_storage: WatermarkStorage | None = None,
     cursor_value_override: str | None = None,
+    history_manager: HistoryManager | None = None,
+    history_retention_days: int = 30,
+    stop_event: threading.Event | None = None,
 ) -> SyncResult:
     """Run a single sync: extract from source, load to destination.
 
@@ -67,13 +72,112 @@ def run_sync(
         project_dir: Root of drt project (for ref() resolution).
         dry_run: If True, extract but do not call destination.load().
         state_manager: If provided, persist sync result after completion.
+        stop_event: Cooperative cancellation signal. When set (e.g. by a
+            SIGTERM/SIGINT handler in the CLI), the engine finishes the
+            current batch, marks ``result.interrupted=True``, persists state,
+            and returns. ``None`` (default) preserves backward behaviour.
 
     Returns:
         Aggregated SyncResult across all batches.
     """
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.perf_counter()
+    total_result = SyncResult()
+    raised: BaseException | None = None
 
+    try:
+        return _run_sync_body(
+            sync=sync,
+            source=source,
+            destination=destination,
+            profile=profile,
+            project_dir=project_dir,
+            dry_run=dry_run,
+            state_manager=state_manager,
+            watermark_storage=watermark_storage,
+            cursor_value_override=cursor_value_override,
+            stop_event=stop_event,
+            started_at=started_at,
+            t0=t0,
+            total_result=total_result,
+        )
+    except BaseException as exc:
+        raised = exc
+        raise
+    finally:
+        duration_s = round(time.perf_counter() - t0, 3)
+        if not dry_run and (raised is not None or total_result.failed > 0):
+            try:
+                from drt.alerts import build_context, dispatch_alerts
+
+                dispatch_alerts(
+                    sync.alerts,
+                    "on_failure",
+                    build_context(
+                        sync_name=sync.name,
+                        result=total_result,
+                        duration_s=duration_s,
+                        started_at=started_at,
+                        exception=raised,
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                logger.warning("Alert dispatch outer failure: %s", exc)
+
+        # Append execution history (best-effort; never affects sync result).
+        # Skip dry-run so test/preview invocations don't pollute history.
+        if not dry_run and history_manager is not None:
+            try:
+                if raised is not None:
+                    status = "failed"
+                elif total_result.failed == 0:
+                    status = "success"
+                elif total_result.success > 0:
+                    status = "partial"
+                else:
+                    status = "failed"
+
+                error_strs: list[str] = list(total_result.errors)
+                if raised is not None and not error_strs:
+                    error_strs = [f"{type(raised).__name__}: {raised}"]
+
+                history_manager.append(
+                    HistoryEntry(
+                        sync_name=sync.name,
+                        started_at=started_at,
+                        completed_at=datetime.now(timezone.utc).isoformat(),
+                        duration_seconds=duration_s,
+                        status=status,
+                        records_synced=total_result.success,
+                        records_failed=total_result.failed,
+                        errors=error_strs,
+                        cursor_value_used=getattr(total_result, "cursor_value_used", None),
+                    )
+                )
+                history_manager.prune(sync.name, history_retention_days)
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                logger.warning("History append outer failure: %s", exc)
+
+
+def _run_sync_body(
+    *,
+    sync: SyncConfig,
+    source: Source,
+    destination: Destination | StagedDestination,
+    profile: ProfileConfig,
+    project_dir: Path,
+    dry_run: bool,
+    state_manager: StateManager | None,
+    watermark_storage: WatermarkStorage | None,
+    cursor_value_override: str | None,
+    stop_event: threading.Event | None,
+    started_at: str,
+    t0: float,
+    total_result: SyncResult,
+) -> SyncResult:
+    """Inner body of run_sync. Mutates `total_result` in place so the outer
+    finally-block can read partial results when an exception propagates.
+    """
     # Load last cursor value for incremental syncs (fallback chain)
     cursor_field = sync.sync.cursor_field if sync.sync.mode == "incremental" else None
     last_cursor_value: str | None = None
@@ -122,10 +226,10 @@ def run_sync(
     query = resolve_model_ref(sync.model, project_dir, profile, cursor_field, last_cursor_value)
 
     records_iter = source.extract(query, profile)
-    total_result = SyncResult()
     new_cursor_value: str | None = last_cursor_value
     is_staged = isinstance(destination, StagedDestination)
     staged_count = 0
+    batches_processed = 0
 
     # Build lookup maps (one query per lookup, before the batch loop)
     lookup_maps: dict[str, tuple[LookupConfig, dict[tuple[Any, ...], Any]]] = {}
@@ -140,6 +244,18 @@ def run_sync(
             lookup_maps[col_name] = (lk_config, mapping)
 
     for record_batch in batch(records_iter, sync.sync.batch_size):
+        # Cooperative shutdown — break before processing this batch.
+        # Existing batches are already finalized; partial state save below
+        # stays consistent because the loop body never starts on this batch.
+        if stop_event is not None and stop_event.is_set():
+            total_result.interrupted = True
+            logger.info(
+                "sync='%s' graceful shutdown requested — stopping after %d batches",
+                sync.name,
+                batches_processed,
+            )
+            break
+
         total_result.rows_extracted += len(record_batch)
 
         # Track max cursor value seen across all batches
@@ -184,6 +300,8 @@ def run_sync(
             if sync.sync.on_error == "fail" and result.failed > 0:
                 break
 
+        batches_processed += 1
+
     # Finalize staged destinations (upload file, trigger job, poll).
     # finalize() is authoritative for staged success/failed counts —
     # stage() only buffers, so records aren't "successful" until finalize.
@@ -194,6 +312,22 @@ def run_sync(
         total_result.failed += finalize_result.failed
         total_result.errors.extend(finalize_result.errors)
         total_result.row_errors.extend(getattr(finalize_result, "row_errors", []))
+
+    # Duck-typed end-of-sync hook for non-staged destinations
+    # (e.g. swap-finalize for replace_strategy=swap on Postgres/MySQL/ClickHouse).
+    # The hook is intentionally NOT a Protocol — destinations opt in by simply
+    # defining a finalize_sync() method.
+    if not is_staged and not dry_run:
+        finalizer = getattr(destination, "finalize_sync", None)
+        if callable(finalizer):
+            finalize_result = finalizer(sync.destination, sync.sync)
+            if finalize_result is not None:
+                total_result.success += finalize_result.success
+                total_result.failed += finalize_result.failed
+                total_result.errors.extend(finalize_result.errors)
+                total_result.row_errors.extend(
+                    getattr(finalize_result, "row_errors", [])
+                )
 
     total_result.duration_seconds = round(time.perf_counter() - t0, 3)
     total_result.watermark_source = watermark_source

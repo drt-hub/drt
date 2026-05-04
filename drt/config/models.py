@@ -1,5 +1,7 @@
 """Pydantic models for drt project and sync configuration."""
 
+from __future__ import annotations
+
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -43,6 +45,39 @@ AuthConfig = Annotated[
 
 
 # ---------------------------------------------------------------------------
+# Pagination (REST API destination)
+# ---------------------------------------------------------------------------
+
+
+class OffsetPaginationConfig(BaseModel):
+    type: Literal["offset"]
+    limit: int = 100
+    offset_param: str = "offset"
+    limit_param: str = "limit"
+    max_pages: int = 100
+
+
+class CursorPaginationConfig(BaseModel):
+    type: Literal["cursor"]
+    limit: int = 100
+    cursor_param: str = "cursor"
+    limit_param: str = "limit"
+    cursor_field: str
+    max_pages: int = 100
+
+
+class LinkHeaderPaginationConfig(BaseModel):
+    type: Literal["link_header"]
+    max_pages: int = 100
+
+
+PaginationConfig = Annotated[
+    OffsetPaginationConfig | CursorPaginationConfig | LinkHeaderPaginationConfig,
+    Field(discriminator="type"),
+]
+
+
+# ---------------------------------------------------------------------------
 # Source config (inline — kept for backward compat; prefer profiles.yml)
 # ---------------------------------------------------------------------------
 
@@ -59,11 +94,20 @@ class SourceConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class HistoryConfig(BaseModel):
+    """Sync execution history retention (#276)."""
+
+    enabled: bool = True
+    retention_days: int = 30
+    # Future: max_entries, storage backend (sqlite), s3 upload, etc.
+
+
 class ProjectConfig(BaseModel):
     name: str
     version: str = "0.1"
     profile: str = "default"
     source: SourceConfig | None = None  # optional; profile is authoritative
+    history: HistoryConfig = Field(default_factory=HistoryConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +122,8 @@ class RestApiDestinationConfig(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     body_template: str | None = None
     auth: AuthConfig | None = None
+    pagination: PaginationConfig | None = None
+    retry: RetryConfig | None = None  # destination-level override of sync.retry
 
     def describe(self) -> str:
         return f"{self.type} ({self.url})"
@@ -93,6 +139,7 @@ class SlackDestinationConfig(BaseModel):
     message_template: str = "{{ row }}"
     # If True, treat message_template as a Block Kit JSON payload
     block_kit: bool = False
+    retry: RetryConfig | None = None  # destination-level override of sync.retry
 
     def describe(self) -> str:
         return f"{self.type} (webhook)"
@@ -114,12 +161,13 @@ class TwilioDestinationConfig(BaseModel):
 
     # Jinja2 template → SMS body
     message_template: str
+    retry: RetryConfig | None = None  # destination-level override of sync.retry
 
     def describe(self) -> str:
         return f"{self.type} ({self.from_number})"
 
     @model_validator(mode="after")
-    def _check_auth(self) -> "TwilioDestinationConfig":
+    def _check_auth(self) -> TwilioDestinationConfig:
         if not (self.account_sid or self.account_sid_env):
             raise ValueError("account_sid or account_sid_env is required.")
         if not (self.auth_token or self.auth_token_env):
@@ -137,6 +185,7 @@ class DiscordDestinationConfig(BaseModel):
     message_template: str = "{{ row }}"
     # If True, treat message_template as a JSON payload with embeds
     embeds: bool = False
+    retry: RetryConfig | None = None  # destination-level override of sync.retry
 
     def describe(self) -> str:
         return f"{self.type} (webhook)"
@@ -152,6 +201,7 @@ class GitHubActionsDestinationConfig(BaseModel):
     # Example: '{"environment": "{{ row.env }}", "version": "{{ row.version }}"}'
     inputs_template: str | None = None
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
+    retry: RetryConfig | None = None  # destination-level override of sync.retry
 
     def describe(self) -> str:
         return f"{self.type} ({self.owner}/{self.repo})"
@@ -178,6 +228,7 @@ class HubSpotDestinationConfig(BaseModel):
     # Example: '{"email": "{{ row.email }}", "firstname": "{{ row.name }}"}'
     properties_template: str | None = None
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
+    retry: RetryConfig | None = None  # destination-level override of sync.retry
 
     def describe(self) -> str:
         return f"{self.type} ({self.object_type})"
@@ -190,6 +241,8 @@ class IntercomDestinationConfig(BaseModel):
 
     # Jinja2 JSON template for contact payload
     properties_template: str
+
+    retry: RetryConfig | None = None  # destination-level override of sync.retry
 
     def describe(self) -> str:
         return f"{self.type} (contacts)"
@@ -204,11 +257,35 @@ class SendGridDestinationConfig(BaseModel):
     to_email_field: str = "email"
     list_ids: list[str] | None = None
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
+    retry: RetryConfig | None = None  # destination-level override of sync.retry
 
     def describe(self) -> str:
         return f"sendgrid ({self.from_email})"
 
 
+class SnowflakeDestinationConfig(BaseModel):
+    type: Literal["snowflake"]
+
+    account_env: str
+    user_env: str
+    password_env: str
+
+    database: str
+    # Use alias because BaseModel.schema() shadows a plain `schema` attribute
+    # under mypy strict mode; YAML key stays `schema:`.
+    schema_: str = Field(alias="schema")
+    table: str
+
+    warehouse: str
+
+    mode: Literal["insert", "merge"] = "insert"
+
+    upsert_key: list[str] | None = None
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.database}.{self.schema_}.{self.table})"
+    
+    
 class LinearDestinationConfig(BaseModel):
     type: Literal["linear"]
     team_id: str | None = None
@@ -218,6 +295,7 @@ class LinearDestinationConfig(BaseModel):
     label_ids: list[str] = []
     assignee_id: str | None = None
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
+    retry: RetryConfig | None = None  # destination-level override of sync.retry
 
     def describe(self) -> str:
         return "linear (issue)"
@@ -247,7 +325,7 @@ class LookupConfig(BaseModel):
     drop_match_columns: bool = True  # remove match source columns from INSERT
 
     @model_validator(mode="after")
-    def _check_match_not_empty(self) -> "LookupConfig":
+    def _check_match_not_empty(self) -> LookupConfig:
         if not self.match:
             raise ValueError("lookups.match must contain at least one mapping.")
         return self
@@ -278,12 +356,13 @@ class PostgresDestinationConfig(BaseModel):
     upsert_key: list[str]  # columns for ON CONFLICT
     ssl: SslConfig | None = None
     lookups: dict[str, LookupConfig] | None = None
+    json_columns: list[str] | None = None  # columns that hold JSON/JSONB data
 
     def describe(self) -> str:
         return f"{self.type} ({self.table})"
 
     @model_validator(mode="after")
-    def _check_connection(self) -> "PostgresDestinationConfig":
+    def _check_connection(self) -> PostgresDestinationConfig:
         if self.connection_string_env:
             return self  # connection string takes precedence
         if not self.host and not self.host_env:
@@ -309,12 +388,13 @@ class MySQLDestinationConfig(BaseModel):
     upsert_key: list[str]  # columns for ON DUPLICATE KEY
     ssl: SslConfig | None = None
     lookups: dict[str, LookupConfig] | None = None
+    json_columns: list[str] | None = None  # columns that hold JSON data
 
     def describe(self) -> str:
         return f"{self.type} ({self.table})"
 
     @model_validator(mode="after")
-    def _check_connection(self) -> "MySQLDestinationConfig":
+    def _check_connection(self) -> MySQLDestinationConfig:
         if self.connection_string_env:
             return self  # connection string takes precedence
         if not self.host and not self.host_env:
@@ -332,6 +412,7 @@ class TeamsDestinationConfig(BaseModel):
     message_template: str = "{{ row }}"
     # If True, treat message_template as an Adaptive Card JSON payload
     adaptive_card: bool = False
+    retry: RetryConfig | None = None  # destination-level override of sync.retry
 
     def describe(self) -> str:
         return f"{self.type} (webhook)"
@@ -347,6 +428,7 @@ class JiraDestinationConfig(BaseModel):
     summary_template: str
     description_template: str
     issue_id_field: str = "issue_id"  # row key that indicates update mode
+    retry: RetryConfig | None = None  # destination-level override of sync.retry
 
     def describe(self) -> str:
         return f"jira ({self.project_key})"
@@ -376,7 +458,7 @@ class ClickHouseDestinationConfig(BaseModel):
         return f"{self.type} ({self.table})"
 
     @model_validator(mode="after")
-    def _check_connection(self) -> "ClickHouseDestinationConfig":
+    def _check_connection(self) -> ClickHouseDestinationConfig:
         if self.connection_string_env:
             return self  # connection string takes precedence
         if not self.host and not self.host_env:
@@ -430,6 +512,7 @@ class NotionDestinationConfig(BaseModel):
     # Example: see https://developers.notion.com/reference/post-page for template format
     properties_template: str | None = None
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
+    retry: RetryConfig | None = None  # destination-level override of sync.retry
 
     def describe(self) -> str:
         return f"{self.type} (database {self.database_id})"
@@ -445,6 +528,7 @@ class GoogleAdsDestinationConfig(BaseModel):
     currency_code: str = "USD"
     developer_token_env: str = "GOOGLE_ADS_DEVELOPER_TOKEN"
     auth: AuthConfig | None = None  # typically oauth2_client_credentials
+    retry: RetryConfig | None = None  # destination-level override of sync.retry
 
     def describe(self) -> str:
         return f"google_ads ({self.customer_id})"
@@ -500,7 +584,7 @@ class SalesforceBulkDestinationConfig(BaseModel):
         return f"salesforce_bulk ({self.object_name})"
 
     @model_validator(mode="after")
-    def _check_instance_url(self) -> "SalesforceBulkDestinationConfig":
+    def _check_instance_url(self) -> SalesforceBulkDestinationConfig:
         if not self.instance_url and not self.instance_url_env:
             raise ValueError("Either instance_url or instance_url_env is required.")
         return self
@@ -529,7 +613,8 @@ DestinationConfig = Annotated[
     | IntercomDestinationConfig
     | StagedUploadDestinationConfig
     | SalesforceBulkDestinationConfig
-    | TwilioDestinationConfig,
+    | TwilioDestinationConfig
+    | SnowflakeDestinationConfig,
     Field(discriminator="type"),
 ]
 
@@ -565,7 +650,7 @@ class WatermarkConfig(BaseModel):
     default_value: str | None = None
 
     @model_validator(mode="after")
-    def _check_backend_fields(self) -> "WatermarkConfig":
+    def _check_backend_fields(self) -> WatermarkConfig:
         if self.storage == "gcs" and not self.bucket:
             raise ValueError("watermark.bucket is required when storage is 'gcs'.")
         if self.storage == "gcs" and not self.key:
@@ -579,6 +664,7 @@ class WatermarkConfig(BaseModel):
 
 class SyncOptions(BaseModel):
     mode: Literal["full", "incremental", "upsert", "replace"] = "full"
+    replace_strategy: Literal["truncate", "swap"] = "truncate"
     cursor_field: str | None = None  # required when mode=incremental
     watermark: WatermarkConfig | None = None
     batch_size: int = 100
@@ -587,9 +673,15 @@ class SyncOptions(BaseModel):
     on_error: Literal["skip", "fail"] = "fail"
 
     @model_validator(mode="after")
-    def _check_incremental_cursor(self) -> "SyncOptions":
+    def _check_incremental_cursor(self) -> SyncOptions:
         if self.mode == "incremental" and not self.cursor_field:
             raise ValueError("cursor_field is required when mode is 'incremental'.")
+        return self
+
+    @model_validator(mode="after")
+    def _check_replace_strategy(self) -> SyncOptions:
+        if self.replace_strategy == "swap" and self.mode != "replace":
+            raise ValueError("replace_strategy='swap' requires mode='replace'.")
         return self
 
 
@@ -624,7 +716,7 @@ class SyncTest(BaseModel):
     accepted_values: AcceptedValuesTest | None = None
 
     @model_validator(mode="after")
-    def _check_exactly_one_test(self) -> "SyncTest":
+    def _check_exactly_one_test(self) -> SyncTest:
         configured_tests = [
             self.row_count,
             self.not_null,
@@ -640,6 +732,44 @@ class SyncTest(BaseModel):
         return self
 
 
+class SlackAlertConfig(BaseModel):
+    type: Literal["slack"]
+    webhook_url: str | None = None
+    webhook_url_env: str | None = None
+    message: str = "drt sync `{sync_name}` failed: {error}"
+
+    @model_validator(mode="after")
+    def _check_url(self) -> SlackAlertConfig:
+        if not self.webhook_url and not self.webhook_url_env:
+            raise ValueError("Either webhook_url or webhook_url_env is required.")
+        return self
+
+
+class WebhookAlertConfig(BaseModel):
+    type: Literal["webhook"]
+    url: str | None = None
+    url_env: str | None = None
+    method: Literal["POST", "PUT"] = "POST"
+    headers: dict[str, str] = Field(default_factory=dict)
+    body_template: str | None = None  # JSON template; None → default JSON payload
+
+    @model_validator(mode="after")
+    def _check_url(self) -> WebhookAlertConfig:
+        if not self.url and not self.url_env:
+            raise ValueError("Either url or url_env is required.")
+        return self
+
+
+AlertItem = Annotated[
+    SlackAlertConfig | WebhookAlertConfig,
+    Field(discriminator="type"),
+]
+
+
+class AlertsConfig(BaseModel):
+    on_failure: list[AlertItem] = Field(default_factory=list)
+
+
 class SyncConfig(BaseModel):
     name: str
     description: str = ""
@@ -648,3 +778,4 @@ class SyncConfig(BaseModel):
     destination: DestinationConfig
     sync: SyncOptions = Field(default_factory=SyncOptions)
     tests: list[SyncTest] = Field(default_factory=list)
+    alerts: AlertsConfig | None = None

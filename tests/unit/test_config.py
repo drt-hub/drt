@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from drt.config.credentials import BigQueryProfile, load_profile, save_profile
 from drt.config.models import (
@@ -595,3 +596,69 @@ def test_sync_config_without_tests() -> None:
     }
     sync = SyncConfig.model_validate(data)
     assert sync.tests == []
+
+
+# ---------------------------------------------------------------------------
+# Alerts config (sync failure alerts — #414)
+# ---------------------------------------------------------------------------
+
+
+class TestAlertsConfig:
+    def test_default_alerts_is_none(self) -> None:
+        sync = SyncConfig(
+            name="t", model="select 1",
+            destination=RestApiDestinationConfig(type="rest_api", url="https://x"),
+        )
+        assert sync.alerts is None
+
+    def test_slack_alert_parsed_via_discriminator(self) -> None:
+        from drt.config.models import AlertsConfig, SlackAlertConfig
+        cfg = AlertsConfig(on_failure=[
+            {"type": "slack", "webhook_url": "https://hooks.slack.com/x"}
+        ])
+        assert isinstance(cfg.on_failure[0], SlackAlertConfig)
+
+    def test_webhook_alert_parsed_via_discriminator(self) -> None:
+        from drt.config.models import AlertsConfig, WebhookAlertConfig
+        cfg = AlertsConfig(on_failure=[
+            {"type": "webhook", "url": "https://example.com/hook"}
+        ])
+        assert isinstance(cfg.on_failure[0], WebhookAlertConfig)
+
+    def test_unknown_alert_type_rejected(self) -> None:
+        from drt.config.models import AlertsConfig
+        with pytest.raises(ValidationError):
+            AlertsConfig(on_failure=[{"type": "pagerduty", "key": "x"}])
+
+    def test_slack_requires_webhook_url_or_env(self) -> None:
+        from drt.config.models import SlackAlertConfig
+        with pytest.raises(ValueError, match="webhook_url"):
+            SlackAlertConfig(type="slack")
+
+    def test_webhook_requires_url_or_env(self) -> None:
+        from drt.config.models import WebhookAlertConfig
+        with pytest.raises(ValueError, match="url"):
+            WebhookAlertConfig(type="webhook")
+
+
+# ---------------------------------------------------------------------------
+# Replace strategy (zero-downtime swap — #338)
+# ---------------------------------------------------------------------------
+
+
+class TestReplaceStrategy:
+    def test_default_replace_strategy_is_truncate(self) -> None:
+        opts = SyncOptions(mode="replace")
+        assert opts.replace_strategy == "truncate"
+
+    def test_replace_strategy_swap_accepted(self) -> None:
+        opts = SyncOptions(mode="replace", replace_strategy="swap")
+        assert opts.replace_strategy == "swap"
+
+    def test_replace_strategy_invalid_value_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            SyncOptions(mode="replace", replace_strategy="hotswap")  # type: ignore[arg-type]
+
+    def test_replace_strategy_swap_requires_replace_mode(self) -> None:
+        with pytest.raises(ValueError, match="replace_strategy"):
+            SyncOptions(mode="full", replace_strategy="swap")

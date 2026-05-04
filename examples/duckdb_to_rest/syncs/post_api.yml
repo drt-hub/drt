@@ -1,0 +1,15 @@
+name: post_api
+description: Post from duckdb database to RestAPI
+model: ref('users')
+destination:
+  type: rest_api
+  url: "https://httpbin.org/post"
+  method: POST
+  body_template: |
+    {
+      "name": "{{ row.name }}",
+      "email": "{{ row.email }}" 
+    }
+sync:
+  mode: full
+  batch_size: 5

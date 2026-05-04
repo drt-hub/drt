@@ -24,6 +24,7 @@ Key design principle: **module boundaries are drawn for future Rust rewrite (PyO
 drt/
 ├── cli/          # Typer CLI commands
 ├── config/       # Pydantic models + YAML parser
+├── connectors/   # Connector registry — auto-discovery of sources/destinations
 ├── sources/      # Source Protocol + BigQuery impl
 ├── destinations/ # Destination Protocol + REST API impl
 ├── engine/       # Sync orchestration (future Rust core)
@@ -37,7 +38,7 @@ drt/
 - `Destination.load(records: list[dict], config: DestinationConfig, sync_options: SyncOptions) -> SyncResult`
 - `StateManager.get_last_sync / save_sync`
 
-Implementations use `assert isinstance(config, SpecificConfig)` for type narrowing. `type: ignore` is only allowed for external library issues.
+Connector dispatch uses a centralized registry (`drt/connectors/registry.py`) — adding a new connector requires registering it there, not editing `main.py`. Implementations use `assert isinstance(config, SpecificConfig)` for type narrowing. `type: ignore` is only allowed for external library issues.
 
 ## Development Commands
 
@@ -68,18 +69,10 @@ make fmt      # ruff format + fix
 
 ## Roadmap Reference
 
-**SSoT: [GitHub Milestones](https://github.com/drt-hub/drt/milestones)** — all issues are tracked there.
+**SSoT for upcoming releases: [ROADMAP.md](ROADMAP.md)** — each version has Theme / Scope / Out of scope / Target / Progress link.
 
-- v0.1 ✅: BigQuery → REST API working end-to-end
-- v0.2 ✅: Incremental sync + retry from config
-- v0.3 ✅: MCP Server + AI Skills for Claude Code + LLM-readable docs + row-level errors + security hardening + Redshift source
-- v0.4 ✅: Google Sheets / PostgreSQL / MySQL destinations + dagster-drt + dbt manifest reader + type safety overhaul
-- v0.5 ✅: Snowflake/MySQL sources + ClickHouse/Parquet/CSV+JSON/Jira/Linear/SendGrid destinations + `drt test` + multi-environment + Docker
-- v0.5.4 ✅: `destination_lookup` — resolve FK values by querying destination DB during sync (MySQL / Postgres / ClickHouse)
-- v0.5.5 ✅: `drop_match_columns` — auto-remove lookup match columns from INSERT after FK resolution
-- [v0.6](https://github.com/drt-hub/drt/milestone/3): Salesforce + Airflow integration + Jira / Twilio / Intercom destinations
-- [v0.7](https://github.com/drt-hub/drt/milestone/4): DWH destinations (Snowflake / BigQuery / ClickHouse / Databricks) + Cloud storage (S3 / GCS / Azure Blob)
-- [v0.8](https://github.com/drt-hub/drt/milestone/5): Lakehouse sources (Delta Lake / Apache Iceberg)
-- v1.x: Rust engine via PyO3
+- **Shipped releases:** see [CHANGELOG.md](CHANGELOG.md) or [GitHub Releases](https://github.com/drt-hub/drt/releases)
+- **Issue-level tracking:** [GitHub Milestones](https://github.com/drt-hub/drt/milestones)
+- **Good First Issues:** https://github.com/drt-hub/drt/issues?q=is%3Aopen+label%3A%22good+first+issue%22
 
-**Good First Issues:** https://github.com/drt-hub/drt/issues?q=is%3Aopen+label%3A%22good+first+issue%22
+When scope shifts between versions, update ROADMAP.md first, then re-label issues to match.

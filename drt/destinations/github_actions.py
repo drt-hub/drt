@@ -40,21 +40,15 @@ from drt.config.credentials import resolve_env
 from drt.config.models import (
     DestinationConfig,
     GitHubActionsDestinationConfig,
-    RetryConfig,
     SyncOptions,
 )
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
-from drt.destinations.retry import with_retry
+from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import RowError
 from drt.templates.renderer import render_template
 
 _GITHUB_API = "https://api.github.com"
-_DEFAULT_RETRY = RetryConfig(
-    max_attempts=3,
-    initial_backoff=1.0,
-    retryable_status_codes=(429, 500, 502, 503, 504),
-)
 
 
 class GitHubActionsDestination:
@@ -87,7 +81,7 @@ class GitHubActionsDestination:
         result = SyncResult()
         # GitHub rate limit: 1000 workflow_dispatch/hour per repo — be conservative
         rate_limiter = RateLimiter(min(sync_options.rate_limit.requests_per_second, 5))
-        retry_config = sync_options.retry or _DEFAULT_RETRY
+        retry_config = resolve_retry(config.retry, sync_options)
 
         with httpx.Client(timeout=30.0) as client:
             for i, record in enumerate(records):

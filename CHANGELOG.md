@@ -37,9 +37,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Sync failure alerts** (#414): Configure `alerts.on_failure` in sync YAML to send Slack or generic HTTP webhook notifications when a sync ends with `failed > 0` or raises an exception. Two target types in v0.7: `slack` (Slack incoming webhook) and `webhook` (generic HTTP POST/PUT with optional `body_template`). Template variables: `sync_name`, `error`, `rows_processed`, `duration_s`, `started_at`. Dispatch is best-effort — alert failures are logged but never affect sync correctness or override the original exception.
+- **Graceful shutdown on SIGTERM/SIGINT** (#279): `drt run` now handles `SIGTERM` (container stop, K8s pod eviction, Airflow cancellation) and `SIGINT` (Ctrl+C) cooperatively. Signal handler sets a `stop_event` checked between batches so the in-flight batch always completes; state and watermark are persisted before exit. POSIX-conventional exit codes: `130` for SIGINT, `143` for SIGTERM. A 30-second watchdog force-exits if the current batch hangs — pair with K8s `terminationGracePeriodSeconds: 60` for a bounded shutdown window. New `SyncResult.interrupted` flag lets integrations (Dagster / Airflow / Prefect) distinguish a clean cancellation from an error. See [docs/guides/graceful-shutdown.md](docs/guides/graceful-shutdown.md).
+- **Snowflake destination** (#353): Write rows back to Snowflake tables. Supports `mode: insert` (append) and `mode: merge` (upsert via temp staging table + `MERGE` statement using `upsert_key`). Auth via `account_env` / `user_env` / `password_env`. Install: `pip install drt-core[snowflake]`. Contributed by @PFCAaron12.
+- **Zero-downtime replace via staging table swap** (#338): `sync.replace_strategy: swap` enables truly atomic table replacement — drt writes to a shadow table (`{table}__drt_swap`) per batch and atomically renames it to the original at the end of the sync. Supported on PostgreSQL (transactional `ALTER TABLE RENAME`), MySQL (atomic `RENAME TABLE`), and ClickHouse (atomic `EXCHANGE TABLES`, requires 21.8+). Default remains `truncate` (existing TRUNCATE → INSERT behavior). Follow-ups tracked in #433 (orphan auto-cleanup) and #434 (Snowflake support).
+- **Per-destination retry override** (#277): Each HTTP destination can now declare its own `retry: RetryConfig` block in YAML to override the sync-level `sync.retry`. Useful when one destination has stricter rate limits or unusual failure modes (e.g. Notion 7 attempts while other destinations stay at the default 3). Priority: `destination.retry` > `sync.retry` > built-in defaults. Brings drt in line with the per-adapter retry knobs in dbt and dlt. Documentation: [`docs/guides/retry.md`](docs/guides/retry.md).
+- **Sync execution history** (#276): Every `drt run` now appends a record to `.drt/history/<sync_name>.jsonl` with timestamp, status, rows synced/failed, duration, and errors. Inspect via `drt status --history [--sync NAME] [--limit N] [--output json]` or via the new `drt_get_history` MCP tool. Configurable retention (`history.retention_days`, default 30) prunes old entries lazily on each append. Best-effort: history persistence never affects sync correctness. The CLI/MCP counterpart to the run-history UI in Census/Hightouch — brought to a Git-native, scriptable workflow. Documentation: [`docs/guides/sync-history.md`](docs/guides/sync-history.md).
+
+### Changed
+
+- **Connector registry** (#381): Replaced hardcoded `isinstance` chains in `_get_destination()` / `_get_source()` with a centralized registry (`drt/connectors/registry.py`). Adding a new connector no longer requires editing `main.py`. Error messages now list available connectors on typo. Contributed by @Muawiya-contact.
+- **REST API destination pagination** (#260): Fetch data from paginated APIs. 3 strategies: offset/limit, cursor-based, HTTP Link headers. Contributed by @Muawiya-contact.
+- **Retry resolution helper** (#277): Each HTTP destination now uses a single `resolve_retry(config.retry, sync_options)` helper instead of duplicating its own `_DEFAULT_RETRY` fallback. Removes ~110 lines of dead code (the per-destination `_DEFAULT_RETRY` constants were unreachable because `SyncOptions.retry` is always populated by `default_factory`).
+
 ### Fixed
 
-- **`${VAR}` env substitution in sync YAML** (#385): Environment variable placeholders now work in all string fields of sync YAML (e.g. `watermark.bucket`, `destination.url`), not just `model:` SQL. Also shipped in [0.6.1](#061---2026-04-20).
+- **PostgreSQL destination**: crash on `dict` values bound for JSONB columns — wrapped with `psycopg2.extras.Json` (#315). Contributed by @armorbreak001.
+- **Notion destination**: `sync_options.retry` override was silently ignored — Notion always used the hardcoded `_DEFAULT_RETRY` (3 attempts) regardless of user configuration. Now respects user-configured retry like every other HTTP destination (#438). Contributes to #365.
+
+## [0.6.2] - 2026-04-20
+
+### Added
+
+- **`watermark.default_value`** (#390): Configure a fallback cursor value for first-run incremental syncs. Prevents broken SQL (e.g. `WHERE TIMESTAMP(...) >= TIMESTAMP('')`) when no watermark file exists yet. Without a default, drt now raises a clear error with actionable guidance instead of silently rendering an empty string.
+- **`--cursor-value` CLI option** (#390): Override the cursor/watermark value at runtime for backfill and recovery scenarios. The override takes highest priority in the fallback chain and the resulting watermark is persisted on success.
+- **Watermark source observability** (#391): Operators can now see *where* the cursor value came from — `storage`, `default_value`, or `cli_override` — via structured INFO logs, `--output json` fields (`watermark_source`, `cursor_value_used`), and an end-of-run summary in text mode.
+
+### Fixed
+
+- **PostgreSQL destination**: crash on `dict` values bound for JSONB columns — dict values are now wrapped with `psycopg2.extras.Json` before binding (#315)
 
 ## [0.6.1] - 2026-04-20
 
@@ -60,6 +88,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Google Ads destination** (#217): Upload offline click conversions. Supports partial failure handling and OAuth2 auth.
 - **Staged Upload destination** (#258): Async bulk-upload APIs (e.g. Amazon Marketing Cloud, Salesforce Bulk API). Declarative 3-phase YAML config: Stage (file upload) → Trigger (job kick) → Poll (completion wait). Supports CSV, JSON, JSONL. New `StagedDestination` Protocol.
 - **OAuth2 Client Credentials auth** (#259): Token exchange with caching for REST API destination.
+- **REST API destination pagination** (#260): Fetch data from paginated APIs before processing. Supports 3 strategies: offset/limit, cursor-based, and HTTP Link headers. Extractable via `fetch_paginated()` for read-before-write upsert patterns.
 - **`drt init --from-dbt`** (#215): Generate sync YAML scaffolds from dbt `manifest.json`.
 - **`--output json` for validate/list** (#230): Structured JSON output for `drt validate` and `drt list`.
 - **MCP Server: `drt_list_connectors`** (#262): New tool listing all available sources and destinations.

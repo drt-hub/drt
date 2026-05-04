@@ -256,3 +256,217 @@ class TestPostgresReplaceMode:
         insert_sql = cur.execute.call_args_list[1][0][0]
         assert "ON CONFLICT" not in insert_sql
         assert "INSERT INTO" in insert_sql
+
+    def test_list_passes_through(self) -> None:
+        """Non-dict types (including list) must pass through unchanged."""
+        from drt.destinations.postgres import _serialize_value
+
+        assert _serialize_value([1, 2, 3]) == [1, 2, 3]
+        assert _serialize_value(True) is True
+        assert _serialize_value(0) == 0
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_non_dict_record_no_json_wrap(self, mock_connect: MagicMock) -> None:
+        """Integration: records without dict columns don't call Json at all."""
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        records = [{"id": 1, "name": "alice", "score": 99}]
+        PostgresDestination().load(records, _config(), _options())
+
+        # All values should be plain Python types, no Json wrapping
+        call_args = cur.execute.call_args[0][1]
+        for val in call_args:
+            assert not hasattr(val, "adapted"), f"Expected plain value, got Json: {val}"
+
+
+class TestPostgresJsonColumns:
+    """Verify Postgres _serialize_value for json_columns config."""
+
+    def test_serialize_value_dict_in_json_columns(self) -> None:
+        """dict value for a json_columns column → Json() wrapper (or JSON string fallback)."""
+        from drt.destinations.postgres import _serialize_value
+
+        result = _serialize_value({"k": "v"}, column="profile", json_columns=["profile"])
+        # Should be a Json wrapper when psycopg2 is available, or JSON string fallback
+        try:
+            from psycopg2.extras import Json
+            assert isinstance(result, Json)
+        except ImportError:
+            assert isinstance(result, str)
+
+    def test_serialize_value_dict_not_in_json_columns_raises(self) -> None:
+        """dict value for non-json column with explicit json_columns → early ValueError."""
+        from drt.destinations.postgres import _serialize_value
+
+        with pytest.raises(ValueError, match="not listed in json_columns"):
+            _serialize_value({"k": "v"}, column="other", json_columns=["profile"])
+
+    def test_serialize_value_list_not_in_json_columns_raises(self) -> None:
+        """list value for non-json column with explicit json_columns → early ValueError."""
+        from drt.destinations.postgres import _serialize_value
+
+        with pytest.raises(ValueError, match="not listed in json_columns"):
+            _serialize_value([1, 2, 3], column="tags", json_columns=["profile"])
+
+    def test_serialize_value_no_config(self) -> None:
+        """No json_columns configured → backward compat (always wrap)."""
+        from drt.destinations.postgres import _serialize_value
+
+        result = _serialize_value({"k": "v"})
+        # No config → always wrap with Json() or JSON string
+        try:
+            from psycopg2.extras import Json
+            assert isinstance(result, Json)
+        except ImportError:
+            assert isinstance(result, str)
+
+    def test_serialize_value_non_complex(self) -> None:
+        """Non-dict/list values always pass through."""
+        from drt.destinations.postgres import _serialize_value
+
+        assert _serialize_value("alice") == "alice"
+        assert _serialize_value(30) == 30
+        assert _serialize_value(None) is None
+
+    def test_serialize_value_error_message_mentions_column(self) -> None:
+        """Error message includes the offending column name."""
+        from drt.destinations.postgres import _serialize_value
+
+        with pytest.raises(ValueError, match="'my_settings'"):
+            _serialize_value({"a": 1}, column="my_settings", json_columns=["profile"])
+
+
+# ---------------------------------------------------------------------------
+# Replace mode — swap strategy
+# ---------------------------------------------------------------------------
+
+
+class TestPostgresReplaceSwap:
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_swap_creates_shadow_then_inserts(self, mock_connect: MagicMock) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+        records = [{"id": 1, "score": 0.95}]
+
+        dest = PostgresDestination()
+        dest.load(records, _config(), _options(mode="replace", replace_strategy="swap"))
+
+        sqls = [c[0][0] for c in cur.execute.call_args_list]
+        assert any("DROP TABLE IF EXISTS" in s and "__drt_swap" in s for s in sqls)
+        assert any(
+            "CREATE TABLE" in s and "(LIKE " in s and "INCLUDING ALL" in s for s in sqls
+        )
+        assert any("INSERT INTO" in s and "__drt_swap" in s for s in sqls)
+        # No swap yet — happens in finalize_sync
+        assert not any("RENAME TO" in s for s in sqls)
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_swap_finalize_renames_atomically(self, mock_connect: MagicMock) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        dest = PostgresDestination()
+        dest.load(
+            [{"id": 1, "score": 0.95}],
+            _config(),
+            _options(mode="replace", replace_strategy="swap"),
+        )
+        dest.finalize_sync(
+            _config(), _options(mode="replace", replace_strategy="swap")
+        )
+
+        sqls = [c[0][0] for c in cur.execute.call_args_list]
+        # Two RENAME steps wrapped in a transaction
+        rename_sqls = [s for s in sqls if "RENAME TO" in s]
+        assert len(rename_sqls) >= 2
+        # Final DROP of old table
+        assert any("DROP TABLE" in s and "__drt_old" in s for s in sqls)
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_swap_finalize_noop_when_no_swap_in_progress(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _fake_connection()
+        mock_connect.return_value = conn
+
+        dest = PostgresDestination()
+        # finalize_sync without prior swap-mode load is a safe no-op
+        result = dest.finalize_sync(_config(), _options(mode="full"))
+        assert result is None or result.success == 0
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_swap_creates_shadow_only_once_across_batches(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        dest = PostgresDestination()
+        dest.load(
+            [{"id": 1, "score": 0.5}],
+            _config(),
+            _options(mode="replace", replace_strategy="swap"),
+        )
+        dest.load(
+            [{"id": 2, "score": 0.9}],
+            _config(),
+            _options(mode="replace", replace_strategy="swap"),
+        )
+
+        sqls = [c[0][0] for c in cur.execute.call_args_list]
+        create_count = sum(
+            1 for s in sqls if "CREATE TABLE" in s and "INCLUDING ALL" in s
+        )
+        assert create_count == 1
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_swap_on_error_fail_drops_shadow_and_resets_state(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """Mid-batch failure with on_error=fail must rollback, drop shadow,
+        and reset state so finalize_sync cannot RENAME a partial shadow into
+        the live table.
+        """
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        # Fail only on INSERT — DROP/CREATE/cleanup succeed.
+        insert_call_count = {"n": 0}
+
+        def execute_side_effect(sql: str, *args: Any) -> None:
+            if sql.startswith("INSERT INTO"):
+                insert_call_count["n"] += 1
+                if insert_call_count["n"] == 2:
+                    raise Exception("constraint violation on row 2")
+            return None
+
+        cur.execute.side_effect = execute_side_effect
+
+        dest = PostgresDestination()
+        result = dest.load(
+            [{"id": 1, "score": 0.5}, {"id": 2, "score": 0.9}],
+            _config(),
+            _options(mode="replace", replace_strategy="swap", on_error="fail"),
+        )
+
+        assert result.failed == 1
+        assert result.success == 1
+        # Rollback called on hard fail
+        conn.rollback.assert_called()
+        # Cleanup DROP IF EXISTS issued after rollback
+        sqls = [c[0][0] for c in cur.execute.call_args_list]
+        drops = [s for s in sqls if "DROP TABLE IF EXISTS" in s and "__drt_swap" in s]
+        assert len(drops) >= 2  # initial + cleanup
+        # State reset → finalize_sync must be a no-op (no RENAME issued)
+        finalize_result = dest.finalize_sync(
+            _config(), _options(mode="replace", replace_strategy="swap")
+        )
+        assert finalize_result is None
+        sqls_after = [c[0][0] for c in cur.execute.call_args_list]
+        assert not any("RENAME TO" in s for s in sqls_after)

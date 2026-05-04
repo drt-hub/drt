@@ -1,0 +1,4 @@
+# Copy to ~/.drt/profiles.yml and fill in your values
+local:
+  type: duckdb
+  database: ./data/warehouse.duckdb   # :memory: for in-memory
