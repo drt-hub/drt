@@ -86,6 +86,27 @@ class TestLookupConfigCheckOnly:
                 match={"user_id": "user_id"},
             )
 
+    def test_check_only_with_on_miss_null_raises(self) -> None:
+        """on_miss=null is meaningless without a target column to NULL —
+        fail at config-load instead of silently coercing to skip at runtime."""
+        with pytest.raises(ValueError, match="on_miss='null' is invalid"):
+            LookupConfig(
+                table="users",
+                match={"id": "user_id"},
+                check_only=True,
+                on_miss="null",
+            )
+
+    def test_check_only_with_on_miss_skip_or_fail_valid(self) -> None:
+        for mode in ("skip", "fail"):
+            lk = LookupConfig(
+                table="users",
+                match={"id": "user_id"},
+                check_only=True,
+                on_miss=mode,  # type: ignore[arg-type]
+            )
+            assert lk.on_miss == mode
+
 
 # ---------------------------------------------------------------------------
 # SyncConfig parsing with lookups
@@ -612,20 +633,6 @@ class TestApplyLookupsCheckOnly:
         assert {r["user_id"] for r in enriched} == {"u1", "u2"}
         assert len(errors) == 1
         assert "ghost" in errors[0].record_preview
-
-    def test_miss_with_on_miss_null_treated_as_skip(self) -> None:
-        """on_miss=null is meaningless without a target column — must behave
-        like skip (docs guarantee). Row is dropped, error logged."""
-        records = [
-            {"user_id": "u1", "name": "Alice"},
-            {"user_id": "ghost", "name": "Ghost"},
-        ]
-        enriched, errors = apply_lookups(records, self._check_only_maps("null"), "skip")
-
-        assert len(enriched) == 1
-        assert enriched[0]["user_id"] == "u1"
-        assert len(errors) == 1
-        assert "check_only" in errors[0].error_message
 
     def test_miss_with_on_miss_fail_stops_sync(self) -> None:
         records = [

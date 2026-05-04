@@ -332,7 +332,7 @@ class LookupConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _check_select_consistency(self) -> "LookupConfig":
+    def _check_select_consistency(self) -> LookupConfig:
         if self.check_only and self.select is not None:
             raise ValueError(
                 "lookups.select must be omitted when check_only=True "
@@ -342,6 +342,15 @@ class LookupConfig(BaseModel):
             raise ValueError(
                 "lookups.select is required (or set check_only=true for "
                 "existence-only filtering)."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_on_miss_consistency(self) -> LookupConfig:
+        if self.check_only and self.on_miss == "null":
+            raise ValueError(
+                "lookups.on_miss='null' is invalid with check_only=True "
+                "(no target column to set NULL on; use 'skip' or 'fail')."
             )
         return self
 

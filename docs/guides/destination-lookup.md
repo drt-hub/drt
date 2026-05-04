@@ -102,9 +102,11 @@ Differences vs a value-resolving lookup:
 | `select` field | required | must be omitted |
 | Target name | written into the row | unused (label only) |
 | `drop_match_columns` | applies | ignored — source columns are always preserved |
-| `on_miss: null` | sets target to NULL | treated as `skip` (NULL is meaningless without a target) |
+| `on_miss: null` | sets target to NULL | rejected at config-load (no target column to NULL) |
 
 You can mix `check_only` lookups with regular value-resolving lookups in the same sync.
+
+> **Ordering note.** When multiple lookups can miss on the same row, the **first** miss wins — that lookup's `on_miss` decides the row's fate, and remaining lookups are not evaluated for that row. Practical guidance: list `check_only` filters **before** value-resolving lookups when both could miss, so existence-failures take precedence over join-failures. Tracked for future parse-time validation in [#453](https://github.com/drt-hub/drt/issues/453).
 
 ## Multiple Lookups
 

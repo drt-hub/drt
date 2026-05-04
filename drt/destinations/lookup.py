@@ -95,22 +95,9 @@ def apply_lookups(
                 if not lk_config.check_only:
                     record[target_col] = mapping[key]
             elif lk_config.on_miss == "null":
-                if lk_config.check_only:
-                    # check_only is filter-only — null is not a meaningful action
-                    # on miss, so treat it the same as skip.
-                    errors.append(
-                        RowError(
-                            batch_index=i,
-                            record_preview=json.dumps(record, default=str)[:200],
-                            http_status=None,
-                            error_message=(
-                                f"Lookup miss (check_only, skipped): {target_col} "
-                                f"(table={lk_config.table}, key={key})"
-                            ),
-                        )
-                    )
-                    skip = True
-                    break
+                # check_only + on_miss=null is rejected at config-load time
+                # by LookupConfig._check_on_miss_consistency, so target_col
+                # here always corresponds to a real value-resolving lookup.
                 record[target_col] = None
             elif lk_config.on_miss == "fail":
                 errors.append(
