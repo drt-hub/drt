@@ -1,7 +1,8 @@
 # Initial database for GitHub Codespaces
 
-import duckdb
 from pathlib import Path
+
+import duckdb
 
 db_path = Path(__file__).resolve().parent.parent / "data" / "warehouse.duckdb"
 
