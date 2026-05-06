@@ -52,6 +52,62 @@ class TestLookupConfigValidation:
             LookupConfig(table="t", match={}, select="id")
 
 
+class TestLookupConfigCheckOnly:
+    def test_check_only_with_select_omitted_valid(self) -> None:
+        lk = LookupConfig(
+            table="users",
+            match={"user_id": "user_id"},
+            check_only=True,
+        )
+        assert lk.check_only is True
+        assert lk.select is None
+
+    def test_check_only_default_is_false(self) -> None:
+        lk = LookupConfig(
+            table="users",
+            match={"user_id": "user_id"},
+            select="id",
+        )
+        assert lk.check_only is False
+
+    def test_check_only_with_select_raises(self) -> None:
+        with pytest.raises(ValueError, match="select"):
+            LookupConfig(
+                table="users",
+                match={"user_id": "user_id"},
+                select="id",
+                check_only=True,
+            )
+
+    def test_no_check_only_without_select_raises(self) -> None:
+        with pytest.raises(ValueError, match="select"):
+            LookupConfig(
+                table="users",
+                match={"user_id": "user_id"},
+            )
+
+    def test_check_only_with_on_miss_null_raises(self) -> None:
+        """on_miss=null is meaningless without a target column to NULL —
+        fail at config-load instead of silently coercing to skip at runtime."""
+        with pytest.raises(ValueError, match="on_miss='null' is invalid"):
+            LookupConfig(
+                table="users",
+                match={"id": "user_id"},
+                check_only=True,
+                on_miss="null",
+            )
+
+    def test_check_only_with_on_miss_skip_or_fail_valid(self) -> None:
+        for mode in ("skip", "fail"):
+            lk = LookupConfig(
+                table="users",
+                match={"id": "user_id"},
+                check_only=True,
+                on_miss=mode,  # type: ignore[arg-type]
+            )
+            assert lk.on_miss == mode
+
+
 # ---------------------------------------------------------------------------
 # SyncConfig parsing with lookups
 # ---------------------------------------------------------------------------
@@ -234,6 +290,57 @@ class TestBuildLookupMap:
         result = build_lookup_map(config, lk)
 
         assert result == {}
+
+
+class TestBuildLookupMapCheckOnly:
+    @patch("drt.destinations.lookup.fetch_rows")
+    def test_query_omits_select_column(self, mock_fetch: MagicMock) -> None:
+        mock_fetch.return_value = [{"user_id": "u1"}, {"user_id": "u2"}]
+        config = MySQLDestinationConfig(
+            type="mysql", host="h", dbname="d", table="t", upsert_key=["id"]
+        )
+        lk = LookupConfig(
+            table="users", match={"user_id": "user_id"}, check_only=True
+        )
+
+        build_lookup_map(config, lk)
+
+        query = mock_fetch.call_args[0][1]
+        assert "SELECT user_id FROM users" in query
+        assert "id" not in query.replace("user_id", "")  # no leftover select col
+
+    @patch("drt.destinations.lookup.fetch_rows")
+    def test_returns_existence_map(self, mock_fetch: MagicMock) -> None:
+        mock_fetch.return_value = [{"user_id": "u1"}, {"user_id": "u2"}]
+        config = MySQLDestinationConfig(
+            type="mysql", host="h", dbname="d", table="t", upsert_key=["id"]
+        )
+        lk = LookupConfig(
+            table="users", match={"user_id": "user_id"}, check_only=True
+        )
+
+        result = build_lookup_map(config, lk)
+
+        assert result == {("u1",): None, ("u2",): None}
+
+    @patch("drt.destinations.lookup.fetch_rows")
+    def test_composite_key_existence_map(self, mock_fetch: MagicMock) -> None:
+        mock_fetch.return_value = [
+            {"company_id": "c1", "user_id": "u1"},
+            {"company_id": "c2", "user_id": "u2"},
+        ]
+        config = MySQLDestinationConfig(
+            type="mysql", host="h", dbname="d", table="t", upsert_key=["id"]
+        )
+        lk = LookupConfig(
+            table="memberships",
+            match={"company_id": "company_id", "user_id": "user_id"},
+            check_only=True,
+        )
+
+        result = build_lookup_map(config, lk)
+
+        assert result == {("c1", "u1"): None, ("c2", "u2"): None}
 
 
 # ---------------------------------------------------------------------------
@@ -473,3 +580,138 @@ class TestApplyLookups:
         assert len(enriched) == 1
         assert "user_id" not in enriched[0]  # dropped (lk1 default)
         assert enriched[0]["company_code"] == "acme"  # kept (lk2 opt-out)
+
+
+# ---------------------------------------------------------------------------
+# apply_lookups — check_only mode (existence-only filtering)
+# ---------------------------------------------------------------------------
+
+
+class TestApplyLookupsCheckOnly:
+    def _check_only_maps(
+        self,
+        on_miss: str = "skip",
+        existing_keys: set[tuple] | None = None,
+        target_name: str = "user_exists",
+    ) -> dict[str, tuple[LookupConfig, dict]]:
+        lk = LookupConfig(
+            table="users",
+            match={"id": "user_id"},
+            check_only=True,
+            on_miss=on_miss,  # type: ignore[arg-type]
+        )
+        if existing_keys is None:
+            existing_keys = {("u1",), ("u2",)}
+        mapping: dict[tuple, None] = dict.fromkeys(existing_keys)
+        return {target_name: (lk, mapping)}
+
+    def test_existence_hit_keeps_row_without_writing_target(self) -> None:
+        records = [
+            {"user_id": "u1", "name": "Alice"},
+            {"user_id": "u2", "name": "Bob"},
+        ]
+        enriched, errors = apply_lookups(records, self._check_only_maps(), "fail")
+
+        assert len(enriched) == 2
+        # Source FK column preserved (purpose: still go to destination)
+        assert enriched[0]["user_id"] == "u1"
+        assert enriched[1]["user_id"] == "u2"
+        # Target name MUST NOT be written into the row — it's an arbitrary check label
+        assert "user_exists" not in enriched[0]
+        assert "user_exists" not in enriched[1]
+        assert errors == []
+
+    def test_miss_with_on_miss_skip_drops_row(self) -> None:
+        records = [
+            {"user_id": "u1", "name": "Alice"},
+            {"user_id": "ghost", "name": "Ghost"},
+            {"user_id": "u2", "name": "Bob"},
+        ]
+        enriched, errors = apply_lookups(records, self._check_only_maps("skip"), "skip")
+
+        assert len(enriched) == 2
+        assert {r["user_id"] for r in enriched} == {"u1", "u2"}
+        assert len(errors) == 1
+        assert "ghost" in errors[0].record_preview
+
+    def test_miss_with_on_miss_fail_stops_sync(self) -> None:
+        records = [
+            {"user_id": "u1", "name": "Alice"},
+            {"user_id": "ghost", "name": "Ghost"},
+            {"user_id": "u2", "name": "Bob"},
+        ]
+        enriched, errors = apply_lookups(records, self._check_only_maps("fail"), "fail")
+
+        assert len(enriched) == 1
+        assert enriched[0]["user_id"] == "u1"
+        assert len(errors) == 1
+
+    def test_check_only_does_not_drop_match_source_column(self) -> None:
+        """check_only is filter-only — source columns must NOT be dropped
+        even when target_name != source_col (target is just a label)."""
+        records = [{"user_id": "u1", "name": "Alice"}]
+        enriched, errors = apply_lookups(records, self._check_only_maps(), "fail")
+
+        assert len(enriched) == 1
+        assert enriched[0]["user_id"] == "u1"  # FK preserved for destination INSERT
+        assert enriched[0]["name"] == "Alice"
+        assert "user_exists" not in enriched[0]
+
+    def test_check_only_combined_with_regular_lookup(self) -> None:
+        """check_only and value-resolving lookups coexist in same record."""
+        check_lk = LookupConfig(
+            table="users",
+            match={"id": "user_id"},
+            check_only=True,
+        )
+        resolve_lk = LookupConfig(
+            table="companies",
+            match={"code": "company_code"},
+            select="id",
+        )
+        maps: dict[str, tuple[LookupConfig, dict]] = {
+            "user_exists": (check_lk, {("u1",): None}),
+            "company_id": (resolve_lk, {("acme",): 99}),
+        }
+        records = [
+            {"user_id": "u1", "company_code": "acme", "name": "A"},
+            {"user_id": "ghost", "company_code": "acme", "name": "B"},
+        ]
+
+        enriched, errors = apply_lookups(records, maps, "skip")
+
+        assert len(enriched) == 1
+        assert enriched[0]["user_id"] == "u1"  # check_only preserves
+        assert enriched[0]["company_id"] == 99  # regular lookup resolves
+        assert "company_code" not in enriched[0]  # dropped by regular lookup default
+        assert "user_exists" not in enriched[0]  # check_only never writes target
+
+
+class TestSyncConfigCheckOnlyParse:
+    def test_parse_check_only_yaml(self) -> None:
+        config = SyncConfig.model_validate(
+            {
+                "name": "fk_filtered_sync",
+                "model": "SELECT * FROM source",
+                "destination": {
+                    "type": "mysql",
+                    "host": "localhost",
+                    "dbname": "testdb",
+                    "table": "child_table",
+                    "upsert_key": ["user_id"],
+                    "lookups": {
+                        "user_exists": {
+                            "table": "users",
+                            "match": {"id": "user_id"},
+                            "check_only": True,
+                            "on_miss": "skip",
+                        },
+                    },
+                },
+            }
+        )
+        assert isinstance(config.destination, MySQLDestinationConfig)
+        assert config.destination.lookups is not None
+        lk = config.destination.lookups["user_exists"]
+        assert lk.check_only is True
+        assert lk.select is None

@@ -280,3 +280,64 @@ class TestRestApiDestinationRetryOverride:
             RestApiDestination().load([{"id": 1}], config, options)
 
         assert mock_client.request.call_count == 3
+
+
+class TestRestApiOnErrorFail:
+    """on_error=fail must stop processing after the first failure (#365)."""
+
+    def test_on_error_fail_stops_after_first_http_error(self) -> None:
+        records = [{"id": 1}, {"id": 2}, {"id": 3}]
+        config = _dest_config()
+        options = SyncOptions(
+            batch_size=10,
+            rate_limit=RateLimitConfig(requests_per_second=1000),
+            retry=RetryConfig(
+                max_attempts=1, initial_backoff=0.0, backoff_multiplier=1.0
+            ),
+            on_error="fail",
+        )
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.return_value = _make_response(500, "internal error")
+
+            result = RestApiDestination().load(records, config, options)
+
+        assert result.failed == 1
+        assert result.success == 0
+        # Only the first record was attempted (one HTTP request, one retry-attempt)
+        assert mock_client.request.call_count == 1
+
+    def test_on_error_fail_stops_after_template_error(self) -> None:
+        records = [
+            {"id": 1, "name": "ok"},
+            {"id": 2},  # missing 'name' — would trigger template error
+            {"id": 3},
+        ]
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/webhook",
+            method="POST",
+            body_template='{"name": "{{ row.required_field_that_does_not_exist }}"}',
+        )
+        options = SyncOptions(
+            batch_size=10,
+            rate_limit=RateLimitConfig(requests_per_second=1000),
+            retry=RetryConfig(max_attempts=1),
+            on_error="fail",
+        )
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            # If template error stops processing, no HTTP requests should be made
+            mock_client.request.return_value = _make_response(200, "OK")
+
+            result = RestApiDestination().load(records, config, options)
+
+        # Template error on first record should immediately fail-out.
+        # Only 1 row attempted — no HTTP since template fails before request.
+        assert result.failed == 1
+        assert result.success == 0
+        assert mock_client.request.call_count == 0

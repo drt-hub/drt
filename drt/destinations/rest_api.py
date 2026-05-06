@@ -66,6 +66,8 @@ class RestApiDestination:
                             )
                         )
                         result.failed += 1
+                        if sync_options.on_error == "fail":
+                            return result
                         continue
                 else:
                     body = record
@@ -97,6 +99,8 @@ class RestApiDestination:
                         )
                     )
                     result.failed += 1
+                    if sync_options.on_error == "fail":
+                        return result
                 except Exception as e:
                     result.row_errors.append(
                         RowError(
@@ -107,6 +111,8 @@ class RestApiDestination:
                         )
                     )
                     result.failed += 1
+                    if sync_options.on_error == "fail":
+                        return result
 
         # Return as SyncResult-compatible object
         return result

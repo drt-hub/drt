@@ -51,14 +51,15 @@ make fmt      # ruff format + fix
 
 ## Current Status
 
-- **v0.6.2 released** — `watermark.default_value` + `--cursor-value` CLI + watermark observability (#390, #391)
+- **v0.7.0 released** — Production Ready theme: graceful shutdown on SIGTERM/SIGINT (#279), per-destination retry override (#277), sync execution history (#276), zero-downtime replace via staging table swap (#338), FK existence check via `lookups.check_only` (#354), `json_columns` config (#316), `drt doctor` (#264), `--quiet` flag (#265), Slack/webhook failure alerts (#414). Plus first DWH destination (Snowflake #353), Codespaces playground (#407), and `OPEN_CORE.md`.
+- **v0.6.2** — `watermark.default_value` + `--cursor-value` CLI + watermark observability (#390, #391)
 - **v0.6.1** — `${VAR}` env substitution in all sync YAML string fields (#385)
 - **v0.6.0** — Notion/Twilio/Intercom/Email SMTP/Salesforce Bulk/Google Ads destinations, `--threads` parallel execution, `--log-format json`, `--select tag:`, JSON Schema validation, freshness/unique/accepted_values tests, `drt sources`/`drt destinations`, `--dry-run` row count diff, StagedDestination Protocol, destination_lookup, GOVERNANCE.md
-- CLI fully wired: `init`, `run`, `list`, `validate`, `status`, `test`, `mcp run`, `serve`, `sources`, `destinations`
+- CLI fully wired: `init`, `run`, `list`, `validate`, `status`, `test`, `mcp run`, `serve`, `sources`, `destinations`, `doctor`, `cloud push` (stub)
 - Sources: BigQuery, DuckDB, PostgreSQL, Redshift, SQLite, ClickHouse, Snowflake, MySQL, Databricks, SQL Server
-- Destinations: REST API, Slack, Discord, Microsoft Teams, GitHub Actions, HubSpot, Google Sheets, PostgreSQL, MySQL, ClickHouse, Parquet, CSV/JSON/JSONL, Jira, Linear, SendGrid, Notion, Twilio, Intercom, Email SMTP, Salesforce Bulk, Google Ads, Staged Upload
+- Destinations: REST API, Slack, Discord, Microsoft Teams, GitHub Actions, HubSpot, Google Sheets, PostgreSQL, MySQL, ClickHouse, Snowflake, Parquet, CSV/JSON/JSONL, Jira, Linear, SendGrid, Notion, Twilio, Intercom, Email SMTP, Salesforce Bulk, Google Ads, Staged Upload
 - Integrations: MCP Server (`drt-core[mcp]`), dagster-drt, Airflow, Prefect, dbt manifest reader
-- 664+ tests, integration tests use `pytest-httpserver`
+- 833+ tests, integration tests use `pytest-httpserver`
 
 ## What NOT to do
 

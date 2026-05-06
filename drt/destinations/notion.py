@@ -92,6 +92,8 @@ class NotionDestination:
                                 error_message=f"properties_template error: {e}",
                             )
                         )
+                        if sync_options.on_error == "fail":
+                            return result
                         continue
                 else:
                     # Without a template, map simple scalar values to rich text
@@ -128,6 +130,8 @@ class NotionDestination:
                             error_message=e.response.text[:500],
                         )
                     )
+                    if sync_options.on_error == "fail":
+                        return result
                 except Exception as e:
                     result.failed += 1
                     result.row_errors.append(
@@ -138,5 +142,7 @@ class NotionDestination:
                             error_message=str(e),
                         )
                     )
+                    if sync_options.on_error == "fail":
+                        return result
 
         return result
