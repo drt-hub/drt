@@ -103,7 +103,7 @@ Add to `CHANGELOG.md` with `[DEPRECATED]` tag:
 
 ### Step 2: Add Tooling Support
 
-- `drt validate` should emit a warning if deprecated features are used (planned — tracked in #XXX; not yet wired up in current releases)
+- `drt validate` should emit a warning if deprecated features are used 
 - Documentation should link to migration guide
 - Error messages should suggest the replacement
 
