@@ -487,3 +487,72 @@ class TestMySQLReplaceSwap:
         assert finalize_result is None
         sqls_after = [c[0][0] for c in cur.execute.call_args_list]
         assert not any("RENAME TABLE" in s for s in sqls_after)
+
+
+# ---------------------------------------------------------------------------
+# Replace mode — swap strategy + json_columns interaction (#448)
+# ---------------------------------------------------------------------------
+
+
+class TestMySQLReplaceSwapJsonColumns:
+    """Swap mode must honor json_columns the same way truncate mode does.
+
+    Discovered post-rebase of #435 onto #382 — the two features were
+    developed in parallel and _load_replace_swap was missing the
+    json_columns plumbing that _load_replace already had.
+    """
+
+    @patch("drt.destinations.mysql.MySQLDestination._connect")
+    def test_swap_serializes_dict_in_listed_json_column(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        records = [
+            {
+                "user_id": 1,
+                "company_id": 5,
+                "score": 0.9,
+                "profile": {"lang": "ja"},
+            }
+        ]
+        config = _config(json_columns=["profile"])
+
+        MySQLDestination().load(
+            records, config, _options(mode="replace", replace_strategy="swap"),
+        )
+
+        insert_calls = [
+            c for c in cur.execute.call_args_list
+            if "INSERT INTO" in c[0][0] and "__drt_swap" in c[0][0]
+        ]
+        assert insert_calls, "expected at least one INSERT into shadow table"
+        bound_values = insert_calls[0][0][1]
+        # dict value must be JSON-serialized to a string
+        assert '{"lang": "ja"}' in bound_values
+
+    @patch("drt.destinations.mysql.MySQLDestination._connect")
+    def test_swap_rejects_dict_in_unlisted_column(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _fake_connection()
+        mock_connect.return_value = conn
+
+        records = [
+            {
+                "user_id": 1,
+                "company_id": 5,
+                "score": 0.5,
+                "extra": {"unexpected": "dict"},
+            }
+        ]
+        config = _config(json_columns=["profile"])  # 'extra' not listed
+
+        result = MySQLDestination().load(
+            records, config, _options(mode="replace", replace_strategy="swap"),
+        )
+
+        assert result.failed == 1
+        assert "not listed in json_columns" in result.row_errors[0].error_message

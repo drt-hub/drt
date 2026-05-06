@@ -57,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **PostgreSQL destination**: crash on `dict` values bound for JSONB columns — wrapped with `psycopg2.extras.Json` (#315). Contributed by @armorbreak001.
 - **Notion destination**: `sync_options.retry` override was silently ignored — Notion always used the hardcoded `_DEFAULT_RETRY` (3 attempts) regardless of user configuration. Now respects user-configured retry like every other HTTP destination (#438). Contributes to #365.
+- **`replace_strategy: swap` ignored `json_columns` config** (#448): When both `replace_strategy: swap` (#338) and `json_columns` (#316) were configured on a Postgres or MySQL destination, swap mode silently bypassed the explicit JSON column declarations because `_load_replace_swap` did not thread `config.json_columns` through to `_serialize_value`. Now both strategies honour the config consistently — swap-mode dict values in unlisted columns raise the same fail-fast `ValueError` as truncate mode. ClickHouse is unaffected (its connector handles JSON encoding driver-side and has no `json_columns` config). Discovered post-rebase of #435 onto #382 — neither feature was wrong in isolation; the gap was an interaction artifact of parallel development.
 
 ## [0.6.2] - 2026-04-20
 
