@@ -198,6 +198,10 @@ drt run || [ $? -eq 2 ] && handle_validation_error
 ```
 ````
 
+```
+
+```
+
 **[Similar sections for each breaking change]**
 
 ````
@@ -210,14 +214,17 @@ drt run || [ $? -eq 2 ] && handle_validation_error
 ## v0.5.0
 
 ### New Features
+
 - Added `sync.retry_backoff` optional YAML key (defaults to exponential)
 - Added `--max-retries` CLI flag
 - Added support for Salesforce Bulk API destination
 
 ### Bug Fixes
+
 - Fixed rare race condition in state manager
 
 ## Breaking Changes
+
 None. This is a safe upgrade.
 ````
 
