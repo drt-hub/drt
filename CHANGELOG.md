@@ -37,6 +37,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-06
+
+**Theme: Production Ready.** Reliability, observability, and correctness for syncs that run in production environments — graceful shutdown on SIGTERM/SIGINT, retry knobs per destination, atomic zero-downtime table replace, sync execution history, FK existence filtering, opinionated JSON column handling. Plus the first DWH destination (Snowflake), the GitHub Codespaces playground for zero-setup onboarding, and `OPEN_CORE.md` documenting the open core boundary.
+
+This release closes 9 v0.7 milestone issues plus several spillover items shipped early.
+
+### Breaking Changes
+
+None. Drop-in upgrade from v0.6.x.
+
 ### Added
 
 - **Sync failure alerts** (#414): Configure `alerts.on_failure` in sync YAML to send Slack or generic HTTP webhook notifications when a sync ends with `failed > 0` or raises an exception. Two target types in v0.7: `slack` (Slack incoming webhook) and `webhook` (generic HTTP POST/PUT with optional `body_template`). Template variables: `sync_name`, `error`, `rows_processed`, `duration_s`, `started_at`. Dispatch is best-effort — alert failures are logged but never affect sync correctness or override the original exception.
