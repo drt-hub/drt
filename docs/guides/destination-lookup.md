@@ -49,6 +49,7 @@ lookups:
     select: <string>        # column to fetch from the lookup table
     on_miss: skip           # what to do when no match is found
     drop_match_columns: true  # remove match source columns from INSERT
+    check_only: false       # filter-only mode (see "Existence-only check" below)
 ```
 
 ### `drop_match_columns`
@@ -73,6 +74,39 @@ lookups:
 | `skip` | (default) Skip the row and log a warning |
 | `fail` | Treat as an error (respects `sync.on_error`) |
 | `null` | Set the target column to NULL |
+
+## Existence-only Check (`check_only: true`)
+
+Sometimes you don't need to *resolve* a value — you just want to *filter* source rows by whether a foreign key exists in the destination. Common case: BigQuery has prd-like data but the destination DB (e.g. staging) has only a subset of users; rows pointing at non-existent FKs should be silently dropped, not fail the sync.
+
+Use `check_only: true` for this. The lookup name becomes a label (no column is written), `select` must be omitted, and the row is filtered based on `on_miss`:
+
+```yaml
+destination:
+  type: mysql
+  table: interviewer_profiles
+  upsert_key: [user_id]
+
+  lookups:
+    user_exists:                  # arbitrary label, not a destination column
+      table: users
+      match: { id: user_id }      # destination column: source column
+      check_only: true            # existence check only — no value resolution
+      on_miss: skip               # drop rows whose user_id doesn't exist in users
+```
+
+Differences vs a value-resolving lookup:
+
+| | Regular lookup | `check_only: true` |
+|---|---|---|
+| `select` field | required | must be omitted |
+| Target name | written into the row | unused (label only) |
+| `drop_match_columns` | applies | ignored — source columns are always preserved |
+| `on_miss: null` | sets target to NULL | rejected at config-load (no target column to NULL) |
+
+You can mix `check_only` lookups with regular value-resolving lookups in the same sync.
+
+> **Ordering note.** When multiple lookups can miss on the same row, the **first** miss wins — that lookup's `on_miss` decides the row's fate, and remaining lookups are not evaluated for that row. Practical guidance: list `check_only` filters **before** value-resolving lookups when both could miss, so existence-failures take precedence over join-failures. Tracked for future parse-time validation in [#453](https://github.com/drt-hub/drt/issues/453).
 
 ## Multiple Lookups
 

@@ -1,4 +1,4 @@
-<!-- i18n-sync: base=README.md, hash=73436240f8a7aed9971bbd32b2aa250f4edbe796 -->
+<!-- i18n-sync: base=README.md, hash=e3dc31e9cd69cbf671e24f01c5c1659f844eec82 -->
 
 [English](./README.md) | [日本語](./README.ja.md)
 
@@ -275,6 +275,7 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | Email SMTP | ✅ v0.6 | (core) | ユーザー名/パスワード（環境変数） |
 | Salesforce Bulk API 2.0 | ✅ v0.6 | (core) | OAuth2（username-password） |
 | Staged Upload | ✅ v0.6 | (core) | プロバイダーごとに設定 |
+| Snowflake | ✅ v0.7 | `pip install drt-core[snowflake]` | パスワード（環境変数） |
 
 ### インテグレーション
 
@@ -304,8 +305,9 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | **v0.5** ✅ | Snowflake / MySQL sources · ClickHouse / Parquet / Teams / CSV+JSON / Jira / Linear / SendGrid destinations · `drt test` · `--output json` · `--profile` · `${VAR}` 環境変数展開 · dbt manifest · secrets.toml · Docker |
 | **v0.5.4** ✅ | `destination_lookup` — 同期中にデスティネーションDBからFK値を解決（MySQL / Postgres / ClickHouse） |
 | **v0.6** ✅ | Databricks / SQL Server sources · Notion / Twilio / Intercom / Email SMTP / Salesforce Bulk / Staged Upload destinations · Airflow / Prefect integrations · `drt serve` · `drt sources` / `drt destinations` · `--threads` 並列実行 · `--log-format json` · `--cursor-value` · `watermark.default_value` · テストバリデータ（freshness, unique, accepted_values） · JSON Schema validation · GOVERNANCE.md |
+| **v0.7** ✅ | **Production Ready** — SIGTERM/SIGINT グレースフルシャットダウン · per-destination retry override · sync 実行履歴 · zero-downtime atomic table swap · `json_columns` 設定 · FK存在チェック (`lookups.check_only`) · Slack/webhook 失敗通知 · `drt doctor` · `--quiet` フラグ · `drt test --output json` / `--dry-run` · Snowflake destination · GitHub Codespaces プレイグラウンド · `OPEN_CORE.md` |
 
-**次のリリース:** [v0.7 Production Ready](ROADMAP.md#v07--production-ready) → [v0.8 Cloud Destinations & Growth](ROADMAP.md#v08--cloud-destinations--growth) → [v0.9 Enterprise Foundation](ROADMAP.md#v09--enterprise-foundation) → [v1.0 Stable Release](ROADMAP.md#v10--stable-release) → [v1.x Rust Engine](ROADMAP.md#v1x--rust-engine)
+**次のリリース:** [v0.7.1 Production Ready Follow-up](ROADMAP.md#v071--production-ready-follow-up) → [v0.8 Cloud Destinations & Growth](ROADMAP.md#v08--cloud-destinations--growth) → [v0.9 Enterprise Foundation](ROADMAP.md#v09--enterprise-foundation) → [v1.0 Stable Release](ROADMAP.md#v10--stable-release) → [v1.x Rust Engine](ROADMAP.md#v1x--rust-engine)
 
 ---
 

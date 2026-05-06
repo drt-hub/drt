@@ -13,10 +13,12 @@ drt has three roles. Each is a step on a ladder — anyone can grow from one to 
 **Anyone with at least one merged PR.**
 
 Permissions:
+
 - Open issues, discussions, and pull requests
 - Comment, review, and propose changes
 
 Recognition:
+
 - Listed in the project's contributor graph
 - Acknowledged in release notes when their changes ship
 
@@ -25,17 +27,20 @@ Recognition:
 **Trusted contributors who help manage the project's day-to-day flow.** Cannot push code directly — that protects both the contributor and the project.
 
 Permissions:
+
 - Triage issues (label, assign, close)
 - Manage pull requests (request reviews, label, close)
 - Help review code (approval is non-binding for merge)
 
 Criteria for invitation (any path qualifies):
+
 - **5+ merged PRs** with consistent quality, OR
 - **One major contribution completed end-to-end** (e.g. a new connector or integration), AND
 - Active in the **last 30 days**, AND
 - Demonstrates **constructive communication** in issues and PRs
 
 Process:
+
 - A current Owner proposes the invitation publicly in a Discussion
 - The candidate is invited with **GitHub Triage permission**
 - Invitation is an **offer, not a decree** — the contributor can decline or step down anytime
@@ -45,12 +50,14 @@ Process:
 **Project maintainers with full administrative rights.**
 
 Permissions:
+
 - Merge pull requests
 - Push to protected branches (rare — squash-merge is the norm)
 - Manage repository settings, secrets, and releases
 - Invite/remove collaborators
 
 Current Owners:
+
 - [@masukai](https://github.com/masukai) — project lead
 - [@yodakanohoshi](https://github.com/yodakanohoshi) — co-maintainer
 
@@ -91,6 +98,12 @@ Roles are voluntary. If a Triage Collaborator or Owner needs to step back:
 - Send a note to the Owners
 
 No explanation needed. Re-joining later is welcome.
+
+## Open Core Model
+
+See [OPEN_CORE.md](./OPEN_CORE.md) for details on what's always free (connectors, CLI, sync engine, MCP server) and what defines the enterprise boundary (RBAC, audit logging, plugin system, cloud hosting).
+
+The boundary is decided using the principles outlined in that document and ratified through lazy consensus (see "How Decisions Are Made" above).
 
 ## Changing this Document
 

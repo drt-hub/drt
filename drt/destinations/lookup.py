@@ -37,9 +37,17 @@ def build_lookup_map(
 
     Executes a single SELECT to fetch all rows from the lookup table,
     then builds ``{(match_col_values,): select_value}`` in memory.
+
+    When ``lookup.check_only`` is ``True``, only the match columns are
+    selected and the mapping values are ``None`` — only key membership
+    is meaningful (existence-only filtering).
     """
     dest_match_cols = list(lookup.match.keys())
-    select_cols = dest_match_cols + [lookup.select]
+    if lookup.check_only:
+        select_cols = list(dest_match_cols)
+    else:
+        assert lookup.select is not None  # enforced by LookupConfig validator
+        select_cols = dest_match_cols + [lookup.select]
     cols_str = ", ".join(select_cols)
     query = f"SELECT {cols_str} FROM {lookup.table}"  # noqa: S608
 
@@ -48,7 +56,11 @@ def build_lookup_map(
     mapping: dict[tuple[Any, ...], Any] = {}
     for row in rows:
         key = tuple(row[c] for c in dest_match_cols)
-        mapping[key] = row[lookup.select]
+        if lookup.check_only:
+            mapping[key] = None
+        else:
+            assert lookup.select is not None
+            mapping[key] = row[lookup.select]
     return mapping
 
 
@@ -80,8 +92,12 @@ def apply_lookups(
             key = tuple(record.get(c) for c in source_cols)
 
             if key in mapping:
-                record[target_col] = mapping[key]
+                if not lk_config.check_only:
+                    record[target_col] = mapping[key]
             elif lk_config.on_miss == "null":
+                # check_only + on_miss=null is rejected at config-load time
+                # by LookupConfig._check_on_miss_consistency, so target_col
+                # here always corresponds to a real value-resolving lookup.
                 record[target_col] = None
             elif lk_config.on_miss == "fail":
                 errors.append(
@@ -119,10 +135,16 @@ def apply_lookups(
         if skip:
             continue
 
-        # Drop match columns that were only used for lookup resolution
+        # Drop match columns that were only used for lookup resolution.
+        # check_only lookups are filter-only — their target name is just a label,
+        # so they neither contribute drops nor block other lookups' drops.
         cols_to_drop: set[str] = set()
-        all_target_cols = set(lookup_maps.keys())
+        all_target_cols = {
+            tc for tc, (lk, _) in lookup_maps.items() if not lk.check_only
+        }
         for target_col, (lk_config, _mapping) in lookup_maps.items():
+            if lk_config.check_only:
+                continue
             if lk_config.drop_match_columns:
                 for source_col in lk_config.match.values():
                     if source_col != target_col and source_col not in all_target_cols:

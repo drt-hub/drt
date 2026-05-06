@@ -118,6 +118,34 @@ class TestSlackDestination:
         SlackDestination().load([{"msg": "x"}], config, opts)
         assert call_count["n"] == 4
 
+    def test_on_error_fail_stops_after_first_failure(
+        self, httpserver: HTTPServer
+    ) -> None:
+        """on_error=fail stops batch processing after first failure (#365)."""
+        call_count = {"n": 0}
+
+        def handler(_request):  # type: ignore[no-untyped-def]
+            from werkzeug.wrappers import Response
+            call_count["n"] += 1
+            return Response("", status=500)
+
+        httpserver.expect_request("/webhook").respond_with_handler(handler)
+        config = SlackDestinationConfig(
+            type="slack",
+            webhook_url=httpserver.url_for("/webhook"),
+            message_template="{{ row.msg }}",
+            retry=RetryConfig(
+                max_attempts=1, initial_backoff=0.0, backoff_multiplier=1.0, max_backoff=0.0
+            ),
+        )
+        opts = SyncOptions(on_error="fail")
+        result = SlackDestination().load(
+            [{"msg": "a"}, {"msg": "b"}, {"msg": "c"}], config, opts
+        )
+        assert result.failed == 1
+        assert result.success == 0
+        assert call_count["n"] == 1  # Second and third rows not attempted
+
 
 # ---------------------------------------------------------------------------
 # DiscordDestination
@@ -169,6 +197,64 @@ class TestDiscordDestination:
             [{"title": "New Alert", "desc": "Something happened"}], config, _options()
         )
         assert result.success == 1
+
+    def test_on_error_fail_stops_after_first_failure(
+        self, httpserver: HTTPServer
+    ) -> None:
+        """on_error=fail stops batch processing after first failure (#365)."""
+        call_count = {"n": 0}
+
+        def handler(_request):  # type: ignore[no-untyped-def]
+            from werkzeug.wrappers import Response
+            call_count["n"] += 1
+            return Response("", status=500)
+
+        httpserver.expect_request("/webhook").respond_with_handler(handler)
+        config = DiscordDestinationConfig(
+            type="discord",
+            webhook_url=httpserver.url_for("/webhook"),
+            message_template="{{ row.msg }}",
+            retry=RetryConfig(
+                max_attempts=1, initial_backoff=0.0, backoff_multiplier=1.0, max_backoff=0.0
+            ),
+        )
+        opts = SyncOptions(on_error="fail")
+        result = DiscordDestination().load(
+            [{"msg": "a"}, {"msg": "b"}, {"msg": "c"}], config, opts
+        )
+        assert result.failed == 1
+        assert result.success == 0
+        assert call_count["n"] == 1
+
+    def test_destination_retry_overrides_sync_retry(
+        self, httpserver: HTTPServer
+    ) -> None:
+        """destination.retry > sync.retry (#277, #365)."""
+        from werkzeug.wrappers import Response
+
+        call_count = {"n": 0}
+
+        def handler(_request):  # type: ignore[no-untyped-def]
+            call_count["n"] += 1
+            return Response("upstream busy", status=503)
+
+        httpserver.expect_request("/webhook").respond_with_handler(handler)
+        config = DiscordDestinationConfig(
+            type="discord",
+            webhook_url=httpserver.url_for("/webhook"),
+            message_template="{{ row.msg }}",
+            retry=RetryConfig(
+                max_attempts=4, initial_backoff=0.0, backoff_multiplier=1.0, max_backoff=0.0
+            ),
+        )
+        opts = SyncOptions(
+            retry=RetryConfig(
+                max_attempts=2, initial_backoff=0.0, backoff_multiplier=1.0, max_backoff=0.0
+            ),
+            on_error="skip",
+        )
+        DiscordDestination().load([{"msg": "x"}], config, opts)
+        assert call_count["n"] == 4
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +309,78 @@ class TestHubSpotDestination:
         result = HubSpotDestination().load([{"email": "x@x.com"}], config, _options())
         assert result.failed == 1
         assert result.success == 0
+
+    def test_on_error_fail_stops_after_first_failure(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """on_error=fail stops batch processing after first failure (#365)."""
+        monkeypatch.setenv("HUBSPOT_TOKEN", "test-token")
+        call_count = {"n": 0}
+
+        def handler(_request):  # type: ignore[no-untyped-def]
+            from werkzeug.wrappers import Response
+            call_count["n"] += 1
+            return Response('{"error": "rate limited"}', status=429)
+
+        httpserver.expect_request("/crm/v3/objects/contacts").respond_with_handler(handler)
+        config = HubSpotDestinationConfig(
+            type="hubspot",
+            object_type="contacts",
+            id_property="email",
+            properties_template='{"email": "{{ row.email }}"}',
+            auth=BearerAuth(type="bearer", token_env="HUBSPOT_TOKEN"),
+            retry=RetryConfig(
+                max_attempts=1, initial_backoff=0.0, backoff_multiplier=1.0, max_backoff=0.0
+            ),
+        )
+        import drt.destinations.hubspot as hs_mod
+
+        monkeypatch.setattr(hs_mod, "_HUBSPOT_API", httpserver.url_for("/crm/v3/objects"))
+        opts = SyncOptions(on_error="fail")
+        result = HubSpotDestination().load(
+            [{"email": "a@x.com"}, {"email": "b@x.com"}, {"email": "c@x.com"}],
+            config,
+            opts,
+        )
+        assert result.failed == 1
+        assert result.success == 0
+        assert call_count["n"] == 1
+
+    def test_destination_retry_overrides_sync_retry(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """destination.retry > sync.retry (#277, #365)."""
+        from werkzeug.wrappers import Response
+
+        monkeypatch.setenv("HUBSPOT_TOKEN", "test-token")
+        call_count = {"n": 0}
+
+        def handler(_request):  # type: ignore[no-untyped-def]
+            call_count["n"] += 1
+            return Response('{"error": "busy"}', status=503)
+
+        httpserver.expect_request("/crm/v3/objects/contacts").respond_with_handler(handler)
+        config = HubSpotDestinationConfig(
+            type="hubspot",
+            object_type="contacts",
+            id_property="email",
+            properties_template='{"email": "{{ row.email }}"}',
+            auth=BearerAuth(type="bearer", token_env="HUBSPOT_TOKEN"),
+            retry=RetryConfig(
+                max_attempts=4, initial_backoff=0.0, backoff_multiplier=1.0, max_backoff=0.0
+            ),
+        )
+        import drt.destinations.hubspot as hs_mod
+
+        monkeypatch.setattr(hs_mod, "_HUBSPOT_API", httpserver.url_for("/crm/v3/objects"))
+        opts = SyncOptions(
+            retry=RetryConfig(
+                max_attempts=2, initial_backoff=0.0, backoff_multiplier=1.0, max_backoff=0.0
+            ),
+            on_error="skip",
+        )
+        HubSpotDestination().load([{"email": "x@x.com"}], config, opts)
+        assert call_count["n"] == 4
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +441,81 @@ class TestGitHubActionsDestination:
         result = GitHubActionsDestination().load([{"env": "prod"}], config, _options())
         assert result.failed == 1
         assert result.success == 0
+
+    def test_on_error_fail_stops_after_first_failure(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """on_error=fail stops batch processing after first failure (#365)."""
+        monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+        call_count = {"n": 0}
+
+        def handler(_request):  # type: ignore[no-untyped-def]
+            from werkzeug.wrappers import Response
+            call_count["n"] += 1
+            return Response('{"message": "Bad credentials"}', status=401)
+
+        httpserver.expect_request(
+            "/repos/myorg/myapp/actions/workflows/deploy.yml/dispatches"
+        ).respond_with_handler(handler)
+        config = GitHubActionsDestinationConfig(
+            type="github_actions",
+            owner="myorg",
+            repo="myapp",
+            workflow_id="deploy.yml",
+            ref="main",
+            auth=BearerAuth(type="bearer", token_env="GITHUB_TOKEN"),
+            retry=RetryConfig(
+                max_attempts=1, initial_backoff=0.0, backoff_multiplier=1.0, max_backoff=0.0
+            ),
+        )
+        import drt.destinations.github_actions as ga_mod
+
+        monkeypatch.setattr(ga_mod, "_GITHUB_API", httpserver.url_for(""))
+        opts = SyncOptions(on_error="fail")
+        result = GitHubActionsDestination().load(
+            [{"env": "dev"}, {"env": "stg"}, {"env": "prod"}], config, opts
+        )
+        assert result.failed == 1
+        assert result.success == 0
+        assert call_count["n"] == 1
+
+    def test_destination_retry_overrides_sync_retry(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """destination.retry > sync.retry (#277, #365)."""
+        from werkzeug.wrappers import Response
+
+        monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+        call_count = {"n": 0}
+
+        def handler(_request):  # type: ignore[no-untyped-def]
+            call_count["n"] += 1
+            return Response('{"message": "API rate limit"}', status=429)
+
+        httpserver.expect_request(
+            "/repos/myorg/myapp/actions/workflows/deploy.yml/dispatches"
+        ).respond_with_handler(handler)
+        config = GitHubActionsDestinationConfig(
+            type="github_actions",
+            owner="myorg",
+            repo="myapp",
+            workflow_id="deploy.yml",
+            auth=BearerAuth(type="bearer", token_env="GITHUB_TOKEN"),
+            retry=RetryConfig(
+                max_attempts=4, initial_backoff=0.0, backoff_multiplier=1.0, max_backoff=0.0
+            ),
+        )
+        import drt.destinations.github_actions as ga_mod
+
+        monkeypatch.setattr(ga_mod, "_GITHUB_API", httpserver.url_for(""))
+        opts = SyncOptions(
+            retry=RetryConfig(
+                max_attempts=2, initial_backoff=0.0, backoff_multiplier=1.0, max_backoff=0.0
+            ),
+            on_error="skip",
+        )
+        GitHubActionsDestination().load([{"env": "prod"}], config, opts)
+        assert call_count["n"] == 4
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +590,39 @@ class TestNotionDestination:
         result = NotionDestination().load([{"name": "a"}, {"name": "b"}], config, opts)
         assert result.failed == 1
         assert result.success == 1
+
+    def test_on_error_fail_stops_after_first_failure(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """on_error=fail stops batch processing after first failure (#365)."""
+        monkeypatch.setenv("NOTION_TOKEN", "test-token")
+        call_count = {"n": 0}
+
+        def handler(_request):  # type: ignore[no-untyped-def]
+            from werkzeug.wrappers import Response
+            call_count["n"] += 1
+            return Response("", status=500)
+
+        httpserver.expect_request("/v1/pages").respond_with_handler(handler)
+        config = NotionDestinationConfig(
+            type="notion",
+            database_id="db-abc123",
+            properties_template='{"Name": {"title": [{"text": {"content": "{{ row.name }}"}}]}}',
+            auth=BearerAuth(type="bearer", token_env="NOTION_TOKEN"),
+            retry=RetryConfig(
+                max_attempts=1, initial_backoff=0.0, backoff_multiplier=1.0, max_backoff=0.0
+            ),
+        )
+        import drt.destinations.notion as notion_mod
+
+        monkeypatch.setattr(notion_mod, "_NOTION_API", httpserver.url_for("/v1"))
+        opts = SyncOptions(on_error="fail")
+        result = NotionDestination().load(
+            [{"name": "a"}, {"name": "b"}, {"name": "c"}], config, opts
+        )
+        assert result.failed == 1
+        assert result.success == 0
+        assert call_count["n"] == 1
 
     def test_notion_version_header_sent(
         self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch

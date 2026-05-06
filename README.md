@@ -48,6 +48,8 @@ drt init && drt run
 | dbt/dlt ecosystem has no reverse leg | Same philosophy, same DX |
 | LLM/MCP era makes GUI SaaS overkill  | LLM-native by design     |
 
+> **What's always free?** All connectors, CLI, MCP server, and sync engine. See [OPEN_CORE.md](./OPEN_CORE.md) for the open core boundary.
+
 ---
 
 ## Quickstart
@@ -271,6 +273,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | Email SMTP              | ✅ v0.6   | (core)                             | Username / Password (env var)     |
 | Salesforce Bulk API 2.0 | ✅ v0.6   | (core)                             | OAuth2 (username-password)        |
 | Staged Upload           | ✅ v0.6   | (core)                             | Configurable per provider         |
+| Snowflake               | ✅ v0.7   | `pip install drt-core[snowflake]`  | Password (env var)                |
 
 ### Integrations
 
@@ -300,8 +303,9 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | **v0.5** ✅   | Snowflake / MySQL sources · ClickHouse / Parquet / Teams / CSV+JSON / Jira / Linear / SendGrid destinations · `drt test` · `--output json` · `--profile` · `${VAR}` substitution · dbt manifest · secrets.toml · Docker                                                                                                                                                                                            |
 | **v0.5.4** ✅ | `destination_lookup` — resolve FK values by querying destination DB during sync (MySQL / Postgres / ClickHouse)                                                                                                                                                                                                                                                                                                    |
 | **v0.6** ✅   | Databricks / SQL Server sources · Notion / Twilio / Intercom / Email SMTP / Salesforce Bulk / Staged Upload destinations · Airflow / Prefect integrations · `drt serve` · `drt sources` / `drt destinations` · `--threads` parallel execution · `--log-format json` · `--cursor-value` · `watermark.default_value` · test validators (freshness, unique, accepted_values) · JSON Schema validation · GOVERNANCE.md |
+| **v0.7** ✅   | **Production Ready** — graceful shutdown on SIGTERM/SIGINT · per-destination retry override · sync execution history · zero-downtime atomic table swap · `json_columns` config · FK existence check (`lookups.check_only`) · Slack/webhook failure alerts · `drt doctor` · `--quiet` flag · `drt test --output json` / `--dry-run` · Snowflake destination · GitHub Codespaces playground · `OPEN_CORE.md`                                                                                                                                                                                                                                                              |
 
-**Next:** [v0.7 Production Ready](ROADMAP.md#v07--production-ready) → [v0.8 Cloud Destinations & Growth](ROADMAP.md#v08--cloud-destinations--growth) → [v0.9 Enterprise Foundation](ROADMAP.md#v09--enterprise-foundation) → [v1.0 Stable Release](ROADMAP.md#v10--stable-release) → [v1.x Rust Engine](ROADMAP.md#v1x--rust-engine)
+**Next:** [v0.7.1 Production Ready Follow-up](ROADMAP.md#v071--production-ready-follow-up) → [v0.8 Cloud Destinations & Growth](ROADMAP.md#v08--cloud-destinations--growth) → [v0.9 Enterprise Foundation](ROADMAP.md#v09--enterprise-foundation) → [v1.0 Stable Release](ROADMAP.md#v10--stable-release) → [v1.x Rust Engine](ROADMAP.md#v1x--rust-engine)
 
 ---
 
@@ -347,7 +351,6 @@ We welcome contributions of all sizes — from typo fixes to new connectors. drt
 
 - **Get started:** [CONTRIBUTING.md](CONTRIBUTING.md) — setup, workflow, and your first connector tutorial
 - **Pick something to work on:** [Good First Issues](https://github.com/drt-hub/drt/issues?q=is%3Aopen+label%3A%22good+first+issue%22)
-- **Understand how decisions are made:** [GOVERNANCE.md](GOVERNANCE.md)
 - **Understand how decisions are made:** [GOVERNANCE.md](GOVERNANCE.md)
 - **What's free vs. enterprise:** [OPEN_CORE.md](OPEN_CORE.md)
 - **Versioning & breaking changes:** [VERSIONING.md](VERSIONING.md)
