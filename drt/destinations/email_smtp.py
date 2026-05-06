@@ -94,6 +94,8 @@ class EmailSmtpDestination:
                         error_message=str(e)[:500],
                     )
                 )
+                if sync_options.on_error == "fail":
+                    return result
             except Exception as e:
                 result.failed += 1
                 result.row_errors.append(
@@ -104,5 +106,7 @@ class EmailSmtpDestination:
                         error_message=str(e),
                     )
                 )
+                if sync_options.on_error == "fail":
+                    return result
 
         return result
