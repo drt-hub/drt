@@ -6,26 +6,11 @@ Targets are indicative, not guarantees. Scope may shift between versions — whe
 
 ---
 
-## v0.7 — Production Ready
+## v0.7 — Production Ready ✅ Shipped 2026-05-06
 
-**Theme:** Reliability, observability, and correctness for real production use.
+Released as **v0.7.0** on 2026-05-06. See [CHANGELOG.md](CHANGELOG.md#070---2026-05-06) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.7.0) for the full feature list.
 
-**Scope:**
-- **Reliability** — retry policy in sync YAML (#277) · graceful shutdown on SIGTERM/SIGINT (#279) · sync execution history as local JSON log + `drt status --history` tail (#276, scope-reduced) · sync failure alerts (Slack / webhook) (#414)
-- **Correctness** — `json_columns` explicit JSON serialization (#316) · FK existence check without value resolution (#354) · zero-downtime replace via staging table swap (#338)
-- **Observability** — opt-in anonymous usage telemetry (#263, moved up from v0.8 — PR #446 in review)
-- **DX** — `drt doctor` environment diagnostics (#264) · `--quiet` flag for `drt run` (#265)
-- **Tests** — `on_error='fail'` and retry config tests across all destinations (#365)
-
-**Also shipped in v0.7 (originally scoped for later):**
-- **Snowflake destination** (#353, originally v0.8) — first DWH destination, ahead of the v0.8 cloud rollout
-- **Codespaces playground** (#283 → PR #407, originally v0.8 Growth)
-- **PyPI keywords / classifiers + `drt cloud push` stub** (#307 / #302 → PR #409, originally v0.8 / v0.9)
-- **all-contributors workflow** (#436) — community recognition, meta
-
-**Out of scope (→ v0.8):** Remaining cloud destinations (BigQuery / Databricks / S3 / GCS / Azure), dead letter queue, benchmark suite, remaining Growth/README refresh items, schema-aware serialization epic.
-
-**Target:** 2026-05 · **Progress:** [milestone/4](https://github.com/drt-hub/drt/milestone/4)
+Tail items continue in [v0.7.1](#v071--production-ready-follow-up) below.
 
 ---
 
