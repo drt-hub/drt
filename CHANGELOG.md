@@ -56,6 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **PostgreSQL destination**: crash on `dict` values bound for JSONB columns — wrapped with `psycopg2.extras.Json` (#315). Contributed by @armorbreak001.
 - **Notion destination**: `sync_options.retry` override was silently ignored — Notion always used the hardcoded `_DEFAULT_RETRY` (3 attempts) regardless of user configuration. Now respects user-configured retry like every other HTTP destination (#438). Contributes to #365.
+- **Snowflake destination**: Fixed missing row-level error tracking during merge staging, corrected SQL generation when all columns are upsert keys, and unified credential resolution to support `secrets.toml` fallback.
 
 ## [0.6.2] - 2026-04-20
 
