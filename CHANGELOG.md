@@ -39,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Opt-in anonymous usage telemetry** (#263): a new `drt/telemetry.py` module sends a single anonymous `sync_completed` event per `drt run` when the user explicitly opts in. Off by default. Honors `DO_NOT_TRACK=1`. Allow-list payload (`drt_version`, `python_version`, `os`, `source_type`, `destination_type`, `sync_mode`, `rows_synced`, `duration_seconds`, `status`) — never sends sync names, model SQL, destination URLs, credentials, or project paths. Configure via `drt config set telemetry.enabled true` or `DRT_TELEMETRY=1`. Inspect what would be sent with `drt config show-telemetry`. Endpoint defaults to PostHog Cloud; override with `DRT_TELEMETRY_ENDPOINT` and `DRT_TELEMETRY_API_KEY` for self-hosted PostHog.
+- **Opt-in anonymous usage telemetry** (#263): a new `drt/telemetry.py` module sends a single anonymous `sync_completed` event per `drt run` when the user explicitly opts in. Off by default. Honors `DO_NOT_TRACK=1`. Allow-list `properties` (`drt_version`, `python_version`, `os`, `source_type`, `destination_type`, `sync_mode`, `rows_synced`, `duration_seconds`, `status`) — never sends sync names, model SQL, destination URLs, credentials, or project paths. The wire envelope additionally carries `event`, `distinct_id`, `timestamp`, and `api_key`. Configure via `drt config set telemetry.enabled true` or `DRT_TELEMETRY=1`. Inspect what would be sent with `drt config show-telemetry`. Endpoint defaults to PostHog Cloud (US region); override with `DRT_TELEMETRY_ENDPOINT` and `DRT_TELEMETRY_API_KEY` for self-hosted PostHog.
 
 ## [0.7.1] - 2026-05-07
 

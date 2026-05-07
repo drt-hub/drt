@@ -119,6 +119,28 @@ Any of the following disables telemetry:
 
 ## Implementation
 
-All telemetry code lives in a single file: [`drt/telemetry.py`](../drt/telemetry.py). It uses only the Python standard library (`urllib.request`), spawns a daemon thread for the POST so `drt run` is never delayed, and silently swallows all network errors.
+All telemetry code lives in a single file: [`drt/telemetry.py`](../drt/telemetry.py). It uses only the Python standard library (`urllib.request`). The POST runs on a daemon thread joined via `atexit` with a 2 s timeout: normal `drt run` exits wait briefly for the POST to complete, while abnormal exits (SIGTERM, SIGINT) skip the wait. All exceptions on the send path are swallowed at DEBUG level so telemetry can never crash the user's command.
 
 Wire format follows PostHog's capture endpoint (`POST /i/v0/e/`), which works against PostHog Cloud and self-hosted PostHog with no code changes. The endpoint and API key are both overridable via environment variables.
+
+## For maintainers
+
+### Release-time API key injection
+
+`_DEFAULT_API_KEY` ships as `None` in source. Without an injection step at release time, `is_enabled()` short-circuits to `False` regardless of user opt-in — so the package on PyPI is physically incapable of sending until a maintainer wires in a key.
+
+Recommended release flow:
+
+1. Store the PostHog write key as a repository secret named `POSTHOG_WRITE_KEY`.
+2. In the release workflow, before `python -m build`, substitute the placeholder:
+   ```bash
+   python -c "import pathlib, os; \
+   p = pathlib.Path('drt/telemetry.py'); \
+   p.write_text(p.read_text().replace('_DEFAULT_API_KEY: str | None = None', \
+     f'_DEFAULT_API_KEY: str | None = \"{os.environ[\"POSTHOG_WRITE_KEY\"]}\"'))"
+   ```
+3. Add a smoke check that fails the release if the substitution did not happen — for example, `python -c "from drt import telemetry; assert telemetry._DEFAULT_API_KEY"`.
+
+If the inject step is skipped, telemetry silently no-ops forever — fail-safe but invisible. The smoke check is what catches a missed inject.
+
+A future docs PR will add the controller-side GDPR posture (controller entity, default destination jurisdiction, retention period, erasure-request contact, and DPA reference). It is intentionally deferred so the polish points above can ship without scope creep.
