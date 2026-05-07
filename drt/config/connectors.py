@@ -15,6 +15,7 @@ SOURCES = [
     ("mysql", "MySQL"),
     ("postgres", "PostgreSQL"),
     ("redshift", "Redshift"),
+    ("rest_api", "REST API"),
     ("snowflake", "Snowflake"),
     ("sqlite", "SQLite"),
     ("sqlserver", "SQL Server"),

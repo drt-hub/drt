@@ -135,6 +135,7 @@ def _register_all_connectors() -> None:
         MySQLProfile,
         PostgresProfile,
         RedshiftProfile,
+        RestApiProfile,
         SnowflakeProfile,
         SQLiteProfile,
         SQLServerProfile,
@@ -198,6 +199,7 @@ def _register_all_connectors() -> None:
     from drt.sources.mysql import MySQLSource
     from drt.sources.postgres import PostgresSource
     from drt.sources.redshift import RedshiftSource
+    from drt.sources.rest_api import RestApiSource
     from drt.sources.snowflake import SnowflakeSource
     from drt.sources.sqlite import SQLiteSource
     from drt.sources.sqlserver import SQLServerSource
@@ -240,6 +242,7 @@ def _register_all_connectors() -> None:
     register_source("snowflake", SnowflakeProfile, SnowflakeSource)
     register_source("databricks", DatabricksProfile, DatabricksSource)
     register_source("sqlserver", SQLServerProfile, SQLServerSource)
+    register_source("rest_api", RestApiProfile, RestApiSource)
 
 
 # Auto-register all connectors on import
