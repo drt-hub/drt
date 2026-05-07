@@ -63,6 +63,13 @@ If the maintainer-side ingestion endpoint should not retain client IPs:
 
 The privacy claim is "drt does not transmit your IP." It is not "the backend you POST to will not log it." Operators of the receiving service are responsible for IP retention policy.
 
+## GDPR disclosure (EU / EEA opt-ins)
+
+Lawful basis for processing is your opt-in consent (GDPR Art. 6(1)(a); Art. 49(1)(a) for the US transfer).
+
+- **Destination**: `https://us.i.posthog.com/i/v0/e/` — PostHog Cloud US, operated by PostHog Inc. (United States). Override with `DRT_TELEMETRY_ENDPOINT` (e.g. `https://eu.i.posthog.com/i/v0/e/` for PostHog EU).
+- **Controller / retention / erasure contact**: _to be populated by drt-hub maintainers at release time._ Deleting `~/.drt/.anonymous_id` rotates your `distinct_id` going forward but does not retroactively scrub past events; use the erasure contact for past events.
+
 ## How to verify
 
 Before opting in, you can see exactly what would be sent:
@@ -143,4 +150,9 @@ Recommended release flow:
 
 If the inject step is skipped, telemetry silently no-ops forever — fail-safe but invisible. The smoke check is what catches a missed inject.
 
-A future docs PR will add the controller-side GDPR posture (controller entity, default destination jurisdiction, retention period, erasure-request contact, and DPA reference). It is intentionally deferred so the polish points above can ship without scope creep.
+### PostHog project setup (one-time)
+
+1. Disable IP data capture: Settings > Project > General ([source](https://posthog.com/docs/privacy/gdpr-compliance)).
+2. Sign the self-serve DPA at `app.posthog.com/legal` ([source](https://posthog.com/dpa)).
+
+Before each release with telemetry enabled, populate the controller / retention / erasure-contact placeholders in the GDPR disclosure section above.
