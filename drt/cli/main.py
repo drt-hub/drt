@@ -688,15 +688,28 @@ def validate(
     if select:
         result.syncs = [s for s in result.syncs if s.name == select]
         result.errors = {k: v for k, v in result.errors.items() if k == select}
+        result.deprecations = {k: v for k, v in result.deprecations.items() if k == select}
         if not result.syncs and not result.errors:
             print_error(f"No sync named '{select}' found.")
             raise typer.Exit(1)
 
     if output == "json":
+        # Collect all deprecations into a flat list for JSON output
+        all_deprecations = []
+        for sync_name, sync_deprecations in result.deprecations.items():
+            all_deprecations.extend(sync_deprecations)
+        
         print(
             json.dumps(
                 {
-                    "results": [{"name": s.name, "valid": True} for s in result.syncs]
+                    "results": [
+                        {
+                            "name": s.name,
+                            "valid": True,
+                            "deprecations": result.deprecations.get(s.name, []),
+                        }
+                        for s in result.syncs
+                    ]
                     + [
                         {"name": name, "valid": False, "errors": errs}
                         for name, errs in result.errors.items()
@@ -715,6 +728,16 @@ def validate(
 
     for sync in result.syncs:
         print_validation_ok(sync.name)
+        # Print deprecation warnings for this sync
+        if sync.name in result.deprecations:
+            for deprecation in result.deprecations[sync.name]:
+                console.print(
+                    f"  [yellow]⚠️  {deprecation['key']} is deprecated "
+                    f"(removed in {deprecation['removed_in']})[/yellow]"
+                )
+                console.print(f"       Use {deprecation['replacement']} instead.")
+                if deprecation["docs_link"]:
+                    console.print(f"       See {deprecation['docs_link']}")
 
     for name, errors in result.errors.items():
         print_validation_error(name, errors)
