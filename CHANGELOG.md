@@ -37,13 +37,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-05-07
+
+**Theme: Production Ready follow-up.** Tail of the v0.7 cycle — the `drt diff` dry-run preview (#413) that shipped as the original v0.7.1 DX feature, a watermark cursor correctness fix surfaced by a prod incident (#475), `on_error=fail` semantic alignment across the remaining HTTP destinations (#463), and the new `VERSIONING.md` policy doc (#457).
+
+### Breaking Changes
+
+None. Drop-in upgrade from v0.7.0.
+
 ### Added
 
 - **`drt run --dry-run --diff`** (#413): Record-level preview before deploying a sync. For queryable destinations (Postgres / MySQL / ClickHouse), compares extracted source records against the destination state keyed on `upsert_key` and shows added / updated (with field-level `old → new` diffs) / deleted records. For non-queryable destinations (REST API, Slack, HubSpot, Notion, file destinations, etc.) falls back to "sample mode" — shows the first N records that would be sent, with a note that comparison is unavailable. Output works in both text (rich tables) and `--output json` (embedded `diff` key per sync). New flag `--diff-limit N` (default 20) caps records shown per category. The `--diff` flag is only valid alongside `--dry-run`. Doc: [docs/guides/dry-run-and-diff.md](docs/guides/dry-run-and-diff.md). Follow-ups: #468 (Snowflake support), #469 (Protocol method), #470 (perf), #471 (`--diff-fields`), #472 (API-based SaaS diff).
+- **`VERSIONING.md` — semver and deprecation policy** (#457, #464): Documents the project's versioning contract pre-1.0, what counts as a breaking change at each layer (CLI / config schema / Python API), and the deprecation cadence (announced one minor version, removable one minor after that). Cross-linked from `CONTRIBUTING.md` PR checklist. Initial draft contributed by @Muawiya-contact, follow-up polish in #464 also by @Muawiya-contact.
 
 ### Fixed
 
 - **Watermark advance for tz-aware cursor values** (#475): `drt/engine/sync.py` was calling `str()` directly on cursor field values, which for tz-aware datetimes (e.g. BigQuery `TIMESTAMP` columns returned by the Python BQ client) produced strings with a `+00:00` suffix. When user SQL or `default_value` was written tz-naive (the common case for warehouses where the `TIMESTAMP` literal is parsed as UTC), the next run compared a naive `WHERE col >= TIMESTAMP('YYYY-MM-DD HH:MM:SS')` against the tz-aware persisted form representing the same instant. The boundary row matched again and re-fired on every subsequent run. The engine now normalizes tz-aware datetimes to naive UTC before stringifying, preserving the same instant in a form that round-trips through naive `TIMESTAMP()` literals. Other types (naive datetime, string, numeric) pass through unchanged. Reported by @K-Masuda-SL after a prod incident where a single `recording_sessions` row triggered a downstream GHA `workflow_dispatch` three times in a row at the watermark boundary.
+- **`on_error=fail` not respected by Notion / REST API / Email SMTP destinations** (#463, contributes to #365): Three HTTP destinations continued processing the rest of the batch after the first row failure even when `on_error: fail` was configured at the sync level — only logging the error and counting `failed += 1`. Other HTTP destinations (Slack / Discord / Teams / HubSpot / Twilio / Intercom / SendGrid / Google Ads) were already correct. Now all three short-circuit and `return result` on the first failure, matching the documented contract and the behavior of every other destination. New `on_error=fail` and per-destination retry override tests added across the webhook surface to lock the semantic in.
 
 ## [0.7.0] - 2026-05-06
 
