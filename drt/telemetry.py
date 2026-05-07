@@ -21,6 +21,7 @@ self-hosted PostHog without conditional logic.
 
 from __future__ import annotations
 
+import atexit
 import functools
 import json
 import logging
@@ -28,7 +29,6 @@ import os
 import platform
 import sys
 import threading
-import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime, timezone
@@ -191,7 +191,7 @@ def _send(payload: dict[str, Any]) -> None:
         )
         with urllib.request.urlopen(req, timeout=_TIMEOUT_SECONDS):
             pass
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    except Exception as exc:
         logger.debug("telemetry send failed: %s", exc)
 
 
@@ -216,6 +216,6 @@ def track_sync_completed(
         duration_seconds=duration_seconds,
         status=status,
     )
-    # daemon=False so the interpreter waits for the in-flight POST before
-    # exiting; urlopen's _TIMEOUT_SECONDS bounds the worst-case wait.
-    threading.Thread(target=_send, args=(payload,)).start()
+    t = threading.Thread(target=_send, args=(payload,), daemon=True)
+    t.start()
+    atexit.register(t.join, _TIMEOUT_SECONDS)

@@ -322,7 +322,7 @@ class TestTrack:
             duration_seconds=0.0,
             status="failed",
         )
-        # Non-daemon thread keeps process alive but eventually times out.
+        # Daemon thread is joined via atexit; URLError is caught and swallowed.
 
 
 def _ok():  # type: ignore[no-untyped-def]
