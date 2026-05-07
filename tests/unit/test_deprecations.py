@@ -147,9 +147,13 @@ def test_validate_text_output_shows_deprecation_warning(
     
     assert result.exit_code == 0
     assert "deprecated-sync" in result.output
-    assert "deprecated" in result.output.lower() or "⚠️" in result.output
+    assert "⚠️" in result.output
     assert "sync.batch_size" in result.output
     assert "sync.batch_config.size" in result.output
+    # Verify replacement instruction is printed
+    assert "Use sync.batch_config.size instead" in result.output
+    # Verify docs link is printed
+    assert "v0.6-to-v0.7.md" in result.output
 
 
 def test_validate_json_output_includes_deprecations(
