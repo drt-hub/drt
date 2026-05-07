@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`drt run --dry-run --diff`** (#413): Record-level preview before deploying a sync. For queryable destinations (Postgres / MySQL / ClickHouse), compares extracted source records against the destination state keyed on `upsert_key` and shows added / updated (with field-level `old → new` diffs) / deleted records. For non-queryable destinations (REST API, Slack, HubSpot, Notion, file destinations, etc.) falls back to "sample mode" — shows the first N records that would be sent, with a note that comparison is unavailable. Output works in both text (rich tables) and `--output json` (embedded `diff` key per sync). New flag `--diff-limit N` (default 20) caps records shown per category. The `--diff` flag is only valid alongside `--dry-run`. Doc: [docs/guides/dry-run-and-diff.md](docs/guides/dry-run-and-diff.md). Follow-ups: #468 (Snowflake support), #469 (Protocol method), #470 (perf), #471 (`--diff-fields`), #472 (API-based SaaS diff).
+
 ### Fixed
 
 - **Watermark advance for tz-aware cursor values** (#475): `drt/engine/sync.py` was calling `str()` directly on cursor field values, which for tz-aware datetimes (e.g. BigQuery `TIMESTAMP` columns returned by the Python BQ client) produced strings with a `+00:00` suffix. When user SQL or `default_value` was written tz-naive (the common case for warehouses where the `TIMESTAMP` literal is parsed as UTC), the next run compared a naive `WHERE col >= TIMESTAMP('YYYY-MM-DD HH:MM:SS')` against the tz-aware persisted form representing the same instant. The boundary row matched again and re-fired on every subsequent run. The engine now normalizes tz-aware datetimes to naive UTC before stringifying, preserving the same instant in a form that round-trips through naive `TIMESTAMP()` literals. Other types (naive datetime, string, numeric) pass through unchanged. Reported by @K-Masuda-SL after a prod incident where a single `recording_sessions` row triggered a downstream GHA `workflow_dispatch` three times in a row at the watermark boundary.

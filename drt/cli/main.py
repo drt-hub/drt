@@ -100,6 +100,10 @@ class _RunContext:
     # Cooperative shutdown flag — set by SIGTERM/SIGINT handler in run().
     # Each engine call checks this between batches and exits gracefully.
     stop_event: threading.Event | None = None
+    # Diff preview (#413) — when both dry_run and compute_diff are True,
+    # the engine populates result.diff for the renderer to display.
+    compute_diff: bool = False
+    diff_limit: int = 20
 
 
 def _exit_code_for_signal(signum: int) -> int:
@@ -138,6 +142,8 @@ def _run_one(
             history_manager=ctx.history_mgr,
             history_retention_days=ctx.history_retention_days,
             stop_event=ctx.stop_event,
+            compute_diff=ctx.compute_diff,
+            diff_limit=ctx.diff_limit,
         )
     except Exception as e:
         elapsed = round(time.monotonic() - t0, 2)
@@ -202,6 +208,19 @@ def _run_one(
             print_sync_result(sync.name, result, elapsed)
     if not ctx.json_mode and ctx.verbose and not ctx.quiet and result.row_errors:
         print_row_errors(result.row_errors)
+    # Render the diff preview (#413) — text mode only; JSON mode embeds
+    # the diff into ``entry`` below. Use getattr so test fakes that don't
+    # carry the diff attribute pass through cleanly.
+    diff_value = getattr(result, "diff", None)
+    if diff_value is not None:
+        if ctx.json_mode:
+            from drt.cli.output import diff_to_dict
+
+            entry["diff"] = diff_to_dict(diff_value)
+        elif not ctx.quiet:
+            from drt.cli.output import print_diff_table
+
+            print_diff_table(diff_value, sync.name)
     return sync.name, entry, result.failed > 0
 
 
@@ -437,6 +456,20 @@ def run(
         "--cursor-value",
         help="Override cursor/watermark value for incremental syncs (backfill/recovery).",
     ),
+    diff: bool = typer.Option(
+        False,
+        "--diff",
+        help=(
+            "When combined with --dry-run, show record-level diff (added/"
+            "updated/deleted) for queryable destinations or a sample of "
+            "records to send for non-queryable destinations."
+        ),
+    ),
+    diff_limit: int = typer.Option(
+        20,
+        "--diff-limit",
+        help="Maximum number of records to show per diff category (default 20).",
+    ),
 ) -> None:
     """Run sync(s) defined in the project.
 
@@ -444,7 +477,11 @@ def run(
     Use --select to filter by name or tag (e.g. --select tag:crm).
     Use --select "*" or --select all to be explicit about running every sync.
     Use --threads N for parallel execution.
+    Use --dry-run --diff to preview record-level changes (#413).
     """
+    if diff and not dry_run:
+        print_error("--diff requires --dry-run")
+        raise typer.Exit(1)
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     from drt.config.credentials import load_profile
@@ -563,6 +600,8 @@ def run(
         log_json=log_format == "json",
         cursor_value=cursor_value,
         stop_event=stop_event,
+        compute_diff=diff,
+        diff_limit=diff_limit,
     )
 
     # Execute syncs — parallel if threads > 1, sequential otherwise

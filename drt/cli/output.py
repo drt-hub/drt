@@ -300,3 +300,126 @@ def print_status_verbose(
 
 def print_error(message: str) -> None:
     console.print(f"[bold red]Error:[/bold red] {message}")
+
+
+# ---------------------------------------------------------------------------
+# diff (#413)
+# ---------------------------------------------------------------------------
+
+
+def _format_row_keys(row: dict[str, object], max_chars: int = 80) -> str:
+    """Render a record as ``key=value, ...`` with truncation."""
+    parts = [f"{k}={v}" for k, v in row.items()]
+    rendered = ", ".join(parts)
+    if len(rendered) > max_chars:
+        rendered = rendered[: max_chars - 1] + "…"
+    return rendered
+
+
+def print_diff_table(diff: object, sync_name: str) -> None:
+    """Print a record-level diff produced by :func:`drt.engine.diff.compute_diff`.
+
+    For queryable destinations: renders added / updated (with field-level
+    changes) / deleted in colored sections. For non-queryable destinations:
+    renders the sample of records with a clear "no comparison available" note.
+    """
+    from drt.engine.diff import DiffResult
+
+    assert isinstance(diff, DiffResult)
+
+    console.print(f"\n[bold]Diff preview — {sync_name}[/bold]")
+
+    if not diff.supported:
+        console.print(f"  [dim]{diff.fallback_reason}[/dim]")
+        n_shown = len(diff.sample)
+        n_total = diff.total_source_rows
+        more = f" ({n_total - n_shown} more not shown)" if n_total > n_shown else ""
+        console.print(
+            f"  [bold]→ {n_total} record(s) would be sent.[/bold] "
+            f"Sample (first {n_shown}{more}):"
+        )
+        for row in diff.sample:
+            console.print(f"    {_format_row_keys(row)}")
+        return
+
+    n_added = len(diff.added)
+    n_updated = len(diff.updated)
+    n_deleted = len(diff.deleted)
+    console.print(
+        f"  [dim]source rows: {diff.total_source_rows} · "
+        f"destination rows: {diff.total_destination_rows}[/dim]"
+    )
+
+    # Added
+    if n_added:
+        console.print(f"\n  [green]+ Added ({n_added}):[/green]")
+        for row in diff.added:
+            console.print(f"    [green]+[/green] {_format_row_keys(row)}")
+    else:
+        console.print("\n  [dim]+ Added: none[/dim]")
+
+    # Updated — show field-level changes
+    if n_updated:
+        console.print(f"\n  [yellow]~ Updated ({n_updated}):[/yellow]")
+        for old, new in diff.updated:
+            changed = DiffResult.changed_fields(old, new)
+            # Use the first column of new as a stable key label
+            key_repr = next(
+                (f"{k}={v}" for k, v in new.items() if k in old), "(?)"
+            )
+            change_repr = ", ".join(
+                f"{c}: {old_v} → {new_v}" for c, (old_v, new_v) in changed.items()
+            )
+            console.print(f"    [yellow]~[/yellow] {key_repr} — {change_repr}")
+    else:
+        console.print("\n  [dim]~ Updated: none[/dim]")
+
+    # Deleted (only populated for replace mode by the engine)
+    if n_deleted:
+        console.print(f"\n  [red]- Deleted ({n_deleted}):[/red]")
+        for row in diff.deleted:
+            console.print(f"    [red]-[/red] {_format_row_keys(row)}")
+    elif diff.deleted == [] and any([n_added, n_updated]):
+        # Don't always print "Deleted: none" — only when other change types
+        # are present, to avoid noise on full-upsert mode where deleted
+        # never applies.
+        pass
+
+    if diff.truncated:
+        console.print(
+            "\n  [dim]…some records omitted (limit reached). "
+            "Use --diff-limit N to see more.[/dim]"
+        )
+
+
+def diff_to_dict(diff: object) -> dict[str, object]:
+    """Serialise a DiffResult for ``--output json`` mode."""
+    from drt.engine.diff import DiffResult
+
+    assert isinstance(diff, DiffResult)
+
+    if not diff.supported:
+        return {
+            "supported": False,
+            "fallback_reason": diff.fallback_reason,
+            "total_source_rows": diff.total_source_rows,
+            "sample": diff.sample,
+            "truncated": diff.truncated,
+        }
+
+    return {
+        "supported": True,
+        "total_source_rows": diff.total_source_rows,
+        "total_destination_rows": diff.total_destination_rows,
+        "added": diff.added,
+        "updated": [
+            {
+                "old": old,
+                "new": new,
+                "changed_fields": list(DiffResult.changed_fields(old, new).keys()),
+            }
+            for old, new in diff.updated
+        ],
+        "deleted": diff.deleted,
+        "truncated": diff.truncated,
+    }

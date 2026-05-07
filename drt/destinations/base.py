@@ -12,6 +12,7 @@ from drt.config.models import DestinationConfig, SyncOptions
 
 if TYPE_CHECKING:
     from drt.destinations.row_errors import RowError
+    from drt.engine.diff import DiffResult
 
 
 @dataclass
@@ -32,6 +33,9 @@ class SyncResult:
     # Graceful shutdown (#279) — True if the sync stopped early due to a
     # cooperative cancellation signal (SIGTERM/SIGINT) between batches.
     interrupted: bool = False
+    # Record-level diff (#413) — populated by run_sync when dry_run + diff
+    # are both requested. Always None outside that path.
+    diff: DiffResult | None = None
 
     @property
     def total(self) -> int:
