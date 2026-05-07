@@ -65,7 +65,7 @@ def _format_validation_errors(exc: ValidationError) -> list[str]:
     return messages
 
 
-def _check_deprecated_keys(data: dict, sync_name: str) -> list[dict[str, str]]:
+def _check_deprecated_keys(data: dict[str, Any], sync_name: str) -> list[dict[str, str]]:
     """Check for deprecated sync keys in the raw YAML data.
     
     Returns a list of deprecation warnings for the given sync.
