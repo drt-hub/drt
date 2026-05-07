@@ -112,14 +112,40 @@ class TestSnowflakeDestinationLoad:
         assert result.failed == 0
 
     def test_missing_credentials_raises(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ) -> None:
         monkeypatch.delenv("SF_ACCOUNT", raising=False)
         monkeypatch.delenv("SF_USER", raising=False)
         monkeypatch.delenv("SF_PASSWORD", raising=False)
+        monkeypatch.chdir(tmp_path)
         with patch.dict("sys.modules", _mocked_snowflake_modules()):
             with pytest.raises(ValueError, match="Missing Snowflake credentials"):
                 SnowflakeDestination().load([{"id": 1}], _config(), _options())
+
+    def test_credentials_fallback_to_secrets_toml(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        monkeypatch.delenv("SF_ACCOUNT", raising=False)
+        monkeypatch.delenv("SF_USER", raising=False)
+        monkeypatch.delenv("SF_PASSWORD", raising=False)
+        monkeypatch.chdir(tmp_path)
+        
+        secrets_dir = tmp_path / ".drt"
+        secrets_dir.mkdir()
+        (secrets_dir / "secrets.toml").write_text(
+            '[destinations]\nSF_ACCOUNT = "acct"\nSF_USER = "user"\nSF_PASSWORD = "pwd"\n'
+        )
+
+        conn = _fake_conn()
+        modules = _mocked_snowflake_modules(conn)
+        with patch.dict("sys.modules", modules):
+            result = SnowflakeDestination().load([{"id": 1}], _config(), _options())
+            
+        assert result.failed == 0
+        conn_kwargs = modules["snowflake.connector"].connect.call_args[1]
+        assert conn_kwargs["account"] == "acct"
+        assert conn_kwargs["user"] == "user"
+        assert conn_kwargs["password"] == "pwd"
 
     def test_import_error_when_extras_missing(self) -> None:
         with patch("builtins.__import__", side_effect=ImportError):
@@ -199,3 +225,57 @@ class TestSnowflakeDestinationLoad:
         assert result.success == 1
         assert len(result.row_errors) == 1
         assert "type mismatch" in result.row_errors[0].error_message
+
+    def test_merge_insert_partial_fail_on_error_skip(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        cur = conn._cur
+
+        insert_call_count = {"n": 0}
+
+        def execute_side_effect(sql: str, *args: Any) -> None:
+            if "INSERT INTO TMP_" in sql:
+                insert_call_count["n"] += 1
+                if insert_call_count["n"] == 1:
+                    raise Exception("type mismatch")
+            return None
+
+        cur.execute.side_effect = execute_side_effect
+        modules = _mocked_snowflake_modules(conn)
+
+        records = [
+            {"id": 1, "score": 0.5},
+            {"id": 2, "score": 0.9},
+        ]
+        config = _config(mode="merge", upsert_key=["id"])
+        with patch.dict("sys.modules", modules):
+            result = SnowflakeDestination().load(
+                records, config, _options(on_error="skip")
+            )
+
+        assert result.failed == 1
+        assert result.success == 1
+        assert len(result.row_errors) == 1
+        
+        sqls = [(call.args[0] if call.args else "") for call in cur.execute.call_args_list]
+        assert any("MERGE INTO ANALYTICS.PUBLIC.USER_SCORES" in s for s in sqls)
+
+    def test_merge_all_columns_are_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        modules = _mocked_snowflake_modules(conn)
+
+        records = [{"id": 1, "score": 0.95}]
+        config = _config(mode="merge", upsert_key=["id", "score"])
+        with patch.dict("sys.modules", modules):
+            SnowflakeDestination().load(records, config, _options())
+
+        sqls = [
+            (call.args[0] if call.args else "")
+            for call in conn._cur.execute.call_args_list
+        ]
+        merge_sql = next(s for s in sqls if "MERGE INTO" in s)
+        assert "WHEN NOT MATCHED THEN INSERT" in merge_sql
+        assert "WHEN MATCHED THEN UPDATE" not in merge_sql

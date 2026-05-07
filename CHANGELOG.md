@@ -73,8 +73,10 @@ None. Drop-in upgrade from v0.6.x.
 
 - **PostgreSQL destination**: crash on `dict` values bound for JSONB columns — wrapped with `psycopg2.extras.Json` (#315). Contributed by @armorbreak001.
 - **Notion destination**: `sync_options.retry` override was silently ignored — Notion always used the hardcoded `_DEFAULT_RETRY` (3 attempts) regardless of user configuration. Now respects user-configured retry like every other HTTP destination (#438). Contributes to #365.
+- **Snowflake destination**: Fixed missing row-level error tracking during merge staging, corrected SQL generation when all columns are upsert keys, and unified credential resolution to support `secrets.toml` fallback.
 - **`BasicAuth` credentials from `secrets.toml`**: `BasicAuth` was the only auth type that couldn't resolve credentials from `.drt/secrets.toml` — it called `os.environ.get()` directly while every other auth type went through `resolve_env()`. Users storing BasicAuth credentials in `secrets.toml` got a misleading "env var not set" error. Now matches the other auth types (#386). Contributed by @armorbreak001.
 - **`replace_strategy: swap` ignored `json_columns` config** (#448): When both `replace_strategy: swap` (#338) and `json_columns` (#316) were configured on a Postgres or MySQL destination, swap mode silently bypassed the explicit JSON column declarations because `_load_replace_swap` did not thread `config.json_columns` through to `_serialize_value`. Now both strategies honour the config consistently — swap-mode dict values in unlisted columns raise the same fail-fast `ValueError` as truncate mode. ClickHouse is unaffected (its connector handles JSON encoding driver-side and has no `json_columns` config). Discovered post-rebase of #435 onto #382 — neither feature was wrong in isolation; the gap was an interaction artifact of parallel development.
+
 
 ## [0.6.2] - 2026-04-20
 

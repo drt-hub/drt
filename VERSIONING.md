@@ -4,6 +4,7 @@
 > "MAJOR-only" guarantee. v1.0 will freeze the Protocol (see #300); from that
 > point, all rules in this document are firm.
 
+
 # Versioning Policy
 
 drt follows **semantic versioning** (MAJOR.MINOR.PATCH). This document defines what constitutes breaking changes, how deprecations work, and how we communicate version updates.
