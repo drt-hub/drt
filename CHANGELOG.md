@@ -37,7 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.7.0] - 2026-05-06
+### Fixed
+
+- **Watermark advance for tz-aware cursor values** (#475): `drt/engine/sync.py` was calling `str()` directly on cursor field values, which for tz-aware datetimes (e.g. BigQuery `TIMESTAMP` columns returned by the Python BQ client) produced strings with a `+00:00` suffix. When user SQL or `default_value` was written tz-naive (the common case for warehouses where the `TIMESTAMP` literal is parsed as UTC), the next run compared a naive `WHERE col >= TIMESTAMP('YYYY-MM-DD HH:MM:SS')` against the tz-aware persisted form representing the same instant. The boundary row matched again and re-fired on every subsequent run. The engine now normalizes tz-aware datetimes to naive UTC before stringifying, preserving the same instant in a form that round-trips through naive `TIMESTAMP()` literals. Other types (naive datetime, string, numeric) pass through unchanged. Reported by @K-Masuda-SL after a prod incident where a single `recording_sessions` row triggered a downstream GHA `workflow_dispatch` three times in a row at the watermark boundary.
+
+
 
 **Theme: Production Ready.** Reliability, observability, and correctness for syncs that run in production environments — graceful shutdown on SIGTERM/SIGINT, retry knobs per destination, atomic zero-downtime table replace, sync execution history, FK existence filtering, opinionated JSON column handling. Plus the first DWH destination (Snowflake), the GitHub Codespaces playground for zero-setup onboarding, and `OPEN_CORE.md` documenting the open core boundary.
 

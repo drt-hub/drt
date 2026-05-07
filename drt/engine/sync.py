@@ -36,6 +36,26 @@ def _cursor_gt(new: str, current: str) -> bool:
         return new > current
 
 
+def _stringify_cursor_value(val: Any) -> str:
+    """Convert a cursor value into a stable string representation.
+
+    For tz-aware datetimes (e.g. BigQuery TIMESTAMP returns from the
+    Python BQ client), normalize to **naive UTC** before stringifying.
+    This avoids a re-emit-at-boundary bug (#475) where the persisted
+    watermark gained a ``+00:00`` suffix while user SQL / default_value
+    is typically written tz-naive — causing the same instant to be
+    represented two different ways and ``WHERE col >= TIMESTAMP(...)``
+    to re-match the boundary row on every subsequent run.
+
+    BigQuery (and most warehouses) parse ``TIMESTAMP('YYYY-MM-DD HH:MM:SS')``
+    as UTC, so dropping the ``+00:00`` suffix preserves the same instant.
+    Other types pass through ``str()`` unchanged.
+    """
+    if isinstance(val, datetime) and val.tzinfo is not None:
+        val = val.astimezone(timezone.utc).replace(tzinfo=None)
+    return str(val)
+
+
 def batch(iterable: Iterator[Any], size: int) -> Iterator[list[Any]]:
     """Yield successive batches of `size` from an iterator."""
     chunk: list[Any] = []
@@ -258,12 +278,14 @@ def _run_sync_body(
 
         total_result.rows_extracted += len(record_batch)
 
-        # Track max cursor value seen across all batches
+        # Track max cursor value seen across all batches.
+        # Stringify with tz-naive UTC normalization for tz-aware datetimes
+        # to avoid #475 (re-emit-at-boundary when user SQL is tz-naive).
         if cursor_field:
             for row in record_batch:
                 val = row.get(cursor_field)
                 if val is not None:
-                    str_val = str(val)
+                    str_val = _stringify_cursor_value(val)
                     if new_cursor_value is None or _cursor_gt(str_val, new_cursor_value):
                         new_cursor_value = str_val
 
