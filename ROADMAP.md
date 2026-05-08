@@ -14,16 +14,23 @@ Tail items continue in [v0.7.1](#v071--production-ready-follow-up) below.
 
 ---
 
-## v0.7.1 — Production Ready Follow-up
+## v0.7.1 — Production Ready Follow-up ✅ Shipped 2026-05-07
 
-**Theme:** Tail of the v0.7 cycle — items originally scoped for v0.7 that didn't make the v0.7.0 tag, plus quality polish on top of the production-ready surface.
+Released as **v0.7.1** on 2026-05-07. See [CHANGELOG.md](CHANGELOG.md#071---2026-05-07) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.7.1) for the full feature list.
+
+Tail items continue in [v0.7.2](#v072--production-ready-follow-up-2) below.
+
+---
+
+## v0.7.2 — Production Ready Follow-up #2
+
+**Theme:** Items deferred from v0.7.1 — opt-in telemetry and the Postgres `psycopg2.sql` migration, both held while their respective contributors complete polish iterations.
 
 **Scope:**
-- **Observability** — opt-in anonymous usage telemetry (#263, PR #446 in review by @kiwamizamurai — Production Ready originally scoped this for v0.7; rolled to v0.7.1 only because the polish push needed an extra cycle)
-- **Tests** — `on_error='fail'` and retry config tests across all destinations (#365, `good first issue`)
-- **DX** — `drt diff` for record-level dry-run visibility (#413)
+- **Observability** — opt-in anonymous usage telemetry (#263, PR #446 by @kiwamizamurai)
+- **Hardening** — Postgres destination `psycopg2.sql` SQL composition (#442, PR #452 by @Khush-domadia)
 
-**Target:** ~2 weeks post-v0.7.0 · **Progress:** [milestone/8](https://github.com/drt-hub/drt/milestone/8)
+**Target:** TBD (driven by contributor cadence) · **Progress:** [milestone/9](https://github.com/drt-hub/drt/milestone/9)
 
 ---
 

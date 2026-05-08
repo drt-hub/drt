@@ -9,9 +9,9 @@ Install: snowflake-connector-python.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
+from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, SnowflakeDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
@@ -37,12 +37,14 @@ class SnowflakeDestination:
                 "Snowflake destination requires: pip install drt-core[snowflake]"
             ) from e
 
-        account = os.environ.get(config.account_env)
-        user = os.environ.get(config.user_env)
-        password = os.environ.get(config.password_env)
+        account = resolve_env(None, config.account_env)
+        user = resolve_env(None, config.user_env)
+        password = resolve_env(None, config.password_env)
 
         if not account or not user or not password:
-            raise ValueError("Missing Snowflake credentials in environment variables.")
+            raise ValueError(
+                "Missing Snowflake credentials. Check environment variables or secrets.toml."
+            )
 
         conn = snowflake.connector.connect(
             account=account,
@@ -95,8 +97,9 @@ class SnowflakeDestination:
                         [f"target.{k} = source.{k}" for k in config.upsert_key]
                     )
 
+                    update_cols = [c for c in columns if c not in config.upsert_key]
                     update_clause = ", ".join(
-                        [f"{c} = source.{c}" for c in columns if c not in config.upsert_key]
+                        [f"{c} = source.{c}" for c in update_cols]
                     )
 
                     insert_cols = col_list
@@ -106,26 +109,45 @@ class SnowflakeDestination:
 
                     cur.execute(f"CREATE TEMP TABLE {staging_table} LIKE {table_fq}")
 
-                    for row in records:
-                        cur.execute(
-                            f"""
-                            INSERT INTO {staging_table} ({col_list})
-                            VALUES ({placeholders})
-                            """,
-                            list(row.values()),
-                        )
+                    for i, row in enumerate(records):
+                        try:
+                            cur.execute(
+                                f"""
+                                INSERT INTO {staging_table} ({col_list})
+                                VALUES ({placeholders})
+                                """,
+                                list(row.values()),
+                            )
+                        except Exception as e:
+                            result.failed += 1
+                            result.row_errors.append(
+                                RowError(
+                                    batch_index=i,
+                                    record_preview=str(row)[:200],
+                                    http_status=None,
+                                    error_message=str(e),
+                                )
+                            )
+                            if sync_options.on_error == "fail":
+                                raise
+
+                    matched_clause = (
+                        f"WHEN MATCHED THEN UPDATE SET {update_clause}"
+                        if update_cols
+                        else ""
+                    )
 
                     merge_sql = f"""
                         MERGE INTO {table_fq} target
                         USING {staging_table} source
                         ON {key_clause}
-                        WHEN MATCHED THEN UPDATE SET {update_clause}
+                        {matched_clause}
                         WHEN NOT MATCHED THEN INSERT ({insert_cols})
                         VALUES ({insert_vals})
                     """
 
                     cur.execute(merge_sql)
-                    result.success += len(records)
+                    result.success += len(records) - result.failed
 
                 else:
                     raise ValueError(f"Unsupported mode: {config.mode}")
