@@ -37,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Deprecation warnings in `drt validate`** (#478, closes #467): The `validate` command now reads `drt/deprecations.py` and surfaces ⚠️ warnings for any deprecated config keys it finds in your sync YAMLs — both in text output and as a per-sync `deprecations` array under `--output json`. Exit code stays `0` (warnings are non-blocking). The registry is currently empty (no active deprecations); add entries to `DEPRECATED_SYNC_KEYS` when announcing a new deprecation per VERSIONING.md Step 1. Migration guides live under `docs/migration/`. Closes the Step 2 ("Add Tooling Support") TODO from #457.
+
 ## [0.7.0] - 2026-05-06
 
 **Theme: Production Ready.** Reliability, observability, and correctness for syncs that run in production environments — graceful shutdown on SIGTERM/SIGINT, retry knobs per destination, atomic zero-downtime table replace, sync execution history, FK existence filtering, opinionated JSON column handling. Plus the first DWH destination (Snowflake), the GitHub Codespaces playground for zero-setup onboarding, and `OPEN_CORE.md` documenting the open core boundary.
@@ -62,7 +64,7 @@ None. Drop-in upgrade from v0.6.x.
 - **`--quiet` / `-q` flag for `drt run`** (#265): Suppresses banner / sync-result / summary / watermark output for CI and cron use cases where logs are noise. `--quiet` wins over `--verbose` when both are passed; `--output json` is unaffected so structured output still flows. Contributed by @Pawansingh3889.
 - **`drt test --output json` and `drt test --dry-run`** (#366, #371): Brings `drt test` to feature parity with `drt run`. JSON output gives CI integrations structured pass/fail data; dry-run prints the test plan (test name, target, type) without hitting any database. Contributed by @wahajahmed010.
 - **`drt cloud push` stub command** (#302): Placeholder Typer subcommand that prints an "enterprise cloud push" message and exits cleanly. Reserves the CLI surface so future enterprise integrations don't break user shell aliases / scripts. Re-landed under maintainer authorship after the original contributor (#308) didn't return to sign the CLA. See [OPEN_CORE.md](OPEN_CORE.md) for what's free vs. enterprise.
-- **Deprecation warnings in `drt validate`** (#478, closes #467): The `validate` command now reads `drt/deprecations.py` and surfaces ⚠️ warnings for any deprecated config keys it finds in your sync YAMLs — both in text output and as a per-sync `deprecations` array under `--output json`. Exit code stays `0` (warnings are non-blocking). The registry is currently empty (no active deprecations); add entries to `DEPRECATED_SYNC_KEYS` when announcing a new deprecation per VERSIONING.md Step 1. Migration guides live under `docs/migration/`. Closes the Step 2 ("Add Tooling Support") TODO from #457.
+ 
 
 ### Changed
 
