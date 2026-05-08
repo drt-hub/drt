@@ -1,12 +1,14 @@
 """Tests for RestApiSource."""
 
+from typing import Any
+
 import httpx
 
 from drt.config.credentials import RestApiProfile
 from drt.sources.rest_api import RestApiSource
 
 
-def test_rest_api_source_extract_records():
+def test_rest_api_source_extract_records() -> None:
     source = RestApiSource()
 
     # Default behavior without result_path
@@ -18,9 +20,15 @@ def test_rest_api_source_extract_records():
     data = {
         "response": {
             "items": [{"id": 1}, {"id": 2}]
+        },
+        "data": {
+            "results": {
+                "items": [{"id": 3}]
+            }
         }
     }
     assert source._extract_records(data, "response.items") == [{"id": 1}, {"id": 2}]
+    assert source._extract_records(data, "data.results.items") == [{"id": 3}]
 
     # With missing path
     assert source._extract_records(data, "response.missing") == []
@@ -29,7 +37,7 @@ def test_rest_api_source_extract_records():
     assert source._extract_records(data, "response") == [{"items": [{"id": 1}, {"id": 2}]}]
 
 
-def test_rest_api_source_extract_single_page(monkeypatch):
+def test_rest_api_source_extract_single_page(monkeypatch: Any) -> None:
     source = RestApiSource()
     profile = RestApiProfile(
         type="rest_api",
@@ -39,26 +47,33 @@ def test_rest_api_source_extract_single_page(monkeypatch):
     )
 
     class MockResponse:
-        def __init__(self):
-            self.headers = {}
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {}
 
-        def json(self):
+        def json(self) -> dict[str, Any]:
             return {"data": [{"id": 1}, {"id": 2}]}
 
-        def raise_for_status(self):
+        def raise_for_status(self) -> None:
             pass
 
     class MockClient:
-        def __init__(self, *args, **kwargs):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
             pass
 
-        def __enter__(self):
+        def __enter__(self) -> "MockClient":
             return self
 
-        def __exit__(self, *args):
+        def __exit__(self, *args: Any) -> None:
             pass
 
-        def request(self, method, url, headers, params, **kwargs):
+        def request(
+            self,
+            method: str,
+            url: str,
+            headers: dict[str, str],
+            params: dict[str, Any] | None,
+            **kwargs: Any
+        ) -> MockResponse:
             assert url == "https://api.example.com/data"
             assert headers["Authorization"] == "Bearer test-token"
             assert params is None
@@ -72,7 +87,7 @@ def test_rest_api_source_extract_single_page(monkeypatch):
     assert records[1]["id"] == 2
 
 
-def test_rest_api_source_extract_offset_pagination(monkeypatch):
+def test_rest_api_source_extract_offset_pagination(monkeypatch: Any) -> None:
     source = RestApiSource()
     profile = RestApiProfile(
         type="rest_api",
@@ -86,34 +101,155 @@ def test_rest_api_source_extract_offset_pagination(monkeypatch):
     )
 
     class MockClient:
-        def __init__(self, *args, **kwargs):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
             pass
 
-        def __enter__(self):
+        def __enter__(self) -> "MockClient":
             return self
 
-        def __exit__(self, *args):
+        def __exit__(self, *args: Any) -> None:
             pass
 
-        def request(self, method, url, headers, params, **kwargs):
+        def request(
+            self,
+            method: str,
+            url: str,
+            headers: dict[str, str],
+            params: dict[str, Any],
+            **kwargs: Any
+        ) -> Any:
             skip = int(params["skip"])
             take = int(params["take"])
             
             assert take == 2
 
             class MockResponse:
-                def json(self):
+                def json(self) -> list[dict[str, Any]]:
                     if skip == 0:
                         return [{"id": 1}, {"id": 2}]
                     elif skip == 2:
                         return [{"id": 3}]
                     return []
 
-                def raise_for_status(self):
+                def raise_for_status(self) -> None:
                     pass
                     
                 @property
-                def headers(self):
+                def headers(self) -> dict[str, str]:
+                    return {}
+
+            return MockResponse()
+
+    monkeypatch.setattr(httpx, "Client", MockClient)
+
+    records = list(source.extract("", profile))
+    assert len(records) == 3
+    assert records[0]["id"] == 1
+    assert records[2]["id"] == 3
+
+
+def test_rest_api_source_extract_cursor_pagination(monkeypatch: Any) -> None:
+    source = RestApiSource()
+    profile = RestApiProfile(
+        type="rest_api",
+        url="https://api.example.com/data",
+        pagination={
+            "type": "cursor",
+            "limit": 2,
+            "cursor_param": "after",
+            "cursor_field": "next_cursor",
+            "limit_param": "limit"
+        }
+    )
+
+    class MockClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def __enter__(self) -> "MockClient":
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            pass
+
+        def request(
+            self,
+            method: str,
+            url: str,
+            headers: dict[str, str],
+            params: dict[str, Any],
+            **kwargs: Any
+        ) -> Any:
+            cursor = params.get("after")
+
+            class MockResponse:
+                def json(self) -> dict[str, Any]:
+                    if not cursor:
+                        return {"data": [{"id": 1}, {"id": 2}], "next_cursor": "cursor-2"}
+                    elif cursor == "cursor-2":
+                        return {"data": [{"id": 3}], "next_cursor": None}
+                    return {"data": []}
+
+                def raise_for_status(self) -> None:
+                    pass
+
+                @property
+                def headers(self) -> dict[str, str]:
+                    return {}
+
+            return MockResponse()
+
+    monkeypatch.setattr(httpx, "Client", MockClient)
+
+    records = list(source.extract("", profile))
+    assert len(records) == 3
+    assert records[0]["id"] == 1
+    assert records[2]["id"] == 3
+
+
+def test_rest_api_source_extract_link_header_pagination(monkeypatch: Any) -> None:
+    source = RestApiSource()
+    profile = RestApiProfile(
+        type="rest_api",
+        url="https://api.example.com/data",
+        pagination={
+            "type": "link_header"
+        }
+    )
+
+    class MockClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def __enter__(self) -> "MockClient":
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            pass
+
+        def request(
+            self,
+            method: str,
+            url: str,
+            headers: dict[str, str],
+            params: dict[str, Any] | None,
+            **kwargs: Any
+        ) -> Any:
+            class MockResponse:
+                def json(self) -> list[dict[str, Any]]:
+                    if url == "https://api.example.com/data":
+                        return [{"id": 1}, {"id": 2}]
+                    elif url == "https://api.example.com/data?page=2":
+                        return [{"id": 3}]
+                    return []
+
+                def raise_for_status(self) -> None:
+                    pass
+
+                @property
+                def headers(self) -> dict[str, str]:
+                    if url == "https://api.example.com/data":
+                        return {"link": '<https://api.example.com/data?page=2>; rel="next"'}
                     return {}
 
             return MockResponse()

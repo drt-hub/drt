@@ -59,7 +59,7 @@ None. Drop-in upgrade from v0.7.0.
 - **`on_error=fail` not respected by Notion / REST API / Email SMTP destinations** (#463, contributes to #365): Three HTTP destinations continued processing the rest of the batch after the first row failure even when `on_error: fail` was configured at the sync level — only logging the error and counting `failed += 1`. Other HTTP destinations (Slack / Discord / Teams / HubSpot / Twilio / Intercom / SendGrid / Google Ads) were already correct. Now all three short-circuit and `return result` on the first failure, matching the documented contract and the behavior of every other destination. New `on_error=fail` and per-destination retry override tests added across the webhook surface to lock the semantic in.
 ### Added
 
-- **REST API source** (#422): Pull data directly from external HTTP endpoints without requiring a DWH intermediary. Supports bearer, API key, basic, and OAuth2 authentication. Includes offset, cursor, and link-header pagination via the `pagination` config, and a `result_path` option using dot-notation to extract the nested records array. Configured via `profiles.yml` just like destination connectors.
+- **REST API source** (#422): Pull data directly from external HTTP endpoints without requiring a DWH intermediary. Supports bearer, API key, basic, and OAuth2 authentication. Includes offset, cursor, and link_header pagination via the `pagination` config, and a `result_path` option using dot-notation to extract the nested records array. Configured via `profiles.yml` just like destination connectors.
 
 ## [0.7.0] - 2026-05-06
 
