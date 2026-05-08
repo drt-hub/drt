@@ -62,6 +62,7 @@ None. Drop-in upgrade from v0.6.x.
 - **`--quiet` / `-q` flag for `drt run`** (#265): Suppresses banner / sync-result / summary / watermark output for CI and cron use cases where logs are noise. `--quiet` wins over `--verbose` when both are passed; `--output json` is unaffected so structured output still flows. Contributed by @Pawansingh3889.
 - **`drt test --output json` and `drt test --dry-run`** (#366, #371): Brings `drt test` to feature parity with `drt run`. JSON output gives CI integrations structured pass/fail data; dry-run prints the test plan (test name, target, type) without hitting any database. Contributed by @wahajahmed010.
 - **`drt cloud push` stub command** (#302): Placeholder Typer subcommand that prints an "enterprise cloud push" message and exits cleanly. Reserves the CLI surface so future enterprise integrations don't break user shell aliases / scripts. Re-landed under maintainer authorship after the original contributor (#308) didn't return to sign the CLA. See [OPEN_CORE.md](OPEN_CORE.md) for what's free vs. enterprise.
+- **Deprecation warnings in `drt validate`** (#478, closes #467): The `validate` command now reads `drt/deprecations.py` and surfaces ⚠️ warnings for any deprecated config keys it finds in your sync YAMLs — both in text output and as a per-sync `deprecations` array under `--output json`. Exit code stays `0` (warnings are non-blocking). The registry is currently empty (no active deprecations); add entries to `DEPRECATED_SYNC_KEYS` when announcing a new deprecation per VERSIONING.md Step 1. Migration guides live under `docs/migration/`. Closes the Step 2 ("Add Tooling Support") TODO from #457.
 
 ### Changed
 
@@ -82,7 +83,7 @@ None. Drop-in upgrade from v0.6.x.
 
 - **`watermark.default_value`** (#390): Configure a fallback cursor value for first-run incremental syncs. Prevents broken SQL (e.g. `WHERE TIMESTAMP(...) >= TIMESTAMP('')`) when no watermark file exists yet. Without a default, drt now raises a clear error with actionable guidance instead of silently rendering an empty string.
 - **`--cursor-value` CLI option** (#390): Override the cursor/watermark value at runtime for backfill and recovery scenarios. The override takes highest priority in the fallback chain and the resulting watermark is persisted on success.
-- **Watermark source observability** (#391): Operators can now see *where* the cursor value came from — `storage`, `default_value`, or `cli_override` — via structured INFO logs, `--output json` fields (`watermark_source`, `cursor_value_used`), and an end-of-run summary in text mode.
+- **Watermark source observability** (#391): Operators can now see _where_ the cursor value came from — `storage`, `default_value`, or `cli_override` — via structured INFO logs, `--output json` fields (`watermark_source`, `cursor_value_used`), and an end-of-run summary in text mode.
 
 ### Fixed
 

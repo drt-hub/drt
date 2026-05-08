@@ -19,12 +19,16 @@ class DeprecatedFeature:
     docs_link: str | None = None
 
 
-DEPRECATED_SYNC_KEYS: dict[str, DeprecatedFeature] = {
-    "batch_size": DeprecatedFeature(
-        key="batch_size",
-        replacement="sync.batch_config.size",
-        announced_in="v0.5.0",
-        removed_in="v0.7.0",
-        docs_link="docs/migration/v0.6-to-v0.7.md",
-    ),
-}
+# No active sync-config deprecations as of v0.7.x.
+# Register entries here when announcing new deprecations.
+# Example structure:
+#     DEPRECATED_SYNC_KEYS = {
+#         "old_key": DeprecatedFeature(
+#             key="old_key",
+#             replacement="new.key.path",
+#             announced_in="v0.X.0",
+#             removed_in="v0.Y.0",
+#             docs_link="docs/migration/vX-to-vY.md",
+#         ),
+#     }
+DEPRECATED_SYNC_KEYS: dict[str, DeprecatedFeature] = {}

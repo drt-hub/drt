@@ -65,7 +65,7 @@ def _format_validation_errors(exc: ValidationError) -> list[str]:
     return messages
 
 
-def _check_deprecated_keys(data: dict[str, Any], sync_name: str) -> list[dict[str, str]]:
+def _check_deprecated_keys(data: dict[str, Any]) -> list[dict[str, str]]:
     """Check for deprecated sync keys in the raw YAML data.
     
     Returns a list of deprecation warnings for the given sync.
@@ -130,7 +130,7 @@ def load_syncs_safe(project_dir: Path = Path(".")) -> SyncLoadResult:
         try:
             data = expand_env_vars(data)
             # Check for deprecated keys before validation
-            deprecations = _check_deprecated_keys(data, path.stem)
+            deprecations = _check_deprecated_keys(data)
             sync = SyncConfig.model_validate(data)
             if deprecations:
                 # Store deprecations using the actual sync name, not the file name
