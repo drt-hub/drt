@@ -23,6 +23,37 @@ jobs:
       - name: Install uv
         run: pip install uv
 
+      - name: Inject telemetry API key
+        env:
+          POSTHOG_WRITE_KEY: ${{ secrets.POSTHOG_WRITE_KEY }}
+        run: |
+          # If telemetry.py exists and the secret is set, replace the
+          # placeholder _DEFAULT_API_KEY = None with the real key.
+          # Fail-safe: if the secret is unset (community fork, accidental
+          # config drift), the build proceeds with telemetry physically
+          # disabled — is_enabled() short-circuits to False without a key.
+          if [ ! -f drt/telemetry.py ]; then
+            echo "drt/telemetry.py not present — skipping injection (pre-#446 release)."
+            exit 0
+          fi
+          if [ -z "$POSTHOG_WRITE_KEY" ]; then
+            echo "::warning::POSTHOG_WRITE_KEY secret not set — release will ship with telemetry disabled."
+            exit 0
+          fi
+          python -c "
+          import pathlib, os
+          p = pathlib.Path('drt/telemetry.py')
+          src = p.read_text()
+          needle = '_DEFAULT_API_KEY: str | None = None'
+          repl = f'_DEFAULT_API_KEY: str | None = \"{os.environ[\"POSTHOG_WRITE_KEY\"]}\"'
+          if needle not in src:
+              raise SystemExit(f'placeholder {needle!r} not found in {p} — refusing to build')
+          p.write_text(src.replace(needle, repl, 1))
+          "
+          # Smoke check: the rebuilt module must report the key as truthy.
+          PYTHONPATH=. python -c "from drt import telemetry; assert telemetry._DEFAULT_API_KEY, 'injection failed'"
+          echo "Telemetry API key injected successfully."
+
       - name: Build
         run: uv build
 
