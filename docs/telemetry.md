@@ -67,8 +67,21 @@ The privacy claim is "drt does not transmit your IP." It is not "the backend you
 
 Lawful basis for processing is your opt-in consent (GDPR Art. 6(1)(a); Art. 49(1)(a) for the US transfer).
 
-- **Destination**: `https://us.i.posthog.com/i/v0/e/` — PostHog Cloud US, operated by PostHog Inc. (United States). Override with `DRT_TELEMETRY_ENDPOINT` (e.g. `https://eu.i.posthog.com/i/v0/e/` for PostHog EU).
-- **Controller / retention / erasure contact**: _to be populated by drt-hub maintainers at release time._ Deleting `~/.drt/.anonymous_id` rotates your `distinct_id` going forward but does not retroactively scrub past events; use the erasure contact for past events.
+- **Destination**: `https://eu.i.posthog.com/i/v0/e/` — PostHog Cloud EU, operated by PostHog Inc. (EU data residency). Override with `DRT_TELEMETRY_ENDPOINT` (e.g. `https://us.i.posthog.com/i/v0/e/` for PostHog US).
+- **Data controller**: K. Masuda (natural person, drt OSS maintainer).
+  drt is currently a single-maintainer OSS project. If drt is transferred
+  to a legal entity in the future, the data controller role transfers
+  with it; the affected release will update this section and the
+  CHANGELOG will note the controller change. Users opted in at the time
+  of transfer can re-confirm or revoke via `drt config unset telemetry.enabled`.
+- **Retention**: 1 year. Events stored in PostHog Cloud EU are deleted
+  after 1 year by the project-level data retention policy (Free plan
+  default). A followup (#TODO_FILL_WITH_FOLLOWUP_NUMBER) will reduce this
+  to 90 days via scheduled API-based deletion.
+- **Erasure / data subject requests**: `drt.hub.dev@gmail.com`. Deleting
+  `~/.drt/.anonymous_id` rotates your `distinct_id` going forward but
+  does not retroactively scrub past events; use the contact above for
+  past events.
 
 ## How to verify
 

@@ -39,7 +39,7 @@ from drt import __version__
 
 logger = logging.getLogger("drt.telemetry")
 
-_DEFAULT_ENDPOINT = "https://us.i.posthog.com/i/v0/e/"
+_DEFAULT_ENDPOINT = "https://eu.i.posthog.com/i/v0/e/"
 _DEFAULT_API_KEY: str | None = None  # populated by maintainer pre-release
 
 _TIMEOUT_SECONDS = 2.0
