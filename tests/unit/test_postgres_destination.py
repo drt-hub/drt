@@ -5,10 +5,12 @@ Uses a fake psycopg2 connection — no real database required.
 
 from __future__ import annotations
 
+import pytest
+
+pytest.importorskip("psycopg2.sql")
+
 from typing import Any
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from drt.config.models import PostgresDestinationConfig, SyncOptions
 from drt.destinations.postgres import PostgresDestination
