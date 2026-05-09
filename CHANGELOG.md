@@ -40,24 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Opt-in anonymous usage telemetry** (#263): a new `drt/telemetry.py` module sends a single anonymous `sync_completed` event per `drt run` when the user explicitly opts in. Off by default. Honors `DO_NOT_TRACK=1`. Allow-list `properties` (`drt_version`, `python_version`, `os`, `source_type`, `destination_type`, `sync_mode`, `rows_synced`, `duration_seconds`, `status`) — never sends sync names, model SQL, destination URLs, credentials, or project paths. The wire envelope additionally carries `event`, `distinct_id`, `timestamp`, and `api_key`. Configure via `drt config set telemetry.enabled true` or `DRT_TELEMETRY=1`. Inspect what would be sent with `drt config show-telemetry`. Endpoint defaults to PostHog Cloud (EU region); override with `DRT_TELEMETRY_ENDPOINT` and `DRT_TELEMETRY_API_KEY` for self-hosted PostHog.
-
-## [0.7.1] - 2026-05-07
-
-**Theme: Production Ready follow-up.** Tail of the v0.7 cycle — the `drt diff` dry-run preview (#413) that shipped as the original v0.7.1 DX feature, a watermark cursor correctness fix surfaced by a prod incident (#475), `on_error=fail` semantic alignment across the remaining HTTP destinations (#463), and the new `VERSIONING.md` policy doc (#457).
-
-### Breaking Changes
-
-None. Drop-in upgrade from v0.7.0.
-
-### Added
-
-- **`drt run --dry-run --diff`** (#413): Record-level preview before deploying a sync. For queryable destinations (Postgres / MySQL / ClickHouse), compares extracted source records against the destination state keyed on `upsert_key` and shows added / updated (with field-level `old → new` diffs) / deleted records. For non-queryable destinations (REST API, Slack, HubSpot, Notion, file destinations, etc.) falls back to "sample mode" — shows the first N records that would be sent, with a note that comparison is unavailable. Output works in both text (rich tables) and `--output json` (embedded `diff` key per sync). New flag `--diff-limit N` (default 20) caps records shown per category. The `--diff` flag is only valid alongside `--dry-run`. Doc: [docs/guides/dry-run-and-diff.md](docs/guides/dry-run-and-diff.md). Follow-ups: #468 (Snowflake support), #469 (Protocol method), #470 (perf), #471 (`--diff-fields`), #472 (API-based SaaS diff).
-- **`VERSIONING.md` — semver and deprecation policy** (#457, #464): Documents the project's versioning contract pre-1.0, what counts as a breaking change at each layer (CLI / config schema / Python API), and the deprecation cadence (announced one minor version, removable one minor after that). Cross-linked from `CONTRIBUTING.md` PR checklist. Initial draft contributed by @Muawiya-contact, follow-up polish in #464 also by @Muawiya-contact.
-
-### Fixed
-
-- **Watermark advance for tz-aware cursor values** (#475): `drt/engine/sync.py` was calling `str()` directly on cursor field values, which for tz-aware datetimes (e.g. BigQuery `TIMESTAMP` columns returned by the Python BQ client) produced strings with a `+00:00` suffix. When user SQL or `default_value` was written tz-naive (the common case for warehouses where the `TIMESTAMP` literal is parsed as UTC), the next run compared a naive `WHERE col >= TIMESTAMP('YYYY-MM-DD HH:MM:SS')` against the tz-aware persisted form representing the same instant. The boundary row matched again and re-fired on every subsequent run. The engine now normalizes tz-aware datetimes to naive UTC before stringifying, preserving the same instant in a form that round-trips through naive `TIMESTAMP()` literals. Other types (naive datetime, string, numeric) pass through unchanged. Reported by @K-Masuda-SL after a prod incident where a single `recording_sessions` row triggered a downstream GHA `workflow_dispatch` three times in a row at the watermark boundary.
-- **`on_error=fail` not respected by Notion / REST API / Email SMTP destinations** (#463, contributes to #365): Three HTTP destinations continued processing the rest of the batch after the first row failure even when `on_error: fail` was configured at the sync level — only logging the error and counting `failed += 1`. Other HTTP destinations (Slack / Discord / Teams / HubSpot / Twilio / Intercom / SendGrid / Google Ads) were already correct. Now all three short-circuit and `return result` on the first failure, matching the documented contract and the behavior of every other destination. New `on_error=fail` and per-destination retry override tests added across the webhook surface to lock the semantic in.
+- **Deprecation warnings in `drt validate`** (#478, closes #467): The `validate` command now reads `drt/deprecations.py` and surfaces ⚠️ warnings for any deprecated config keys it finds in your sync YAMLs — both in text output and as a per-sync `deprecations` array under `--output json`. Exit code stays `0` (warnings are non-blocking). The registry is currently empty (no active deprecations); add entries to `DEPRECATED_SYNC_KEYS` when announcing a new deprecation per VERSIONING.md Step 1. Migration guides live under `docs/migration/`. Closes the Step 2 ("Add Tooling Support") TODO from #457.
 
 ## [0.7.0] - 2026-05-06
 
@@ -84,6 +67,7 @@ None. Drop-in upgrade from v0.6.x.
 - **`--quiet` / `-q` flag for `drt run`** (#265): Suppresses banner / sync-result / summary / watermark output for CI and cron use cases where logs are noise. `--quiet` wins over `--verbose` when both are passed; `--output json` is unaffected so structured output still flows. Contributed by @Pawansingh3889.
 - **`drt test --output json` and `drt test --dry-run`** (#366, #371): Brings `drt test` to feature parity with `drt run`. JSON output gives CI integrations structured pass/fail data; dry-run prints the test plan (test name, target, type) without hitting any database. Contributed by @wahajahmed010.
 - **`drt cloud push` stub command** (#302): Placeholder Typer subcommand that prints an "enterprise cloud push" message and exits cleanly. Reserves the CLI surface so future enterprise integrations don't break user shell aliases / scripts. Re-landed under maintainer authorship after the original contributor (#308) didn't return to sign the CLA. See [OPEN_CORE.md](OPEN_CORE.md) for what's free vs. enterprise.
+ 
 
 ### Changed
 
@@ -106,7 +90,7 @@ None. Drop-in upgrade from v0.6.x.
 
 - **`watermark.default_value`** (#390): Configure a fallback cursor value for first-run incremental syncs. Prevents broken SQL (e.g. `WHERE TIMESTAMP(...) >= TIMESTAMP('')`) when no watermark file exists yet. Without a default, drt now raises a clear error with actionable guidance instead of silently rendering an empty string.
 - **`--cursor-value` CLI option** (#390): Override the cursor/watermark value at runtime for backfill and recovery scenarios. The override takes highest priority in the fallback chain and the resulting watermark is persisted on success.
-- **Watermark source observability** (#391): Operators can now see *where* the cursor value came from — `storage`, `default_value`, or `cli_override` — via structured INFO logs, `--output json` fields (`watermark_source`, `cursor_value_used`), and an end-of-run summary in text mode.
+- **Watermark source observability** (#391): Operators can now see _where_ the cursor value came from — `storage`, `default_value`, or `cli_override` — via structured INFO logs, `--output json` fields (`watermark_source`, `cursor_value_used`), and an end-of-run summary in text mode.
 
 ### Fixed
 

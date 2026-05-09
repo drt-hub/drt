@@ -49,10 +49,11 @@ def expand_env_vars(data: Any) -> Any:
 
 @dataclass
 class SyncLoadResult:
-    """Result of loading sync YAML files — valid syncs + per-file errors."""
+    """Result of loading sync YAML files — valid syncs + per-file errors + deprecations."""
 
     syncs: list[SyncConfig] = field(default_factory=list)
     errors: dict[str, list[str]] = field(default_factory=dict)
+    deprecations: dict[str, list[dict[str, str]]] = field(default_factory=dict)
 
 
 def _format_validation_errors(exc: ValidationError) -> list[str]:
@@ -62,6 +63,30 @@ def _format_validation_errors(exc: ValidationError) -> list[str]:
         loc = " → ".join(str(part) for part in err["loc"]) if err["loc"] else "(root)"
         messages.append(f"{loc}: {err['msg']}")
     return messages
+
+
+def _check_deprecated_keys(data: dict[str, Any]) -> list[dict[str, str]]:
+    """Check for deprecated sync keys in the raw YAML data.
+    
+    Returns a list of deprecation warnings for the given sync.
+    """
+    from drt.deprecations import DEPRECATED_SYNC_KEYS
+    
+    warnings: list[dict[str, str]] = []
+    
+    # Check top-level sync options
+    sync_config = data.get("sync", {})
+    if isinstance(sync_config, dict):
+        for deprecated_key, feature in DEPRECATED_SYNC_KEYS.items():
+            if deprecated_key in sync_config:
+                warnings.append({
+                    "key": f"sync.{deprecated_key}",
+                    "replacement": feature.replacement,
+                    "removed_in": feature.removed_in,
+                    "docs_link": feature.docs_link or "",
+                })
+    
+    return warnings
 
 
 def load_project(project_dir: Path = Path(".")) -> ProjectConfig:
@@ -104,7 +129,13 @@ def load_syncs_safe(project_dir: Path = Path(".")) -> SyncLoadResult:
             data = yaml.safe_load(f)
         try:
             data = expand_env_vars(data)
-            result.syncs.append(SyncConfig.model_validate(data))
+            # Check for deprecated keys before validation
+            deprecations = _check_deprecated_keys(data)
+            sync = SyncConfig.model_validate(data)
+            if deprecations:
+                # Store deprecations using the actual sync name, not the file name
+                result.deprecations[sync.name] = deprecations
+            result.syncs.append(sync)
         except (ValidationError, ValueError) as e:
             if isinstance(e, ValidationError):
                 result.errors[path.stem] = _format_validation_errors(e)
