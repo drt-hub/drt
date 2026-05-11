@@ -185,18 +185,19 @@ class PostgresDestination:
         config: PostgresDestinationConfig,
     ) -> SyncResult:
         """TRUNCATE (once) → INSERT within a transaction."""
+        from psycopg2 import sql as _pgsql
         result = SyncResult()
 
         if not self._replace_truncated:
-            cur.execute(f"TRUNCATE TABLE {table}")
+            cur.execute(_pgsql.SQL("TRUNCATE TABLE {}").format(_pgsql.Identifier(table)))
             self._replace_truncated = True
 
-        sql = self._build_insert_sql(table, columns)
+        query = self._build_insert_sql(table, columns)
 
         for i, record in enumerate(records):
             try:
                 values = [_serialize_value(record.get(c), c, config.json_columns) for c in columns]
-                cur.execute(sql, values)
+                cur.execute(query, values)
                 result.success += 1
             except Exception as e:
                 result.failed += 1
@@ -214,7 +215,7 @@ class PostgresDestination:
                 conn.rollback()
                 cur = conn.cursor()
                 if not self._replace_truncated:
-                    cur.execute(f"TRUNCATE TABLE {table}")
+                    cur.execute(_pgsql.SQL("TRUNCATE TABLE {}").format(_pgsql.Identifier(table)))
                     self._replace_truncated = True
                 continue
 
@@ -316,7 +317,7 @@ class PostgresDestination:
     ) -> SyncResult:
         result = SyncResult()
         update_cols = [c for c in columns if c not in config.upsert_key]
-        sql = PostgresDestination._build_upsert_sql(
+        query = PostgresDestination._build_upsert_sql(
             config.table,
             columns,
             config.upsert_key,
@@ -326,7 +327,7 @@ class PostgresDestination:
         for i, record in enumerate(records):
             try:
                 values = [_serialize_value(record.get(c), c, config.json_columns) for c in columns]
-                cur.execute(sql, values)
+                cur.execute(query, values)
                 result.success += 1
             except Exception as e:
                 result.failed += 1
@@ -349,11 +350,13 @@ class PostgresDestination:
         return result
 
     @staticmethod
-    def _build_insert_sql(table: str, columns: list[str]) -> str:
-        """Build plain INSERT SQL (no conflict handling)."""
-        cols_str = ", ".join(f'"{c}"' for c in columns)
-        placeholders = ", ".join(["%s"] * len(columns))
-        return f"INSERT INTO {table} ({cols_str}) VALUES ({placeholders})"
+    def _build_insert_sql(table: str, columns: list[str]) -> Any:
+        from psycopg2 import sql as _pgsql
+        return _pgsql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
+            _pgsql.Identifier(table),
+            _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in columns),
+            _pgsql.SQL(", ").join(_pgsql.Placeholder() for _ in columns),
+        )
 
     @staticmethod
     def _build_upsert_sql(
@@ -361,22 +364,27 @@ class PostgresDestination:
         columns: list[str],
         upsert_key: list[str],
         update_cols: list[str],
-    ) -> str:
-        """Build INSERT ... ON CONFLICT DO UPDATE SQL."""
-        cols_str = ", ".join(f'"{c}"' for c in columns)
-        placeholders = ", ".join(["%s"] * len(columns))
-        conflict_str = ", ".join(f'"{c}"' for c in upsert_key)
-
+    ) -> Any:
+        from psycopg2 import sql as _pgsql
         if update_cols:
-            set_clause = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in update_cols)
-            return (
-                f"INSERT INTO {table} ({cols_str}) VALUES ({placeholders}) "
-                f"ON CONFLICT ({conflict_str}) DO UPDATE SET {set_clause}"
+            set_clause = _pgsql.SQL(", ").join(
+                _pgsql.SQL("{} = EXCLUDED.{}").format(
+                    _pgsql.Identifier(c), _pgsql.Identifier(c)
+                )
+                for c in update_cols
             )
-        # All columns are part of the key — just ignore duplicates
-        return (
-            f"INSERT INTO {table} ({cols_str}) VALUES ({placeholders}) "
-            f"ON CONFLICT ({conflict_str}) DO NOTHING"
+            conflict_action = _pgsql.SQL("DO UPDATE SET ") + set_clause
+        else:
+            conflict_action = _pgsql.SQL("DO NOTHING")
+
+        return _pgsql.SQL(
+            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) {}"
+        ).format(
+            _pgsql.Identifier(table),
+            _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in columns),
+            _pgsql.SQL(", ").join(_pgsql.Placeholder() for _ in columns),
+            _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in upsert_key),
+            conflict_action,
         )
 
     @staticmethod
