@@ -65,7 +65,7 @@ The privacy claim is "drt does not transmit your IP." It is not "the backend you
 
 ## GDPR disclosure (EU / EEA opt-ins)
 
-Lawful basis for processing is your opt-in consent (GDPR Art. 6(1)(a); Art. 49(1)(a) for the US transfer).
+Lawful basis for processing is your opt-in consent (GDPR Art. 6(1)(a)). The data is stored in PostHog Cloud EU (EU-hosted). The processor, PostHog Inc. (United States), may have technical access from outside the EU; the international transfer safeguard is the Standard Contractual Clauses (Art. 46(2)(c)) included in the signed Data Processing Agreement.
 
 - **Destination**: `https://eu.i.posthog.com/i/v0/e/` — PostHog Cloud EU, operated by PostHog Inc. (EU data residency). Override with `DRT_TELEMETRY_ENDPOINT` (e.g. `https://us.i.posthog.com/i/v0/e/` for PostHog US).
 - **Data controller**: K. Masuda (natural person, drt OSS maintainer).
