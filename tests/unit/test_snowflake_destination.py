@@ -279,3 +279,18 @@ class TestSnowflakeDestinationLoad:
         merge_sql = next(s for s in sqls if "MERGE INTO" in s)
         assert "WHEN NOT MATCHED THEN INSERT" in merge_sql
         assert "WHEN MATCHED THEN UPDATE" not in merge_sql
+
+
+class TestSnowflakeConnection:
+    def test_test_connection_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        modules = _mocked_snowflake_modules(conn)
+        
+        with patch.dict("sys.modules", modules):
+            dest = SnowflakeDestination()
+            dest.test_connection(_config())
+        
+        conn.close.assert_called_once()
+        # Snowflake uses cursor.execute("SELECT 1")
+        assert any("SELECT 1" in str(call.args[0]) for call in conn._cur.execute.call_args_list)

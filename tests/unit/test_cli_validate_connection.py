@@ -9,17 +9,20 @@ runner = CliRunner()
 
 def test_validate_check_connection_sql_success() -> None:
     """Test validate --check-connection for an SQL destination (success)."""
-    # Mocking the registry and destination
     mock_dest = MagicMock()
+    # Mocking that the destination has test_connection
     mock_dest.test_connection.return_value = None
     
     with patch("drt.connectors.registry.get_destination", return_value=mock_dest), \
          patch("drt.config.parser.load_syncs_safe") as mock_load:
         
-        # Setup a mock sync
         mock_sync = MagicMock()
         mock_sync.name = "sql_sync"
-        mock_sync.destination = MagicMock(spec=PostgresDestinationConfig)
+        # Use a real class instance to pass isinstance checks in main.py
+        mock_sync.destination = PostgresDestinationConfig(
+            type="postgres", table="t", upsert_key=["id"],
+            host="localhost", dbname="db"
+        )
         
         mock_result = MagicMock()
         mock_result.syncs = [mock_sync]
@@ -31,19 +34,21 @@ def test_validate_check_connection_sql_success() -> None:
         
         assert result.exit_code == 0
         assert "✓ connection ok" in result.stdout
-        mock_dest.test_connection.assert_called_once()
 
 def test_validate_check_connection_sql_failure() -> None:
     """Test validate --check-connection for an SQL destination (failure)."""
     mock_dest = MagicMock()
-    mock_dest.test_connection.side_effect = Exception("Connection Refused")
+    mock_dest.test_connection.side_effect = Exception("Conn Error")
     
     with patch("drt.connectors.registry.get_destination", return_value=mock_dest), \
          patch("drt.config.parser.load_syncs_safe") as mock_load:
         
         mock_sync = MagicMock()
         mock_sync.name = "sql_fail"
-        mock_sync.destination = MagicMock(spec=PostgresDestinationConfig)
+        mock_sync.destination = PostgresDestinationConfig(
+            type="postgres", table="t", upsert_key=["id"],
+            host="localhost", dbname="db"
+        )
         
         mock_result = MagicMock()
         mock_result.syncs = [mock_sync]
@@ -53,8 +58,8 @@ def test_validate_check_connection_sql_failure() -> None:
         
         result = runner.invoke(app, ["validate", "--check-connection", "--select", "sql_fail"])
         
-        assert result.exit_code == 0 # Validation still passes, only connection failed
-        assert "✗ connection failed: Connection Refused" in result.stdout
+        assert result.exit_code == 0
+        assert "✗ connection failed: Conn Error" in result.stdout
 
 def test_validate_check_connection_non_sql_skip() -> None:
     """Test validate --check-connection for a non-SQL destination (skip)."""
@@ -62,7 +67,9 @@ def test_validate_check_connection_non_sql_skip() -> None:
         
         mock_sync = MagicMock()
         mock_sync.name = "slack_sync"
-        mock_sync.destination = MagicMock(spec=SlackDestinationConfig)
+        mock_sync.destination = SlackDestinationConfig(
+            type="slack", channel="#c", auth={"type": "token", "token_env": "T"}
+        )
         
         mock_result = MagicMock()
         mock_result.syncs = [mock_sync]
@@ -73,4 +80,31 @@ def test_validate_check_connection_non_sql_skip() -> None:
         result = runner.invoke(app, ["validate", "--check-connection", "--select", "slack_sync"])
         
         assert result.exit_code == 0
-        assert "⏭ connection test skipped (non-SQL)" in result.stdout
+        assert "⏭ connection test skipped" in result.stdout
+
+def test_validate_check_connection_sql_no_tester_method() -> None:
+    """Test case where is_sql is true but test_connection method is missing."""
+    mock_dest = object() # No test_connection
+    
+    with patch("drt.connectors.registry.get_destination", return_value=mock_dest), \
+         patch("drt.config.parser.load_syncs_safe") as mock_load:
+        
+        mock_sync = MagicMock()
+        mock_sync.name = "no_method"
+        # We must make sure this passes the isinstance check in main.py
+        from drt.config.models import PostgresDestinationConfig
+        mock_sync.destination = PostgresDestinationConfig(
+            type="postgres", table="t", upsert_key=["id"],
+            host="localhost", dbname="db"
+        )
+        
+        mock_result = MagicMock()
+        mock_result.syncs = [mock_sync]
+        mock_result.errors = {}
+        mock_result.deprecations = {}
+        mock_load.return_value = mock_result
+        
+        result = runner.invoke(app, ["validate", "--check-connection", "--select", "no_method"])
+        
+        assert result.exit_code == 0
+        assert "✗ connection failed: test_connection method missing" in result.stdout

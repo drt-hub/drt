@@ -816,7 +816,7 @@ def validate(
                     print_connection_test_result(sync.name, success=False, error=str(e))
             else:
                 from drt.cli.output import print_connection_test_result
-                print_connection_test_result(sync.name, success=False, error=None)
+                print_connection_test_result(sync.name, success=False, skip=True)
 
     for name, errors in result.errors.items():
         print_validation_error(name, errors)

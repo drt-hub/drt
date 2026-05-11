@@ -540,3 +540,18 @@ class TestPostgresReplaceSwapJsonColumns:
 
         assert result.failed == 1
         assert "not listed in json_columns" in result.row_errors[0].error_message
+
+
+class TestPostgresConnection:
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_test_connection_success(self, mock_connect: MagicMock) -> None:
+        conn = _fake_connection()
+        mock_connect.return_value = conn
+        
+        dest = PostgresDestination()
+        dest.test_connection(_config())
+        
+        mock_connect.assert_called_once()
+        # Verify SELECT 1 was called
+        cur = conn.cursor()
+        assert any("SELECT 1" in str(call.args[0]) for call in cur.execute.call_args_list)

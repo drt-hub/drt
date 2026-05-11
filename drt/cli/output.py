@@ -195,13 +195,21 @@ def print_validation_error(sync_name: str, errors: list[str]) -> None:
         console.print(f"  [red]• {err}[/red]")
 
 
-def print_connection_test_result(sync_name: str, success: bool, error: str | None = None) -> None:
-    if success:
+def print_connection_test_result(
+    sync_name: str, 
+    success: bool, 
+    error: str | None = None,
+    skip: bool = False
+) -> None:
+    if skip:
+        console.print("  [dim]⏭ connection test skipped (non-SQL)[/dim]")
+    elif success:
         console.print("  [green]✓ connection ok[/green]")
     elif error:
         console.print(f"  [red]✗ connection failed: {error}[/red]")
     else:
-        console.print("  [dim]⏭ connection test skipped (non-SQL)[/dim]")
+        # SQL destination but no tester method
+        console.print("  [red]✗ connection failed: test_connection method missing[/red]")
 
 
 # ---------------------------------------------------------------------------
