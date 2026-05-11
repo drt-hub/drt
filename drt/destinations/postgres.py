@@ -233,12 +233,20 @@ class PostgresDestination:
         config: PostgresDestinationConfig,
     ) -> SyncResult:
         """Build a shadow table per sync; atomic rename happens in finalize_sync."""
+        from psycopg2 import sql as _pgsql
         result = SyncResult()
         shadow = f"{table}__drt_swap"
 
         if not self._swap_shadow_created:
-            cur.execute(f"DROP TABLE IF EXISTS {shadow}")
-            cur.execute(f"CREATE TABLE {shadow} (LIKE {table} INCLUDING ALL)")
+            cur.execute(
+                _pgsql.SQL("DROP TABLE IF EXISTS {}").format(_pgsql.Identifier(shadow))
+            )
+            cur.execute(
+                _pgsql.SQL("CREATE TABLE {} (LIKE {} INCLUDING ALL)").format(
+                    _pgsql.Identifier(shadow),
+                    _pgsql.Identifier(table),
+                )
+            )
             self._swap_shadow_created = True
             self._swap_table = table
 
@@ -263,7 +271,11 @@ class PostgresDestination:
                     conn.rollback()
                     # Cleanup shadow on hard fail
                     cur = conn.cursor()
-                    cur.execute(f"DROP TABLE IF EXISTS {shadow}")
+                    cur.execute(
+                        _pgsql.SQL("DROP TABLE IF EXISTS {}").format(
+                            _pgsql.Identifier(shadow)
+                        )
+                    )
                     conn.commit()
                     self._swap_shadow_created = False
                     self._swap_table = None
@@ -279,6 +291,8 @@ class PostgresDestination:
         sync_options: SyncOptions,
     ) -> SyncResult | None:
         """Atomic rename: original->old, shadow->original, drop old."""
+        from psycopg2 import sql as _pgsql
+
         if not self._swap_shadow_created or self._swap_table is None:
             return None
 
@@ -293,11 +307,21 @@ class PostgresDestination:
             # Single transaction: original->old, shadow->original.
             # ALTER TABLE ... RENAME TO takes a bare relation name on the RHS;
             # the schema is preserved automatically.
-            cur.execute(f"ALTER TABLE {table} RENAME TO {old.split('.')[-1]}")
-            cur.execute(f"ALTER TABLE {shadow} RENAME TO {table.split('.')[-1]}")
+            cur.execute(
+                _pgsql.SQL("ALTER TABLE {} RENAME TO {}").format(
+                    _pgsql.Identifier(table),
+                    _pgsql.Identifier(old.split(".")[-1]),
+                )
+            )
+            cur.execute(
+                _pgsql.SQL("ALTER TABLE {} RENAME TO {}").format(
+                    _pgsql.Identifier(shadow),
+                    _pgsql.Identifier(table.split(".")[-1]),
+                )
+            )
             conn.commit()
             # DROP old in separate tx (failure here doesn't break the swap).
-            cur.execute(f"DROP TABLE {old}")
+            cur.execute(_pgsql.SQL("DROP TABLE {}").format(_pgsql.Identifier(old)))
             conn.commit()
         finally:
             conn.close()
