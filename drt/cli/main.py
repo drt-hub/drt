@@ -804,9 +804,13 @@ def validate(
             if is_sql:
                 try:
                     dest = get_destination(dest_config)
-                    dest.test_connection(dest_config)
+                    tester = getattr(dest, "test_connection", None)
                     from drt.cli.output import print_connection_test_result
-                    print_connection_test_result(sync.name, success=True)
+                    if callable(tester):
+                        tester(dest_config)
+                        print_connection_test_result(sync.name, success=True)
+                    else:
+                        print_connection_test_result(sync.name, success=False, error=None)
                 except Exception as e:
                     from drt.cli.output import print_connection_test_result
                     print_connection_test_result(sync.name, success=False, error=str(e))

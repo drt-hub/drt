@@ -64,7 +64,3 @@ class ParquetDestination:
             return result
 
         return result
-
-    def test_connection(self, config: DestinationConfig) -> None:
-        """Test connectivity (gracefully skipped for non-SQL)."""
-        pass

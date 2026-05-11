@@ -151,7 +151,3 @@ class GoogleAdsDestination:
             result.errors.append(f"Google Ads error: {e}")
 
         return result
-
-    def test_connection(self, config: DestinationConfig) -> None:
-        """Test connectivity (gracefully skipped for non-SQL)."""
-        pass
