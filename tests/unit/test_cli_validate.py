@@ -191,3 +191,123 @@ def test_cli_validate_error_shows_field_path(
     result = runner.invoke(app, ["validate"])
     assert "destination" in result.output
     assert result.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# CLI validate --check-connection
+# ---------------------------------------------------------------------------
+
+
+def test_cli_validate_check_connection_skips_non_sql(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--check-connection skips non-SQL destinations gracefully."""
+    _write_sync(tmp_path / "syncs", "api", VALID_SYNC)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["validate", "--check-connection"])
+    assert result.exit_code == 0
+    assert "✓" in result.output
+    assert "skipped" in result.output
+
+
+def test_cli_validate_check_connection_json_includes_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--check-connection with JSON output includes connection field."""
+    import json as _json
+
+    _write_sync(tmp_path / "syncs", "api", VALID_SYNC)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["validate", "--check-connection", "--output", "json"])
+    assert result.exit_code == 0
+    data = _json.loads(result.output)
+    assert len(data["results"]) == 1
+    assert data["results"][0]["name"] == "test-sync"
+    assert "connection" in data["results"][0]
+    assert "skipped" in data["results"][0]["connection"]
+
+
+def test_cli_validate_check_connection_reports_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--check-connection reports connection failures for SQL destinations."""
+    sync = {
+        "name": "pg-sync",
+        "model": "SELECT 1",
+        "destination": {
+            "type": "postgres",
+            "host": "localhost",
+            "dbname": "nonexistent",
+            "user": "nobody",
+            "password": "nope",
+            "table": "test",
+            "upsert_key": ["id"],
+        },
+    }
+    _write_sync(tmp_path / "syncs", "pg", sync)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["validate", "--check-connection"])
+    assert "✓" in result.output
+    assert "✗" in result.output
+    assert "connection failed" in result.output.lower()
+
+
+def test_cli_validate_check_connection_json_reports_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--check-connection JSON output with connection failure message."""
+    import json as _json
+
+    sync = {
+        "name": "pg-sync",
+        "model": "SELECT 1",
+        "destination": {
+            "type": "postgres",
+            "host": "localhost",
+            "dbname": "nonexistent",
+            "user": "nobody",
+            "password": "nope",
+            "table": "test",
+            "upsert_key": ["id"],
+        },
+    }
+    _write_sync(tmp_path / "syncs", "pg", sync)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["validate", "--check-connection", "--output", "json"])
+    data = _json.loads(result.output)
+    assert result.exit_code == 0
+    pg = next(r for r in data["results"] if r["name"] == "pg-sync")
+    assert pg["connection"] != "ok"
+    assert "connection" in pg
+
+
+def test_cli_validate_without_check_connection_excludes_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without --check-connection, JSON output has no connection field."""
+    import json as _json
+
+    _write_sync(tmp_path / "syncs", "api", VALID_SYNC)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["validate", "--output", "json"])
+    assert result.exit_code == 0
+    data = _json.loads(result.output)
+    assert "connection" not in data["results"][0]
+    assert data["results"][0]["valid"] is True
+
+
+def test_cli_validate_check_connection_with_select(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--check-connection works with --select to test a specific sync."""
+    sync_a = {**VALID_SYNC, "name": "alpha"}
+    sync_b = {**VALID_SYNC, "name": "beta"}
+    _write_sync(tmp_path / "syncs", "alpha", sync_a)
+    _write_sync(tmp_path / "syncs", "beta", sync_b)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(
+        app, ["validate", "--check-connection", "--select", "alpha"]
+    )
+    assert result.exit_code == 0
+    assert "✓" in result.output
+    assert "beta" not in result.output

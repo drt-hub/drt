@@ -716,6 +716,9 @@ def validate(
         False, "--emit-schema", help="Write JSON Schemas to .drt/schemas/."
     ),
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
+    check_connection: bool = typer.Option(
+        False, "--check-connection", help="Test destination connectivity with SELECT 1 (SQL only)."
+    ),
 ) -> None:
     """Validate sync definitions against the JSON Schema."""
 
@@ -732,31 +735,42 @@ def validate(
             print_error(f"No sync named '{select}' found.")
             raise typer.Exit(1)
 
+    connection_status: dict[str, bool | str] = {}
+    if check_connection:
+        from drt.destinations.query import execute_test_query, is_queryable
+
+        for sync in result.syncs:
+            try:
+                if is_queryable(sync.destination):
+                    execute_test_query(sync.destination, "SELECT 1")
+                    connection_status[sync.name] = True
+                else:
+                    connection_status[sync.name] = "skipped"
+            except Exception as exc:
+                connection_status[sync.name] = str(exc)
+
     if output == "json":
         # Collect all deprecations into a flat list for JSON output
         all_deprecations = []
         for sync_name, sync_deprecations in result.deprecations.items():
             all_deprecations.extend(sync_deprecations)
         
-        print(
-            json.dumps(
-                {
-                    "results": [
-                        {
-                            "name": s.name,
-                            "valid": True,
-                            "deprecations": result.deprecations.get(s.name, []),
-                        }
-                        for s in result.syncs
-                    ]
-                    + [
-                        {"name": name, "valid": False, "errors": errs}
-                        for name, errs in result.errors.items()
-                    ],
-                },
-                indent=2,
-            )
-        )
+        sync_results = []
+        for s in result.syncs:
+            entry: dict[str, Any] = {
+                "name": s.name,
+                "valid": True,
+                "deprecations": result.deprecations.get(s.name, []),
+            }
+            if check_connection and s.name in connection_status:
+                status = connection_status[s.name]
+                entry["connection"] = "ok" if status is True else f"skipped ({status})"
+            sync_results.append(entry)
+
+        for name, errs in result.errors.items():
+            sync_results.append({"name": name, "valid": False, "errors": errs})
+
+        print(json.dumps({"results": sync_results}, indent=2))
         if result.errors:
             raise typer.Exit(code=1)
         return
@@ -777,6 +791,15 @@ def validate(
                 console.print(f"       Use {deprecation['replacement']} instead.")
                 if deprecation["docs_link"]:
                     console.print(f"       See {deprecation['docs_link']}")
+        # Connection check result
+        if check_connection and sync.name in connection_status:
+            status = connection_status[sync.name]
+            if status is True:
+                console.print("  [green]✓ connection OK[/green]")
+            elif status == "skipped":
+                console.print("  [dim]⏭ connection check skipped (not a SQL destination)[/dim]")
+            else:
+                console.print(f"  [red]✗ connection failed: {status}[/red]")
 
     for name, errors in result.errors.items():
         print_validation_error(name, errors)
