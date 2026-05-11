@@ -55,6 +55,14 @@ class Destination(Protocol):
         """Send a batch of records to the destination."""
         ...
 
+    def test_connection(self, config: DestinationConfig) -> None:
+        """Test connectivity to the destination.
+        
+        Should raise an exception (e.g., ConnectionError, OperationalError) 
+        if the connection cannot be established.
+        """
+        ...
+
 
 @runtime_checkable
 class StagedDestination(Protocol):

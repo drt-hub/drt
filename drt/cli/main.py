@@ -715,6 +715,9 @@ def validate(
     emit_schema: bool = typer.Option(  # noqa: E501
         False, "--emit-schema", help="Write JSON Schemas to .drt/schemas/."
     ),
+    check_connection: bool = typer.Option(
+        False, "--check-connection", help="Test connectivity to SQL destinations."
+    ),
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
 ) -> None:
     """Validate sync definitions against the JSON Schema."""
@@ -777,6 +780,39 @@ def validate(
                 console.print(f"       Use {deprecation['replacement']} instead.")
                 if deprecation["docs_link"]:
                     console.print(f"       See {deprecation['docs_link']}")
+
+        if check_connection:
+            from drt.config.models import (
+                ClickHouseDestinationConfig,
+                MySQLDestinationConfig,
+                PostgresDestinationConfig,
+                SnowflakeDestinationConfig,
+            )
+            from drt.connectors.registry import get_destination
+
+            dest_config = sync.destination
+            is_sql = isinstance(
+                dest_config,
+                (
+                    PostgresDestinationConfig,
+                    MySQLDestinationConfig,
+                    ClickHouseDestinationConfig,
+                    SnowflakeDestinationConfig,
+                ),
+            )
+
+            if is_sql:
+                try:
+                    dest = get_destination(dest_config)
+                    dest.test_connection(dest_config)
+                    from drt.cli.output import print_connection_test_result
+                    print_connection_test_result(sync.name, success=True)
+                except Exception as e:
+                    from drt.cli.output import print_connection_test_result
+                    print_connection_test_result(sync.name, success=False, error=str(e))
+            else:
+                from drt.cli.output import print_connection_test_result
+                print_connection_test_result(sync.name, success=False, error=None)
 
     for name, errors in result.errors.items():
         print_validation_error(name, errors)

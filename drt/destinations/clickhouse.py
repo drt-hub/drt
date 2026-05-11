@@ -213,6 +213,15 @@ class ClickHouseDestination:
         finally:
             client.close()
 
+    def test_connection(self, config: DestinationConfig) -> None:
+        """Test connectivity by establishing a connection and running SELECT 1."""
+        assert isinstance(config, ClickHouseDestinationConfig)
+        client = self._connect(config)
+        try:
+            client.command("SELECT 1")
+        finally:
+            client.close()
+
     @staticmethod
     def _connect(config: ClickHouseDestinationConfig) -> Any:
         try:

@@ -81,3 +81,7 @@ class FileDestination:
         with open(path, "w", encoding="utf-8") as f:
             for record in records:
                 f.write(json.dumps(record, default=str) + "\n")
+
+    def test_connection(self, config: DestinationConfig) -> None:
+        """Test connectivity (gracefully skipped for non-SQL)."""
+        pass

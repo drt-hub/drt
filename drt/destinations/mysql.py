@@ -149,6 +149,16 @@ class MySQLDestination:
         finally:
             conn.close()
 
+    def test_connection(self, config: DestinationConfig) -> None:
+        """Test connectivity by establishing a connection and running SELECT 1."""
+        assert isinstance(config, MySQLDestinationConfig)
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+        finally:
+            conn.close()
+
     @staticmethod
     def _quote_ident(table: str) -> str:
         """Backtick-quote a (possibly schema-qualified) identifier.

@@ -186,3 +186,7 @@ class SalesforceBulkDestination:
             failed=records_failed,
             row_errors=row_errors,
         )
+
+    def test_connection(self, config: DestinationConfig) -> None:
+        """Test connectivity (gracefully skipped for non-SQL)."""
+        pass

@@ -190,3 +190,7 @@ def _to_adf(text: str) -> dict[str, Any]:
 def _record_preview(row: dict[str, Any]) -> str:
     """Best-effort JSON preview that tolerates non-serializable values."""
     return json.dumps(row, default=str)[:200]
+
+    def test_connection(self, config: DestinationConfig) -> None:
+        """Test connectivity (gracefully skipped for non-SQL)."""
+        pass

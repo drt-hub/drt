@@ -249,3 +249,7 @@ class RestApiDestination:
                 if match:
                     return match.group(1)
         return None
+
+    def test_connection(self, config: DestinationConfig) -> None:
+        """Test connectivity (gracefully skipped for non-SQL)."""
+        pass
