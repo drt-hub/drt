@@ -1115,13 +1115,21 @@ cloud_app = typer.Typer(name="cloud", help="drt Cloud commands (stub).", no_args
 app.add_typer(cloud_app)
 
 
+CLOUD_MESSAGE = (
+    "\n☁️  drt Cloud is coming soon!\nFollow https://github.com/drt-hub/drt for updates.\n"
+)
+
+
 @cloud_app.command(name="push")
 def cloud_push() -> None:
     """Push local project configuration to drt Cloud (stub)."""
-    console.print("\n[bold blue]🚀 drt Cloud[/bold blue]")
-    console.print("This is a stub for the future drt Cloud service.")
-    console.print("Project state would be pushed to your cloud dashboard here.")
-    console.print("\n[dim]Coming soon...[/dim]\n")
+    print(CLOUD_MESSAGE)
+
+
+@cloud_app.command(name="status")
+def cloud_status() -> None:
+    """Check drt Cloud deployment status (stub)."""
+    print(CLOUD_MESSAGE)
 
 
 # ---------------------------------------------------------------------------
