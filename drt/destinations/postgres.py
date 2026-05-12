@@ -19,14 +19,18 @@ Example sync YAML:
 from __future__ import annotations
 
 import json
+import logging
+from datetime import timedelta
 from typing import Any
 
 from drt.config.credentials import resolve_env
-from drt.config.models import DestinationConfig, PostgresDestinationConfig, SyncOptions
+from drt.config.models import (
+    DestinationConfig,
+    PostgresDestinationConfig,
+    SyncOptions,
+)
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
-import logging
-from datetime import timedelta
 
 try:
     from psycopg2.extras import Json as _Psycopg2Json
@@ -318,12 +322,12 @@ class PostgresDestination:
         swap shadow tables in non-system schemas.
         """
         assert isinstance(config, PostgresDestinationConfig)
-        from psycopg2 import sql
 
         if older_than is not None:
             # Best-effort: PostgreSQL doesn't store table creation timestamp
             logging.getLogger(__name__).info(
-                "older_than filter requested but not supported for Postgres; returning all matches"
+                "older_than filter requested but not supported for Postgres; "
+                "returning all matches"
             )
 
         conn = self._connect(config)

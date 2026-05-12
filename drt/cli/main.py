@@ -9,7 +9,7 @@ import signal
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
@@ -23,7 +23,6 @@ if TYPE_CHECKING:
     from drt.sources.base import Source
     from drt.state.history import HistoryManager
     from drt.state.manager import StateManager
-
 
 from drt import __version__
 from drt.cli.output import (
@@ -400,7 +399,7 @@ def destinations() -> None:
 @app.command()
 def clean(
     orphans: bool = typer.Option(False, "--orphans", help="Detect orphan swap shadow tables."),
-    execute: bool = typer.Option(False, "--execute", help="Actually drop orphan tables (irreversible)."),
+    execute: bool = typer.Option(False, "--execute", help="Drop orphan tables (irreversible)."),
     older_than: float | None = typer.Option(
         None, "--older-than", help="Filter orphans older than given hours (best-effort)."
     ),
@@ -459,7 +458,9 @@ def clean(
         return
 
     if not execute:
-        console.print("\n[bold yellow]Dry run:[/bold yellow] No tables were dropped. Use --execute to remove the tables.")
+        console.print(
+            "\n[bold yellow]Dry run:[/bold yellow] No tables were dropped. Use --execute to remove."
+        )
         return
 
     # Execute: delegate drops to each destination implementation.
