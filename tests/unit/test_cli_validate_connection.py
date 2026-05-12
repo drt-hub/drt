@@ -108,3 +108,69 @@ def test_validate_check_connection_sql_no_tester_method() -> None:
         
         assert result.exit_code == 0
         assert "✗ connection failed: test_connection method missing" in result.stdout
+
+def test_validate_check_connection_json() -> None:
+    """Test validate --check-connection --output json."""
+    import json
+    mock_dest = MagicMock()
+    mock_dest.test_connection.return_value = None
+    
+    with patch("drt.connectors.registry.get_destination", return_value=mock_dest), \
+         patch("drt.config.parser.load_syncs_safe") as mock_load:
+        
+        mock_sync = MagicMock()
+        mock_sync.name = "json_sync"
+        mock_sync.destination = PostgresDestinationConfig(
+            type="postgres", table="t", upsert_key=["id"],
+            host="localhost", dbname="db"
+        )
+        
+        mock_result = MagicMock()
+        mock_result.syncs = [mock_sync]
+        mock_result.errors = {}
+        mock_result.deprecations = {}
+        mock_load.return_value = mock_result
+        
+        result = runner.invoke(app, ["validate", "--check-connection", "--output", "json"])
+        
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+        
+        assert "results" in data
+        sync_res = data["results"][0]
+        assert sync_res["name"] == "json_sync"
+        assert "connection_test" in sync_res
+        assert sync_res["connection_test"] == {
+            "success": True,
+            "error": None,
+            "skipped": False
+        }
+
+def test_validate_check_connection_skipped_json() -> None:
+    """Test validate --check-connection --output json for non-SQL."""
+    import json
+    with patch("drt.config.parser.load_syncs_safe") as mock_load:
+        
+        mock_sync = MagicMock()
+        mock_sync.name = "skipped_sync"
+        mock_sync.destination = SlackDestinationConfig(
+            type="slack", channel="#c", auth={"type": "token", "token_env": "T"}
+        )
+        
+        mock_result = MagicMock()
+        mock_result.syncs = [mock_sync]
+        mock_result.errors = {}
+        mock_result.deprecations = {}
+        mock_load.return_value = mock_result
+        
+        result = runner.invoke(app, ["validate", "--check-connection", "--output", "json"])
+        
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+        
+        sync_res = data["results"][0]
+        assert sync_res["connection_test"] == {
+            "success": None,
+            "error": None,
+            "skipped": True
+        }

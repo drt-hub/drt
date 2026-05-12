@@ -197,11 +197,10 @@ def print_validation_error(sync_name: str, errors: list[str]) -> None:
 
 def print_connection_test_result(
     sync_name: str, 
-    success: bool, 
+    success: bool | None, 
     error: str | None = None,
-    skip: bool = False
 ) -> None:
-    if skip:
+    if success is None:
         console.print("  [dim]⏭ connection test skipped (non-SQL)[/dim]")
     elif success:
         console.print("  [green]✓ connection ok[/green]")
