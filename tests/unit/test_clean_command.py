@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from unittest import mock
 
-import pytest
 from typer.testing import CliRunner
 
 from drt.cli.main import app

@@ -36,7 +36,9 @@ def _build_sheets_service(config: GoogleSheetsDestinationConfig) -> Any:
     else:
         import google.auth
 
-        creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/spreadsheets"])
+        creds, _ = google.auth.default(  # type: ignore[no-untyped-call]
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
 
     return build("sheets", "v4", credentials=creds)
 
