@@ -1,4 +1,4 @@
-<!-- i18n-sync: base=README.md, hash=474502e36e59eb896d68bf3e2350b2a82505c92f -->
+<!-- i18n-sync: base=README.md, hash=c55dc5c98718f609e3212b34dd9a479638ef8189 -->
 
 [English](./README.md) | [日本語](./README.ja.md)
 
@@ -304,8 +304,10 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | **v0.5.4** ✅ | `destination_lookup` — 同期中にデスティネーションDBからFK値を解決（MySQL / Postgres / ClickHouse） |
 | **v0.6** ✅ | Databricks / SQL Server sources · Notion / Twilio / Intercom / Email SMTP / Salesforce Bulk / Staged Upload destinations · Airflow / Prefect integrations · `drt serve` · `drt sources` / `drt destinations` · `--threads` 並列実行 · `--log-format json` · `--cursor-value` · `watermark.default_value` · テストバリデータ（freshness, unique, accepted_values） · JSON Schema validation · GOVERNANCE.md |
 | **v0.7** ✅ | **Production Ready** — SIGTERM/SIGINT グレースフルシャットダウン · per-destination retry override · sync 実行履歴 · zero-downtime atomic table swap · `json_columns` 設定 · FK存在チェック (`lookups.check_only`) · Slack/webhook 失敗通知 · `drt doctor` · `--quiet` フラグ · `drt test --output json` / `--dry-run` · Snowflake destination · GitHub Codespaces プレイグラウンド · `OPEN_CORE.md` |
+| **v0.7.1** ✅ | `drt run --dry-run --diff` でレコード単位プレビュー · tz-aware カーソル文字列化バグ修正 · `on_error=fail` を Notion / REST API / Email SMTP に整合 · `VERSIONING.md` セマンティクスバージョニング & 非推奨ポリシー |
+| **v0.7.2** ✅ | **opt-in 匿名テレメトリ**（PostHog Cloud EU、デフォルト off、許可リスト式 payload、`DO_NOT_TRACK` 尊重）· `drt validate` の非推奨警告 · Postgres destination の `psycopg2.sql` 安全な SQL 合成 |
 
-**次のリリース:** [v0.7.1 Production Ready Follow-up](ROADMAP.md#v071--production-ready-follow-up) → [v0.8 Cloud Destinations & Growth](ROADMAP.md#v08--cloud-destinations--growth) → [v0.9 Enterprise Foundation](ROADMAP.md#v09--enterprise-foundation) → [v1.0 Stable Release](ROADMAP.md#v10--stable-release) → [v1.x Rust Engine](ROADMAP.md#v1x--rust-engine)
+**次のリリース:** [v0.8 Cloud Destinations & Growth](ROADMAP.md#v08--cloud-destinations--growth) → [v0.9 Enterprise Foundation](ROADMAP.md#v09--enterprise-foundation) → [v1.0 Stable Release](ROADMAP.md#v10--stable-release) → [v1.x Rust Engine](ROADMAP.md#v1x--rust-engine)
 
 ---
 

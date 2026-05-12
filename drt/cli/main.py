@@ -117,6 +117,7 @@ def _run_one(
     profile: ProfileConfig,
 ) -> tuple[str, dict[str, object], bool]:
     """Execute a single sync and return (name, result_dict, had_error)."""
+    from drt import telemetry
     from drt.engine.sync import run_sync
 
     dest = _get_destination(sync)
@@ -126,102 +127,118 @@ def _run_one(
     t0 = time.monotonic()
     if ctx.log_json:
         logging.info("sync_started", extra={"sync": sync.name})
+
+    status_str = "failed"
+    rows_synced = 0
+    elapsed = 0.0
+    return_value: tuple[str, dict[str, object], bool]
     try:
-        result = run_sync(
-            sync,
-            ctx.source,
-            dest,
-            profile,
-            Path("."),
-            ctx.dry_run,
-            ctx.state_mgr,
-            watermark_storage=wm_storage,
-            cursor_value_override=(
-                ctx.cursor_value if sync.sync.mode == "incremental" else None
-            ),
-            history_manager=ctx.history_mgr,
-            history_retention_days=ctx.history_retention_days,
-            stop_event=ctx.stop_event,
-            compute_diff=ctx.compute_diff,
-            diff_limit=ctx.diff_limit,
-        )
-    except Exception as e:
+        try:
+            result = run_sync(
+                sync,
+                ctx.source,
+                dest,
+                profile,
+                Path("."),
+                ctx.dry_run,
+                ctx.state_mgr,
+                watermark_storage=wm_storage,
+                cursor_value_override=(
+                    ctx.cursor_value if sync.sync.mode == "incremental" else None
+                ),
+                history_manager=ctx.history_mgr,
+                history_retention_days=ctx.history_retention_days,
+                stop_event=ctx.stop_event,
+                compute_diff=ctx.compute_diff,
+                diff_limit=ctx.diff_limit,
+            )
+        except Exception as e:
+            elapsed = round(time.monotonic() - t0, 2)
+            entry: dict[str, object] = {
+                "name": sync.name,
+                "status": "failed",
+                "rows_synced": 0,
+                "rows_failed": 0,
+                "duration_seconds": elapsed,
+                "dry_run": ctx.dry_run,
+                "error": str(e),
+            }
+            if ctx.log_json:
+                logging.error(
+                    "sync_complete",
+                    extra={
+                        "sync": sync.name,
+                        "rows": 0,
+                        "duration_ms": round(elapsed * 1000),
+                        "status": "failed",
+                    },
+                )
+            if not ctx.json_mode:
+                print_error(f"[{sync.name}] Unexpected error: {e}")
+            return_value = (sync.name, entry, True)
+            return return_value
+
         elapsed = round(time.monotonic() - t0, 2)
-        entry: dict[str, object] = {
+        status_str = (
+            "success"
+            if result.failed == 0
+            else "partial"
+            if result.success > 0
+            else "failed"
+        )
+        rows_synced = result.success
+        entry = {
             "name": sync.name,
-            "status": "failed",
-            "rows_synced": 0,
-            "rows_failed": 0,
+            "status": status_str,
+            "rows_extracted": result.rows_extracted,
+            "rows_synced": result.success,
+            "rows_failed": result.failed,
             "duration_seconds": elapsed,
             "dry_run": ctx.dry_run,
-            "error": str(e),
         }
+        if result.watermark_source:
+            entry["watermark_source"] = result.watermark_source
+        if result.cursor_value_used is not None:
+            entry["cursor_value_used"] = result.cursor_value_used
         if ctx.log_json:
-            logging.error(
+            logging.info(
                 "sync_complete",
                 extra={
                     "sync": sync.name,
-                    "rows": 0,
+                    "rows": result.success,
                     "duration_ms": round(elapsed * 1000),
-                    "status": "failed",
+                    "status": status_str,
                 },
             )
-        if not ctx.json_mode:
-            print_error(f"[{sync.name}] Unexpected error: {e}")
-        return sync.name, entry, True
+        if not ctx.json_mode and not ctx.quiet:
+            if ctx.dry_run:
+                print_dry_run_summary(sync, profile, result.success, dest)
+            else:
+                print_sync_result(sync.name, result, elapsed)
+        if not ctx.json_mode and ctx.verbose and not ctx.quiet and result.row_errors:
+            print_row_errors(result.row_errors)
+        diff_value = getattr(result, "diff", None)
+        if diff_value is not None:
+            if ctx.json_mode:
+                from drt.cli.output import diff_to_dict
 
-    elapsed = round(time.monotonic() - t0, 2)
-    status_str = (
-        "success"
-        if result.failed == 0
-        else "partial"
-        if result.success > 0
-        else "failed"
-    )
-    entry = {
-        "name": sync.name,
-        "status": status_str,
-        "rows_extracted": result.rows_extracted,
-        "rows_synced": result.success,
-        "rows_failed": result.failed,
-        "duration_seconds": elapsed,
-        "dry_run": ctx.dry_run,
-    }
-    if result.watermark_source:
-        entry["watermark_source"] = result.watermark_source
-    if result.cursor_value_used is not None:
-        entry["cursor_value_used"] = result.cursor_value_used
-    if ctx.log_json:
-        logging.info(
-            "sync_complete",
-            extra={
-                "sync": sync.name,
-                "rows": result.success,
-                "duration_ms": round(elapsed * 1000),
-                "status": status_str,
-            },
-        )
-    if not ctx.json_mode and not ctx.quiet:
-        if ctx.dry_run:
-            print_dry_run_summary(sync, profile, result.success, dest)
-        else:
-            print_sync_result(sync.name, result, elapsed)
-    if not ctx.json_mode and ctx.verbose and not ctx.quiet and result.row_errors:
-        print_row_errors(result.row_errors)
-    # Render the diff preview (#413) — text mode only; JSON mode embeds
-    # the diff into ``entry`` below. Use getattr so test fakes that don't
-    # carry the diff attribute pass through cleanly.
-    diff_value = getattr(result, "diff", None)
-    if diff_value is not None:
-        if ctx.json_mode:
-            from drt.cli.output import diff_to_dict
+                entry["diff"] = diff_to_dict(diff_value)
+            elif not ctx.quiet:
+                from drt.cli.output import print_diff_table
 
-            entry["diff"] = diff_to_dict(diff_value)
-        elif not ctx.quiet:
-            from drt.cli.output import print_diff_table
-
-            print_diff_table(diff_value, sync.name)
-    return sync.name, entry, result.failed > 0
+                print_diff_table(diff_value, sync.name)
+        return_value = (sync.name, entry, result.failed > 0)
+        return return_value
+    finally:
+        if not ctx.dry_run:
+            telemetry.track_sync_completed(
+                sync_mode=sync.sync.mode,
+                source_type=profile.type,
+                destination_type=sync.destination.type,
+                rows_synced=rows_synced,
+                duration_seconds=elapsed,
+                status=status_str,
+            )
 
 
 def _print_watermark_summary(results: list[dict[str, object]]) -> None:
@@ -1158,6 +1175,76 @@ def serve(
 
     token = os.environ.get(token_env) or None
     serve_impl(host=host, port=port, token=token, project_dir=".")
+
+
+# ---------------------------------------------------------------------------
+# config (user-level settings — currently telemetry only)
+# ---------------------------------------------------------------------------
+
+config_app = typer.Typer(
+    name="config",
+    help="Manage user-level drt settings (~/.drt/).",
+    no_args_is_help=True,
+)
+app.add_typer(config_app)
+
+
+@config_app.command(name="set")
+def config_set(key: str, value: str) -> None:
+    """Set a user-level setting. Currently supports: telemetry.enabled."""
+    from drt import telemetry
+
+    if key == "telemetry.enabled":
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            telemetry.set_enabled(True)
+            console.print("[green]Telemetry enabled.[/green] Thanks for helping improve drt.")
+        elif normalized in {"false", "0", "no", "off"}:
+            telemetry.set_enabled(False)
+            console.print("Telemetry disabled.")
+        else:
+            print_error(f"Invalid boolean value: {value!r}")
+            raise typer.Exit(code=2)
+        return
+    print_error(f"Unknown config key: {key!r}. Known keys: telemetry.enabled")
+    raise typer.Exit(code=2)
+
+
+@config_app.command(name="unset")
+def config_unset(key: str) -> None:
+    """Remove a user-level setting (returns to default)."""
+    from drt import telemetry
+
+    if key == "telemetry.enabled":
+        telemetry.unset_enabled()
+        console.print("Telemetry preference cleared (default: off).")
+        return
+    print_error(f"Unknown config key: {key!r}.")
+    raise typer.Exit(code=2)
+
+
+@config_app.command(name="show-telemetry")
+def config_show_telemetry() -> None:
+    """Print the exact payload that would be sent for the next sync.
+
+    Helps users verify what data leaves their machine before opting in.
+    """
+    from drt import telemetry
+
+    enabled = telemetry.is_enabled()
+    sample = telemetry.build_sync_completed_payload(
+        distinct_id="<anonymous-id>",
+        sync_mode="<sync.sync.mode>",
+        source_type="<profile.type>",
+        destination_type="<destination.type>",
+        rows_synced=0,
+        duration_seconds=0.0,
+        status="<success|partial|failed>",
+    )
+    sample.pop("api_key", None)
+    console.print(f"Telemetry enabled: [{'green' if enabled else 'yellow'}]{enabled}[/]")
+    console.print("Payload schema (api_key elided):")
+    console.print_json(json.dumps(sample))
 
 
 # ---------------------------------------------------------------------------

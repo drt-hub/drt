@@ -44,6 +44,10 @@ def _fake_connection() -> MagicMock:
     return conn
 
 
+def _query_text(query: Any) -> str:
+    return str(query)
+
+
 # ---------------------------------------------------------------------------
 # Config validation
 # ---------------------------------------------------------------------------
@@ -362,12 +366,14 @@ class TestPostgresReplaceSwap:
         dest = PostgresDestination()
         dest.load(records, _config(), _options(mode="replace", replace_strategy="swap"))
 
-        sqls = [c[0][0] for c in cur.execute.call_args_list]
+        queries = [c[0][0] for c in cur.execute.call_args_list]
+        sqls = [_query_text(q) for q in queries]
         assert any("DROP TABLE IF EXISTS" in s and "__drt_swap" in s for s in sqls)
         assert any(
             "CREATE TABLE" in s and "(LIKE " in s and "INCLUDING ALL" in s for s in sqls
         )
         assert any("INSERT INTO" in s and "__drt_swap" in s for s in sqls)
+        assert not any(isinstance(q, str) and "__drt_swap" in q for q in queries)
         # No swap yet — happens in finalize_sync
         assert not any("RENAME TO" in s for s in sqls)
 
@@ -387,10 +393,12 @@ class TestPostgresReplaceSwap:
             _config(), _options(mode="replace", replace_strategy="swap")
         )
 
-        sqls = [c[0][0] for c in cur.execute.call_args_list]
+        queries = [c[0][0] for c in cur.execute.call_args_list]
+        sqls = [_query_text(q) for q in queries]
         # Two RENAME steps wrapped in a transaction
         rename_sqls = [s for s in sqls if "RENAME TO" in s]
         assert len(rename_sqls) >= 2
+        assert not any(isinstance(q, str) and "RENAME TO" in q for q in queries)
         # Final DROP of old table
         assert any("DROP TABLE" in s and "__drt_old" in s for s in sqls)
 
@@ -426,7 +434,7 @@ class TestPostgresReplaceSwap:
             _options(mode="replace", replace_strategy="swap"),
         )
 
-        sqls = [c[0][0] for c in cur.execute.call_args_list]
+        sqls = [_query_text(c[0][0]) for c in cur.execute.call_args_list]
         create_count = sum(
             1 for s in sqls if "CREATE TABLE" in s and "INCLUDING ALL" in s
         )
@@ -447,8 +455,8 @@ class TestPostgresReplaceSwap:
         # Fail only on INSERT — DROP/CREATE/cleanup succeed.
         insert_call_count = {"n": 0}
 
-        def execute_side_effect(sql: str, *args: Any) -> None:
-            if sql.startswith("INSERT INTO"):
+        def execute_side_effect(sql: Any, *args: Any) -> None:
+            if _query_text(sql).startswith("Composed([SQL('INSERT INTO"):
                 insert_call_count["n"] += 1
                 if insert_call_count["n"] == 2:
                     raise Exception("constraint violation on row 2")
@@ -468,7 +476,7 @@ class TestPostgresReplaceSwap:
         # Rollback called on hard fail
         conn.rollback.assert_called()
         # Cleanup DROP IF EXISTS issued after rollback
-        sqls = [c[0][0] for c in cur.execute.call_args_list]
+        sqls = [_query_text(c[0][0]) for c in cur.execute.call_args_list]
         drops = [s for s in sqls if "DROP TABLE IF EXISTS" in s and "__drt_swap" in s]
         assert len(drops) >= 2  # initial + cleanup
         # State reset → finalize_sync must be a no-op (no RENAME issued)
@@ -476,7 +484,7 @@ class TestPostgresReplaceSwap:
             _config(), _options(mode="replace", replace_strategy="swap")
         )
         assert finalize_result is None
-        sqls_after = [c[0][0] for c in cur.execute.call_args_list]
+        sqls_after = [_query_text(c[0][0]) for c in cur.execute.call_args_list]
         assert not any("RENAME TO" in s for s in sqls_after)
 
 
@@ -511,7 +519,8 @@ class TestPostgresReplaceSwapJsonColumns:
         # Find the INSERT call against the shadow table
         insert_calls = [
             c for c in cur.execute.call_args_list
-            if "INSERT INTO" in c[0][0] and "__drt_swap" in c[0][0]
+            if "INSERT INTO" in _query_text(c[0][0])
+            and "__drt_swap" in _query_text(c[0][0])
         ]
         assert insert_calls, "expected at least one INSERT into shadow table"
         bound_values = insert_calls[0][0][1]

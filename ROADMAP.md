@@ -22,15 +22,11 @@ Tail items continue in [v0.7.2](#v072--production-ready-follow-up-2) below.
 
 ---
 
-## v0.7.2 — Production Ready Follow-up #2
+## v0.7.2 — Production Ready Follow-up #2 ✅ Shipped 2026-05-11
 
-**Theme:** Items deferred from v0.7.1 — opt-in telemetry and the Postgres `psycopg2.sql` migration, both held while their respective contributors complete polish iterations.
+Released as **v0.7.2** on 2026-05-11. See [CHANGELOG.md](CHANGELOG.md#072---2026-05-11) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.7.2) for the full feature list.
 
-**Scope:**
-- **Observability** — opt-in anonymous usage telemetry (#263, PR #446 by @kiwamizamurai)
-- **Hardening** — Postgres destination `psycopg2.sql` SQL composition (#442, PR #452 by @Khush-domadia)
-
-**Target:** TBD (driven by contributor cadence) · **Progress:** [milestone/9](https://github.com/drt-hub/drt/milestone/9)
+Followup items continue in their own issues (#482 telemetry retention cleanup, #483 swap-path psycopg2.sql migration).
 
 ---
 
