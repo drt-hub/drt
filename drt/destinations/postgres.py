@@ -334,15 +334,16 @@ class PostgresDestination:
         try:
             cur = conn.cursor()
             # Exclude system schemas
+            # Use escaped underscore pattern to match exactly '__drt_swap' suffix
             cur.execute(
                 """
                 SELECT table_schema, table_name
                 FROM information_schema.tables
                 WHERE table_type = 'BASE TABLE'
-                  AND table_name LIKE %s
+                  AND table_name LIKE %s ESCAPE '\\'
                   AND table_schema NOT IN ('pg_catalog', 'information_schema')
                 """,
-                ("%__drt_swap",),
+                ("%\\_\\_drt_swap",),
             )
             rows = cur.fetchall()
             result: list[str] = []
@@ -367,8 +368,6 @@ class PostgresDestination:
         Each table drop is independently committed to ensure that failure
         of one table does not rollback successful drops of others.
         """
-        from psycopg2 import sql
-
         assert isinstance(config, PostgresDestinationConfig)
 
         dropped: list[str] = []
@@ -378,13 +377,26 @@ class PostgresDestination:
         try:
             cur = conn.cursor()
             for full in tables:
-                # Safety: reject invalid names early to avoid wasted connection
-                if not full or not full.split(".")[-1].endswith("__drt_swap"):
+                # Safety: validate format (schema.table) and reject invalid names
+                if not full or "." not in full:
                     failed.append(full)
                     continue
 
-                schema, name = full.rsplit(".", 1)
                 try:
+                    schema, name = full.rsplit(".", 1)
+                except ValueError:
+                    # rsplit should succeed after '.' check, but be defensive
+                    failed.append(full)
+                    continue
+
+                # Extra safety: ensure name ends with __drt_swap
+                if not name.endswith("__drt_swap"):
+                    failed.append(full)
+                    continue
+
+                try:
+                    from psycopg2 import sql
+
                     cur.execute(
                         sql.SQL("DROP TABLE IF EXISTS {}.{}").format(
                             sql.Identifier(schema), sql.Identifier(name)

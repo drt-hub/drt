@@ -447,13 +447,16 @@ def clean(
             for t in tables:
                 found.add(t)
 
+    # Deduplicate found tables across all syncs (avoid redundant drops)
+    found_unique = list(dict.fromkeys(found))
+
     # Output summary
     console.print("")
-    console.print(f"Found {len(found)} orphan swap table(s).")
-    for t in sorted(found):
+    console.print(f"Found {len(found_unique)} orphan swap table(s).")
+    for t in sorted(found_unique):
         console.print(f"  {t}")
 
-    if not found:
+    if not found_unique:
         console.print("\n[green]No orphan swap tables found.[/green]")
         return
 
@@ -463,24 +466,29 @@ def clean(
         )
         return
 
-    # Execute: delegate drops to each destination implementation.
+    # Execute: deduplicate and drop each unique table once
     dropped: list[str] = []
     failed: list[str] = []
-    for sync_name, tables in per_sync.items():
-        # Reuse cached destination to avoid re-instantiation
-        dest = dests_by_sync.get(sync_name)
-        if dest is None or not isinstance(dest, OrphanCleanup):
-            # Destination missing or cannot drop; mark as failed.
-            failed.extend(tables)
+    for table in found_unique:
+        # Find a destination that supports cleanup (use first match)
+        dest_to_use = None
+        for sync in syncs:
+            if sync.name in dests_by_sync:
+                dest = dests_by_sync[sync.name]
+                if isinstance(dest, OrphanCleanup):
+                    dest_to_use = dest
+                    sync_config = sync.destination
+                    break
+        if dest_to_use is None:
+            failed.append(table)
             continue
         try:
-            sync = next(s for s in syncs if s.name == sync_name)
-            d, f = dest.drop_orphan_swap_tables(sync.destination, tables)
+            d, f = dest_to_use.drop_orphan_swap_tables(sync_config, [table])
             dropped.extend(d)
             failed.extend(f)
         except Exception as e:
-            print_error(f"Failed to drop orphans for {sync_name}: {e}")
-            failed.extend(tables)
+            print_error(f"Failed to drop {table}: {e}")
+            failed.append(table)
 
     console.print("")
     console.print(f"Dropped: {len(dropped)}")
