@@ -26,6 +26,10 @@ keywords = [
     "open-source",
     "mcp",
     "llm-data",
+    "data-sync",
+    "yaml",
+    "duckdb",
+    "data-integration",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -83,8 +87,10 @@ drt = "drt.cli.main:app"
 
 [project.urls]
 Homepage = "https://github.com/drt-hub/drt"
+Documentation = "https://github.com/drt-hub/drt#readme"
 Repository = "https://github.com/drt-hub/drt"
 Issues = "https://github.com/drt-hub/drt/issues"
+Changelog = "https://github.com/drt-hub/drt/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["drt"]
