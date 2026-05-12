@@ -412,6 +412,7 @@ def clean(
     `--execute` to actually drop them.
     """
     from drt.config.parser import load_syncs_safe
+    from drt.destinations.base import OrphanCleanup
 
     if not orphans:
         console.print("[dim]No clean action specified. Try: drt clean --orphans[/dim]")
@@ -422,15 +423,17 @@ def clean(
 
     found: set[str] = set()
     per_sync: dict[str, list[str]] = {}
+    dests_by_sync: dict[str, Any] = {}  # Cache to avoid re-instantiation during execute phase
 
     for sync in syncs:
-        # Only consider syncs that use a Postgres destination (scope-limited)
+        # Only consider syncs with destinations that support orphan cleanup
         try:
             dest = _get_destination(sync)
+            dests_by_sync[sync.name] = dest  # Cache for reuse during execute phase
         except Exception:
             continue
 
-        if not hasattr(dest, "list_orphan_swap_tables"):
+        if not isinstance(dest, OrphanCleanup):
             continue
 
         hours_td = timedelta(hours=older_than) if older_than is not None else None
@@ -463,13 +466,14 @@ def clean(
     dropped: list[str] = []
     failed: list[str] = []
     for sync_name, tables in per_sync.items():
-        sync = next(s for s in syncs if s.name == sync_name)
-        dest = _get_destination(sync)
-        if not hasattr(dest, "drop_orphan_swap_tables"):
-            # Destination cannot drop; mark as failed for now.
+        # Reuse cached destination to avoid re-instantiation
+        dest = dests_by_sync.get(sync_name)
+        if dest is None or not isinstance(dest, OrphanCleanup):
+            # Destination missing or cannot drop; mark as failed.
             failed.extend(tables)
             continue
         try:
+            sync = next(s for s in syncs if s.name == sync_name)
             d, f = dest.drop_orphan_swap_tables(sync.destination, tables)
             dropped.extend(d)
             failed.extend(f)

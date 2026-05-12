@@ -359,6 +359,9 @@ class PostgresDestination:
         ``__drt_swap``) and performs the DROP using the destination's
         connection. Returns two lists: successfully dropped tables and
         tables that failed to drop.
+
+        Each table drop is independently committed to ensure that failure
+        of one table does not rollback successful drops of others.
         """
         from psycopg2 import sql
 
@@ -371,21 +374,26 @@ class PostgresDestination:
         try:
             cur = conn.cursor()
             for full in tables:
+                # Safety: reject invalid names early to avoid wasted connection
+                if not full or not full.split(".")[-1].endswith("__drt_swap"):
+                    failed.append(full)
+                    continue
+
+                schema, name = full.rsplit(".", 1)
                 try:
-                    if not full or not full.split(".")[-1].endswith("__drt_swap"):
-                        failed.append(full)
-                        continue
-                    schema, name = full.rsplit(".", 1)
                     cur.execute(
                         sql.SQL("DROP TABLE IF EXISTS {}.{}").format(
                             sql.Identifier(schema), sql.Identifier(name)
                         )
                     )
+                    # Commit immediately after each successful drop to isolate
+                    # from failures of subsequent tables (#447)
+                    conn.commit()
                     dropped.append(full)
                 except Exception:
+                    # Rollback only this table's attempt; don't affect others
                     conn.rollback()
                     failed.append(full)
-            conn.commit()
         finally:
             conn.close()
 
