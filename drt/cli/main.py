@@ -9,7 +9,7 @@ import signal
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
@@ -395,6 +395,96 @@ def destinations() -> None:
     from drt.config.connectors import DESTINATIONS
 
     _print_connectors_table("Available destinations:", DESTINATIONS)
+
+
+@app.command()
+def clean(
+    orphans: bool = typer.Option(False, "--orphans", help="Detect orphan swap shadow tables."),
+    execute: bool = typer.Option(False, "--execute", help="Actually drop orphan tables (irreversible)."),
+    older_than: float | None = typer.Option(
+        None, "--older-than", help="Filter orphans older than given hours (best-effort)."
+    ),
+) -> None:
+    """Cleanup utilities.
+
+    Use `drt clean --orphans` to detect orphan swap shadow tables. By default
+    this is a dry-run and will only print tables that would be dropped. Use
+    `--execute` to actually drop them.
+    """
+    from drt.config.parser import load_syncs_safe
+
+    if not orphans:
+        console.print("[dim]No clean action specified. Try: drt clean --orphans[/dim]")
+        raise typer.Exit()
+
+    result = load_syncs_safe(Path("."))
+    syncs = result.syncs
+
+    found: set[str] = set()
+    per_sync: dict[str, list[str]] = {}
+
+    for sync in syncs:
+        # Only consider syncs that use a Postgres destination (scope-limited)
+        try:
+            dest = _get_destination(sync)
+        except Exception:
+            continue
+
+        if not hasattr(dest, "list_orphan_swap_tables"):
+            continue
+
+        hours_td = timedelta(hours=older_than) if older_than is not None else None
+        try:
+            tables = dest.list_orphan_swap_tables(sync.destination, older_than=hours_td)
+        except Exception as e:
+            print_error(f"Failed to list orphans for {sync.name}: {e}")
+            continue
+
+        if tables:
+            per_sync[sync.name] = tables
+            for t in tables:
+                found.add(t)
+
+    # Output summary
+    console.print("")
+    console.print(f"Found {len(found)} orphan swap table(s).")
+    for t in sorted(found):
+        console.print(f"  {t}")
+
+    if not found:
+        console.print("\n[green]No orphan swap tables found.[/green]")
+        return
+
+    if not execute:
+        console.print("\n[bold yellow]Dry run:[/bold yellow] No tables were dropped. Use --execute to remove the tables.")
+        return
+
+    # Execute: delegate drops to each destination implementation.
+    dropped: list[str] = []
+    failed: list[str] = []
+    for sync_name, tables in per_sync.items():
+        sync = next(s for s in syncs if s.name == sync_name)
+        dest = _get_destination(sync)
+        if not hasattr(dest, "drop_orphan_swap_tables"):
+            # Destination cannot drop; mark as failed for now.
+            failed.extend(tables)
+            continue
+        try:
+            d, f = dest.drop_orphan_swap_tables(sync.destination, tables)
+            dropped.extend(d)
+            failed.extend(f)
+        except Exception as e:
+            print_error(f"Failed to drop orphans for {sync_name}: {e}")
+            failed.extend(tables)
+
+    console.print("")
+    console.print(f"Dropped: {len(dropped)}")
+    for t in dropped:
+        console.print(f"  {t}")
+    if failed:
+        console.print(f"\nFailed: {len(failed)}")
+        for t in failed:
+            console.print(f"  {t}")
 
 
 # ---------------------------------------------------------------------------

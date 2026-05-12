@@ -25,6 +25,8 @@ from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, PostgresDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
+import logging
+from datetime import timedelta
 
 try:
     from psycopg2.extras import Json as _Psycopg2Json
@@ -304,6 +306,90 @@ class PostgresDestination:
             self._swap_table = None
 
         return SyncResult()
+
+    def list_orphan_swap_tables(
+        self, config: DestinationConfig, older_than: timedelta | None = None
+    ) -> list[str]:
+        """Detect tables ending with '__drt_swap' and return schema-qualified names.
+
+        *older_than* is accepted for API compatibility but PostgreSQL does not
+        expose a reliable creation timestamp for tables in standard catalogs,
+        so this implementation ignores the age filter and returns all matching
+        swap shadow tables in non-system schemas.
+        """
+        assert isinstance(config, PostgresDestinationConfig)
+        from psycopg2 import sql
+
+        if older_than is not None:
+            # Best-effort: PostgreSQL doesn't store table creation timestamp
+            logging.getLogger(__name__).info(
+                "older_than filter requested but not supported for Postgres; returning all matches"
+            )
+
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            # Exclude system schemas
+            cur.execute(
+                """
+                SELECT table_schema, table_name
+                FROM information_schema.tables
+                WHERE table_type = 'BASE TABLE'
+                  AND table_name LIKE %s
+                  AND table_schema NOT IN ('pg_catalog', 'information_schema')
+                """,
+                ("%__drt_swap",),
+            )
+            rows = cur.fetchall()
+            result: list[str] = []
+            for schema, name in rows:
+                # Defensive: ensure suffix matches exactly
+                if name.endswith("__drt_swap"):
+                    result.append(f"{schema}.{name}")
+            return result
+        finally:
+            conn.close()
+
+    def drop_orphan_swap_tables(
+        self, config: DestinationConfig, tables: list[str]
+    ) -> tuple[list[str], list[str]]:
+        """Drop the given orphan swap tables and return (dropped, failed).
+
+        This enforces safety checks (only drop tables ending with
+        ``__drt_swap``) and performs the DROP using the destination's
+        connection. Returns two lists: successfully dropped tables and
+        tables that failed to drop.
+        """
+        from psycopg2 import sql
+
+        assert isinstance(config, PostgresDestinationConfig)
+
+        dropped: list[str] = []
+        failed: list[str] = []
+
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            for full in tables:
+                try:
+                    if not full or not full.split(".")[-1].endswith("__drt_swap"):
+                        failed.append(full)
+                        continue
+                    schema, name = full.rsplit(".", 1)
+                    cur.execute(
+                        sql.SQL("DROP TABLE IF EXISTS {}.{}").format(
+                            sql.Identifier(schema), sql.Identifier(name)
+                        )
+                    )
+                    dropped.append(full)
+                except Exception:
+                    conn.rollback()
+                    failed.append(full)
+            conn.commit()
+        finally:
+            conn.close()
+
+        return dropped, failed
 
     @staticmethod
     def _load_upsert(

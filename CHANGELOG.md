@@ -64,7 +64,6 @@ None. Drop-in upgrade from v0.6.x.
 - **`--quiet` / `-q` flag for `drt run`** (#265): Suppresses banner / sync-result / summary / watermark output for CI and cron use cases where logs are noise. `--quiet` wins over `--verbose` when both are passed; `--output json` is unaffected so structured output still flows. Contributed by @Pawansingh3889.
 - **`drt test --output json` and `drt test --dry-run`** (#366, #371): Brings `drt test` to feature parity with `drt run`. JSON output gives CI integrations structured pass/fail data; dry-run prints the test plan (test name, target, type) without hitting any database. Contributed by @wahajahmed010.
 - **`drt cloud push` stub command** (#302): Placeholder Typer subcommand that prints an "enterprise cloud push" message and exits cleanly. Reserves the CLI surface so future enterprise integrations don't break user shell aliases / scripts. Re-landed under maintainer authorship after the original contributor (#308) didn't return to sign the CLA. See [OPEN_CORE.md](OPEN_CORE.md) for what's free vs. enterprise.
- 
 
 ### Changed
 

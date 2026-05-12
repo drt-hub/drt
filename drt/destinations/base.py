@@ -6,6 +6,7 @@ Designed with Rust-compatibility in mind: clear boundaries, no magic.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from drt.config.models import DestinationConfig, SyncOptions
@@ -49,6 +50,28 @@ class Destination(Protocol):
         sync_options: SyncOptions,
     ) -> SyncResult:
         """Send a batch of records to the destination."""
+        ...
+
+    def list_orphan_swap_tables(
+        self, config: DestinationConfig, older_than: timedelta | None = None
+    ) -> list[str]:
+        """List orphan shadow tables created by swap replace strategy.
+
+        Returns fully qualified table names (schema.table) for any tables
+        that appear to be shadow swap tables (ending with "__drt_swap").
+
+        Implementations MAY ignore *older_than* if the underlying DB
+        cannot filter by age; callers should treat this as best-effort.
+        """
+        ...
+
+    def drop_orphan_swap_tables(self, config: DestinationConfig, tables: list[str]) -> tuple[list[str], list[str]]:
+        """Drop the provided orphan swap tables.
+
+        Returns a tuple of `(dropped, failed)` where each is a list of
+        schema-qualified table names. Implementations MUST only drop
+        tables that are known safe (e.g. end with "__drt_swap").
+        """
         ...
 
 
