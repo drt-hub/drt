@@ -1273,65 +1273,57 @@ def cloud_status() -> None:
 
 
 # ---------------------------------------------------------------------------
-# docs
+# docs (epic #499 — sync catalog & lineage UI)
 # ---------------------------------------------------------------------------
 
-docs_app = typer.Typer(name="docs", help="Project documentation commands.", no_args_is_help=True)
+docs_app = typer.Typer(
+    name="docs",
+    help="Generate or serve the project's sync catalog.",
+    no_args_is_help=True,
+)
 app.add_typer(docs_app)
 
 
 @docs_app.command(name="generate")
 def docs_generate(
-    format_: str = typer.Option(
-        "html",
-        "--format",
-        "-f",
-        click_type=click.Choice(["html", "mermaid", "json"]),
-        help="Documentation output format.",
+    output: Path = typer.Option(
+        Path("target/docs"), "--output", "-o", help="Output directory."
     ),
-    output: Path | None = typer.Option(
-        None,
-        "--output",
-        "-o",
-        help="Output path for future formats. Mermaid is always written to stdout.",
+    format: str = typer.Option(
+        "html", "--format", "-f", help="Output format: html | mermaid | json."
     ),
     no_state: bool = typer.Option(
-        False,
-        "--no-state",
-        help="Omit state overlays when supported. Currently accepted as a no-op.",
+        False, "--no-state", help="Exclude per-sync run state from the manifest."
     ),
 ) -> None:
-    """Generate project documentation."""
-    if format_ != "mermaid":
-        print_error(
-            f"docs generate --format {format_} is not implemented yet. "
-            "Use --format mermaid for now. Tracking: #501."
-        )
-        raise typer.Exit(1)
+    """Generate the project's sync catalog (Phase 1: --format mermaid only)."""
+    from drt.docs.builder import build_manifest
+    from drt.docs.mermaid import render_mermaid
 
-    from drt.docs import build_manifest, render_mermaid
-
-    try:
+    fmt = format.lower()
+    if fmt == "mermaid":
         manifest = build_manifest(Path("."), include_state=not no_state)
-    except Exception as e:
-        print_error(str(e))
-        raise typer.Exit(1)
-
-    if not manifest.syncs:
-        typer.echo("No sync definitions found. Add YAML files under syncs/ first.", err=True)
+        print(render_mermaid(manifest))
         return
 
-    if output is not None:
-        typer.echo("Ignoring --output for Mermaid; writing graph to stdout.", err=True)
+    if fmt in ("html", "json"):
+        raise NotImplementedError(
+            f"--format {fmt} is scheduled for a follow-up phase of #499. "
+            "Use --format mermaid for now."
+        )
 
-    typer.echo(render_mermaid(manifest), nl=False)
+    raise typer.BadParameter(
+        f"Unknown --format value: {format!r}. Expected: html | mermaid | json."
+    )
 
 
 @docs_app.command(name="serve")
 def docs_serve() -> None:
-    """Serve generated project documentation locally."""
-    print_error("drt docs serve is not implemented yet. Tracking: #501.")
-    raise typer.Exit(1)
+    """Live Web UI for the sync catalog (scheduled for v0.8.x — epic #499)."""
+    raise NotImplementedError(
+        "`drt docs serve` is scheduled for v0.8.x (Phase 4 of epic #499). "
+        "Use `drt docs generate --format mermaid` in the meantime."
+    )
 
 
 # ---------------------------------------------------------------------------

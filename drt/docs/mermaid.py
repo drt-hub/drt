@@ -1,49 +1,77 @@
-"""Mermaid renderer for drt documentation manifests."""
+"""Render a `Manifest` as a Mermaid `graph LR` block."""
 
 from __future__ import annotations
 
-from drt.docs.manifest import Edge, Manifest
+import re
+
+from drt.docs.manifest import Manifest
+
+_SLUG_RE = re.compile(r"[^A-Za-z0-9_]+")
+
+
+def _node_id(prefix: str, name: str) -> str:
+    return f"{prefix}_{_SLUG_RE.sub('_', name).strip('_') or 'x'}"
+
+
+def _escape_label(text: str) -> str:
+    """Mermaid label-safe — wrap in quotes and escape inner quotes."""
+    return text.replace('"', "&quot;")
 
 
 def render_mermaid(manifest: Manifest) -> str:
-    """Render a project manifest as a Mermaid left-to-right DAG."""
-    lines = ["graph LR"]
+    """Render a Mermaid `graph LR` block from *manifest*.
 
-    lines.append("  subgraph Sources")
-    for source in manifest.sources:
-        lines.append(f"    {source.id}[{_label(source.name)}]")
-    lines.append("  end")
+    Layout:
+      - Three subgraphs: Sources, Syncs, Destinations
+      - source -> sync: solid arrow, label "extract"
+      - sync -> destination: solid arrow, label "load"
+      - sync -> sync (lookup): dashed arrow, label "lookup"
+    """
+    lines: list[str] = ["graph LR"]
 
-    lines.append("  subgraph Syncs")
+    if not manifest.syncs:
+        lines.append('    empty["No syncs found"]')
+        return "\n".join(lines)
+
+    # Sources subgraph
+    lines.append("    subgraph Sources")
+    for src in manifest.sources:
+        nid = _node_id("src", src.name)
+        label = f"{_escape_label(src.name)}<br/><i>{_escape_label(src.type)}</i>"
+        lines.append(f'        {nid}["{label}"]')
+    lines.append("    end")
+
+    # Syncs subgraph (hexagon shape with mode label)
+    lines.append("    subgraph Syncs")
     for sync in manifest.syncs:
-        lines.append(f"    {sync.id}{{{{{_label(sync.name)}<br/>{_label(sync.mode)}}}}}")
-    lines.append("  end")
+        nid = _node_id("sync", sync.name)
+        label = f"{_escape_label(sync.name)}<br/><i>{_escape_label(sync.mode)}</i>"
+        lines.append(f'        {nid}{{{{"{label}"}}}}')
+    lines.append("    end")
 
-    lines.append("  subgraph Destinations")
-    for destination in manifest.destinations:
-        lines.append(f"    {destination.id}[{_label(destination.name)}]")
-    lines.append("  end")
+    # Destinations subgraph
+    lines.append("    subgraph Destinations")
+    for dst in manifest.destinations:
+        nid = _node_id("dst", dst.label)
+        label = f"{_escape_label(dst.label)}<br/><i>{_escape_label(dst.type)}</i>"
+        lines.append(f'        {nid}["{label}"]')
+    lines.append("    end")
 
+    # Edges
+    dst_by_id = {d.name: d for d in manifest.destinations}
     for edge in manifest.edges:
-        lines.append(_render_edge(edge))
+        if edge.kind == "source_to_sync":
+            from_id = _node_id("src", edge.from_)
+            to_id = _node_id("sync", edge.to)
+            lines.append(f"    {from_id} -->|extract| {to_id}")
+        elif edge.kind == "sync_to_destination":
+            from_id = _node_id("sync", edge.from_)
+            dst_match = dst_by_id.get(edge.to)
+            to_id = _node_id("dst", dst_match.label) if dst_match else _node_id("dst", edge.to)
+            lines.append(f"    {from_id} -->|load| {to_id}")
+        elif edge.kind == "lookup":
+            from_id = _node_id("sync", edge.from_)
+            to_id = _node_id("sync", edge.to)
+            lines.append(f"    {from_id} -.lookup.-> {to_id}")
 
-    return "\n".join(lines) + "\n"
-
-
-def _render_edge(edge: Edge) -> str:
-    if edge.kind == "source_to_sync":
-        return f"  {edge.from_id} -->|extract| {edge.to_id}"
-    if edge.kind == "sync_to_destination":
-        return f"  {edge.from_id} -->|load| {edge.to_id}"
-    return f"  {edge.from_id} -.lookup.-> {edge.to_id}"
-
-
-def _label(value: str) -> str:
-    return (
-        value.replace("\\", "\\\\")
-        .replace("[", "&#91;")
-        .replace("]", "&#93;")
-        .replace("{", "&#123;")
-        .replace("}", "&#125;")
-        .replace("\n", " ")
-    )
+    return "\n".join(lines)

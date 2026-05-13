@@ -157,21 +157,21 @@ drt docs generate --format mermaid > dag.md
 
 ```mermaid
 graph LR
-  subgraph Sources
-    src_bigquery_prod[bigquery_prod]
-  end
-  subgraph Syncs
-    sync_users_to_hubspot{{users_to_hubspot<br/>upsert}}
-    sync_accounts_to_hubspot{{accounts_to_hubspot<br/>upsert}}
-  end
-  subgraph Destinations
-    dst_hubspot_hubspot_contacts[hubspot_contacts]
-  end
-  src_bigquery_prod -->|extract| sync_users_to_hubspot
-  src_bigquery_prod -->|extract| sync_accounts_to_hubspot
-  sync_users_to_hubspot -->|load| dst_hubspot_hubspot_contacts
-  sync_accounts_to_hubspot -->|load| dst_hubspot_hubspot_contacts
-  sync_accounts_to_hubspot -.lookup.-> sync_users_to_hubspot
+    subgraph Sources
+        src_bigquery_prod["bigquery_prod<br/><i>bigquery</i>"]
+    end
+    subgraph Syncs
+        sync_users_to_hubspot{{"users_to_hubspot<br/><i>upsert</i>"}}
+        sync_accounts_to_hubspot{{"accounts_to_hubspot<br/><i>upsert</i>"}}
+    end
+    subgraph Destinations
+        dst_hubspot_contacts["hubspot (contacts)<br/><i>hubspot</i>"]
+    end
+    src_bigquery_prod -->|extract| sync_users_to_hubspot
+    src_bigquery_prod -->|extract| sync_accounts_to_hubspot
+    sync_users_to_hubspot -->|load| dst_hubspot_contacts
+    sync_accounts_to_hubspot -->|load| dst_hubspot_contacts
+    sync_users_to_hubspot -.lookup.-> sync_accounts_to_hubspot
 ```
 
 ### Shell completion
