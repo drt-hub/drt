@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -191,3 +192,88 @@ def test_cli_validate_error_shows_field_path(
     result = runner.invoke(app, ["validate"])
     assert "destination" in result.output
     assert result.exit_code == 1
+
+
+def test_cli_validate_warns_on_hardcoded_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sync = {
+        **VALID_SYNC,
+        "destination": {
+            **VALID_SYNC["destination"],
+            "auth": {"type": "bearer", "token": "sk-" + "a" * 32},
+        },
+    }
+    _write_sync(tmp_path / "syncs", "secret", sync)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["validate"])
+
+    assert result.exit_code == 0
+    assert "WARNING" in result.output
+    assert "destination.auth.token" in result.output
+    assert "hardcoded secret" in result.output
+
+
+def test_cli_validate_does_not_warn_on_env_secret_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("API_TOKEN", "sk-" + "b" * 32)
+    sync = {
+        **VALID_SYNC,
+        "destination": {
+            **VALID_SYNC["destination"],
+            "auth": {"type": "bearer", "token": "${API_TOKEN}"},
+        },
+    }
+    _write_sync(tmp_path / "syncs", "env-secret", sync)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["validate"])
+
+    assert result.exit_code == 0
+    assert "WARNING" not in result.output
+    assert "hardcoded secret" not in result.output
+
+
+def test_cli_validate_strict_promotes_secret_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sync = {
+        **VALID_SYNC,
+        "destination": {
+            **VALID_SYNC["destination"],
+            "auth": {"type": "bearer", "token": "sk-" + "c" * 32},
+        },
+    }
+    _write_sync(tmp_path / "syncs", "secret", sync)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["validate", "--strict"])
+
+    assert result.exit_code == 1
+    assert "✗" in result.output
+    assert "destination.auth.token" in result.output
+    assert "hardcoded secret" in result.output
+
+
+def test_cli_validate_json_includes_secret_warnings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sync = {
+        **VALID_SYNC,
+        "destination": {
+            **VALID_SYNC["destination"],
+            "auth": {"type": "bearer", "token": "sk-" + "d" * 32},
+        },
+    }
+    _write_sync(tmp_path / "syncs", "secret", sync)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["validate", "--output", "json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    warning = payload["results"][0]["warnings"][0]
+    assert warning["path"] == "destination.auth.token"
+    assert "hardcoded secret" in warning["message"]
