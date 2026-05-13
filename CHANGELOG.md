@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Connection test in `drt validate`** (#367, PR #484): Added `--check-connection` flag to test connectivity to SQL destinations (PostgreSQL, MySQL, ClickHouse, Snowflake) before running syncs via `SELECT 1`. Reports pass/fail per sync in both text and `--output json`; non-SQL destinations are skipped gracefully. Snowflake destination internally refactored to share a `_connect()` helper between `load` and `test_connection`. Contributed by @GokulKashyap.
 - **`drt cloud status` stub command** (#491, PR #488): Companion stub to `drt cloud push`. Both commands now print a unified "drt Cloud coming soon" message via a shared `CLOUD_MESSAGE` constant. Lays groundwork for the future drt Cloud control plane. Contributed by @Photon101.
+- **`drt docs generate --format mermaid`** (epic #499, sub-issue #501): First slice of the sync catalog & lineage primitive. Renders a Mermaid `graph LR` of `source → sync → destination`, including heuristic lookup edges between syncs whose destination table is referenced by another sync's `lookups`. Pinable in README via GitHub-flavored Mermaid fence. `--format html` and `--format json` raise `NotImplementedError` pending follow-up phases (P2/P3 of #499). New package `drt/docs/` lays the foundation for `drt docs generate --format html` (Phase 3, v0.8) and `drt docs serve` (Phase 4, v0.8.x).
 
 ## [0.7.2] - 2026-05-11
 

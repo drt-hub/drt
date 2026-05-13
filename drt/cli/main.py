@@ -1273,6 +1273,60 @@ def cloud_status() -> None:
 
 
 # ---------------------------------------------------------------------------
+# docs (epic #499 — sync catalog & lineage UI)
+# ---------------------------------------------------------------------------
+
+docs_app = typer.Typer(
+    name="docs",
+    help="Generate or serve the project's sync catalog.",
+    no_args_is_help=True,
+)
+app.add_typer(docs_app)
+
+
+@docs_app.command(name="generate")
+def docs_generate(
+    output: Path = typer.Option(
+        Path("target/docs"), "--output", "-o", help="Output directory."
+    ),
+    format: str = typer.Option(
+        "html", "--format", "-f", help="Output format: html | mermaid | json."
+    ),
+    no_state: bool = typer.Option(
+        False, "--no-state", help="Exclude per-sync run state from the manifest."
+    ),
+) -> None:
+    """Generate the project's sync catalog (Phase 1: --format mermaid only)."""
+    from drt.docs.builder import build_manifest
+    from drt.docs.mermaid import render_mermaid
+
+    fmt = format.lower()
+    if fmt == "mermaid":
+        manifest = build_manifest(Path("."))
+        print(render_mermaid(manifest))
+        return
+
+    if fmt in ("html", "json"):
+        raise NotImplementedError(
+            f"--format {fmt} is scheduled for a follow-up phase of #499. "
+            "Use --format mermaid for now."
+        )
+
+    raise typer.BadParameter(
+        f"Unknown --format value: {format!r}. Expected: html | mermaid | json."
+    )
+
+
+@docs_app.command(name="serve")
+def docs_serve() -> None:
+    """Live Web UI for the sync catalog (scheduled for v0.8.x — epic #499)."""
+    raise NotImplementedError(
+        "`drt docs serve` is scheduled for v0.8.x (Phase 4 of epic #499). "
+        "Use `drt docs generate --format mermaid` in the meantime."
+    )
+
+
+# ---------------------------------------------------------------------------
 # mcp
 # ---------------------------------------------------------------------------
 
