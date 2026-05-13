@@ -88,7 +88,10 @@ def _serialize_value(
 
 
 class PostgresDestination:
-    """Upsert or replace records into a PostgreSQL table."""
+    """Upsert or replace records into a PostgreSQL table.
+
+    Implements ConnectionTestable via test_connection().
+    """
 
     def __init__(self) -> None:
         self._replace_truncated: bool = False

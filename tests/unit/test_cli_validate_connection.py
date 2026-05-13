@@ -3,15 +3,27 @@ from unittest.mock import MagicMock, patch
 from typer.testing import CliRunner
 
 from drt.cli.main import app
-from drt.config.models import PostgresDestinationConfig, SlackDestinationConfig
+from drt.config.models import (
+    DestinationConfig,
+    PostgresDestinationConfig,
+    SlackDestinationConfig,
+)
 
 runner = CliRunner()
 
+
+class _ConnectionTestDestination:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+
+    def test_connection(self, config: DestinationConfig) -> None:
+        if self.error is not None:
+            raise self.error
+
+
 def test_validate_check_connection_sql_success() -> None:
     """Test validate --check-connection for an SQL destination (success)."""
-    mock_dest = MagicMock()
-    # Mocking that the destination has test_connection
-    mock_dest.test_connection.return_value = None
+    mock_dest = _ConnectionTestDestination()
     
     with patch("drt.connectors.registry.get_destination", return_value=mock_dest), \
          patch("drt.config.parser.load_syncs_safe") as mock_load:
@@ -37,8 +49,7 @@ def test_validate_check_connection_sql_success() -> None:
 
 def test_validate_check_connection_sql_failure() -> None:
     """Test validate --check-connection for an SQL destination (failure)."""
-    mock_dest = MagicMock()
-    mock_dest.test_connection.side_effect = Exception("Conn Error")
+    mock_dest = _ConnectionTestDestination(Exception("Conn Error"))
     
     with patch("drt.connectors.registry.get_destination", return_value=mock_dest), \
          patch("drt.config.parser.load_syncs_safe") as mock_load:
@@ -112,8 +123,7 @@ def test_validate_check_connection_sql_no_tester_method() -> None:
 def test_validate_check_connection_json() -> None:
     """Test validate --check-connection --output json."""
     import json
-    mock_dest = MagicMock()
-    mock_dest.test_connection.return_value = None
+    mock_dest = _ConnectionTestDestination()
     
     with patch("drt.connectors.registry.get_destination", return_value=mock_dest), \
          patch("drt.config.parser.load_syncs_safe") as mock_load:

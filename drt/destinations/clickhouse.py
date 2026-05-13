@@ -37,7 +37,10 @@ from drt.destinations.row_errors import RowError
 
 
 class ClickHouseDestination:
-    """Insert records into a ClickHouse table."""
+    """Insert records into a ClickHouse table.
+
+    Implements ConnectionTestable via test_connection().
+    """
 
     def __init__(self) -> None:
         self._replace_truncated: bool = False

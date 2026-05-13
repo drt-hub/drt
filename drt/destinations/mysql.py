@@ -62,7 +62,10 @@ def _serialize_value(
 
 
 class MySQLDestination:
-    """Upsert or replace records into a MySQL table."""
+    """Upsert or replace records into a MySQL table.
+
+    Implements ConnectionTestable via test_connection().
+    """
 
     def __init__(self) -> None:
         self._replace_truncated: bool = False

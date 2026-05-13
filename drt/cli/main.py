@@ -831,6 +831,7 @@ def _run_connection_test(sync: SyncConfig) -> dict[str, Any]:
         SnowflakeDestinationConfig,
     )
     from drt.connectors.registry import get_destination
+    from drt.destinations.base import ConnectionTestable
 
     dest_config = sync.destination
     is_sql = isinstance(
@@ -848,9 +849,8 @@ def _run_connection_test(sync: SyncConfig) -> dict[str, Any]:
 
     try:
         dest = get_destination(dest_config)
-        tester = getattr(dest, "test_connection", None)
-        if callable(tester):
-            tester(dest_config)
+        if isinstance(dest, ConnectionTestable):
+            dest.test_connection(dest_config)
             return {"success": True, "error": None, "skipped": False}
         else:
             return {

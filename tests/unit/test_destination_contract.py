@@ -6,7 +6,7 @@ import inspect
 
 import pytest
 
-from drt.destinations.base import Destination, SyncResult
+from drt.destinations.base import ConnectionTestable, Destination, SyncResult
 from drt.destinations.clickhouse import ClickHouseDestination
 from drt.destinations.discord import DiscordDestination
 from drt.destinations.file import FileDestination
@@ -19,6 +19,7 @@ from drt.destinations.parquet import ParquetDestination
 from drt.destinations.postgres import PostgresDestination
 from drt.destinations.rest_api import RestApiDestination
 from drt.destinations.slack import SlackDestination
+from drt.destinations.snowflake import SnowflakeDestination
 from drt.destinations.teams import TeamsDestination
 
 ALL_DESTINATIONS = [
@@ -32,6 +33,26 @@ ALL_DESTINATIONS = [
     NotionDestination,
     ParquetDestination,
     PostgresDestination,
+    RestApiDestination,
+    SlackDestination,
+    TeamsDestination,
+]
+
+CONNECTION_TESTABLE_DESTINATIONS = [
+    ClickHouseDestination,
+    MySQLDestination,
+    PostgresDestination,
+    SnowflakeDestination,
+]
+
+NON_CONNECTION_TESTABLE_DESTINATIONS = [
+    DiscordDestination,
+    FileDestination,
+    GitHubActionsDestination,
+    GoogleSheetsDestination,
+    HubSpotDestination,
+    NotionDestination,
+    ParquetDestination,
     RestApiDestination,
     SlackDestination,
     TeamsDestination,
@@ -55,3 +76,17 @@ def test_load_return_annotation(cls: type) -> None:
     sig = inspect.signature(cls.load)
     ann = sig.return_annotation
     assert ann is SyncResult or ann == "SyncResult"
+
+
+@pytest.mark.parametrize("cls", CONNECTION_TESTABLE_DESTINATIONS, ids=lambda c: c.__name__)
+def test_sql_destinations_implement_connection_testable(cls: type) -> None:
+    assert isinstance(cls(), ConnectionTestable)
+
+
+@pytest.mark.parametrize(
+    "cls",
+    NON_CONNECTION_TESTABLE_DESTINATIONS,
+    ids=lambda c: c.__name__,
+)
+def test_non_sql_destinations_do_not_implement_connection_testable(cls: type) -> None:
+    assert not isinstance(cls(), ConnectionTestable)
