@@ -50,7 +50,7 @@ sync:
     max_attempts: 3
 ```
 
-Supported on every HTTP destination: `discord`, `github_actions`, `google_ads`, `hubspot`, `intercom`, `jira`, `linear`, `notion`, `rest_api`, `sendgrid`, `slack`, `teams`, `twilio`.
+Supported on every HTTP destination: `discord`, `github_actions`, `google_ads`, `hubspot`, `intercom`, `jira`, `linear`, `notion`, `rest_api`, `sendgrid`, `slack`, `teams`, `twilio`, `zendesk`.
 
 ## When retry happens
 

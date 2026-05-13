@@ -20,6 +20,7 @@ from drt.destinations.postgres import PostgresDestination
 from drt.destinations.rest_api import RestApiDestination
 from drt.destinations.slack import SlackDestination
 from drt.destinations.teams import TeamsDestination
+from drt.destinations.zendesk import ZendeskDestination
 
 ALL_DESTINATIONS = [
     ClickHouseDestination,
@@ -35,6 +36,7 @@ ALL_DESTINATIONS = [
     RestApiDestination,
     SlackDestination,
     TeamsDestination,
+    ZendeskDestination,
 ]
 
 
