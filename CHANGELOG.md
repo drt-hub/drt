@@ -37,9 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-
-- **Connection test in `drt validate`** (#367): Added `--check-connection` flag to test connectivity to SQL destinations (PostgreSQL, MySQL, ClickHouse, Snowflake) before running syncs. Reports pass/fail per sync; non-SQL destinations are skipped gracefully.
-- **Deprecation warnings in `drt validate`** (#478, closes #467): The `validate` command now reads `drt/deprecations.py` and surfaces ⚠️ warnings for any deprecated config keys it finds in your sync YAMLs — both in text output and as a per-sync `deprecations` array under `--output json`. Exit code stays `0` (warnings are non-blocking). The registry is currently empty (no active deprecations); add entries to `DEPRECATED_SYNC_KEYS` when announcing a new deprecation per VERSIONING.md Step 1. Migration guides live under `docs/migration/`. Closes the Step 2 ("Add Tooling Support") TODO from #457.
+- **Connection test in `drt validate`** (#367, PR #484): Added `--check-connection` flag to test connectivity to SQL destinations (PostgreSQL, MySQL, ClickHouse, Snowflake) before running syncs via `SELECT 1`. Reports pass/fail per sync in both text and `--output json`; non-SQL destinations are skipped gracefully. Snowflake destination internally refactored to share a `_connect()` helper between `load` and `test_connection`. Contributed by @GokulKashyap.
+- **`drt cloud status` stub command** (#491, PR #488): Companion stub to `drt cloud push`. Both commands now print a unified "drt Cloud coming soon" message via a shared `CLOUD_MESSAGE` constant. Lays groundwork for the future drt Cloud control plane. Contributed by @Photon101.
 
 ## [0.7.2] - 2026-05-11
 
