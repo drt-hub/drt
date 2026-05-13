@@ -206,6 +206,116 @@ def test_incremental_saves_max_cursor(tmp_path: Path) -> None:
     assert state.last_cursor_value == "2024-01-03"
 
 
+# ---------------------------------------------------------------------------
+# Cursor value stringification (#475)
+# ---------------------------------------------------------------------------
+
+
+class TestCursorStringification:
+    """tz-aware datetimes (e.g. BigQuery TIMESTAMP) must persist as naive UTC
+    so that user SQL written tz-naive doesn't re-fire the boundary row.
+    """
+
+    def test_tz_aware_datetime_normalized_to_naive_utc(self, tmp_path: Path) -> None:
+        from datetime import datetime, timezone
+
+        from drt.state.manager import StateManager
+
+        # Simulate what BigQuery's Python client returns for a TIMESTAMP column
+        tz_aware = datetime(2026, 5, 7, 12, 24, 17, tzinfo=timezone.utc)
+        rows = [{"id": 1, "updated_at": tz_aware}]
+        source = FakeSource(rows)
+        dest = FakeDestination()
+        sync = _make_incremental_sync()
+        state_mgr = StateManager(tmp_path)
+
+        run_sync(sync, source, dest, _make_profile(), tmp_path, state_manager=state_mgr)
+
+        state = state_mgr.get_last_sync("inc_sync")
+        assert state is not None
+        # No "+00:00" suffix — the persisted form should round-trip through
+        # naive TIMESTAMP() literals in user SQL.
+        assert state.last_cursor_value is not None
+        assert "+00:00" not in state.last_cursor_value
+        assert state.last_cursor_value == "2026-05-07 12:24:17"
+
+    def test_tz_aware_non_utc_normalized_to_utc_then_naive(
+        self, tmp_path: Path
+    ) -> None:
+        """JST 21:24 → UTC 12:24 (naive) — preserves the instant."""
+        from datetime import datetime, timedelta, timezone
+
+        from drt.state.manager import StateManager
+
+        jst = timezone(timedelta(hours=9))
+        tz_aware = datetime(2026, 5, 7, 21, 24, 17, tzinfo=jst)
+        rows = [{"id": 1, "updated_at": tz_aware}]
+        source = FakeSource(rows)
+        dest = FakeDestination()
+        sync = _make_incremental_sync()
+        state_mgr = StateManager(tmp_path)
+
+        run_sync(sync, source, dest, _make_profile(), tmp_path, state_manager=state_mgr)
+
+        state = state_mgr.get_last_sync("inc_sync")
+        assert state is not None
+        assert state.last_cursor_value == "2026-05-07 12:24:17"
+
+    def test_naive_datetime_preserved_unchanged(self, tmp_path: Path) -> None:
+        """Naive datetimes were already correct — must not be touched."""
+        from datetime import datetime
+
+        from drt.state.manager import StateManager
+
+        naive = datetime(2026, 5, 7, 12, 24, 17)
+        rows = [{"id": 1, "updated_at": naive}]
+        source = FakeSource(rows)
+        dest = FakeDestination()
+        sync = _make_incremental_sync()
+        state_mgr = StateManager(tmp_path)
+
+        run_sync(sync, source, dest, _make_profile(), tmp_path, state_manager=state_mgr)
+
+        state = state_mgr.get_last_sync("inc_sync")
+        assert state is not None
+        assert state.last_cursor_value == "2026-05-07 12:24:17"
+
+    def test_string_cursor_unchanged(self, tmp_path: Path) -> None:
+        """String cursors (e.g. ISO date strings) pass through str() unchanged."""
+        from drt.state.manager import StateManager
+
+        rows = [
+            {"id": 1, "updated_at": "2026-05-07"},
+            {"id": 2, "updated_at": "2026-05-09"},
+        ]
+        source = FakeSource(rows)
+        dest = FakeDestination()
+        sync = _make_incremental_sync()
+        state_mgr = StateManager(tmp_path)
+
+        run_sync(sync, source, dest, _make_profile(), tmp_path, state_manager=state_mgr)
+
+        state = state_mgr.get_last_sync("inc_sync")
+        assert state is not None
+        assert state.last_cursor_value == "2026-05-09"
+
+    def test_numeric_cursor_unchanged(self, tmp_path: Path) -> None:
+        """Numeric cursors (epoch seconds, auto-incrementing IDs) unchanged."""
+        from drt.state.manager import StateManager
+
+        rows = [{"id": 1, "updated_at": 1746619457}]
+        source = FakeSource(rows)
+        dest = FakeDestination()
+        sync = _make_incremental_sync()
+        state_mgr = StateManager(tmp_path)
+
+        run_sync(sync, source, dest, _make_profile(), tmp_path, state_manager=state_mgr)
+
+        state = state_mgr.get_last_sync("inc_sync")
+        assert state is not None
+        assert state.last_cursor_value == "1746619457"
+
+
 def test_incremental_uses_saved_cursor(tmp_path: Path) -> None:
     from drt.state.manager import StateManager, SyncState
 

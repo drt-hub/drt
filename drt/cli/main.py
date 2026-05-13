@@ -107,6 +107,10 @@ class _RunContext:
     # Cooperative shutdown flag — set by SIGTERM/SIGINT handler in run().
     # Each engine call checks this between batches and exits gracefully.
     stop_event: threading.Event | None = None
+    # Diff preview (#413) — when both dry_run and compute_diff are True,
+    # the engine populates result.diff for the renderer to display.
+    compute_diff: bool = False
+    diff_limit: int = 20
 
 
 def _exit_code_for_signal(signum: int) -> int:
@@ -120,6 +124,7 @@ def _run_one(
     profile: ProfileConfig,
 ) -> tuple[str, dict[str, object], bool]:
     """Execute a single sync and return (name, result_dict, had_error)."""
+    from drt import telemetry
     from drt.engine.sync import run_sync
 
     dest = _get_destination(sync)
@@ -129,87 +134,118 @@ def _run_one(
     t0 = time.monotonic()
     if ctx.log_json:
         logging.info("sync_started", extra={"sync": sync.name})
+
+    status_str = "failed"
+    rows_synced = 0
+    elapsed = 0.0
+    return_value: tuple[str, dict[str, object], bool]
     try:
-        result = run_sync(
-            sync,
-            ctx.source,
-            dest,
-            profile,
-            Path("."),
-            ctx.dry_run,
-            ctx.state_mgr,
-            watermark_storage=wm_storage,
-            cursor_value_override=(
-                ctx.cursor_value if sync.sync.mode == "incremental" else None
-            ),
-            history_manager=ctx.history_mgr,
-            history_retention_days=ctx.history_retention_days,
-            stop_event=ctx.stop_event,
-        )
-    except Exception as e:
+        try:
+            result = run_sync(
+                sync,
+                ctx.source,
+                dest,
+                profile,
+                Path("."),
+                ctx.dry_run,
+                ctx.state_mgr,
+                watermark_storage=wm_storage,
+                cursor_value_override=(
+                    ctx.cursor_value if sync.sync.mode == "incremental" else None
+                ),
+                history_manager=ctx.history_mgr,
+                history_retention_days=ctx.history_retention_days,
+                stop_event=ctx.stop_event,
+                compute_diff=ctx.compute_diff,
+                diff_limit=ctx.diff_limit,
+            )
+        except Exception as e:
+            elapsed = round(time.monotonic() - t0, 2)
+            entry: dict[str, object] = {
+                "name": sync.name,
+                "status": "failed",
+                "rows_synced": 0,
+                "rows_failed": 0,
+                "duration_seconds": elapsed,
+                "dry_run": ctx.dry_run,
+                "error": str(e),
+            }
+            if ctx.log_json:
+                logging.error(
+                    "sync_complete",
+                    extra={
+                        "sync": sync.name,
+                        "rows": 0,
+                        "duration_ms": round(elapsed * 1000),
+                        "status": "failed",
+                    },
+                )
+            if not ctx.json_mode:
+                print_error(f"[{sync.name}] Unexpected error: {e}")
+            return_value = (sync.name, entry, True)
+            return return_value
+
         elapsed = round(time.monotonic() - t0, 2)
-        entry: dict[str, object] = {
+        status_str = (
+            "success"
+            if result.failed == 0
+            else "partial"
+            if result.success > 0
+            else "failed"
+        )
+        rows_synced = result.success
+        entry = {
             "name": sync.name,
-            "status": "failed",
-            "rows_synced": 0,
-            "rows_failed": 0,
+            "status": status_str,
+            "rows_extracted": result.rows_extracted,
+            "rows_synced": result.success,
+            "rows_failed": result.failed,
             "duration_seconds": elapsed,
             "dry_run": ctx.dry_run,
-            "error": str(e),
         }
+        if result.watermark_source:
+            entry["watermark_source"] = result.watermark_source
+        if result.cursor_value_used is not None:
+            entry["cursor_value_used"] = result.cursor_value_used
         if ctx.log_json:
-            logging.error(
+            logging.info(
                 "sync_complete",
                 extra={
                     "sync": sync.name,
-                    "rows": 0,
+                    "rows": result.success,
                     "duration_ms": round(elapsed * 1000),
-                    "status": "failed",
+                    "status": status_str,
                 },
             )
-        if not ctx.json_mode:
-            print_error(f"[{sync.name}] Unexpected error: {e}")
-        return sync.name, entry, True
+        if not ctx.json_mode and not ctx.quiet:
+            if ctx.dry_run:
+                print_dry_run_summary(sync, profile, result.success, dest)
+            else:
+                print_sync_result(sync.name, result, elapsed)
+        if not ctx.json_mode and ctx.verbose and not ctx.quiet and result.row_errors:
+            print_row_errors(result.row_errors)
+        diff_value = getattr(result, "diff", None)
+        if diff_value is not None:
+            if ctx.json_mode:
+                from drt.cli.output import diff_to_dict
 
-    elapsed = round(time.monotonic() - t0, 2)
-    status_str = (
-        "success"
-        if result.failed == 0
-        else "partial"
-        if result.success > 0
-        else "failed"
-    )
-    entry = {
-        "name": sync.name,
-        "status": status_str,
-        "rows_extracted": result.rows_extracted,
-        "rows_synced": result.success,
-        "rows_failed": result.failed,
-        "duration_seconds": elapsed,
-        "dry_run": ctx.dry_run,
-    }
-    if result.watermark_source:
-        entry["watermark_source"] = result.watermark_source
-    if result.cursor_value_used is not None:
-        entry["cursor_value_used"] = result.cursor_value_used
-    if ctx.log_json:
-        logging.info(
-            "sync_complete",
-            extra={
-                "sync": sync.name,
-                "rows": result.success,
-                "duration_ms": round(elapsed * 1000),
-                "status": status_str,
-            },
-        )
-    if not ctx.json_mode and not ctx.quiet:
-        if ctx.dry_run:
-            print_dry_run_summary(sync, profile, result.success, dest)
-        else:
-            print_sync_result(sync.name, result, elapsed)
-    if not ctx.json_mode and ctx.verbose and not ctx.quiet and result.row_errors:
-        print_row_errors(result.row_errors)
-    return sync.name, entry, result.failed > 0
+                entry["diff"] = diff_to_dict(diff_value)
+            elif not ctx.quiet:
+                from drt.cli.output import print_diff_table
+
+                print_diff_table(diff_value, sync.name)
+        return_value = (sync.name, entry, result.failed > 0)
+        return return_value
+    finally:
+        if not ctx.dry_run:
+            telemetry.track_sync_completed(
+                sync_mode=sync.sync.mode,
+                source_type=profile.type,
+                destination_type=sync.destination.type,
+                rows_synced=rows_synced,
+                duration_seconds=elapsed,
+                status=status_str,
+            )
 
 
 def _print_watermark_summary(results: list[dict[str, object]]) -> None:
@@ -485,6 +521,20 @@ def run(
         "--cursor-value",
         help="Override cursor/watermark value for incremental syncs (backfill/recovery).",
     ),
+    diff: bool = typer.Option(
+        False,
+        "--diff",
+        help=(
+            "When combined with --dry-run, show record-level diff (added/"
+            "updated/deleted) for queryable destinations or a sample of "
+            "records to send for non-queryable destinations."
+        ),
+    ),
+    diff_limit: int = typer.Option(
+        20,
+        "--diff-limit",
+        help="Maximum number of records to show per diff category (default 20).",
+    ),
 ) -> None:
     """Run sync(s) defined in the project.
 
@@ -492,7 +542,11 @@ def run(
     Use --select to filter by name or tag (e.g. --select tag:crm).
     Use --select "*" or --select all to be explicit about running every sync.
     Use --threads N for parallel execution.
+    Use --dry-run --diff to preview record-level changes (#413).
     """
+    if diff and not dry_run:
+        print_error("--diff requires --dry-run")
+        raise typer.Exit(1)
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     from drt.config.credentials import load_profile
@@ -611,6 +665,8 @@ def run(
         log_json=log_format == "json",
         cursor_value=cursor_value,
         stop_event=stop_event,
+        compute_diff=diff,
+        diff_limit=diff_limit,
     )
 
     # Execute syncs — parallel if threads > 1, sequential otherwise
@@ -723,6 +779,9 @@ def validate(
     select: str = typer.Option(None, "--select", "-s", help="Validate a specific sync by name."),
     emit_schema: bool = typer.Option(  # noqa: E501
         False, "--emit-schema", help="Write JSON Schemas to .drt/schemas/."
+    ),
+    check_connection: bool = typer.Option(
+        False, "--check-connection", help="Test connectivity to SQL destinations."
     ),
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
     check_connection: bool = typer.Option(
@@ -848,6 +907,46 @@ def validate(
         console.print(f"\n[dim]Schemas written to {schema_dir}/[/dim]")
         for p in written:
             console.print(f"  {p}")
+
+
+def _run_connection_test(sync: SyncConfig) -> dict[str, Any]:
+    """Internal helper to test connectivity for a sync's destination."""
+    from drt.config.models import (
+        ClickHouseDestinationConfig,
+        MySQLDestinationConfig,
+        PostgresDestinationConfig,
+        SnowflakeDestinationConfig,
+    )
+    from drt.connectors.registry import get_destination
+
+    dest_config = sync.destination
+    is_sql = isinstance(
+        dest_config,
+        (
+            PostgresDestinationConfig,
+            MySQLDestinationConfig,
+            ClickHouseDestinationConfig,
+            SnowflakeDestinationConfig,
+        ),
+    )
+
+    if not is_sql:
+        return {"success": None, "error": None, "skipped": True}
+
+    try:
+        dest = get_destination(dest_config)
+        tester = getattr(dest, "test_connection", None)
+        if callable(tester):
+            tester(dest_config)
+            return {"success": True, "error": None, "skipped": False}
+        else:
+            return {
+                "success": False,
+                "error": "test_connection method missing",
+                "skipped": False,
+            }
+    except Exception as e:
+        return {"success": False, "error": str(e), "skipped": False}
 
 
 # ---------------------------------------------------------------------------
@@ -1166,6 +1265,76 @@ def serve(
 
 
 # ---------------------------------------------------------------------------
+# config (user-level settings — currently telemetry only)
+# ---------------------------------------------------------------------------
+
+config_app = typer.Typer(
+    name="config",
+    help="Manage user-level drt settings (~/.drt/).",
+    no_args_is_help=True,
+)
+app.add_typer(config_app)
+
+
+@config_app.command(name="set")
+def config_set(key: str, value: str) -> None:
+    """Set a user-level setting. Currently supports: telemetry.enabled."""
+    from drt import telemetry
+
+    if key == "telemetry.enabled":
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            telemetry.set_enabled(True)
+            console.print("[green]Telemetry enabled.[/green] Thanks for helping improve drt.")
+        elif normalized in {"false", "0", "no", "off"}:
+            telemetry.set_enabled(False)
+            console.print("Telemetry disabled.")
+        else:
+            print_error(f"Invalid boolean value: {value!r}")
+            raise typer.Exit(code=2)
+        return
+    print_error(f"Unknown config key: {key!r}. Known keys: telemetry.enabled")
+    raise typer.Exit(code=2)
+
+
+@config_app.command(name="unset")
+def config_unset(key: str) -> None:
+    """Remove a user-level setting (returns to default)."""
+    from drt import telemetry
+
+    if key == "telemetry.enabled":
+        telemetry.unset_enabled()
+        console.print("Telemetry preference cleared (default: off).")
+        return
+    print_error(f"Unknown config key: {key!r}.")
+    raise typer.Exit(code=2)
+
+
+@config_app.command(name="show-telemetry")
+def config_show_telemetry() -> None:
+    """Print the exact payload that would be sent for the next sync.
+
+    Helps users verify what data leaves their machine before opting in.
+    """
+    from drt import telemetry
+
+    enabled = telemetry.is_enabled()
+    sample = telemetry.build_sync_completed_payload(
+        distinct_id="<anonymous-id>",
+        sync_mode="<sync.sync.mode>",
+        source_type="<profile.type>",
+        destination_type="<destination.type>",
+        rows_synced=0,
+        duration_seconds=0.0,
+        status="<success|partial|failed>",
+    )
+    sample.pop("api_key", None)
+    console.print(f"Telemetry enabled: [{'green' if enabled else 'yellow'}]{enabled}[/]")
+    console.print("Payload schema (api_key elided):")
+    console.print_json(json.dumps(sample))
+
+
+# ---------------------------------------------------------------------------
 # cloud (stub for future drt Cloud service)
 # ---------------------------------------------------------------------------
 
@@ -1173,13 +1342,75 @@ cloud_app = typer.Typer(name="cloud", help="drt Cloud commands (stub).", no_args
 app.add_typer(cloud_app)
 
 
+CLOUD_MESSAGE = (
+    "\n☁️  drt Cloud is coming soon!\nFollow https://github.com/drt-hub/drt for updates.\n"
+)
+
+
 @cloud_app.command(name="push")
 def cloud_push() -> None:
     """Push local project configuration to drt Cloud (stub)."""
-    console.print("\n[bold blue]🚀 drt Cloud[/bold blue]")
-    console.print("This is a stub for the future drt Cloud service.")
-    console.print("Project state would be pushed to your cloud dashboard here.")
-    console.print("\n[dim]Coming soon...[/dim]\n")
+    print(CLOUD_MESSAGE)
+
+
+@cloud_app.command(name="status")
+def cloud_status() -> None:
+    """Check drt Cloud deployment status (stub)."""
+    print(CLOUD_MESSAGE)
+
+
+# ---------------------------------------------------------------------------
+# docs (epic #499 — sync catalog & lineage UI)
+# ---------------------------------------------------------------------------
+
+docs_app = typer.Typer(
+    name="docs",
+    help="Generate or serve the project's sync catalog.",
+    no_args_is_help=True,
+)
+app.add_typer(docs_app)
+
+
+@docs_app.command(name="generate")
+def docs_generate(
+    output: Path = typer.Option(
+        Path("target/docs"), "--output", "-o", help="Output directory."
+    ),
+    format: str = typer.Option(
+        "html", "--format", "-f", help="Output format: html | mermaid | json."
+    ),
+    no_state: bool = typer.Option(
+        False, "--no-state", help="Exclude per-sync run state from the manifest."
+    ),
+) -> None:
+    """Generate the project's sync catalog (Phase 1: --format mermaid only)."""
+    from drt.docs.builder import build_manifest
+    from drt.docs.mermaid import render_mermaid
+
+    fmt = format.lower()
+    if fmt == "mermaid":
+        manifest = build_manifest(Path("."))
+        print(render_mermaid(manifest))
+        return
+
+    if fmt in ("html", "json"):
+        raise NotImplementedError(
+            f"--format {fmt} is scheduled for a follow-up phase of #499. "
+            "Use --format mermaid for now."
+        )
+
+    raise typer.BadParameter(
+        f"Unknown --format value: {format!r}. Expected: html | mermaid | json."
+    )
+
+
+@docs_app.command(name="serve")
+def docs_serve() -> None:
+    """Live Web UI for the sync catalog (scheduled for v0.8.x — epic #499)."""
+    raise NotImplementedError(
+        "`drt docs serve` is scheduled for v0.8.x (Phase 4 of epic #499). "
+        "Use `drt docs generate --format mermaid` in the meantime."
+    )
 
 
 # ---------------------------------------------------------------------------

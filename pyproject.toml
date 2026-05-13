@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "drt-core"
-version = "0.7.0"
+version = "0.7.2"
 description = "Reverse ETL for the code-first data stack"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -26,6 +26,10 @@ keywords = [
     "open-source",
     "mcp",
     "llm-data",
+    "data-sync",
+    "yaml",
+    "duckdb",
+    "data-integration",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -72,7 +76,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
     "pytest-httpserver>=1.0",
-    "mypy>=1.10,<2",
+    "mypy>=1.10,<3",
     "ruff>=0.4,<1",
     "types-pyyaml",
     "types-PyMySQL",
@@ -83,8 +87,10 @@ drt = "drt.cli.main:app"
 
 [project.urls]
 Homepage = "https://github.com/drt-hub/drt"
+Documentation = "https://github.com/drt-hub/drt#readme"
 Repository = "https://github.com/drt-hub/drt"
 Issues = "https://github.com/drt-hub/drt/issues"
+Changelog = "https://github.com/drt-hub/drt/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["drt"]

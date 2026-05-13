@@ -108,8 +108,19 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "GokulKashyap",
+      "name": "GokulKashyap",
+      "avatar_url": "https://avatars.githubusercontent.com/u/147384970?v=4",
+      "profile": "https://github.com/GokulKashyap",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,
-  "linkToUsage": true
+  "linkToUsage": true,
+  "commitType": "docs"
 }

@@ -36,6 +36,26 @@ def _cursor_gt(new: str, current: str) -> bool:
         return new > current
 
 
+def _stringify_cursor_value(val: Any) -> str:
+    """Convert a cursor value into a stable string representation.
+
+    For tz-aware datetimes (e.g. BigQuery TIMESTAMP returns from the
+    Python BQ client), normalize to **naive UTC** before stringifying.
+    This avoids a re-emit-at-boundary bug (#475) where the persisted
+    watermark gained a ``+00:00`` suffix while user SQL / default_value
+    is typically written tz-naive — causing the same instant to be
+    represented two different ways and ``WHERE col >= TIMESTAMP(...)``
+    to re-match the boundary row on every subsequent run.
+
+    BigQuery (and most warehouses) parse ``TIMESTAMP('YYYY-MM-DD HH:MM:SS')``
+    as UTC, so dropping the ``+00:00`` suffix preserves the same instant.
+    Other types pass through ``str()`` unchanged.
+    """
+    if isinstance(val, datetime) and val.tzinfo is not None:
+        val = val.astimezone(timezone.utc).replace(tzinfo=None)
+    return str(val)
+
+
 def batch(iterable: Iterator[Any], size: int) -> Iterator[list[Any]]:
     """Yield successive batches of `size` from an iterator."""
     chunk: list[Any] = []
@@ -61,6 +81,8 @@ def run_sync(
     history_manager: HistoryManager | None = None,
     history_retention_days: int = 30,
     stop_event: threading.Event | None = None,
+    compute_diff: bool = False,
+    diff_limit: int = 20,
 ) -> SyncResult:
     """Run a single sync: extract from source, load to destination.
 
@@ -76,6 +98,11 @@ def run_sync(
             SIGTERM/SIGINT handler in the CLI), the engine finishes the
             current batch, marks ``result.interrupted=True``, persists state,
             and returns. ``None`` (default) preserves backward behaviour.
+        compute_diff: When True (and ``dry_run`` is also True), compute a
+            record-level diff (#413) against the destination's current state
+            and populate ``SyncResult.diff``. Ignored when ``dry_run=False``.
+        diff_limit: Cap on how many records appear in each diff category
+            (added / updated / deleted / sample). Default 20.
 
     Returns:
         Aggregated SyncResult across all batches.
@@ -97,6 +124,8 @@ def run_sync(
             watermark_storage=watermark_storage,
             cursor_value_override=cursor_value_override,
             stop_event=stop_event,
+            compute_diff=compute_diff,
+            diff_limit=diff_limit,
             started_at=started_at,
             t0=t0,
             total_result=total_result,
@@ -171,6 +200,8 @@ def _run_sync_body(
     watermark_storage: WatermarkStorage | None,
     cursor_value_override: str | None,
     stop_event: threading.Event | None,
+    compute_diff: bool,
+    diff_limit: int,
     started_at: str,
     t0: float,
     total_result: SyncResult,
@@ -230,6 +261,9 @@ def _run_sync_body(
     is_staged = isinstance(destination, StagedDestination)
     staged_count = 0
     batches_processed = 0
+    # When dry_run + compute_diff, accumulate (post-lookup) records to feed
+    # the diff engine after extraction completes (#413).
+    dry_run_records: list[dict[str, Any]] = []
 
     # Build lookup maps (one query per lookup, before the batch loop)
     lookup_maps: dict[str, tuple[LookupConfig, dict[tuple[Any, ...], Any]]] = {}
@@ -258,12 +292,14 @@ def _run_sync_body(
 
         total_result.rows_extracted += len(record_batch)
 
-        # Track max cursor value seen across all batches
+        # Track max cursor value seen across all batches.
+        # Stringify with tz-naive UTC normalization for tz-aware datetimes
+        # to avoid #475 (re-emit-at-boundary when user SQL is tz-naive).
         if cursor_field:
             for row in record_batch:
                 val = row.get(cursor_field)
                 if val is not None:
-                    str_val = str(val)
+                    str_val = _stringify_cursor_value(val)
                     if new_cursor_value is None or _cursor_gt(str_val, new_cursor_value):
                         new_cursor_value = str_val
 
@@ -282,6 +318,8 @@ def _run_sync_body(
 
         if dry_run:
             total_result.success += len(record_batch)
+            if compute_diff:
+                dry_run_records.extend(record_batch)
             continue
 
         if is_staged:
@@ -328,6 +366,16 @@ def _run_sync_body(
                 total_result.row_errors.extend(
                     getattr(finalize_result, "row_errors", [])
                 )
+
+    # Compute the record-level diff after extraction completes (#413).
+    # Only meaningful when dry_run is set; the engine collected all
+    # post-lookup source records into dry_run_records during the loop.
+    if dry_run and compute_diff:
+        from drt.engine.diff import compute_diff as _compute_diff
+
+        total_result.diff = _compute_diff(
+            dry_run_records, sync.destination, sync.sync, limit=diff_limit
+        )
 
     total_result.duration_seconds = round(time.perf_counter() - t0, 3)
     total_result.watermark_source = watermark_source

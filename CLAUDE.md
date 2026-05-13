@@ -51,7 +51,9 @@ make fmt      # ruff format + fix
 
 ## Current Status
 
-- **v0.7.0 released** — Production Ready theme: graceful shutdown on SIGTERM/SIGINT (#279), per-destination retry override (#277), sync execution history (#276), zero-downtime replace via staging table swap (#338), FK existence check via `lookups.check_only` (#354), `json_columns` config (#316), `drt doctor` (#264), `--quiet` flag (#265), Slack/webhook failure alerts (#414). Plus first DWH destination (Snowflake #353), Codespaces playground (#407), and `OPEN_CORE.md`.
+- **v0.7.2 released** — Production Ready follow-up #2: opt-in anonymous telemetry (#263, PostHog Cloud EU), deprecation warnings in `drt validate` (#467), Postgres `psycopg2.sql` SQL composition hardening (#442). Telemetry is off by default + `DO_NOT_TRACK` honored; release-time API key injection workflow (#481) ships with the wheel.
+- **v0.7.1** — Production Ready follow-up: `drt run --dry-run --diff` for record-level preview (#413), tz-aware cursor stringification fix (#475), `on_error=fail` alignment for Notion / REST API / Email SMTP (#463), `VERSIONING.md` policy doc (#457).
+- **v0.7.0** — Production Ready theme: graceful shutdown on SIGTERM/SIGINT (#279), per-destination retry override (#277), sync execution history (#276), zero-downtime replace via staging table swap (#338), FK existence check via `lookups.check_only` (#354), `json_columns` config (#316), `drt doctor` (#264), `--quiet` flag (#265), Slack/webhook failure alerts (#414). Plus first DWH destination (Snowflake #353), Codespaces playground (#407), and `OPEN_CORE.md`.
 - **v0.6.2** — `watermark.default_value` + `--cursor-value` CLI + watermark observability (#390, #391)
 - **v0.6.1** — `${VAR}` env substitution in all sync YAML string fields (#385)
 - **v0.6.0** — Notion/Twilio/Intercom/Email SMTP/Salesforce Bulk/Google Ads destinations, `--threads` parallel execution, `--log-format json`, `--select tag:`, JSON Schema validation, freshness/unique/accepted_values tests, `drt sources`/`drt destinations`, `--dry-run` row count diff, StagedDestination Protocol, destination_lookup, GOVERNANCE.md

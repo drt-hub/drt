@@ -6,9 +6,9 @@ drt follows an **open core model**. This document explains what's always free, w
 
 Everything core to reverse ETL workflows is in open source:
 
-- **All connectors** — BigQuery, Slack, REST APIs, Google Sheets, HubSpot, and more. No connector is behind a paywall.
+- **All connectors** — 20+ destinations (PostgreSQL, MySQL, ClickHouse, Snowflake, BigQuery, Notion, Slack, Google Sheets, HubSpot, Twilio, …) and 10+ sources. No connector is behind a paywall.
 - **Sync engine** — Core orchestration, batching, rate limits, retry logic, cursor management. Free to run anywhere.
-- **CLI** — Full feature parity. `drt init`, `drt run`, `drt validate` work the same in OSS and enterprise.
+- **CLI** — Full feature parity. `drt init`, `drt run`, `drt validate` work the same in drt-core and enterprise.
 - **MCP server** — LLM integration via Model Context Protocol. Enables AI-native workflows without restriction.
 
 **If it ships in drt-core, it's free forever.**
@@ -22,9 +22,9 @@ These features are designed for enterprise deployments but are **not shipped in 
 - **Plugin system** — extend drt with custom connectors or transformations
 - **Cloud hosting / drt Cloud** — managed hosting, zero-ops deployment
 
-We provide **extensibility points** for some of these in the OSS repo (see below). In some cases, OSS includes CLI command stubs or extension interfaces, but not the underlying hosted service or enterprise implementation. Third parties can implement against those extension points; drt ships the official reference implementation in the enterprise product only.
+We provide **extensibility points** for some of these in drt-core (see below). In some cases, drt-core includes CLI command stubs or extension interfaces, but not the underlying hosted service or enterprise implementation. Third parties can implement against those extension points; drt ships the official reference implementation in the enterprise product only.
 
-## What "Interface in OSS" Means
+## What "Interface in drt-core" Means
 
 drt-core exposes extension points where you can build and integrate your own code:
 
@@ -32,10 +32,10 @@ drt-core exposes extension points where you can build and integrate your own cod
 - **Future extension points:** RBAC, audit logging, and plugin management interfaces will be designed for third-party implementation.
 - This allows:
   - Community members and vendors to build compatible extensions
-  - Clear separation between OSS extensibility and enterprise-hosted distribution
+  - Clear separation between drt-core extensibility and enterprise-hosted distribution
   - No vendor lock-in on core extension logic
 
-**Current state:** Today, you can build custom connectors by extending the registry. Enterprise features like RBAC and plugin management are planned for future OSS interface definitions.
+**Current state:** Today, you can build custom connectors by extending the registry. Enterprise features like RBAC and plugin management are planned for future drt-core interface definitions.
 
 ## How We Decide
 
@@ -56,7 +56,7 @@ See [GOVERNANCE.md](./GOVERNANCE.md) for how decisions are made and who has inpu
 
 **It depends.** If the feature is core to reverse ETL workflows (like connectors or the CLI), it stays free. If it's a deployments/ops/governance feature (like RBAC or audit logging), it's likely enterprise. We're transparent about the boundary and listen to the community.
 
-Open a [Discussion](https://github.com/drt-hub/drt/discussions) to propose moving a feature to OSS. We take it seriously.
+Open a [Discussion](https://github.com/drt-hub/drt/discussions) to propose moving a feature to drt-core. We take it seriously.
 
 ### Can I self-implement RBAC or audit logging?
 
