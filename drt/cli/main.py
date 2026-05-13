@@ -1273,6 +1273,68 @@ def cloud_status() -> None:
 
 
 # ---------------------------------------------------------------------------
+# docs
+# ---------------------------------------------------------------------------
+
+docs_app = typer.Typer(name="docs", help="Project documentation commands.", no_args_is_help=True)
+app.add_typer(docs_app)
+
+
+@docs_app.command(name="generate")
+def docs_generate(
+    format_: str = typer.Option(
+        "html",
+        "--format",
+        "-f",
+        click_type=click.Choice(["html", "mermaid", "json"]),
+        help="Documentation output format.",
+    ),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output path for future formats. Mermaid is always written to stdout.",
+    ),
+    no_state: bool = typer.Option(
+        False,
+        "--no-state",
+        help="Omit state overlays when supported. Currently accepted as a no-op.",
+    ),
+) -> None:
+    """Generate project documentation."""
+    if format_ != "mermaid":
+        print_error(
+            f"docs generate --format {format_} is not implemented yet. "
+            "Use --format mermaid for now. Tracking: #501."
+        )
+        raise typer.Exit(1)
+
+    from drt.docs import build_manifest, render_mermaid
+
+    try:
+        manifest = build_manifest(Path("."), include_state=not no_state)
+    except Exception as e:
+        print_error(str(e))
+        raise typer.Exit(1)
+
+    if not manifest.syncs:
+        typer.echo("No sync definitions found. Add YAML files under syncs/ first.", err=True)
+        return
+
+    if output is not None:
+        typer.echo("Ignoring --output for Mermaid; writing graph to stdout.", err=True)
+
+    typer.echo(render_mermaid(manifest), nl=False)
+
+
+@docs_app.command(name="serve")
+def docs_serve() -> None:
+    """Serve generated project documentation locally."""
+    print_error("drt docs serve is not implemented yet. Tracking: #501.")
+    raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
 # mcp
 # ---------------------------------------------------------------------------
 
