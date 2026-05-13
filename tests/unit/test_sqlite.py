@@ -17,7 +17,8 @@ class TestSQLiteSource(unittest.TestCase):
         self.temp_db.close()
 
         # Initialize database and table
-        with sqlite3.connect(self.db_path) as conn:
+        conn = sqlite3.connect(self.db_path)
+        try:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -37,6 +38,8 @@ class TestSQLiteSource(unittest.TestCase):
                 ],
             )
             conn.commit()
+        finally:
+            conn.close()
 
         self.source = SQLiteSource()
         self.config = SQLiteProfile(type="sqlite", database=self.db_path)

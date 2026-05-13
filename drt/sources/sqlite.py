@@ -31,10 +31,11 @@ class SQLiteSource:
         try:
             result = conn.execute(query)
             columns = [desc[0] for desc in result.description]
-            for row in result.fetchall():
-                yield dict(zip(columns, row))
+            rows = [dict(zip(columns, row)) for row in result.fetchall()]
         finally:
             conn.close()
+
+        yield from rows
 
     def test_connection(self, config: ProfileConfig) -> bool:
         if not isinstance(config, SQLiteProfile):

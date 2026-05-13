@@ -9,7 +9,7 @@ import signal
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
@@ -55,7 +55,7 @@ try:
 
     SQL_DESTINATION_CONFIGS = (PostgresDestinationConfig,)
 except Exception:
-    SQL_DESTINATION_CONFIGS = tuple()
+    SQL_DESTINATION_CONFIGS = ()  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -406,22 +406,27 @@ def destinations() -> None:
 
 @app.command()
 def clean(
-    orphans: bool = typer.Option(False, "--orphans", help="List or drop orphan __drt_swap tables."),
-    execute: bool = typer.Option(False, "--execute", help="Actually drop tables. Default is dry-run."),
+    orphans: bool = typer.Option(
+        False, "--orphans", help="List or drop orphan __drt_swap tables."
+    ),
+    execute: bool = typer.Option(False, "--execute", help="Execute drops (default: dry-run)."),
     config: str = typer.Option("drt.yml", "--config", "-c", help="Path to config file."),
 ) -> None:
     """Clean up orphan __drt_swap shadow tables left by interrupted swaps."""
     from drt.config.parser import load_syncs_safe
     from drt.destinations.base import OrphanCleanup
 
-    result = load_syncs_safe(config)
+    config_path = Path(config) if config != "drt.yml" else Path(".")
+    result = load_syncs_safe(config_path)
 
     for sync in result.syncs:
         dest = _get_destination(sync)
         if not isinstance(dest, OrphanCleanup):
             continue
 
-        base_table = sync.destination.table
+        if not hasattr(sync.destination, "table"):
+            continue
+        base_table = sync.destination.table  # type: ignore[union-attr]
         orphan_tables = dest.list_orphan_swap_tables(sync.destination, base_table)
 
         if not orphan_tables:
@@ -760,7 +765,11 @@ def validate(
                     try:
                         dest = _get_destination(s)
                         if not hasattr(dest, "test_connection"):
-                            conn_test = {"success": False, "error": "test_connection method missing", "skipped": False}
+                            conn_test = {
+                                "success": False,
+                                "error": "test_connection method missing",
+                                "skipped": False,
+                            }
                         else:
                             try:
                                 dest.test_connection()
