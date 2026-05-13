@@ -141,9 +141,37 @@ drt validate                # validate sync YAML configs
 drt status                  # show recent sync status
 drt status --output json    # JSON output for status
 drt serve                   # start HTTP webhook endpoint
+drt docs generate --format mermaid  # print project DAG as Mermaid
 drt mcp run                 # start MCP server (requires drt-core[mcp])
 drt --install-completion    # install shell completion (bash/zsh/fish)
 drt --show-completion       # show completion script
+```
+
+### Visualize your syncs
+
+Generate a Mermaid DAG from your local `drt_project.yml` and `syncs/*.yml` files:
+
+```bash
+drt docs generate --format mermaid > dag.md
+```
+
+```mermaid
+graph LR
+    subgraph Sources
+        src_bigquery_prod["bigquery_prod<br/><i>bigquery</i>"]
+    end
+    subgraph Syncs
+        sync_users_to_hubspot{{"users_to_hubspot<br/><i>upsert</i>"}}
+        sync_accounts_to_hubspot{{"accounts_to_hubspot<br/><i>upsert</i>"}}
+    end
+    subgraph Destinations
+        dst_hubspot_contacts["hubspot (contacts)<br/><i>hubspot</i>"]
+    end
+    src_bigquery_prod -->|extract| sync_users_to_hubspot
+    src_bigquery_prod -->|extract| sync_accounts_to_hubspot
+    sync_users_to_hubspot -->|load| dst_hubspot_contacts
+    sync_accounts_to_hubspot -->|load| dst_hubspot_contacts
+    sync_users_to_hubspot -.lookup.-> sync_accounts_to_hubspot
 ```
 
 ### Shell completion

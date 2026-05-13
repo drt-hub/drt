@@ -1346,7 +1346,7 @@ def docs_generate(
 
     fmt = format.lower()
     if fmt == "mermaid":
-        manifest = build_manifest(Path("."))
+        manifest = build_manifest(Path("."), include_state=not no_state)
         print(render_mermaid(manifest))
         return
 

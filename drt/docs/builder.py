@@ -28,13 +28,13 @@ def _slug(value: str) -> str:
 def _destination_id(sync: SyncConfig) -> str:
     """Synthesize a stable destination node id; shared across syncs that target the same one."""
     dest = sync.destination
-    # describe() is type-specific (e.g. "postgres (public.users)", "slack (#alerts)")
     return f"dest_{_slug(dest.type)}_{_slug(dest.describe())}"
 
 
 def _destination_table(sync: SyncConfig) -> str | None:
-    """SQL-shaped destinations expose `.table`; non-SQL ones don't."""
-    return getattr(sync.destination, "table", None)
+    """SQL-shaped destinations expose `.table`; non-SQL ones do not."""
+    table = getattr(sync.destination, "table", None)
+    return str(table) if table else None
 
 
 def _destination_lookup_tables(sync: SyncConfig) -> list[str]:
@@ -42,20 +42,28 @@ def _destination_lookup_tables(sync: SyncConfig) -> list[str]:
     lookups = getattr(sync.destination, "lookups", None)
     if not lookups:
         return []
-    return [cfg.table for cfg in lookups.values()]
+    return [str(cfg.table) for cfg in lookups.values()]
 
 
-def build_manifest(project_dir: Path = Path(".")) -> Manifest:
+def _table_aliases(table: str) -> tuple[str, ...]:
+    aliases = [table]
+    if "." in table:
+        aliases.append(table.rsplit(".", maxsplit=1)[-1])
+    return tuple(dict.fromkeys(aliases))
+
+
+def build_manifest(project_dir: Path = Path("."), include_state: bool = False) -> Manifest:
     """Build a `Manifest` from sync YAMLs + project config under *project_dir*.
 
-    State is NOT included in P1 (Mermaid output doesn't render it; `--no-state`
-    is parsed but no-op in P1).
+    State is not included in P1. `include_state` is accepted so the CLI flag can
+    remain stable while later docs phases add state overlays.
     """
+    _ = include_state
     project = load_project(project_dir)
     syncs_result = load_syncs_safe(project_dir)
 
     # Source: project.profile is authoritative; type from inline ProjectConfig.source if present,
-    # else "configured" (operator can resolve to a concrete type later via profiles.yml).
+    # else "configured" because profiles.yml resolves the concrete type later.
     source_type = project.source.type if project.source else "configured"
     source = Source(name=project.profile, type=source_type)
 
@@ -92,13 +100,24 @@ def build_manifest(project_dir: Path = Path(".")) -> Manifest:
     for sync_cfg in syncs_result.syncs:
         table = _destination_table(sync_cfg)
         if table:
-            sync_by_dest_table[table] = sync_cfg.name
+            for alias in _table_aliases(table):
+                sync_by_dest_table.setdefault(alias, sync_cfg.name)
 
+    lookup_edges_seen: set[tuple[str, str]] = set()
     for sync_cfg in syncs_result.syncs:
         for lookup_table in _destination_lookup_tables(sync_cfg):
-            producer = sync_by_dest_table.get(lookup_table)
-            if producer and producer != sync_cfg.name:
-                edges.append(Edge(kind="lookup", from_=producer, to=sync_cfg.name))
+            producer = None
+            for alias in _table_aliases(lookup_table):
+                producer = sync_by_dest_table.get(alias)
+                if producer:
+                    break
+            if not producer or producer == sync_cfg.name:
+                continue
+            edge_key = (producer, sync_cfg.name)
+            if edge_key in lookup_edges_seen:
+                continue
+            lookup_edges_seen.add(edge_key)
+            edges.append(Edge(kind="lookup", from_=producer, to=sync_cfg.name))
 
     return Manifest(
         schema_version=SCHEMA_VERSION,
