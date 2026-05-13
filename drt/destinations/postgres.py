@@ -37,6 +37,12 @@ try:
 except ImportError:
     _Psycopg2Json = None  # type: ignore[assignment,misc]
 
+# Prefer to import sql at module import time if available; fall back to None
+try:
+    from psycopg2 import sql  # type: ignore
+except Exception:
+    sql = None  # type: ignore
+
 
 def _serialize_value(
     value: Any,
@@ -394,41 +400,43 @@ class PostgresDestination:
 
         conn = self._connect(config)
         try:
-            cur = conn.cursor()
-            for full in tables:
-                # Safety: validate format (schema.table) and reject invalid names
-                if not full or "." not in full:
-                    failed.append(full)
+            for full_name in tables:
+                # Validate format: must contain schema.table
+                if not full_name or "." not in full_name:
+                    failed.append(full_name)
+                    continue
+
+                schema, table = full_name.split(".", 1)
+                if not schema or not table:
+                    failed.append(full_name)
+                    continue
+
+                # Validate suffix: must end with __drt_swap
+                if not table.endswith("__drt_swap"):
+                    failed.append(full_name)
                     continue
 
                 try:
-                    schema, name = full.rsplit(".", 1)
-                except ValueError:
-                    # rsplit should succeed after '.' check, but be defensive
-                    failed.append(full)
-                    continue
-
-                # Extra safety: ensure name ends with __drt_swap
-                if not name.endswith("__drt_swap"):
-                    failed.append(full)
-                    continue
-
-                try:
-                    from psycopg2 import sql
+                    cur = conn.cursor()
+                    # Ensure we have psycopg2.sql available; import lazily if needed
+                    _sql = sql
+                    if _sql is None:
+                        from psycopg2 import sql as _sql  # type: ignore
 
                     cur.execute(
-                        sql.SQL("DROP TABLE IF EXISTS {}.{}").format(
-                            sql.Identifier(schema), sql.Identifier(name)
+                        _sql.SQL("DROP TABLE IF EXISTS {}.{}").format(
+                            _sql.Identifier(schema), _sql.Identifier(table)
                         )
                     )
-                    # Commit immediately after each successful drop to isolate
-                    # from failures of subsequent tables (#447)
                     conn.commit()
-                    dropped.append(full)
+                    dropped.append(full_name)
                 except Exception:
-                    # Rollback only this table's attempt; don't affect others
-                    conn.rollback()
-                    failed.append(full)
+                    # Try to rollback this attempt and record failure
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    failed.append(full_name)
         finally:
             conn.close()
 

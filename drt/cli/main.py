@@ -49,6 +49,14 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
+# SQL destination types used for connection-checking
+try:
+    from drt.config.models import PostgresDestinationConfig
+
+    SQL_DESTINATION_CONFIGS = (PostgresDestinationConfig,)
+except Exception:
+    SQL_DESTINATION_CONFIGS = tuple()
+
 
 # ---------------------------------------------------------------------------
 # JSON logging
@@ -398,93 +406,38 @@ def destinations() -> None:
 
 @app.command()
 def clean(
-    orphans: bool = typer.Option(False, "--orphans", help="Detect orphan swap shadow tables."),
-    execute: bool = typer.Option(False, "--execute", help="Drop orphan tables (irreversible)."),
-    older_than: float | None = typer.Option(
-        None, "--older-than", help="Filter orphans older than given hours (best-effort)."
-    ),
+    orphans: bool = typer.Option(False, "--orphans", help="List or drop orphan __drt_swap tables."),
+    execute: bool = typer.Option(False, "--execute", help="Actually drop tables. Default is dry-run."),
+    config: str = typer.Option("drt.yml", "--config", "-c", help="Path to config file."),
 ) -> None:
-    """Cleanup utilities.
-
-    Use `drt clean --orphans` to detect orphan swap shadow tables. By default
-    this is a dry-run and will only print tables that would be dropped. Use
-    `--execute` to actually drop them.
-    """
+    """Clean up orphan __drt_swap shadow tables left by interrupted swaps."""
     from drt.config.parser import load_syncs_safe
     from drt.destinations.base import OrphanCleanup
 
-    if not orphans:
-        console.print("[dim]No clean action specified. Try: drt clean --orphans[/dim]")
-        raise typer.Exit()
+    result = load_syncs_safe(config)
 
-    result = load_syncs_safe(Path("."))
-    syncs = result.syncs
-
-    found_sources: dict[str, tuple[Any, Any]] = {}
-
-    for sync in syncs:
-        # Only consider syncs with destinations that support orphan cleanup
-        try:
-            dest = _get_destination(sync)
-        except Exception:
-            continue
-
+    for sync in result.syncs:
+        dest = _get_destination(sync)
         if not isinstance(dest, OrphanCleanup):
             continue
 
-        base_table = getattr(sync.destination, "table", None)
-        if not base_table:
-            print_error(f"Skipping {sync.name}: destination table is missing.")
+        base_table = sync.destination.table
+        orphan_tables = dest.list_orphan_swap_tables(sync.destination, base_table)
+
+        if not orphan_tables:
+            typer.echo("No orphan swap tables found.")
             continue
 
-        hours_td = timedelta(hours=older_than) if older_than is not None else None
-        try:
-            tables = dest.list_orphan_swap_tables(sync.destination, base_table, older_than=hours_td)
-        except Exception as e:
-            print_error(f"Failed to list orphans for {sync.name}: {e}")
-            continue
-
-        if tables:
-            for t in tables:
-                found_sources.setdefault(t, (sync.destination, dest))
-
-    # Deduplicate found tables across all syncs (avoid redundant drops)
-    found_unique = list(found_sources)
-
-    # Output summary
-    console.print("")
-    console.print(f"Found {len(found_unique)} orphan swap table(s).")
-    if not found_unique:
-        console.print("\n[green]No orphan swap tables found.[/green]")
-        return
-
-    if not execute:
-        for t in found_unique:
-            console.print(f"[DRY RUN] Would drop: {t}")
-        console.print("Run with --execute to apply.")
-        return
-
-    # Execute: deduplicate and drop each unique table once
-    dropped: list[str] = []
-    failed: list[str] = []
-    for table in found_unique:
-        try:
-            sync_config, dest_to_use = found_sources[table]
-            d, f = dest_to_use.drop_orphan_swap_tables(sync_config, [table])
-            dropped.extend(d)
-            failed.extend(f)
-        except Exception as e:
-            print_error(f"Failed to drop {table}: {e}")
-            failed.append(table)
-
-    console.print("")
-    console.print(f"Dropped: {len(dropped)}")
-    for t in dropped:
-        console.print(f"  {t}")
-    if failed:
-        console.print(f"\nFailed: {len(failed)}")
-        for t in failed:
-            console.print(f"  {t}")
+        if execute:
+            dropped, failed = dest.drop_orphan_swap_tables(sync.destination, orphan_tables)
+            typer.echo(f"Dropped: {len(dropped)} orphan swap table(s).")
+            if failed:
+                typer.echo(f"Failed: {len(failed)} orphan swap table(s).")
+        else:
+            typer.echo(f"Found {len(orphan_tables)} orphan swap table(s).")
+            for table in orphan_tables:
+                typer.echo(f"[DRY RUN] Would drop: {table}")
+            typer.echo("Run with --execute to apply.")
 
 
 # ---------------------------------------------------------------------------
@@ -767,6 +720,9 @@ def validate(
         False, "--emit-schema", help="Write JSON Schemas to .drt/schemas/."
     ),
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
+    check_connection: bool = typer.Option(
+        False, "--check-connection", help="Run connection tests for SQL destinations."
+    ),
 ) -> None:
     """Validate sync definitions against the JSON Schema."""
 
@@ -784,30 +740,46 @@ def validate(
             raise typer.Exit(1)
 
     if output == "json":
-        # Collect all deprecations into a flat list for JSON output
-        all_deprecations = []
-        for sync_name, sync_deprecations in result.deprecations.items():
-            all_deprecations.extend(sync_deprecations)
-        
-        print(
-            json.dumps(
-                {
-                    "results": [
-                        {
-                            "name": s.name,
-                            "valid": True,
-                            "deprecations": result.deprecations.get(s.name, []),
-                        }
-                        for s in result.syncs
-                    ]
-                    + [
-                        {"name": name, "valid": False, "errors": errs}
-                        for name, errs in result.errors.items()
-                    ],
-                },
-                indent=2,
-            )
-        )
+        # Build JSON results including optional connection_test when requested
+        from drt.config.models import PostgresDestinationConfig
+
+        results: list[dict[str, object]] = []
+        # Valid syncs
+        for s in result.syncs:
+            entry: dict[str, object] = {
+                "name": s.name,
+                "valid": True,
+                "deprecations": result.deprecations.get(s.name, []),
+            }
+            if check_connection:
+                # Default: skipped for non-SQL destinations
+                conn_test: dict[str, object] | None = None
+                if not isinstance(s.destination, PostgresDestinationConfig):
+                    conn_test = {"success": None, "error": None, "skipped": True}
+                else:
+                    try:
+                        dest = _get_destination(s)
+                        if not hasattr(dest, "test_connection"):
+                            conn_test = {"success": False, "error": "test_connection method missing", "skipped": False}
+                        else:
+                            try:
+                                dest.test_connection()
+                                conn_test = {"success": True, "error": None, "skipped": False}
+                            except Exception as e:  # noqa: PERF203
+                                conn_test = {"success": False, "error": str(e), "skipped": False}
+                    except Exception as e:
+                        conn_test = {"success": False, "error": str(e), "skipped": False}
+                entry["connection_test"] = conn_test
+            results.append(entry)
+
+        # Invalid syncs (errors)
+        for name, errs in result.errors.items():
+            entry = {"name": name, "valid": False, "errors": errs}
+            if check_connection:
+                entry["connection_test"] = {"success": None, "error": None, "skipped": True}
+            results.append(entry)
+
+        print(json.dumps({"results": results}, indent=2))
         if result.errors:
             raise typer.Exit(code=1)
         return
@@ -831,6 +803,32 @@ def validate(
 
     for name, errors in result.errors.items():
         print_validation_error(name, errors)
+
+    # Optional: run connection tests for SQL destinations and show succinct results
+    if check_connection:
+        from drt.config.models import PostgresDestinationConfig
+
+        for sync in result.syncs:
+            # Non-SQL destinations: skip
+            if not isinstance(sync.destination, PostgresDestinationConfig):
+                console.print("⏭ connection test skipped")
+                continue
+
+            try:
+                dest = _get_destination(sync)
+            except Exception as e:
+                console.print(f"✗ connection failed: {e}")
+                continue
+
+            if not hasattr(dest, "test_connection"):
+                console.print("✗ connection failed: test_connection method missing")
+                continue
+
+            try:
+                dest.test_connection()
+                console.print("✓ connection ok")
+            except Exception as e:
+                console.print(f"✗ connection failed: {e}")
 
     if result.errors:
         raise typer.Exit(code=1)
