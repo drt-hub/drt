@@ -312,16 +312,35 @@ class PostgresDestination:
         return SyncResult()
 
     def list_orphan_swap_tables(
-        self, config: DestinationConfig, older_than: timedelta | None = None
+        self,
+        config: DestinationConfig,
+        base_table: str,
+        older_than: timedelta | None = None,
     ) -> list[str]:
-        """Detect tables ending with '__drt_swap' and return schema-qualified names.
+        """Detect orphan swap tables for the current sync's base table.
 
-        *older_than* is accepted for API compatibility but PostgreSQL does not
-        expose a reliable creation timestamp for tables in standard catalogs,
-        so this implementation ignores the age filter and returns all matching
-        swap shadow tables in non-system schemas.
+        PostgreSQL does not expose a reliable creation timestamp for tables in
+        standard catalogs, so *older_than* is best-effort and currently only
+        affects logging. The lookup is scoped to the current sync's base table
+        so one sync never sees another sync's shadow tables.
+
+        Args:
+            config: Postgres destination configuration.
+            base_table: The current sync's base table name. May be schema-
+                qualified (e.g. ``public.users``); only the table component is
+                used to derive the shadow name.
+            older_than: Optional age filter in hours.
+
+        Returns:
+            Fully qualified ``schema.table`` names for orphan swap tables.
+
+        Raises:
+            Exception: If the catalog query fails.
         """
         assert isinstance(config, PostgresDestinationConfig)
+
+        shadow_name = f"{base_table.rsplit('.', 1)[-1]}__drt_swap"
+        schema_name = config.table.rsplit('.', 1)[0] if "." in config.table else None
 
         if older_than is not None:
             # Best-effort: PostgreSQL doesn't store table creation timestamp
@@ -333,23 +352,23 @@ class PostgresDestination:
         conn = self._connect(config)
         try:
             cur = conn.cursor()
-            # Exclude system schemas
-            # Use escaped underscore pattern to match exactly '__drt_swap' suffix
-            cur.execute(
-                """
-                SELECT table_schema, table_name
-                FROM information_schema.tables
-                WHERE table_type = 'BASE TABLE'
-                  AND table_name LIKE %s ESCAPE '\\'
-                  AND table_schema NOT IN ('pg_catalog', 'information_schema')
-                """,
-                ("%\\_\\_drt_swap",),
-            )
+            query = [
+                "SELECT table_schema, table_name",
+                "FROM information_schema.tables",
+                "WHERE table_type = 'BASE TABLE'",
+                "  AND table_name = %s",
+                "  AND table_schema NOT IN ('pg_catalog', 'information_schema')",
+            ]
+            params: list[Any] = [shadow_name]
+            if schema_name:
+                query.append("  AND table_schema = %s")
+                params.append(schema_name)
+            cur.execute("\n".join(query), tuple(params))
             rows = cur.fetchall()
             result: list[str] = []
             for schema, name in rows:
-                # Defensive: ensure suffix matches exactly
-                if name.endswith("__drt_swap"):
+                # Defensive: ensure exact shadow name matches the current sync.
+                if name == shadow_name:
                     result.append(f"{schema}.{name}")
             return result
         finally:

@@ -37,7 +37,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
 - **Deprecation warnings in `drt validate`** (#478, closes #467): The `validate` command now reads `drt/deprecations.py` and surfaces ⚠️ warnings for any deprecated config keys it finds in your sync YAMLs — both in text output and as a per-sync `deprecations` array under `--output json`. Exit code stays `0` (warnings are non-blocking). The registry is currently empty (no active deprecations); add entries to `DEPRECATED_SYNC_KEYS` when announcing a new deprecation per VERSIONING.md Step 1. Migration guides live under `docs/migration/`. Closes the Step 2 ("Add Tooling Support") TODO from #457.
+- **Orphan shadow table cleanup** (#492): `drt clean --orphans` safely lists and drops orphan `__drt_swap` shadow tables for the current sync only. PostgreSQL adds `list_orphan_swap_tables()` and `drop_orphan_swap_tables()` behind the opt-in `OrphanCleanup` protocol; dry-run remains the default and `--execute` is required to apply changes.
+
+## [0.7.2] - 2026-05-11
+
+**Theme: Production Ready follow-up #2.** Opt-in anonymous telemetry, deprecation warnings in `drt validate`, Postgres `psycopg2.sql` hardening — closing out the v0.7 cycle items that didn't make v0.7.1.
+
+### Breaking Changes
+
+None. Drop-in upgrade from v0.7.1.
+
+### Added
+
+- **Opt-in anonymous usage telemetry** (#263, PR #446): a new `drt/telemetry.py` module sends a single anonymous `sync_completed` event per `drt run` when the user explicitly opts in. Off by default. Honors `DO_NOT_TRACK=1`. Allow-list `properties` (`drt_version`, `python_version`, `os`, `source_type`, `destination_type`, `sync_mode`, `rows_synced`, `duration_seconds`, `status`) — never sends sync names, model SQL, destination URLs, credentials, or project paths. The wire envelope additionally carries `event`, `distinct_id`, `timestamp`, and `api_key`. Configure via `drt config set telemetry.enabled true` or `DRT_TELEMETRY=1`. Inspect what would be sent with `drt config show-telemetry`. Endpoint defaults to PostHog Cloud EU region; override with `DRT_TELEMETRY_ENDPOINT` and `DRT_TELEMETRY_API_KEY` for self-hosted PostHog. Privacy posture is documented in [docs/telemetry.md](docs/telemetry.md), including the GDPR disclosure for EU/EEA opt-ins. Contributed by @kiwamizamurai.
+- **Deprecation warnings in `drt validate`** (#467, PR #478): the `validate` command now reads `drt/deprecations.py` and surfaces ⚠️ warnings for any deprecated config keys it finds in your sync YAMLs — both in text output and as a per-sync `deprecations` array under `--output json`. Exit code stays `0` (warnings are non-blocking). The registry is currently empty (no active deprecations); add entries to `DEPRECATED_SYNC_KEYS` when announcing a new deprecation per VERSIONING.md Step 1. Migration guides live under `docs/migration/`. Closes the Step 2 ("Add Tooling Support") TODO from #457. Contributed by @Muawiya-contact.
+- **Release-time telemetry key injection workflow** (#481): `.github/workflows/publish-drt-core.yml` now sed-injects the `POSTHOG_WRITE_KEY` repo secret into `drt/telemetry.py:_DEFAULT_API_KEY` before `uv build`, with a smoke check that asserts the injection happened. Fail-safe when the secret is unset (community forks ship with telemetry physically disabled).
+
+### Changed
+
+- **Postgres destination: safe SQL composition via `psycopg2.sql`** (#442, PR #452): replaced f-string interpolation of table and column identifiers in `_load_replace`, `_load_upsert`, `_build_insert_sql`, and `_build_upsert_sql` with `psycopg2.sql.SQL` / `psycopg2.sql.Identifier`. Eliminates a class of identifier-injection bugs in environments where table/column names are derived from config rather than hard-coded. Swap-path methods (`_load_replace_swap` / `finalize_sync` from #435 / #448) are tracked for follow-up in #483. Contributed by @Khush-domadia.
+
+### Documentation
+
+- **GDPR disclosure section in `docs/telemetry.md`** (PR #446): documents data controller (K. Masuda as natural person, transferable to a future legal entity), retention (1 year on Free tier; #482 tracks reducing to 90 days via API-based cleanup), erasure contact (`drt.hub.dev@gmail.com`), and the Art. 6(1)(a) / Art. 46(2)(c) SCCs legal basis for the US-incorporated processor / EU-hosted storage split.
+
+## [0.7.1] - 2026-05-07
+
+**Theme: Production Ready follow-up.** Tail of the v0.7 cycle — the `drt diff` dry-run preview (#413) that shipped as the original v0.7.1 DX feature, a watermark cursor correctness fix surfaced by a prod incident (#475), `on_error=fail` semantic alignment across the remaining HTTP destinations (#463), and the new `VERSIONING.md` policy doc (#457).
+
+### Breaking Changes
+
+None. Drop-in upgrade from v0.7.0.
+
+### Added
+
+- **`drt run --dry-run --diff`** (#413, PR #473): Record-level preview before deploying a sync. For queryable destinations (Postgres / MySQL / ClickHouse), compares extracted source records against the destination state keyed on `upsert_key` and shows added / updated (with field-level `old → new` diffs) / deleted records. For non-queryable destinations (REST API, Slack, HubSpot, Notion, file destinations, etc.) falls back to "sample mode" — shows the first N records that would be sent, with a note that comparison is unavailable. Output works in both text (rich tables) and `--output json` (embedded `diff` key per sync). New flag `--diff-limit N` (default 20) caps records shown per category. The `--diff` flag is only valid alongside `--dry-run`. Doc: [docs/guides/dry-run-and-diff.md](docs/guides/dry-run-and-diff.md). Follow-ups: #468 (Snowflake support), #469 (Protocol method), #470 (perf), #471 (`--diff-fields`), #472 (API-based SaaS diff).
+- **`VERSIONING.md` — semver and deprecation policy** (#457, #464): Documents the project's versioning contract pre-1.0, what counts as a breaking change at each layer (CLI / config schema / Python API), and the deprecation cadence (announced one minor version, removable one minor after that). Cross-linked from `CONTRIBUTING.md` PR checklist. Initial draft contributed by @Muawiya-contact, follow-up polish in #464 also by @Muawiya-contact.
+
+### Fixed
+
+- **Watermark advance for tz-aware cursor values** (#475, PR #476): `drt/engine/sync.py` was calling `str()` directly on cursor field values, which for tz-aware datetimes (e.g. BigQuery `TIMESTAMP` columns from the Python BQ client) produced strings with a `+00:00` suffix. When user SQL or `default_value` was written tz-naive, the next run compared a naive `WHERE col >= TIMESTAMP('YYYY-MM-DD HH:MM:SS')` against the tz-aware persisted form and the boundary row re-fired on every run. The engine now normalizes tz-aware datetimes to naive UTC before stringifying. Reported by @K-Masuda-SL after a prod incident where a single `recording_sessions` row triggered a downstream GHA `workflow_dispatch` three times in a row.
+- **`on_error=fail` not respected by Notion / REST API / Email SMTP destinations** (#365, PR #463): three HTTP destinations continued processing the rest of the batch after the first failure even when `on_error: fail` was configured. Now all three short-circuit and `return result` on the first failure, matching the documented contract and the behavior of every other destination. New `on_error=fail` and per-destination retry override tests lock the semantic in across the webhook surface.
 
 ## [0.7.0] - 2026-05-06
 

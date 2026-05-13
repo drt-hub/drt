@@ -14,7 +14,8 @@ Example sync YAML:
 from __future__ import annotations
 
 import os
-from typing import Any
+from collections.abc import Callable
+from typing import Any, cast
 
 from drt.config.models import DestinationConfig, GoogleSheetsDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
@@ -36,9 +37,8 @@ def _build_sheets_service(config: GoogleSheetsDestinationConfig) -> Any:
     else:
         import google.auth
 
-        creds, _ = google.auth.default(  # type: ignore[no-untyped-call]
-            scopes=["https://www.googleapis.com/auth/spreadsheets"]
-        )
+        default_auth = cast(Callable[..., tuple[Any, Any]], google.auth.default)
+        creds, _ = default_auth(scopes=["https://www.googleapis.com/auth/spreadsheets"])
 
     return build("sheets", "v4", credentials=creds)
 

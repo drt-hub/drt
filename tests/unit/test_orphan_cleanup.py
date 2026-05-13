@@ -28,10 +28,10 @@ def _config(**overrides: Any) -> PostgresDestinationConfig:
 class TestListOrphanSwapTables:
     """Test orphan swap table discovery via PostgreSQL."""
 
-    def test_detects_orphan_swap_tables(self):
-        """Should detect tables ending with __drt_swap."""
+    def test_list_orphan_tables_returns_only_matching_shadow_name(self):
+        """Should return only the current sync's shadow table."""
         dest = PostgresDestination()
-        config = _config()
+        config = _config(table="public.users")
         mock_conn = mock.Mock()
         mock_cur = mock.Mock()
         mock_conn.cursor.return_value = mock_cur
@@ -41,14 +41,18 @@ class TestListOrphanSwapTables:
         ]
 
         with mock.patch.object(dest, "_connect", return_value=mock_conn):
-            result = dest.list_orphan_swap_tables(config)
+            result = dest.list_orphan_swap_tables(config, "public.users")
 
-        assert result == ["public.users__drt_swap", "public.orders__drt_swap"]
+        assert result == ["public.users__drt_swap"]
 
-    def test_python_side_suffix_filtering(self):
-        """Should defensively filter by __drt_swap suffix on Python side."""
+        sql, params = mock_cur.execute.call_args.args
+        assert "table_name = %s" in sql
+        assert params == ("users__drt_swap", "public")
+
+    def test_list_orphan_tables_filters_false_positive_rows(self):
+        """Should defensively filter false positives returned by the catalog."""
         dest = PostgresDestination()
-        config = _config()
+        config = _config(table="public.users")
         mock_conn = mock.Mock()
         mock_cur = mock.Mock()
         mock_conn.cursor.return_value = mock_cur
@@ -60,15 +64,14 @@ class TestListOrphanSwapTables:
         ]
 
         with mock.patch.object(dest, "_connect", return_value=mock_conn):
-            result = dest.list_orphan_swap_tables(config)
+            result = dest.list_orphan_swap_tables(config, "public.users")
 
-        # Only exact __drt_swap suffix should remain
-        assert result == ["public.users__drt_swap", "public.orders__drt_swap"]
+        assert result == ["public.users__drt_swap"]
 
-    def test_older_than_best_effort_logging(self):
+    def test_list_orphan_tables_logs_older_than_as_best_effort(self):
         """Should log that older_than is best-effort for Postgres."""
         dest = PostgresDestination()
-        config = _config()
+        config = _config(table="public.users")
         mock_conn = mock.Mock()
         mock_cur = mock.Mock()
         mock_conn.cursor.return_value = mock_cur
@@ -76,7 +79,11 @@ class TestListOrphanSwapTables:
 
         with mock.patch.object(dest, "_connect", return_value=mock_conn):
             with mock.patch("logging.getLogger") as mock_logger:
-                dest.list_orphan_swap_tables(config, older_than=timedelta(hours=24))
+                dest.list_orphan_swap_tables(
+                    config,
+                    "public.users",
+                    older_than=timedelta(hours=24),
+                )
                 mock_logger.return_value.info.assert_called_once()
                 call_msg = mock_logger.return_value.info.call_args[0][0]
                 assert "older_than" in call_msg.lower()
@@ -85,7 +92,7 @@ class TestListOrphanSwapTables:
 class TestDropOrphanSwapTables:
     """Test orphan swap table deletion with transaction safety."""
 
-    def test_drops_valid_tables(self):
+    def test_drop_orphan_tables_drops_valid_entries(self):
         """Should successfully drop valid schema.table entries."""
         dest = PostgresDestination()
         config = _config()
@@ -102,7 +109,7 @@ class TestDropOrphanSwapTables:
         assert failed == []
         assert mock_conn.commit.call_count == 2
 
-    def test_per_table_transaction_isolation(self):
+    def test_drop_orphan_tables_commits_each_table_independently(self):
         """Should commit each successful drop independently."""
         dest = PostgresDestination()
         config = _config()
@@ -128,7 +135,7 @@ class TestDropOrphanSwapTables:
         assert mock_conn.commit.call_count == 1
         assert mock_conn.rollback.call_count == 1
 
-    def test_rejects_malformed_table_entries(self):
+    def test_drop_orphan_tables_rejects_malformed_entries(self):
         """Should reject entries without schema.table format."""
         dest = PostgresDestination()
         config = _config()
@@ -151,7 +158,7 @@ class TestDropOrphanSwapTables:
         assert set(failed) == {"no_schema", ""}
         assert mock_cur.execute.call_count == 2
 
-    def test_rejects_non_swap_suffix_tables(self):
+    def test_drop_orphan_tables_rejects_non_swap_tables(self):
         """Should reject tables not ending with __drt_swap."""
         dest = PostgresDestination()
         config = _config()
@@ -173,7 +180,7 @@ class TestDropOrphanSwapTables:
         assert failed == ["public.regular_table"]
         assert mock_cur.execute.call_count == 2
 
-    def test_connection_cleanup_on_error(self):
+    def test_drop_orphan_tables_closes_connection_on_error(self):
         """Should close connection even if drop fails."""
         dest = PostgresDestination()
         config = _config()

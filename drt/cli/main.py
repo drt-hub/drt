@@ -420,69 +420,56 @@ def clean(
     result = load_syncs_safe(Path("."))
     syncs = result.syncs
 
-    found: set[str] = set()
-    per_sync: dict[str, list[str]] = {}
-    dests_by_sync: dict[str, Any] = {}  # Cache to avoid re-instantiation during execute phase
+    found_sources: dict[str, tuple[Any, Any]] = {}
 
     for sync in syncs:
         # Only consider syncs with destinations that support orphan cleanup
         try:
             dest = _get_destination(sync)
-            dests_by_sync[sync.name] = dest  # Cache for reuse during execute phase
         except Exception:
             continue
 
         if not isinstance(dest, OrphanCleanup):
             continue
 
+        base_table = getattr(sync.destination, "table", None)
+        if not base_table:
+            print_error(f"Skipping {sync.name}: destination table is missing.")
+            continue
+
         hours_td = timedelta(hours=older_than) if older_than is not None else None
         try:
-            tables = dest.list_orphan_swap_tables(sync.destination, older_than=hours_td)
+            tables = dest.list_orphan_swap_tables(sync.destination, base_table, older_than=hours_td)
         except Exception as e:
             print_error(f"Failed to list orphans for {sync.name}: {e}")
             continue
 
         if tables:
-            per_sync[sync.name] = tables
             for t in tables:
-                found.add(t)
+                found_sources.setdefault(t, (sync.destination, dest))
 
     # Deduplicate found tables across all syncs (avoid redundant drops)
-    found_unique = list(dict.fromkeys(found))
+    found_unique = list(found_sources)
 
     # Output summary
     console.print("")
     console.print(f"Found {len(found_unique)} orphan swap table(s).")
-    for t in sorted(found_unique):
-        console.print(f"  {t}")
-
     if not found_unique:
         console.print("\n[green]No orphan swap tables found.[/green]")
         return
 
     if not execute:
-        console.print(
-            "\n[bold yellow]Dry run:[/bold yellow] No tables were dropped. Use --execute to remove."
-        )
+        for t in found_unique:
+            console.print(f"[DRY RUN] Would drop: {t}")
+        console.print("Run with --execute to apply.")
         return
 
     # Execute: deduplicate and drop each unique table once
     dropped: list[str] = []
     failed: list[str] = []
     for table in found_unique:
-        # Find a destination that supports cleanup (use first match)
-        dest_to_use = None
-        for sync in syncs:
-            if sync.name in dests_by_sync:
-                dest = dests_by_sync[sync.name]
-                if isinstance(dest, OrphanCleanup):
-                    dest_to_use = dest
-                    sync_config = sync.destination
-                    break
-        if dest_to_use is None:
-            failed.append(table)
-            continue
         try:
+            sync_config, dest_to_use = found_sources[table]
             d, f = dest_to_use.drop_orphan_swap_tables(sync_config, [table])
             dropped.extend(d)
             failed.extend(f)
