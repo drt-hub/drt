@@ -1340,20 +1340,34 @@ def docs_generate(
         False, "--no-state", help="Exclude per-sync run state from the manifest."
     ),
 ) -> None:
-    """Generate the project's sync catalog (Phase 1: --format mermaid only)."""
+    """Generate the project's sync catalog (P1 mermaid + P2 json)."""
     from drt.docs.builder import build_manifest
     from drt.docs.mermaid import render_mermaid
 
     fmt = format.lower()
+    include_state = not no_state
+
     if fmt == "mermaid":
-        manifest = build_manifest(Path("."), include_state=not no_state)
+        manifest = build_manifest(Path("."), include_state=include_state)
         print(render_mermaid(manifest))
         return
 
-    if fmt in ("html", "json"):
+    if fmt == "json":
+        manifest = build_manifest(Path("."), include_state=include_state)
+        output.mkdir(parents=True, exist_ok=True)
+        manifest_path = output / "manifest.json"
+        with manifest_path.open("w") as f:
+            json.dump(manifest.to_dict(), f, indent=2)
+        console.print(
+            f"Wrote [bold]{manifest_path}[/bold] "
+            f"({len(manifest.syncs)} sync(s), schema_version={manifest.schema_version})"
+        )
+        return
+
+    if fmt == "html":
         raise NotImplementedError(
-            f"--format {fmt} is scheduled for a follow-up phase of #499. "
-            "Use --format mermaid for now."
+            "--format html is scheduled for P3 of #499. "
+            "Use --format mermaid or --format json for now."
         )
 
     raise typer.BadParameter(

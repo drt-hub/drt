@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 from drt import __version__
@@ -13,9 +14,12 @@ from drt.docs.manifest import (
     Destination,
     Edge,
     Manifest,
+    Project,
     Source,
     Sync,
+    SyncStateSnapshot,
 )
+from drt.state.manager import StateManager, SyncState
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9_]+")
 
@@ -52,15 +56,31 @@ def _table_aliases(table: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(aliases))
 
 
+def _state_snapshot(state: SyncState) -> SyncStateSnapshot:
+    """Rename internal SyncState fields to the public manifest schema (v1)."""
+    return SyncStateSnapshot(
+        last_sync_at=state.last_run_at,
+        last_cursor_value=state.last_cursor_value,
+        rows_synced=state.records_synced,
+        last_status=state.status,
+        last_error=state.error,
+    )
+
+
 def build_manifest(project_dir: Path = Path("."), include_state: bool = False) -> Manifest:
     """Build a `Manifest` from sync YAMLs + project config under *project_dir*.
 
-    State is not included in P1. `include_state` is accepted so the CLI flag can
-    remain stable while later docs phases add state overlays.
+    When *include_state* is true, each sync's latest persisted state from
+    ``.drt/state.json`` is attached as :class:`SyncStateSnapshot` under the
+    sync's ``state`` field. Syncs that have never run are emitted with
+    ``state=None`` (and the public schema omits the ``state`` block).
     """
-    _ = include_state
     project = load_project(project_dir)
     syncs_result = load_syncs_safe(project_dir)
+
+    states: dict[str, SyncState] = {}
+    if include_state:
+        states = StateManager(project_dir).get_all()
 
     # Source: project.profile is authoritative; type from inline ProjectConfig.source if present,
     # else "configured" because profiles.yml resolves the concrete type later.
@@ -80,6 +100,7 @@ def build_manifest(project_dir: Path = Path("."), include_state: bool = False) -
                 label=sync_cfg.destination.describe(),
             )
 
+        sync_state = states.get(sync_cfg.name)
         syncs.append(
             Sync(
                 name=sync_cfg.name,
@@ -88,6 +109,7 @@ def build_manifest(project_dir: Path = Path("."), include_state: bool = False) -
                 mode=sync_cfg.sync.mode,
                 description=sync_cfg.description,
                 tags=tuple(sync_cfg.tags),
+                state=_state_snapshot(sync_state) if sync_state else None,
             )
         )
 
@@ -122,6 +144,10 @@ def build_manifest(project_dir: Path = Path("."), include_state: bool = False) -
     return Manifest(
         schema_version=SCHEMA_VERSION,
         drt_version=__version__,
+        generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
+            "+00:00", "Z"
+        ),
+        project=Project(name=project.name, profile=project.profile),
         syncs=syncs,
         sources=[source],
         destinations=list(destinations.values()),
