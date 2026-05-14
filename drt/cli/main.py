@@ -821,11 +821,6 @@ def validate(
                     finding.to_dict() for finding in secret_warnings_by_sync.get(s.name, [])
                 ],
             }
-            if strict and entry["warnings"]:
-                entry["valid"] = False
-                entry["errors"] = [
-                    finding.message for finding in secret_warnings_by_sync.get(s.name, [])
-                ]
             if check_connection:
                 # Default: skipped for non-SQL destinations
                 conn_test: dict[str, object] | None = None
@@ -868,8 +863,6 @@ def validate(
         return
 
     for sync in result.syncs:
-        if strict and sync.name in secret_warnings_by_sync:
-            continue
         print_validation_ok(sync.name)
         # Print deprecation warnings for this sync
         if sync.name in result.deprecations:
