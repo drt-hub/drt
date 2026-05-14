@@ -785,9 +785,6 @@ def validate(
         False, "--check-connection", help="Test connectivity to SQL destinations."
     ),
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
-    check_connection: bool = typer.Option(
-        False, "--check-connection", help="Run connection tests for SQL destinations."
-    ),
 ) -> None:
     """Validate sync definitions against the JSON Schema."""
 
