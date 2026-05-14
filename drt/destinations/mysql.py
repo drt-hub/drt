@@ -140,13 +140,7 @@ class MySQLDestination:
         conn = self._connect(config)
         try:
             cur = conn.cursor()
-            # Escape table name with backticks for safety
-            escaped_table = (
-                "`.`".join(config.table.split("."))
-                if "." in config.table
-                else config.table
-            )
-            cur.execute(f"SELECT COUNT(*) FROM `{escaped_table}`")
+            cur.execute(f"SELECT COUNT(*) FROM {self._quote_ident(config.table)}")
             row = cur.fetchone()
             return row[0] if row else 0
         finally:
@@ -187,7 +181,7 @@ class MySQLDestination:
         result = SyncResult()
 
         if not self._replace_truncated:
-            cur.execute(f"TRUNCATE TABLE `{table}`")
+            cur.execute(f"TRUNCATE TABLE {self._quote_ident(table)}")
             self._replace_truncated = True
 
         sql = self._build_insert_sql(table, columns)
@@ -350,7 +344,7 @@ class MySQLDestination:
         """Build plain INSERT SQL (no conflict handling)."""
         cols_str = ", ".join(f"`{c}`" for c in columns)
         placeholders = ", ".join(["%s"] * len(columns))
-        return f"INSERT INTO `{table}` ({cols_str}) VALUES ({placeholders})"
+        return f"INSERT INTO {MySQLDestination._quote_ident(table)} ({cols_str}) VALUES ({placeholders})"
 
     @staticmethod
     def _build_upsert_sql(
@@ -365,11 +359,11 @@ class MySQLDestination:
         if update_cols:
             set_clause = ", ".join(f"`{c}` = VALUES(`{c}`)" for c in update_cols)
             return (
-                f"INSERT INTO `{table}` ({cols_str}) VALUES ({placeholders}) "
+                f"INSERT INTO {MySQLDestination._quote_ident(table)} ({cols_str}) VALUES ({placeholders}) "
                 f"ON DUPLICATE KEY UPDATE {set_clause}"
             )
         # All columns are part of the key — just ignore duplicates
-        return f"INSERT IGNORE INTO `{table}` ({cols_str}) VALUES ({placeholders})"
+        return f"INSERT IGNORE INTO {MySQLDestination._quote_ident(table)} ({cols_str}) VALUES ({placeholders})"
 
     @staticmethod
     def _connect(config: MySQLDestinationConfig) -> Any:
