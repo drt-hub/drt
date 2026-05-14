@@ -879,24 +879,24 @@ def validate(
         for sync in result.syncs:
             # Non-SQL destinations: skip
             if not isinstance(sync.destination, PostgresDestinationConfig):
-                console.print("⏭ connection test skipped")
+                typer.echo("⏭ connection test skipped")
                 continue
 
             try:
                 dest = _get_destination(sync)
             except Exception as e:
-                console.print(f"✗ connection failed: {e}")
+                typer.echo(f"✗ connection failed: {e}")
                 continue
 
             if not hasattr(dest, "test_connection"):
-                console.print("✗ connection failed: test_connection method missing")
+                typer.echo("✗ connection failed: test_connection method missing")
                 continue
 
             try:
                 dest.test_connection()
-                console.print("✓ connection ok")
+                typer.echo("✓ connection ok")
             except Exception as e:
-                console.print(f"✗ connection failed: {e}")
+                typer.echo(f"✗ connection failed: {e}")
 
     if result.errors:
         raise typer.Exit(code=1)
