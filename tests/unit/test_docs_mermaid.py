@@ -208,9 +208,7 @@ class TestDocsGenerateCLI:
     def test_generate_html_not_yet_implemented(self) -> None:
         result = runner.invoke(app, ["docs", "generate", "--format", "html"])
         assert result.exit_code != 0
-        assert "follow-up phase" in str(result.exception) or "follow-up phase" in (
-            result.output or ""
-        )
+        assert "P3" in str(result.exception) or "P3" in (result.output or "")
 
     def test_generate_unknown_format_is_bad_param(self) -> None:
         result = runner.invoke(app, ["docs", "generate", "--format", "xml"])
