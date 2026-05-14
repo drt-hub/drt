@@ -457,6 +457,9 @@ def clean(
     from drt.config.parser import load_syncs_safe
     from drt.destinations.base import OrphanCleanup
 
+    if not orphans:
+        return
+
     config_path = Path(config) if config != "drt.yml" else Path(".")
     result = load_syncs_safe(config_path)
 
