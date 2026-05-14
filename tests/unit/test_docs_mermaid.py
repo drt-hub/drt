@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import yaml
 from typer.testing import CliRunner
 
 from drt.cli.main import app
+from drt.docs.builder import build_manifest
 from drt.docs.manifest import (
     SCHEMA_VERSION,
     Destination,
@@ -27,6 +31,47 @@ def _manifest(*, syncs=None, sources=None, destinations=None, edges=None) -> Man
         destinations=list(destinations or []),
         edges=list(edges or []),
     )
+
+
+def _write_project(project_dir: Path, profile: str = "bigquery_prod") -> None:
+    (project_dir / "drt_project.yml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "demo",
+                "version": "0.1",
+                "profile": profile,
+                "source": {"type": "bigquery"},
+            }
+        )
+    )
+
+
+def _write_sync(project_dir: Path, filename: str, sync: dict[str, object]) -> None:
+    syncs_dir = project_dir / "syncs"
+    syncs_dir.mkdir(exist_ok=True)
+    (syncs_dir / filename).write_text(yaml.safe_dump(sync))
+
+
+def _postgres_sync(
+    name: str,
+    table: str,
+    lookups: dict[str, object] | None = None,
+) -> dict[str, object]:
+    destination: dict[str, object] = {
+        "type": "postgres",
+        "host": "localhost",
+        "dbname": "warehouse",
+        "table": table,
+        "upsert_key": ["id"],
+    }
+    if lookups:
+        destination["lookups"] = lookups
+    return {
+        "name": name,
+        "model": f"SELECT * FROM {name}",
+        "destination": destination,
+        "sync": {"mode": "upsert"},
+    }
 
 
 class TestRenderMermaid:
@@ -81,7 +126,6 @@ class TestRenderMermaid:
             ],
         )
         out = render_mermaid(m)
-        # Source node appears once; two extract edges fan out
         assert out.count("src_bq[") == 1
         assert out.count("-->|extract|") == 2
 
@@ -122,6 +166,32 @@ class TestRenderMermaid:
         assert "&quot;" in out
 
 
+class TestBuildManifest:
+    def test_lookup_edge_matches_unqualified_table_alias(self, tmp_path: Path) -> None:
+        _write_project(tmp_path, profile="postgres_replica")
+        _write_sync(tmp_path, "users.yml", _postgres_sync("users", "public.users"))
+        _write_sync(
+            tmp_path,
+            "accounts.yml",
+            _postgres_sync(
+                "accounts",
+                "public.accounts",
+                lookups={
+                    "user_id": {
+                        "table": "users",
+                        "match": {"id": "user_id"},
+                        "select": "id",
+                    }
+                },
+            ),
+        )
+
+        manifest = build_manifest(tmp_path)
+
+        assert Edge(kind="lookup", from_="users", to="accounts") in manifest.edges
+        assert "sync_users -.lookup.-> sync_accounts" in render_mermaid(manifest)
+
+
 class TestDocsGenerateCLI:
     def test_help_lists_generate_and_serve(self) -> None:
         result = runner.invoke(app, ["docs", "--help"])
@@ -138,16 +208,14 @@ class TestDocsGenerateCLI:
     def test_generate_html_not_yet_implemented(self) -> None:
         result = runner.invoke(app, ["docs", "generate", "--format", "html"])
         assert result.exit_code != 0
-        assert "follow-up phase" in str(result.exception) or "follow-up phase" in (
-            result.output or ""
-        )
+        assert "P3" in str(result.exception) or "P3" in (result.output or "")
 
     def test_generate_unknown_format_is_bad_param(self) -> None:
         result = runner.invoke(app, ["docs", "generate", "--format", "xml"])
         assert result.exit_code != 0
 
     def test_generate_mermaid_on_empty_project_prints_placeholder(
-        self, tmp_path, monkeypatch
+        self, tmp_path: Path, monkeypatch
     ) -> None:
         monkeypatch.chdir(tmp_path)
         (tmp_path / "drt_project.yml").write_text("name: empty\nprofile: default\n")

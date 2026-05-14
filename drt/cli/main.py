@@ -19,6 +19,7 @@ import typer
 if TYPE_CHECKING:
     from drt.config.credentials import ProfileConfig
     from drt.config.models import SyncConfig
+    from drt.config.secrets import SecretFinding
     from drt.destinations.base import Destination
     from drt.sources.base import Source
     from drt.state.history import HistoryManager
@@ -792,16 +793,21 @@ def validate(
 
     from drt.config.parser import load_syncs_safe
     from drt.config.schema import write_schemas
+    from drt.config.secrets import find_hardcoded_secrets
 
     result = load_syncs_safe(Path("."))
+    secret_findings = find_hardcoded_secrets(Path("."))
 
     if select:
         result.syncs = [s for s in result.syncs if s.name == select]
         result.errors = {k: v for k, v in result.errors.items() if k == select}
         result.deprecations = {k: v for k, v in result.deprecations.items() if k == select}
+        secret_findings = [finding for finding in secret_findings if finding.sync_name == select]
         if not result.syncs and not result.errors:
             print_error(f"No sync named '{select}' found.")
             raise typer.Exit(1)
+
+    secret_warnings_by_sync = _group_secret_findings(secret_findings)
 
     if output == "json":
         # Build JSON results including optional connection_test when requested
@@ -814,7 +820,15 @@ def validate(
                 "name": s.name,
                 "valid": True,
                 "deprecations": result.deprecations.get(s.name, []),
+                "warnings": [
+                    finding.to_dict() for finding in secret_warnings_by_sync.get(s.name, [])
+                ],
             }
+            if strict and entry["warnings"]:
+                entry["valid"] = False
+                entry["errors"] = [
+                    finding.message for finding in secret_warnings_by_sync.get(s.name, [])
+                ]
             if check_connection:
                 # Default: skipped for non-SQL destinations
                 conn_test: dict[str, object] | None = None
@@ -857,6 +871,8 @@ def validate(
         return
 
     for sync in result.syncs:
+        if strict and sync.name in secret_warnings_by_sync:
+            continue
         print_validation_ok(sync.name)
         # Print deprecation warnings for this sync
         if sync.name in result.deprecations:
@@ -907,6 +923,15 @@ def validate(
         console.print(f"\n[dim]Schemas written to {schema_dir}/[/dim]")
         for p in written:
             console.print(f"  {p}")
+
+
+def _group_secret_findings(
+    findings: list[SecretFinding],
+) -> dict[str, list[SecretFinding]]:
+    grouped: dict[str, list[SecretFinding]] = {}
+    for finding in findings:
+        grouped.setdefault(finding.sync_name, []).append(finding)
+    return grouped
 
 
 def _run_connection_test(sync: SyncConfig) -> dict[str, Any]:
@@ -1343,20 +1368,22 @@ app.add_typer(cloud_app)
 
 
 CLOUD_MESSAGE = (
-    "\n☁️  drt Cloud is coming soon!\nFollow https://github.com/drt-hub/drt for updates.\n"
+    "\n[bold blue]🚀 drt Cloud[/bold blue]\n"
+    "This is a stub for the future drt Cloud service.\n"
+    "[dim]Coming soon... Follow https://github.com/drt-hub/drt for updates.[/dim]\n"
 )
 
 
 @cloud_app.command(name="push")
 def cloud_push() -> None:
     """Push local project configuration to drt Cloud (stub)."""
-    print(CLOUD_MESSAGE)
+    console.print(CLOUD_MESSAGE)
 
 
 @cloud_app.command(name="status")
 def cloud_status() -> None:
     """Check drt Cloud deployment status (stub)."""
-    print(CLOUD_MESSAGE)
+    console.print(CLOUD_MESSAGE)
 
 
 # ---------------------------------------------------------------------------
@@ -1383,20 +1410,34 @@ def docs_generate(
         False, "--no-state", help="Exclude per-sync run state from the manifest."
     ),
 ) -> None:
-    """Generate the project's sync catalog (Phase 1: --format mermaid only)."""
+    """Generate the project's sync catalog (P1 mermaid + P2 json)."""
     from drt.docs.builder import build_manifest
     from drt.docs.mermaid import render_mermaid
 
     fmt = format.lower()
+    include_state = not no_state
+
     if fmt == "mermaid":
-        manifest = build_manifest(Path("."))
+        manifest = build_manifest(Path("."), include_state=include_state)
         print(render_mermaid(manifest))
         return
 
-    if fmt in ("html", "json"):
+    if fmt == "json":
+        manifest = build_manifest(Path("."), include_state=include_state)
+        output.mkdir(parents=True, exist_ok=True)
+        manifest_path = output / "manifest.json"
+        with manifest_path.open("w") as f:
+            json.dump(manifest.to_dict(), f, indent=2)
+        console.print(
+            f"Wrote [bold]{manifest_path}[/bold] "
+            f"({len(manifest.syncs)} sync(s), schema_version={manifest.schema_version})"
+        )
+        return
+
+    if fmt == "html":
         raise NotImplementedError(
-            f"--format {fmt} is scheduled for a follow-up phase of #499. "
-            "Use --format mermaid for now."
+            "--format html is scheduled for P3 of #499. "
+            "Use --format mermaid or --format json for now."
         )
 
     raise typer.BadParameter(
