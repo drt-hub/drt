@@ -58,6 +58,15 @@ class Destination(Protocol):
 
 
 @runtime_checkable
+class ConnectionTestable(Protocol):
+    """Optional destination capability for validating external connectivity."""
+
+    def test_connection(self, config: DestinationConfig) -> None:
+        """Raise an exception if the destination cannot be reached."""
+        ...
+
+
+@runtime_checkable
 class StagedDestination(Protocol):
     """Destination that accumulates records, then uploads as a batch job.
 
