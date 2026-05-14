@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 from drt import __version__
 from drt.cli.output import (
     console,
+    print_connection_test_result,
     print_dry_run_summary,
     print_error,
     print_init_success,
@@ -449,7 +450,10 @@ def clean(
     execute: bool = typer.Option(False, "--execute", help="Execute drops (default: dry-run)."),
     config: str = typer.Option("drt.yml", "--config", "-c", help="Path to config file."),
 ) -> None:
-    """Clean up orphan __drt_swap shadow tables left by interrupted swaps."""
+    """Clean up orphan __drt_swap shadow tables left by interrupted swaps.
+
+    Use --orphans to list candidate shadow tables and --execute to drop them.
+    """
     from drt.config.parser import load_syncs_safe
     from drt.destinations.base import OrphanCleanup
 
@@ -784,6 +788,9 @@ def validate(
     check_connection: bool = typer.Option(
         False, "--check-connection", help="Test connectivity to SQL destinations."
     ),
+    strict: bool = typer.Option(
+        False, "--strict", help="Treat validation warnings as errors."
+    ),
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
 ) -> None:
     """Validate sync definitions against the JSON Schema."""
@@ -791,7 +798,6 @@ def validate(
     from drt.config.parser import load_syncs_safe
     from drt.config.schema import write_schemas
     from drt.config.secrets import find_hardcoded_secrets
-
     result = load_syncs_safe(Path("."))
     secret_findings = find_hardcoded_secrets(Path("."))
 
@@ -808,8 +814,6 @@ def validate(
 
     if output == "json":
         # Build JSON results including optional connection_test when requested
-        from drt.config.models import PostgresDestinationConfig
-
         results: list[dict[str, object]] = []
         # Valid syncs
         for s in result.syncs:
@@ -821,29 +825,13 @@ def validate(
                     finding.to_dict() for finding in secret_warnings_by_sync.get(s.name, [])
                 ],
             }
+            if strict and entry["warnings"]:
+                entry["valid"] = False
+                entry["errors"] = [
+                    finding.message for finding in secret_warnings_by_sync.get(s.name, [])
+                ]
             if check_connection:
-                # Default: skipped for non-SQL destinations
-                conn_test: dict[str, object] | None = None
-                if not isinstance(s.destination, PostgresDestinationConfig):
-                    conn_test = {"success": None, "error": None, "skipped": True}
-                else:
-                    try:
-                        dest = _get_destination(s)
-                        if not hasattr(dest, "test_connection"):
-                            conn_test = {
-                                "success": False,
-                                "error": "test_connection method missing",
-                                "skipped": False,
-                            }
-                        else:
-                            try:
-                                dest.test_connection()
-                                conn_test = {"success": True, "error": None, "skipped": False}
-                            except Exception as e:  # noqa: PERF203
-                                conn_test = {"success": False, "error": str(e), "skipped": False}
-                    except Exception as e:
-                        conn_test = {"success": False, "error": str(e), "skipped": False}
-                entry["connection_test"] = conn_test
+                entry["connection_test"] = _run_connection_test(s)
             results.append(entry)
 
         # Invalid syncs (errors)
@@ -862,8 +850,18 @@ def validate(
         console.print("[dim]No syncs found.[/dim]")
         return
 
+    saw_strict_warnings = False
     for sync in result.syncs:
-        print_validation_ok(sync.name)
+        findings = secret_warnings_by_sync.get(sync.name, [])
+        if strict and findings:
+            print_validation_error(sync.name, [finding.message for finding in findings])
+            saw_strict_warnings = True
+        else:
+            print_validation_ok(sync.name)
+
+        for finding in findings:
+            console.print(f"  [yellow]WARNING[/yellow] {finding.message}")
+
         # Print deprecation warnings for this sync
         if sync.name in result.deprecations:
             for deprecation in result.deprecations[sync.name]:
@@ -880,31 +878,15 @@ def validate(
 
     # Optional: run connection tests for SQL destinations and show succinct results
     if check_connection:
-        from drt.config.models import PostgresDestinationConfig
-
         for sync in result.syncs:
-            # Non-SQL destinations: skip
-            if not isinstance(sync.destination, PostgresDestinationConfig):
-                typer.echo("⏭ connection test skipped")
-                continue
+            conn_test = _run_connection_test(sync)
+            print_connection_test_result(
+                sync.name,
+                conn_test["success"],
+                conn_test.get("error"),
+            )
 
-            try:
-                dest = _get_destination(sync)
-            except Exception as e:
-                typer.echo(f"✗ connection failed: {e}")
-                continue
-
-            if not hasattr(dest, "test_connection"):
-                typer.echo("✗ connection failed: test_connection method missing")
-                continue
-
-            try:
-                dest.test_connection()
-                typer.echo("✓ connection ok")
-            except Exception as e:
-                typer.echo(f"✗ connection failed: {e}")
-
-    if result.errors:
+    if result.errors or (strict and saw_strict_warnings):
         raise typer.Exit(code=1)
 
     if emit_schema:
