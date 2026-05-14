@@ -436,8 +436,8 @@ class PostgresDestination:
         conn = self._connect(config)
         try:
             for full_name in tables:
-                # Validate format: must contain schema.table
-                if not full_name or "." not in full_name:
+                # Validate format: must be exactly schema.table
+                if not full_name or full_name.count(".") != 1:
                     failed.append(full_name)
                     continue
 
