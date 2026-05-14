@@ -13,7 +13,12 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 from drt.config.models import PostgresDestinationConfig, SyncOptions
-from drt.destinations.postgres import PostgresDestination
+from drt.destinations.postgres import (
+    PostgresDestination,
+    _qualified_ident,
+    _split_qualified,
+    _with_relation_suffix,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -46,6 +51,10 @@ def _fake_connection() -> MagicMock:
 
 def _query_text(query: Any) -> str:
     return str(query)
+
+
+def _split_identifier_text(schema: str, relation: str) -> str:
+    return f"Identifier('{schema}', '{relation}')"
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +96,7 @@ class TestUpsertSql:
             update_cols=["score", "updated_at"],
         )
         assert "INSERT INTO" in str(sql)
-        assert "public.scores" in str(sql)
+        assert _split_identifier_text("public", "scores") in str(sql)
         assert "ON CONFLICT" in str(sql)
         assert "DO UPDATE SET" in str(sql)
         assert "score" in str(sql)
@@ -135,6 +144,26 @@ class TestPostgresDestinationLoad:
         assert result.failed == 0
         assert conn.cursor().execute.call_count == 2
         conn.commit.assert_called_once()
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_upsert_uses_schema_qualified_identifier(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        config = _config(table="marketing.email_events")
+        result = PostgresDestination().load(
+            [{"id": 1, "score": 0.95}],
+            config,
+            _options(),
+        )
+
+        assert result.success == 1
+        query = _query_text(cur.execute.call_args.args[0])
+        assert "INSERT INTO" in query
+        assert _split_identifier_text("marketing", "email_events") in query
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
     def test_empty_records(self, mock_connect: MagicMock) -> None:
@@ -213,10 +242,51 @@ class TestInsertSql:
         )
         rendered = str(sql)
         assert "INSERT INTO" in rendered
-        assert "public.scores" in rendered
+        assert _split_identifier_text("public", "scores") in rendered
         assert "id" in rendered
         assert "score" in rendered
         assert "updated_at" in rendered
+
+
+class TestQualifiedIdentifiers:
+    def test_split_qualified_table_name(self) -> None:
+        assert _split_qualified("marketing.email_events") == (
+            "marketing",
+            "email_events",
+        )
+        assert _split_qualified("email_events") == (None, "email_events")
+
+    def test_qualified_identifier_quotes_schema_and_relation_separately(self) -> None:
+        rendered = str(_qualified_ident("marketing.email_events"))
+        assert _split_identifier_text("marketing", "email_events") in rendered
+
+    def test_shadow_table_suffix_stays_on_relation(self) -> None:
+        assert (
+            _with_relation_suffix("marketing.email_events", "__drt_swap")
+            == "marketing.email_events__drt_swap"
+        )
+        assert (
+            _with_relation_suffix("email_events", "__drt_swap")
+            == "email_events__drt_swap"
+        )
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_get_row_count_uses_schema_qualified_identifier(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        cur.fetchone.return_value = (7,)
+        mock_connect.return_value = conn
+
+        count = PostgresDestination().get_row_count(
+            _config(table="marketing.email_events")
+        )
+
+        assert count == 7
+        query = _query_text(cur.execute.call_args.args[0])
+        assert _split_identifier_text("marketing", "email_events") in query
+        assert "marketing.email_events" not in query
 
 
 class TestPostgresReplaceMode:
@@ -268,6 +338,88 @@ class TestPostgresReplaceMode:
         # The INSERT call (second execute, after TRUNCATE)
         insert_sql = str(cur.execute.call_args_list[1][0][0])
         assert "INSERT INTO" in insert_sql
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_replace_uses_schema_qualified_identifier(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        config = _config(table="marketing.email_events")
+        PostgresDestination().load(
+            [{"id": 1, "score": 0.95}],
+            config,
+            _options(mode="replace"),
+        )
+
+        sqls = [_query_text(c[0][0]) for c in cur.execute.call_args_list]
+        assert any(
+            "TRUNCATE TABLE" in s
+            and _split_identifier_text("marketing", "email_events") in s
+            for s in sqls
+        )
+        assert any(
+            "INSERT INTO" in s
+            and _split_identifier_text("marketing", "email_events") in s
+            for s in sqls
+        )
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_replace_on_error_fail_rolls_back_and_returns(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        def execute_side_effect(sql: Any, *args: Any) -> None:
+            if "INSERT INTO" in _query_text(sql):
+                raise Exception("bad row")
+
+        cur.execute.side_effect = execute_side_effect
+
+        result = PostgresDestination().load(
+            [{"id": 1, "score": 0.95}],
+            _config(table="marketing.email_events"),
+            _options(mode="replace", on_error="fail"),
+        )
+
+        assert result.failed == 1
+        assert "bad row" in result.row_errors[0].error_message
+        conn.rollback.assert_called_once()
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_replace_on_error_skip_retruncates_after_reset_state(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+        dest = PostgresDestination()
+
+        def execute_side_effect(sql: Any, *args: Any) -> None:
+            if "INSERT INTO" in _query_text(sql):
+                dest._replace_truncated = False
+                raise Exception("bad row")
+
+        cur.execute.side_effect = execute_side_effect
+
+        result = dest.load(
+            [{"id": 1, "score": 0.95}],
+            _config(table="marketing.email_events"),
+            _options(mode="replace", on_error="skip"),
+        )
+
+        sqls = [_query_text(c[0][0]) for c in cur.execute.call_args_list]
+        truncate_sqls = [s for s in sqls if "TRUNCATE TABLE" in s]
+        assert result.failed == 1
+        assert len(truncate_sqls) == 2
+        assert all(
+            _split_identifier_text("marketing", "email_events") in s
+            for s in truncate_sqls
+        )
 
     def test_list_passes_through(self) -> None:
         """Non-dict types (including list) must pass through unchanged."""
@@ -401,6 +553,43 @@ class TestPostgresReplaceSwap:
         assert not any(isinstance(q, str) and "RENAME TO" in q for q in queries)
         # Final DROP of old table
         assert any("DROP TABLE" in s and "__drt_old" in s for s in sqls)
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_swap_uses_schema_qualified_identifiers(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        config = _config(table="marketing.email_events")
+        dest = PostgresDestination()
+        dest.load(
+            [{"id": 1, "score": 0.95}],
+            config,
+            _options(mode="replace", replace_strategy="swap"),
+        )
+        dest.finalize_sync(config, _options(mode="replace", replace_strategy="swap"))
+
+        sqls = [_query_text(c[0][0]) for c in cur.execute.call_args_list]
+        assert any(
+            "CREATE TABLE" in s
+            and _split_identifier_text("marketing", "email_events__drt_swap") in s
+            and _split_identifier_text("marketing", "email_events") in s
+            for s in sqls
+        )
+        assert any(
+            "ALTER TABLE" in s
+            and _split_identifier_text("marketing", "email_events") in s
+            and "Identifier('email_events__drt_old')" in s
+            for s in sqls
+        )
+        assert any(
+            "ALTER TABLE" in s
+            and _split_identifier_text("marketing", "email_events__drt_swap") in s
+            and "Identifier('email_events')" in s
+            for s in sqls
+        )
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
     def test_swap_finalize_noop_when_no_swap_in_progress(
