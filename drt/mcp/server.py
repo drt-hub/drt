@@ -139,14 +139,13 @@ def create_server(project_dir: Path | None = None) -> Any:
                 - `skipped` (optional): true when destination type isn't queryable
                 - `reason` (optional): why the sync was skipped
         """
-        from drt.cli.main import _test_display_name
         from drt.config.parser import load_syncs
         from drt.destinations.query import (
             execute_test_query,
             get_table_name,
             is_queryable,
         )
-        from drt.engine.test_runner import build_test_query
+        from drt.engine.test_runner import build_test_query, test_display_name
 
         syncs = load_syncs(_project_dir)
         if not syncs:
@@ -177,7 +176,7 @@ def create_server(project_dir: Path | None = None) -> Any:
 
             table = get_table_name(sync.destination)
             for test_def in sync.tests:
-                test_name = _test_display_name(test_def)
+                test_name = test_display_name(test_def)
                 try:
                     query, check = build_test_query(test_def, table)
                     result_val = execute_test_query(sync.destination, query)
