@@ -22,13 +22,9 @@ echo "Last release: $LAST_TAG"
 
 If no `v*` tag exists, fall back to the first commit on `main` and inform the user this is a first-release draft.
 
-### 2. List merged PRs since that tag
+### 2. List squash-merged PRs since that tag
 
-```bash
-git log "$LAST_TAG"..HEAD --merges --pretty=format:'%h %s' --reverse
-```
-
-For squash-merged repos (drt uses squash-merge), use this instead — squash commits aren't merge commits:
+**drt uses squash-merge** (each PR lands as a single commit on `main`, not a merge commit). Use this — `--merges` would return nothing:
 
 ```bash
 git log "$LAST_TAG"..HEAD --pretty=format:'%h|%s' --reverse
@@ -46,7 +42,15 @@ For each commit, extract the conventional commit prefix:
 - `chore(...)`, `test(...)`, `ci(...)` → skip unless reader-facing
 - `BREAKING CHANGE:` in body, or `!` after type (e.g. `feat!:`) → **Breaking changes** (top of the entry)
 
-Extract the PR number from the commit subject (squash-merge format ends with `(#NNN)`).
+Extract the **PR number** from the commit subject — squash-merge format always ends with `(#NNN)`. That `NNN` is the PR number, not the issue number.
+
+To get the **issue number** (often different — PRs typically "close" an issue), parse the PR body for `Closes #NNN` / `Fixes #NNN` / `Resolves #NNN`:
+
+```bash
+gh pr view <PR_NUMBER> --json body --jq '.body' | grep -oE '(Closes|Fixes|Resolves) #[0-9]+' | grep -oE '[0-9]+' | head -1
+```
+
+If no issue is referenced, omit the issue number — just cite `(PR #MMM)`.
 
 ### 4. Format to match CHANGELOG.md style
 
@@ -92,6 +96,24 @@ Output the formatted block ready to paste into `CHANGELOG.md` directly above `##
 - PRs whose body doesn't clearly state user impact → mark with `[needs review]`
 
 Do **not** write to `CHANGELOG.md` automatically — the maintainer should paste it in so they can edit phrasing and merge with any handwritten entries already there.
+
+### Example output
+
+For a release with three merged PRs since `v0.7.2` (a feat that closes an issue, a fix from a contributor with no linked issue, and a chore), the draft looks like:
+
+```markdown
+## [Unreleased]
+
+### Added
+
+- **Orphan shadow table cleanup for swap strategy** (#447, PR #492): New `drt clean --orphans` CLI command detects and (with `--execute`) drops leftover `__drt_swap` tables from interrupted swap-based replacements. Dry-run by default; Postgres implementation only for now. Contributed by @Muawiya-contact.
+
+### Fixed
+
+- **Postgres: qualified `schema.table` identifiers safely composed** (PR #498): Row-count, replace, swap, finalize, insert, and upsert SQL paths previously passed `f"{schema}.{table}"` through `psycopg2.sql.Identifier()`, double-quoting the entire dotted name into a single identifier. The fix splits qualified names into separate schema and relation `Identifier()` components. Contributed by @Photon101.
+```
+
+Note the `(#447, PR #492)` pattern when both are known, vs `(PR #498)` when no issue was linked.
 
 ## Style invariants
 
