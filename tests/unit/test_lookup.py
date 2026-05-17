@@ -729,10 +729,10 @@ class TestSyncConfigCheckOnlyParse:
 class TestDetectAmbiguousLookupOrdering:
     """Surface cases where YAML key order can flip row fate (#453)."""
 
-    def test_empty_lookups_returns_no_warnings(self):
+    def test_empty_lookups_returns_no_warnings(self) -> None:
         assert detect_ambiguous_lookup_ordering({}) == []
 
-    def test_single_lookup_returns_no_warnings(self):
+    def test_single_lookup_returns_no_warnings(self) -> None:
         lookups = {
             "interviewer_profile_id": LookupConfig(
                 table="interviewer_profiles",
@@ -743,7 +743,7 @@ class TestDetectAmbiguousLookupOrdering:
         }
         assert detect_ambiguous_lookup_ordering(lookups) == []
 
-    def test_disjoint_source_columns_returns_no_warnings(self):
+    def test_disjoint_source_columns_returns_no_warnings(self) -> None:
         # Two lookups, but no shared source column → order can't matter
         lookups = {
             "profile_id": LookupConfig(
@@ -761,8 +761,8 @@ class TestDetectAmbiguousLookupOrdering:
         }
         assert detect_ambiguous_lookup_ordering(lookups) == []
 
-    def test_shared_source_same_policy_returns_no_warnings(self):
-        # Same source column, same on_miss/check_only → order doesn't change fate
+    def test_shared_source_same_on_miss_returns_no_warnings(self) -> None:
+        # Same source column, same on_miss → order doesn't change fate
         lookups = {
             "a": LookupConfig(
                 table="a", match={"user_id": "user_id"}, select="id", on_miss="skip"
@@ -773,7 +773,27 @@ class TestDetectAmbiguousLookupOrdering:
         }
         assert detect_ambiguous_lookup_ordering(lookups) == []
 
-    def test_shared_source_different_on_miss_returns_warning(self):
+    def test_shared_source_same_on_miss_different_check_only_returns_no_warnings(self) -> None:
+        # Row fate on miss is determined by on_miss only. check_only only
+        # affects the HIT path, so two skip-policies (one check_only, one
+        # value-resolving) produce identical row outcomes — must NOT warn.
+        lookups = {
+            "user_exists": LookupConfig(
+                table="users",
+                match={"id": "user_id"},
+                check_only=True,
+                on_miss="skip",
+            ),
+            "profile_id": LookupConfig(
+                table="profiles",
+                match={"user_id": "user_id"},
+                select="id",
+                on_miss="skip",
+            ),
+        }
+        assert detect_ambiguous_lookup_ordering(lookups) == []
+
+    def test_shared_source_different_on_miss_returns_warning(self) -> None:
         # The exact scenario from #453
         lookups = {
             "interviewer_profile_id": LookupConfig(
@@ -796,7 +816,7 @@ class TestDetectAmbiguousLookupOrdering:
         assert "user_exists" in warnings[0]
         assert "#453" in warnings[0]
 
-    def test_warning_per_ambiguous_source_column(self):
+    def test_warning_per_ambiguous_source_column(self) -> None:
         # Two different source columns each ambiguous → two warnings
         lookups = {
             "a": LookupConfig(

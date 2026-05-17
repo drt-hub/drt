@@ -90,23 +90,26 @@ def detect_ambiguous_lookup_ordering(
     if not lookups or len(lookups) < 2:
         return []
 
-    by_source: dict[str, list[tuple[str, str, bool]]] = {}
+    # Row fate on miss is determined solely by on_miss — check_only only
+    # affects the HIT path (whether the resolved value is written). So
+    # `{skip, skip+check_only}` produces identical outcomes and should not
+    # warn; `{skip, fail}` does.
+    by_source: dict[str, list[tuple[str, str]]] = {}
     for target_col, lk in lookups.items():
         for source_col in lk.match.values():
-            by_source.setdefault(source_col, []).append(
-                (target_col, lk.on_miss, lk.check_only)
-            )
+            by_source.setdefault(source_col, []).append((target_col, lk.on_miss))
 
     warnings: list[str] = []
     for source_col, entries in by_source.items():
         if len(entries) < 2:
             continue
-        policies = {(on_miss, check_only) for _, on_miss, check_only in entries}
-        if len(policies) > 1:
-            targets = [t for t, _, _ in entries]
+        on_miss_policies = {on_miss for _, on_miss in entries}
+        if len(on_miss_policies) > 1:
+            targets = [t for t, _ in entries]
             warnings.append(
                 f"Lookups {targets} all match on source column '{source_col}' "
-                f"but have differing (on_miss, check_only) policies. "
+                f"but have differing on_miss policies "
+                f"({sorted(on_miss_policies)}). "
                 f"apply_lookups uses first-miss-wins in YAML insertion order, "
                 f"so reordering these keys can change row fate. "
                 f"Place check_only lookups first when in doubt — see issue #453."
