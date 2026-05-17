@@ -51,7 +51,8 @@ make fmt      # ruff format + fix
 
 ## Current Status
 
-- **v0.7.2 released** — Production Ready follow-up #2: opt-in anonymous telemetry (#263, PostHog Cloud EU), deprecation warnings in `drt validate` (#467), Postgres `psycopg2.sql` SQL composition hardening (#442). Telemetry is off by default + `DO_NOT_TRACK` honored; release-time API key injection workflow (#481) ships with the wheel.
+- **v0.7.3 released** — Patch release for Postgres schema-qualified identifier handling (#442, PR #498). Cherry-pick of the qualified `Identifier()` composition fix on top of the v0.7.2 line — `marketing.events` and similar `schema.table` configs no longer fail at SQL execution. No new features, no breaking changes; v0.8.0 work continues on `main` in parallel.
+- **v0.7.2** — Production Ready follow-up #2: opt-in anonymous telemetry (#263, PostHog Cloud EU), deprecation warnings in `drt validate` (#467), Postgres `psycopg2.sql` SQL composition hardening (#442). Telemetry is off by default + `DO_NOT_TRACK` honored; release-time API key injection workflow (#481) ships with the wheel.
 - **v0.7.1** — Production Ready follow-up: `drt run --dry-run --diff` for record-level preview (#413), tz-aware cursor stringification fix (#475), `on_error=fail` alignment for Notion / REST API / Email SMTP (#463), `VERSIONING.md` policy doc (#457).
 - **v0.7.0** — Production Ready theme: graceful shutdown on SIGTERM/SIGINT (#279), per-destination retry override (#277), sync execution history (#276), zero-downtime replace via staging table swap (#338), FK existence check via `lookups.check_only` (#354), `json_columns` config (#316), `drt doctor` (#264), `--quiet` flag (#265), Slack/webhook failure alerts (#414). Plus first DWH destination (Snowflake #353), Codespaces playground (#407), and `OPEN_CORE.md`.
 - **v0.6.2** — `watermark.default_value` + `--cursor-value` CLI + watermark observability (#390, #391)

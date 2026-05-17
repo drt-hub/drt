@@ -30,6 +30,14 @@ Followup items continue in their own issues (#482 telemetry retention cleanup, #
 
 ---
 
+## v0.7.3 — Postgres Patch ✅ Shipped 2026-05-17
+
+Released as **v0.7.3** on 2026-05-17. See [CHANGELOG.md](CHANGELOG.md#073---2026-05-17) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.7.3) for the full feature list.
+
+Strict patch release — cherry-pick of PR #498 (Postgres schema-qualified `Identifier()` composition fix, closing #442) on top of the v0.7.2 line. No new features, no breaking changes. v0.8 work continues in parallel.
+
+---
+
 ## v0.8 — Cloud Destinations & Growth
 
 **Theme:** DWH/Lakehouse destinations + community growth push.

@@ -1,4 +1,4 @@
-<!-- i18n-sync: base=README.md, hash=c55dc5c98718f609e3212b34dd9a479638ef8189 -->
+<!-- i18n-sync: base=README.md, hash=088072f66b5441ce899902bdeae46fbce237c611 -->
 
 [English](./README.md) | [日本語](./README.ja.md)
 
@@ -306,6 +306,7 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | **v0.7** ✅ | **Production Ready** — SIGTERM/SIGINT グレースフルシャットダウン · per-destination retry override · sync 実行履歴 · zero-downtime atomic table swap · `json_columns` 設定 · FK存在チェック (`lookups.check_only`) · Slack/webhook 失敗通知 · `drt doctor` · `--quiet` フラグ · `drt test --output json` / `--dry-run` · Snowflake destination · GitHub Codespaces プレイグラウンド · `OPEN_CORE.md` |
 | **v0.7.1** ✅ | `drt run --dry-run --diff` でレコード単位プレビュー · tz-aware カーソル文字列化バグ修正 · `on_error=fail` を Notion / REST API / Email SMTP に整合 · `VERSIONING.md` セマンティクスバージョニング & 非推奨ポリシー |
 | **v0.7.2** ✅ | **opt-in 匿名テレメトリ**（PostHog Cloud EU、デフォルト off、許可リスト式 payload、`DO_NOT_TRACK` 尊重）· `drt validate` の非推奨警告 · Postgres destination の `psycopg2.sql` 安全な SQL 合成 |
+| **v0.7.3** ✅ | **パッチ** — Postgres の `schema.table` 識別子合成の修正 (#442, PR #498): `marketing.events` のような schema 修飾名が単一 identifier として double-quote されていたバグを修正し、schema と relation を分離して合成 |
 
 **次のリリース:** [v0.8 Cloud Destinations & Growth](ROADMAP.md#v08--cloud-destinations--growth) → [v0.9 Enterprise Foundation](ROADMAP.md#v09--enterprise-foundation) → [v1.0 Stable Release](ROADMAP.md#v10--stable-release) → [v1.x Rust Engine](ROADMAP.md#v1x--rust-engine)
 
