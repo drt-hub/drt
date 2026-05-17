@@ -64,12 +64,73 @@ def build_lookup_map(
     return mapping
 
 
+def detect_ambiguous_lookup_ordering(
+    lookups: dict[str, LookupConfig],
+) -> list[str]:
+    """Detect lookups whose evaluation order changes row fate (#453).
+
+    When multiple lookups share the same source column but have different
+    ``on_miss`` policies, ``apply_lookups`` evaluates them in YAML
+    insertion order and the **first miss wins** — its policy decides the
+    row's fate, and the remaining lookups for that row are not evaluated.
+
+    This means a YAML key reorder can flip the row's outcome (e.g. from
+    ``fail`` to ``skip``) without any other config change, which is
+    surprising. This helper returns one human-readable warning per
+    ambiguous source column so callers can log at sync startup.
+
+    Args:
+        lookups: The destination's ``lookups`` mapping (``target_col -> LookupConfig``).
+
+    Returns:
+        One warning string per source column that participates in
+        multiple lookups with differing policies. Empty when no ambiguity
+        is detected.
+    """
+    if not lookups or len(lookups) < 2:
+        return []
+
+    # Row fate on miss is determined solely by on_miss — check_only only
+    # affects the HIT path (whether the resolved value is written). So
+    # `{skip, skip+check_only}` produces identical outcomes and should not
+    # warn; `{skip, fail}` does.
+    by_source: dict[str, list[tuple[str, str]]] = {}
+    for target_col, lk in lookups.items():
+        for source_col in lk.match.values():
+            by_source.setdefault(source_col, []).append((target_col, lk.on_miss))
+
+    warnings: list[str] = []
+    for source_col, entries in by_source.items():
+        if len(entries) < 2:
+            continue
+        on_miss_policies = {on_miss for _, on_miss in entries}
+        if len(on_miss_policies) > 1:
+            targets = [t for t, _ in entries]
+            warnings.append(
+                f"Lookups {targets} all match on source column '{source_col}' "
+                f"but have differing on_miss policies "
+                f"({sorted(on_miss_policies)}). "
+                f"apply_lookups uses first-miss-wins in YAML insertion order, "
+                f"so reordering these keys can change row fate. "
+                f"Place check_only lookups first when in doubt — see issue #453."
+            )
+    return warnings
+
+
 def apply_lookups(
     records: list[dict[str, Any]],
     lookup_maps: dict[str, tuple[LookupConfig, dict[tuple[Any, ...], Any]]],
     on_error: str,
 ) -> tuple[list[dict[str, Any]], list[RowError]]:
     """Enrich records with resolved lookup values.
+
+    **Ordering invariant:** lookups are evaluated in YAML insertion order
+    (preserved by ``dict``). For a row that misses on more than one
+    lookup, the **first miss wins** — that lookup's ``on_miss`` policy
+    decides the row's fate, and remaining lookups are not evaluated.
+    When multiple lookups share a source column with different policies,
+    reordering keys can therefore flip outcomes (see #453); use
+    :func:`detect_ambiguous_lookup_ordering` at config-load time to warn.
 
     Args:
         records: Source rows to enrich.
