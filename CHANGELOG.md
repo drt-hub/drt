@@ -45,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`ConnectionTestable` destination protocol** (#495, PR #497): New runtime-checkable `Protocol` in `drt/destinations/base.py` formalizing the `test_connection()` method introduced by #484. `drt validate --check-connection` now dispatches via `isinstance(dest, ConnectionTestable)` instead of dynamic `getattr`, giving destination implementers (including third-party ones) a typed contract. PostgreSQL / MySQL / ClickHouse / Snowflake destinations are declared `ConnectionTestable`; non-SQL destinations correctly fall through to the skip path. Contributed by @Photon101.
 - **Postgres: qualified `schema.table` identifiers now safely composed** (#442, PR #498): follow-up to PR #452 / PR #485. The row-count, replace, swap, finalize, insert, and upsert SQL paths previously passed `f"{schema}.{table}"` style strings through `psycopg2.sql.Identifier()`, which double-quoted the entire dotted name into a single identifier (`"marketing.email_events"`). The fix splits qualified names into separate schema and relation `Identifier()` components, while keeping swap shadow/old suffixes attached to the relation name only (so `marketing.email_events` becomes `marketing."email_events__drt_swap"`, not a single quoted identifier). Contributed by @Photon101.
 
+### Fixed
+
+- **MySQL destination correctly quotes schema-qualified table names** (#511): `mydb.scores` now produces `` `mydb`.`scores` `` across replace, insert, and upsert paths (was treated as a single identifier).
+
 ## [0.7.2] - 2026-05-11
 
 **Theme: Production Ready follow-up #2.** Opt-in anonymous telemetry, deprecation warnings in `drt validate`, Postgres `psycopg2.sql` hardening — closing out the v0.7 cycle items that didn't make v0.7.1.

@@ -344,7 +344,8 @@ class MySQLDestination:
         """Build plain INSERT SQL (no conflict handling)."""
         cols_str = ", ".join(f"`{c}`" for c in columns)
         placeholders = ", ".join(["%s"] * len(columns))
-        return f"INSERT INTO {MySQLDestination._quote_ident(table)} ({cols_str}) VALUES ({placeholders})"
+        table_q = MySQLDestination._quote_ident(table)
+        return f"INSERT INTO {table_q} ({cols_str}) VALUES ({placeholders})"
 
     @staticmethod
     def _build_upsert_sql(
@@ -355,15 +356,16 @@ class MySQLDestination:
         """Build INSERT ... ON DUPLICATE KEY UPDATE SQL."""
         cols_str = ", ".join(f"`{c}`" for c in columns)
         placeholders = ", ".join(["%s"] * len(columns))
+        table_q = MySQLDestination._quote_ident(table)
 
         if update_cols:
             set_clause = ", ".join(f"`{c}` = VALUES(`{c}`)" for c in update_cols)
             return (
-                f"INSERT INTO {MySQLDestination._quote_ident(table)} ({cols_str}) VALUES ({placeholders}) "
+                f"INSERT INTO {table_q} ({cols_str}) VALUES ({placeholders}) "
                 f"ON DUPLICATE KEY UPDATE {set_clause}"
             )
         # All columns are part of the key — just ignore duplicates
-        return f"INSERT IGNORE INTO {MySQLDestination._quote_ident(table)} ({cols_str}) VALUES ({placeholders})"
+        return f"INSERT IGNORE INTO {table_q} ({cols_str}) VALUES ({placeholders})"
 
     @staticmethod
     def _connect(config: MySQLDestinationConfig) -> Any:
