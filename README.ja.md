@@ -1,4 +1,4 @@
-<!-- i18n-sync: base=README.md, hash=c55dc5c98718f609e3212b34dd9a479638ef8189 -->
+<!-- i18n-sync: base=README.md, hash=088072f66b5441ce899902bdeae46fbce237c611 -->
 
 [English](./README.md) | [日本語](./README.ja.md)
 
