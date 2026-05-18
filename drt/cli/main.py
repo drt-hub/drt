@@ -442,6 +442,7 @@ def destinations() -> None:
     _print_connectors_table("Available destinations:", DESTINATIONS)
 
 
+
 @app.command()
 def clean(
     orphans: bool = typer.Option(
