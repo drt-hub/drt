@@ -6,6 +6,10 @@ from datetime import timedelta
 from typing import Any
 from unittest import mock
 
+import pytest
+
+pytest.importorskip("psycopg2.sql")
+
 from drt.config.models import PostgresDestinationConfig
 from drt.destinations.postgres import PostgresDestination
 
