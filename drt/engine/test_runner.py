@@ -16,6 +16,33 @@ class TestResult:
     message: str
 
 
+def test_display_name(test_def: SyncTest) -> str:
+    """Human-readable label for a SyncTest definition.
+
+    Shared between the ``drt test`` CLI and the ``drt_run_test`` MCP tool so
+    both render identical labels.
+    """
+    if test_def.row_count is not None:
+        parts = []
+        if test_def.row_count.min is not None:
+            parts.append(f"min={test_def.row_count.min}")
+        if test_def.row_count.max is not None:
+            parts.append(f"max={test_def.row_count.max}")
+        return f"row_count({', '.join(parts)})"
+    if test_def.not_null is not None:
+        cols = ", ".join(test_def.not_null.columns)
+        return f"not_null({cols})"
+    if test_def.freshness is not None:
+        return f"freshness({test_def.freshness.column}, max_age={test_def.freshness.max_age})"
+    if test_def.unique is not None:
+        cols = ", ".join(test_def.unique.columns)
+        return f"unique({cols})"
+    if test_def.accepted_values is not None:
+        vals = ", ".join(test_def.accepted_values.values)
+        return f"accepted_values({test_def.accepted_values.column}: {vals})"
+    return "unknown"
+
+
 def _safe_table(table: str) -> str:
     """Basic table name validation."""
     for ch in table:

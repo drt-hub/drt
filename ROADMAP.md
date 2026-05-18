@@ -30,6 +30,14 @@ Followup items continue in their own issues (#482 telemetry retention cleanup, #
 
 ---
 
+## v0.7.3 — Postgres Patch ✅ Shipped 2026-05-17
+
+Released as **v0.7.3** on 2026-05-17. See [CHANGELOG.md](CHANGELOG.md#073---2026-05-17) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.7.3) for the full feature list.
+
+Strict patch release — cherry-pick of PR #498 (Postgres schema-qualified `Identifier()` composition fix, closing #442) on top of the v0.7.2 line. No new features, no breaking changes. v0.8 work continues in parallel.
+
+---
+
 ## v0.8 — Cloud Destinations & Growth
 
 **Theme:** DWH/Lakehouse destinations + community growth push.
@@ -40,13 +48,28 @@ Followup items continue in their own issues (#482 telemetry retention cleanup, #
 - **Reliability follow-on** — dead letter queue (#278) — *opt-in telemetry (#263) moved up to v0.7*
 - **Correctness epic** — schema-aware serialization via INFORMATION_SCHEMA (#317)
 - **Engine** — `sync.mode: mirror` differential delete (#340)
-- **Growth / README** — hero section redesign (#281) · Quickstart GIF/asciinema (#282) · "Why OSS Reverse ETL" blog (#284) · production use case blog (#285) · Discord (#378) · X account link (#379) · Awesome lists (#290) · Reddit/HN launch (#289) — *Codespaces devcontainer (#283) and PyPI keywords (#307) shipped early in v0.7*
+- **Growth / README** — hero section redesign (#281) · Quickstart GIF/asciinema (#282) · "Why OSS Reverse ETL" blog (#284) · production use case blog (#285) · Discord (#378) · X account link (#379) · Awesome lists (#290) — *Codespaces devcontainer (#283) and PyPI keywords (#307) shipped early in v0.7; Reddit/HN launch (#289) deferred to opportunistic timing post-v0.8*
 - **Ecosystem** — GitHub Action (#292) · VS Code extension (#293)
 - **Dev tooling** — FakeSource (#364) · `drt_run_test` MCP tool (#368) · `/drt-troubleshoot` skill (#369) · `/drt-changelog` repo skill (#372) · connection test in `drt validate` (#367)
 
 **Out of scope:** Enterprise boundary (RBAC / audit log / plugin system → v0.9), Rust engine work (→ v1.x).
 
 **Target:** 2026-07 · **Progress:** [milestone/5](https://github.com/drt-hub/drt/milestone/5)
+
+---
+
+## v0.8.1 — Diff Polish
+
+**Theme:** Polish and follow-ups for the `--diff` feature shipped in v0.7.1.
+
+**Scope:**
+- **Diff UX** — `--diff-fields` column filter (#471) · API-based diff for upsert-keyed SaaS destinations (#472)
+- **Diff perf** — batch lookup queries for large diff sets (#470)
+- **Lookup correctness** — first-miss-wins YAML order semantics (#453)
+
+**Out of scope:** New destinations, engine features unrelated to `--diff`.
+
+**Target:** Cut from v0.8 once Cloud Destinations land · **Progress:** [milestone/10](https://github.com/drt-hub/drt/milestone/10)
 
 ---
 

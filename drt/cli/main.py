@@ -1210,29 +1210,12 @@ def test_syncs(
 
 
 def _test_display_name(test_def: object) -> str:
-    """Human-readable name for a test definition."""
+    """Backward-compatible private wrapper — delegates to the public helper."""
     from drt.config.models import SyncTest
+    from drt.engine.test_runner import test_display_name
 
     assert isinstance(test_def, SyncTest)
-    if test_def.row_count is not None:
-        parts = []
-        if test_def.row_count.min is not None:
-            parts.append(f"min={test_def.row_count.min}")
-        if test_def.row_count.max is not None:
-            parts.append(f"max={test_def.row_count.max}")
-        return f"row_count({', '.join(parts)})"
-    if test_def.not_null is not None:
-        cols = ", ".join(test_def.not_null.columns)
-        return f"not_null({cols})"
-    if test_def.freshness is not None:
-        return f"freshness({test_def.freshness.column}, max_age={test_def.freshness.max_age})"
-    if test_def.unique is not None:
-        cols = ", ".join(test_def.unique.columns)
-        return f"unique({cols})"
-    if test_def.accepted_values is not None:
-        vals = ", ".join(test_def.accepted_values.values)
-        return f"accepted_values({test_def.accepted_values.column}: {vals})"
-    return "unknown"
+    return test_display_name(test_def)
 
 
 # ---------------------------------------------------------------------------

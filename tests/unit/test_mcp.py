@@ -81,6 +81,7 @@ async def test_server_has_expected_tools() -> None:
     expected = {
         "drt_list_syncs",
         "drt_run_sync",
+        "drt_run_test",
         "drt_get_status",
         "drt_validate",
         "drt_get_schema",
@@ -120,6 +121,56 @@ async def test_validate_returns_valid_syncs(server: FastMCP) -> None:
     result = await call(server, "drt_validate")
     assert "notify" in result["valid"]
     assert result["errors"] == {}
+
+
+# ---------------------------------------------------------------------------
+# drt_run_test
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_test_no_syncs(tmp_path: Path) -> None:
+    (tmp_path / "drt_project.yml").write_text("name: empty\nprofile: default\n")
+    (tmp_path / "syncs").mkdir()
+    srv = create_server(tmp_path)
+    result = await call(srv, "drt_run_test")
+    assert result == {"status": "no_syncs", "results": []}
+
+
+@pytest.mark.asyncio
+async def test_run_test_sync_not_found(server: FastMCP) -> None:
+    result = await call(server, "drt_run_test", sync_name="nonexistent")
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_run_test_no_tests_defined(server: FastMCP) -> None:
+    # The default fixture sync has no `tests:` block
+    result = await call(server, "drt_run_test")
+    assert result == {"status": "no_tests", "results": []}
+
+
+@pytest.mark.asyncio
+async def test_run_test_skips_non_queryable_destination(tmp_path: Path) -> None:
+    (tmp_path / "drt_project.yml").write_text("name: test\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    # rest_api is not queryable — tests should report skipped
+    (syncs_dir / "notify.yml").write_text(
+        "name: notify\n"
+        "model: ref('users')\n"
+        "destination:\n"
+        "  type: rest_api\n"
+        "  url: https://example.com/hook\n"
+        "tests:\n"
+        "  - row_count: { min: 1 }\n"
+    )
+    srv = create_server(tmp_path)
+    result = await call(srv, "drt_run_test", sync_name="notify")
+    assert result["status"] == "passed"
+    assert len(result["results"]) == 1
+    assert result["results"][0]["skipped"] is True
+    assert "rest_api" in result["results"][0]["reason"]
 
 
 # ---------------------------------------------------------------------------
