@@ -83,11 +83,13 @@ class TestCleanCommand:
 
     def test_clean_help_shows_options(self):
         """Help should document --orphans and --execute."""
+        import re as _re
         runner = CliRunner()
         result = runner.invoke(app, ["clean", "--help"])
         assert result.exit_code == 0
-        assert "--orphans" in result.stdout
-        assert "--execute" in result.stdout
+        stdout = _re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
+        assert "--orphans" in stdout
+        assert "--execute" in stdout
 
     def test_clean_deduplicates_orphan_tables_across_syncs(self):
         """Duplicate orphan tables should be dropped only once."""
