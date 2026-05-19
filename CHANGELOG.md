@@ -59,6 +59,10 @@ Cherry-pick of PR #485 + PR #498 onto the v0.7.2 release line — so users on `d
 - **Postgres: qualified `schema.table` identifiers now safely composed** (#442, PR #498): the row-count, replace, swap, finalize, insert, and upsert SQL paths previously passed `f"{schema}.{table}"` style strings through `psycopg2.sql.Identifier()`, which double-quoted the entire dotted name into a single identifier (`"marketing.email_events"`) — so any Postgres destination configured with a schema-qualified table name failed at SQL execution. The fix splits qualified names into separate schema and relation `Identifier()` components, while keeping swap shadow/old suffixes attached to the relation name only (so `marketing.email_events` becomes `marketing."email_events__drt_swap"`, not a single quoted identifier). Contributed by @Photon101.
 - **Postgres: swap path fully migrated to `psycopg2.sql` composition** (PR #485, fixes #483): prerequisite for the qualified-identifier fix above. The swap-path SQL (DROP TABLE IF EXISTS, CREATE TABLE LIKE, INSERT, ALTER TABLE RENAME, cleanup DROP) was still using f-string formatting; this commit migrates it to `psycopg2.sql.SQL` + `Identifier` for safe composition. Originally queued for v0.7.2 but landed post-release (#485's CLA signature was in v0.7.2 but the commit itself was not); bundled into this patch because PR #498 depends on it. Contributed by @Photon101.
 
+### Fixed
+
+- **MySQL destination correctly quotes schema-qualified table names** (#511): `mydb.scores` now produces `` `mydb`.`scores` `` across replace, insert, and upsert paths (was treated as a single identifier).
+
 ## [0.7.2] - 2026-05-11
 
 **Theme: Production Ready follow-up #2.** Opt-in anonymous telemetry, deprecation warnings in `drt validate`, Postgres `psycopg2.sql` hardening — closing out the v0.7 cycle items that didn't make v0.7.1.
