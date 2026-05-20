@@ -95,6 +95,28 @@ class TestZendeskDestination:
             "segment": "strategic",
         }
 
+    def test_custom_fields_template_wins_user_field_conflicts(self) -> None:
+        record = {
+            "email": "alice@example.com",
+            "plan": "enterprise",
+            "user_fields": {"plan": "legacy", "segment": "strategic"},
+        }
+        config = _config(custom_fields_template='{"plan": "{{ row.plan }}"}')
+
+        with patch("drt.destinations.zendesk.httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.post.return_value = _response()
+
+            result = ZendeskDestination().load([record], config, _options())
+
+        assert result.success == 1
+        _, kwargs = mock_client.post.call_args
+        assert kwargs["json"]["users"][0]["user_fields"] == {
+            "plan": "enterprise",
+            "segment": "strategic",
+        }
+
     def test_user_bulk_splits_batches_at_zendesk_limit(self) -> None:
         records = [
             {"external_id": f"user-{index}", "email": f"user-{index}@example.com"}

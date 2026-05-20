@@ -134,10 +134,10 @@ class ZendeskDestination:
         for chunk in _chunks(indexed_payloads, _ZENDESK_MAX_USER_BATCH_SIZE):
             users = [payload for _, _, payload in chunk]
 
-            def do_post() -> httpx.Response:
+            def do_post(_users: list[dict[str, Any]] = users) -> httpx.Response:
                 response = client.post(
                     url,
-                    json={"users": users},
+                    json={"users": _users},
                     auth=auth,
                     headers=headers,
                 )
@@ -193,10 +193,10 @@ class ZendeskDestination:
                     break
                 continue
 
-            def do_post() -> httpx.Response:
+            def do_post(_organization: dict[str, Any] = organization) -> httpx.Response:
                 response = client.post(
                     url,
-                    json={"organization": organization},
+                    json={"organization": _organization},
                     auth=auth,
                     headers=headers,
                 )
@@ -243,7 +243,7 @@ def _resolve_credentials(config: ZendeskDestinationConfig) -> dict[str, str]:
     assert email is not None
     assert api_token is not None
     return {
-        "subdomain": subdomain,
+        "subdomain": subdomain.strip(),
         "email": email,
         "api_token": api_token,
     }
