@@ -27,11 +27,23 @@ Example ~/.drt/profiles.yml:
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
+from pydantic import BaseModel, Field
+
+
+class OtelConfig(BaseModel):
+    endpoint: str | None = None
+    service_name: str = "drt"
+    headers: dict[str, str] = Field(default_factory=dict)
+
+
+class ObservabilityConfig(BaseModel):
+    otel: OtelConfig = Field(default_factory=OtelConfig)
+
 
 # ---------------------------------------------------------------------------
 # Source profile types
@@ -46,6 +58,7 @@ class BigQueryProfile:
     method: Literal["application_default", "keyfile"] = "application_default"
     keyfile: str | None = None
     location: str = "US"  # e.g. "US", "EU", "asia-northeast1"
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def describe(self) -> str:
         return f"{self.type} ({self.project}.{self.dataset})"
@@ -55,6 +68,7 @@ class BigQueryProfile:
 class DuckDBProfile:
     type: Literal["duckdb"]
     database: str = ":memory:"  # path or :memory:
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def describe(self) -> str:
         return f"{self.type} ({self.database})"
@@ -64,6 +78,7 @@ class DuckDBProfile:
 class SQLiteProfile:
     type: Literal["sqlite"]
     database: str = ":memory:"  # path or :memory:
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def describe(self) -> str:
         return f"{self.type} ({self.database})"
@@ -78,6 +93,7 @@ class PostgresProfile:
     user: str = ""
     password_env: str | None = None  # env var name
     password: str | None = None  # explicit (non-recommended)
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def describe(self) -> str:
         return f"{self.type} ({self.host}:{self.port}/{self.dbname})"
@@ -106,6 +122,7 @@ class RedshiftProfile:
     password_env: str | None = None  # env var name
     password: str | None = None  # explicit (non-recommended)
     schema: str = "public"  # Redshift schema
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def describe(self) -> str:
         return f"{self.type} ({self.host}:{self.port}/{self.dbname})"
@@ -122,6 +139,7 @@ class ClickHouseProfile:
     user: str = "default"
     password_env: str | None = None  # env var name
     password: str | None = None  # explicit (non-recommended)
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def describe(self) -> str:
         return f"{self.type} ({self.host}:{self.port}/{self.database})"
@@ -148,6 +166,7 @@ class MySQLProfile:
     user: str = ""
     password_env: str | None = None
     password: str | None = None
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def describe(self) -> str:
         return f"{self.type} ({self.host}:{self.port}/{self.dbname})"
@@ -166,6 +185,7 @@ class SnowflakeProfile:
     schema: str = "PUBLIC"
     warehouse: str = ""
     role: str | None = None
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def describe(self) -> str:
         return f"{self.type} ({self.account}/{self.database}.{self.schema})"
@@ -183,6 +203,7 @@ class SQLServerProfile:
     password_env: str | None = None
     password: str | None = None
     schema: str = "dbo"
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def describe(self) -> str:
         return f"{self.type} ({self.host}/{self.database}.{self.schema})"
@@ -199,6 +220,7 @@ class DatabricksProfile:
     access_token: str | None = None
     catalog: str | None = None  # Unity Catalog (optional)
     schema: str = "default"
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def describe(self) -> str:
         path = f"{self.catalog}.{self.schema}" if self.catalog else self.schema
@@ -281,6 +303,13 @@ def resolve_env(value: str | None, env_var: str | None) -> str | None:
     return None
 
 
+def _parse_observability(raw: dict[str, Any]) -> ObservabilityConfig:
+    observability_raw = raw.get("observability")
+    if observability_raw is None:
+        return ObservabilityConfig()
+    return ObservabilityConfig.model_validate(observability_raw)
+
+
 # ---------------------------------------------------------------------------
 # Load / Save
 # ---------------------------------------------------------------------------
@@ -316,6 +345,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
 
     raw = data[profile_name]
     source_type = raw.get("type")
+    observability = _parse_observability(raw)
 
     if source_type == "bigquery":
         return BigQueryProfile(
@@ -325,17 +355,20 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             method=raw.get("method", "application_default"),
             keyfile=raw.get("keyfile"),
             location=raw.get("location", "US"),
+            observability=observability,
         )
     if source_type == "duckdb":
         return DuckDBProfile(
             type="duckdb",
             database=raw.get("database", ":memory:"),
+            observability=observability,
         )
 
     if source_type == "sqlite":
         return SQLiteProfile(
             type="sqlite",
             database=raw.get("database", ":memory:"),
+            observability=observability,
         )
     if source_type == "postgres":
         return PostgresProfile(
@@ -346,6 +379,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             user=raw.get("user", ""),
             password_env=raw.get("password_env"),
             password=raw.get("password"),
+            observability=observability,
         )
 
     if source_type == "redshift":
@@ -358,6 +392,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             password_env=raw.get("password_env"),
             password=raw.get("password"),
             schema=raw.get("schema", "public"),
+            observability=observability,
         )
 
     if source_type == "clickhouse":
@@ -369,6 +404,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             user=raw.get("user", "default"),
             password_env=raw.get("password_env"),
             password=raw.get("password"),
+            observability=observability,
         )
 
     if source_type == "mysql":
@@ -380,6 +416,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             user=raw.get("user", ""),
             password_env=raw.get("password_env"),
             password=raw.get("password"),
+            observability=observability,
         )
 
     if source_type == "snowflake":
@@ -399,6 +436,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             schema=raw.get("schema") or "PUBLIC",
             warehouse=raw.get("warehouse", ""),
             role=raw.get("role"),
+            observability=observability,
         )
 
     if source_type == "sqlserver":
@@ -414,6 +452,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             password_env=raw.get("password_env"),
             password=raw.get("password"),
             schema=raw.get("schema") or "dbo",
+            observability=observability,
         )
 
     if source_type == "databricks":
@@ -429,6 +468,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             access_token=raw.get("access_token"),
             catalog=raw.get("catalog"),
             schema=raw.get("schema") or "default",
+            observability=observability,
         )
 
     raise ValueError(
@@ -544,6 +584,9 @@ def save_profile(
             entry["catalog"] = profile.catalog
     else:
         raise ValueError(f"Unknown profile type: {type(profile)}")
+
+    if profile.observability != ObservabilityConfig():
+        entry["observability"] = profile.observability.model_dump(exclude_none=True)
 
     data[profile_name] = entry
     with profiles_path.open("w") as f:
