@@ -27,6 +27,7 @@ Example ~/.drt/profiles.yml:
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -43,6 +44,9 @@ class OtelConfig(BaseModel):
 
 class ObservabilityConfig(BaseModel):
     otel: OtelConfig = Field(default_factory=OtelConfig)
+
+
+_ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
 
 # ---------------------------------------------------------------------------
@@ -303,11 +307,32 @@ def resolve_env(value: str | None, env_var: str | None) -> str | None:
     return None
 
 
+def _expand_env_vars_in_str(value: str) -> str:
+    def _replace(match: re.Match[str]) -> str:
+        var = match.group(1)
+        env_val = os.environ.get(var)
+        if env_val is None:
+            raise ValueError(f"Environment variable ${{{var}}} is not set")
+        return env_val
+
+    return _ENV_VAR_PATTERN.sub(_replace, value)
+
+
+def _expand_env_vars(value: Any) -> Any:
+    if isinstance(value, str):
+        return _expand_env_vars_in_str(value)
+    if isinstance(value, dict):
+        return {key: _expand_env_vars(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_expand_env_vars(item) for item in value]
+    return value
+
+
 def _parse_observability(raw: dict[str, Any]) -> ObservabilityConfig:
     observability_raw = raw.get("observability")
     if observability_raw is None:
         return ObservabilityConfig()
-    return ObservabilityConfig.model_validate(observability_raw)
+    return ObservabilityConfig.model_validate(_expand_env_vars(observability_raw))
 
 
 # ---------------------------------------------------------------------------
@@ -585,8 +610,9 @@ def save_profile(
     else:
         raise ValueError(f"Unknown profile type: {type(profile)}")
 
-    if profile.observability != ObservabilityConfig():
-        entry["observability"] = profile.observability.model_dump(exclude_none=True)
+    observability_entry = profile.observability.model_dump(exclude_defaults=True)
+    if observability_entry:
+        entry["observability"] = observability_entry
 
     data[profile_name] = entry
     with profiles_path.open("w") as f:
