@@ -25,10 +25,10 @@ if TYPE_CHECKING:
     from drt.state.history import HistoryManager
     from drt.state.manager import StateManager
 
+
 from drt import __version__
 from drt.cli.output import (
     console,
-    print_connection_test_result,
     print_dry_run_summary,
     print_error,
     print_init_success,
@@ -50,14 +50,6 @@ app = typer.Typer(
     help="Reverse ETL for the code-first data stack.",
     no_args_is_help=True,
 )
-
-# SQL destination types used for connection-checking
-try:
-    from drt.config.models import PostgresDestinationConfig
-
-    SQL_DESTINATION_CONFIGS = (PostgresDestinationConfig,)
-except Exception:
-    SQL_DESTINATION_CONFIGS = ()  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +434,10 @@ def destinations() -> None:
     _print_connectors_table("Available destinations:", DESTINATIONS)
 
 
+# ---------------------------------------------------------------------------
+# clean
+# ---------------------------------------------------------------------------
+
 
 @app.command()
 def clean(
@@ -792,16 +788,15 @@ def validate(
     check_connection: bool = typer.Option(
         False, "--check-connection", help="Test connectivity to SQL destinations."
     ),
-    strict: bool = typer.Option(
-        False, "--strict", help="Treat validation warnings as errors."
-    ),
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
+    strict: bool = typer.Option(False, "--strict", help="Treat warnings as validation errors."),
 ) -> None:
     """Validate sync definitions against the JSON Schema."""
 
     from drt.config.parser import load_syncs_safe
     from drt.config.schema import write_schemas
     from drt.config.secrets import find_hardcoded_secrets
+
     result = load_syncs_safe(Path("."))
     secret_findings = find_hardcoded_secrets(Path("."))
 
@@ -817,11 +812,14 @@ def validate(
     secret_warnings_by_sync = _group_secret_findings(secret_findings)
 
     if output == "json":
-        # Build JSON results including optional connection_test when requested
-        results: list[dict[str, object]] = []
-        # Valid syncs
+        # Collect all deprecations into a flat list for JSON output
+        all_deprecations = []
+        for sync_name, sync_deprecations in result.deprecations.items():
+            all_deprecations.extend(sync_deprecations)
+        
+        results_json = []
         for s in result.syncs:
-            entry: dict[str, object] = {
+            entry = {
                 "name": s.name,
                 "valid": True,
                 "deprecations": result.deprecations.get(s.name, []),
@@ -836,17 +834,27 @@ def validate(
                 ]
             if check_connection:
                 entry["connection_test"] = _run_connection_test(s)
-            results.append(entry)
-
-        # Invalid syncs (errors)
+            results_json.append(entry)
+        
         for name, errs in result.errors.items():
-            entry = {"name": name, "valid": False, "errors": errs}
-            if check_connection:
-                entry["connection_test"] = {"success": None, "error": None, "skipped": True}
-            results.append(entry)
+            results_json.append(
+                {
+                    "name": name,
+                    "valid": False,
+                    "errors": errs,
+                    "warnings": [
+                        finding.to_dict() for finding in secret_warnings_by_sync.get(name, [])
+                    ],
+                }
+            )
 
-        print(json.dumps({"results": results}, indent=2))
-        if result.errors:
+        print(
+            json.dumps(
+                {"results": results_json},
+                indent=2,
+            )
+        )
+        if result.errors or (strict and secret_findings):
             raise typer.Exit(code=1)
         return
 
@@ -854,18 +862,10 @@ def validate(
         console.print("[dim]No syncs found.[/dim]")
         return
 
-    saw_strict_warnings = False
     for sync in result.syncs:
-        findings = secret_warnings_by_sync.get(sync.name, [])
-        if strict and findings:
-            print_validation_error(sync.name, [finding.message for finding in findings])
-            saw_strict_warnings = True
-        else:
-            print_validation_ok(sync.name)
-
-        for finding in findings:
-            console.print(f"  [yellow]WARNING[/yellow] {finding.message}")
-
+        if strict and sync.name in secret_warnings_by_sync:
+            continue
+        print_validation_ok(sync.name)
         # Print deprecation warnings for this sync
         if sync.name in result.deprecations:
             for deprecation in result.deprecations[sync.name]:
@@ -877,20 +877,26 @@ def validate(
                 if deprecation["docs_link"]:
                     console.print(f"       See {deprecation['docs_link']}")
 
+        for finding in secret_warnings_by_sync.get(sync.name, []):
+            console.print(f"  [yellow]WARNING[/yellow] {finding.message}")
+
+        if check_connection:
+            from drt.cli.output import print_connection_test_result
+            conn_res = _run_connection_test(sync)
+            print_connection_test_result(
+                sync.name,
+                success=conn_res["success"],
+                error=conn_res["error"],
+            )
+
     for name, errors in result.errors.items():
         print_validation_error(name, errors)
 
-    # Optional: run connection tests for SQL destinations and show succinct results
-    if check_connection:
-        for sync in result.syncs:
-            conn_test = _run_connection_test(sync)
-            print_connection_test_result(
-                sync.name,
-                conn_test["success"],
-                conn_test.get("error"),
-            )
+    if strict:
+        for name, findings in secret_warnings_by_sync.items():
+            print_validation_error(name, [finding.message for finding in findings])
 
-    if result.errors or (strict and saw_strict_warnings):
+    if result.errors or (strict and secret_findings):
         raise typer.Exit(code=1)
 
     if emit_schema:
