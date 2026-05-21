@@ -163,6 +163,7 @@ def _register_all_connectors() -> None:
         StagedUploadDestinationConfig,
         TeamsDestinationConfig,
         TwilioDestinationConfig,
+        ZendeskDestinationConfig,
     )
 
     # Import destination classes
@@ -189,6 +190,7 @@ def _register_all_connectors() -> None:
     from drt.destinations.staged_upload import StagedUploadDestination
     from drt.destinations.teams import TeamsDestination
     from drt.destinations.twilio import TwilioDestination
+    from drt.destinations.zendesk import ZendeskDestination
 
     # Import source classes
     from drt.sources.bigquery import BigQuerySource
@@ -209,6 +211,7 @@ def _register_all_connectors() -> None:
     register_destination("discord", DiscordDestinationConfig, DiscordDestination)
     register_destination("github_actions", GitHubActionsDestinationConfig, GitHubActionsDestination)
     register_destination("hubspot", HubSpotDestinationConfig, HubSpotDestination)
+    register_destination("zendesk", ZendeskDestinationConfig, ZendeskDestination)
     register_destination("jira", JiraDestinationConfig, JiraDestination)
     register_destination("sendgrid", SendGridDestinationConfig, SendGridDestination)
     register_destination("google_sheets", GoogleSheetsDestinationConfig, GoogleSheetsDestination)

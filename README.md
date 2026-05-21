@@ -282,6 +282,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | Discord Webhook         | ✅ v0.4.2 | (core)                             | Webhook URL                       |
 | GitHub Actions          | ✅ v0.1   | (core)                             | Token (env var)                   |
 | HubSpot                 | ✅ v0.1   | (core)                             | Token (env var)                   |
+| Zendesk                 | ✅ v0.7   | (core)                             | Basic (email + API token)         |
 | Google Ads              | ✅ v0.6   | (core)                             | OAuth2 Client Credentials         |
 | Google Sheets           | ✅ v0.4   | `pip install drt-core[sheets]`     | Service Account Keyfile           |
 | PostgreSQL (upsert)     | ✅ v0.4   | `pip install drt-core[postgres]`   | Password (env var)                |
