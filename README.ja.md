@@ -1,4 +1,4 @@
-<!-- i18n-sync: base=README.md, hash=088072f66b5441ce899902bdeae46fbce237c611 -->
+<!-- i18n-sync: base=README.md, hash=200d17e173906dc78d97f66bedbb37f653ca6be8 -->
 
 [English](./README.md) | [日本語](./README.ja.md)
 
@@ -256,6 +256,7 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | Discord Webhook | ✅ v0.4.2 | (core) | Webhook URL |
 | GitHub Actions | ✅ v0.1 | (core) | Token（環境変数） |
 | HubSpot | ✅ v0.1 | (core) | Token（環境変数） |
+| Zendesk | ✅ v0.7 | (core) | Basic（メールアドレス + API トークン） |
 | Google Ads | ✅ v0.6 | (core) | OAuth2 Client Credentials |
 | Google Sheets | ✅ v0.4 | `pip install drt-core[sheets]` | Service Account Keyfile |
 | PostgreSQL (upsert) | ✅ v0.4 | `pip install drt-core[postgres]` | パスワード（環境変数） |
