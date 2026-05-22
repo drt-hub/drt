@@ -27,13 +27,14 @@ Example ~/.drt/profiles.yml:
 from __future__ import annotations
 
 import os
-import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
+
+from drt.config.parser import expand_env_vars
 
 
 class OtelConfig(BaseModel):
@@ -44,9 +45,6 @@ class OtelConfig(BaseModel):
 
 class ObservabilityConfig(BaseModel):
     otel: OtelConfig = Field(default_factory=OtelConfig)
-
-
-_ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +60,6 @@ class BigQueryProfile:
     method: Literal["application_default", "keyfile"] = "application_default"
     keyfile: str | None = None
     location: str = "US"  # e.g. "US", "EU", "asia-northeast1"
-    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def describe(self) -> str:
         return f"{self.type} ({self.project}.{self.dataset})"
@@ -72,7 +69,6 @@ class BigQueryProfile:
 class DuckDBProfile:
     type: Literal["duckdb"]
     database: str = ":memory:"  # path or :memory:
-    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def describe(self) -> str:
         return f"{self.type} ({self.database})"
@@ -82,7 +78,6 @@ class DuckDBProfile:
 class SQLiteProfile:
     type: Literal["sqlite"]
     database: str = ":memory:"  # path or :memory:
-    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def describe(self) -> str:
         return f"{self.type} ({self.database})"
@@ -97,7 +92,6 @@ class PostgresProfile:
     user: str = ""
     password_env: str | None = None  # env var name
     password: str | None = None  # explicit (non-recommended)
-    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def describe(self) -> str:
         return f"{self.type} ({self.host}:{self.port}/{self.dbname})"
@@ -126,7 +120,6 @@ class RedshiftProfile:
     password_env: str | None = None  # env var name
     password: str | None = None  # explicit (non-recommended)
     schema: str = "public"  # Redshift schema
-    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def describe(self) -> str:
         return f"{self.type} ({self.host}:{self.port}/{self.dbname})"
@@ -143,7 +136,6 @@ class ClickHouseProfile:
     user: str = "default"
     password_env: str | None = None  # env var name
     password: str | None = None  # explicit (non-recommended)
-    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def describe(self) -> str:
         return f"{self.type} ({self.host}:{self.port}/{self.database})"
@@ -170,7 +162,6 @@ class MySQLProfile:
     user: str = ""
     password_env: str | None = None
     password: str | None = None
-    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def describe(self) -> str:
         return f"{self.type} ({self.host}:{self.port}/{self.dbname})"
@@ -189,7 +180,6 @@ class SnowflakeProfile:
     schema: str = "PUBLIC"
     warehouse: str = ""
     role: str | None = None
-    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def describe(self) -> str:
         return f"{self.type} ({self.account}/{self.database}.{self.schema})"
@@ -207,7 +197,6 @@ class SQLServerProfile:
     password_env: str | None = None
     password: str | None = None
     schema: str = "dbo"
-    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def describe(self) -> str:
         return f"{self.type} ({self.host}/{self.database}.{self.schema})"
@@ -224,7 +213,6 @@ class DatabricksProfile:
     access_token: str | None = None
     catalog: str | None = None  # Unity Catalog (optional)
     schema: str = "default"
-    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
     def describe(self) -> str:
         path = f"{self.catalog}.{self.schema}" if self.catalog else self.schema
@@ -307,32 +295,32 @@ def resolve_env(value: str | None, env_var: str | None) -> str | None:
     return None
 
 
-def _expand_env_vars_in_str(value: str) -> str:
-    def _replace(match: re.Match[str]) -> str:
-        var = match.group(1)
-        env_val = os.environ.get(var)
-        if env_val is None:
-            raise ValueError(f"Environment variable ${{{var}}} is not set")
-        return env_val
+def _load_profiles_yaml(config_dir: Path | None = None) -> dict[str, Any]:
+    profiles_path = _config_dir(config_dir) / "profiles.yml"
+    if not profiles_path.exists():
+        raise FileNotFoundError(
+            f"profiles.yml not found at {profiles_path}. "
+            "Run `drt init` to create it, or create it manually."
+        )
 
-    return _ENV_VAR_PATTERN.sub(_replace, value)
-
-
-def _expand_env_vars(value: Any) -> Any:
-    if isinstance(value, str):
-        return _expand_env_vars_in_str(value)
-    if isinstance(value, dict):
-        return {key: _expand_env_vars(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_expand_env_vars(item) for item in value]
-    return value
+    with profiles_path.open() as f:
+        return yaml.safe_load(f) or {}
 
 
-def _parse_observability(raw: dict[str, Any]) -> ObservabilityConfig:
-    observability_raw = raw.get("observability")
+def _profiles_mapping(data: dict[str, Any]) -> dict[str, Any]:
+    profiles = data.get("profiles")
+    if isinstance(profiles, dict):
+        return profiles
+    return {key: value for key, value in data.items() if key != "observability"}
+
+
+def load_observability_config(config_dir: Path | None = None) -> ObservabilityConfig:
+    """Load the top-level observability block from ~/.drt/profiles.yml."""
+    data = _load_profiles_yaml(config_dir)
+    observability_raw = data.get("observability")
     if observability_raw is None:
         return ObservabilityConfig()
-    return ObservabilityConfig.model_validate(_expand_env_vars(observability_raw))
+    return ObservabilityConfig.model_validate(observability_raw)
 
 
 # ---------------------------------------------------------------------------
@@ -352,25 +340,18 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
         KeyError: profile_name not found.
         ValueError: Unknown source type or missing required fields.
     """
-    profiles_path = _config_dir(config_dir) / "profiles.yml"
-    if not profiles_path.exists():
-        raise FileNotFoundError(
-            f"profiles.yml not found at {profiles_path}. "
-            "Run `drt init` to create it, or create it manually."
-        )
+    data = _load_profiles_yaml(config_dir)
+    profiles = _profiles_mapping(data)
 
-    with profiles_path.open() as f:
-        data = yaml.safe_load(f) or {}
-
-    if profile_name not in data:
-        available = ", ".join(data.keys()) or "(none)"
+    if profile_name not in profiles:
+        available = ", ".join(profiles.keys()) or "(none)"
         raise KeyError(
-            f"Profile '{profile_name}' not found in {profiles_path}. Available: {available}"
+            f"Profile '{profile_name}' not found in {_config_dir(config_dir) / 'profiles.yml'}. "
+            f"Available: {available}"
         )
 
-    raw = data[profile_name]
+    raw = expand_env_vars(profiles[profile_name])
     source_type = raw.get("type")
-    observability = _parse_observability(raw)
 
     if source_type == "bigquery":
         return BigQueryProfile(
@@ -380,20 +361,17 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             method=raw.get("method", "application_default"),
             keyfile=raw.get("keyfile"),
             location=raw.get("location", "US"),
-            observability=observability,
         )
     if source_type == "duckdb":
         return DuckDBProfile(
             type="duckdb",
             database=raw.get("database", ":memory:"),
-            observability=observability,
         )
 
     if source_type == "sqlite":
         return SQLiteProfile(
             type="sqlite",
             database=raw.get("database", ":memory:"),
-            observability=observability,
         )
     if source_type == "postgres":
         return PostgresProfile(
@@ -404,7 +382,6 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             user=raw.get("user", ""),
             password_env=raw.get("password_env"),
             password=raw.get("password"),
-            observability=observability,
         )
 
     if source_type == "redshift":
@@ -417,7 +394,6 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             password_env=raw.get("password_env"),
             password=raw.get("password"),
             schema=raw.get("schema", "public"),
-            observability=observability,
         )
 
     if source_type == "clickhouse":
@@ -429,7 +405,6 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             user=raw.get("user", "default"),
             password_env=raw.get("password_env"),
             password=raw.get("password"),
-            observability=observability,
         )
 
     if source_type == "mysql":
@@ -441,7 +416,6 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             user=raw.get("user", ""),
             password_env=raw.get("password_env"),
             password=raw.get("password"),
-            observability=observability,
         )
 
     if source_type == "snowflake":
@@ -461,7 +435,6 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             schema=raw.get("schema") or "PUBLIC",
             warehouse=raw.get("warehouse", ""),
             role=raw.get("role"),
-            observability=observability,
         )
 
     if source_type == "sqlserver":
@@ -477,7 +450,6 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             password_env=raw.get("password_env"),
             password=raw.get("password"),
             schema=raw.get("schema") or "dbo",
-            observability=observability,
         )
 
     if source_type == "databricks":
@@ -493,7 +465,6 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             access_token=raw.get("access_token"),
             catalog=raw.get("catalog"),
             schema=raw.get("schema") or "default",
-            observability=observability,
         )
 
     raise ValueError(
@@ -517,6 +488,16 @@ def save_profile(
     if profiles_path.exists():
         with profiles_path.open() as f:
             data = yaml.safe_load(f) or {}
+
+    observability = data.get("observability")
+    profiles = data.get("profiles")
+    if not isinstance(profiles, dict):
+        profiles = {key: value for key, value in data.items() if key != "observability"}
+
+    data = {}
+    if observability is not None:
+        data["observability"] = observability
+    data["profiles"] = profiles
 
     if isinstance(profile, BigQueryProfile):
         entry: dict[str, Any] = {
@@ -610,11 +591,7 @@ def save_profile(
     else:
         raise ValueError(f"Unknown profile type: {type(profile)}")
 
-    observability_entry = profile.observability.model_dump(exclude_defaults=True)
-    if observability_entry:
-        entry["observability"] = observability_entry
-
-    data[profile_name] = entry
+    profiles[profile_name] = entry
     with profiles_path.open("w") as f:
         yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
 
