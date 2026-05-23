@@ -44,7 +44,8 @@ Strict patch release — cherry-pick of PR #498 (Postgres schema-qualified `Iden
 
 **Scope:**
 - **Cloud destinations** — BigQuery (#165) · Databricks Delta Lake (#167) · S3 Parquet/CSV (#168) · GCS (#169) · Azure Blob (#170) — *Snowflake (#164) shipped early in v0.7 via PR #353*
-- **Lakehouse sources** — Delta Lake (#172) · Apache Iceberg (#173)
+- **SaaS destinations** — *Zendesk (#421) shipped via PR #504 — pattern reference for future SaaS connectors*
+- **Sources** — REST API (#422) ✅ *shipped via PR #474 — first non-database source, pattern reference for future API sources* · Delta Lake (#172) · Apache Iceberg (#173)
 - **Reliability follow-on** — dead letter queue (#278) — *opt-in telemetry (#263) moved up to v0.7*
 - **Correctness epic** — schema-aware serialization via INFORMATION_SCHEMA (#317)
 - **Engine** — `sync.mode: mirror` differential delete (#340)
