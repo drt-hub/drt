@@ -1,0 +1,57 @@
+name: Telemetry retention cleanup
+
+# Workaround for the PostHog Free plan, which doesn't expose per-event
+# retention shorter than 1 year through the UI. This workflow calls
+# PostHog's async_deletions API daily to schedule deletion of
+# sync_completed events older than 90 days. See issue #482 for context.
+#
+# Deletion is best-effort, asynchronous, and observability-only: if the
+# workflow fails (PostHog outage, expired key, scope drift), drt-core
+# itself is unaffected — only old telemetry events accumulate until the
+# next successful run. The workflow does NOT block any release.
+
+on:
+  schedule:
+    # Daily at 03:00 UTC — low-traffic, well outside US/EU business hours.
+    - cron: "0 3 * * *"
+  # Manual trigger from the Actions tab (e.g. for the first smoke run, or
+  # after rotating POSTHOG_PERSONAL_API_KEY).
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run in --dry-run mode (report only, no deletion scheduled)"
+        type: boolean
+        default: false
+
+# Don't pile up overlapping runs if one stalls.
+concurrency:
+  group: telemetry-retention-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      # No write permissions needed — script only POSTs to PostHog.
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Run retention cleanup
+        env:
+          POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
+        run: |
+          if [ -z "$POSTHOG_PERSONAL_API_KEY" ]; then
+            echo "::warning::POSTHOG_PERSONAL_API_KEY secret not set — skipping cleanup. Add the secret in repo Settings to enable scheduled retention."
+            exit 0
+          fi
+          MODE=--apply
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" = "true" ]; then
+            MODE=--dry-run
+          fi
+          python scripts/posthog-retention-cleanup.py "$MODE"
