@@ -50,6 +50,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`/drt-changelog` repo skill** (#372, PR #519): new skill at `.claude/commands/drt-changelog.md` that drafts an `[Unreleased]` CHANGELOG entry from squash-merged PRs since the latest `v*` tag — parses conventional commit prefixes (`feat/fix/refactor/perf`), enriches with PR title + contributor login via `gh pr view`, and outputs in drt's `(#NNN, PR #MMM)` bold-headline style. Does not write to `CHANGELOG.md` automatically.
 - **REST API source** (#422, PR #474): Pull data directly from external HTTP endpoints without requiring a DWH intermediary. Supports bearer, API key, basic, and OAuth2 authentication. Includes offset, cursor, and link_header pagination via the `pagination` config, and a `result_path` option using dot-notation to extract the nested records array. First non-database source — lays the architectural pattern for the v0.8 source-diversification slice. Contributed by @GokulKashyap.
 
+## [0.7.4] - 2026-05-23
+
+**Theme: Patch release for MySQL schema-qualified identifier handling.**
+
+Cherry-pick of PR #514 onto the v0.7.3 release line — the MySQL counterpart to the Postgres `Identifier()` composition fix that shipped in v0.7.3. No new features, no breaking changes. v0.8 work continues in parallel on `main`.
+
+> **Note on v0.7.3:** Earlier drafts of the v0.7.3 CHANGELOG referenced this MySQL fix as if it had shipped in v0.7.3, but PR #514 actually landed on `main` two days after the v0.7.3 tag was cut. The wheel published to PyPI as `drt-core==0.7.3` does **not** contain the MySQL fix. v0.7.4 is the release that actually delivers it; users hitting #511 should upgrade to `drt-core>=0.7.4`.
+
+### Fixed
+
+- **MySQL destination correctly quotes schema-qualified table names** (#511, PR #514): `mydb.scores` now produces `` `mydb`.`scores` `` across the row-count, replace, insert, and upsert paths (previously the dotted name was treated as a single backtick-quoted identifier, so any MySQL destination configured with a schema-qualified table name failed at SQL execution). The `_quote_ident` helper is now applied consistently across all SQL-composition paths on the MySQL destination, matching the Postgres `Identifier()` composition fix that shipped in v0.7.3 (#442 / PR #498). Contributed by @Godzilaa.
+
 ## [0.7.3] - 2026-05-17
 
 **Theme: Patch release for Postgres schema-qualified identifier handling.**
@@ -60,10 +72,6 @@ Cherry-pick of PR #485 + PR #498 onto the v0.7.2 release line — so users on `d
 
 - **Postgres: qualified `schema.table` identifiers now safely composed** (#442, PR #498): the row-count, replace, swap, finalize, insert, and upsert SQL paths previously passed `f"{schema}.{table}"` style strings through `psycopg2.sql.Identifier()`, which double-quoted the entire dotted name into a single identifier (`"marketing.email_events"`) — so any Postgres destination configured with a schema-qualified table name failed at SQL execution. The fix splits qualified names into separate schema and relation `Identifier()` components, while keeping swap shadow/old suffixes attached to the relation name only (so `marketing.email_events` becomes `marketing."email_events__drt_swap"`, not a single quoted identifier). Contributed by @Photon101.
 - **Postgres: swap path fully migrated to `psycopg2.sql` composition** (PR #485, fixes #483): prerequisite for the qualified-identifier fix above. The swap-path SQL (DROP TABLE IF EXISTS, CREATE TABLE LIKE, INSERT, ALTER TABLE RENAME, cleanup DROP) was still using f-string formatting; this commit migrates it to `psycopg2.sql.SQL` + `Identifier` for safe composition. Originally queued for v0.7.2 but landed post-release (#485's CLA signature was in v0.7.2 but the commit itself was not); bundled into this patch because PR #498 depends on it. Contributed by @Photon101.
-
-### Fixed
-
-- **MySQL destination correctly quotes schema-qualified table names** (#511): `mydb.scores` now produces `` `mydb`.`scores` `` across replace, insert, and upsert paths (was treated as a single identifier).
 
 ## [0.7.2] - 2026-05-11
 

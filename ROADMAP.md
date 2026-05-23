@@ -38,6 +38,14 @@ Strict patch release — cherry-pick of PR #498 (Postgres schema-qualified `Iden
 
 ---
 
+## v0.7.4 — MySQL Patch ✅ Shipped 2026-05-23
+
+Released as **v0.7.4** on 2026-05-23. See [CHANGELOG.md](CHANGELOG.md#074---2026-05-23) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.7.4) for the full feature list.
+
+Strict patch release — cherry-pick of PR #514 (MySQL `_quote_ident` applied across all SQL paths, closing #511) on top of the v0.7.3 release line. MySQL counterpart to the Postgres `Identifier()` fix that shipped in v0.7.3. PR #514 originally landed on `main` two days after the v0.7.3 tag, so the wheel published as `drt-core==0.7.3` did **not** contain it; v0.7.4 is the release that actually delivers the fix. No new features, no breaking changes. v0.8 work continues in parallel.
+
+---
+
 ## v0.8 — Cloud Destinations & Growth
 
 **Theme:** DWH/Lakehouse destinations + community growth push.
