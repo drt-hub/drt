@@ -1,8 +1,10 @@
 """Tests for RestApiSource."""
 
+import logging
 from typing import Any
 
 import httpx
+import pytest
 
 from drt.config.credentials import RestApiProfile
 from drt.sources.rest_api import RestApiSource
@@ -35,6 +37,26 @@ def test_rest_api_source_extract_records() -> None:
 
     # With object at path instead of array
     assert source._extract_records(data, "response") == [{"items": [{"id": 1}, {"id": 2}]}]
+
+
+def test_rest_api_source_extract_records_single_dict_fallback_logs_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When a response is a dict with neither 'records' nor 'data' arrays, the source
+    wraps the dict as a single-record list (e.g. `{"error": "..."}` becomes one row).
+    This is easy to miss, so the source emits a debug log noting the fallback shape.
+    """
+    source = RestApiSource()
+
+    with caplog.at_level(logging.DEBUG, logger="drt"):
+        result = source._extract_records({"error": "rate limit exceeded"}, None)
+
+    assert result == [{"error": "rate limit exceeded"}]
+    assert any(
+        "wrapping single dict as one record" in record.message
+        and "error" in record.message  # keys logged
+        for record in caplog.records
+    )
 
 
 def test_rest_api_source_extract_single_page(monkeypatch: Any) -> None:

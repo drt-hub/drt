@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from pydantic import TypeAdapter
@@ -28,6 +28,13 @@ class RestApiSource(Source):
     """Extract records from a REST API endpoint."""
 
     def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
+        """Extract records from the configured REST endpoint.
+
+        The ``query`` argument is part of the ``Source`` Protocol (used by SQL
+        sources for the SELECT statement) and is **ignored** here — for REST,
+        the endpoint URL and pagination strategy come from ``config`` (the
+        ``RestApiProfile`` block in ``profiles.yml``).
+        """
         assert isinstance(config, RestApiProfile)
 
         auth_config: AuthConfig | None = None
@@ -126,14 +133,21 @@ class RestApiSource(Source):
         if not result_path:
             # Default behavior if no result_path:
             if isinstance(data, list):
-                return data  # type: ignore[no-any-return]
+                return cast(list[dict[str, Any]], data)
             if isinstance(data, dict) and "records" in data:
-                return data["records"]  # type: ignore[no-any-return]
+                return cast(list[dict[str, Any]], data["records"])
             if isinstance(data, dict) and "data" in data:
                 items = data["data"]
                 if isinstance(items, list):
-                    return items  # type: ignore[no-any-return]
-            return [data] if isinstance(data, dict) else []
+                    return cast(list[dict[str, Any]], items)
+            if isinstance(data, dict):
+                logger.debug(
+                    "REST source: no records array found in response; "
+                    "wrapping single dict as one record (keys=%s)",
+                    list(data.keys()),
+                )
+                return [data]
+            return []
 
         # Simple dot notation resolution
         current = data
@@ -144,7 +158,7 @@ class RestApiSource(Source):
                 return []
 
         if isinstance(current, list):
-            return current  # type: ignore[no-any-return]
+            return cast(list[dict[str, Any]], current)
         if isinstance(current, dict):
             return [current]
         return []
