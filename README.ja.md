@@ -308,6 +308,7 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | **v0.7.1** ✅ | `drt run --dry-run --diff` でレコード単位プレビュー · tz-aware カーソル文字列化バグ修正 · `on_error=fail` を Notion / REST API / Email SMTP に整合 · `VERSIONING.md` セマンティクスバージョニング & 非推奨ポリシー |
 | **v0.7.2** ✅ | **opt-in 匿名テレメトリ**（PostHog Cloud EU、デフォルト off、許可リスト式 payload、`DO_NOT_TRACK` 尊重）· `drt validate` の非推奨警告 · Postgres destination の `psycopg2.sql` 安全な SQL 合成 |
 | **v0.7.3** ✅ | **パッチ** — Postgres の `schema.table` 識別子合成の修正 (#442, PR #498): `marketing.events` のような schema 修飾名が単一 identifier として double-quote されていたバグを修正し、schema と relation を分離して合成 |
+| **v0.7.4** ✅ | **パッチ** — MySQL の `schema.table` 識別子クオートの修正 (#511, PR #514): `mydb.scores` が replace / insert / upsert / 行カウントの各 SQL パスで `` `mydb`.`scores` `` に正しくクオートされるよう `_quote_ident` を統一適用。PR #514 は v0.7.3 タグの2日後に `main` にマージされたため `drt-core==0.7.3` の wheel には含まれていない — `#511` を踏んでいるユーザは `drt-core>=0.7.4` へアップグレードを |
 
 **次のリリース:** [v0.8 Cloud Destinations & Growth](ROADMAP.md#v08--cloud-destinations--growth) → [v0.9 Enterprise Foundation](ROADMAP.md#v09--enterprise-foundation) → [v1.0 Stable Release](ROADMAP.md#v10--stable-release) → [v1.x Rust Engine](ROADMAP.md#v1x--rust-engine)
 
