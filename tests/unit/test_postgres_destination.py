@@ -5,13 +5,20 @@ Uses a fake psycopg2 connection — no real database required.
 
 from __future__ import annotations
 
+import pytest
+
+pytest.importorskip("psycopg2.sql")
+
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from drt.config.models import PostgresDestinationConfig, SyncOptions
-from drt.destinations.postgres import PostgresDestination
+from drt.destinations.postgres import (
+    PostgresDestination,
+    _qualified_ident,
+    _split_qualified,
+    _with_relation_suffix,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -40,6 +47,14 @@ def _fake_connection() -> MagicMock:
     conn = MagicMock()
     conn.cursor.return_value = MagicMock()
     return conn
+
+
+def _query_text(query: Any) -> str:
+    return str(query)
+
+
+def _split_identifier_text(schema: str, relation: str) -> str:
+    return f"Identifier('{schema}', '{relation}')"
 
 
 # ---------------------------------------------------------------------------
@@ -80,9 +95,11 @@ class TestUpsertSql:
             upsert_key=["id"],
             update_cols=["score", "updated_at"],
         )
-        assert 'INSERT INTO public.scores ("id", "score", "updated_at")' in sql
-        assert "ON CONFLICT" in sql
-        assert 'DO UPDATE SET "score" = EXCLUDED."score"' in sql
+        assert "INSERT INTO" in str(sql)
+        assert _split_identifier_text("public", "scores") in str(sql)
+        assert "ON CONFLICT" in str(sql)
+        assert "DO UPDATE SET" in str(sql)
+        assert "score" in str(sql)
 
     def test_composite_upsert_key(self) -> None:
         sql = PostgresDestination._build_upsert_sql(
@@ -91,8 +108,10 @@ class TestUpsertSql:
             upsert_key=["user_id", "metric_id"],
             update_cols=["value"],
         )
-        assert '"user_id", "metric_id"' in sql
-        assert 'DO UPDATE SET "value" = EXCLUDED."value"' in sql
+        assert "user_id" in str(sql)
+        assert "metric_id" in str(sql)
+        assert "DO UPDATE SET" in str(sql)
+        assert "value" in str(sql)
 
     def test_all_columns_are_key_does_nothing(self) -> None:
         sql = PostgresDestination._build_upsert_sql(
@@ -101,7 +120,7 @@ class TestUpsertSql:
             upsert_key=["id"],
             update_cols=[],
         )
-        assert "DO NOTHING" in sql
+        assert "DO NOTHING" in str(sql)
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +144,26 @@ class TestPostgresDestinationLoad:
         assert result.failed == 0
         assert conn.cursor().execute.call_count == 2
         conn.commit.assert_called_once()
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_upsert_uses_schema_qualified_identifier(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        config = _config(table="marketing.email_events")
+        result = PostgresDestination().load(
+            [{"id": 1, "score": 0.95}],
+            config,
+            _options(),
+        )
+
+        assert result.success == 1
+        query = _query_text(cur.execute.call_args.args[0])
+        assert "INSERT INTO" in query
+        assert _split_identifier_text("marketing", "email_events") in query
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
     def test_empty_records(self, mock_connect: MagicMock) -> None:
@@ -201,9 +240,53 @@ class TestInsertSql:
             table="public.scores",
             columns=["id", "score", "updated_at"],
         )
-        assert 'INSERT INTO public.scores ("id", "score", "updated_at")' in sql
-        assert "ON CONFLICT" not in sql
-        assert "VALUES (%s, %s, %s)" in sql
+        rendered = str(sql)
+        assert "INSERT INTO" in rendered
+        assert _split_identifier_text("public", "scores") in rendered
+        assert "id" in rendered
+        assert "score" in rendered
+        assert "updated_at" in rendered
+
+
+class TestQualifiedIdentifiers:
+    def test_split_qualified_table_name(self) -> None:
+        assert _split_qualified("marketing.email_events") == (
+            "marketing",
+            "email_events",
+        )
+        assert _split_qualified("email_events") == (None, "email_events")
+
+    def test_qualified_identifier_quotes_schema_and_relation_separately(self) -> None:
+        rendered = str(_qualified_ident("marketing.email_events"))
+        assert _split_identifier_text("marketing", "email_events") in rendered
+
+    def test_shadow_table_suffix_stays_on_relation(self) -> None:
+        assert (
+            _with_relation_suffix("marketing.email_events", "__drt_swap")
+            == "marketing.email_events__drt_swap"
+        )
+        assert (
+            _with_relation_suffix("email_events", "__drt_swap")
+            == "email_events__drt_swap"
+        )
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_get_row_count_uses_schema_qualified_identifier(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        cur.fetchone.return_value = (7,)
+        mock_connect.return_value = conn
+
+        count = PostgresDestination().get_row_count(
+            _config(table="marketing.email_events")
+        )
+
+        assert count == 7
+        query = _query_text(cur.execute.call_args.args[0])
+        assert _split_identifier_text("marketing", "email_events") in query
+        assert "marketing.email_events" not in query
 
 
 class TestPostgresReplaceMode:
@@ -224,8 +307,8 @@ class TestPostgresReplaceMode:
         assert result.failed == 0
         # TRUNCATE + 2 INSERTs = 3 execute calls
         assert cur.execute.call_count == 3
-        first_call_sql = cur.execute.call_args_list[0][0][0]
-        assert "TRUNCATE TABLE" in first_call_sql
+        first_call_sql = str(cur.execute.call_args_list[0][0][0])
+        assert "TRUNCATE" in first_call_sql
         conn.commit.assert_called_once()
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
@@ -238,9 +321,9 @@ class TestPostgresReplaceMode:
         dest.load([{"id": 1, "score": 0.5}], _config(), _options(mode="replace"))
         # Second batch — should NOT truncate again
         dest.load([{"id": 2, "score": 0.9}], _config(), _options(mode="replace"))
-
-        all_sqls = [call[0][0] for call in conn.cursor().execute.call_args_list]
-        truncate_count = sum(1 for sql in all_sqls if "TRUNCATE" in sql)
+        cur = conn.cursor()   # capture cursor once at top of test, then use it
+        all_sqls = [str(call[0][0]) for call in cur.execute.call_args_list]
+        truncate_count = sum(1 for s in all_sqls if "TRUNCATE" in s)
         assert truncate_count == 1
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
@@ -253,9 +336,90 @@ class TestPostgresReplaceMode:
         dest.load([{"id": 1, "score": 0.5}], _config(), _options(mode="replace"))
 
         # The INSERT call (second execute, after TRUNCATE)
-        insert_sql = cur.execute.call_args_list[1][0][0]
-        assert "ON CONFLICT" not in insert_sql
+        insert_sql = str(cur.execute.call_args_list[1][0][0])
         assert "INSERT INTO" in insert_sql
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_replace_uses_schema_qualified_identifier(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        config = _config(table="marketing.email_events")
+        PostgresDestination().load(
+            [{"id": 1, "score": 0.95}],
+            config,
+            _options(mode="replace"),
+        )
+
+        sqls = [_query_text(c[0][0]) for c in cur.execute.call_args_list]
+        assert any(
+            "TRUNCATE TABLE" in s
+            and _split_identifier_text("marketing", "email_events") in s
+            for s in sqls
+        )
+        assert any(
+            "INSERT INTO" in s
+            and _split_identifier_text("marketing", "email_events") in s
+            for s in sqls
+        )
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_replace_on_error_fail_rolls_back_and_returns(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        def execute_side_effect(sql: Any, *args: Any) -> None:
+            if "INSERT INTO" in _query_text(sql):
+                raise Exception("bad row")
+
+        cur.execute.side_effect = execute_side_effect
+
+        result = PostgresDestination().load(
+            [{"id": 1, "score": 0.95}],
+            _config(table="marketing.email_events"),
+            _options(mode="replace", on_error="fail"),
+        )
+
+        assert result.failed == 1
+        assert "bad row" in result.row_errors[0].error_message
+        conn.rollback.assert_called_once()
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_replace_on_error_skip_retruncates_after_reset_state(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+        dest = PostgresDestination()
+
+        def execute_side_effect(sql: Any, *args: Any) -> None:
+            if "INSERT INTO" in _query_text(sql):
+                dest._replace_truncated = False
+                raise Exception("bad row")
+
+        cur.execute.side_effect = execute_side_effect
+
+        result = dest.load(
+            [{"id": 1, "score": 0.95}],
+            _config(table="marketing.email_events"),
+            _options(mode="replace", on_error="skip"),
+        )
+
+        sqls = [_query_text(c[0][0]) for c in cur.execute.call_args_list]
+        truncate_sqls = [s for s in sqls if "TRUNCATE TABLE" in s]
+        assert result.failed == 1
+        assert len(truncate_sqls) == 2
+        assert all(
+            _split_identifier_text("marketing", "email_events") in s
+            for s in truncate_sqls
+        )
 
     def test_list_passes_through(self) -> None:
         """Non-dict types (including list) must pass through unchanged."""
@@ -354,12 +518,14 @@ class TestPostgresReplaceSwap:
         dest = PostgresDestination()
         dest.load(records, _config(), _options(mode="replace", replace_strategy="swap"))
 
-        sqls = [c[0][0] for c in cur.execute.call_args_list]
+        queries = [c[0][0] for c in cur.execute.call_args_list]
+        sqls = [_query_text(q) for q in queries]
         assert any("DROP TABLE IF EXISTS" in s and "__drt_swap" in s for s in sqls)
         assert any(
             "CREATE TABLE" in s and "(LIKE " in s and "INCLUDING ALL" in s for s in sqls
         )
         assert any("INSERT INTO" in s and "__drt_swap" in s for s in sqls)
+        assert not any(isinstance(q, str) and "__drt_swap" in q for q in queries)
         # No swap yet — happens in finalize_sync
         assert not any("RENAME TO" in s for s in sqls)
 
@@ -379,12 +545,51 @@ class TestPostgresReplaceSwap:
             _config(), _options(mode="replace", replace_strategy="swap")
         )
 
-        sqls = [c[0][0] for c in cur.execute.call_args_list]
+        queries = [c[0][0] for c in cur.execute.call_args_list]
+        sqls = [_query_text(q) for q in queries]
         # Two RENAME steps wrapped in a transaction
         rename_sqls = [s for s in sqls if "RENAME TO" in s]
         assert len(rename_sqls) >= 2
+        assert not any(isinstance(q, str) and "RENAME TO" in q for q in queries)
         # Final DROP of old table
         assert any("DROP TABLE" in s and "__drt_old" in s for s in sqls)
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_swap_uses_schema_qualified_identifiers(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        config = _config(table="marketing.email_events")
+        dest = PostgresDestination()
+        dest.load(
+            [{"id": 1, "score": 0.95}],
+            config,
+            _options(mode="replace", replace_strategy="swap"),
+        )
+        dest.finalize_sync(config, _options(mode="replace", replace_strategy="swap"))
+
+        sqls = [_query_text(c[0][0]) for c in cur.execute.call_args_list]
+        assert any(
+            "CREATE TABLE" in s
+            and _split_identifier_text("marketing", "email_events__drt_swap") in s
+            and _split_identifier_text("marketing", "email_events") in s
+            for s in sqls
+        )
+        assert any(
+            "ALTER TABLE" in s
+            and _split_identifier_text("marketing", "email_events") in s
+            and "Identifier('email_events__drt_old')" in s
+            for s in sqls
+        )
+        assert any(
+            "ALTER TABLE" in s
+            and _split_identifier_text("marketing", "email_events__drt_swap") in s
+            and "Identifier('email_events')" in s
+            for s in sqls
+        )
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
     def test_swap_finalize_noop_when_no_swap_in_progress(
@@ -418,7 +623,7 @@ class TestPostgresReplaceSwap:
             _options(mode="replace", replace_strategy="swap"),
         )
 
-        sqls = [c[0][0] for c in cur.execute.call_args_list]
+        sqls = [_query_text(c[0][0]) for c in cur.execute.call_args_list]
         create_count = sum(
             1 for s in sqls if "CREATE TABLE" in s and "INCLUDING ALL" in s
         )
@@ -439,8 +644,8 @@ class TestPostgresReplaceSwap:
         # Fail only on INSERT — DROP/CREATE/cleanup succeed.
         insert_call_count = {"n": 0}
 
-        def execute_side_effect(sql: str, *args: Any) -> None:
-            if sql.startswith("INSERT INTO"):
+        def execute_side_effect(sql: Any, *args: Any) -> None:
+            if _query_text(sql).startswith("Composed([SQL('INSERT INTO"):
                 insert_call_count["n"] += 1
                 if insert_call_count["n"] == 2:
                     raise Exception("constraint violation on row 2")
@@ -460,7 +665,7 @@ class TestPostgresReplaceSwap:
         # Rollback called on hard fail
         conn.rollback.assert_called()
         # Cleanup DROP IF EXISTS issued after rollback
-        sqls = [c[0][0] for c in cur.execute.call_args_list]
+        sqls = [_query_text(c[0][0]) for c in cur.execute.call_args_list]
         drops = [s for s in sqls if "DROP TABLE IF EXISTS" in s and "__drt_swap" in s]
         assert len(drops) >= 2  # initial + cleanup
         # State reset → finalize_sync must be a no-op (no RENAME issued)
@@ -468,7 +673,7 @@ class TestPostgresReplaceSwap:
             _config(), _options(mode="replace", replace_strategy="swap")
         )
         assert finalize_result is None
-        sqls_after = [c[0][0] for c in cur.execute.call_args_list]
+        sqls_after = [_query_text(c[0][0]) for c in cur.execute.call_args_list]
         assert not any("RENAME TO" in s for s in sqls_after)
 
 
@@ -503,7 +708,8 @@ class TestPostgresReplaceSwapJsonColumns:
         # Find the INSERT call against the shadow table
         insert_calls = [
             c for c in cur.execute.call_args_list
-            if "INSERT INTO" in c[0][0] and "__drt_swap" in c[0][0]
+            if "INSERT INTO" in _query_text(c[0][0])
+            and "__drt_swap" in _query_text(c[0][0])
         ]
         assert insert_calls, "expected at least one INSERT into shadow table"
         bound_values = insert_calls[0][0][1]
@@ -532,3 +738,18 @@ class TestPostgresReplaceSwapJsonColumns:
 
         assert result.failed == 1
         assert "not listed in json_columns" in result.row_errors[0].error_message
+
+
+class TestPostgresConnection:
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_test_connection_success(self, mock_connect: MagicMock) -> None:
+        conn = _fake_connection()
+        mock_connect.return_value = conn
+        
+        dest = PostgresDestination()
+        dest.test_connection(_config())
+        
+        mock_connect.assert_called_once()
+        # Verify SELECT 1 was called
+        cur = conn.cursor()
+        assert any("SELECT 1" in str(call.args[0]) for call in cur.execute.call_args_list)

@@ -44,4 +44,5 @@ DESTINATIONS = [
     ("staged_upload", "Staged Upload"),
     ("teams", "Microsoft Teams"),
     ("twilio", "Twilio"),
+    ("zendesk", "Zendesk"),
 ]

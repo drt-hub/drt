@@ -87,8 +87,44 @@ def _serialize_value(
     return value
 
 
+def _split_qualified(table: str) -> tuple[str | None, str]:
+    """Split an optional ``schema.table`` name into schema and relation parts."""
+    if "." not in table:
+        return None, table
+    schema, relation = table.split(".", 1)
+    return schema or None, relation
+
+
+def _join_qualified(schema: str | None, relation: str) -> str:
+    if schema is None:
+        return relation
+    return f"{schema}.{relation}"
+
+
+def _qualified_ident(table: str) -> Any:
+    """Return a psycopg2 Identifier that quotes each qualified-name part."""
+    from psycopg2 import sql as _pgsql
+
+    schema, relation = _split_qualified(table)
+    if schema is None:
+        return _pgsql.Identifier(relation)
+    return _pgsql.Identifier(schema, relation)
+
+
+def _relation_name(table: str) -> str:
+    return _split_qualified(table)[1]
+
+
+def _with_relation_suffix(table: str, suffix: str) -> str:
+    schema, relation = _split_qualified(table)
+    return _join_qualified(schema, f"{relation}{suffix}")
+
+
 class PostgresDestination:
-    """Upsert or replace records into a PostgreSQL table."""
+    """Upsert or replace records into a PostgreSQL table.
+
+    Implements ConnectionTestable via test_connection().
+    """
 
     def __init__(self) -> None:
         self._replace_truncated: bool = False
@@ -166,11 +202,21 @@ class PostgresDestination:
         try:
             cur = conn.cursor()
             query = sql.SQL("SELECT COUNT(*) FROM {}").format(
-                sql.Identifier(config.table)
+                _qualified_ident(config.table)
             )
             cur.execute(query)
             row = cur.fetchone()
             return row[0] if row else 0
+        finally:
+            conn.close()
+
+    def test_connection(self, config: DestinationConfig) -> None:
+        """Test connectivity by establishing a connection and running SELECT 1."""
+        assert isinstance(config, PostgresDestinationConfig)
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
         finally:
             conn.close()
 
@@ -185,18 +231,19 @@ class PostgresDestination:
         config: PostgresDestinationConfig,
     ) -> SyncResult:
         """TRUNCATE (once) → INSERT within a transaction."""
+        from psycopg2 import sql as _pgsql
         result = SyncResult()
 
         if not self._replace_truncated:
-            cur.execute(f"TRUNCATE TABLE {table}")
+            cur.execute(_pgsql.SQL("TRUNCATE TABLE {}").format(_qualified_ident(table)))
             self._replace_truncated = True
 
-        sql = self._build_insert_sql(table, columns)
+        query = self._build_insert_sql(table, columns)
 
         for i, record in enumerate(records):
             try:
                 values = [_serialize_value(record.get(c), c, config.json_columns) for c in columns]
-                cur.execute(sql, values)
+                cur.execute(query, values)
                 result.success += 1
             except Exception as e:
                 result.failed += 1
@@ -214,7 +261,11 @@ class PostgresDestination:
                 conn.rollback()
                 cur = conn.cursor()
                 if not self._replace_truncated:
-                    cur.execute(f"TRUNCATE TABLE {table}")
+                    cur.execute(
+                        _pgsql.SQL("TRUNCATE TABLE {}").format(
+                            _qualified_ident(table)
+                        )
+                    )
                     self._replace_truncated = True
                 continue
 
@@ -232,12 +283,20 @@ class PostgresDestination:
         config: PostgresDestinationConfig,
     ) -> SyncResult:
         """Build a shadow table per sync; atomic rename happens in finalize_sync."""
+        from psycopg2 import sql as _pgsql
         result = SyncResult()
-        shadow = f"{table}__drt_swap"
+        shadow = _with_relation_suffix(table, "__drt_swap")
 
         if not self._swap_shadow_created:
-            cur.execute(f"DROP TABLE IF EXISTS {shadow}")
-            cur.execute(f"CREATE TABLE {shadow} (LIKE {table} INCLUDING ALL)")
+            cur.execute(
+                _pgsql.SQL("DROP TABLE IF EXISTS {}").format(_qualified_ident(shadow))
+            )
+            cur.execute(
+                _pgsql.SQL("CREATE TABLE {} (LIKE {} INCLUDING ALL)").format(
+                    _qualified_ident(shadow),
+                    _qualified_ident(table),
+                )
+            )
             self._swap_shadow_created = True
             self._swap_table = table
 
@@ -262,7 +321,11 @@ class PostgresDestination:
                     conn.rollback()
                     # Cleanup shadow on hard fail
                     cur = conn.cursor()
-                    cur.execute(f"DROP TABLE IF EXISTS {shadow}")
+                    cur.execute(
+                        _pgsql.SQL("DROP TABLE IF EXISTS {}").format(
+                            _qualified_ident(shadow)
+                        )
+                    )
                     conn.commit()
                     self._swap_shadow_created = False
                     self._swap_table = None
@@ -278,13 +341,15 @@ class PostgresDestination:
         sync_options: SyncOptions,
     ) -> SyncResult | None:
         """Atomic rename: original->old, shadow->original, drop old."""
+        from psycopg2 import sql as _pgsql
+
         if not self._swap_shadow_created or self._swap_table is None:
             return None
 
         assert isinstance(config, PostgresDestinationConfig)
         table = self._swap_table
-        shadow = f"{table}__drt_swap"
-        old = f"{table}__drt_old"
+        shadow = _with_relation_suffix(table, "__drt_swap")
+        old = _with_relation_suffix(table, "__drt_old")
 
         conn = self._connect(config)
         try:
@@ -292,11 +357,21 @@ class PostgresDestination:
             # Single transaction: original->old, shadow->original.
             # ALTER TABLE ... RENAME TO takes a bare relation name on the RHS;
             # the schema is preserved automatically.
-            cur.execute(f"ALTER TABLE {table} RENAME TO {old.split('.')[-1]}")
-            cur.execute(f"ALTER TABLE {shadow} RENAME TO {table.split('.')[-1]}")
+            cur.execute(
+                _pgsql.SQL("ALTER TABLE {} RENAME TO {}").format(
+                    _qualified_ident(table),
+                    _pgsql.Identifier(_relation_name(old)),
+                )
+            )
+            cur.execute(
+                _pgsql.SQL("ALTER TABLE {} RENAME TO {}").format(
+                    _qualified_ident(shadow),
+                    _pgsql.Identifier(_relation_name(table)),
+                )
+            )
             conn.commit()
             # DROP old in separate tx (failure here doesn't break the swap).
-            cur.execute(f"DROP TABLE {old}")
+            cur.execute(_pgsql.SQL("DROP TABLE {}").format(_qualified_ident(old)))
             conn.commit()
         finally:
             conn.close()
@@ -316,7 +391,7 @@ class PostgresDestination:
     ) -> SyncResult:
         result = SyncResult()
         update_cols = [c for c in columns if c not in config.upsert_key]
-        sql = PostgresDestination._build_upsert_sql(
+        query = PostgresDestination._build_upsert_sql(
             config.table,
             columns,
             config.upsert_key,
@@ -326,7 +401,7 @@ class PostgresDestination:
         for i, record in enumerate(records):
             try:
                 values = [_serialize_value(record.get(c), c, config.json_columns) for c in columns]
-                cur.execute(sql, values)
+                cur.execute(query, values)
                 result.success += 1
             except Exception as e:
                 result.failed += 1
@@ -349,11 +424,13 @@ class PostgresDestination:
         return result
 
     @staticmethod
-    def _build_insert_sql(table: str, columns: list[str]) -> str:
-        """Build plain INSERT SQL (no conflict handling)."""
-        cols_str = ", ".join(f'"{c}"' for c in columns)
-        placeholders = ", ".join(["%s"] * len(columns))
-        return f"INSERT INTO {table} ({cols_str}) VALUES ({placeholders})"
+    def _build_insert_sql(table: str, columns: list[str]) -> Any:
+        from psycopg2 import sql as _pgsql
+        return _pgsql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
+            _qualified_ident(table),
+            _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in columns),
+            _pgsql.SQL(", ").join(_pgsql.Placeholder() for _ in columns),
+        )
 
     @staticmethod
     def _build_upsert_sql(
@@ -361,22 +438,27 @@ class PostgresDestination:
         columns: list[str],
         upsert_key: list[str],
         update_cols: list[str],
-    ) -> str:
-        """Build INSERT ... ON CONFLICT DO UPDATE SQL."""
-        cols_str = ", ".join(f'"{c}"' for c in columns)
-        placeholders = ", ".join(["%s"] * len(columns))
-        conflict_str = ", ".join(f'"{c}"' for c in upsert_key)
-
+    ) -> Any:
+        from psycopg2 import sql as _pgsql
         if update_cols:
-            set_clause = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in update_cols)
-            return (
-                f"INSERT INTO {table} ({cols_str}) VALUES ({placeholders}) "
-                f"ON CONFLICT ({conflict_str}) DO UPDATE SET {set_clause}"
+            set_clause = _pgsql.SQL(", ").join(
+                _pgsql.SQL("{} = EXCLUDED.{}").format(
+                    _pgsql.Identifier(c), _pgsql.Identifier(c)
+                )
+                for c in update_cols
             )
-        # All columns are part of the key — just ignore duplicates
-        return (
-            f"INSERT INTO {table} ({cols_str}) VALUES ({placeholders}) "
-            f"ON CONFLICT ({conflict_str}) DO NOTHING"
+            conflict_action = _pgsql.SQL("DO UPDATE SET ") + set_clause
+        else:
+            conflict_action = _pgsql.SQL("DO NOTHING")
+
+        return _pgsql.SQL(
+            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) {}"
+        ).format(
+            _qualified_ident(table),
+            _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in columns),
+            _pgsql.SQL(", ").join(_pgsql.Placeholder() for _ in columns),
+            _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in upsert_key),
+            conflict_action,
         )
 
     @staticmethod

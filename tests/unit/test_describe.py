@@ -17,6 +17,7 @@ from drt.config.models import (
     SendGridDestinationConfig,
     SlackDestinationConfig,
     TeamsDestinationConfig,
+    ZendeskDestinationConfig,
 )
 
 ALL_DESTINATIONS = [
@@ -61,6 +62,12 @@ ALL_DESTINATIONS = [
     ClickHouseDestinationConfig(type="clickhouse", host="localhost", database="db", table="table"),
     ParquetDestinationConfig(type="parquet", path="output.parquet"),
     FileDestinationConfig(type="file", path="output.csv"),
+    ZendeskDestinationConfig(
+        type="zendesk",
+        subdomain="example",
+        email="bot@example.com",
+        api_token="token",
+    ),
 ]
 
 

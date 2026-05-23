@@ -21,6 +21,9 @@ uv.lock
 .drt/
 state.json
 
+# drt docs generate output (#499)
+target/
+
 # Testing
 .pytest_cache/
 .coverage

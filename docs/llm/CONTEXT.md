@@ -14,7 +14,7 @@ dlt (load into DWH) → dbt (transform) → drt (activate out of DWH)
 - **Tagline:** "Reverse ETL for the code-first data stack"
 - **Install:** `pip install drt-core` or `uv add drt-core`
 - **Package name:** `drt-core` (PyPI) — CLI command is `drt`
-- **Current version:** v0.7.1
+- **Current version:** v0.7.3
 
 ## What drt is NOT
 
@@ -84,6 +84,7 @@ default:
 | Microsoft Teams | `teams` | Incoming Webhook, Adaptive Card support |
 | GitHub Actions | `github_actions` | workflow_dispatch trigger |
 | HubSpot CRM | `hubspot` | Contacts / Deals / Companies upsert |
+| Zendesk | `zendesk` | Users / organizations upsert |
 | Google Sheets | `google_sheets` | Overwrite or append. Requires `drt-core[sheets]` |
 | PostgreSQL (upsert) | `postgres` | INSERT ... ON CONFLICT DO UPDATE. Requires `drt-core[postgres]` |
 | MySQL (upsert) | `mysql` | INSERT ... ON DUPLICATE KEY UPDATE. Requires `drt-core[mysql]` |

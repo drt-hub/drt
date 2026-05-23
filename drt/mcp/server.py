@@ -7,6 +7,7 @@ Start with:
 Tools:
     drt_list_syncs      — list all sync definitions
     drt_run_sync        — run a specific sync (dry_run supported)
+    drt_run_test        — run post-sync validation tests for a sync
     drt_get_status      — get last sync result for a sync
     drt_validate        — validate all sync YAML configs (per-file errors)
     drt_get_schema      — return JSON Schema for drt_project.yml / sync.yml
@@ -112,6 +113,90 @@ def create_server(project_dir: Path | None = None) -> Any:
             "success": result.success,
             "failed": result.failed,
             "errors": result.errors[:10],  # cap at 10 to avoid huge payloads
+        }
+
+    # -----------------------------------------------------------------------
+    # drt_run_test
+    # -----------------------------------------------------------------------
+
+    @mcp.tool()
+    def drt_run_test(sync_name: str | None = None) -> dict[str, Any]:
+        """Run post-sync validation tests for one or all syncs.
+
+        Mirrors the `drt test` CLI: for each sync with `tests:` defined,
+        executes the test queries against the destination and reports
+        per-test pass/fail.
+
+        Args:
+            sync_name: Restrict to one sync. If omitted, runs tests for
+                every sync that has tests defined.
+
+        Returns:
+            Dict with `status` ("passed" | "failed" | "no_tests" | "no_syncs"),
+            and `results` — a list of per-sync result objects, each with:
+                - `sync`: sync name
+                - `tests`: list of {name, passed, value} or {name, passed: false, error}
+                - `skipped` (optional): true when destination type isn't queryable
+                - `reason` (optional): why the sync was skipped
+        """
+        from drt.config.parser import load_syncs
+        from drt.destinations.query import (
+            execute_test_query,
+            get_table_name,
+            is_queryable,
+        )
+        from drt.engine.test_runner import build_test_query, test_display_name
+
+        syncs = load_syncs(_project_dir)
+        if not syncs:
+            return {"status": "no_syncs", "results": []}
+
+        if sync_name is not None:
+            syncs = [s for s in syncs if s.name == sync_name]
+            if not syncs:
+                return {"error": f"No sync named '{sync_name}' found."}
+
+        syncs_with_tests = [s for s in syncs if s.tests]
+        if not syncs_with_tests:
+            return {"status": "no_tests", "results": []}
+
+        had_failures = False
+        results: list[dict[str, Any]] = []
+
+        for sync in syncs_with_tests:
+            sync_result: dict[str, Any] = {"sync": sync.name, "tests": []}
+
+            if not is_queryable(sync.destination):
+                sync_result["skipped"] = True
+                sync_result["reason"] = (
+                    f"tests not supported for {sync.destination.type} destinations"
+                )
+                results.append(sync_result)
+                continue
+
+            table = get_table_name(sync.destination)
+            for test_def in sync.tests:
+                test_name = test_display_name(test_def)
+                try:
+                    query, check = build_test_query(test_def, table)
+                    result_val = execute_test_query(sync.destination, query)
+                    passed = check(result_val)
+                    sync_result["tests"].append(
+                        {"name": test_name, "passed": passed, "value": str(result_val)}
+                    )
+                    if not passed:
+                        had_failures = True
+                except Exception as e:
+                    sync_result["tests"].append(
+                        {"name": test_name, "passed": False, "error": str(e)}
+                    )
+                    had_failures = True
+
+            results.append(sync_result)
+
+        return {
+            "status": "failed" if had_failures else "passed",
+            "results": results,
         }
 
     # -----------------------------------------------------------------------
@@ -261,6 +346,7 @@ def create_server(project_dir: Path | None = None) -> Any:
                 {"name": "Microsoft Teams", "type": "teams", "install": "(core)"},
                 {"name": "GitHub Actions", "type": "github_actions", "install": "(core)"},
                 {"name": "HubSpot", "type": "hubspot", "install": "(core)"},
+                {"name": "Zendesk", "type": "zendesk", "install": "(core)"},
                 {"name": "Google Sheets", "type": "google_sheets", "install": "drt-core[sheets]"},
                 {"name": "PostgreSQL", "type": "postgres", "install": "drt-core[postgres]"},
                 {"name": "MySQL", "type": "mysql", "install": "drt-core[mysql]"},

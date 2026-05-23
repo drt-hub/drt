@@ -102,6 +102,24 @@ class TestUpsertSql:
         assert "INSERT IGNORE INTO" in sql
         assert "ON DUPLICATE KEY" not in sql
 
+    def test_qualified_table_on_duplicate_key(self) -> None:
+        sql = MySQLDestination._build_upsert_sql(
+            table="mydb.scores",
+            columns=["id", "score"],
+            update_cols=["score"],
+        )
+        assert "INSERT INTO `mydb`.`scores`" in sql
+        assert "`mydb.scores`" not in sql
+
+    def test_qualified_table_all_key_uses_insert_ignore(self) -> None:
+        sql = MySQLDestination._build_upsert_sql(
+            table="mydb.lookup",
+            columns=["id"],
+            update_cols=[],
+        )
+        assert "INSERT IGNORE INTO `mydb`.`lookup`" in sql
+        assert "`mydb.lookup`" not in sql
+
 
 # ---------------------------------------------------------------------------
 # Load behavior
@@ -205,6 +223,24 @@ class TestMySQLDestinationLoad:
         assert values[4] == 0.9
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
+    def test_get_row_count_with_qualified_table(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        cur.fetchone.return_value = (42,)
+        mock_connect.return_value = conn
+
+        count = MySQLDestination().get_row_count(
+            _config(table="mydb.learning_profiles")
+        )
+
+        assert count == 42
+        sql = cur.execute.call_args.args[0]
+        assert "`mydb`.`learning_profiles`" in sql
+        assert "`mydb.learning_profiles`" not in sql
+
+    @patch("drt.destinations.mysql.MySQLDestination._connect")
     def test_connection_closed_on_error(self, mock_connect: MagicMock) -> None:
         conn = _fake_connection()
         conn.cursor().execute.side_effect = Exception("fail")
@@ -232,6 +268,14 @@ class TestInsertSql:
         assert "INSERT INTO `learning_profiles`" in sql
         assert "ON DUPLICATE KEY" not in sql
         assert "VALUES (%s, %s, %s)" in sql
+
+    def test_qualified_insert_sql(self) -> None:
+        sql = MySQLDestination._build_insert_sql(
+            table="mydb.scores",
+            columns=["id", "score"],
+        )
+        assert "INSERT INTO `mydb`.`scores`" in sql
+        assert "`mydb.scores`" not in sql
 
 
 class TestMySQLReplaceMode:
@@ -294,6 +338,24 @@ class TestMySQLReplaceMode:
         insert_sql = cur.execute.call_args_list[1][0][0]
         assert "ON DUPLICATE KEY" not in insert_sql
         assert "INSERT INTO" in insert_sql
+
+    @patch("drt.destinations.mysql.MySQLDestination._connect")
+    def test_replace_uses_qualified_identifier(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        MySQLDestination().load(
+            [{"user_id": 1, "company_id": 5, "score": 0.5}],
+            _config(table="mydb.learning_profiles"),
+            _options(mode="replace"),
+        )
+
+        sqls = [c[0][0] for c in cur.execute.call_args_list]
+        assert any("TRUNCATE TABLE `mydb`.`learning_profiles`" in s for s in sqls)
+        assert any("INSERT INTO `mydb`.`learning_profiles`" in s for s in sqls)
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
     def test_replace_serializes_json_values(self, mock_connect: MagicMock) -> None:
@@ -556,3 +618,18 @@ class TestMySQLReplaceSwapJsonColumns:
 
         assert result.failed == 1
         assert "not listed in json_columns" in result.row_errors[0].error_message
+
+
+class TestMySQLConnection:
+    @patch("drt.destinations.mysql.MySQLDestination._connect")
+    def test_test_connection_success(self, mock_connect: MagicMock) -> None:
+        conn = _fake_connection()
+        mock_connect.return_value = conn
+        
+        dest = MySQLDestination()
+        dest.test_connection(_config())
+        
+        mock_connect.assert_called_once()
+        # Verify SELECT 1 was called
+        cur = conn.cursor()
+        assert any("SELECT 1" in str(call.args[0]) for call in cur.execute.call_args_list)

@@ -234,6 +234,23 @@ class HubSpotDestinationConfig(BaseModel):
         return f"{self.type} ({self.object_type})"
 
 
+class ZendeskDestinationConfig(BaseModel):
+    type: Literal["zendesk"]
+    subdomain: str | None = None
+    subdomain_env: str | None = None
+    email: str | None = None
+    email_env: str | None = None
+    api_token: str | None = None
+    api_token_env: str | None = None
+    object: Literal["user", "organization"] = "user"
+    id_field: str | None = None
+    custom_fields_template: str | None = None
+    retry: RetryConfig | None = None  # destination-level override of sync.retry
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.object})"
+
+
 class IntercomDestinationConfig(BaseModel):
     type: Literal["intercom"]
 
@@ -621,6 +638,7 @@ DestinationConfig = Annotated[
     | DiscordDestinationConfig
     | GitHubActionsDestinationConfig
     | HubSpotDestinationConfig
+    | ZendeskDestinationConfig
     | SendGridDestinationConfig
     | LinearDestinationConfig
     | GoogleSheetsDestinationConfig

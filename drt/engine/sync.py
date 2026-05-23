@@ -18,7 +18,11 @@ from typing import Any
 from drt.config.credentials import ProfileConfig
 from drt.config.models import LookupConfig, SyncConfig
 from drt.destinations.base import Destination, StagedDestination, SyncResult
-from drt.destinations.lookup import apply_lookups, build_lookup_map
+from drt.destinations.lookup import (
+    apply_lookups,
+    build_lookup_map,
+    detect_ambiguous_lookup_ordering,
+)
 from drt.engine.resolver import resolve_model_ref
 from drt.sources.base import Source
 from drt.state.history import HistoryEntry, HistoryManager
@@ -273,6 +277,8 @@ def _run_sync_body(
         None,
     )
     if lookups:
+        for warning in detect_ambiguous_lookup_ordering(lookups):
+            logger.warning("sync='%s' %s", sync.name, warning)
         for col_name, lk_config in lookups.items():
             mapping = build_lookup_map(sync.destination, lk_config)
             lookup_maps[col_name] = (lk_config, mapping)

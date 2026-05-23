@@ -419,3 +419,17 @@ class TestClickHouseReplaceSwap:
             _config(), _options(mode="replace", replace_strategy="swap")
         )
         assert finalize_result is None
+
+
+class TestClickHouseConnection:
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_test_connection_success(self, mock_connect: MagicMock) -> None:
+        client = _fake_client()
+        mock_connect.return_value = client
+        
+        dest = ClickHouseDestination()
+        dest.test_connection(_config())
+        
+        mock_connect.assert_called_once()
+        # ClickHouse uses client.command("SELECT 1")
+        client.command.assert_called_once_with("SELECT 1")

@@ -29,32 +29,7 @@ class SnowflakeDestination:
         assert isinstance(config, SnowflakeDestinationConfig)
         if not records:
             return SyncResult()
-
-        try:
-            import snowflake.connector
-        except ImportError as e:
-            raise ImportError(
-                "Snowflake destination requires: pip install drt-core[snowflake]"
-            ) from e
-
-        account = resolve_env(None, config.account_env)
-        user = resolve_env(None, config.user_env)
-        password = resolve_env(None, config.password_env)
-
-        if not account or not user or not password:
-            raise ValueError(
-                "Missing Snowflake credentials. Check environment variables or secrets.toml."
-            )
-
-        conn = snowflake.connector.connect(
-            account=account,
-            user=user,
-            password=password,
-            warehouse=config.warehouse,
-            database=config.database,
-            schema=config.schema_,
-        )
-
+        conn = self._connect(config)
         result = SyncResult()
 
         try:
@@ -156,3 +131,40 @@ class SnowflakeDestination:
             conn.close()
 
         return result
+
+    def test_connection(self, config: DestinationConfig) -> None:
+        """Test connectivity by establishing a connection and running SELECT 1."""
+        assert isinstance(config, SnowflakeDestinationConfig)
+        conn = self._connect(config)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+        finally:
+            conn.close()
+
+    def _connect(self, config: SnowflakeDestinationConfig) -> Any:
+        """Establish a connection to Snowflake."""
+        try:
+            import snowflake.connector
+        except ImportError as e:
+            raise ImportError(
+                "Snowflake destination requires: pip install drt-core[snowflake]"
+            ) from e
+
+        account = resolve_env(None, config.account_env)
+        user = resolve_env(None, config.user_env)
+        password = resolve_env(None, config.password_env)
+
+        if not account or not user or not password:
+            raise ValueError(
+                "Missing Snowflake credentials. Check environment variables or secrets.toml."
+            )
+
+        return snowflake.connector.connect(
+            account=account,
+            user=user,
+            password=password,
+            warehouse=config.warehouse,
+            database=config.database,
+            schema=config.schema_,
+        )

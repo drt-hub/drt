@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>drt docs — UI mockup</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'media',
+      theme: {
+        extend: {
+          colors: {
+            // Extracted from drt logo (drt-hub/.github profile assets).
+            // Primary purple is the icon square fill (#7C3AED, violet-600).
+            brand: {
+              50:  '#f5f3ff',
+              100: '#ede9fe',
+              200: '#ddd6fe',
+              500: '#8b5cf6',
+              600: '#7c3aed',
+              700: '#6d28d9',
+              900: '#1e1b4b',
+            },
+            ink: {
+              50:  '#f7f8fa',
+              100: '#eef0f3',
+              200: '#e3e6eb',
+              500: '#5a6068',
+              700: '#262b33',
+              800: '#1a1d22',
+              900: '#0f1115',
+            },
+          },
+          fontFamily: {
+            sans: ['ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif'],
+            mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'monospace'],
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    .view { display: none; }
+    .view.active { display: block; }
+    .navbtn {
+      padding: 0.25rem 0.625rem;
+      border-radius: 0.375rem;
+      color: #5a6068;
+      transition: background 0.12s, color 0.12s;
+    }
+    .navbtn:hover { background: #f5f3ff; color: #6d28d9; }
+    .navbtn.active { background: #7c3aed; color: #ffffff; }
+    @media (prefers-color-scheme: dark) {
+      .navbtn { color: #c4c7cc; }
+      .navbtn:hover { background: #1e1b4b; color: #c4b5fd; }
+      .navbtn.active { background: #8b5cf6; color: #ffffff; }
+    }
+    details > summary { list-style: none; cursor: pointer; }
+    details > summary::-webkit-details-marker { display: none; }
+    .yaml-key { color: #7c3aed; }
+    .yaml-str { color: #16a34a; }
+    .yaml-num { color: #d97706; }
+    .tab {
+      color: #5a6068;
+      border-bottom: 2px solid transparent;
+      padding: 0.5rem 0.25rem;
+      margin-bottom: -1px;
+    }
+    .tab:hover { color: #6d28d9; }
+    .tab.active { border-bottom-color: #7c3aed; color: #7c3aed; }
+    @media (prefers-color-scheme: dark) {
+      .tab { color: #c4c7cc; }
+      .tab:hover { color: #c4b5fd; }
+      .tab.active { border-bottom-color: #8b5cf6; color: #c4b5fd; }
+    }
+    /* Mermaid in dark mode */
+    @media (prefers-color-scheme: dark) {
+      .mermaid { background: #161a20; padding: 1rem; border-radius: 0.5rem; }
+    }
+  </style>
+</head>
+<body class="bg-white text-ink-800 dark:bg-ink-900 dark:text-ink-50 font-sans">
+
+<!-- ============================ TOP BAR ============================ -->
+<header class="border-b border-ink-200 dark:border-ink-700 px-4 py-3 flex items-center gap-4 sticky top-0 bg-white dark:bg-ink-900 z-10">
+  <div class="flex items-center gap-3">
+    <a href="https://github.com/drt-hub/drt" class="flex items-center">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/drt-hub/.github/main/profile/assets/logo-dark.svg" />
+        <img src="https://raw.githubusercontent.com/drt-hub/.github/main/profile/assets/logo.svg" alt="drt logo" height="32" class="h-8 w-auto" />
+      </picture>
+    </a>
+    <span class="text-sm text-ink-500 border-l border-ink-200 dark:border-ink-700 pl-3">docs</span>
+    <span class="text-xs text-ink-500">v0.8.0</span>
+  </div>
+  <nav class="flex items-center gap-1 ml-4 text-sm">
+    <button class="navbtn active" data-view="landing">Overview</button>
+    <button class="navbtn" data-view="dag">DAG</button>
+    <button class="navbtn" data-view="sync">Sync detail</button>
+    <button class="navbtn" data-view="source">Source detail</button>
+    <button class="navbtn" data-view="destination">Destination detail</button>
+  </nav>
+  <div class="ml-auto flex items-center gap-3">
+    <input type="search" placeholder="Search syncs, sources, destinations..." class="border border-ink-200 dark:border-ink-700 dark:bg-ink-800 rounded-md px-3 py-1 text-sm w-72" />
+    <button class="text-ink-500 hover:text-ink-800 dark:hover:text-ink-50" title="Toggle theme (uses prefers-color-scheme)">🌗</button>
+    <a href="https://github.com/drt-hub/drt" class="text-ink-500 hover:text-ink-800 dark:hover:text-ink-50 text-sm">GitHub →</a>
+  </div>
+</header>
+
+<!-- ============================ LAYOUT (sidebar + main) ============================ -->
+<div class="flex">
+  <!-- SIDEBAR -->
+  <aside class="w-64 shrink-0 border-r border-ink-200 dark:border-ink-700 p-4 text-sm h-[calc(100vh-57px)] overflow-y-auto sticky top-[57px]">
+    <details open class="mb-3">
+      <summary class="font-semibold text-ink-700 dark:text-ink-100 flex justify-between">
+        <span>Syncs</span><span class="text-ink-500">12</span>
+      </summary>
+      <ul class="mt-2 space-y-1 pl-2">
+        <li class="text-brand-700 font-medium">▶ users_to_hubspot</li>
+        <li>▶ orders_to_pg</li>
+        <li>▶ alerts_to_slack</li>
+        <li>▶ accounts_to_hubspot</li>
+        <li>▶ subscriptions_to_stripe</li>
+        <li class="text-ink-500">… 7 more</li>
+      </ul>
+    </details>
+    <details open class="mb-3">
+      <summary class="font-semibold text-ink-700 dark:text-ink-100 flex justify-between">
+        <span>Sources</span><span class="text-ink-500">2</span>
+      </summary>
+      <ul class="mt-2 space-y-1 pl-2">
+        <li>▶ bq_prod</li>
+        <li>▶ pg_replica</li>
+      </ul>
+    </details>
+    <details open class="mb-3">
+      <summary class="font-semibold text-ink-700 dark:text-ink-100 flex justify-between">
+        <span>Destinations</span><span class="text-ink-500">3</span>
+      </summary>
+      <ul class="mt-2 space-y-1 pl-2">
+        <li>▶ postgres (public.users)</li>
+        <li>▶ postgres (public.orders)</li>
+        <li>▶ slack (#alerts)</li>
+      </ul>
+    </details>
+    <details class="mb-3">
+      <summary class="font-semibold text-ink-700 dark:text-ink-100 flex justify-between">
+        <span>Tags</span><span class="text-ink-500">2</span>
+      </summary>
+      <ul class="mt-2 space-y-1 pl-2">
+        <li><span class="px-1.5 py-0.5 rounded bg-ink-100 dark:bg-ink-700 text-xs"># production</span></li>
+        <li><span class="px-1.5 py-0.5 rounded bg-ink-100 dark:bg-ink-700 text-xs"># crm</span></li>
+      </ul>
+    </details>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="flex-1 p-8 max-w-5xl">
+
+    <!-- ============================ LANDING ============================ -->
+    <section class="view active" data-view="landing">
+      <div class="text-xs text-ink-500 mb-1">Overview</div>
+      <h1 class="text-3xl font-bold mb-1">my-drt-project</h1>
+      <div class="text-sm text-ink-500 mb-6">Generated 2026-05-13 01:00 UTC · drt 0.8.0</div>
+
+      <!-- KPI cards -->
+      <div class="grid grid-cols-3 gap-4 mb-8">
+        <div class="border border-ink-200 dark:border-ink-700 rounded-lg p-4">
+          <div class="text-3xl font-bold">12</div>
+          <div class="text-sm text-ink-500">syncs</div>
+        </div>
+        <div class="border border-ink-200 dark:border-ink-700 rounded-lg p-4">
+          <div class="text-3xl font-bold">2</div>
+          <div class="text-sm text-ink-500">sources</div>
+        </div>
+        <div class="border border-ink-200 dark:border-ink-700 rounded-lg p-4">
+          <div class="text-3xl font-bold">3</div>
+          <div class="text-sm text-ink-500">destinations</div>
+        </div>
+      </div>
+
+      <!-- Type breakdown -->
+      <div class="grid grid-cols-2 gap-6 mb-8">
+        <div>
+          <h2 class="text-sm font-semibold uppercase tracking-wide text-ink-500 mb-3">Source types</h2>
+          <div class="space-y-2">
+            <div class="flex items-center gap-2">
+              <div class="w-32 text-sm">bigquery</div>
+              <div class="flex-1 bg-ink-100 dark:bg-ink-700 rounded h-2">
+                <div class="bg-brand-600 h-2 rounded" style="width: 80%"></div>
+              </div>
+              <div class="text-sm text-ink-500 w-8 text-right">10</div>
+            </div>
+            <div class="flex items-center gap-2">
+              <div class="w-32 text-sm">postgres</div>
+              <div class="flex-1 bg-ink-100 dark:bg-ink-700 rounded h-2">
+                <div class="bg-brand-600 h-2 rounded" style="width: 20%"></div>
+              </div>
+              <div class="text-sm text-ink-500 w-8 text-right">2</div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <h2 class="text-sm font-semibold uppercase tracking-wide text-ink-500 mb-3">Destination types</h2>
+          <div class="space-y-2">
+            <div class="flex items-center gap-2">
+              <div class="w-32 text-sm">postgres</div>
+              <div class="flex-1 bg-ink-100 dark:bg-ink-700 rounded h-2">
+                <div class="bg-brand-600 h-2 rounded" style="width: 58%"></div>
+              </div>
+              <div class="text-sm text-ink-500 w-8 text-right">7</div>
+            </div>
+            <div class="flex items-center gap-2">
+              <div class="w-32 text-sm">slack</div>
+              <div class="flex-1 bg-ink-100 dark:bg-ink-700 rounded h-2">
+                <div class="bg-brand-600 h-2 rounded" style="width: 25%"></div>
+              </div>
+              <div class="text-sm text-ink-500 w-8 text-right">3</div>
+            </div>
+            <div class="flex items-center gap-2">
+              <div class="w-32 text-sm">hubspot</div>
+              <div class="flex-1 bg-ink-100 dark:bg-ink-700 rounded h-2">
+                <div class="bg-brand-600 h-2 rounded" style="width: 17%"></div>
+              </div>
+              <div class="text-sm text-ink-500 w-8 text-right">2</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Recent runs -->
+      <h2 class="text-sm font-semibold uppercase tracking-wide text-ink-500 mb-3">Recent runs</h2>
+      <table class="w-full text-sm border border-ink-200 dark:border-ink-700 rounded-lg overflow-hidden">
+        <thead class="bg-ink-50 dark:bg-ink-800 text-ink-500">
+          <tr><th class="text-left p-2 font-medium">Time (UTC)</th><th class="text-left p-2 font-medium">Sync</th><th class="text-left p-2 font-medium">Status</th><th class="text-right p-2 font-medium">Rows</th><th class="text-right p-2 font-medium">Duration</th></tr>
+        </thead>
+        <tbody>
+          <tr class="border-t border-ink-200 dark:border-ink-700"><td class="p-2 font-mono text-xs">23:55:12</td><td class="p-2">users_to_hubspot</td><td class="p-2"><span class="text-green-600">✓ success</span></td><td class="p-2 text-right">1,248</td><td class="p-2 text-right">3.1s</td></tr>
+          <tr class="border-t border-ink-200 dark:border-ink-700"><td class="p-2 font-mono text-xs">23:00:48</td><td class="p-2">orders_to_pg</td><td class="p-2"><span class="text-amber-600">⚠ partial</span></td><td class="p-2 text-right">502/520</td><td class="p-2 text-right">6.4s</td></tr>
+          <tr class="border-t border-ink-200 dark:border-ink-700"><td class="p-2 font-mono text-xs">22:55:33</td><td class="p-2">alerts_to_slack</td><td class="p-2"><span class="text-red-600">✗ failed</span></td><td class="p-2 text-right">—</td><td class="p-2 text-right">8.2s</td></tr>
+          <tr class="border-t border-ink-200 dark:border-ink-700"><td class="p-2 font-mono text-xs">22:00:11</td><td class="p-2">accounts_to_hubspot</td><td class="p-2"><span class="text-green-600">✓ success</span></td><td class="p-2 text-right">312</td><td class="p-2 text-right">1.8s</td></tr>
+          <tr class="border-t border-ink-200 dark:border-ink-700"><td class="p-2 font-mono text-xs">21:55:50</td><td class="p-2">subscriptions_to_stripe</td><td class="p-2"><span class="text-green-600">✓ success</span></td><td class="p-2 text-right">89</td><td class="p-2 text-right">2.3s</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ============================ DAG ============================ -->
+    <section class="view" data-view="dag">
+      <div class="text-xs text-ink-500 mb-1">DAG</div>
+      <h1 class="text-3xl font-bold mb-4">Lineage</h1>
+      <div class="flex items-center gap-2 mb-6 text-sm">
+        <span class="text-ink-500">Filter:</span>
+        <select class="border border-ink-200 dark:border-ink-700 dark:bg-ink-800 rounded px-2 py-1"><option>All tags</option></select>
+        <select class="border border-ink-200 dark:border-ink-700 dark:bg-ink-800 rounded px-2 py-1"><option>All sources</option></select>
+        <select class="border border-ink-200 dark:border-ink-700 dark:bg-ink-800 rounded px-2 py-1"><option>All destinations</option></select>
+        <select class="border border-ink-200 dark:border-ink-700 dark:bg-ink-800 rounded px-2 py-1"><option>All modes</option></select>
+      </div>
+
+      <div class="border border-ink-200 dark:border-ink-700 rounded-lg p-4 mb-4">
+        <pre class="mermaid">
+graph LR
+    subgraph Sources
+      src_bq[bq_prod]
+    end
+    subgraph Syncs
+      sync_users{{users_to_hubspot<br/>upsert}}
+      sync_orders{{orders_to_pg<br/>upsert}}
+      sync_alerts{{alerts_to_slack<br/>full}}
+    end
+    subgraph Destinations
+      dst_pg_users[postgres public.users]
+      dst_pg_orders[postgres public.orders]
+      dst_slack[slack #alerts]
+    end
+    src_bq -->|extract| sync_users
+    src_bq -->|extract| sync_orders
+    src_bq -->|extract| sync_alerts
+    sync_users -->|load| dst_pg_users
+    sync_orders -->|load| dst_pg_orders
+    sync_alerts -->|load| dst_slack
+    sync_users -.lookup.-> sync_orders
+        </pre>
+      </div>
+
+      <div class="text-xs text-ink-500 flex items-center gap-4">
+        <span><span class="font-mono">──▶</span> extract / load</span>
+        <span><span class="font-mono">┄┄▶</span> lookup (heuristic FK across syncs)</span>
+      </div>
+    </section>
+
+    <!-- ============================ SYNC DETAIL ============================ -->
+    <section class="view" data-view="sync">
+      <div class="text-xs text-ink-500 mb-1">Syncs / users_to_hubspot</div>
+      <h1 class="text-3xl font-bold mb-1">users_to_hubspot</h1>
+      <div class="text-sm text-ink-500 mb-4">Sync users from BigQuery into HubSpot CRM, upserting by email.</div>
+
+      <div class="flex gap-2 mb-4">
+        <span class="px-1.5 py-0.5 rounded bg-ink-100 dark:bg-ink-700 text-xs"># production</span>
+        <span class="px-1.5 py-0.5 rounded bg-ink-100 dark:bg-ink-700 text-xs"># crm</span>
+      </div>
+
+      <div class="grid grid-cols-2 gap-4 mb-6">
+        <div class="border border-ink-200 dark:border-ink-700 rounded-lg p-4">
+          <div class="text-xs text-ink-500 mb-1">Last run</div>
+          <div class="font-medium">2026-05-13 00:00 UTC · <span class="text-green-600">✓ success</span></div>
+          <div class="text-sm text-ink-500 mt-1">1,248 rows · 3.1s</div>
+        </div>
+        <div class="border border-ink-200 dark:border-ink-700 rounded-lg p-4">
+          <div class="text-xs text-ink-500 mb-1">Configuration</div>
+          <div class="font-medium">source: bq_prod · mode: upsert</div>
+          <div class="text-sm text-ink-500 mt-1">schedule: 0 */4 * * *</div>
+        </div>
+      </div>
+
+      <div class="border-b border-ink-200 dark:border-ink-700 mb-4 flex gap-4 text-sm">
+        <button class="tab active py-2">YAML</button>
+        <button class="tab py-2">Lineage</button>
+        <button class="tab py-2">State</button>
+        <button class="tab py-2">Tests</button>
+      </div>
+
+      <pre class="bg-ink-50 dark:bg-ink-800 p-4 rounded-lg text-sm font-mono overflow-x-auto"><span class="yaml-key">name</span>: users_to_hubspot
+<span class="yaml-key">description</span>: <span class="yaml-str">Sync users from BigQuery into HubSpot CRM, upserting by email.</span>
+<span class="yaml-key">model</span>: <span class="yaml-str">queries/users.sql</span>
+<span class="yaml-key">tags</span>: [<span class="yaml-str">production</span>, <span class="yaml-str">crm</span>]
+<span class="yaml-key">destination</span>:
+  <span class="yaml-key">type</span>: <span class="yaml-str">hubspot</span>
+  <span class="yaml-key">object</span>: <span class="yaml-str">contacts</span>
+  <span class="yaml-key">upsert_key</span>: <span class="yaml-str">email</span>
+  <span class="yaml-key">auth</span>:
+    <span class="yaml-key">type</span>: <span class="yaml-str">bearer</span>
+    <span class="yaml-key">token_env</span>: <span class="yaml-str">HUBSPOT_TOKEN</span>
+<span class="yaml-key">sync</span>:
+  <span class="yaml-key">mode</span>: <span class="yaml-str">upsert</span>
+  <span class="yaml-key">batch_size</span>: <span class="yaml-num">100</span></pre>
+
+      <h2 class="text-sm font-semibold uppercase tracking-wide text-ink-500 mt-8 mb-3">Lineage</h2>
+      <div class="grid grid-cols-2 gap-6 text-sm">
+        <div>
+          <div class="text-xs text-ink-500 mb-2">Upstream</div>
+          <ul class="space-y-1">
+            <li class="flex gap-2"><span class="text-ink-500">source</span> <span class="text-brand-700">bq_prod</span></li>
+          </ul>
+        </div>
+        <div>
+          <div class="text-xs text-ink-500 mb-2">Downstream</div>
+          <ul class="space-y-1">
+            <li class="flex gap-2"><span class="text-ink-500">lookup</span> <span class="text-brand-700">orders_to_pg</span> <span class="text-ink-500">via lookups.user_id</span></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================ SOURCE DETAIL ============================ -->
+    <section class="view" data-view="source">
+      <div class="text-xs text-ink-500 mb-1">Sources / bq_prod</div>
+      <h1 class="text-3xl font-bold mb-1">bq_prod</h1>
+      <div class="text-sm text-ink-500 mb-6">Type: <span class="font-medium">bigquery</span> · Profile resolved from drt_project.yml</div>
+
+      <h2 class="text-sm font-semibold uppercase tracking-wide text-ink-500 mb-3">Consumed by 10 syncs</h2>
+      <table class="w-full text-sm border border-ink-200 dark:border-ink-700 rounded-lg overflow-hidden mb-6">
+        <thead class="bg-ink-50 dark:bg-ink-800 text-ink-500">
+          <tr><th class="text-left p-2 font-medium">Sync</th><th class="text-left p-2 font-medium">Query template</th><th class="text-left p-2 font-medium">Mode</th><th class="text-left p-2 font-medium">Destination</th></tr>
+        </thead>
+        <tbody>
+          <tr class="border-t border-ink-200 dark:border-ink-700"><td class="p-2 text-brand-700">users_to_hubspot</td><td class="p-2 font-mono text-xs">queries/users.sql</td><td class="p-2">upsert</td><td class="p-2">hubspot (contacts)</td></tr>
+          <tr class="border-t border-ink-200 dark:border-ink-700"><td class="p-2 text-brand-700">orders_to_pg</td><td class="p-2 font-mono text-xs">queries/orders.sql</td><td class="p-2">upsert</td><td class="p-2">postgres (public.orders)</td></tr>
+          <tr class="border-t border-ink-200 dark:border-ink-700"><td class="p-2 text-brand-700">alerts_to_slack</td><td class="p-2 font-mono text-xs">queries/alerts.sql</td><td class="p-2">full</td><td class="p-2">slack (#alerts)</td></tr>
+          <tr class="border-t border-ink-200 dark:border-ink-700"><td class="p-2 text-brand-700">accounts_to_hubspot</td><td class="p-2 font-mono text-xs">queries/accounts.sql</td><td class="p-2">upsert</td><td class="p-2">hubspot (companies)</td></tr>
+        </tbody>
+      </table>
+
+      <h2 class="text-sm font-semibold uppercase tracking-wide text-ink-500 mb-3">Query templates referenced</h2>
+      <ul class="text-sm font-mono space-y-1 text-ink-700 dark:text-ink-100">
+        <li>queries/users.sql</li>
+        <li>queries/orders.sql</li>
+        <li>queries/alerts.sql</li>
+        <li>queries/accounts.sql</li>
+        <li class="text-ink-500">… 6 more</li>
+      </ul>
+    </section>
+
+    <!-- ============================ DESTINATION DETAIL ============================ -->
+    <section class="view" data-view="destination">
+      <div class="text-xs text-ink-500 mb-1">Destinations / postgres (public.users)</div>
+      <h1 class="text-3xl font-bold mb-1">postgres <span class="text-ink-500 font-normal">(public.users)</span></h1>
+      <div class="text-sm text-ink-500 mb-6">Type: <span class="font-medium">postgres</span> · Endpoint resolved from PG_HOST_USERS env</div>
+
+      <h2 class="text-sm font-semibold uppercase tracking-wide text-ink-500 mb-3">Produced by</h2>
+      <table class="w-full text-sm border border-ink-200 dark:border-ink-700 rounded-lg overflow-hidden mb-6">
+        <thead class="bg-ink-50 dark:bg-ink-800 text-ink-500">
+          <tr><th class="text-left p-2 font-medium">Sync</th><th class="text-left p-2 font-medium">Mode</th><th class="text-left p-2 font-medium">Source</th></tr>
+        </thead>
+        <tbody>
+          <tr class="border-t border-ink-200 dark:border-ink-700"><td class="p-2 text-brand-700">users_to_hubspot</td><td class="p-2">upsert</td><td class="p-2">bq_prod</td></tr>
+        </tbody>
+      </table>
+
+      <h2 class="text-sm font-semibold uppercase tracking-wide text-ink-500 mb-3">Mode breakdown</h2>
+      <div class="text-sm mb-6"><span class="px-2 py-0.5 rounded bg-ink-100 dark:bg-ink-700">upsert: 1</span></div>
+
+      <h2 class="text-sm font-semibold uppercase tracking-wide text-ink-500 mb-3">Referenced by other syncs' lookups (FK)</h2>
+      <ul class="text-sm space-y-1">
+        <li><span class="text-brand-700">orders_to_pg</span> <span class="text-ink-500">— lookups.user_id → public.users</span></li>
+      </ul>
+    </section>
+
+  </main>
+</div>
+
+<!-- ============================ FOOTER ============================ -->
+<footer class="border-t border-ink-200 dark:border-ink-700 px-4 py-3 text-xs text-ink-500 text-center">
+  drt docs prototype · static-rendered · ADR <a href="https://github.com/drt-hub/drt/issues/500" class="text-brand-700">#500</a> · epic <a href="https://github.com/drt-hub/drt/issues/499" class="text-brand-700">#499</a>
+</footer>
+
+<script>
+  // View switching
+  document.querySelectorAll('.navbtn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const target = btn.dataset.view;
+      document.querySelectorAll('.navbtn').forEach(b => b.classList.toggle('active', b === btn));
+      document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.dataset.view === target));
+    });
+  });
+
+  // Tab switching (sync detail view)
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      const siblings = tab.parentElement.querySelectorAll('.tab');
+      siblings.forEach(t => t.classList.toggle('active', t === tab));
+    });
+  });
+
+  // Init Mermaid with drt brand palette (violet)
+  const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {
+      primaryColor:        isDark ? '#1e1b4b' : '#ede9fe',
+      primaryBorderColor:  '#7c3aed',
+      primaryTextColor:    isDark ? '#ede9fe' : '#1e1b4b',
+      lineColor:           isDark ? '#8b5cf6' : '#7c3aed',
+      secondaryColor:      isDark ? '#262b33' : '#f5f3ff',
+      tertiaryColor:       isDark ? '#0f1115' : '#ffffff',
+      fontFamily:          'ui-sans-serif, system-ui, -apple-system, sans-serif',
+    },
+  });
+</script>
+
+</body>
+</html>

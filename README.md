@@ -141,9 +141,37 @@ drt validate                # validate sync YAML configs
 drt status                  # show recent sync status
 drt status --output json    # JSON output for status
 drt serve                   # start HTTP webhook endpoint
+drt docs generate --format mermaid  # print project DAG as Mermaid
 drt mcp run                 # start MCP server (requires drt-core[mcp])
 drt --install-completion    # install shell completion (bash/zsh/fish)
 drt --show-completion       # show completion script
+```
+
+### Visualize your syncs
+
+Generate a Mermaid DAG from your local `drt_project.yml` and `syncs/*.yml` files:
+
+```bash
+drt docs generate --format mermaid > dag.md
+```
+
+```mermaid
+graph LR
+    subgraph Sources
+        src_bigquery_prod["bigquery_prod<br/><i>bigquery</i>"]
+    end
+    subgraph Syncs
+        sync_users_to_hubspot{{"users_to_hubspot<br/><i>upsert</i>"}}
+        sync_accounts_to_hubspot{{"accounts_to_hubspot<br/><i>upsert</i>"}}
+    end
+    subgraph Destinations
+        dst_hubspot_contacts["hubspot (contacts)<br/><i>hubspot</i>"]
+    end
+    src_bigquery_prod -->|extract| sync_users_to_hubspot
+    src_bigquery_prod -->|extract| sync_accounts_to_hubspot
+    sync_users_to_hubspot -->|load| dst_hubspot_contacts
+    sync_accounts_to_hubspot -->|load| dst_hubspot_contacts
+    sync_users_to_hubspot -.lookup.-> sync_accounts_to_hubspot
 ```
 
 ### Shell completion
@@ -254,6 +282,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | Discord Webhook         | ✅ v0.4.2 | (core)                             | Webhook URL                       |
 | GitHub Actions          | ✅ v0.1   | (core)                             | Token (env var)                   |
 | HubSpot                 | ✅ v0.1   | (core)                             | Token (env var)                   |
+| Zendesk                 | ✅ v0.7   | (core)                             | Basic (email + API token)         |
 | Google Ads              | ✅ v0.6   | (core)                             | OAuth2 Client Credentials         |
 | Google Sheets           | ✅ v0.4   | `pip install drt-core[sheets]`     | Service Account Keyfile           |
 | PostgreSQL (upsert)     | ✅ v0.4   | `pip install drt-core[postgres]`   | Password (env var)                |
@@ -302,8 +331,11 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | **v0.5.4** ✅ | `destination_lookup` — resolve FK values by querying destination DB during sync (MySQL / Postgres / ClickHouse)                                                                                                                                                                                                                                                                                                    |
 | **v0.6** ✅   | Databricks / SQL Server sources · Notion / Twilio / Intercom / Email SMTP / Salesforce Bulk / Staged Upload destinations · Airflow / Prefect integrations · `drt serve` · `drt sources` / `drt destinations` · `--threads` parallel execution · `--log-format json` · `--cursor-value` · `watermark.default_value` · test validators (freshness, unique, accepted_values) · JSON Schema validation · GOVERNANCE.md |
 | **v0.7** ✅   | **Production Ready** — graceful shutdown on SIGTERM/SIGINT · per-destination retry override · sync execution history · zero-downtime atomic table swap · `json_columns` config · FK existence check (`lookups.check_only`) · Slack/webhook failure alerts · `drt doctor` · `--quiet` flag · `drt test --output json` / `--dry-run` · Snowflake destination · GitHub Codespaces playground · `OPEN_CORE.md`                                                                                                                                                                                                                                                              |
+| **v0.7.1** ✅ | `drt run --dry-run --diff` for record-level preview · tz-aware cursor stringification fix · `on_error=fail` alignment for Notion / REST API / Email SMTP · `VERSIONING.md` semver & deprecation policy                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| **v0.7.2** ✅ | **Opt-in anonymous telemetry** (PostHog Cloud EU, off by default, allow-list payload, `DO_NOT_TRACK` honored) · deprecation warnings in `drt validate` · Postgres destination `psycopg2.sql` SQL composition                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| **v0.7.3** ✅ | **Patch** — Postgres schema-qualified `Identifier()` composition fix (#442, PR #498): `marketing.events` was being double-quoted as a single identifier; now correctly composed as separate schema + relation parts                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 
-**Next:** [v0.7.1 Production Ready Follow-up](ROADMAP.md#v071--production-ready-follow-up) → [v0.8 Cloud Destinations & Growth](ROADMAP.md#v08--cloud-destinations--growth) → [v0.9 Enterprise Foundation](ROADMAP.md#v09--enterprise-foundation) → [v1.0 Stable Release](ROADMAP.md#v10--stable-release) → [v1.x Rust Engine](ROADMAP.md#v1x--rust-engine)
+**Next:** [v0.8 Cloud Destinations & Growth](ROADMAP.md#v08--cloud-destinations--growth) → [v0.9 Enterprise Foundation](ROADMAP.md#v09--enterprise-foundation) → [v1.0 Stable Release](ROADMAP.md#v10--stable-release) → [v1.x Rust Engine](ROADMAP.md#v1x--rust-engine)
 
 ---
 
@@ -342,6 +374,23 @@ drt is designed to work alongside, not against, the modern data stack:
 </p>
 
 ---
+
+## Telemetry
+
+drt collects **no telemetry by default**. Opting in helps us understand which sources / destinations / sync modes are actually used, so we can prioritise.
+
+```bash
+drt config set telemetry.enabled true     # opt in
+drt config show-telemetry                 # preview the exact payload that would be sent
+drt config set telemetry.enabled false    # opt out
+DO_NOT_TRACK=1 drt run                    # universal kill switch — overrides everything
+```
+
+When opted in, drt sends one `sync_completed` event per sync. The **only `properties`** we collect are these 9 fields: `drt_version`, `python_version`, `os`, `source_type`, `destination_type`, `sync_mode`, `rows_synced`, `duration_seconds`, `status`. The wire envelope additionally carries `event`, `distinct_id` (a per-machine random UUID at `~/.drt/.anonymous_id`), `timestamp`, and `api_key`. Sync names, model SQL, destination URLs, credentials, and project paths are **never** transmitted — the allow-list is enforced at the function-signature level in [`drt/telemetry.py`](drt/telemetry.py). By default events go to **PostHog Cloud (EU region)**; override with `DRT_TELEMETRY_ENDPOINT` and `DRT_TELEMETRY_API_KEY` for self-hosted PostHog or a custom collector.
+
+> Note: drt itself never transmits your IP, but the receiving PostHog backend records the TCP source IP as `$ip`. See [docs/telemetry.md](docs/telemetry.md) for details and how to disable / substitute the backend.
+
+For full details see [docs/telemetry.md](docs/telemetry.md).
 
 ## Contributing
 
