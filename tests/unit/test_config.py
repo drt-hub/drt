@@ -197,19 +197,13 @@ def test_expand_env_vars_no_placeholders() -> None:
     assert expand_env_vars("plain string") == "plain string"
 
 
-def test_load_syncs_expands_env_vars(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_load_syncs_expands_env_vars(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Environment variables in sync YAML are expanded before validation."""
     monkeypatch.setenv("TEST_API_URL", "https://expanded.example.com")
     syncs_dir = tmp_path / "syncs"
     syncs_dir.mkdir()
     (syncs_dir / "env_sync.yml").write_text(
-        "name: env-sync\n"
-        "model: SELECT 1\n"
-        "destination:\n"
-        "  type: rest_api\n"
-        "  url: ${TEST_API_URL}\n"
+        "name: env-sync\nmodel: SELECT 1\ndestination:\n  type: rest_api\n  url: ${TEST_API_URL}\n"
     )
     syncs = load_syncs(tmp_path)
     assert len(syncs) == 1
@@ -270,8 +264,9 @@ def test_save_profile_appends(tmp_path: Path) -> None:
 
     profiles_path = tmp_path / "profiles.yml"
     data = yaml.safe_load(profiles_path.read_text())
-    assert "dev" in data
-    assert "prod" in data
+    assert "profiles" in data
+    assert "dev" in data["profiles"]
+    assert "prod" in data["profiles"]
 
 
 # ---------------------------------------------------------------------------
@@ -606,37 +601,41 @@ def test_sync_config_without_tests() -> None:
 class TestAlertsConfig:
     def test_default_alerts_is_none(self) -> None:
         sync = SyncConfig(
-            name="t", model="select 1",
+            name="t",
+            model="select 1",
             destination=RestApiDestinationConfig(type="rest_api", url="https://x"),
         )
         assert sync.alerts is None
 
     def test_slack_alert_parsed_via_discriminator(self) -> None:
         from drt.config.models import AlertsConfig, SlackAlertConfig
-        cfg = AlertsConfig(on_failure=[
-            {"type": "slack", "webhook_url": "https://hooks.slack.com/x"}
-        ])
+
+        cfg = AlertsConfig(
+            on_failure=[{"type": "slack", "webhook_url": "https://hooks.slack.com/x"}]
+        )
         assert isinstance(cfg.on_failure[0], SlackAlertConfig)
 
     def test_webhook_alert_parsed_via_discriminator(self) -> None:
         from drt.config.models import AlertsConfig, WebhookAlertConfig
-        cfg = AlertsConfig(on_failure=[
-            {"type": "webhook", "url": "https://example.com/hook"}
-        ])
+
+        cfg = AlertsConfig(on_failure=[{"type": "webhook", "url": "https://example.com/hook"}])
         assert isinstance(cfg.on_failure[0], WebhookAlertConfig)
 
     def test_unknown_alert_type_rejected(self) -> None:
         from drt.config.models import AlertsConfig
+
         with pytest.raises(ValidationError):
             AlertsConfig(on_failure=[{"type": "pagerduty", "key": "x"}])
 
     def test_slack_requires_webhook_url_or_env(self) -> None:
         from drt.config.models import SlackAlertConfig
+
         with pytest.raises(ValueError, match="webhook_url"):
             SlackAlertConfig(type="slack")
 
     def test_webhook_requires_url_or_env(self) -> None:
         from drt.config.models import WebhookAlertConfig
+
         with pytest.raises(ValueError, match="url"):
             WebhookAlertConfig(type="webhook")
 

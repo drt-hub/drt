@@ -32,6 +32,18 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
+from pydantic import BaseModel, Field
+
+
+class OtelConfig(BaseModel):
+    endpoint: str | None = None
+    service_name: str = "drt"
+    headers: dict[str, str] = Field(default_factory=dict)
+
+
+class ObservabilityConfig(BaseModel):
+    otel: OtelConfig = Field(default_factory=OtelConfig)
+
 
 # ---------------------------------------------------------------------------
 # Source profile types
@@ -296,6 +308,34 @@ def resolve_env(value: str | None, env_var: str | None) -> str | None:
     return None
 
 
+def _load_profiles_yaml(config_dir: Path | None = None) -> dict[str, Any]:
+    profiles_path = _config_dir(config_dir) / "profiles.yml"
+    if not profiles_path.exists():
+        raise FileNotFoundError(
+            f"profiles.yml not found at {profiles_path}. "
+            "Run `drt init` to create it, or create it manually."
+        )
+
+    with profiles_path.open() as f:
+        return yaml.safe_load(f) or {}
+
+
+def _profiles_mapping(data: dict[str, Any]) -> dict[str, Any]:
+    profiles = data.get("profiles")
+    if isinstance(profiles, dict):
+        return profiles
+    return {key: value for key, value in data.items() if key != "observability"}
+
+
+def load_observability_config(config_dir: Path | None = None) -> ObservabilityConfig:
+    """Load the top-level observability block from ~/.drt/profiles.yml."""
+    data = _load_profiles_yaml(config_dir)
+    observability_raw = data.get("observability")
+    if observability_raw is None:
+        return ObservabilityConfig()
+    return ObservabilityConfig.model_validate(observability_raw)
+
+
 # ---------------------------------------------------------------------------
 # Load / Save
 # ---------------------------------------------------------------------------
@@ -313,23 +353,17 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
         KeyError: profile_name not found.
         ValueError: Unknown source type or missing required fields.
     """
-    profiles_path = _config_dir(config_dir) / "profiles.yml"
-    if not profiles_path.exists():
-        raise FileNotFoundError(
-            f"profiles.yml not found at {profiles_path}. "
-            "Run `drt init` to create it, or create it manually."
-        )
+    data = _load_profiles_yaml(config_dir)
+    profiles = _profiles_mapping(data)
 
-    with profiles_path.open() as f:
-        data = yaml.safe_load(f) or {}
-
-    if profile_name not in data:
-        available = ", ".join(data.keys()) or "(none)"
+    if profile_name not in profiles:
+        available = ", ".join(profiles.keys()) or "(none)"
         raise KeyError(
-            f"Profile '{profile_name}' not found in {profiles_path}. Available: {available}"
+            f"Profile '{profile_name}' not found in {_config_dir(config_dir) / 'profiles.yml'}. "
+            f"Available: {available}"
         )
 
-    raw = data[profile_name]
+    raw = profiles[profile_name]
     source_type = raw.get("type")
 
     if source_type == "bigquery":
@@ -468,6 +502,16 @@ def save_profile(
         with profiles_path.open() as f:
             data = yaml.safe_load(f) or {}
 
+    observability = data.get("observability")
+    profiles = data.get("profiles")
+    if not isinstance(profiles, dict):
+        profiles = {key: value for key, value in data.items() if key != "observability"}
+
+    data = {}
+    if observability is not None:
+        data["observability"] = observability
+    data["profiles"] = profiles
+
     if isinstance(profile, BigQueryProfile):
         entry: dict[str, Any] = {
             "type": "bigquery",
@@ -560,7 +604,7 @@ def save_profile(
     else:
         raise ValueError(f"Unknown profile type: {type(profile)}")
 
-    data[profile_name] = entry
+    profiles[profile_name] = entry
     with profiles_path.open("w") as f:
         yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
 
