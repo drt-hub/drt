@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from drt._http_utils import extract_next_link
 from drt.config.models import (
     CursorPaginationConfig,
     LinkHeaderPaginationConfig,
@@ -43,41 +44,39 @@ def sync_options():
 
 
 class TestExtractNextLink:
-    """Tests for _extract_next_link static method (RFC 5988 Link header parsing)."""
+    """Tests for drt._http_utils.extract_next_link (RFC 5988 Link header parsing)."""
 
-    def test_extract_next_link_standard_format(self, rest_api_destination):
+    def test_extract_next_link_standard_format(self):
         """Parse standard RFC 5988 Link header format."""
         link_header = (
             '<https://api.example.com?page=2>; rel="next", '
             '<https://api.example.com?page=50>; rel="last"'
         )
-        result = rest_api_destination._extract_next_link(link_header)
-        assert result == "https://api.example.com?page=2"
+        assert extract_next_link(link_header) == "https://api.example.com?page=2"
 
-    def test_extract_next_link_no_next(self, rest_api_destination):
+    def test_extract_next_link_no_next(self):
         """Return None when rel='next' not present."""
         link_header = '<https://api.example.com?page=50>; rel="last"'
-        result = rest_api_destination._extract_next_link(link_header)
-        assert result is None
+        assert extract_next_link(link_header) is None
 
-    def test_extract_next_link_empty_header(self, rest_api_destination):
+    def test_extract_next_link_empty_header(self):
         """Return None for empty link header."""
-        result = rest_api_destination._extract_next_link("")
-        assert result is None
+        assert extract_next_link("") is None
 
-    def test_extract_next_link_single_quotes(self, rest_api_destination):
+    def test_extract_next_link_single_quotes(self):
         """Handle single quotes in rel attribute."""
         link_header = "<https://api.example.com?page=2>; rel='next'"
-        result = rest_api_destination._extract_next_link(link_header)
-        assert result == "https://api.example.com?page=2"
+        assert extract_next_link(link_header) == "https://api.example.com?page=2"
 
-    def test_extract_next_link_with_parameters(self, rest_api_destination):
+    def test_extract_next_link_with_parameters(self):
         """Handle URLs with query parameters."""
         link_header = (
             '<https://api.example.com/contacts?offset=50&limit=25&filter=active>; rel="next"'
         )
-        result = rest_api_destination._extract_next_link(link_header)
-        assert result == "https://api.example.com/contacts?offset=50&limit=25&filter=active"
+        assert (
+            extract_next_link(link_header)
+            == "https://api.example.com/contacts?offset=50&limit=25&filter=active"
+        )
 
 
 class TestFetchPaginatedOffsetBased:

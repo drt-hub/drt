@@ -11,11 +11,11 @@ Features:
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 import httpx
 
+from drt._http_utils import extract_next_link
 from drt.config.models import (
     CursorPaginationConfig,
     DestinationConfig,
@@ -222,7 +222,7 @@ class RestApiDestination:
                     elif isinstance(pagination, LinkHeaderPaginationConfig):
                         # Parse Link header for next URL
                         link_header = response.headers.get("link", "")
-                        next_url = self._extract_next_link(link_header)
+                        next_url = extract_next_link(link_header)
                         if not next_url:
                             break
 
@@ -233,19 +233,3 @@ class RestApiDestination:
                     break
 
         return all_records
-
-    @staticmethod
-    def _extract_next_link(link_header: str) -> str | None:
-        """Extract next URL from Link header.
-
-        RFC 5988 format: <https://api.example.com?page=2>; rel="next"
-        Returns the URL with rel="next".
-        """
-        links = link_header.split(",")
-        for link in links:
-            if re.search(r'rel\s*=\s*["\']next["\']', link, re.IGNORECASE):
-                # Extract URL between < and >
-                match = re.search(r"<([^>]+)>", link)
-                if match:
-                    return match.group(1)
-        return None

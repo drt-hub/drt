@@ -9,6 +9,7 @@ from typing import Any, cast
 import httpx
 from pydantic import TypeAdapter
 
+from drt._http_utils import extract_next_link
 from drt.config.credentials import ProfileConfig, RestApiProfile
 from drt.config.models import (
     AuthConfig,
@@ -18,7 +19,6 @@ from drt.config.models import (
     PaginationConfig,
 )
 from drt.destinations.auth import AuthHandler
-from drt.destinations.rest_api import RestApiDestination
 from drt.sources.base import Source
 
 logger = logging.getLogger("drt")
@@ -118,7 +118,7 @@ class RestApiSource(Source):
                 elif isinstance(pagination_config, LinkHeaderPaginationConfig):
                     # Parse Link header for next URL
                     link_header = response.headers.get("link", "")
-                    next_url = RestApiDestination._extract_next_link(link_header)
+                    next_url = extract_next_link(link_header)
                     if not next_url:
                         break
 
