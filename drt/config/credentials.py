@@ -34,8 +34,6 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, Field
 
-from drt.config.parser import expand_env_vars
-
 
 class OtelConfig(BaseModel):
     endpoint: str | None = None
@@ -350,7 +348,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             f"Available: {available}"
         )
 
-    raw = expand_env_vars(profiles[profile_name])
+    raw = profiles[profile_name]
     source_type = raw.get("type")
 
     if source_type == "bigquery":
