@@ -1,0 +1,44 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly scan (Mon 03:00 UTC) — offset from ci.yml nightly (00:00 UTC)
+    # so the two scheduled runs don't compete for runner capacity.
+    # TODO: wire failure notifications once an alerting convention exists
+    # (see issue #539 follow-up — no slack/issues alert path defined yet).
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: read
+  security-events: write  # required to upload CodeQL results
+  actions: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ["python"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          # `security-extended` adds higher-signal queries beyond the default
+          # set; `security-and-quality` is too noisy for a small codebase.
+          queries: security-extended
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"

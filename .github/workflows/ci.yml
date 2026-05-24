@@ -37,6 +37,24 @@ jobs:
       - name: Install dependencies
         run: uv pip install --system -e ".[dev,mcp,duckdb]"
 
+      - name: Dependency vulnerability scan (pip-audit)
+        # Pinned version for reproducibility; bump in lockstep with Dependabot.
+        # OSV is the vulnerability service used by GitHub Advisory DB and is
+        # broader than PyPI-only sources for the Python ecosystem.
+        # `--strict` makes pip-audit exit non-zero on warnings (e.g. skipped
+        # packages) so silent gaps in coverage surface as CI failures.
+        # Run on a single matrix entry (3.12) to avoid 4x duplicated work —
+        # vuln data is python-version-independent.
+        if: matrix.python-version == '3.12'
+        run: |
+          pip install "pip-audit==2.10.0"
+          # Allow-list: pass `--ignore-vuln GHSA-xxxx` here when a finding is
+          # triaged as a known false positive. Keep this list empty by default
+          # and document each entry in SECURITY.md.
+          pip-audit \
+            --strict \
+            --vulnerability-service osv
+
       - name: Lint (ruff)
         run: ruff check drt tests
 

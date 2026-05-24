@@ -41,6 +41,7 @@ jobs:
     environment: pypi
     permissions:
       id-token: write  # for Trusted Publishing (no API token needed)
+      contents: write  # for uploading SBOM to the GitHub Release
 
     steps:
       - uses: actions/checkout@v6
@@ -52,6 +53,22 @@ jobs:
 
       - name: Install uv
         run: pip install uv
+
+      - name: Install dependencies (for SBOM scope)
+        # SBOM must reflect what users actually install. Mirror the extras
+        # set used by `verify` so optional integrations shipped to PyPI are
+        # represented in the bill of materials.
+        run: uv pip install --system -e ".[dev,mcp,duckdb]"
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          pip install "cyclonedx-bom==7.3.0"
+          cyclonedx-py environment \
+            --output-format JSON \
+            --output-file drt-core-sbom.cdx.json \
+            --pyproject pyproject.toml
+          # Sanity-check the SBOM is non-empty JSON with a components list.
+          python -c "import json; d=json.load(open('drt-core-sbom.cdx.json')); assert d.get('components'), 'SBOM has no components'"
 
       - name: Inject telemetry API key
         env:
@@ -89,3 +106,12 @@ jobs:
 
       - name: Publish drt-core to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Attach SBOM to GitHub Release
+        # `softprops/action-gh-release` creates the Release if missing and
+        # uploads the SBOM as an asset. Only runs for tag pushes (which is
+        # the only trigger for this workflow anyway).
+        uses: softprops/action-gh-release@v2
+        with:
+          files: drt-core-sbom.cdx.json
+          fail_on_unmatched_files: true

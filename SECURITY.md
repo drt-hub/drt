@@ -17,6 +17,28 @@
 | 0.3.x   | ✅        |
 | 0.2.x   | ✅        |
 
+## Supply-Chain Scanning
+
+The repository runs the following automated scans:
+
+| Scan          | Trigger                          | Workflow                                |
+|---------------|----------------------------------|-----------------------------------------|
+| Dependabot    | Weekly                           | (GitHub-native, no workflow file)       |
+| CodeQL        | PR + push to `main` + weekly     | `.github/workflows/codeql.yml`          |
+| `pip-audit`   | PR + push to `main` + weekly     | `.github/workflows/ci.yml` (`test` job) |
+| CycloneDX SBOM| On release tag (`v*` / `dagster-drt-v*`) | `.github/workflows/publish-*.yml` |
+
+`pip-audit` runs against the OSV vulnerability database and fails CI on any
+known advisory. False positives can be triaged via `--ignore-vuln <GHSA-id>`
+flags in `.github/workflows/ci.yml`; any entry added there must be documented
+in this file with a link to the upstream advisory and a justification.
+
+**Current allow-list entries:** none.
+
+A CycloneDX-format SBOM (`*-sbom.cdx.json`) is generated and attached to each
+GitHub Release as an asset. Downstream consumers can use it to feed their own
+vulnerability tooling (Grype, Trivy, Dependency-Track, etc.).
+
 ## Branch Protection
 
 The `main` branch enforces the following rules to mitigate supply chain attacks (e.g., [GlassWorm/ForceMemo](https://socket.dev/blog/glassworm-forcememo-github-supply-chain-attack)):

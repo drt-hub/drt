@@ -41,6 +41,7 @@ jobs:
     environment: pypi
     permissions:
       id-token: write  # for Trusted Publishing (no API token needed)
+      contents: write  # for uploading SBOM to the GitHub Release
 
     steps:
       - uses: actions/checkout@v6
@@ -53,6 +54,20 @@ jobs:
       - name: Install uv
         run: pip install uv
 
+      - name: Install dagster-drt (for SBOM scope)
+        # Install the package itself so the SBOM captures its actual runtime
+        # closure (dagster + drt-core + transitive deps), not the dev env.
+        run: uv pip install --system ./integrations/dagster-drt
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          pip install "cyclonedx-bom==7.3.0"
+          cyclonedx-py environment \
+            --output-format JSON \
+            --output-file dagster-drt-sbom.cdx.json \
+            --pyproject integrations/dagster-drt/pyproject.toml
+          python -c "import json; d=json.load(open('dagster-drt-sbom.cdx.json')); assert d.get('components'), 'SBOM has no components'"
+
       - name: Build dagster-drt
         working-directory: integrations/dagster-drt
         run: uv build
@@ -61,3 +76,9 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: integrations/dagster-drt/dist/
+
+      - name: Attach SBOM to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dagster-drt-sbom.cdx.json
+          fail_on_unmatched_files: true
