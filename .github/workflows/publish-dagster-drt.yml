@@ -6,7 +6,37 @@ on:
       - "dagster-drt-v*"
 
 jobs:
+  verify:
+    # Re-run lint/type/tests against the tagged commit before publishing,
+    # so a tag pushed off a stale local can never ship without verification.
+    # Mirrors the .github/workflows/ci.yml `test` job for the primary
+    # Python version; the full matrix runs on PR / push@main / nightly.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        run: uv pip install --system -e ".[dev,mcp,duckdb]"
+
+      - name: Lint (ruff)
+        run: ruff check drt tests
+
+      - name: Type check (mypy)
+        run: mypy drt
+
+      - name: Test (pytest)
+        run: pytest
+
   publish:
+    needs: verify
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

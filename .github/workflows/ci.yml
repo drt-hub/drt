@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Weekly nightly run (Mon 00:00 UTC) to catch env-drift / flaky tests
+    # against fresh upstream dependencies, independent of PR/push activity.
+    # TODO: wire failure notifications once an alerting convention exists
+    # (see issue #539 follow-up — no slack/issues alert path defined yet).
+    - cron: "0 0 * * 1"
 
 permissions:
   contents: read
