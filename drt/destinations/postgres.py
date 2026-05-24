@@ -19,10 +19,16 @@ Example sync YAML:
 from __future__ import annotations
 
 import json
+import logging
+from datetime import timedelta
 from typing import Any
 
 from drt.config.credentials import resolve_env
-from drt.config.models import DestinationConfig, PostgresDestinationConfig, SyncOptions
+from drt.config.models import (
+    DestinationConfig,
+    PostgresDestinationConfig,
+    SyncOptions,
+)
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 
@@ -30,6 +36,12 @@ try:
     from psycopg2.extras import Json as _Psycopg2Json
 except ImportError:
     _Psycopg2Json = None  # type: ignore[assignment,misc]
+
+# Prefer to import sql at module import time if available; fall back to None
+try:
+    from psycopg2 import sql  # type: ignore
+except Exception:
+    sql = None  # type: ignore
 
 
 def _serialize_value(
@@ -379,6 +391,131 @@ class PostgresDestination:
             self._swap_table = None
 
         return SyncResult()
+
+    def list_orphan_swap_tables(
+        self,
+        config: DestinationConfig,
+        base_table: str,
+        older_than: timedelta | None = None,
+    ) -> list[str]:
+        """Detect orphan swap tables for the current sync's base table.
+
+        PostgreSQL does not expose a reliable creation timestamp for tables in
+        standard catalogs, so *older_than* is best-effort and currently only
+        affects logging. The lookup is scoped to the current sync's base table
+        so one sync never sees another sync's shadow tables.
+
+        Args:
+            config: Postgres destination configuration.
+            base_table: The current sync's base table name. May be schema-
+                qualified (e.g. ``public.users``); only the table component is
+                used to derive the shadow name.
+            older_than: Optional age filter in hours.
+
+        Returns:
+            Fully qualified ``schema.table`` names for orphan swap tables.
+
+        Raises:
+            Exception: If the catalog query fails.
+        """
+        assert isinstance(config, PostgresDestinationConfig)
+
+        shadow_name = f"{base_table.rsplit('.', 1)[-1]}__drt_swap"
+        schema_name = config.table.rsplit('.', 1)[0] if "." in config.table else None
+
+        if older_than is not None:
+            # Best-effort: PostgreSQL doesn't store table creation timestamp
+            logging.getLogger(__name__).info(
+                "older_than filter requested but not supported for Postgres; "
+                "returning all matches"
+            )
+
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            query = [
+                "SELECT table_schema, table_name",
+                "FROM information_schema.tables",
+                "WHERE table_type = 'BASE TABLE'",
+                "  AND table_name = %s",
+                "  AND table_schema NOT IN ('pg_catalog', 'information_schema')",
+            ]
+            params: list[Any] = [shadow_name]
+            if schema_name:
+                query.append("  AND table_schema = %s")
+                params.append(schema_name)
+            cur.execute("\n".join(query), tuple(params))
+            rows = cur.fetchall()
+            result: list[str] = []
+            for schema, name in rows:
+                # Defensive: ensure exact shadow name matches the current sync.
+                if name == shadow_name:
+                    result.append(f"{schema}.{name}")
+            return result
+        finally:
+            conn.close()
+
+    def drop_orphan_swap_tables(
+        self, config: DestinationConfig, tables: list[str]
+    ) -> tuple[list[str], list[str]]:
+        """Drop the given orphan swap tables and return (dropped, failed).
+
+        This enforces safety checks (only drop tables ending with
+        ``__drt_swap``) and performs the DROP using the destination's
+        connection. Returns two lists: successfully dropped tables and
+        tables that failed to drop.
+
+        Each table drop is independently committed to ensure that failure
+        of one table does not rollback successful drops of others.
+        """
+        assert isinstance(config, PostgresDestinationConfig)
+
+        dropped: list[str] = []
+        failed: list[str] = []
+
+        conn = self._connect(config)
+        try:
+            for full_name in tables:
+                # Validate format: must be exactly schema.table
+                if not full_name or full_name.count(".") != 1:
+                    failed.append(full_name)
+                    continue
+
+                schema, table = full_name.split(".", 1)
+                if not schema or not table:
+                    failed.append(full_name)
+                    continue
+
+                # Validate suffix: must end with __drt_swap
+                if not table.endswith("__drt_swap"):
+                    failed.append(full_name)
+                    continue
+
+                try:
+                    cur = conn.cursor()
+                    # Ensure we have psycopg2.sql available; import lazily if needed
+                    _sql = sql
+                    if _sql is None:
+                        from psycopg2 import sql as _sql  # type: ignore
+
+                    cur.execute(
+                        _sql.SQL("DROP TABLE IF EXISTS {}.{}").format(
+                            _sql.Identifier(schema), _sql.Identifier(table)
+                        )
+                    )
+                    conn.commit()
+                    dropped.append(full_name)
+                except Exception:
+                    # Try to rollback this attempt and record failure
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    failed.append(full_name)
+        finally:
+            conn.close()
+
+        return dropped, failed
 
     @staticmethod
     def _load_upsert(
