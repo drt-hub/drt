@@ -35,13 +35,13 @@ from drt.destinations.row_errors import RowError
 
 try:
     from psycopg2.extras import Json as _Psycopg2Json
-except ImportError:
+except ImportError:  # pragma: no cover — fires only when drt-core[postgres] is not installed
     _Psycopg2Json = None  # type: ignore[assignment,misc]
 
 # Prefer to import sql at module import time if available; fall back to None
 try:
     from psycopg2 import sql  # type: ignore
-except Exception:
+except Exception:  # pragma: no cover — fires only when drt-core[postgres] is not installed
     sql = None  # type: ignore
 
 

@@ -429,6 +429,23 @@ class TestPostgresReplaceMode:
         assert _serialize_value(True) is True
         assert _serialize_value(0) == 0
 
+    def test_pg_dict_encoder_falls_back_to_json_dumps_without_psycopg2(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When ``psycopg2.extras.Json`` is unavailable, the encoder uses
+        ``json.dumps`` so the destination still produces JSON-serializable
+        output. Covers the optional-dep fallback path that CI (with
+        psycopg2 installed) cannot otherwise exercise.
+        """
+        import json as _json
+
+        from drt.destinations import postgres as pg
+
+        monkeypatch.setattr(pg, "_Psycopg2Json", None)
+
+        out = pg._pg_dict_encoder({"k": "v", "n": 1})
+        assert out == _json.dumps({"k": "v", "n": 1}, ensure_ascii=False)
+
     @patch("drt.destinations.postgres.PostgresDestination._connect")
     def test_non_dict_record_no_json_wrap(self, mock_connect: MagicMock) -> None:
         """Integration: records without dict columns don't call Json at all."""
