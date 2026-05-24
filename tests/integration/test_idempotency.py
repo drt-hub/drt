@@ -32,6 +32,7 @@ duckdb = pytest.importorskip("duckdb")  # noqa: F841  — module-gate
 
 from drt.config.models import RestApiDestinationConfig, SyncConfig, SyncOptions  # noqa: E402
 from drt.destinations.rest_api import RestApiDestination  # noqa: E402
+from drt.engine.observer import StatePersistingObserver  # noqa: E402
 from drt.engine.sync import run_sync  # noqa: E402
 from drt.state.manager import StateManager  # noqa: E402
 
@@ -63,7 +64,7 @@ def test_state_recorded_after_successful_sync(
 
     state = StateManager(tmp_path)
     run_sync(_sync_cfg(_dest(httpserver)), source, RestApiDestination(), profile, tmp_path,
-             state_manager=state)
+             state_manager=state, observer=StatePersistingObserver(state, None))
 
     saved = state.get_last_sync("idem_sync")
     assert saved is not None
@@ -94,8 +95,14 @@ def test_second_run_resends_all_rows_without_cursor(
 
     state = StateManager(tmp_path)
     cfg = _sync_cfg(_dest(httpserver))
-    run_sync(cfg, source, RestApiDestination(), profile, tmp_path, state_manager=state)
-    run_sync(cfg, source, RestApiDestination(), profile, tmp_path, state_manager=state)
+    run_sync(
+        cfg, source, RestApiDestination(), profile, tmp_path,
+        state_manager=state, observer=StatePersistingObserver(state, None),
+    )
+    run_sync(
+        cfg, source, RestApiDestination(), profile, tmp_path,
+        state_manager=state, observer=StatePersistingObserver(state, None),
+    )
 
     assert len(received) == 6  # 3 rows × 2 runs
     # IDs duplicated, not deduplicated
@@ -111,10 +118,16 @@ def test_state_entry_is_overwritten_not_appended(
 
     state = StateManager(tmp_path)
     cfg = _sync_cfg(_dest(httpserver))
-    run_sync(cfg, source, RestApiDestination(), profile, tmp_path, state_manager=state)
+    run_sync(
+        cfg, source, RestApiDestination(), profile, tmp_path,
+        state_manager=state, observer=StatePersistingObserver(state, None),
+    )
     first_run_at = state.get_last_sync("idem_sync").last_run_at  # type: ignore[union-attr]
 
-    run_sync(cfg, source, RestApiDestination(), profile, tmp_path, state_manager=state)
+    run_sync(
+        cfg, source, RestApiDestination(), profile, tmp_path,
+        state_manager=state, observer=StatePersistingObserver(state, None),
+    )
     all_states = state.get_all()
 
     assert list(all_states.keys()) == ["idem_sync"]  # single key, not appended

@@ -7,7 +7,6 @@ CLI owns all console output; engine only returns SyncResult.
 
 from __future__ import annotations
 
-import logging
 import threading
 import time
 from collections.abc import Iterator
@@ -23,13 +22,12 @@ from drt.destinations.lookup import (
     build_lookup_map,
     detect_ambiguous_lookup_ordering,
 )
+from drt.engine.observer import NullObserver, SyncObserver
 from drt.engine.resolver import resolve_model_ref
 from drt.sources.base import Source
 from drt.state.history import HistoryEntry, HistoryManager
-from drt.state.manager import StateManager, SyncState
+from drt.state.manager import StateManager
 from drt.state.watermark import WatermarkStorage
-
-logger = logging.getLogger("drt")
 
 
 def _cursor_gt(new: str, current: str) -> bool:
@@ -87,6 +85,7 @@ def run_sync(
     stop_event: threading.Event | None = None,
     compute_diff: bool = False,
     diff_limit: int = 20,
+    observer: SyncObserver | None = None,
 ) -> SyncResult:
     """Run a single sync: extract from source, load to destination.
 
@@ -97,24 +96,41 @@ def run_sync(
         profile: Resolved source credentials.
         project_dir: Root of drt project (for ref() resolution).
         dry_run: If True, extract but do not call destination.load().
-        state_manager: If provided, persist sync result after completion.
+        state_manager: Source of truth for cursor reads (incremental sync
+            watermark fallback chain). State PERSISTENCE no longer happens
+            inside the engine — pass a ``StatePersistingObserver`` via
+            ``observer=`` to persist the post-run ``SyncState`` (#548).
+        watermark_storage: Source of truth for cursor reads from external
+            watermark storage. As with ``state_manager``, watermark PERSISTENCE
+            now flows through ``observer``.
         stop_event: Cooperative cancellation signal. When set (e.g. by a
             SIGTERM/SIGINT handler in the CLI), the engine finishes the
-            current batch, marks ``result.interrupted=True``, persists state,
-            and returns. ``None`` (default) preserves backward behaviour.
+            current batch, marks ``result.interrupted=True``, persists state
+            via the observer, and returns. ``None`` (default) preserves
+            backward behaviour.
         compute_diff: When True (and ``dry_run`` is also True), compute a
             record-level diff (#413) against the destination's current state
             and populate ``SyncResult.diff``. Ignored when ``dry_run=False``.
         diff_limit: Cap on how many records appear in each diff category
             (added / updated / deleted / sample). Default 20.
+        observer: Event sink for logging, state persistence, OTel spans,
+            etc. Defaults to ``NullObserver`` — the engine becomes silent
+            and does not persist state unless a real observer is passed.
+            Library callers compose with ``CompositeObserver``; the CLI
+            sets up ``LoggingObserver`` + ``StatePersistingObserver`` by
+            default (see ``drt.cli.main._run_one``).
 
     Returns:
         Aggregated SyncResult across all batches.
     """
+    if observer is None:
+        observer = NullObserver()
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.perf_counter()
     total_result = SyncResult()
     raised: BaseException | None = None
+
+    observer.on_sync_started(sync.name, started_at)
 
     try:
         return _run_sync_body(
@@ -133,6 +149,7 @@ def run_sync(
             started_at=started_at,
             t0=t0,
             total_result=total_result,
+            observer=observer,
         )
     except BaseException as exc:
         raised = exc
@@ -155,7 +172,7 @@ def run_sync(
                     ),
                 )
             except Exception as exc:  # noqa: BLE001 — best-effort
-                logger.warning("Alert dispatch outer failure: %s", exc)
+                observer.on_warning(sync.name, f"Alert dispatch outer failure: {exc}")
 
         # Append execution history (best-effort; never affects sync result).
         # Skip dry-run so test/preview invocations don't pollute history.
@@ -189,7 +206,7 @@ def run_sync(
                 )
                 history_manager.prune(sync.name, history_retention_days)
             except Exception as exc:  # noqa: BLE001 — best-effort
-                logger.warning("History append outer failure: %s", exc)
+                observer.on_warning(sync.name, f"History append outer failure: {exc}")
 
 
 def _run_sync_body(
@@ -209,6 +226,7 @@ def _run_sync_body(
     started_at: str,
     t0: float,
     total_result: SyncResult,
+    observer: SyncObserver,
 ) -> SyncResult:
     """Inner body of run_sync. Mutates `total_result` in place so the outer
     finally-block can read partial results when an exception propagates.
@@ -223,22 +241,14 @@ def _run_sync_body(
         if cursor_value_override is not None:
             last_cursor_value = cursor_value_override
             watermark_source = "cli_override"
-            logger.info(
-                "sync='%s' watermark_source=cli_override cursor_value='%s'",
-                sync.name,
-                last_cursor_value,
-            )
+            observer.on_watermark_resolved(sync.name, "cli_override", last_cursor_value)
         # 2. Watermark storage (GCS / BigQuery / local)
         elif watermark_storage:
             stored = watermark_storage.get(sync.name)
             if stored is not None:
                 last_cursor_value = stored
                 watermark_source = "storage"
-                logger.info(
-                    "sync='%s' watermark_source=storage cursor_value='%s'",
-                    sync.name,
-                    last_cursor_value,
-                )
+                observer.on_watermark_resolved(sync.name, "storage", last_cursor_value)
         # 3. State manager fallback (local .drt/state.json)
         elif state_manager:
             prev = state_manager.get_last_sync(sync.name)
@@ -251,12 +261,7 @@ def _run_sync_body(
         if last_cursor_value is None and wm and wm.default_value is not None:
             last_cursor_value = wm.default_value
             watermark_source = "default_value"
-            logger.info(
-                "sync='%s' watermark_source=default_value cursor_value='%s' "
-                "reason='no existing watermark'",
-                sync.name,
-                last_cursor_value,
-            )
+            observer.on_watermark_resolved(sync.name, "default_value", last_cursor_value)
 
     query = resolve_model_ref(sync.model, project_dir, profile, cursor_field, last_cursor_value)
 
@@ -278,7 +283,7 @@ def _run_sync_body(
     )
     if lookups:
         for warning in detect_ambiguous_lookup_ordering(lookups):
-            logger.warning("sync='%s' %s", sync.name, warning)
+            observer.on_warning(sync.name, warning)
         for col_name, lk_config in lookups.items():
             mapping = build_lookup_map(sync.destination, lk_config)
             lookup_maps[col_name] = (lk_config, mapping)
@@ -289,11 +294,7 @@ def _run_sync_body(
         # stays consistent because the loop body never starts on this batch.
         if stop_event is not None and stop_event.is_set():
             total_result.interrupted = True
-            logger.info(
-                "sync='%s' graceful shutdown requested — stopping after %d batches",
-                sync.name,
-                batches_processed,
-            )
+            observer.on_interrupted(sync.name, batches_processed)
             break
 
         total_result.rows_extracted += len(record_batch)
@@ -387,27 +388,11 @@ def _run_sync_body(
     total_result.watermark_source = watermark_source
     total_result.cursor_value_used = last_cursor_value
 
-    if state_manager is not None:
-        status = (
-            "success"
-            if total_result.failed == 0
-            else "partial"
-            if total_result.success > 0
-            else "failed"
-        )
-        state_manager.save_sync(
-            SyncState(
-                sync_name=sync.name,
-                last_run_at=started_at,
-                records_synced=total_result.success,
-                status=status,
-                error=total_result.errors[0] if total_result.errors else None,
-                last_cursor_value=new_cursor_value if cursor_field else None,
-            )
-        )
-
-    # Persist watermark to external storage if configured
-    if watermark_storage is not None and cursor_field and new_cursor_value:
-        watermark_storage.save(sync.name, new_cursor_value)
+    # State + watermark persistence is the observer's responsibility (#548).
+    # The CLI composes ``LoggingObserver`` + ``StatePersistingObserver`` so
+    # default user-facing behaviour is unchanged.
+    observer.on_sync_completed(
+        sync.name, total_result, started_at, new_cursor_value, cursor_field
+    )
 
     return total_result

@@ -119,10 +119,22 @@ def _run_one(
 ) -> tuple[str, dict[str, object], bool]:
     """Execute a single sync and return (name, result_dict, had_error)."""
     from drt import telemetry
+    from drt.engine.observer import (
+        CompositeObserver,
+        LoggingObserver,
+        StatePersistingObserver,
+    )
     from drt.engine.sync import run_sync
 
     dest = _get_destination(sync)
     wm_storage = _get_watermark_storage(sync, Path("."))
+    # Compose the engine's default observer surface: logging events to the
+    # ``drt`` logger (legacy parity) + state/watermark persistence on
+    # sync_completed. The engine itself no longer reaches for state directly
+    # (#548); CLI is responsible for wiring this up.
+    observer = CompositeObserver(
+        [LoggingObserver(), StatePersistingObserver(ctx.state_mgr, wm_storage)]
+    )
     if not ctx.json_mode and not ctx.dry_run and not ctx.quiet:
         print_sync_start(sync.name, ctx.dry_run)
     t0 = time.monotonic()
@@ -152,6 +164,7 @@ def _run_one(
                 stop_event=ctx.stop_event,
                 compute_diff=ctx.compute_diff,
                 diff_limit=ctx.diff_limit,
+                observer=observer,
             )
         except Exception as e:
             from drt.cli.errors import format_error, render_to_console

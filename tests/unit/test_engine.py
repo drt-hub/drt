@@ -11,6 +11,7 @@ import pytest
 from drt.config.credentials import BigQueryProfile, ProfileConfig
 from drt.config.models import DestinationConfig, SyncConfig, SyncOptions
 from drt.destinations.base import SyncResult
+from drt.engine.observer import StatePersistingObserver
 from drt.engine.sync import batch, run_sync
 
 # ---------------------------------------------------------------------------
@@ -162,7 +163,15 @@ def test_run_sync_saves_state(tmp_path: Path) -> None:
     sync = _make_sync()
     state_mgr = StateManager(tmp_path)
 
-    run_sync(sync, source, dest, _make_profile(), tmp_path, state_manager=state_mgr)
+    run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
 
     state = state_mgr.get_last_sync("test_sync")
     assert state is not None
@@ -199,7 +208,15 @@ def test_incremental_saves_max_cursor(tmp_path: Path) -> None:
     sync = _make_incremental_sync()
     state_mgr = StateManager(tmp_path)
 
-    run_sync(sync, source, dest, _make_profile(), tmp_path, state_manager=state_mgr)
+    run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
 
     state = state_mgr.get_last_sync("inc_sync")
     assert state is not None
@@ -229,7 +246,15 @@ class TestCursorStringification:
         sync = _make_incremental_sync()
         state_mgr = StateManager(tmp_path)
 
-        run_sync(sync, source, dest, _make_profile(), tmp_path, state_manager=state_mgr)
+        run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
 
         state = state_mgr.get_last_sync("inc_sync")
         assert state is not None
@@ -255,7 +280,15 @@ class TestCursorStringification:
         sync = _make_incremental_sync()
         state_mgr = StateManager(tmp_path)
 
-        run_sync(sync, source, dest, _make_profile(), tmp_path, state_manager=state_mgr)
+        run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
 
         state = state_mgr.get_last_sync("inc_sync")
         assert state is not None
@@ -274,7 +307,15 @@ class TestCursorStringification:
         sync = _make_incremental_sync()
         state_mgr = StateManager(tmp_path)
 
-        run_sync(sync, source, dest, _make_profile(), tmp_path, state_manager=state_mgr)
+        run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
 
         state = state_mgr.get_last_sync("inc_sync")
         assert state is not None
@@ -293,7 +334,15 @@ class TestCursorStringification:
         sync = _make_incremental_sync()
         state_mgr = StateManager(tmp_path)
 
-        run_sync(sync, source, dest, _make_profile(), tmp_path, state_manager=state_mgr)
+        run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
 
         state = state_mgr.get_last_sync("inc_sync")
         assert state is not None
@@ -309,7 +358,15 @@ class TestCursorStringification:
         sync = _make_incremental_sync()
         state_mgr = StateManager(tmp_path)
 
-        run_sync(sync, source, dest, _make_profile(), tmp_path, state_manager=state_mgr)
+        run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
 
         state = state_mgr.get_last_sync("inc_sync")
         assert state is not None
@@ -343,7 +400,15 @@ def test_incremental_uses_saved_cursor(tmp_path: Path) -> None:
     dest = FakeDestination()
     sync = _make_incremental_sync()
 
-    run_sync(sync, CapturingSource(), dest, _make_profile(), tmp_path, state_manager=state_mgr)
+    run_sync(
+        sync,
+        CapturingSource(),
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
 
     assert len(captured_queries) == 1
     assert "WHERE updated_at > '2024-01-01'" in captured_queries[0]
@@ -386,6 +451,7 @@ def test_watermark_storage_used_when_configured(tmp_path: Path) -> None:
         _make_profile(),
         tmp_path,
         watermark_storage=wm_storage,
+        observer=StatePersistingObserver(None, wm_storage),
     )
 
     assert result.success == 1
@@ -565,7 +631,15 @@ def test_full_sync_no_cursor_saved(tmp_path: Path) -> None:
     sync = _make_sync()  # mode=full, no cursor_field
     state_mgr = StateManager(tmp_path)
 
-    run_sync(sync, source, dest, _make_profile(), tmp_path, state_manager=state_mgr)
+    run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
 
     state = state_mgr.get_last_sync("test_sync")
     assert state is not None
@@ -1028,6 +1102,7 @@ class TestGracefulShutdown:
             tmp_path,
             state_manager=state_mgr,
             stop_event=stop_event,
+            observer=StatePersistingObserver(state_mgr, None),
         )
 
         saved = state_mgr.get_last_sync(sync.name)
