@@ -35,9 +35,13 @@ def print_init_success(paths: list[str]) -> None:
         console.print(f"  [dim]Created[/dim] {p}")
     console.print()
     console.print("Next steps:")
-    console.print("  1. Edit [bold]drt_project.yml[/bold] if needed")
-    console.print("  2. Add sync definitions to [bold]syncs/[/bold]")
-    console.print("  3. Run [bold]drt run --dry-run[/bold] to preview")
+    console.print("  1. Edit [bold]drt_project.yml[/bold] — set your profile credentials")
+    console.print("  2. Edit [bold]syncs/example_sync.yml[/bold] — define your first sync")
+    console.print("  3. Run: [bold]drt validate[/bold]\t\t[dim](check config)[/dim]")
+    console.print("  4. Run: [bold]drt run --dry-run[/bold]\t[dim](preview without writing)[/dim]")
+    console.print("  5. Run: [bold]drt run[/bold]\t\t[dim](execute)[/dim]")
+    console.print()
+    console.print("Docs: https://github.com/drt-hub/drt#quickstart")
     console.print()
 
 
@@ -116,10 +120,7 @@ def _print_row_count_diff(sync: SyncConfig, destination: object, new_rows: int) 
             )
     except Exception as e:
         # Silently skip row count if unable to connect (not a blocking error)
-        console.print(
-            f"  [dim](Could not retrieve current row count: {type(e).__name__})[/dim]"
-        )
-
+        console.print(f"  [dim](Could not retrieve current row count: {type(e).__name__})[/dim]")
 
 
 def print_sync_result(sync_name: str, result: SyncResult, elapsed: float) -> None:
@@ -196,8 +197,8 @@ def print_validation_error(sync_name: str, errors: list[str]) -> None:
 
 
 def print_connection_test_result(
-    sync_name: str, 
-    success: bool | None, 
+    sync_name: str,
+    success: bool | None,
     error: str | None = None,
 ) -> None:
     if success is None:
@@ -380,9 +381,7 @@ def print_diff_table(diff: object, sync_name: str) -> None:
         for old, new in diff.updated:
             changed = DiffResult.changed_fields(old, new)
             # Use the first column of new as a stable key label
-            key_repr = next(
-                (f"{k}={v}" for k, v in new.items() if k in old), "(?)"
-            )
+            key_repr = next((f"{k}={v}" for k, v in new.items() if k in old), "(?)")
             change_repr = ", ".join(
                 f"{c}: {old_v} → {new_v}" for c, (old_v, new_v) in changed.items()
             )
