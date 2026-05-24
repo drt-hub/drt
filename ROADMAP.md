@@ -46,6 +46,22 @@ Strict patch release — cherry-pick of PR #514 (MySQL `_quote_ident` applied ac
 
 ---
 
+## v0.7.5 — Tech Foundation Hardening
+
+**Theme:** Lock in the foundations before v0.8 Cloud Destinations push — CI reach, functional test coverage for the reverse-ETL paths, CLI/UX polish, and targeted refactors of the modules that have grown across v0.6→v0.7.
+
+**Scope:**
+- **CI strengthening** — nightly schedule + publish-time lint/test gate · supply-chain scans (CodeQL, pip-audit, SBOM)
+- **Functional test coverage** — DuckDB Source dedicated test + end-to-end harness (DuckDB → FakeDestination, building on FakeSource #364) · boundary cases (idempotency / large batches / schema evolution / type conversion)
+- **UX** — `drt sources --detailed` / `drt destinations --detailed` (auth method, required env vars, sample YAML) · `ErrorFormatter` for `drt run` failures (sync name, stage, suggested next step) · `drt init --template <connector>` quickstart scaffolds + README → docs/ entry-point
+- **Refactor** (gated on open contributor PRs to avoid rebase churn) — `cli/main.py` handler split (after #522) · `destinations/postgres.py` + `mysql.py` serializer consolidation (after #492) · `engine/sync.py` I/O boundary tightening for the Rust migration (after #527) · `config/models.py` `BaseDestinationConfig` extraction
+
+**Out of scope:** New connectors (→ v0.8), new engine features (`sync.mode: mirror` → v0.8), Open Core interfaces (→ v0.9), Rust migration itself (→ v1.x).
+
+**Target:** 2026-06 · **Progress:** [milestone/11](https://github.com/drt-hub/drt/milestone/11)
+
+---
+
 ## v0.8 — Cloud Destinations & Growth
 
 **Theme:** DWH/Lakehouse destinations + community growth push.
