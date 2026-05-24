@@ -276,6 +276,25 @@ destination:
     token_env: HUBSPOT_TOKEN      # Private App token with CRM write scope
 ```
 
+### `type: zendesk`
+
+```yaml
+destination:
+  type: zendesk
+  subdomain_env: ZENDESK_SUBDOMAIN       # e.g. "acme" for acme.zendesk.com
+  email_env: ZENDESK_EMAIL               # Zendesk user email
+  api_token_env: ZENDESK_API_TOKEN       # Zendesk API token
+  object: user                           # "user" (default) | "organization"
+  id_field: zendesk_user_id              # optional: source field copied to Zendesk id
+  custom_fields_template: |              # optional: JSON object for custom fields
+    {
+      "health_score": "{{ row.health_score }}",
+      "plan": "{{ row.plan }}"
+    }
+```
+
+> Users are upserted through `users/create_or_update_many` in 100-record batches. Organizations use `organizations/create_or_update` per row. Custom fields are sent as `user_fields` or `organization_fields`.
+
 ### `type: jira`
 
 ```yaml

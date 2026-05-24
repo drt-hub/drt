@@ -21,6 +21,7 @@ from drt.destinations.rest_api import RestApiDestination
 from drt.destinations.slack import SlackDestination
 from drt.destinations.snowflake import SnowflakeDestination
 from drt.destinations.teams import TeamsDestination
+from drt.destinations.zendesk import ZendeskDestination
 
 ALL_DESTINATIONS = [
     ClickHouseDestination,
@@ -36,6 +37,7 @@ ALL_DESTINATIONS = [
     RestApiDestination,
     SlackDestination,
     TeamsDestination,
+    ZendeskDestination,
 ]
 
 CONNECTION_TESTABLE_DESTINATIONS = [

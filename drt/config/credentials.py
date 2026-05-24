@@ -205,6 +205,20 @@ class DatabricksProfile:
         return f"{self.type} ({self.server_hostname}/{path})"
 
 
+@dataclass
+class RestApiProfile:
+    """REST API source profile."""
+
+    type: Literal["rest_api"]
+    url: str
+    auth: dict[str, Any] | None = None
+    pagination: dict[str, Any] | None = None
+    result_path: str | None = None
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.url})"
+
+
 # Union type — used throughout the codebase
 ProfileConfig = (
     BigQueryProfile
@@ -217,6 +231,7 @@ ProfileConfig = (
     | SnowflakeProfile
     | DatabricksProfile
     | SQLServerProfile
+    | RestApiProfile
 )
 
 

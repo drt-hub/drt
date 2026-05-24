@@ -275,7 +275,23 @@ def _resolve_profile_name(cli_flag: str | None, project_profile: str) -> str:
 
 def version_callback(value: bool) -> None:
     if value:
+        import platform
+        import sys
+
+        import drt as drt_pkg
+
+        # First line stays `drt version X.Y.Z` so scripts grepping for that
+        # pattern keep working. The follow-up lines are diagnostic context
+        # that saves a round-trip on bug reports.
+        py = sys.version_info
+        impl = platform.python_implementation()
+        install_path = Path(drt_pkg.__file__).resolve().parent
+        plat = f"{platform.system()} {platform.release()} ({platform.machine()})"
+
         console.print(f"drt version {__version__}")
+        console.print(f"Python {py.major}.{py.minor}.{py.micro} ({impl})")
+        console.print(f"Install: {install_path}")
+        console.print(f"Platform: {plat}")
         raise typer.Exit()
 
 

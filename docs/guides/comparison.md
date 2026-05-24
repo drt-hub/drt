@@ -85,7 +85,7 @@ drt currently supports:
 
 **Sources (10):** BigQuery, DuckDB, PostgreSQL, Snowflake, SQLite, Redshift, ClickHouse, MySQL, Databricks, SQL Server
 
-**Destinations (22):** REST API, Slack, Discord, Teams, GitHub Actions, HubSpot, Google Sheets, PostgreSQL, MySQL, ClickHouse, Parquet, CSV/JSON/JSONL, Jira, Linear, SendGrid, Notion, Twilio SMS, Intercom, Email SMTP, Salesforce Bulk API, Google Ads, Staged Upload
+**Destinations (23):** REST API, Slack, Discord, Teams, GitHub Actions, HubSpot, Zendesk, Google Sheets, PostgreSQL, MySQL, ClickHouse, Parquet, CSV/JSON/JSONL, Jira, Linear, SendGrid, Notion, Twilio SMS, Intercom, Email SMTP, Salesforce Bulk API, Google Ads, Staged Upload
 
 **Integrations:** Dagster (`dagster-drt`), Airflow (built-in), Prefect (built-in), dbt manifest reader
 

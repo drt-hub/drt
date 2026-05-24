@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **`drt --version` enriched with Python / install path / platform** (#515): the version flag now prints four diagnostic lines instead of one — `drt version X.Y.Z`, `Python X.Y.Z (CPython)`, `Install: <site-packages path>`, `Platform: <system> <release> (<machine>)`. First line is byte-identical to the old output so scripts grepping `drt version X.Y.Z` keep working. Saves a back-and-forth on bug reports where the relevant Python / OS / install info would otherwise need a follow-up. Seven unit tests in `tests/unit/test_cli_version.py` lock the format and the BC contract on the first line.
 - **Connection test in `drt validate`** (#367, PR #484): Added `--check-connection` flag to test connectivity to SQL destinations (PostgreSQL, MySQL, ClickHouse, Snowflake) before running syncs via `SELECT 1`. Reports pass/fail per sync in both text and `--output json`; non-SQL destinations are skipped gracefully. Snowflake destination internally refactored to share a `_connect()` helper between `load` and `test_connection`. Contributed by @GokulKashyap.
 - **`drt cloud status` stub command** (#491, PR #488; Rich rendering polish in #494, PR #496): Companion stub to `drt cloud push`. Both commands now print a unified "drt Cloud coming soon" message via a shared `CLOUD_MESSAGE` constant, rendered through Rich `console.print` with a bold blue `drt Cloud` heading and a dim coming-soon footer. Lays groundwork for the future drt Cloud control plane. Contributed by @Photon101.
 - **`drt docs generate --format mermaid`** (epic #499, sub-issue #501): First slice of the sync catalog & lineage primitive. Renders a Mermaid `graph LR` of `source → sync → destination`, including heuristic lookup edges between syncs whose destination table is referenced by another sync's `lookups`. Pinable in README via GitHub-flavored Mermaid fence. `--format html` and `--format json` raise `NotImplementedError` pending follow-up phases (P2/P3 of #499). New package `drt/docs/` lays the foundation for `drt docs generate --format html` (Phase 3, v0.8) and `drt docs serve` (Phase 4, v0.8.x).
@@ -59,10 +60,6 @@ Cherry-pick of PR #485 + PR #498 onto the v0.7.2 release line — so users on `d
 
 - **Postgres: qualified `schema.table` identifiers now safely composed** (#442, PR #498): the row-count, replace, swap, finalize, insert, and upsert SQL paths previously passed `f"{schema}.{table}"` style strings through `psycopg2.sql.Identifier()`, which double-quoted the entire dotted name into a single identifier (`"marketing.email_events"`) — so any Postgres destination configured with a schema-qualified table name failed at SQL execution. The fix splits qualified names into separate schema and relation `Identifier()` components, while keeping swap shadow/old suffixes attached to the relation name only (so `marketing.email_events` becomes `marketing."email_events__drt_swap"`, not a single quoted identifier). Contributed by @Photon101.
 - **Postgres: swap path fully migrated to `psycopg2.sql` composition** (PR #485, fixes #483): prerequisite for the qualified-identifier fix above. The swap-path SQL (DROP TABLE IF EXISTS, CREATE TABLE LIKE, INSERT, ALTER TABLE RENAME, cleanup DROP) was still using f-string formatting; this commit migrates it to `psycopg2.sql.SQL` + `Identifier` for safe composition. Originally queued for v0.7.2 but landed post-release (#485's CLA signature was in v0.7.2 but the commit itself was not); bundled into this patch because PR #498 depends on it. Contributed by @Photon101.
-
-### Fixed
-
-- **MySQL destination correctly quotes schema-qualified table names** (#511): `mydb.scores` now produces `` `mydb`.`scores` `` across replace, insert, and upsert paths (was treated as a single identifier).
 
 ## [0.7.2] - 2026-05-11
 
@@ -103,7 +100,6 @@ None. Drop-in upgrade from v0.7.0.
 
 - **Watermark advance for tz-aware cursor values** (#475, PR #476): `drt/engine/sync.py` was calling `str()` directly on cursor field values, which for tz-aware datetimes (e.g. BigQuery `TIMESTAMP` columns from the Python BQ client) produced strings with a `+00:00` suffix. When user SQL or `default_value` was written tz-naive, the next run compared a naive `WHERE col >= TIMESTAMP('YYYY-MM-DD HH:MM:SS')` against the tz-aware persisted form and the boundary row re-fired on every run. The engine now normalizes tz-aware datetimes to naive UTC before stringifying. Reported by @K-Masuda-SL after a prod incident where a single `recording_sessions` row triggered a downstream GHA `workflow_dispatch` three times in a row.
 - **`on_error=fail` not respected by Notion / REST API / Email SMTP destinations** (#365, PR #463): three HTTP destinations continued processing the rest of the batch after the first failure even when `on_error: fail` was configured. Now all three short-circuit and `return result` on the first failure, matching the documented contract and the behavior of every other destination. New `on_error=fail` and per-destination retry override tests lock the semantic in across the webhook surface.
-
 
 ## [0.7.0] - 2026-05-06
 

@@ -38,13 +38,22 @@ Strict patch release — cherry-pick of PR #498 (Postgres schema-qualified `Iden
 
 ---
 
+## v0.7.4 — MySQL Patch ✅ Shipped 2026-05-23
+
+Released as **v0.7.4** on 2026-05-23. See [CHANGELOG.md](CHANGELOG.md#074---2026-05-23) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.7.4) for the full feature list.
+
+Strict patch release — cherry-pick of PR #514 (MySQL `_quote_ident` applied across all SQL paths, closing #511) on top of the v0.7.3 release line. MySQL counterpart to the Postgres `Identifier()` fix that shipped in v0.7.3. PR #514 originally landed on `main` two days after the v0.7.3 tag, so the wheel published as `drt-core==0.7.3` did **not** contain it; v0.7.4 is the release that actually delivers the fix. No new features, no breaking changes. v0.8 work continues in parallel.
+
+---
+
 ## v0.8 — Cloud Destinations & Growth
 
 **Theme:** DWH/Lakehouse destinations + community growth push.
 
 **Scope:**
 - **Cloud destinations** — BigQuery (#165) · Databricks Delta Lake (#167) · S3 Parquet/CSV (#168) · GCS (#169) · Azure Blob (#170) — *Snowflake (#164) shipped early in v0.7 via PR #353*
-- **Lakehouse sources** — Delta Lake (#172) · Apache Iceberg (#173)
+- **SaaS destinations** — *Zendesk (#421) shipped via PR #504 — pattern reference for future SaaS connectors*
+- **Sources** — REST API (#422) ✅ *shipped via PR #474 — first non-database source, pattern reference for future API sources* · Delta Lake (#172) · Apache Iceberg (#173)
 - **Reliability follow-on** — dead letter queue (#278) — *opt-in telemetry (#263) moved up to v0.7*
 - **Correctness epic** — schema-aware serialization via INFORMATION_SCHEMA (#317)
 - **Engine** — `sync.mode: mirror` differential delete (#340)

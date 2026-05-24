@@ -5,7 +5,12 @@ from __future__ import annotations
 import pytest
 
 from drt.config.credentials import DuckDBProfile, PostgresProfile
-from drt.config.models import RestApiDestinationConfig, SlackDestinationConfig, SyncConfig
+from drt.config.models import (
+    RestApiDestinationConfig,
+    SlackDestinationConfig,
+    SyncConfig,
+    ZendeskDestinationConfig,
+)
 from drt.connectors import get_destination, get_source
 
 
@@ -31,6 +36,18 @@ class TestConnectorRegistry:
         destination = get_destination(config)
         assert destination is not None
         assert type(destination).__name__ == "RestApiDestination"
+
+    def test_get_destination_zendesk(self):
+        """Get a Zendesk destination from registry."""
+        config = ZendeskDestinationConfig(
+            type="zendesk",
+            subdomain="example",
+            email="bot@example.com",
+            api_token="token",
+        )
+        destination = get_destination(config)
+        assert destination is not None
+        assert type(destination).__name__ == "ZendeskDestination"
 
     def test_get_source_postgres(self):
         """Get a Postgres source from registry."""

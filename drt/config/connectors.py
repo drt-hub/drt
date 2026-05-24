@@ -15,6 +15,7 @@ SOURCES = [
     ("mysql", "MySQL"),
     ("postgres", "PostgreSQL"),
     ("redshift", "Redshift"),
+    ("rest_api", "REST API"),
     ("snowflake", "Snowflake"),
     ("sqlite", "SQLite"),
     ("sqlserver", "SQL Server"),
@@ -43,4 +44,5 @@ DESTINATIONS = [
     ("staged_upload", "Staged Upload"),
     ("teams", "Microsoft Teams"),
     ("twilio", "Twilio"),
+    ("zendesk", "Zendesk"),
 ]

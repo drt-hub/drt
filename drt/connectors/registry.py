@@ -135,6 +135,7 @@ def _register_all_connectors() -> None:
         MySQLProfile,
         PostgresProfile,
         RedshiftProfile,
+        RestApiProfile,
         SnowflakeProfile,
         SQLiteProfile,
         SQLServerProfile,
@@ -163,6 +164,7 @@ def _register_all_connectors() -> None:
         StagedUploadDestinationConfig,
         TeamsDestinationConfig,
         TwilioDestinationConfig,
+        ZendeskDestinationConfig,
     )
 
     # Import destination classes
@@ -189,6 +191,7 @@ def _register_all_connectors() -> None:
     from drt.destinations.staged_upload import StagedUploadDestination
     from drt.destinations.teams import TeamsDestination
     from drt.destinations.twilio import TwilioDestination
+    from drt.destinations.zendesk import ZendeskDestination
 
     # Import source classes
     from drt.sources.bigquery import BigQuerySource
@@ -198,6 +201,7 @@ def _register_all_connectors() -> None:
     from drt.sources.mysql import MySQLSource
     from drt.sources.postgres import PostgresSource
     from drt.sources.redshift import RedshiftSource
+    from drt.sources.rest_api import RestApiSource
     from drt.sources.snowflake import SnowflakeSource
     from drt.sources.sqlite import SQLiteSource
     from drt.sources.sqlserver import SQLServerSource
@@ -209,6 +213,7 @@ def _register_all_connectors() -> None:
     register_destination("discord", DiscordDestinationConfig, DiscordDestination)
     register_destination("github_actions", GitHubActionsDestinationConfig, GitHubActionsDestination)
     register_destination("hubspot", HubSpotDestinationConfig, HubSpotDestination)
+    register_destination("zendesk", ZendeskDestinationConfig, ZendeskDestination)
     register_destination("jira", JiraDestinationConfig, JiraDestination)
     register_destination("sendgrid", SendGridDestinationConfig, SendGridDestination)
     register_destination("google_sheets", GoogleSheetsDestinationConfig, GoogleSheetsDestination)
@@ -240,6 +245,7 @@ def _register_all_connectors() -> None:
     register_source("snowflake", SnowflakeProfile, SnowflakeSource)
     register_source("databricks", DatabricksProfile, DatabricksSource)
     register_source("sqlserver", SQLServerProfile, SQLServerSource)
+    register_source("rest_api", RestApiProfile, RestApiSource)
 
 
 # Auto-register all connectors on import
