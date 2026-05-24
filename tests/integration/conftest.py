@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from drt.config.credentials import BigQueryProfile, DuckDBProfile, ProfileConfig
+from drt.sources.duckdb import DuckDBSource
 
 
 class FakeSource:
@@ -39,8 +40,33 @@ def fake_source() -> FakeSource:
     )
 
 
+def seed_duckdb_table(
+    db_path: str,
+    schema_sql: str,
+    rows: list[tuple],
+    insert_template: str,
+) -> tuple[DuckDBSource, DuckDBProfile]:
+    """Create a DuckDB file with one table seeded by ``rows``.
+
+    Used by boundary tests that need a schema different from the default
+    ``users`` table. Returns ``(DuckDBSource, DuckDBProfile)`` ready for
+    ``run_sync``. Caller supplies the schema and a parameterised INSERT
+    template (e.g. ``"INSERT INTO t VALUES (?, ?, ?)"``).
+    """
+    import duckdb  # local import so module collection works without the extra
+
+    conn = duckdb.connect(db_path)
+    try:
+        conn.execute(schema_sql)
+        if rows:
+            conn.executemany(insert_template, rows)
+    finally:
+        conn.close()
+    return DuckDBSource(), DuckDBProfile(type="duckdb", database=db_path)
+
+
 @pytest.fixture
-def duckdb_with_users(tmp_path: Path) -> tuple[object, DuckDBProfile]:
+def duckdb_with_users(tmp_path: Path) -> tuple[DuckDBSource, DuckDBProfile]:
     """Seed a DuckDB file with a `users` table and return (Source, Profile).
 
     Uses a file path under tmp_path (not `:memory:`) because each
@@ -53,8 +79,6 @@ def duckdb_with_users(tmp_path: Path) -> tuple[object, DuckDBProfile]:
     ``SELECT * FROM users``.
     """
     duckdb = pytest.importorskip("duckdb")
-
-    from drt.sources.duckdb import DuckDBSource
 
     db_path = str(tmp_path / "test.duckdb")
     conn = duckdb.connect(db_path)
