@@ -381,22 +381,46 @@ class SslConfig(BaseModel):
     key_env: str | None = None  # env var for client key path
 
 
-class PostgresDestinationConfig(BaseModel):
-    type: Literal["postgres"]
+class BaseSqlDestinationConfig(BaseModel):
+    """Shared connection fields for host-based SQL destinations.
+
+    Postgres, MySQL, and ClickHouse all expose the same connection
+    surface (``host`` / ``host_env`` + credentials + a connection-string
+    escape hatch) plus a lookups field for FK resolution. The
+    destination-specific bits (``dbname`` vs ``database`` field name,
+    ``ssl`` vs ``secure``, port defaults, ``json_columns`` applicability,
+    ``upsert_key`` typing) stay on the concrete subclasses where they
+    differ in name or semantics.
+
+    Subclasses keep their own ``_check_connection`` model_validator
+    because the database field name differs across dialects; sharing the
+    validator would require a ClassVar lookup that obscures the simple
+    "host + dbname required unless connection_string_env" rule.
+
+    New host-based SQL destinations (Redshift, future Vertica/CockroachDB)
+    should inherit from this class and override ``port`` for the default
+    wire port; see ``MySQLDestinationConfig`` / ``ClickHouseDestinationConfig``
+    for examples.
+    """
+
     connection_string_env: str | None = None
     host: str | None = None
     host_env: str | None = None
-    port: int = 5432
-    dbname: str | None = None
-    dbname_env: str | None = None
+    port: int = 5432  # Postgres default; subclasses override
     user: str | None = None
     user_env: str | None = None
     password: str | None = None
     password_env: str | None = None
+    lookups: dict[str, LookupConfig] | None = None
+
+
+class PostgresDestinationConfig(BaseSqlDestinationConfig):
+    type: Literal["postgres"]
+    dbname: str | None = None
+    dbname_env: str | None = None
     table: str  # e.g. "public.analytics_scores"
     upsert_key: list[str]  # columns for ON CONFLICT
     ssl: SslConfig | None = None
-    lookups: dict[str, LookupConfig] | None = None
     json_columns: list[str] | None = None  # columns that hold JSON/JSONB data
 
     def describe(self) -> str:
@@ -413,22 +437,14 @@ class PostgresDestinationConfig(BaseModel):
         return self
 
 
-class MySQLDestinationConfig(BaseModel):
+class MySQLDestinationConfig(BaseSqlDestinationConfig):
     type: Literal["mysql"]
-    connection_string_env: str | None = None
-    host: str | None = None
-    host_env: str | None = None
-    port: int = 3306
+    port: int = 3306  # MySQL default
     dbname: str | None = None
     dbname_env: str | None = None
-    user: str | None = None
-    user_env: str | None = None
-    password: str | None = None
-    password_env: str | None = None
     table: str  # e.g. "interviewer_learning_profiles"
     upsert_key: list[str]  # columns for ON DUPLICATE KEY
     ssl: SslConfig | None = None
-    lookups: dict[str, LookupConfig] | None = None
     json_columns: list[str] | None = None  # columns that hold JSON data
 
     def describe(self) -> str:
@@ -475,25 +491,17 @@ class JiraDestinationConfig(BaseModel):
         return f"jira ({self.project_key})"
 
 
-class ClickHouseDestinationConfig(BaseModel):
+class ClickHouseDestinationConfig(BaseSqlDestinationConfig):
     type: Literal["clickhouse"]
-    connection_string_env: str | None = None
-    host: str | None = None
-    host_env: str | None = None
-    port: int = 8123
+    port: int = 8123  # ClickHouse HTTP interface; use 8443 for HTTPS
     database: str | None = None
     database_env: str | None = None
-    user: str | None = None
-    user_env: str | None = None
-    password: str | None = None
-    password_env: str | None = None
     table: str  # unqualified table name (database set via database/database_env)
 
     # Informational only for ClickHouse. drt does not enforce/create
     # ReplacingMergeTree tables or apply upsert semantics from this field.
     upsert_key: list[str] | None = None
     secure: bool = False  # use HTTPS/TLS; set port explicitly for your deployment (commonly 8443)
-    lookups: dict[str, LookupConfig] | None = None
 
     def describe(self) -> str:
         return f"{self.type} ({self.table})"
