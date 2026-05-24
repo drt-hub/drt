@@ -169,6 +169,15 @@ def build_sync_completed_payload(
         "rows_synced": int(rows_synced),
         "duration_seconds": float(duration_seconds),
         "status": status,
+        # PostHog server-side IP / GeoIP suppression — defense in depth so the
+        # client IP that PostHog observes at the TCP boundary is neither stored
+        # as `$ip` nor resolved to country / region. Stays in lockstep with the
+        # project-level "Anonymize IPs" setting in PostHog so a future operator
+        # change to the project setting cannot accidentally start collecting
+        # geo data. See docs/telemetry.md for the full rationale.
+        "$ip": "",
+        "$geoip_disable": True,
+        "$process_person_profile": False,
     }
     return {
         "api_key": _resolve_api_key() or "",

@@ -47,21 +47,28 @@ The payload is built by an **allow-list** function, [`build_sync_completed_paylo
 - ❌ Credentials of any kind
 - ❌ Project file paths
 - ❌ Hostname / username
-- ❌ IP address (drt does not include client IP in the request body)
+- ❌ IP address (drt does not include client IP in the request body AND explicitly suppresses PostHog server-side IP capture — see the "A note on IP addresses" section below)
+- ❌ Geo data (country / region / city — explicitly suppressed via `$geoip_disable`)
+- ❌ PostHog person profile (explicitly suppressed via `$process_person_profile: false`)
 - ❌ Row contents
 - ❌ Column names
 - ❌ Schema names
 
 ### A note on IP addresses
 
-PostHog's capture endpoint (`/i/v0/e/`) auto-attaches a `$ip` property server-side from the TCP source IP, even though drt never sends one. This is verifiable: a `sync_completed` event captured by a self-hosted PostHog shows `"$ip": "192.168.x.x"` in the stored properties despite the request body containing only the allow-list above.
+PostHog's capture endpoint (`/i/v0/e/`) historically auto-attached a `$ip` property server-side from the TCP source IP, even though drt never sent one in the request body. To prevent that capture, drt now **explicitly includes three PostHog meta-properties in every payload**:
 
-If the maintainer-side ingestion endpoint should not retain client IPs:
-- Configure the PostHog project with **GeoIP/IP capture disabled**, or
-- Run a thin proxy in front of capture that strips `$ip` before forwarding, or
-- Substitute the backend with a custom collector (drt does not require PostHog specifically — `DRT_TELEMETRY_ENDPOINT` accepts any URL that returns 2xx for a JSON POST).
+| Property | Value | Effect |
+|---|---|---|
+| `$ip` | `""` (empty string) | Tells PostHog to record an empty IP for this event rather than the TCP source. |
+| `$geoip_disable` | `true` | Disables PostHog's GeoIP resolution for this event so no country / region / city is derived. |
+| `$process_person_profile` | `false` | Prevents PostHog from materializing a per-`distinct_id` profile, further reducing what's stored downstream. |
 
-The privacy claim is "drt does not transmit your IP." It is not "the backend you POST to will not log it." Operators of the receiving service are responsible for IP retention policy.
+These three properties form a **defense-in-depth** layer in front of the maintainer-side PostHog project setting ("Anonymize IPs"), so even if the project setting is ever flipped back on the payload still tells PostHog not to capture IPs. The combination is verifiable with a self-hosted PostHog or via the `drt config show-telemetry` preview.
+
+The privacy claim is therefore stronger than "drt does not transmit your IP": **drt actively instructs the backend not to record one.** This makes it possible to keep drt's GDPR posture clean without depending on a configurable backend setting that an operator might change later.
+
+drt does not require PostHog specifically — `DRT_TELEMETRY_ENDPOINT` accepts any URL that returns 2xx for a JSON POST. Backends that ignore the PostHog meta-property convention should be paired with their own IP-stripping logic.
 
 ## GDPR disclosure (EU / EEA opt-ins)
 
@@ -76,8 +83,22 @@ Lawful basis for processing is your opt-in consent (GDPR Art. 6(1)(a)). The data
   of transfer can re-confirm or revoke via `drt config unset telemetry.enabled`.
 - **Retention**: 1 year. Events stored in PostHog Cloud EU are deleted
   after 1 year by the project-level data retention policy (Free plan
-  default). A followup (#TODO_FILL_WITH_FOLLOWUP_NUMBER) will reduce this
-  to 90 days via scheduled API-based deletion.
+  default). Earlier drafts of this document committed to reducing
+  retention to 90 days via a scheduled API cleanup (tracked in
+  [#482](https://github.com/drt-hub/drt/issues/482)), but the public
+  PostHog API does not expose an endpoint to bulk-delete events by
+  `event` name and `timestamp` — the deletion workaround turned out to
+  be infeasible. Instead, drt removed the PII at the source by sending
+  PostHog the `$ip` / `$geoip_disable` / `$process_person_profile`
+  meta-properties on every event (see the "A note on IP addresses"
+  section above), so no IP, no GeoIP-derived geo, and no person profile
+  is created or stored on the maintainer side. The 1-year retention is
+  therefore on **PII-free** data: `distinct_id` is a random install
+  UUID with no identity link, and the allow-list payload carries no
+  user content. We consider the data-minimization concern that
+  originally motivated the 90-day target satisfied at the
+  data-collection layer, which is a stronger posture than retention
+  alone.
 - **Erasure / data subject requests**: `drt.hub.dev@gmail.com`. Deleting
   `~/.drt/.anonymous_id` rotates your `distinct_id` going forward but
   does not retroactively scrub past events; use the contact above for
@@ -165,7 +186,11 @@ If the inject step is skipped, telemetry silently no-ops forever — fail-safe b
 
 ### PostHog project setup (one-time)
 
-1. Disable IP data capture: Settings > Project > General ([source](https://posthog.com/docs/privacy/gdpr-compliance)).
+1. **Disable IP data capture** at the project level: Settings > Project > "Anonymize IPs" ([source](https://posthog.com/docs/privacy/gdpr-compliance)). drt also sends the `$ip` / `$geoip_disable` / `$process_person_profile` meta-properties on every event as defense-in-depth, but the project-level setting is the belt to those suspenders — keep both on.
 2. Sign the self-serve DPA at `app.posthog.com/legal` ([source](https://posthog.com/dpa)).
+
+### Why no automated retention cleanup
+
+The original plan ([#482](https://github.com/drt-hub/drt/issues/482)) was to schedule a daily PostHog API call deleting `sync_completed` events older than 90 days, on the assumption that PostHog exposed a public bulk-delete endpoint. It does not — only person-based deletion is public (the `async_deletion` model is backend-only and not surfaced via REST). A first implementation attempt ([PR #535](https://github.com/drt-hub/drt/pull/535), reverted by the same PR that introduced this paragraph) hit 404 against the assumed endpoint. drt's privacy posture now rests on **not collecting PII in the first place** rather than retention cleanup, which is a stronger guarantee and removes the operational burden.
 
 Before each release with telemetry enabled, populate the controller / retention / erasure-contact placeholders in the GDPR disclosure section above.

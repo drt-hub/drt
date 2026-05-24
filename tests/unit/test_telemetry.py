@@ -103,6 +103,7 @@ class TestPayload:
         )
         assert set(payload.keys()) == {"api_key", "event", "distinct_id", "properties", "timestamp"}
         assert set(payload["properties"].keys()) == {
+            # User-visible content fields (the original allow-list).
             "drt_version",
             "python_version",
             "os",
@@ -112,8 +113,38 @@ class TestPayload:
             "rows_synced",
             "duration_seconds",
             "status",
+            # PostHog server-side anonymization controls — meta-properties
+            # (prefix `$`) used to suppress IP / GeoIP capture at the
+            # receiving end. These are anti-collection signals, not
+            # user data we transmit.
+            "$ip",
+            "$geoip_disable",
+            "$process_person_profile",
         }
         assert payload["distinct_id"] == "fixed-id"
+
+    def test_posthog_anonymization_properties_present(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The PostHog meta-properties that suppress server-side IP / GeoIP
+        capture must be present in every payload, regardless of caller input.
+        This is the privacy contract: even if the maintainer's PostHog project
+        setting drifts back to "capture IPs", drt's payload still tells PostHog
+        not to record them."""
+        monkeypatch.setenv("DRT_TELEMETRY_API_KEY", "phc_test")
+        payload = telemetry.build_sync_completed_payload(
+            distinct_id="fixed-id",
+            sync_mode="incremental",
+            source_type="bigquery",
+            destination_type="slack",
+            rows_synced=42,
+            duration_seconds=1.5,
+            status="success",
+        )
+        props = payload["properties"]
+        assert props["$ip"] == ""
+        assert props["$geoip_disable"] is True
+        assert props["$process_person_profile"] is False
 
     def test_event_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("DRT_TELEMETRY_API_KEY", "phc_test")
