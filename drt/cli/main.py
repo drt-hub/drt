@@ -154,7 +154,10 @@ def _run_one(
                 diff_limit=ctx.diff_limit,
             )
         except Exception as e:
+            from drt.cli.errors import format_error, render_to_console
+
             elapsed = round(time.monotonic() - t0, 2)
+            fe = format_error(sync.name, e)
             entry: dict[str, object] = {
                 "name": sync.name,
                 "status": "failed",
@@ -162,7 +165,13 @@ def _run_one(
                 "rows_failed": 0,
                 "duration_seconds": elapsed,
                 "dry_run": ctx.dry_run,
+                # Preserve `error` for backwards compatibility with JSON
+                # consumers that already parse it. Add structured siblings
+                # for new consumers (stage, error_type, error_suggestion).
                 "error": str(e),
+                "error_type": fe.error_type,
+                "error_stage": fe.stage.value,
+                "error_suggestion": fe.suggestion,
             }
             if ctx.log_json:
                 logging.error(
@@ -172,10 +181,12 @@ def _run_one(
                         "rows": 0,
                         "duration_ms": round(elapsed * 1000),
                         "status": "failed",
+                        "error_stage": fe.stage.value,
+                        "error_type": fe.error_type,
                     },
                 )
             if not ctx.json_mode:
-                print_error(f"[{sync.name}] Unexpected error: {e}")
+                render_to_console(fe)
             return_value = (sync.name, entry, True)
             return return_value
 
