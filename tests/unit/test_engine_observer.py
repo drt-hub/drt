@@ -262,7 +262,6 @@ def test_engine_routes_alert_dispatch_failure_through_observer(
     ``observer.on_warning`` (used to be ``logger.warning`` pre-#548).
     """
     import drt.alerts
-
     from tests.unit.test_engine import FakeDestination, FakeSource, _make_profile, _make_sync
 
     monkeypatch.setattr(
@@ -278,8 +277,14 @@ def test_engine_routes_alert_dispatch_failure_through_observer(
 
     run_sync(sync, FakeSource([{"id": 1}]), dest, _make_profile(), tmp_path, observer=obs)
 
-    warning_calls = [c for c in obs.on_warning.call_args_list if "Alert dispatch outer failure" in c.args[1]]
-    assert warning_calls, f"Expected on_warning with 'Alert dispatch outer failure', got {obs.on_warning.call_args_list}"
+    warning_calls = [
+        c for c in obs.on_warning.call_args_list
+        if "Alert dispatch outer failure" in c.args[1]
+    ]
+    assert warning_calls, (
+        f"Expected on_warning('Alert dispatch outer failure'...), "
+        f"got {obs.on_warning.call_args_list}"
+    )
 
 
 def test_engine_routes_history_append_failure_through_observer(tmp_path: Path) -> None:
@@ -303,8 +308,14 @@ def test_engine_routes_history_append_failure_through_observer(tmp_path: Path) -
         observer=obs,
     )
 
-    warning_calls = [c for c in obs.on_warning.call_args_list if "History append outer failure" in c.args[1]]
-    assert warning_calls, f"Expected on_warning with 'History append outer failure', got {obs.on_warning.call_args_list}"
+    warning_calls = [
+        c for c in obs.on_warning.call_args_list
+        if "History append outer failure" in c.args[1]
+    ]
+    assert warning_calls, (
+        f"Expected on_warning('History append outer failure'...), "
+        f"got {obs.on_warning.call_args_list}"
+    )
 
 
 # ---------------------------------------------------------------------------
