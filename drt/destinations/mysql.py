@@ -23,8 +23,19 @@ from typing import Any
 
 from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, MySQLDestinationConfig, SyncOptions
+from drt.destinations._serializer import serialize_complex_value
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
+
+
+def _mysql_json_encoder(value: Any) -> str:
+    """Wire-format a dict/list as a JSON string for pymysql.
+
+    pymysql has no native JSON adapter, so both dicts and lists get
+    serialized the same way and the column type (``JSON``, ``TEXT``,
+    etc.) determines the storage.
+    """
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _serialize_value(
@@ -34,31 +45,27 @@ def _serialize_value(
 ) -> Any:
     """Serialize dict/list values to JSON strings for pymysql.
 
-    If json_columns is specified, only columns in that list are JSON-serialized.
-    This allows non-JSON columns to receive native Python types (e.g. list →
-    ARRAY) when the driver supports it.
+    If json_columns is specified, only columns in that list are
+    JSON-serialized — other complex values raise early so the user gets
+    a pointing error instead of a deep driver failure. When json_columns
+    is ``None`` (back-compat with pre-#316), all dict/list values are
+    serialized.
 
-    When json_columns is None (backward compat), all dict/list values are
-    serialized — matching the pre-#316 heuristic behavior.
+    Delegates the decision logic to
+    :func:`drt.destinations._serializer.serialize_complex_value`; only
+    the MySQL-specific JSON encoder lives here.
 
     Raises:
         ValueError: If *json_columns* is set and an unlisted column receives
             a dict or list value.
     """
-    if not isinstance(value, (dict, list)):  # noqa: UP038
-        return value
-    # Explicit config: only serialize listed columns
-    if json_columns is not None:
-        if column and column in json_columns:
-            return json.dumps(value, ensure_ascii=False)
-        # Unlisted dict/list column with explicit json_columns → fail early
-        raise ValueError(
-            f"Column '{column}' contains a {type(value).__name__} value but "
-            f"is not listed in json_columns={json_columns}. "
-            f"Add '{column}' to json_columns or remove the value."
-        )
-    # Backward compat: no config → serialize all complex types
-    return json.dumps(value, ensure_ascii=False)
+    return serialize_complex_value(
+        value,
+        column,
+        json_columns,
+        dict_encoder=_mysql_json_encoder,
+        list_encoder=_mysql_json_encoder,  # MySQL encodes both dicts and lists
+    )
 
 
 class MySQLDestination:

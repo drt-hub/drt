@@ -29,6 +29,7 @@ from drt.config.models import (
     PostgresDestinationConfig,
     SyncOptions,
 )
+from drt.destinations._serializer import serialize_complex_value
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 
@@ -44,6 +45,18 @@ except Exception:
     sql = None  # type: ignore
 
 
+def _pg_dict_encoder(value: dict[str, Any]) -> Any:
+    """Wire-format a dict for PostgreSQL JSONB.
+
+    Prefer psycopg2's native ``Json`` adapter; fall back to ``json.dumps``
+    so the destination keeps working when psycopg2.extras is unavailable
+    (e.g. behind an import-shim during tests).
+    """
+    if _Psycopg2Json is not None:
+        return _Psycopg2Json(value)
+    return json.dumps(value, ensure_ascii=False)
+
+
 def _serialize_value(
     value: Any,
     column: str | None = None,
@@ -51,52 +64,31 @@ def _serialize_value(
 ) -> Any:
     """Wrap dict values with psycopg2.extras.Json for JSONB columns.
 
-    psycopg2 has no default adapter for ``dict``, so any dict value
-    bound for a JSONB column (e.g. from a BigQuery JSON source) causes
-    ``ProgrammingError: can't adapt type 'dict'``. Wrapping with
+    psycopg2 has no default adapter for ``dict``, so any dict value bound
+    for a JSONB column (e.g. from a BigQuery JSON source) would otherwise
+    raise ``ProgrammingError: can't adapt type 'dict'``. Wrapping with
     ``Json`` produces the correct wire format for PostgreSQL JSONB.
 
-    When *json_columns* is specified, only columns in that list are wrapped
-    with ``Json()`` — other dict columns raise an early :class:`ValueError`
-    pointing at the missing column, rather than failing deep inside the driver
-    with a confusing ``can't adapt type 'dict'`` error.
-    When *json_columns* is ``None`` (backward compat), all dicts are wrapped.
+    Lists pass through to psycopg2's ARRAY adapter unchanged — the driver
+    handles them when the destination column is a typed ARRAY. Lists
+    routed to a JSON column should be listed in ``json_columns`` so this
+    function knows to allow them; unlisted complex values raise early.
 
-    Other types (str, int, float, list, None) pass through unchanged —
-    psycopg2's built-in adapters handle those correctly.
+    Delegates the decision logic to
+    :func:`drt.destinations._serializer.serialize_complex_value`; only the
+    Postgres-specific dict encoder lives here.
 
     Raises:
         ValueError: If *json_columns* is set and an unlisted column receives
             a dict or list value.
     """
-    if isinstance(value, dict):
-        if json_columns is not None:
-            if column and column in json_columns:
-                if _Psycopg2Json is not None:
-                    return _Psycopg2Json(value)
-                return json.dumps(value, ensure_ascii=False)
-            # Unlisted dict column with explicit json_columns → fail early
-            raise ValueError(
-                f"Column '{column}' contains a dict value but "
-                f"is not listed in json_columns={json_columns}. "
-                f"Add '{column}' to json_columns or remove the value."
-            )
-        if _Psycopg2Json is not None:
-            return _Psycopg2Json(value)
-        return json.dumps(value, ensure_ascii=False)  # backward compat fallback
-    if (
-        isinstance(value, list)
-        and json_columns is not None
-        and column
-        and column not in json_columns
-    ):
-        # Unlisted list column with explicit json_columns → fail early
-        raise ValueError(
-            f"Column '{column}' contains a list value but "
-            f"is not listed in json_columns={json_columns}. "
-            f"Add '{column}' to json_columns or remove the value."
-        )
-    return value
+    return serialize_complex_value(
+        value,
+        column,
+        json_columns,
+        dict_encoder=_pg_dict_encoder,
+        list_encoder=None,  # pass-through — psycopg2's ARRAY adapter takes over
+    )
 
 
 def _split_qualified(table: str) -> tuple[str | None, str]:
