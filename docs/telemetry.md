@@ -64,7 +64,7 @@ PostHog's capture endpoint (`/i/v0/e/`) historically auto-attached a `$ip` prope
 | `$geoip_disable` | `true` | Disables PostHog's GeoIP resolution for this event so no country / region / city is derived. |
 | `$process_person_profile` | `false` | Prevents PostHog from materializing a per-`distinct_id` profile, further reducing what's stored downstream. |
 
-These three properties form a **defense-in-depth** layer in front of the maintainer-side PostHog project setting ("Anonymize IPs"), so even if the project setting is ever flipped back on the payload still tells PostHog not to capture IPs. The combination is verifiable with a self-hosted PostHog or via the `drt config show-telemetry` preview.
+These three properties form a **defense-in-depth** layer in front of the maintainer-side PostHog project setting (**Settings > Project > General > Privacy > "IP data capture configuration" > "Discard client IP data"**, which is ON for the drt project), so even if the project setting is ever flipped back off the payload still tells PostHog not to capture IPs. The combination is verifiable with a self-hosted PostHog or via the `drt config show-telemetry` preview.
 
 The privacy claim is therefore stronger than "drt does not transmit your IP": **drt actively instructs the backend not to record one.** This makes it possible to keep drt's GDPR posture clean without depending on a configurable backend setting that an operator might change later.
 
@@ -186,7 +186,7 @@ If the inject step is skipped, telemetry silently no-ops forever — fail-safe b
 
 ### PostHog project setup (one-time)
 
-1. **Disable IP data capture** at the project level: Settings > Project > "Anonymize IPs" ([source](https://posthog.com/docs/privacy/gdpr-compliance)). drt also sends the `$ip` / `$geoip_disable` / `$process_person_profile` meta-properties on every event as defense-in-depth, but the project-level setting is the belt to those suspenders — keep both on.
+1. **Disable IP data capture** at the project level: **Settings > Project > General > Privacy > "IP data capture configuration"** → turn on **"Discard client IP data"** ([source](https://posthog.com/docs/privacy/gdpr-compliance)). On PostHog Cloud EU this is the default for new projects, so the toggle may already be on. drt also sends the `$ip` / `$geoip_disable` / `$process_person_profile` meta-properties on every event as defense-in-depth, but the project-level setting is the belt to those suspenders — keep both on.
 2. Sign the self-serve DPA at `app.posthog.com/legal` ([source](https://posthog.com/dpa)).
 
 ### Why no automated retention cleanup
