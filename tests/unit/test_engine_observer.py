@@ -192,6 +192,48 @@ def test_composite_observer_broadcasts_to_all(tmp_path: Path) -> None:
     assert saved is not None  # state observer ran
 
 
+def test_composite_observer_forwards_every_event_method() -> None:
+    """All 5 broadcast methods reach every child — guards future event additions."""
+    child = MagicMock(spec=SyncObserver)
+    obs = CompositeObserver([child])
+
+    obs.on_sync_started("s", "ts")
+    obs.on_watermark_resolved("s", "cli_override", "v")
+    obs.on_warning("s", "msg")
+    obs.on_interrupted("s", 4)
+    obs.on_sync_completed("s", SyncResult(), "ts", None, None)
+
+    child.on_sync_started.assert_called_once_with("s", "ts")
+    child.on_watermark_resolved.assert_called_once_with("s", "cli_override", "v")
+    child.on_warning.assert_called_once_with("s", "msg")
+    child.on_interrupted.assert_called_once_with("s", 4)
+    child.on_sync_completed.assert_called_once_with("s", SyncResult(), "ts", None, None)
+
+
+def test_logging_observer_on_sync_started_is_silent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pre-refactor engine did not log a sync_start line — preserve that parity."""
+    obs = LoggingObserver()
+    with caplog.at_level(logging.DEBUG, logger="drt"):
+        obs.on_sync_started("my_sync", "2026-05-24T00:00:00Z")
+    assert caplog.records == []
+
+
+def test_state_persisting_observer_swallows_watermark_save_errors(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Per fire-and-forget contract: a broken watermark storage must NOT crash a sync."""
+    wm = MagicMock()
+    wm.save.side_effect = OSError("disk full")
+    obs = StatePersistingObserver(None, wm)
+
+    with caplog.at_level(logging.WARNING, logger="drt"):
+        obs.on_sync_completed("s", SyncResult(success=1), "ts", "2026-05-10", "updated_at")
+
+    assert any("Watermark save failure" in r.message for r in caplog.records)
+
+
 def test_composite_observer_continues_after_child_raises(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -206,6 +248,63 @@ def test_composite_observer_continues_after_child_raises(
 
     good.on_warning.assert_called_once_with("s", "msg")
     assert any("raised" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Engine-side wiring: defensive except branches route through observer.on_warning
+# ---------------------------------------------------------------------------
+
+
+def test_engine_routes_alert_dispatch_failure_through_observer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ``drt.alerts.dispatch_alerts`` raises, the engine swallows it via
+    ``observer.on_warning`` (used to be ``logger.warning`` pre-#548).
+    """
+    import drt.alerts
+
+    from tests.unit.test_engine import FakeDestination, FakeSource, _make_profile, _make_sync
+
+    monkeypatch.setattr(
+        drt.alerts, "dispatch_alerts", MagicMock(side_effect=RuntimeError("alert sink down"))
+    )
+    obs = MagicMock(spec=SyncObserver)
+    # Force the engine into the "raised or failed" branch that triggers
+    # alert dispatch — easiest is to make the destination fail every row.
+    dest = FakeDestination(fail_indices={0})
+    sync = _make_sync(batch_size=1, on_error="skip")
+
+    from drt.engine.sync import run_sync
+
+    run_sync(sync, FakeSource([{"id": 1}]), dest, _make_profile(), tmp_path, observer=obs)
+
+    warning_calls = [c for c in obs.on_warning.call_args_list if "Alert dispatch outer failure" in c.args[1]]
+    assert warning_calls, f"Expected on_warning with 'Alert dispatch outer failure', got {obs.on_warning.call_args_list}"
+
+
+def test_engine_routes_history_append_failure_through_observer(tmp_path: Path) -> None:
+    """When the history manager raises during append, the engine swallows via observer."""
+    from tests.unit.test_engine import FakeDestination, FakeSource, _make_profile, _make_sync
+
+    history_mgr = MagicMock()
+    history_mgr.append.side_effect = RuntimeError("history store down")
+    obs = MagicMock(spec=SyncObserver)
+    sync = _make_sync()
+
+    from drt.engine.sync import run_sync
+
+    run_sync(
+        sync,
+        FakeSource([{"id": 1}]),
+        FakeDestination(),
+        _make_profile(),
+        tmp_path,
+        history_manager=history_mgr,
+        observer=obs,
+    )
+
+    warning_calls = [c for c in obs.on_warning.call_args_list if "History append outer failure" in c.args[1]]
+    assert warning_calls, f"Expected on_warning with 'History append outer failure', got {obs.on_warning.call_args_list}"
 
 
 # ---------------------------------------------------------------------------
