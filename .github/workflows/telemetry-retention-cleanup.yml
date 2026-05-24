@@ -19,9 +19,9 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Run in --dry-run mode (report only, no deletion scheduled)"
+        description: "Run in --dry-run mode (report only, no deletion scheduled). Defaults to TRUE so the first manual trigger is always safe — flip to false to actually queue deletion."
         type: boolean
-        default: false
+        default: true
 
 # Don't pile up overlapping runs if one stalls.
 concurrency:
