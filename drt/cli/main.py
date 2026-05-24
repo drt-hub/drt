@@ -564,6 +564,12 @@ def run(
     Use --select "*" or --select all to be explicit about running every sync.
     Use --threads N for parallel execution.
     Use --dry-run --diff to preview record-level changes (#413).
+
+    Examples:
+      drt run
+      drt run --select post_users
+      drt run --select tag:crm --threads 4
+      drt run --dry-run --diff
     """
     if diff and not dry_run:
         print_error("--diff requires --dry-run")
@@ -762,7 +768,12 @@ def run(
 def list_syncs(
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
 ) -> None:
-    """List all sync definitions in the project."""
+    """List all sync definitions in the project.
+
+    Examples:
+      drt list
+      drt list --output json
+    """
 
     from drt.config.parser import load_syncs
 
@@ -807,7 +818,14 @@ def validate(
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
     strict: bool = typer.Option(False, "--strict", help="Treat warnings as validation errors."),
 ) -> None:
-    """Validate sync definitions against the JSON Schema."""
+    """Validate sync definitions against the JSON Schema.
+
+    Examples:
+      drt validate
+      drt validate --select post_users
+      drt validate --emit-schema
+      drt validate --strict
+    """
 
     from drt.config.parser import load_syncs_safe
     from drt.config.schema import write_schemas
