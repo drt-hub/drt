@@ -38,7 +38,6 @@ from drt.cli.output import (
     console,
     print_dry_run_summary,
     print_error,
-    print_init_success,
     print_row_errors,
     print_status_table,
     print_status_verbose,
@@ -327,343 +326,9 @@ def main(
     pass
 
 
-# ---------------------------------------------------------------------------
-# init
-# ---------------------------------------------------------------------------
-
-
-@app.command()
-def init(
-    from_dbt: str = typer.Option(
-        None,
-        "--from-dbt",
-        help="Path to dbt manifest.json — generate sync YAMLs from dbt models.",
-    ),
-    template: str = typer.Option(
-        None,
-        "--template",
-        help="Scaffold from a curated template. Use 'list' to see available templates.",
-    ),
-) -> None:
-    """Initialize a new drt project in the current directory."""
-    if from_dbt:
-        _init_from_dbt(Path(from_dbt))
-        return
-
-    if template == "list":
-        _list_templates()
-        return
-    if template:
-        _init_from_template(template, Path("."))
-        return
-
-    from drt.cli.init_wizard import run_wizard, scaffold_project
-
-    try:
-        answers = run_wizard()
-        created = scaffold_project(answers, Path("."))
-        print_init_success(created)
-    except (KeyboardInterrupt, typer.Abort):
-        console.print("\n[dim]Aborted.[/dim]")
-        raise typer.Exit(1)
-    except Exception as e:
-        print_error(str(e))
-        raise typer.Exit(1)
-
-
-def _list_templates() -> None:
-    """Print available ``drt init --template`` choices."""
-    from drt.cli._init_templates import TEMPLATES
-
-    console.print("\n[bold]Available templates:[/bold]\n")
-    for name, info in TEMPLATES.items():
-        console.print(f"  [cyan]{name}[/cyan] — {info.description}")
-    console.print("\nUse: [bold]drt init --template <name>[/bold]\n")
-
-
-def _init_from_template(name: str, project_dir: Path) -> None:
-    """Scaffold a project from a curated template and print next steps."""
-    from drt.cli._init_templates import TEMPLATES, write_template
-
-    if name not in TEMPLATES:
-        print_error(f"Unknown template: {name!r}")
-        console.print("Run [bold]drt init --template list[/bold] to see available templates.")
-        raise typer.Exit(1)
-
-    # Ensure minimal project shell exists so `drt validate` / `drt run` work.
-    created: list[str] = []
-    project_file = project_dir / "drt_project.yml"
-    if not project_file.exists():
-        project_file.write_text(
-            "name: my_drt_project\nprofile: default\n"
-        )
-        created.append(str(project_file))
-
-    drt_dir = project_dir / ".drt"
-    drt_dir.mkdir(exist_ok=True)
-    drt_gitignore = drt_dir / ".gitignore"
-    if not drt_gitignore.exists():
-        drt_gitignore.write_text("*\n")
-        created.append(str(drt_gitignore))
-
-    sync_path = write_template(name, project_dir)
-    created.append(str(sync_path))
-
-    print_init_success(created)
-
-    info = TEMPLATES[name]
-    console.print(f"\n[bold]Next steps for '{name}':[/bold]")
-    for i, step in enumerate(info.next_steps, 1):
-        console.print(f"  {i}. {step}")
-    console.print()
-
-
-def _init_from_dbt(manifest_path: Path) -> None:
-    """Generate sync YAML scaffolds from dbt manifest.json."""
-    import yaml
-
-    from drt.integrations.dbt import list_models_from_manifest
-
-    try:
-        models = list_models_from_manifest(manifest_path)
-    except FileNotFoundError as e:
-        print_error(str(e))
-        raise typer.Exit(1)
-
-    if not models:
-        console.print("[dim]No models found in manifest.[/dim]")
-        return
-
-    console.print(f"\n[bold]Found {len(models)} dbt models:[/bold]\n")
-    for i, m in enumerate(models):
-        desc = f" — {m.description}" if m.description else ""
-        console.print(f"  {i + 1}. {m.name}{desc}")
-
-    console.print("")
-    raw = typer.prompt(
-        "Select models (comma-separated numbers, or 'all')",
-        default="all",
-    )
-
-    if raw.strip().lower() == "all":
-        selected = models
-    else:
-        indices = [int(x.strip()) - 1 for x in raw.split(",") if x.strip().isdigit()]
-        selected = [models[i] for i in indices if 0 <= i < len(models)]
-
-    if not selected:
-        console.print("[dim]No models selected.[/dim]")
-        return
-
-    syncs_dir = Path(".") / "syncs"
-    syncs_dir.mkdir(exist_ok=True)
-    created: list[str] = []
-
-    for model in selected:
-        sync_data = {
-            "name": f"sync_{model.name}",
-            "description": model.description or f"Sync {model.name} to destination",
-            "model": f"ref('{model.name}')",
-            "destination": {
-                "type": "rest_api",
-                "url": "https://example.com/api",
-                "method": "POST",
-            },
-        }
-        path = syncs_dir / f"sync_{model.name}.yml"
-        if path.exists():
-            console.print(f"  [dim]skip[/dim] {path} (already exists)")
-            continue
-        with path.open("w") as f:
-            yaml.dump(sync_data, f, default_flow_style=False, sort_keys=False)
-        created.append(str(path))
-
-    if created:
-        console.print(f"\n[green]Created {len(created)} sync file(s):[/green]")
-        for c in created:
-            console.print(f"  {c}")
-        console.print(
-            "\n[dim]Edit the destination config in each file,"
-            " then run: drt validate && drt run --dry-run[/dim]"
-        )
-    else:
-        console.print("[dim]No new sync files created.[/dim]")
-
-
-# ---------------------------------------------------------------------------
-# sources
-# ---------------------------------------------------------------------------
-
-
-def _print_connectors_table(title: str, connectors: list[tuple[str, str]]) -> None:
-    """Print connectors in a rich table."""
-    from rich.table import Table
-
-    console.print(f"\n[bold]{title}[/bold]\n")
-    table = Table(show_header=True, header_style="bold magenta")
-    table.add_column("Type", style="cyan")
-    table.add_column("Description", style="green")
-
-    for connector_type, description in connectors:
-        table.add_row(connector_type, description)
-
-    console.print(table)
-    console.print()
-
-
-def _print_connector_details(title: str, connectors: list[tuple[str, str]], kind: str) -> None:
-    """Print one Rich panel per connector with derived field detail."""
-    from rich.panel import Panel
-
-    from drt.cli._connector_detail import (
-        build_destination_detail,
-        build_source_detail,
-    )
-
-    builder = build_source_detail if kind == "source" else build_destination_detail
-    console.print(f"\n[bold]{title}[/bold]")
-    for connector_type, description in connectors:
-        detail = builder(connector_type, description)
-        body_lines: list[str] = []
-        if detail.required_env_vars:
-            joined = ", ".join(detail.required_env_vars)
-            body_lines.append(f"[bold]Required env vars:[/bold] {joined}")
-        if detail.required_fields:
-            joined = ", ".join(detail.required_fields)
-            body_lines.append(f"[bold]Required fields:[/bold] {joined}")
-        if detail.optional_env_vars:
-            joined = ", ".join(detail.optional_env_vars)
-            body_lines.append(f"[bold]Optional env vars:[/bold] {joined}")
-        body_lines.append("")
-        body_lines.append("[bold]Sample YAML:[/bold]")
-        body_lines.append(detail.sample_yaml)
-        console.print(
-            Panel(
-                "\n".join(body_lines),
-                title=f"[cyan]{detail.type}[/cyan] — {detail.display_name}",
-                border_style="cyan",
-                expand=False,
-            )
-        )
-    console.print()
-
-
-def _emit_connectors_json(connectors: list[tuple[str, str]], kind: str, *, detailed: bool) -> None:
-    """Emit machine-readable JSON for ``--format json`` consumers."""
-    import json as _json
-
-    if detailed:
-        from drt.cli._connector_detail import (
-            build_destination_detail,
-            build_source_detail,
-        )
-
-        builder = build_source_detail if kind == "source" else build_destination_detail
-        payload: list[dict[str, object]] = [builder(t, d).to_dict() for t, d in connectors]
-    else:
-        payload = [{"type": t, "display_name": d, "kind": kind} for t, d in connectors]
-    # Use plain print(), not console.print() — Rich wraps long lines at the
-    # terminal width and would corrupt the JSON for machine consumers.
-    print(_json.dumps({"connectors": payload}, indent=2))
-
-
-@app.command()
-def sources(
-    detailed: bool = typer.Option(
-        False, "--detailed", help="Print per-connector fields, env vars, and sample YAML."
-    ),
-    output: str = typer.Option(
-        "table", "--format", "-o", help="Output format: 'table' (default) or 'json'."
-    ),
-) -> None:
-    """List available source connectors."""
-    from drt.config.connectors import SOURCES
-
-    if output == "json":
-        _emit_connectors_json(SOURCES, "source", detailed=detailed)
-        return
-    if detailed:
-        _print_connector_details("Available sources:", SOURCES, "source")
-        return
-    _print_connectors_table("Available sources:", SOURCES)
-
-
-# ---------------------------------------------------------------------------
-# destinations
-# ---------------------------------------------------------------------------
-
-
-@app.command()
-def destinations(
-    detailed: bool = typer.Option(
-        False, "--detailed", help="Print per-connector fields, env vars, and sample YAML."
-    ),
-    output: str = typer.Option(
-        "table", "--format", "-o", help="Output format: 'table' (default) or 'json'."
-    ),
-) -> None:
-    """List available destination connectors."""
-    from drt.config.connectors import DESTINATIONS
-
-    if output == "json":
-        _emit_connectors_json(DESTINATIONS, "destination", detailed=detailed)
-        return
-    if detailed:
-        _print_connector_details("Available destinations:", DESTINATIONS, "destination")
-        return
-    _print_connectors_table("Available destinations:", DESTINATIONS)
-
-
-# ---------------------------------------------------------------------------
-# clean
-# ---------------------------------------------------------------------------
-
-
-@app.command()
-def clean(
-    orphans: bool = typer.Option(
-        False, "--orphans", help="List or drop orphan __drt_swap tables."
-    ),
-    execute: bool = typer.Option(False, "--execute", help="Execute drops (default: dry-run)."),
-    config: str = typer.Option("drt.yml", "--config", "-c", help="Path to config file."),
-) -> None:
-    """Clean up orphan __drt_swap shadow tables left by interrupted swaps.
-
-    Use --orphans to list candidate shadow tables and --execute to drop them.
-    """
-    from drt.config.parser import load_syncs_safe
-    from drt.destinations.base import OrphanCleanup
-
-    if not orphans:
-        return
-
-    config_path = Path(config) if config != "drt.yml" else Path(".")
-    result = load_syncs_safe(config_path)
-
-    for sync in result.syncs:
-        dest = _get_destination(sync)
-        if not isinstance(dest, OrphanCleanup):
-            continue
-
-        if not hasattr(sync.destination, "table"):
-            continue
-        base_table = sync.destination.table  # type: ignore[union-attr]
-        orphan_tables = dest.list_orphan_swap_tables(sync.destination, base_table)
-
-        if not orphan_tables:
-            typer.echo("No orphan swap tables found.")
-            continue
-
-        if execute:
-            dropped, failed = dest.drop_orphan_swap_tables(sync.destination, orphan_tables)
-            typer.echo(f"Dropped: {len(dropped)} orphan swap table(s).")
-            if failed:
-                typer.echo(f"Failed: {len(failed)} orphan swap table(s).")
-        else:
-            typer.echo(f"Found {len(orphan_tables)} orphan swap table(s).")
-            for table in orphan_tables:
-                typer.echo(f"[DRY RUN] Would drop: {table}")
-            typer.echo("Run with --execute to apply.")
+# `drt init` lives in drt/cli/commands/init.py (#546 Phase 2)
+# `drt sources` / `drt destinations` live in drt/cli/commands/connectors.py
+# `drt clean` lives in drt/cli/commands/clean.py
 
 
 # ---------------------------------------------------------------------------
@@ -1374,33 +1039,7 @@ def _test_display_name(test_def: object) -> str:
     return test_display_name(test_def)
 
 
-# ---------------------------------------------------------------------------
-# serve (webhook trigger)
-# ---------------------------------------------------------------------------
-
-
-@app.command()
-def serve(
-    host: str = typer.Option("127.0.0.1", "--host", help="Host to bind."),
-    port: int = typer.Option(8080, "--port", "-p", help="Port to bind."),
-    token_env: str = typer.Option(
-        "DRT_WEBHOOK_TOKEN",
-        "--token-env",
-        help="Env var holding bearer token for auth. Empty/unset = no auth.",
-    ),
-) -> None:
-    """Start an HTTP endpoint that triggers drt syncs on demand.
-
-    Example:
-        drt serve --port 8080 --token-env DRT_WEBHOOK_TOKEN
-
-        curl -X POST http://localhost:8080/sync/my_sync \\
-          -H "Authorization: Bearer $DRT_WEBHOOK_TOKEN"
-    """
-    from drt.cli.server import serve as serve_impl
-
-    token = os.environ.get(token_env) or None
-    serve_impl(host=host, port=port, token=token, project_dir=".")
+# `drt serve` lives in drt/cli/commands/serve.py (#546 Phase 2)
 
 
 # Sub-Typer namespaces — each one lives in its own module under
@@ -1414,55 +1053,31 @@ def serve(
 
 
 # ---------------------------------------------------------------------------
-# Source / Destination factories
+# Source / Destination factories — backward-compat shims
 # ---------------------------------------------------------------------------
+#
+# The real implementations now live in ``drt/cli/_helpers.py``. These thin
+# wrappers preserve the legacy ``from drt.cli.main import _get_source`` /
+# ``_get_destination`` import path that several tests rely on (see #565
+# back-compat note). New callers should import directly from _helpers.
 
 
 def _get_source(profile: ProfileConfig) -> Source:
-    """Get a source instance for the profile configuration.
-
-    Uses the connector registry for automatic connector discovery and instantiation.
-    """
-    from drt.connectors import get_source
+    """Back-compat shim — see ``drt.cli._helpers.get_source``."""
+    from drt.cli._helpers import get_source
 
     return get_source(profile)
 
 
-def _get_watermark_storage(
-    sync: SyncConfig,
-    project_dir: Path,
-) -> Any:
-    """Build watermark storage from sync config, or None if not configured."""
-    from drt.state.watermark import (
-        BigQueryWatermarkStorage,
-        GCSWatermarkStorage,
-        LocalWatermarkStorage,
-    )
+def _get_watermark_storage(sync: SyncConfig, project_dir: Path) -> Any:
+    """Back-compat shim — see ``drt.cli._helpers.get_watermark_storage``."""
+    from drt.cli._helpers import get_watermark_storage
 
-    wm = sync.sync.watermark
-    if wm is None:
-        return None
+    return get_watermark_storage(sync, project_dir)
 
-    if wm.storage == "local":
-        return LocalWatermarkStorage(project_dir)
-    elif wm.storage == "gcs":
-        assert wm.bucket is not None
-        assert wm.key is not None
-        return GCSWatermarkStorage(bucket=wm.bucket, key=wm.key)
-    elif wm.storage == "bigquery":
-        assert wm.project is not None
-        assert wm.dataset is not None
-        return BigQueryWatermarkStorage(
-            project=wm.project,
-            dataset=wm.dataset,
-        )
-    return None
 
 def _get_destination(sync: SyncConfig) -> Destination:
-    """Get a destination instance for the sync configuration.
+    """Back-compat shim — see ``drt.cli._helpers.get_destination``."""
+    from drt.cli._helpers import get_destination
 
-    Uses the connector registry for automatic connector discovery and instantiation.
-    """
-    from drt.connectors import get_destination
-
-    return get_destination(sync.destination)
+    return get_destination(sync)
