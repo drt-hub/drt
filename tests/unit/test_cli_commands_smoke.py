@@ -100,8 +100,7 @@ def test_mcp_run_exits_1_when_extra_missing(monkeypatch: pytest.MonkeyPatch) -> 
 
     result = runner.invoke(app, ["mcp", "run"])
     assert result.exit_code == 1
-    # The hint mentions install path. Note: Rich strips ``[mcp]`` as a
-    # markup tag in the current message (``drt-core[mcp]`` → ``drt-core``);
-    # tracking that as a pre-existing rendering bug separate from #546.
-    assert "MCP server requires" in result.output
-    assert "pip install" in result.output
+    # The hint must include the FULL ``drt-core[mcp]`` install string so
+    # users know which extra to install — Rich must not consume ``[mcp]``
+    # as a markup tag. Guarded by the escape() in drt.cli.output.print_error.
+    assert "drt-core[mcp]" in result.output
