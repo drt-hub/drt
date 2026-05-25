@@ -1,4 +1,4 @@
-<!-- i18n-sync: base=README.md, hash=200d17e173906dc78d97f66bedbb37f653ca6be8 -->
+<!-- i18n-sync: base=README.md, hash=09dc2779fcc2b439690c8e6d57ed60443831720f -->
 
 [English](./README.md) | [日本語](./README.ja.md)
 
@@ -54,24 +54,16 @@ drt init && drt run
 
 ## クイックスタート
 
-クラウドアカウントは不要です。DuckDBを使って、ローカル環境で約5分で実行できます。
-
-### 1. インストール
+クラウドアカウントは不要 — DuckDB と httpbin.org でコマンド3つから。
 
 ```bash
 pip install drt-core
-```
-
-> クラウドソースの場合：`pip install drt-core[bigquery]`、`drt-core[postgres]` など。
-
-### 2. プロジェクトのセットアップ
-
-```bash
 mkdir my-drt-project && cd my-drt-project
-drt init   # select "duckdb" as source
+drt init --template duckdb_to_rest
 ```
 
-### 3. サンプルデータの作成
+実行可能な `syncs/duckdb_to_rest.yml` がスキャフォールドされます。DuckDB
+に小さなテーブルをシードして実行:
 
 ```bash
 python -c "
@@ -84,38 +76,36 @@ c.execute('''CREATE TABLE IF NOT EXISTS users AS SELECT * FROM (VALUES
 ) t(id, name, email)''')
 c.close()
 "
+drt run --dry-run   # プレビュー、データは送信されない
+drt run             # httpbin.org に各行を POST
+drt status          # 結果を確認
 ```
 
-### 4. 同期の作成
-
-```yaml
-# syncs/post_users.yml
-name: post_users
-description: "POST user records to an API"
-model: ref('users')
-destination:
-  type: rest_api
-  url: "https://httpbin.org/post"
-  method: POST
-  headers:
-    Content-Type: "application/json"
-  body_template: |
-    { "id": {{ row.id }}, "name": "{{ row.name }}", "email": "{{ row.email }}" }
-sync:
-  mode: full
-  batch_size: 1
-  on_error: fail
-```
-
-### 5. 実行
+### その他のスタータテンプレート
 
 ```bash
-drt run --dry-run   # preview, no data sent
-drt run             # run for real
-drt status          # check results
+drt init --template list             # 利用可能なテンプレート一覧
+drt init --template postgres_to_slack
+drt init --template duckdb_to_hubspot
 ```
 
-> 詳細は [examples/](examples/) を参照してください（Slack、Google Sheets、HubSpot、GitHub Actions など）。
+各テンプレートは必要な環境変数 / ソースデータの次のステップを表示します。
+完全なコレクションは [examples/](examples/) (Discord、Google Sheets、
+GitHub Actions、MySQL、ClickHouse、BigQuery …)、コネクタ別リファレンスは
+[docs/connectors/](docs/connectors/) を参照。
+
+### 同期のカスタマイズ
+
+プロファイル + プロジェクトのセットアップを案内するウィザードが必要な場合:
+
+```bash
+drt init   # 対話形式 — ソース選択、プロファイル設定、プロジェクトスキャフォールド
+```
+
+どちらのフローも同じプロジェクト構造 (`drt_project.yml`、`syncs/`、
+`.drt/`) を生成します。`drt sources --detailed` と
+`drt destinations --detailed` は各コネクタの必要な環境変数とサンプル
+YAML スタンザを表示します — テンプレートを超えて手で書くときに便利です。
 
 ---
 
@@ -231,6 +221,8 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 ---
 
 ## コネクタ
+
+> コネクタ別リファレンス: [docs/connectors/](docs/connectors/) · CLI からも辿れます: `drt sources --detailed` / `drt destinations --detailed`
 
 ### ソース
 

@@ -1,0 +1,21 @@
+# PostgreSQL → Slack webhook — typical "operational alert" shape.
+# Requires:
+#   export SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../...
+# Plus a `postgres` profile in ~/.drt/profiles.yml pointing at your DB.
+name: postgres_to_slack
+description: "Notify Slack when new high-priority rows appear in Postgres"
+
+model: ref('alerts')
+
+destination:
+  type: slack
+  webhook_url_env: SLACK_WEBHOOK_URL
+  message_template: ":rotating_light: {{ row.severity }} — {{ row.message }} (id={{ row.id }})"
+
+sync:
+  mode: incremental
+  cursor_field: created_at
+  batch_size: 50
+  rate_limit:
+    requests_per_second: 1  # Slack incoming-webhook limit
+  on_error: skip
