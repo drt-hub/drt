@@ -56,6 +56,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Telemetry: PII-not-collected posture; retention cleanup workflow removed** (PR #536, closes #482): drt's opt-in `sync_completed` payload now includes three PostHog meta-properties — `$ip: ""`, `$geoip_disable: true`, `$process_person_profile: false` — that suppress server-side IP recording, GeoIP resolution, and per-`distinct_id` person-profile creation on the receiving end. These are defense-in-depth in front of the project-level "Discard client IP data" setting, so a future operator change at the project layer can't accidentally start collecting geo / IP data. Replaces the planned 90-day API-based retention cleanup (workflow + script introduced in PR #535 and reverted by this PR) — PostHog does not expose a public REST endpoint for bulk event deletion by name + timestamp, so PII-at-source removal is the cleaner and stronger guarantee. The 1-year retention number on the maintainer's PostHog Free tier is unchanged but now applies to PII-free data. See `docs/telemetry.md` for the full posture.
 - **REST API source polish** (PR #534, addresses 4/5 items of #530): docstring on `RestApiSource.extract()` documents that the Source-Protocol `query` argument is intentionally ignored (the URL lives in `config`); four `# type: ignore[no-any-return]` in `_extract_records` replaced with `cast(list[dict[str, Any]], ...)` per CLAUDE.md's "no `type: ignore` outside external libs" rule; the previously-unreferenced module logger now wires a DEBUG log on the single-dict fallback path so silent shape drift (e.g. `{"error": "rate limit"}` arriving without a `records`/`data` wrapper) becomes visible under `--log-level debug`. Item 1 of #530 (lifting `_extract_next_link` into a shared HTTP util) remains open for a community contributor.
 
+## [0.7.4] - 2026-05-23
+
+**Theme: Patch release for MySQL schema-qualified identifier handling.**
+
+Cherry-pick of PR #514 onto the v0.7.3 release line — the MySQL counterpart to the Postgres `Identifier()` composition fix that shipped in v0.7.3. No new features, no breaking changes. v0.8 work continues in parallel on `main`.
+
+> **Note on v0.7.3:** Earlier drafts of the v0.7.3 CHANGELOG referenced this MySQL fix as if it had shipped in v0.7.3, but PR #514 actually landed on `main` two days after the v0.7.3 tag was cut. The wheel published to PyPI as `drt-core==0.7.3` does **not** contain the MySQL fix. v0.7.4 is the release that actually delivers it; users hitting #511 should upgrade to `drt-core>=0.7.4`.
+
+### Fixed
+
+- **MySQL destination correctly quotes schema-qualified table names** (#511, PR #514): `mydb.scores` now produces `` `mydb`.`scores` `` across the row-count, replace, insert, and upsert paths (previously the dotted name was treated as a single backtick-quoted identifier, so any MySQL destination configured with a schema-qualified table name failed at SQL execution). The `_quote_ident` helper is now applied consistently across all SQL-composition paths on the MySQL destination, matching the Postgres `Identifier()` composition fix that shipped in v0.7.3 (#442 / PR #498). Contributed by @Godzilaa.
+
 ## [0.7.3] - 2026-05-17
 
 **Theme: Patch release for Postgres schema-qualified identifier handling.**
