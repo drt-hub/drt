@@ -150,3 +150,43 @@ def test_every_destination_in_DESTINATIONS_has_a_registered_config_class() -> No
         f"Destinations missing from DESTINATION_CONFIG_CLASSES: {missing}. "
         f"Register the Pydantic config class in drt/cli/_connector_detail.py."
     )
+
+
+# ---------------------------------------------------------------------------
+# Defensive paths — exercised directly so codecov sees them
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_detail_returns_unregistered_sentinel() -> None:
+    """The fallback used when a connector is missing from the registry.
+
+    Unreachable in production (registry-parity tests above prevent it),
+    but worth exercising so the shape is locked: callers can rely on
+    the same ConnectorDetail fields being present.
+    """
+    from drt.cli._connector_detail import _unknown_detail
+
+    detail = _unknown_detail("mystery", "Mystery Connector", "destination")
+    assert detail.type == "mystery"
+    assert detail.display_name == "Mystery Connector"
+    assert detail.kind == "destination"
+    assert detail.config_class == "(unregistered)"
+    assert detail.sample_yaml == "type: mystery"
+
+
+def test_sample_yaml_caps_at_eight_lines_when_required_fields_overflow() -> None:
+    """When a connector declares 8+ required fields, the renderer stops
+    at the cap rather than producing an unbounded stanza.
+    """
+    from drt.cli._connector_detail import _FieldInfo, _render_sample_yaml
+
+    fields = [
+        _FieldInfo(name=f"f{i}", is_env_var=False, is_required=True, default_repr="")
+        for i in range(12)
+    ]
+    yaml = _render_sample_yaml("synthetic", "destination", fields)
+    lines = yaml.split("\n")
+    # 1 line for "type:" + 7 required fields = 8 lines max
+    assert len(lines) == 8
+    assert lines[0].endswith("type: synthetic")
+    assert lines[-1].endswith("f6: <f6>")  # last required field that fit
