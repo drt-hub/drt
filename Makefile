@@ -1,4 +1,4 @@
-.PHONY: install dev lint fmt test clean sync-skills check-skills check-i18n sync-version release-check topics sync-labels
+.PHONY: install dev lint fmt test clean sync-skills check-skills check-i18n check-changelog sync-version release-check topics sync-labels
 
 # ── Development ────────────────────────────────────────────────────────────────
 
@@ -54,6 +54,9 @@ check-skills:  ## Verify .claude/commands/ matches skills (CI gate)
 
 check-i18n:  ## Check if translated *.{lang}.md files are in sync with English base
 	@bash scripts/check-i18n-sync.sh
+
+check-changelog:  ## Verify every drt-core v* tag has a ## [X.Y.Z] section in CHANGELOG.md
+	@python3 scripts/check_changelog_monotonic.py
 
 sync-version:  ## Propagate version from pyproject.toml to all plugin JSONs
 	@python3 scripts/sync-version.py
