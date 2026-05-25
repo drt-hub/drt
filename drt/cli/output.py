@@ -316,7 +316,12 @@ def print_status_verbose(
 
 
 def print_error(message: str) -> None:
-    console.print(f"[bold red]Error:[/bold red] {message}")
+    # Escape Rich markup in the user-supplied message so square-bracket
+    # fragments like ``drt-core[mcp]`` or ``[INFO]`` aren't consumed as
+    # style tags and silently dropped from the rendered output.
+    from rich.markup import escape
+
+    console.print(f"[bold red]Error:[/bold red] {escape(message)}")
 
 
 # ---------------------------------------------------------------------------
