@@ -1,4 +1,4 @@
-<!-- i18n-sync: base=README.md, hash=09dc2779fcc2b439690c8e6d57ed60443831720f -->
+<!-- i18n-sync: base=README.md, hash=cfef58b28353617261d525531e420c2dfe0b257b -->
 
 [English](./README.md) | [日本語](./README.ja.md)
 
@@ -301,6 +301,7 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | **v0.7.2** ✅ | **opt-in 匿名テレメトリ**（PostHog Cloud EU、デフォルト off、許可リスト式 payload、`DO_NOT_TRACK` 尊重）· `drt validate` の非推奨警告 · Postgres destination の `psycopg2.sql` 安全な SQL 合成 |
 | **v0.7.3** ✅ | **パッチ** — Postgres の `schema.table` 識別子合成の修正 (#442, PR #498): `marketing.events` のような schema 修飾名が単一 identifier として double-quote されていたバグを修正し、schema と relation を分離して合成 |
 | **v0.7.4** ✅ | **パッチ** — MySQL の `schema.table` 識別子クオートの修正 (#511, PR #514): `mydb.scores` が replace / insert / upsert / 行カウントの各 SQL パスで `` `mydb`.`scores` `` に正しくクオートされるよう `_quote_ident` を統一適用。PR #514 は v0.7.3 タグの2日後に `main` にマージされたため `drt-core==0.7.3` の wheel には含まれていない — `#511` を踏んでいるユーザは `drt-core>=0.7.4` へアップグレードを |
+| **v0.7.5** ✅ | **Production Ready follow-up #3 + Tech Foundation Hardening** — [Tech Foundation Hardening epic (#538)](https://github.com/drt-hub/drt/issues/538) の 11 子 issue をクローズ: CI nightly + publish gate + CodeQL + pip-audit + SBOM · DuckDB E2E ハーネス + 境界テスト · `ErrorFormatter` + `drt sources/destinations --detailed` + `drt init --template` の UX · `SyncObserver` で engine I/O 境界整理 · destinations serializer + config base class 統合 · `cli/main.py` 分割 Phase 1。あわせて REST API source polish · sync catalog (#499 P1+P2) · `drt_run_test` MCP ツール · OpenTelemetry Phase 1 config · ハードコードシークレット検知 · orphan shadow テーブルクリーンアップ も同梱。新規コネクタなし、破壊変更なし。 |
 
 **次のリリース:** [v0.8 Cloud Destinations & Growth](ROADMAP.md#v08--cloud-destinations--growth) → [v0.9 Enterprise Foundation](ROADMAP.md#v09--enterprise-foundation) → [v1.0 Stable Release](ROADMAP.md#v10--stable-release) → [v1.x Rust Engine](ROADMAP.md#v1x--rust-engine)
 
