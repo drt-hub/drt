@@ -66,14 +66,38 @@ def classify_filename(filename: str) -> Stage:
 
 
 def infer_stage(exc: BaseException) -> Stage:
-    """Walk the exception's traceback to find the deepest drt-owned frame.
+    """Return the pipeline stage that produced ``exc``.
 
-    "Deepest" means: the most recent frame inside a ``drt/<area>/`` module.
-    If the exception bubbled through ``drt/sources/postgres.py`` and then
-    ``drt/engine/sync.py``, we return ``SOURCE`` — that's where the actual
-    fault originated. Frames from third-party packages between the two are
-    skipped, never overriding the stage.
+    Resolution order:
+
+    1. **Engine-emitted ``_drt_stage`` attribute** (#544 retrofit). The
+       engine wraps each phase call in a ``_stage_ctx`` context manager
+       (``drt.engine.sync._stage_ctx``) that attaches a string tag
+       (``"source"`` / ``"destination"`` / ``"state"`` / ``"engine"``)
+       to any exception bubbling through. First writer wins so a source-
+       raised error tagged at the source site survives intermediate
+       destination/engine frames. This is the authoritative signal —
+       prefer it over the heuristic when present.
+
+    2. **Traceback walk fallback**. For exceptions raised outside any
+       engine ``_stage_ctx`` block (library callers using ``run_sync``
+       directly, future code paths not yet wrapped) we walk the
+       traceback for the deepest ``drt/<area>/`` frame. Same heuristic
+       as before #544 — preserves back-compat for the 26 ErrorFormatter
+       tests that depend on it.
     """
+    # 1. Engine-emitted tag (preferred)
+    tag = getattr(exc, "_drt_stage", None)
+    if tag is not None:
+        try:
+            # Stage subclasses str so Stage("source") round-trips fine.
+            return Stage(tag) if not isinstance(tag, Stage) else tag
+        except ValueError:
+            # Unknown tag string (e.g. drifted between engine and cli) —
+            # fall through to the traceback walk rather than crash.
+            pass
+
+    # 2. Traceback walk fallback
     stage = Stage.UNKNOWN
     tb = exc.__traceback__
     while tb is not None:
