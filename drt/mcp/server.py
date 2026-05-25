@@ -346,6 +346,7 @@ def create_server(project_dir: Path | None = None) -> Any:
                 {"name": "Microsoft Teams", "type": "teams", "install": "(core)"},
                 {"name": "GitHub Actions", "type": "github_actions", "install": "(core)"},
                 {"name": "HubSpot", "type": "hubspot", "install": "(core)"},
+                {"name": "Amplitude", "type": "amplitude", "install": "(core)"},
                 {"name": "Zendesk", "type": "zendesk", "install": "(core)"},
                 {"name": "Google Sheets", "type": "google_sheets", "install": "drt-core[sheets]"},
                 {"name": "PostgreSQL", "type": "postgres", "install": "drt-core[postgres]"},
