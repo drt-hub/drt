@@ -252,3 +252,123 @@ def test_render_to_console_omits_suggestion_when_none() -> None:
         suggestion=None,
     )
     render_to_console(fe)
+
+
+# ---------------------------------------------------------------------------
+# #544 retrofit: infer_stage prefers engine-emitted ``_drt_stage`` attr
+# over the traceback-walk heuristic
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "tag, expected",
+    [
+        ("source", Stage.SOURCE),
+        ("destination", Stage.DESTINATION),
+        ("engine", Stage.ENGINE),
+        ("state", Stage.STATE),
+    ],
+)
+def test_infer_stage_uses_drt_stage_attr_when_present(tag: str, expected: Stage) -> None:
+    """An exception carrying ``_drt_stage = "<tag>"`` returns the matching enum."""
+    exc = RuntimeError("boom")
+    exc._drt_stage = tag  # type: ignore[attr-defined]
+    assert infer_stage(exc) is expected
+
+
+def test_infer_stage_attr_overrides_traceback_walk() -> None:
+    """The attr is authoritative — even when traceback would say otherwise.
+
+    Raises from inside drt.sources.duckdb (which the walk classifies as
+    SOURCE) but pre-tags with "destination". infer_stage must trust the
+    explicit tag, not re-derive from the traceback.
+    """
+    pytest.importorskip("duckdb")
+    from drt.sources.duckdb import DuckDBSource
+
+    class FakeConfig:
+        database = ":memory:"
+
+    try:
+        list(DuckDBSource().extract("SELECT 1", FakeConfig()))  # type: ignore[arg-type]
+    except AssertionError as e:
+        e._drt_stage = "destination"  # type: ignore[attr-defined]
+        # Without the attr this would return SOURCE (proven by an existing test);
+        # with the attr it must return DESTINATION.
+        assert infer_stage(e) is Stage.DESTINATION
+
+
+def test_infer_stage_falls_back_to_walk_for_unknown_attr_value() -> None:
+    """Unknown tag strings shouldn't crash — fall through to the walk."""
+    exc = RuntimeError("boom")
+    exc._drt_stage = "not-a-real-stage"  # type: ignore[attr-defined]
+    # Raised in this test module → no drt path → UNKNOWN from walk
+    assert infer_stage(exc) is Stage.UNKNOWN
+
+
+def test_infer_stage_accepts_stage_enum_as_attr_value() -> None:
+    """Future-proofing: if engine ever attaches the enum directly, accept it."""
+    exc = RuntimeError("boom")
+    exc._drt_stage = Stage.DESTINATION  # type: ignore[attr-defined]
+    assert infer_stage(exc) is Stage.DESTINATION
+
+
+def test_infer_stage_no_attr_uses_walk_unchanged() -> None:
+    """Back-compat: exceptions raised outside any _stage_ctx block (library
+    callers using run_sync directly without going through engine wrapping)
+    still get the walk-based classification.
+    """
+    pytest.importorskip("duckdb")
+    from drt.sources.duckdb import DuckDBSource
+
+    class FakeConfig:
+        database = ":memory:"
+
+    try:
+        list(DuckDBSource().extract("SELECT 1", FakeConfig()))  # type: ignore[arg-type]
+    except AssertionError as e:
+        # No _drt_stage attr → walk fallback finds drt/sources/duckdb.py frame
+        assert not hasattr(e, "_drt_stage")
+        assert infer_stage(e) is Stage.SOURCE
+
+
+# ---------------------------------------------------------------------------
+# Engine _stage_ctx: attaches the right tag on raise
+# ---------------------------------------------------------------------------
+
+
+def test_engine_stage_ctx_attaches_tag_first_writer_wins() -> None:
+    """The context manager attaches ``_drt_stage`` and does NOT overwrite a
+    previously-set value (so inner blocks take precedence over outer ones,
+    which is what gives a source-raised error the SOURCE tag even when it
+    bubbles through a destination-stage block).
+    """
+    from drt.engine.sync import _stage_ctx
+
+    try:
+        with _stage_ctx("destination"):
+            with _stage_ctx("source"):
+                raise RuntimeError("from source")
+    except RuntimeError as e:
+        # Inner block (source) wins — first writer
+        assert e._drt_stage == "source"  # type: ignore[attr-defined]
+
+
+def test_engine_stage_ctx_tags_uncaught_exception() -> None:
+    """A plain raise inside the block gets tagged with the stage."""
+    from drt.engine.sync import _stage_ctx
+
+    try:
+        with _stage_ctx("destination"):
+            raise ValueError("kaboom")
+    except ValueError as e:
+        assert e._drt_stage == "destination"  # type: ignore[attr-defined]
+
+
+def test_engine_stage_ctx_does_not_swallow_exception() -> None:
+    """``_stage_ctx`` is tagging-only; the exception still propagates."""
+    from drt.engine.sync import _stage_ctx
+
+    with pytest.raises(RuntimeError, match="propagated"):
+        with _stage_ctx("source"):
+            raise RuntimeError("propagated")

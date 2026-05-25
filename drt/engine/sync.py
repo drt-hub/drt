@@ -12,7 +12,7 @@ import time
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from drt.config.credentials import ProfileConfig
 from drt.config.models import LookupConfig, SyncConfig
@@ -68,6 +68,61 @@ def batch(iterable: Iterator[Any], size: int) -> Iterator[list[Any]]:
             chunk = []
     if chunk:
         yield chunk
+
+
+class _stage_ctx:
+    """Tag any exception raised within the block with ``_drt_stage = <stage>``.
+
+    Retrofit for #544 (ErrorFormatter): supersedes the traceback-walk
+    heuristic in ``drt.cli.errors.infer_stage`` with an engine-emitted
+    string tag. ``infer_stage`` reads ``getattr(exc, '_drt_stage', None)``
+    first, falls back to the walk if absent (preserving back-compat for
+    exceptions raised outside any ``_stage_ctx`` block).
+
+    Stages are strings (``"source"`` / ``"destination"`` / ``"state"`` /
+    ``"engine"``) rather than the ``drt.cli.errors.Stage`` enum so the
+    engine module stays free of CLI imports — ``Stage`` has ``str`` as
+    its base so ``Stage(tag)`` round-trips cleanly on the reader side.
+
+    First writer wins. Nested blocks don't overwrite the outer-most
+    attribution — if a source-raised exception bubbles up through a
+    destination-stage block, the SOURCE tag set by the inner block
+    stays. (Engine sites that wrap source iteration are themselves
+    inside the for-loop that destination calls live in; the inner
+    ``_stage_ctx("source")`` runs first.)
+    """
+
+    __slots__ = ("_stage",)
+
+    def __init__(self, stage: str) -> None:
+        self._stage = stage
+
+    def __enter__(self) -> _stage_ctx:
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, tb: Any) -> Literal[False]:
+        if exc_val is not None and getattr(exc_val, "_drt_stage", None) is None:
+            try:
+                exc_val._drt_stage = self._stage
+            except (AttributeError, TypeError):
+                # Some C-level exception types reject attribute setting.
+                # Silent skip — the traceback-walk fallback still works.
+                pass
+        return False  # propagate
+
+
+def _staged_source_iter(
+    source: Source, query: str, profile: ProfileConfig
+) -> Iterator[dict[str, Any]]:
+    """Wrap ``source.extract`` so iteration errors get tagged with stage="source".
+
+    ``source.extract`` returns an iterator. Errors that fire during the
+    initial call OR during subsequent ``__next__`` invocations both bubble
+    through this generator's frame, which means ``_stage_ctx`` catches
+    them whether the source materialises eagerly or lazily.
+    """
+    with _stage_ctx("source"):
+        yield from source.extract(query, profile)
 
 
 def run_sync(
@@ -265,7 +320,9 @@ def _run_sync_body(
 
     query = resolve_model_ref(sync.model, project_dir, profile, cursor_field, last_cursor_value)
 
-    records_iter = source.extract(query, profile)
+    # Source extraction wrapped via generator helper so exceptions raised
+    # during iteration (not just the initial call) carry stage="source" (#544).
+    records_iter = _staged_source_iter(source, query, profile)
     new_cursor_value: str | None = last_cursor_value
     is_staged = isinstance(destination, StagedDestination)
     staged_count = 0
@@ -274,7 +331,9 @@ def _run_sync_body(
     # the diff engine after extraction completes (#413).
     dry_run_records: list[dict[str, Any]] = []
 
-    # Build lookup maps (one query per lookup, before the batch loop)
+    # Build lookup maps (one query per lookup, before the batch loop).
+    # The build_lookup_map() call hits the destination, so tag failures
+    # accordingly (#544).
     lookup_maps: dict[str, tuple[LookupConfig, dict[tuple[Any, ...], Any]]] = {}
     lookups: dict[str, LookupConfig] | None = getattr(
         sync.destination,
@@ -285,7 +344,8 @@ def _run_sync_body(
         for warning in detect_ambiguous_lookup_ordering(lookups):
             observer.on_warning(sync.name, warning)
         for col_name, lk_config in lookups.items():
-            mapping = build_lookup_map(sync.destination, lk_config)
+            with _stage_ctx("destination"):
+                mapping = build_lookup_map(sync.destination, lk_config)
             lookup_maps[col_name] = (lk_config, mapping)
 
     for record_batch in batch(records_iter, sync.sync.batch_size):
@@ -331,11 +391,13 @@ def _run_sync_body(
 
         if is_staged:
             assert isinstance(destination, StagedDestination)
-            destination.stage(record_batch, sync.destination, sync.sync)
+            with _stage_ctx("destination"):
+                destination.stage(record_batch, sync.destination, sync.sync)
             staged_count += len(record_batch)
         else:
             assert isinstance(destination, Destination)
-            result = destination.load(record_batch, sync.destination, sync.sync)
+            with _stage_ctx("destination"):
+                result = destination.load(record_batch, sync.destination, sync.sync)
             total_result.success += result.success
             total_result.failed += result.failed
             total_result.skipped += result.skipped
@@ -352,7 +414,8 @@ def _run_sync_body(
     # stage() only buffers, so records aren't "successful" until finalize.
     if is_staged and not dry_run and staged_count > 0:
         assert isinstance(destination, StagedDestination)
-        finalize_result = destination.finalize(sync.destination, sync.sync)
+        with _stage_ctx("destination"):
+            finalize_result = destination.finalize(sync.destination, sync.sync)
         total_result.success += finalize_result.success
         total_result.failed += finalize_result.failed
         total_result.errors.extend(finalize_result.errors)
@@ -365,7 +428,8 @@ def _run_sync_body(
     if not is_staged and not dry_run:
         finalizer = getattr(destination, "finalize_sync", None)
         if callable(finalizer):
-            finalize_result = finalizer(sync.destination, sync.sync)
+            with _stage_ctx("destination"):
+                finalize_result = finalizer(sync.destination, sync.sync)
             if finalize_result is not None:
                 total_result.success += finalize_result.success
                 total_result.failed += finalize_result.failed
