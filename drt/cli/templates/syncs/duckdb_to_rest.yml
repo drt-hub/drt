@@ -1,0 +1,26 @@
+# DuckDB → REST API (httpbin.org) — no cloud accounts needed.
+# Edit `model` to point at your table, then run `drt run --dry-run`.
+name: duckdb_to_rest
+description: "POST each row from a local DuckDB table to a REST endpoint"
+
+model: ref('users')
+
+destination:
+  type: rest_api
+  url: "https://httpbin.org/post"
+  method: POST
+  headers:
+    Content-Type: "application/json"
+  body_template: |
+    {
+      "id": {{ row.id }},
+      "name": "{{ row.name }}",
+      "email": "{{ row.email }}"
+    }
+
+sync:
+  mode: full
+  batch_size: 5
+  rate_limit:
+    requests_per_second: 5
+  on_error: skip

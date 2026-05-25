@@ -340,10 +340,22 @@ def init(
         "--from-dbt",
         help="Path to dbt manifest.json — generate sync YAMLs from dbt models.",
     ),
+    template: str = typer.Option(
+        None,
+        "--template",
+        help="Scaffold from a curated template. Use 'list' to see available templates.",
+    ),
 ) -> None:
     """Initialize a new drt project in the current directory."""
     if from_dbt:
         _init_from_dbt(Path(from_dbt))
+        return
+
+    if template == "list":
+        _list_templates()
+        return
+    if template:
+        _init_from_template(template, Path("."))
         return
 
     from drt.cli.init_wizard import run_wizard, scaffold_project
@@ -358,6 +370,53 @@ def init(
     except Exception as e:
         print_error(str(e))
         raise typer.Exit(1)
+
+
+def _list_templates() -> None:
+    """Print available ``drt init --template`` choices."""
+    from drt.cli._init_templates import TEMPLATES
+
+    console.print("\n[bold]Available templates:[/bold]\n")
+    for name, info in TEMPLATES.items():
+        console.print(f"  [cyan]{name}[/cyan] — {info.description}")
+    console.print("\nUse: [bold]drt init --template <name>[/bold]\n")
+
+
+def _init_from_template(name: str, project_dir: Path) -> None:
+    """Scaffold a project from a curated template and print next steps."""
+    from drt.cli._init_templates import TEMPLATES, write_template
+
+    if name not in TEMPLATES:
+        print_error(f"Unknown template: {name!r}")
+        console.print("Run [bold]drt init --template list[/bold] to see available templates.")
+        raise typer.Exit(1)
+
+    # Ensure minimal project shell exists so `drt validate` / `drt run` work.
+    created: list[str] = []
+    project_file = project_dir / "drt_project.yml"
+    if not project_file.exists():
+        project_file.write_text(
+            "name: my_drt_project\nprofile: default\n"
+        )
+        created.append(str(project_file))
+
+    drt_dir = project_dir / ".drt"
+    drt_dir.mkdir(exist_ok=True)
+    drt_gitignore = drt_dir / ".gitignore"
+    if not drt_gitignore.exists():
+        drt_gitignore.write_text("*\n")
+        created.append(str(drt_gitignore))
+
+    sync_path = write_template(name, project_dir)
+    created.append(str(sync_path))
+
+    print_init_success(created)
+
+    info = TEMPLATES[name]
+    console.print(f"\n[bold]Next steps for '{name}':[/bold]")
+    for i, step in enumerate(info.next_steps, 1):
+        console.print(f"  {i}. {step}")
+    console.print()
 
 
 def _init_from_dbt(manifest_path: Path) -> None:

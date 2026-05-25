@@ -1,0 +1,29 @@
+# DuckDB → HubSpot contacts upsert.
+# Requires:
+#   export HUBSPOT_TOKEN=pat-xxx   # HubSpot private app token
+# DuckDB source needs a `contacts` table with at least: email, firstname, lastname.
+name: duckdb_to_hubspot
+description: "Upsert DuckDB contacts into HubSpot by email"
+
+model: ref('contacts')
+
+destination:
+  type: hubspot
+  object_type: contacts
+  id_property: email
+  properties_template: |
+    {
+      "email": "{{ row.email }}",
+      "firstname": "{{ row.firstname }}",
+      "lastname": "{{ row.lastname }}"
+    }
+  auth:
+    type: bearer
+    token_env: HUBSPOT_TOKEN
+
+sync:
+  mode: full
+  batch_size: 100
+  rate_limit:
+    requests_per_second: 10  # HubSpot allows ~100/10s; conservative default
+  on_error: skip

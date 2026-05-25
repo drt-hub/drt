@@ -52,24 +52,16 @@ drt init && drt run
 
 ## Quickstart
 
-No cloud accounts needed — runs locally with DuckDB in about 5 minutes.
-
-### 1. Install
+No cloud accounts needed — DuckDB + httpbin.org, three commands.
 
 ```bash
 pip install drt-core
-```
-
-> For cloud sources: `pip install drt-core[bigquery]`, `drt-core[postgres]`, etc.
-
-### 2. Set up a project
-
-```bash
 mkdir my-drt-project && cd my-drt-project
-drt init   # select "duckdb" as source
+drt init --template duckdb_to_rest
 ```
 
-### 3. Create sample data
+That scaffolds a runnable `syncs/duckdb_to_rest.yml`. Seed a tiny
+DuckDB table and run:
 
 ```bash
 python -c "
@@ -82,38 +74,36 @@ c.execute('''CREATE TABLE IF NOT EXISTS users AS SELECT * FROM (VALUES
 ) t(id, name, email)''')
 c.close()
 "
-```
-
-### 4. Create a sync
-
-```yaml
-# syncs/post_users.yml
-name: post_users
-description: "POST user records to an API"
-model: ref('users')
-destination:
-  type: rest_api
-  url: "https://httpbin.org/post"
-  method: POST
-  headers:
-    Content-Type: "application/json"
-  body_template: |
-    { "id": {{ row.id }}, "name": "{{ row.name }}", "email": "{{ row.email }}" }
-sync:
-  mode: full
-  batch_size: 1
-  on_error: fail
-```
-
-### 5. Run
-
-```bash
 drt run --dry-run   # preview, no data sent
-drt run             # run for real
+drt run             # POST each row to httpbin.org
 drt status          # check results
 ```
 
-> See [examples/](examples/) for more: Slack, Google Sheets, HubSpot, GitHub Actions, etc.
+### Other starter templates
+
+```bash
+drt init --template list             # see all available templates
+drt init --template postgres_to_slack
+drt init --template duckdb_to_hubspot
+```
+
+Each template prints next-steps for the env vars / source data it needs.
+See [examples/](examples/) for the full collection (Discord, Google
+Sheets, GitHub Actions, MySQL, ClickHouse, BigQuery, …) and
+[docs/connectors/](docs/connectors/) for per-connector reference.
+
+### Customizing your sync
+
+For a guided wizard that walks you through profile + project setup:
+
+```bash
+drt init   # interactive — picks a source, configures profile, scaffolds project
+```
+
+Both flows produce the same project shape (`drt_project.yml`, `syncs/`,
+`.drt/`). `drt sources --detailed` and `drt destinations --detailed`
+print every connector's required env vars and a sample YAML stanza —
+useful when hand-authoring beyond the templates.
 
 ---
 
@@ -257,6 +247,8 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 ---
 
 ## Connectors
+
+> Per-connector reference: [docs/connectors/](docs/connectors/) · Discoverable from the CLI: `drt sources --detailed` / `drt destinations --detailed`
 
 ### Sources
 
