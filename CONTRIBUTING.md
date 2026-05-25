@@ -135,6 +135,26 @@ This is to keep momentum, not to gatekeep. If you're unsure, just ask in the iss
 
 For details on what constitutes a breaking change, see [VERSIONING.md](VERSIONING.md).
 
+### CI guard: don't lose released-version CHANGELOG sections
+
+Every `vX.Y.Z` git tag must have a corresponding `## [X.Y.Z]` section in
+`CHANGELOG.md`. CI runs `make check-changelog` to enforce this — if your
+PR fails it, the most common cause is a merge-conflict resolution that
+dropped a released-version section while restoring the file to "main"
+state. To restore the missing section from its tag:
+
+```bash
+git show v0.7.4:CHANGELOG.md | sed -n '/^## \[0.7.4\]/,/^## \[/p'
+```
+
+…then paste the result back into your `CHANGELOG.md` at the right
+position (after `## [Unreleased]`, before the next-older version), and
+re-run `make check-changelog`.
+
+Editing the content of an existing released-version section (typo fixes,
+broken-link repair) is fine — the guard only enforces existence of the
+section heading, not its contents.
+
 ## Commit Style
 
 Use [Conventional Commits](https://www.conventionalcommits.org/):

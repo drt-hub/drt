@@ -67,6 +67,16 @@ jobs:
       - name: Check i18n sync
         run: make check-i18n || echo "::warning::Some translations are stale. Run 'make check-i18n' for details."
 
+      - name: Check CHANGELOG covers all tagged versions
+        # Requires git fetch --unshallow so the script can see v* tags
+        # (checkout@v6 uses a shallow clone by default; tags are not
+        # fetched). The check itself is fast — pure Python + one
+        # git tag invocation.
+        if: matrix.python-version == '3.12'
+        run: |
+          git fetch --tags --quiet
+          make check-changelog
+
       - name: Test (pytest)
         run: pytest --cov=drt --cov-report=xml
 
