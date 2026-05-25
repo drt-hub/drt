@@ -27,6 +27,13 @@ if TYPE_CHECKING:
 
 
 from drt import __version__
+from drt.cli import commands as _commands  # noqa: F401 — register commands
+
+# The shared Typer instance lives in drt.cli._app so that per-command
+# modules under drt/cli/commands/ can import it without circular imports
+# (this main module then imports the commands package to trigger their
+# @app.command decorator side effects).
+from drt.cli._app import app
 from drt.cli.output import (
     console,
     print_dry_run_summary,
@@ -37,20 +44,12 @@ from drt.cli.output import (
     print_status_verbose,
     print_sync_result,
     print_sync_start,
-    print_sync_table,
     print_test_header,
     print_test_result,
     print_test_skip,
     print_validation_error,
     print_validation_ok,
 )
-
-app = typer.Typer(
-    name="drt",
-    help="Reverse ETL for the code-first data stack.",
-    no_args_is_help=True,
-)
-
 
 # ---------------------------------------------------------------------------
 # JSON logging
@@ -924,46 +923,7 @@ def run(
         raise typer.Exit(1)
 
 
-# ---------------------------------------------------------------------------
-# list
-# ---------------------------------------------------------------------------
-
-
-@app.command(name="list")
-def list_syncs(
-    output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
-) -> None:
-    """List all sync definitions in the project.
-
-    Examples:
-      drt list
-      drt list --output json
-    """
-
-    from drt.config.parser import load_syncs
-
-    syncs = load_syncs(Path("."))
-
-    if output == "json":
-        print(
-            json.dumps(
-                {
-                    "syncs": [
-                        {
-                            "name": s.name,
-                            "destination_type": s.destination.type,
-                            "mode": s.sync.mode,
-                            "description": s.description,
-                        }
-                        for s in syncs
-                    ],
-                },
-                indent=2,
-            )
-        )
-        return
-
-    print_sync_table(syncs)
+# `drt list` lives in drt/cli/commands/list_syncs.py (#546)
 
 
 # ---------------------------------------------------------------------------
@@ -1272,17 +1232,7 @@ def _print_history(*, sync_name: str | None, limit: int, output: str) -> None:
     console.print(table)
 
 
-# ---------------------------------------------------------------------------
-# doctor
-# ---------------------------------------------------------------------------
-
-
-@app.command()
-def doctor() -> None:
-    """Check environment and report potential issues."""
-    from drt.cli.doctor import run_doctor
-
-    run_doctor()
+# `drt doctor` lives in drt/cli/commands/doctor.py (#546)
 
 
 # ---------------------------------------------------------------------------
@@ -1453,202 +1403,14 @@ def serve(
     serve_impl(host=host, port=port, token=token, project_dir=".")
 
 
-# ---------------------------------------------------------------------------
-# config (user-level settings — currently telemetry only)
-# ---------------------------------------------------------------------------
-
-config_app = typer.Typer(
-    name="config",
-    help="Manage user-level drt settings (~/.drt/).",
-    no_args_is_help=True,
-)
-app.add_typer(config_app)
-
-
-@config_app.command(name="set")
-def config_set(key: str, value: str) -> None:
-    """Set a user-level setting. Currently supports: telemetry.enabled."""
-    from drt import telemetry
-
-    if key == "telemetry.enabled":
-        normalized = value.strip().lower()
-        if normalized in {"true", "1", "yes", "on"}:
-            telemetry.set_enabled(True)
-            console.print("[green]Telemetry enabled.[/green] Thanks for helping improve drt.")
-        elif normalized in {"false", "0", "no", "off"}:
-            telemetry.set_enabled(False)
-            console.print("Telemetry disabled.")
-        else:
-            print_error(f"Invalid boolean value: {value!r}")
-            raise typer.Exit(code=2)
-        return
-    print_error(f"Unknown config key: {key!r}. Known keys: telemetry.enabled")
-    raise typer.Exit(code=2)
-
-
-@config_app.command(name="unset")
-def config_unset(key: str) -> None:
-    """Remove a user-level setting (returns to default)."""
-    from drt import telemetry
-
-    if key == "telemetry.enabled":
-        telemetry.unset_enabled()
-        console.print("Telemetry preference cleared (default: off).")
-        return
-    print_error(f"Unknown config key: {key!r}.")
-    raise typer.Exit(code=2)
-
-
-@config_app.command(name="show-telemetry")
-def config_show_telemetry() -> None:
-    """Print the exact payload that would be sent for the next sync.
-
-    Helps users verify what data leaves their machine before opting in.
-    """
-    from drt import telemetry
-
-    enabled = telemetry.is_enabled()
-    sample = telemetry.build_sync_completed_payload(
-        distinct_id="<anonymous-id>",
-        sync_mode="<sync.sync.mode>",
-        source_type="<profile.type>",
-        destination_type="<destination.type>",
-        rows_synced=0,
-        duration_seconds=0.0,
-        status="<success|partial|failed>",
-    )
-    sample.pop("api_key", None)
-    console.print(f"Telemetry enabled: [{'green' if enabled else 'yellow'}]{enabled}[/]")
-    console.print("Payload schema (api_key elided):")
-    console.print_json(json.dumps(sample))
-
-
-# ---------------------------------------------------------------------------
-# cloud (stub for future drt Cloud service)
-# ---------------------------------------------------------------------------
-
-cloud_app = typer.Typer(name="cloud", help="drt Cloud commands (stub).", no_args_is_help=True)
-app.add_typer(cloud_app)
-
-
-CLOUD_MESSAGE = (
-    "\n[bold blue]🚀 drt Cloud[/bold blue]\n"
-    "This is a stub for the future drt Cloud service.\n"
-    "[dim]Coming soon... Follow https://github.com/drt-hub/drt for updates.[/dim]\n"
-)
-
-
-@cloud_app.command(name="push")
-def cloud_push() -> None:
-    """Push local project configuration to drt Cloud (stub)."""
-    console.print(CLOUD_MESSAGE)
-
-
-@cloud_app.command(name="status")
-def cloud_status() -> None:
-    """Check drt Cloud deployment status (stub)."""
-    console.print(CLOUD_MESSAGE)
-
-
-# ---------------------------------------------------------------------------
-# docs (epic #499 — sync catalog & lineage UI)
-# ---------------------------------------------------------------------------
-
-docs_app = typer.Typer(
-    name="docs",
-    help="Generate or serve the project's sync catalog.",
-    no_args_is_help=True,
-)
-app.add_typer(docs_app)
-
-
-@docs_app.command(name="generate")
-def docs_generate(
-    output: Path = typer.Option(
-        Path("target/docs"), "--output", "-o", help="Output directory."
-    ),
-    format: str = typer.Option(
-        "html", "--format", "-f", help="Output format: html | mermaid | json."
-    ),
-    no_state: bool = typer.Option(
-        False, "--no-state", help="Exclude per-sync run state from the manifest."
-    ),
-) -> None:
-    """Generate the project's sync catalog (P1 mermaid + P2 json)."""
-    from drt.docs.builder import build_manifest
-    from drt.docs.mermaid import render_mermaid
-
-    fmt = format.lower()
-    include_state = not no_state
-
-    if fmt == "mermaid":
-        manifest = build_manifest(Path("."), include_state=include_state)
-        print(render_mermaid(manifest))
-        return
-
-    if fmt == "json":
-        manifest = build_manifest(Path("."), include_state=include_state)
-        output.mkdir(parents=True, exist_ok=True)
-        manifest_path = output / "manifest.json"
-        with manifest_path.open("w") as f:
-            json.dump(manifest.to_dict(), f, indent=2)
-        console.print(
-            f"Wrote [bold]{manifest_path}[/bold] "
-            f"({len(manifest.syncs)} sync(s), schema_version={manifest.schema_version})"
-        )
-        return
-
-    if fmt == "html":
-        raise NotImplementedError(
-            "--format html is scheduled for P3 of #499. "
-            "Use --format mermaid or --format json for now."
-        )
-
-    raise typer.BadParameter(
-        f"Unknown --format value: {format!r}. Expected: html | mermaid | json."
-    )
-
-
-@docs_app.command(name="serve")
-def docs_serve() -> None:
-    """Live Web UI for the sync catalog (scheduled for v0.8.x — epic #499)."""
-    raise NotImplementedError(
-        "`drt docs serve` is scheduled for v0.8.x (Phase 4 of epic #499). "
-        "Use `drt docs generate --format mermaid` in the meantime."
-    )
-
-
-# ---------------------------------------------------------------------------
-# mcp
-# ---------------------------------------------------------------------------
-
-mcp_app = typer.Typer(name="mcp", help="MCP server commands.", no_args_is_help=True)
-app.add_typer(mcp_app)
-
-
-@mcp_app.command(name="run")
-def mcp_run() -> None:
-    """Start the drt MCP server (stdio transport).
-
-    Requires: pip install drt-core[mcp]
-
-    Add to Claude Desktop or Cursor:
-        {
-          "mcpServers": {
-            "drt": {
-              "command": "uvx",
-              "args": ["drt-core[mcp]", "mcp", "run"]
-            }
-          }
-        }
-    """
-    try:
-        from drt.mcp.server import run as mcp_server_run
-    except ImportError:
-        print_error("MCP server requires: pip install drt-core[mcp]")
-        raise typer.Exit(1)
-
-    mcp_server_run()
+# Sub-Typer namespaces — each one lives in its own module under
+# drt/cli/commands/ (#546). Imported via drt.cli.commands package which
+# fires the registration decorators.
+#
+#   `drt config ...`  → drt/cli/commands/config.py
+#   `drt cloud ...`   → drt/cli/commands/cloud.py
+#   `drt docs ...`    → drt/cli/commands/docs.py
+#   `drt mcp ...`     → drt/cli/commands/mcp.py
 
 
 # ---------------------------------------------------------------------------
