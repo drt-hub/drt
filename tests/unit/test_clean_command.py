@@ -48,7 +48,7 @@ class TestCleanCommand:
         )
 
         with mock.patch("drt.config.parser.load_syncs_safe") as mock_load, \
-             mock.patch("drt.cli.main._get_destination") as mock_get_dest:
+             mock.patch("drt.cli.commands.clean.get_destination") as mock_get_dest:
             mock_load.return_value = mock.Mock(syncs=[mock_sync])
             mock_get_dest.return_value = fake_dest
             result = runner.invoke(app, ["clean", "--orphans"])
@@ -72,7 +72,7 @@ class TestCleanCommand:
         )
 
         with mock.patch("drt.config.parser.load_syncs_safe") as mock_load, \
-             mock.patch("drt.cli.main._get_destination") as mock_get_dest:
+             mock.patch("drt.cli.commands.clean.get_destination") as mock_get_dest:
             mock_load.return_value = mock.Mock(syncs=[mock_sync])
             mock_get_dest.return_value = fake_dest
             result = runner.invoke(app, ["clean", "--orphans", "--execute"])
@@ -108,7 +108,7 @@ class TestCleanCommand:
         )
 
         with mock.patch("drt.config.parser.load_syncs_safe") as mock_load, \
-             mock.patch("drt.cli.main._get_destination") as mock_get_dest:
+             mock.patch("drt.cli.commands.clean.get_destination") as mock_get_dest:
             mock_load.return_value = mock.Mock(syncs=[mock_sync1, mock_sync2])
             mock_get_dest.side_effect = [fake_dest, fake_dest]
             result = runner.invoke(app, ["clean", "--orphans"])
@@ -130,7 +130,7 @@ class TestCleanCommand:
         fake_dest = FakeOrphanCleanup({"public.users": []})
 
         with mock.patch("drt.config.parser.load_syncs_safe") as mock_load, \
-             mock.patch("drt.cli.main._get_destination") as mock_get_dest:
+             mock.patch("drt.cli.commands.clean.get_destination") as mock_get_dest:
             mock_load.return_value = mock.Mock(syncs=[mock_sync])
             mock_get_dest.return_value = fake_dest
             result = runner.invoke(app, ["clean", "--orphans"])
