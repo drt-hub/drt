@@ -87,7 +87,6 @@ _RESERVED_ROW_KEYS = frozenset(
         "idfv",
         "adid",
         "android_id",
-        "event_id",
     }
 )
 
