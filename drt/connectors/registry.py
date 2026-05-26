@@ -141,6 +141,7 @@ def _register_all_connectors() -> None:
         SQLServerProfile,
     )
     from drt.config.models import (
+        AmplitudeDestinationConfig,
         ClickHouseDestinationConfig,
         DiscordDestinationConfig,
         EmailSmtpDestinationConfig,
@@ -168,6 +169,7 @@ def _register_all_connectors() -> None:
     )
 
     # Import destination classes
+    from drt.destinations.amplitude import AmplitudeDestination
     from drt.destinations.clickhouse import ClickHouseDestination
     from drt.destinations.discord import DiscordDestination
     from drt.destinations.email_smtp import EmailSmtpDestination
@@ -213,6 +215,7 @@ def _register_all_connectors() -> None:
     register_destination("discord", DiscordDestinationConfig, DiscordDestination)
     register_destination("github_actions", GitHubActionsDestinationConfig, GitHubActionsDestination)
     register_destination("hubspot", HubSpotDestinationConfig, HubSpotDestination)
+    register_destination("amplitude", AmplitudeDestinationConfig, AmplitudeDestination)
     register_destination("zendesk", ZendeskDestinationConfig, ZendeskDestination)
     register_destination("jira", JiraDestinationConfig, JiraDestination)
     register_destination("sendgrid", SendGridDestinationConfig, SendGridDestination)

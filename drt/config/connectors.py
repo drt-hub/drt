@@ -23,6 +23,7 @@ SOURCES = [
 
 # Available destination connectors: (type, display_name)
 DESTINATIONS = [
+    ("amplitude", "Amplitude"),
     ("clickhouse", "ClickHouse"),
     ("discord", "Discord"),
     ("email_smtp", "Email"),

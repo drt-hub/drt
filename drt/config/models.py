@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # Auth (shared across destination types)
@@ -249,6 +249,46 @@ class ZendeskDestinationConfig(BaseModel):
 
     def describe(self) -> str:
         return f"{self.type} ({self.object})"
+
+
+class AmplitudeDestinationConfig(BaseModel):
+    type: Literal["amplitude"]
+    api_key: str | None = None
+    api_key_env: str | None = "AMPLITUDE_API_KEY"
+    region: Literal["default", "eu"] = "default"
+    endpoint: Literal["identify", "event"] = "identify"
+    user_id_field: str = "user_id"
+    device_id_field: str | None = None
+    event_type_field: str | None = None
+    event_type: str | None = None
+    time_field: str | None = None
+    insert_id_field: str | None = None
+    properties_template: str | None = None
+    batch_size: int = 1000
+    min_id_length: int | None = None
+    retry: RetryConfig | None = None
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.endpoint}, {self.region})"
+
+    @model_validator(mode="after")
+    def _check_api_key(self) -> AmplitudeDestinationConfig:
+        if not self.api_key and not self.api_key_env:
+            raise ValueError("api_key or api_key_env is required.")
+        return self
+
+    @model_validator(mode="after")
+    def _check_event_endpoint(self) -> AmplitudeDestinationConfig:
+        if self.endpoint == "event" and not self.event_type and not self.event_type_field:
+            raise ValueError(
+                "event_type or event_type_field is required when endpoint is 'event'."
+            )
+        return self
+
+    @field_validator("batch_size", mode="after")
+    @classmethod
+    def _clamp_batch_size(cls, value: int) -> int:
+        return max(1, min(value, 1000))
 
 
 class IntercomDestinationConfig(BaseModel):
@@ -647,6 +687,7 @@ DestinationConfig = Annotated[
     | GitHubActionsDestinationConfig
     | HubSpotDestinationConfig
     | ZendeskDestinationConfig
+    | AmplitudeDestinationConfig
     | SendGridDestinationConfig
     | LinearDestinationConfig
     | GoogleSheetsDestinationConfig

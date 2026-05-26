@@ -46,6 +46,7 @@ SOURCE_CONFIG_CLASSES: dict[str, type] = {
 
 
 DESTINATION_CONFIG_CLASSES: dict[str, type[BaseModel]] = {
+    "amplitude": _models.AmplitudeDestinationConfig,
     "clickhouse": _models.ClickHouseDestinationConfig,
     "discord": _models.DiscordDestinationConfig,
     "email_smtp": _models.EmailSmtpDestinationConfig,

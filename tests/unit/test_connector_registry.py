@@ -6,6 +6,7 @@ import pytest
 
 from drt.config.credentials import DuckDBProfile, PostgresProfile
 from drt.config.models import (
+    AmplitudeDestinationConfig,
     RestApiDestinationConfig,
     SlackDestinationConfig,
     SyncConfig,
@@ -48,6 +49,17 @@ class TestConnectorRegistry:
         destination = get_destination(config)
         assert destination is not None
         assert type(destination).__name__ == "ZendeskDestination"
+
+    def test_get_destination_amplitude(self):
+        """Get an Amplitude destination from registry."""
+        config = AmplitudeDestinationConfig(
+            type="amplitude",
+            api_key="test-key",
+            endpoint="identify",
+        )
+        destination = get_destination(config)
+        assert destination is not None
+        assert type(destination).__name__ == "AmplitudeDestination"
 
     def test_get_source_postgres(self):
         """Get a Postgres source from registry."""

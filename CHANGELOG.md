@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Amplitude destination**: Sync DWH rows to Amplitude Identify API (user properties) or HTTP V2 API (events). No extra dependencies. 18 unit tests.
+
 ## [0.7.5] - 2026-05-25
 
 **Theme: Production Ready follow-up #3 + Tech Foundation Hardening.** Two streams shipping together: (1) the accumulated work since v0.7.4 — REST API polish, sync catalog (#499 P1+P2), MCP test tool, OTel Phase 1 config, hardcoded secret detection, lookup ambiguity warning, orphan shadow cleanup, `drt init` "Next steps:" block — and (2) the **Tech Foundation Hardening epic** ([#538](https://github.com/drt-hub/drt/issues/538), 11 child issues, all closed) which locks in the foundations before v0.8 Cloud Destinations: CI reach (nightly + publish gate + CodeQL + pip-audit + SBOM), functional E2E coverage for the reverse-ETL paths (DuckDB harness + boundary cases), CLI/UX polish (`ErrorFormatter`, `--detailed`, `--template`), and load-bearing refactors (`SyncObserver` engine seam, destinations serializer + config base class consolidation, cli/main split Phase 1). No breaking changes — drop-in upgrade from v0.7.2 (v0.7.3 / v0.7.4 were patch-only cherry-picks).
