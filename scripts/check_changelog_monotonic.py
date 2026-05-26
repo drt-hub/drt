@@ -47,17 +47,17 @@ _TAG_RE = re.compile(r"^v(\d+\.\d+\.\d+(?:[.\-][a-z0-9]+)?)$")
 
 # Pre-existing CHANGELOG gaps known to predate this guard.
 #
-# These versions were tagged and published to PyPI but never had a
-# ``## [X.Y.Z]`` section on main's CHANGELOG.md (the gap pre-existed
-# when this check landed). Listed here so the guard remains useful for
-# catching NEW regressions while not blocking on historical omissions.
+# An entry here suppresses the check for a single version — useful when
+# a tagged release pre-dates this guard and the CHANGELOG entry was
+# never written. Empty by default; v0.5.2 / v0.5.3 (the two original
+# entries) were backfilled by a follow-up PR, so the set is now empty
+# and the guard runs in full-strict mode.
 #
-# Remove an entry the moment the corresponding section is restored —
-# the script then enforces it for future PRs automatically.
-ALLOWLISTED_MISSING_VERSIONS: frozenset[str] = frozenset({
-    "0.5.2",  # tagged 2026-04-14 and on PyPI, never had a main CHANGELOG entry
-    "0.5.3",  # tagged 2026-04-15 and on PyPI, never had a main CHANGELOG entry
-})
+# To add a new entry: include the bare ``"X.Y.Z"`` string (no ``v``)
+# with an inline comment explaining the historical context. Remove
+# the moment the corresponding section is restored — the script then
+# enforces it for future PRs automatically.
+ALLOWLISTED_MISSING_VERSIONS: frozenset[str] = frozenset()
 
 
 def parse_versions_from_changelog(content: str) -> set[str]:
