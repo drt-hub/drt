@@ -10,10 +10,10 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
-import click
 import typer
 
 if TYPE_CHECKING:
@@ -49,6 +49,14 @@ from drt.cli.output import (
     print_validation_error,
     print_validation_ok,
 )
+
+
+class LogFormat(str, Enum):
+    """Output format for application logs (separate from --output)."""
+
+    TEXT = "text"
+    JSON = "json"
+
 
 # ---------------------------------------------------------------------------
 # JSON logging
@@ -203,11 +211,7 @@ def _run_one(
 
         elapsed = round(time.monotonic() - t0, 2)
         status_str = (
-            "success"
-            if result.failed == 0
-            else "partial"
-            if result.success > 0
-            else "failed"
+            "success" if result.failed == 0 else "partial" if result.success > 0 else "failed"
         )
         rows_synced = result.success
         entry = {
@@ -357,19 +361,13 @@ def run(
     profile_name: str = typer.Option(
         None, "--profile", "-p", help="Override profile (default: drt_project.yml or DRT_PROFILE)."
     ),
-    log_format: str = typer.Option(  # type: ignore[call-overload]
-        # CI mypy on Python 3.10 / 3.11 rejects the (default, param_decl,
-        # help, click_type) call shape since 2026-05-26 — the local mypy
-        # 1.20 on Python 3.12 accepts it. The runtime call works on every
-        # supported Python; the stubs disagree across mypy versions. Track
-        # in a follow-up issue.
-        "text",
+    log_format: LogFormat = typer.Option(
+        LogFormat.TEXT,
         "--log-format",
         help=(
             "Log format: 'text' (default) or 'json' (structured JSON Lines,"
             " separate from --output json)."
         ),
-        click_type=click.Choice(["text", "json"]),
     ),
     cursor_value: str = typer.Option(
         None,
@@ -414,7 +412,7 @@ def run(
     from drt.config.parser import load_project, load_syncs
     from drt.state.manager import StateManager
 
-    if log_format == "json":
+    if log_format is LogFormat.JSON:
         _configure_json_logging()
 
     json_mode = output == "json"
@@ -523,7 +521,7 @@ def run(
         dry_run=dry_run,
         verbose=verbose,
         quiet=quiet,
-        log_json=log_format == "json",
+        log_json=log_format is LogFormat.JSON,
         cursor_value=cursor_value,
         stop_event=stop_event,
         compute_diff=diff,
@@ -556,8 +554,10 @@ def run(
 
     # Summary report
     if not json_mode and not quiet and len(syncs) > 1:
-        console.print(f"\n[bold]Summary:[/bold] {succeeded} succeeded, {failed} failed, "
-                       f"{total_duration}s total")
+        console.print(
+            f"\n[bold]Summary:[/bold] {succeeded} succeeded, {failed} failed, "
+            f"{total_duration}s total"
+        )
 
     if not json_mode and not quiet:
         _print_watermark_summary(json_results)
@@ -584,8 +584,7 @@ def run(
             force_timer["t"].cancel()
         if not json_mode and not quiet:
             console.print(
-                f"[yellow]Stopped after {succeeded + failed} sync(s). "
-                f"State persisted.[/yellow]"
+                f"[yellow]Stopped after {succeeded + failed} sync(s). State persisted.[/yellow]"
             )
         raise typer.Exit(_exit_code_for_signal(received_signal["sig"]))
 
@@ -645,7 +644,7 @@ def validate(
         all_deprecations = []
         for sync_name, sync_deprecations in result.deprecations.items():
             all_deprecations.extend(sync_deprecations)
-        
+
         results_json = []
         for s in result.syncs:
             entry = {
@@ -664,7 +663,7 @@ def validate(
             if check_connection:
                 entry["connection_test"] = _run_connection_test(s)
             results_json.append(entry)
-        
+
         for name, errs in result.errors.items():
             results_json.append(
                 {
@@ -711,6 +710,7 @@ def validate(
 
         if check_connection:
             from drt.cli.output import print_connection_test_result
+
             conn_res = _run_connection_test(sync)
             print_connection_test_result(
                 sync.name,
@@ -926,7 +926,7 @@ def test_syncs(
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without running tests."),
 ) -> None:
     """Run post-sync validation tests.
-    
+
     With --dry-run, shows what tests would be executed without actually
     connecting to the destination or running queries.
     """
@@ -994,9 +994,7 @@ def test_syncs(
             if dry_run:
                 if not json_mode:
                     console.print(f"  [dim](dry-run)[/dim] {test_name}")
-                sync_results["tests"].append(
-                    {"name": test_name, "dry_run": True}
-                )
+                sync_results["tests"].append({"name": test_name, "dry_run": True})
             else:
                 try:
                     query, check = build_test_query(test_def, table)
@@ -1016,7 +1014,7 @@ def test_syncs(
                         {"name": test_name, "passed": False, "error": str(e)}
                     )
                     had_failures = True
-        
+
         results.append(sync_results)
 
     if json_mode:
