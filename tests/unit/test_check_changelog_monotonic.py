@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 # Load the script as a module — it lives outside ``drt/`` so an import path
 # rewrite is the simplest way to make it testable.
 _SCRIPT = Path(__file__).parent.parent.parent / "scripts" / "check_changelog_monotonic.py"
@@ -97,11 +99,16 @@ def test_check_fails_when_a_tag_is_missing_from_changelog() -> None:
     assert "missing" in message.lower()
 
 
-def test_check_respects_the_allowlist() -> None:
-    """Versions in ALLOWLISTED_MISSING_VERSIONS must not trigger a failure."""
-    # 0.5.2 is allowlisted at module level (pre-existing gap)
+def test_check_respects_the_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Versions in ALLOWLISTED_MISSING_VERSIONS must not trigger a failure.
+
+    Injected via ``monkeypatch`` so the test stays valid regardless of the
+    current module-level allowlist contents (which is now empty after the
+    v0.5.2 / v0.5.3 CHANGELOG backfill).
+    """
+    monkeypatch.setattr(mod, "ALLOWLISTED_MISSING_VERSIONS", frozenset({"9.9.9"}))
     changelog = "## [0.7.5] - 2026-05-25\n"
-    tags = "v0.7.5\nv0.5.2\n"
+    tags = "v0.7.5\nv9.9.9\n"
     ok, message = mod.check(changelog, tags)
     assert ok is True, f"Allowlisted version should not fail; got: {message}"
 
@@ -138,11 +145,10 @@ def test_version_sort_key_is_numeric_not_lexical() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_allowlist_is_a_frozenset_and_documented() -> None:
-    """The allowlist must be a frozenset (immutable from the test side) and the
-    module docstring + inline comment must explain why each entry is there.
+def test_allowlist_is_a_frozenset() -> None:
+    """The allowlist must be a frozenset so the script + tests can rely on
+    immutability. Currently empty (post-v0.5.2 / v0.5.3 backfill) — the
+    guard is in full-strict mode. Any future additions should come with
+    an inline comment explaining the historical context.
     """
     assert isinstance(mod.ALLOWLISTED_MISSING_VERSIONS, frozenset)
-    # Existing pre-existing gaps that landed with this guard
-    assert "0.5.2" in mod.ALLOWLISTED_MISSING_VERSIONS
-    assert "0.5.3" in mod.ALLOWLISTED_MISSING_VERSIONS

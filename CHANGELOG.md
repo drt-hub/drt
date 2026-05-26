@@ -250,6 +250,24 @@ None. Drop-in upgrade from v0.6.x.
 
 - **`destination_lookup`** (#345): Resolve foreign key values by querying the destination database during sync. When syncing related tables, child tables can now reference parent table auto-increment IDs without triggers or denormalized schemas. Supports MySQL, PostgreSQL, and ClickHouse destinations. Configure via `lookups` field in destination YAML with `on_miss: skip | fail | null`. Guide: `docs/guides/destination-lookup.md`.
 
+## [0.5.3] - 2026-04-16
+
+**Theme: Stateless watermark persistence.** Backfilled from the GitHub Release page on 2026-05-27 — this entry was missing from `CHANGELOG.md` since the original release (#341 / #342 work landed but the release-prep step never wrote the section).
+
+### Added
+
+- **Watermark Storage for Stateless Environments** (#341): Remote watermark persistence for stateless runtimes like Cloud Run Jobs. Three storage backends — `local` (default, no deps), `gcs` (requires `drt-core[gcs]`), and `bigquery` (requires `drt-core[bigquery]`). Configured via the `sync.watermark` block, e.g. `watermark: { storage: gcs, bucket: my-drt-state, key: watermarks/trigger.json }`. Removes the need for per-run state files on ephemeral compute.
+- **`{{ cursor_value }}` template variable** (#341): Use `{{ cursor_value }}` (or `{{ watermark }}`) in model SQL for flexible cursor placement — when present in the model body, drt skips the automatic `WHERE` injection and trusts the operator to place the cursor reference correctly. Lets a single sync template handle complex windowed queries (e.g. `WHERE completed_at >= '{{ cursor_value }}' AND completed_at < CURRENT_TIMESTAMP()`).
+- **Row count reporting + skip detection** (#342): New `rows_extracted` field on `drt run --output json` entries. CLI text output shows `(no rows)` when 0 rows are extracted. Enables Dagster Pipes / CI scripts to distinguish "nothing to do" from a successful sync of zero rows.
+
+## [0.5.2] - 2026-04-16
+
+**Theme: Full-refresh replace mode.** Backfilled from the GitHub Release page on 2026-05-27 — this entry was missing from `CHANGELOG.md` since the original release.
+
+### Added
+
+- **`sync.mode: replace`** (#337): TRUNCATE → INSERT for full table refresh. Useful for junction/mapping tables and other use cases where stale rows in the destination must be removed each run. Supported destinations: PostgreSQL (TRUNCATE + INSERT in one transaction), MySQL (same), ClickHouse (TRUNCATE TABLE + INSERT). `upsert_key` is not required in replace mode; `--dry-run` warns that the table will be truncated; no cursor/state tracking is performed since each run is a full refresh. Follow-ups deliberately scoped out at the time: zero-downtime swap-strategy variant (#338, shipped in v0.7), `--dry-run` row count diff (#339, shipped in v0.6), and `sync.mode: mirror` differential delete (#340, deferred to v0.8).
+
 ## [0.5.1] - 2026-04-14
 
 ### Fixed

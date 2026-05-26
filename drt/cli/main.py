@@ -357,7 +357,12 @@ def run(
     profile_name: str = typer.Option(
         None, "--profile", "-p", help="Override profile (default: drt_project.yml or DRT_PROFILE)."
     ),
-    log_format: str = typer.Option(
+    log_format: str = typer.Option(  # type: ignore[call-overload]
+        # CI mypy on Python 3.10 / 3.11 rejects the (default, param_decl,
+        # help, click_type) call shape since 2026-05-26 — the local mypy
+        # 1.20 on Python 3.12 accepts it. The runtime call works on every
+        # supported Python; the stubs disagree across mypy versions. Track
+        # in a follow-up issue.
         "text",
         "--log-format",
         help=(
