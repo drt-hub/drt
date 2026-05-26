@@ -1,4 +1,4 @@
-<!-- i18n-sync: base=CONTRIBUTING.md, hash=d31a04a58a6f281b143c00cbf9cb8a195c0f9f7a -->
+<!-- i18n-sync: base=CONTRIBUTING.md, hash=b3bb08c1a727bed96786c4fea8b37bdbafdadb46 -->
 
 [English](./CONTRIBUTING.md) | [日本語](./CONTRIBUTING.ja.md)
 
