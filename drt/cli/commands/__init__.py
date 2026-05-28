@@ -24,5 +24,6 @@ from drt.cli.commands import (
     init,  # noqa: F401
     list_syncs,  # noqa: F401
     mcp,  # noqa: F401
+    run,  # noqa: F401 — registers `drt run`
     serve,  # noqa: F401
 )

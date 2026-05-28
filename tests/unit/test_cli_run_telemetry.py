@@ -77,9 +77,9 @@ def test_run_one_success_emits_status_success(
 
     monkeypatch.setattr("drt.engine.sync.run_sync", fake_run_sync)
     monkeypatch.setattr(
-        "drt.cli.main._get_destination", lambda _s: MagicMock(spec_set=["__call__"])
+        "drt.cli.commands.run.get_destination", lambda _s: MagicMock(spec_set=["__call__"])
     )
-    monkeypatch.setattr("drt.cli.main._get_watermark_storage", lambda _s, _d: None)
+    monkeypatch.setattr("drt.cli.commands.run.get_watermark_storage", lambda _s, _d: None)
 
     name, _entry, had_err = _run_one(sync, ctx, _fake_profile())
     assert had_err is False
@@ -104,8 +104,8 @@ def test_run_one_failed_emits_status_failed(
         raise RuntimeError("simulated failure")
 
     monkeypatch.setattr("drt.engine.sync.run_sync", boom)
-    monkeypatch.setattr("drt.cli.main._get_destination", lambda _s: MagicMock())
-    monkeypatch.setattr("drt.cli.main._get_watermark_storage", lambda _s, _d: None)
+    monkeypatch.setattr("drt.cli.commands.run.get_destination", lambda _s: MagicMock())
+    monkeypatch.setattr("drt.cli.commands.run.get_watermark_storage", lambda _s, _d: None)
 
     _name, _entry, had_err = _run_one(sync, ctx, _fake_profile())
     assert had_err is True
@@ -125,8 +125,8 @@ def test_run_one_partial_emits_status_partial(
         return SyncResult(rows_extracted=5, success=3, failed=2)
 
     monkeypatch.setattr("drt.engine.sync.run_sync", fake_run_sync)
-    monkeypatch.setattr("drt.cli.main._get_destination", lambda _s: MagicMock())
-    monkeypatch.setattr("drt.cli.main._get_watermark_storage", lambda _s, _d: None)
+    monkeypatch.setattr("drt.cli.commands.run.get_destination", lambda _s: MagicMock())
+    monkeypatch.setattr("drt.cli.commands.run.get_watermark_storage", lambda _s, _d: None)
 
     _name, _entry, had_err = _run_one(sync, ctx, _fake_profile())
     assert had_err is True
@@ -146,8 +146,8 @@ def test_run_one_dry_run_does_not_emit(
         return SyncResult(rows_extracted=3, success=3, failed=0)
 
     monkeypatch.setattr("drt.engine.sync.run_sync", fake_run_sync)
-    monkeypatch.setattr("drt.cli.main._get_destination", lambda _s: MagicMock())
-    monkeypatch.setattr("drt.cli.main._get_watermark_storage", lambda _s, _d: None)
+    monkeypatch.setattr("drt.cli.commands.run.get_destination", lambda _s: MagicMock())
+    monkeypatch.setattr("drt.cli.commands.run.get_watermark_storage", lambda _s, _d: None)
 
     _run_one(sync, ctx, _fake_profile())
     assert captured_calls == []
@@ -172,8 +172,8 @@ def _ctx(**overrides: Any) -> _RunContext:
 
 def _wire_run_sync(monkeypatch: pytest.MonkeyPatch, fn: Any) -> None:
     monkeypatch.setattr("drt.engine.sync.run_sync", fn)
-    monkeypatch.setattr("drt.cli.main._get_destination", lambda _s: MagicMock())
-    monkeypatch.setattr("drt.cli.main._get_watermark_storage", lambda _s, _d: None)
+    monkeypatch.setattr("drt.cli.commands.run.get_destination", lambda _s: MagicMock())
+    monkeypatch.setattr("drt.cli.commands.run.get_watermark_storage", lambda _s, _d: None)
 
 
 def test_run_one_log_json_success_emits_info_log(
@@ -273,6 +273,6 @@ def test_run_one_verbose_prints_row_errors(
         ),
     )
     called: list[Any] = []
-    monkeypatch.setattr("drt.cli.main.print_row_errors", lambda errs: called.append(errs))
+    monkeypatch.setattr("drt.cli.commands.run.print_row_errors", lambda errs: called.append(errs))
     _run_one(_fake_sync(), _ctx(json_mode=False, quiet=False, verbose=True), _fake_profile())
     assert called == [rows]
