@@ -36,19 +36,14 @@ def tojson_safe(value: Any) -> str:
     return json.dumps(value, default=_json_default, ensure_ascii=False)
 
 
-def _build_env() -> Environment:
-    env = Environment(loader=BaseLoader(), undefined=StrictUndefined)
-    env.filters["tojson_safe"] = tojson_safe
-    return env
-
-
 def render_template(template_str: str, row: dict[str, Any]) -> str:
     """Render a Jinja2 template string with a single row of data.
 
     Variables are accessed as {{ row.field_name }}.
     Raises ValueError on missing variables (strict mode).
     """
-    env = _build_env()
+    env = Environment(loader=BaseLoader(), undefined=StrictUndefined)
+    env.filters["tojson_safe"] = tojson_safe
     try:
         tmpl = env.from_string(template_str)
         return tmpl.render(row=row)
