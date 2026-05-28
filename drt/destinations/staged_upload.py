@@ -64,11 +64,13 @@ from drt.config.models import (
 )
 from drt.destinations.auth import AuthHandler
 from drt.destinations.base import SyncResult
+from drt.templates.renderer import tojson_safe
 
 
 def _render(template_str: str, context: dict[str, str]) -> str:
     """Render a Jinja2 template with context variables (not row-scoped)."""
     env = Environment(loader=BaseLoader(), undefined=StrictUndefined)
+    env.filters["tojson_safe"] = tojson_safe
     try:
         return env.from_string(template_str).render(**context)
     except UndefinedError as e:
