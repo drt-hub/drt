@@ -39,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.7.6] - 2026-05-28
 
-**Theme: Small follow-up.** Two additive features accumulated since v0.7.5: a new **Amplitude destination** (#574) covering both the Identify API for user properties and the HTTP V2 API for events, and a new **`tojson_safe` Jinja2 filter** (#580) that unblocks `datetime` / `Decimal` / `UUID` columns flowing through REST API `body_template` rendering without `CAST(... AS STRING)` workarounds in model SQL. No breaking changes — drop-in upgrade from v0.7.5.
+**Theme: Small follow-up.** Two additive features accumulated since v0.7.5 — a new **Amplitude destination** (#574, Identify API + HTTP V2 events API) and a new **`tojson_safe` Jinja2 filter** (#580) that unblocks `datetime` / `Decimal` / `UUID` columns flowing through REST API `body_template` rendering — plus a CLI `--log-format` typer-compatibility fix (#578), a follow-up retrofit of `ErrorFormatter` stage detection to an engine-emitted attribute (#571, supersedes the traceback-walk heuristic from #544), and Phase 2a of the `cli/main.py` split (#572, continues #565's Phase 1). No breaking changes — drop-in upgrade from v0.7.5.
 
 ### Breaking Changes
 
@@ -49,6 +49,15 @@ None. Drop-in upgrade from v0.7.5.
 
 - **Amplitude destination** (#574): Sync DWH rows to Amplitude Identify API (user properties) or HTTP V2 API (events). No extra dependencies. 18 unit tests.
 - **`tojson_safe` Jinja2 filter** ([#580](https://github.com/drt-hub/drt/issues/580), PR [#581](https://github.com/drt-hub/drt/pull/581)): drop-in replacement for `tojson` in `body_template` rendering that tolerates `datetime` / `date` / `time` (encoded as ISO 8601), `Decimal` and `UUID` (encoded as string). Registered on both `drt.templates.renderer` and `drt.destinations.staged_upload`'s local Jinja environments. The default `tojson` filter is unchanged — opt-in only, no behavioural change for existing templates. Unblocks BigQuery `TIMESTAMP` / Postgres `numeric` / `uuid` columns flowing into REST API destinations without `CAST(... AS STRING)` workarounds in model SQL. Docs: [docs/connectors/rest-api.md](docs/connectors/rest-api.md#serializing-datetime--decimal--uuid-columns).
+
+### Fixed
+
+- **`drt run --log-format` typer 0.26.1 compatibility** ([#577](https://github.com/drt-hub/drt/issues/577), PR [#578](https://github.com/drt-hub/drt/pull/578)): the option was declared with `str + click_type=click.Choice(...)`, a shape typer 0.26.1's revised stubs no longer accept (mypy fails on CI's resolved typer version while passing on the locally-pinned 0.24.1). Replaced with `LogFormat(str, Enum)` — the canonical typer pattern, version-agnostic, and removes the need for a `# type: ignore`. No user-visible behaviour change; CLI accepts the same `text` / `json` values as before.
+
+### Changed (Internal)
+
+- **`ErrorFormatter` stage detection retrofitted to engine-emitted attr** (PR [#571](https://github.com/drt-hub/drt/pull/571), follow-up to #544): replaces the traceback-walk heuristic in `drt.cli.errors.infer_stage` with a `_drt_stage` string attribute set by `engine/sync.py` at the point of failure. Removes two failure modes of the heuristic (re-raise wrapping loses attribution; engine-vs-source ambiguity when source iterators fail mid-iteration). User-visible `error_stage` semantics unchanged — same `source` / `destination` / `engine` / `state` values, just sourced from the engine directly instead of inferred.
+- **`cli/main.py` split Phase 2a** (PR [#572](https://github.com/drt-hub/drt/pull/572), continues #565's Phase 1): extracts `drt sources` / `drt destinations` / `drt clean --orphans` / `drt serve` into `drt/cli/commands/{connectors,clean,serve}.py`, with shared internals (`resolve_profile_name`, `get_source`, `get_destination`, `get_watermark_storage`) moved to `drt/cli/_helpers.py`. No CLI behaviour change; `drt/cli/main.py` shrinks accordingly. (Phase 2b extracts `drt run` itself — tracked in PR #579.)
 
 ## [0.7.5] - 2026-05-25
 

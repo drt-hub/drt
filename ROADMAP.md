@@ -58,7 +58,7 @@ Closes the **Tech Foundation Hardening epic** ([#538](https://github.com/drt-hub
 
 Released as **v0.7.6** on 2026-05-28. See [CHANGELOG.md](CHANGELOG.md#076---2026-05-28) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.7.6) for the full feature list.
 
-Two additive features accumulated since v0.7.5: a new **Amplitude destination** (#574) covering both the Identify API for user properties and the HTTP V2 API for events, and a new **`tojson_safe` Jinja2 filter** (#580 / PR #581) that unblocks `datetime` / `Decimal` / `UUID` columns flowing through REST API `body_template` rendering without `CAST(... AS STRING)` workarounds in model SQL. No breaking changes — drop-in upgrade from v0.7.5. v0.8 work continues in parallel.
+Two additive features accumulated since v0.7.5 — a new **Amplitude destination** (#574, Identify API + HTTP V2 events API) and a new **`tojson_safe` Jinja2 filter** (#580 / PR #581) that unblocks `datetime` / `Decimal` / `UUID` columns flowing through REST API `body_template` rendering — plus a CLI `--log-format` typer-compatibility fix (#578), a follow-up retrofit of `ErrorFormatter` stage detection to an engine-emitted attribute (#571, supersedes the traceback-walk heuristic from #544), and Phase 2a of the `cli/main.py` split (#572, continues #565's Phase 1). No breaking changes — drop-in upgrade from v0.7.5. v0.8 work continues in parallel.
 
 ---
 
