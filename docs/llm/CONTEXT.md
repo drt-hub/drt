@@ -14,7 +14,7 @@ dlt (load into DWH) → dbt (transform) → drt (activate out of DWH)
 - **Tagline:** "Reverse ETL for the code-first data stack"
 - **Install:** `pip install drt-core` or `uv add drt-core`
 - **Package name:** `drt-core` (PyPI) — CLI command is `drt`
-- **Current version:** v0.7.5
+- **Current version:** v0.7.6
 
 ## What drt is NOT
 
@@ -101,6 +101,8 @@ default:
 | Intercom | `intercom` | Create/update contacts via Intercom REST API v2 |
 | Email SMTP | `email_smtp` | Send emails via SMTP (plain text or HTML) |
 | Salesforce Bulk API 2.0 | `salesforce_bulk` | Upsert via Bulk API 2.0 with CSV serialization |
+| Snowflake | `snowflake` | INSERT / MERGE upsert. Requires `drt-core[snowflake]` |
+| Amplitude | `amplitude` | Identify API (user properties) or HTTP V2 API (events). No extra dependencies. |
 
 ## CLI Commands
 

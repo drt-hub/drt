@@ -37,10 +37,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-05-28
+
+**Theme: Small follow-up.** Two additive features accumulated since v0.7.5: a new **Amplitude destination** (#574) covering both the Identify API for user properties and the HTTP V2 API for events, and a new **`tojson_safe` Jinja2 filter** (#580) that unblocks `datetime` / `Decimal` / `UUID` columns flowing through REST API `body_template` rendering without `CAST(... AS STRING)` workarounds in model SQL. No breaking changes — drop-in upgrade from v0.7.5.
+
+### Breaking Changes
+
+None. Drop-in upgrade from v0.7.5.
+
 ### Added
 
-- **Amplitude destination**: Sync DWH rows to Amplitude Identify API (user properties) or HTTP V2 API (events). No extra dependencies. 18 unit tests.
-- **`tojson_safe` Jinja2 filter** ([#580](https://github.com/drt-hub/drt/issues/580)): drop-in replacement for `tojson` in `body_template` rendering that tolerates `datetime` / `date` / `time` (encoded as ISO 8601), `Decimal` and `UUID` (encoded as string). Registered on both `drt.templates.renderer` and `drt.destinations.staged_upload`'s local Jinja environments. The default `tojson` filter is unchanged — opt-in only, no behavioural change for existing templates. Unblocks BigQuery `TIMESTAMP` / Postgres `numeric` / `uuid` columns flowing into REST API destinations without `CAST(... AS STRING)` workarounds in model SQL. Docs: [docs/connectors/rest-api.md](docs/connectors/rest-api.md#serializing-datetime--decimal--uuid-columns).
+- **Amplitude destination** (#574): Sync DWH rows to Amplitude Identify API (user properties) or HTTP V2 API (events). No extra dependencies. 18 unit tests.
+- **`tojson_safe` Jinja2 filter** ([#580](https://github.com/drt-hub/drt/issues/580), PR [#581](https://github.com/drt-hub/drt/pull/581)): drop-in replacement for `tojson` in `body_template` rendering that tolerates `datetime` / `date` / `time` (encoded as ISO 8601), `Decimal` and `UUID` (encoded as string). Registered on both `drt.templates.renderer` and `drt.destinations.staged_upload`'s local Jinja environments. The default `tojson` filter is unchanged — opt-in only, no behavioural change for existing templates. Unblocks BigQuery `TIMESTAMP` / Postgres `numeric` / `uuid` columns flowing into REST API destinations without `CAST(... AS STRING)` workarounds in model SQL. Docs: [docs/connectors/rest-api.md](docs/connectors/rest-api.md#serializing-datetime--decimal--uuid-columns).
 
 ## [0.7.5] - 2026-05-25
 
