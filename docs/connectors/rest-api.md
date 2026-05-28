@@ -85,6 +85,30 @@ method: PUT
 body_template: '{"id": {{ row.id }}, "name": "{{ row.name }}"}'
 ```
 
+## Serializing datetime / Decimal / UUID columns
+
+Jinja2's built-in `tojson` filter calls `json.dumps(value)` with no `default=`, so it raises `Object of type datetime is not JSON serializable` when a row contains a `datetime`, `date`, `Decimal`, or `UUID` (common for BigQuery `TIMESTAMP`, Postgres `numeric` / `uuid`, etc.).
+
+Use the `tojson_safe` filter instead — it encodes the same types as ISO 8601 / string representations:
+
+```yaml
+body_template: |
+  {
+    "name":     {{ row.name | tojson_safe }},
+    "metadata": {{ row | tojson_safe }}
+  }
+```
+
+`tojson_safe` mirrors `tojson` for all JSON-native types (strings, numbers, bool, None, lists, dicts) and additionally handles:
+
+| Python type | Encoded as |
+|---|---|
+| `datetime`, `date`, `time` | ISO 8601 string (`obj.isoformat()`) |
+| `Decimal` | string (`str(obj)`) |
+| `UUID` | string (`str(obj)`) |
+
+Anything else still raises `TypeError`, matching `json.dumps`. The default `tojson` filter is unchanged.
+
 ## Notes
 
 - Without `body_template`, each record is sent as-is as a JSON object
