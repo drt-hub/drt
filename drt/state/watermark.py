@@ -105,12 +105,18 @@ class GCSWatermarkStorage:
 def _bq_client(project: str | None = None) -> Any:
     """Lazy BigQuery client — import only when needed."""
     try:
-        from google.cloud import bigquery  # type: ignore[import-untyped]
+        # Submodule direct import for consistency with `_gcs_client` and
+        # `_query_config` below — `from google.cloud import bigquery` would
+        # also work today (google-cloud-bigquery ships `py.typed`), but
+        # keeping all three import sites in the same shape avoids
+        # reintroducing the #561 attribute-lookup failure mode if the
+        # google package layout changes.
+        from google.cloud.bigquery import Client  # type: ignore[import-untyped]
     except ImportError as e:
         raise ImportError(
             "BigQuery watermark storage requires: pip install drt-core[bigquery]"
         ) from e
-    return bigquery.Client(project=project)
+    return Client(project=project)
 
 
 class BigQueryWatermarkStorage:
