@@ -78,7 +78,7 @@ jobs:
           packages-dir: integrations/dagster-drt/dist/
 
       - name: Attach SBOM to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dagster-drt-sbom.cdx.json
           fail_on_unmatched_files: true
