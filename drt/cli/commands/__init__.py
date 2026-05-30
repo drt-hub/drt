@@ -26,4 +26,7 @@ from drt.cli.commands import (
     mcp,  # noqa: F401
     run,  # noqa: F401 — registers `drt run`
     serve,  # noqa: F401
+    status,  # noqa: F401 — registers `drt status`
+    test,  # noqa: F401 — registers `drt test`
+    validate,  # noqa: F401 — registers `drt validate`
 )
