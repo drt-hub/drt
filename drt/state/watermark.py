@@ -54,10 +54,16 @@ class LocalWatermarkStorage:
 def _gcs_client() -> Any:
     """Lazy GCS client — import only when needed."""
     try:
-        from google.cloud import storage  # type: ignore[import-untyped]
+        # Import the submodule directly rather than the `storage` attribute
+        # of the `google.cloud` namespace: google-cloud-bigquery ships
+        # `py.typed`, which makes mypy treat `google.cloud` as a typed
+        # namespace and reject `from google.cloud import storage` with
+        # `attr-defined` if only `[bigquery]` (not `[gcs]`) is installed
+        # (#561). Importing the submodule sidesteps the attribute lookup.
+        from google.cloud.storage import Client  # type: ignore[import-untyped]
     except ImportError as e:
         raise ImportError("GCS watermark storage requires: pip install drt-core[gcs]") from e
-    return storage.Client()
+    return Client()
 
 
 class GCSWatermarkStorage:
