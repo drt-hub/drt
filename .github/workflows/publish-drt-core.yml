@@ -111,7 +111,7 @@ jobs:
         # `softprops/action-gh-release` creates the Release if missing and
         # uploads the SBOM as an asset. Only runs for tag pushes (which is
         # the only trigger for this workflow anyway).
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: drt-core-sbom.cdx.json
           fail_on_unmatched_files: true
