@@ -54,6 +54,14 @@ Closes the **Tech Foundation Hardening epic** ([#538](https://github.com/drt-hub
 
 ---
 
+## v0.7.7 — `sync.mode: mirror` across SQL destinations ✅ Shipped 2026-06-01
+
+Released as **v0.7.7** on 2026-06-01. See [CHANGELOG.md](CHANGELOG.md#077---2026-06-01) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.7.7) for the full feature list.
+
+The first user-facing addition since v0.7.6 is the **`sync.mode: mirror`** differential-delete sync mode ([#340](https://github.com/drt-hub/drt/issues/340)), shipping in four landings across **Postgres (#596)**, **MySQL (#597)**, **ClickHouse (#598)**, and **Snowflake (#599)** — all four SQL destinations now upsert source rows and then DELETE destination rows whose `upsert_key` was not observed in the source, without the TRUNCATE / re-insert overhead of `replace` mode. BigQuery follows once the contributor PR #584 lands (then v0.7.8). Also lands the **`cli/main.py` split completion** — Phase 2b PR (a) + PR (b) + tighten finish the 1706 → 164 LOC split (-90%) begun in v0.7.5 — plus a `FakeSource` + destination contract test framework (#592–#595), a CI `check-changelog-required` guard (#590), a GCS storage import mypy fix (#588), and CI install line extension that unlocked ~102 silently-skipped SQL destination tests (raised total coverage 82.68 → 85.29). No breaking changes — drop-in upgrade from v0.7.6. v0.8 Cloud Destinations work continues in parallel.
+
+---
+
 ## v0.7.6 — Small follow-up ✅ Shipped 2026-05-28
 
 Released as **v0.7.6** on 2026-05-28. See [CHANGELOG.md](CHANGELOG.md#076---2026-05-28) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.7.6) for the full feature list.
