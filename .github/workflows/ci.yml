@@ -77,6 +77,22 @@ jobs:
           git fetch --tags --quiet
           make check-changelog
 
+      - name: Check CHANGELOG entry on code-touching PR (warn-only)
+        # Surfaces a warning — does NOT block merge — when a PR touches
+        # drt/ or pyproject.toml without adding a CHANGELOG.md entry.
+        # Bypass: dependabot (auto), or include `[skip changelog]` in
+        # the PR description (CI/dep bumps, i18n marker updates).
+        # See scripts/check_changelog_required.py and CONTRIBUTING.md.
+        if: |
+          github.event_name == 'pull_request' &&
+          matrix.python-version == '3.12' &&
+          github.event.pull_request.user.login != 'dependabot[bot]' &&
+          !contains(github.event.pull_request.body, '[skip changelog]')
+        run: |
+          git fetch origin main --quiet
+          python3 scripts/check_changelog_required.py origin/main HEAD \
+            || echo "::warning::CHANGELOG.md not updated for this code-touching PR. See CONTRIBUTING.md."
+
       - name: Test (pytest)
         run: pytest --cov=drt --cov-report=xml
 
