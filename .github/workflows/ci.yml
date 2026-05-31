@@ -35,7 +35,13 @@ jobs:
         run: pip install uv
 
       - name: Install dependencies
-        run: uv pip install --system -e ".[dev,mcp,duckdb]"
+        # SQL extras (postgres / mysql / clickhouse) ensure the destination
+        # test suites actually run in CI rather than being silently skipped
+        # by their `pytest.importorskip(...)` guards (#596 / #340 follow-up).
+        # snowflake is omitted — its tests use sys.modules injection so the
+        # heavy snowflake-connector-python install would only slow CI.
+        # bigquery / gcs / parquet remain opt-in for the same reason.
+        run: uv pip install --system -e ".[dev,mcp,duckdb,postgres,mysql,clickhouse]"
 
       - name: Dependency vulnerability scan (pip-audit)
         # Pinned version for reproducibility; bump in lockstep with Dependabot.
