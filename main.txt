@@ -1,0 +1,4 @@
+# README.md 贡献者链接修正脚本
+
+## 脚本说明
+该脚本用于自动修正 README.md 文件中 Muawiya 贡献者的链接，从 YouTube 链接改为个人网站链接。
