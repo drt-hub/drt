@@ -754,7 +754,7 @@ class WatermarkConfig(BaseModel):
 
 
 class SyncOptions(BaseModel):
-    mode: Literal["full", "incremental", "upsert", "replace"] = "full"
+    mode: Literal["full", "incremental", "upsert", "replace", "mirror"] = "full"
     replace_strategy: Literal["truncate", "swap"] = "truncate"
     cursor_field: str | None = None  # required when mode=incremental
     watermark: WatermarkConfig | None = None
