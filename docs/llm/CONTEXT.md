@@ -14,7 +14,7 @@ dlt (load into DWH) → dbt (transform) → drt (activate out of DWH)
 - **Tagline:** "Reverse ETL for the code-first data stack"
 - **Install:** `pip install drt-core` or `uv add drt-core`
 - **Package name:** `drt-core` (PyPI) — CLI command is `drt`
-- **Current version:** v0.7.6
+- **Current version:** v0.7.7
 
 ## What drt is NOT
 
@@ -228,6 +228,13 @@ Slash command versions also available in `.claude/commands/` for manual installa
 - Useful for junction/mapping tables where deleted source rows must be removed from destination
 - PostgreSQL/MySQL: wrapped in a transaction for safety
 - ClickHouse: `TRUNCATE TABLE` then INSERT
+
+**Mirror mode** (#340 — v0.7.7): Upsert every source row, then DELETE destination rows whose `upsert_key` tuple was not observed in the source — application-side differential delete. Lighter than `replace` (no TRUNCATE / re-insert), heavier than `upsert` (extra DELETE pass).
+- Set `sync.mode: mirror`
+- `destination.upsert_key` is **required** (used to identify which rows to DELETE)
+- Supported destinations: Postgres (#596), MySQL (#597), ClickHouse (#598, via `ALTER TABLE ... DELETE` mutation), Snowflake (#599). BigQuery follows in v0.7.8.
+- Safety: if the source produces no batches with records, the DELETE is skipped — a transient empty source can't wipe the destination
+- Memory-bound to source key cardinality; for tables larger than a few million rows, the temp-table strategy is a planned follow-up
 
 ### Model Reference
 

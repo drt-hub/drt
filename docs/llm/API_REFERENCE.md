@@ -119,7 +119,7 @@ destination:                # required: see Destination Configs below
   # ... destination-specific fields
 
 sync:                       # optional: all fields have defaults
-  mode: full                # "full" (default) | "incremental" | "upsert" | "replace"  # "upsert" is alias for "full" when upsert_key is set; "replace" does TRUNCATE + INSERT
+  mode: full                # "full" (default) | "incremental" | "upsert" | "replace" | "mirror"  # "upsert" is alias for "full" when upsert_key is set; "replace" does TRUNCATE + INSERT; "mirror" upserts then DELETEs destination rows whose upsert_key was not in the source (#340 — Postgres / MySQL / ClickHouse / Snowflake)
   cursor_field: updated_at  # required when mode=incremental — column name for watermark
   watermark:                # optional: remote watermark storage for stateless environments
     storage: local          # "local" (default) | "gcs" | "bigquery"
