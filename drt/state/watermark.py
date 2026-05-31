@@ -54,10 +54,16 @@ class LocalWatermarkStorage:
 def _gcs_client() -> Any:
     """Lazy GCS client — import only when needed."""
     try:
-        from google.cloud import storage  # type: ignore[import-untyped]
+        # Import the submodule directly rather than the `storage` attribute
+        # of the `google.cloud` namespace: google-cloud-bigquery ships
+        # `py.typed`, which makes mypy treat `google.cloud` as a typed
+        # namespace and reject `from google.cloud import storage` with
+        # `attr-defined` if only `[bigquery]` (not `[gcs]`) is installed
+        # (#561). Importing the submodule sidesteps the attribute lookup.
+        from google.cloud.storage import Client  # type: ignore[import-untyped]
     except ImportError as e:
         raise ImportError("GCS watermark storage requires: pip install drt-core[gcs]") from e
-    return storage.Client()
+    return Client()
 
 
 class GCSWatermarkStorage:
@@ -99,12 +105,18 @@ class GCSWatermarkStorage:
 def _bq_client(project: str | None = None) -> Any:
     """Lazy BigQuery client — import only when needed."""
     try:
-        from google.cloud import bigquery  # type: ignore[import-untyped]
+        # Submodule direct import for consistency with `_gcs_client` and
+        # `_query_config` below — `from google.cloud import bigquery` would
+        # also work today (google-cloud-bigquery ships `py.typed`), but
+        # keeping all three import sites in the same shape avoids
+        # reintroducing the #561 attribute-lookup failure mode if the
+        # google package layout changes.
+        from google.cloud.bigquery import Client  # type: ignore[import-untyped]
     except ImportError as e:
         raise ImportError(
             "BigQuery watermark storage requires: pip install drt-core[bigquery]"
         ) from e
-    return bigquery.Client(project=project)
+    return Client(project=project)
 
 
 class BigQueryWatermarkStorage:
