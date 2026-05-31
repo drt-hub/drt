@@ -27,7 +27,9 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 from drt.config.models import MySQLDestinationConfig, SyncOptions
+from drt.destinations.base import SyncResult
 from drt.destinations.mysql import MySQLDestination
+from drt.destinations.row_errors import RowError
 
 
 def _options(**kwargs: Any) -> SyncOptions:
@@ -278,6 +280,50 @@ def test_mirror_raises_when_upsert_key_missing() -> None:
     with patch.object(MySQLDestination, "_connect", return_value=conn):
         with pytest.raises(ValueError, match="mirror requires destination.upsert_key"):
             dest.load([{"id": 1, "score": 100}], config, opts)
+
+
+def test_mirror_excludes_failed_record_keys_from_accumulation() -> None:
+    """Records whose batch_index appears in row_errors are skipped from ``_mirror_keys``.
+
+    Only successfully-loaded keys count as "source state" — otherwise a
+    transient row-level failure could cause the finalize DELETE to wipe a
+    row that actually exists in the source.
+    """
+    dest = MySQLDestination()
+    conn = _fake_connection()
+    config = _config()
+    opts = _options()
+
+    # Force _load_upsert to report record at batch_index=1 as failed,
+    # leaving indices 0 and 2 as successful.
+    canned_result = SyncResult(
+        success=2,
+        failed=1,
+        row_errors=[
+            RowError(
+                batch_index=1,
+                record_preview='{"id": 2}',
+                http_status=None,
+                error_message="forced for test",
+            )
+        ],
+    )
+
+    with patch.object(MySQLDestination, "_connect", return_value=conn), patch.object(
+        MySQLDestination, "_load_upsert", return_value=canned_result
+    ):
+        dest.load(
+            [
+                {"id": 1, "score": 100},
+                {"id": 2, "score": 200},
+                {"id": 3, "score": 300},
+            ],
+            config,
+            opts,
+        )
+
+    # id=2 was the failed record; mirror_keys must contain only 1 and 3.
+    assert dest._mirror_keys == [(1,), (3,)]
 
 
 def test_finalize_sync_swap_still_works_when_mode_not_mirror() -> None:
