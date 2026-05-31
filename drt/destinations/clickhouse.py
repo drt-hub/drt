@@ -12,6 +12,15 @@ Supports ``sync.mode: replace`` (TRUNCATE TABLE → INSERT) and
 ``CREATE TABLE ... AS ...``, INSERT into the shadow, then atomically
 ``EXCHANGE TABLES`` in :meth:`finalize_sync`).
 
+Also supports ``sync.mode: mirror`` (#340 Step 3): INSERT every source
+row, then in :meth:`finalize_sync` issue a single ``ALTER TABLE ...
+DELETE WHERE <upsert_key> NOT IN (<observed>)`` mutation that removes
+destination rows whose key was not in the source. The mutation runs
+with ``mutations_sync=1`` so it completes before the call returns.
+Mutations rewrite affected parts and are expensive — mirror mode is
+appropriate for small/medium reference tables, not for high-volume
+fact tables.
+
 Requires: pip install drt-core[clickhouse]
 
 Example sync YAML:
@@ -46,6 +55,12 @@ class ClickHouseDestination:
         self._replace_truncated: bool = False
         self._swap_shadow_created: bool = False
         self._swap_table: str | None = None
+        # sync.mode: mirror (#340 Step 3) — accumulates upsert_key tuples seen
+        # across batches so finalize_sync can DELETE missing rows.
+        # ``None`` means mirror mode hasn't engaged yet (no batch with
+        # records); finalize_sync treats that as "skip DELETE" — safety
+        # against deleting everything when the source produced no data.
+        self._mirror_keys: list[tuple[Any, ...]] | None = None
 
     def load(
         self,
@@ -79,6 +94,15 @@ class ClickHouseDestination:
                     client.command(f"TRUNCATE TABLE {config.table}")
                     self._replace_truncated = True
 
+                # sync.mode: mirror (#340 Step 3) — validate upsert_key
+                # before any INSERT so a misconfigured sync fails fast
+                # rather than after partially populating the table.
+                if sync_options.mode == "mirror" and not config.upsert_key:
+                    raise ValueError(
+                        "sync.mode: mirror requires destination.upsert_key "
+                        "(needed to identify which rows to DELETE)."
+                    )
+
                 # TODO: batch insert with fallback to row-by-row on error
                 for i, record in enumerate(records):
                     try:
@@ -98,6 +122,24 @@ class ClickHouseDestination:
                         if sync_options.on_error == "fail":
                             return result
                         continue
+
+                # sync.mode: mirror (#340 Step 3) — accumulate upsert_key
+                # tuples for the finalize_sync DELETE pass. Only keys from
+                # successfully-loaded records are tracked (failed records
+                # don't count as "source state").
+                if sync_options.mode == "mirror":
+                    assert config.upsert_key  # guarded above
+                    if self._mirror_keys is None:
+                        self._mirror_keys = []
+                    failed_indices = {
+                        re.batch_index for re in result.row_errors
+                    }
+                    for idx, record in enumerate(records):
+                        if idx in failed_indices:
+                            continue
+                        self._mirror_keys.append(
+                            tuple(record.get(k) for k in config.upsert_key)
+                        )
         finally:
             client.close()
 
@@ -161,12 +203,24 @@ class ClickHouseDestination:
         config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult | None:
-        """Atomic EXCHANGE: shadow contents become live; old data dropped.
+        """End-of-sync hook: EXCHANGE for swap-replace, ALTER DELETE for mirror.
 
-        After ``EXCHANGE TABLES original AND shadow``, the shadow table now
-        holds the OLD data, so we drop it. ``EXCHANGE TABLES`` is atomic in
-        ClickHouse 21.8+.
+        - ``mode=replace, replace_strategy=swap``: atomic ``EXCHANGE TABLES``
+          (existing behaviour). After the exchange the shadow table holds the
+          OLD data, so we drop it. ``EXCHANGE TABLES`` is atomic in
+          ClickHouse 21.8+.
+        - ``mode=mirror`` (#340 Step 3): ``ALTER TABLE ... DELETE WHERE
+          <upsert_key> NOT IN (<observed>)`` mutation that removes
+          destination rows whose key was not in the source. Skipped if the
+          source produced no batches with records — treats "no observation"
+          as "don't delete anything" for safety.
         """
+        if sync_options.mode == "mirror":
+            result = self._finalize_mirror(config, sync_options)
+            # Reset mirror state regardless of result so a re-run starts fresh.
+            self._mirror_keys = None
+            return result
+
         if not self._swap_shadow_created or self._swap_table is None:
             return None
 
@@ -185,6 +239,87 @@ class ClickHouseDestination:
             self._swap_table = None
 
         return SyncResult()
+
+    def _finalize_mirror(
+        self,
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult | None:
+        """``sync.mode: mirror`` end-of-sync DELETE pass (#340 Step 3).
+
+        Deletes destination rows whose ``upsert_key`` tuple is not in the
+        set of keys observed across all batches via an ``ALTER TABLE ...
+        DELETE`` mutation. Runs with ``mutations_sync=1`` so the call
+        blocks until the mutation finishes.
+
+        Uses clickhouse_connect's native ``{name:Type}`` parameter
+        substitution with ``Array(String)`` (single column) or
+        ``Array(Tuple(String, ...))`` (composite). Both column references
+        and parameter values are coerced with ``toString()`` so the
+        comparison works regardless of the source column type — at the
+        cost of skipping any index on the upsert_key column. Mirror mode
+        is intended for small/medium reference tables where this is
+        acceptable; the temp-table strategy (#340 follow-up) targets the
+        high-cardinality case.
+
+        Returns ``None`` when ``_mirror_keys`` is empty or ``None`` —
+        treats "no batch with records was ever observed" as a signal to
+        skip the DELETE entirely, so a transient empty source doesn't
+        wipe the destination.
+        """
+        assert isinstance(config, ClickHouseDestinationConfig)
+        if not self._mirror_keys:
+            return None
+
+        upsert_cols = config.upsert_key
+        assert upsert_cols  # guarded in load()
+
+        # Dedupe to keep the IN list compact when batches overlap.
+        keys = list({tuple(k) for k in self._mirror_keys})
+        table_q = self._quote_ident(config.table)
+
+        client = self._connect(config)
+        try:
+            if len(upsert_cols) == 1:
+                col_q = f"`{upsert_cols[0]}`"
+                sql = (
+                    f"ALTER TABLE {table_q} DELETE "
+                    f"WHERE toString({col_q}) NOT IN {{keys:Array(String)}}"
+                )
+                params: dict[str, Any] = {
+                    "keys": [str(k[0]) for k in keys]
+                }
+            else:
+                col_tuple = (
+                    "(" + ", ".join(f"toString(`{c}`)" for c in upsert_cols) + ")"
+                )
+                tuple_type = "Tuple(" + ", ".join(["String"] * len(upsert_cols)) + ")"
+                sql = (
+                    f"ALTER TABLE {table_q} DELETE "
+                    f"WHERE {col_tuple} NOT IN {{keys:Array({tuple_type})}}"
+                )
+                params = {
+                    "keys": [tuple(str(v) for v in k) for k in keys]
+                }
+            client.command(sql, parameters=params, settings={"mutations_sync": 1})
+        finally:
+            client.close()
+
+        # SyncResult has no dedicated `deleted` field; future work tracks
+        # this separately. Returning a bare SyncResult signals "finalize
+        # ran successfully" to the engine without inflating success/failed.
+        return SyncResult()
+
+    @staticmethod
+    def _quote_ident(table: str) -> str:
+        """Backtick-quote a (possibly database-qualified) identifier.
+
+        ``mydb.scores`` -> ``\\`mydb\\`.\\`scores\\```
+        ``scores``      -> ``\\`scores\\```
+        """
+        if "." in table:
+            return "`" + "`.`".join(table.split(".")) + "`"
+        return f"`{table}`"
 
     def get_row_count(self, config: DestinationConfig) -> int:
         """Get the current row count from the destination table.
