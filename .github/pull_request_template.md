@@ -10,4 +10,4 @@
 
 - [ ] Tests pass (`make test`)
 - [ ] Linter passes (`make lint`)
-- [ ] Updated `CHANGELOG.md` (if user-facing change)
+- [ ] Updated `CHANGELOG.md` under `[Unreleased]` (user-facing change, internal refactor, or bug fix). Skip only for pure CI / dep bumps or i18n marker updates — add `[skip changelog]` to this description if so.

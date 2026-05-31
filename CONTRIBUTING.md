@@ -129,7 +129,7 @@ This is to keep momentum, not to gatekeep. If you're unsure, just ask in the iss
 
 - [ ] Tests pass (`make test`)
 - [ ] Linter passes (`make lint`)
-- [ ] `CHANGELOG.md` updated (if user-facing change)
+- [ ] `CHANGELOG.md` updated under `[Unreleased]` for any change that isn't a pure CI / dep bump or i18n marker — that includes user-facing changes, internal refactors, and bug fixes. `make check-changelog-required` surfaces this as a CI warning. To bypass (CI/dep bump, i18n marker only), add `[skip changelog]` to the PR description.
 - [ ] New connectors include tests under `tests/` and an example under `examples/`
 - [ ] If breaking change: documented in `CHANGELOG.md` using the format required by `VERSIONING.md`, and updated `VERSIONING.md` if needed
 

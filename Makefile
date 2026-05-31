@@ -58,6 +58,9 @@ check-i18n:  ## Check if translated *.{lang}.md files are in sync with English b
 check-changelog:  ## Verify every drt-core v* tag has a ## [X.Y.Z] section in CHANGELOG.md
 	@python3 scripts/check_changelog_monotonic.py
 
+check-changelog-required:  ## Warn if drt/ or pyproject.toml changed without a CHANGELOG.md update
+	@python3 scripts/check_changelog_required.py origin/main HEAD
+
 sync-version:  ## Propagate version from pyproject.toml to all plugin JSONs
 	@python3 scripts/sync-version.py
 
