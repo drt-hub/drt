@@ -1,7 +1,10 @@
-"""MySQL destination — upsert or replace rows into a MySQL table.
+"""MySQL destination — upsert / replace / mirror rows into a MySQL table.
 
 Uses INSERT ... ON DUPLICATE KEY UPDATE for idempotent writes.
-Supports ``sync.mode: replace`` (TRUNCATE → INSERT within a single transaction).
+Supports ``sync.mode: replace`` (TRUNCATE → INSERT within a single transaction)
+and ``sync.mode: mirror`` (upsert all source rows, then DELETE destination
+rows whose ``upsert_key`` was not observed across the run — application-side
+diff strategy, see #340).
 Requires: pip install drt-core[mysql]
 
 Example sync YAML:
@@ -78,6 +81,12 @@ class MySQLDestination:
         self._replace_truncated: bool = False
         self._swap_shadow_created: bool = False
         self._swap_table: str | None = None
+        # sync.mode: mirror (#340 Step 2) — accumulates upsert_key tuples seen
+        # across batches so finalize_sync can DELETE missing rows.
+        # ``None`` means mirror mode hasn't engaged yet (no batch with
+        # records); finalize_sync treats that as "skip DELETE" — safety
+        # against deleting everything when the source produced no data.
+        self._mirror_keys: list[tuple[Any, ...]] | None = None
 
     def load(
         self,
@@ -126,6 +135,27 @@ class MySQLDestination:
                     config,
                     sync_options,
                 )
+                # sync.mode: mirror (#340 Step 2) — accumulate upsert_key
+                # tuples for the finalize_sync DELETE pass. Only keys from
+                # successfully-loaded records are tracked (failed records
+                # don't count as "source state").
+                if sync_options.mode == "mirror":
+                    if not config.upsert_key:
+                        raise ValueError(
+                            "sync.mode: mirror requires destination.upsert_key "
+                            "(needed to identify which rows to DELETE)."
+                        )
+                    if self._mirror_keys is None:
+                        self._mirror_keys = []
+                    failed_indices = {
+                        re.batch_index for re in result.row_errors
+                    }
+                    for idx, record in enumerate(records):
+                        if idx in failed_indices:
+                            continue
+                        self._mirror_keys.append(
+                            tuple(record.get(k) for k in config.upsert_key)
+                        )
         finally:
             conn.close()
 
@@ -278,7 +308,21 @@ class MySQLDestination:
         config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult | None:
-        """Atomic single-statement RENAME: original->old, shadow->original; drop old."""
+        """End-of-sync hook: swap-finalize for replace, DELETE-missing for mirror.
+
+        - ``mode=replace, replace_strategy=swap``: atomic multi-table RENAME of
+          the shadow table over the original (existing behaviour).
+        - ``mode=mirror`` (#340 Step 2): DELETE rows from the destination whose
+          ``upsert_key`` tuple is not in the set seen across all batches.
+          Skipped if the source produced no batches with records —
+          treats "no observation" as "don't delete anything" for safety.
+        """
+        if sync_options.mode == "mirror":
+            result = self._finalize_mirror(config, sync_options)
+            # Reset mirror state regardless of result so a re-run starts fresh.
+            self._mirror_keys = None
+            return result
+
         if not self._swap_shadow_created or self._swap_table is None:
             return None
 
@@ -306,6 +350,69 @@ class MySQLDestination:
             self._swap_shadow_created = False
             self._swap_table = None
 
+        return SyncResult()
+
+    def _finalize_mirror(
+        self,
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult | None:
+        """``sync.mode: mirror`` end-of-sync DELETE pass (#340 Step 2).
+
+        Deletes destination rows whose ``upsert_key`` tuple is not in the
+        set of keys observed across all batches.
+
+        pymysql does not auto-expand tuple-of-tuples like psycopg2 does,
+        so we build the ``NOT IN`` placeholder list explicitly:
+
+        - single-column form: ``DELETE FROM `t` WHERE `c` NOT IN (%s, %s, ...)``
+        - composite form:     ``DELETE FROM `t` WHERE (`c1`,`c2`) NOT IN ((%s,%s),(%s,%s),...)``
+
+        Memory-bound to the source key cardinality; for tables larger than
+        a few million keys, a temp-table strategy (#340 follow-up) will be
+        more appropriate.
+
+        Returns ``None`` when ``_mirror_keys`` is empty or ``None`` —
+        treats "no batch with records was ever observed" as a signal to
+        skip the DELETE entirely, so a transient empty source doesn't
+        wipe the destination.
+        """
+        assert isinstance(config, MySQLDestinationConfig)
+        if not self._mirror_keys:
+            return None
+
+        # Dedupe to keep the IN list compact when batches overlap.
+        keys = list({tuple(k) for k in self._mirror_keys})
+        upsert_cols = config.upsert_key
+        table_q = self._quote_ident(config.table)
+
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            if len(upsert_cols) == 1:
+                placeholders = ", ".join(["%s"] * len(keys))
+                col_q = f"`{upsert_cols[0]}`"
+                stmt = (
+                    f"DELETE FROM {table_q} WHERE {col_q} NOT IN ({placeholders})"
+                )
+                params: list[Any] = [k[0] for k in keys]
+            else:
+                col_tuple = "(" + ", ".join(f"`{c}`" for c in upsert_cols) + ")"
+                row_placeholder = "(" + ", ".join(["%s"] * len(upsert_cols)) + ")"
+                placeholders = ", ".join([row_placeholder] * len(keys))
+                stmt = (
+                    f"DELETE FROM {table_q} WHERE {col_tuple} "
+                    f"NOT IN ({placeholders})"
+                )
+                params = [v for key in keys for v in key]
+            cur.execute(stmt, params)
+            conn.commit()
+        finally:
+            conn.close()
+
+        # SyncResult has no dedicated `deleted` field; future work tracks
+        # this separately. Returning a bare SyncResult signals "finalize
+        # ran successfully" to the engine without inflating success/failed.
         return SyncResult()
 
     @staticmethod
