@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -29,16 +28,15 @@ from drt.cli.output import (
 
 
 def _resolve_profile_name(cli_flag: str | None, project_profile: str) -> str:
-    """Resolve which profile to use.
+    """Back-compat shim — see ``drt.cli._helpers.resolve_profile_name``.
 
-    Precedence: --profile flag > DRT_PROFILE env var > drt_project.yml
+    Kept here because ``drt/integrations/_runner.py`` and
+    ``tests/unit/test_cli_profile_override.py`` still import from this
+    module; new callers should hit ``_helpers`` directly.
     """
-    if cli_flag:
-        return cli_flag
-    env = os.environ.get("DRT_PROFILE")
-    if env:
-        return env
-    return project_profile
+    from drt.cli._helpers import resolve_profile_name
+
+    return resolve_profile_name(cli_flag, project_profile)
 
 
 def version_callback(value: bool) -> None:
