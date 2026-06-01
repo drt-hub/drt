@@ -1,0 +1,14 @@
+# Copy to ~/.drt/profiles.yml and fill in your values.
+#
+# This example syncs FROM the HR data warehouse TO the operational
+# Postgres instance, so the profile here is the HR-side connection.
+# Destination credentials are read at sync time from the OPS_PG_*
+# environment variables (see syncs/mirror_active_employees.yml).
+
+hr_warehouse:
+  type: postgres
+  host: warehouse.internal
+  port: 5432
+  dbname: hr
+  user: drt_reader
+  password_env: HR_PG_PASSWORD
