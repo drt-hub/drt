@@ -291,6 +291,73 @@ class AmplitudeDestinationConfig(BaseModel):
         return max(1, min(value, 1000))
 
 
+class MixpanelDestinationConfig(BaseModel):
+    type: Literal["mixpanel"]
+    # endpoint selects which Mixpanel API to target:
+    #   people_set    -> /engage#profile-set (auth: project token, per-record)
+    #   import_events -> /import             (auth: service account + project_id)
+    endpoint: Literal["people_set", "import_events"] = "people_set"
+    region: Literal["default", "eu"] = "default"
+
+    # people_set auth — project token
+    project_token: str | None = None
+    project_token_env: str | None = "MIXPANEL_TOKEN"
+
+    # import_events auth — service account + numeric project id
+    project_id: str | None = None
+    service_account_username: str | None = None
+    service_account_username_env: str | None = "MIXPANEL_SA_USERNAME"
+    service_account_secret: str | None = None
+    service_account_secret_env: str | None = "MIXPANEL_SA_SECRET"
+
+    # field mapping
+    distinct_id_field: str = "distinct_id"
+    event_name_field: str | None = None  # import_events: per-row event name
+    event_name: str | None = None  # import_events: constant event name
+    time_field: str | None = None  # import_events: row field for event time
+    insert_id_field: str | None = None  # import_events: dedup id (else derived)
+    properties_template: str | None = None
+
+    batch_size: int = 2000
+    retry: RetryConfig | None = None
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.endpoint}, {self.region})"
+
+    @model_validator(mode="after")
+    def _check_auth(self) -> MixpanelDestinationConfig:
+        if self.endpoint == "people_set":
+            if not self.project_token and not self.project_token_env:
+                raise ValueError(
+                    "project_token or project_token_env is required for endpoint 'people_set'."
+                )
+        else:  # import_events
+            if not self.project_id:
+                raise ValueError("project_id is required for endpoint 'import_events'.")
+            has_user = self.service_account_username or self.service_account_username_env
+            has_secret = self.service_account_secret or self.service_account_secret_env
+            if not has_user or not has_secret:
+                raise ValueError(
+                    "service account credentials (username + secret, or their *_env "
+                    "vars) are required for endpoint 'import_events'."
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _check_event_name(self) -> MixpanelDestinationConfig:
+        if self.endpoint == "import_events" and not self.event_name and not self.event_name_field:
+            raise ValueError(
+                "event_name or event_name_field is required when endpoint is 'import_events'."
+            )
+        return self
+
+    @field_validator("batch_size", mode="after")
+    @classmethod
+    def _clamp_batch_size(cls, value: int) -> int:
+        # Mixpanel caps both /engage and /import at 2000 records per request.
+        return max(1, min(value, 2000))
+
+
 class IntercomDestinationConfig(BaseModel):
     type: Literal["intercom"]
 
@@ -688,6 +755,7 @@ DestinationConfig = Annotated[
     | HubSpotDestinationConfig
     | ZendeskDestinationConfig
     | AmplitudeDestinationConfig
+    | MixpanelDestinationConfig
     | SendGridDestinationConfig
     | LinearDestinationConfig
     | GoogleSheetsDestinationConfig
