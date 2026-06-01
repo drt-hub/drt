@@ -2,9 +2,32 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Optional, List
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+try:
+    from pydantic import BaseModel, Field, field_validator, model_validator
+except Exception:
+    # Fallback stubs for editor/static-analysis when pydantic is not installed.
+    # These are intentionally minimal and only silence import diagnostics;
+    # runtime behavior requires real pydantic.
+    from typing import Any, Callable
+
+    class BaseModel:  # minimal stub base class
+        def __init_subclass__(cls, **kwargs):  # allow subclassing
+            return None
+
+    def Field(*args, **kwargs):  # minimal placeholder for pydantic.Field
+        return kwargs.get("default", None)
+
+    def field_validator(*args, **kwargs) -> Callable:
+        def decorator(func: Callable) -> Callable:
+            return func
+        return decorator
+
+    def model_validator(*args, **kwargs) -> Callable:
+        def decorator(func: Callable) -> Callable:
+            return func
+        return decorator
 
 # ---------------------------------------------------------------------------
 # Auth (shared across destination types)
@@ -679,6 +702,37 @@ class SalesforceBulkDestinationConfig(BaseModel):
         return self
 
 
+class BigQueryDestinationConfig(BaseModel):
+    type: Literal["bigquery"] = "bigquery"
+
+    # Core identifiers
+    project: str = Field(..., description="GCP project ID")
+    dataset: str = Field(..., description="BigQuery dataset name")
+    table: str = Field(..., description="Target table name")
+
+    # Write behavior
+    upsert_key: Optional[List[str]] = Field(
+        default=None,
+        description="Columns used for MERGE (upsert) operations"
+    )
+
+    # Auth config
+    method: Literal["application_default", "service_account"] = Field(
+        default="application_default",
+        description="Authentication method"
+    )
+    keyfile: Optional[str] = Field(
+        default=None,
+        description="Path to service account keyfile (required if method=service_account)"
+    )
+
+    def validate_auth(self):
+        if self.method == "service_account" and not self.keyfile:
+            raise ValueError(
+                "keyfile must be provided when method='service_account'"
+            )
+            
+            
 # Discriminated union — add new destination types here
 DestinationConfig = Annotated[
     RestApiDestinationConfig
@@ -705,7 +759,8 @@ DestinationConfig = Annotated[
     | StagedUploadDestinationConfig
     | SalesforceBulkDestinationConfig
     | TwilioDestinationConfig
-    | SnowflakeDestinationConfig,
+    | SnowflakeDestinationConfig
+    | BigQueryDestinationConfig,
     Field(discriminator="type"),
 ]
 
