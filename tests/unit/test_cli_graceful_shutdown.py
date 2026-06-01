@@ -75,12 +75,8 @@ def _patch_runtime(monkeypatch: pytest.MonkeyPatch, fake_run_sync: Any) -> None:
 
     monkeypatch.setattr(sync_module, "run_sync", fake_run_sync, raising=False)
     monkeypatch.setattr(creds, "load_profile", fake_load_profile, raising=False)
-    monkeypatch.setattr(
-        cli_main, "_get_source", lambda *_a, **_kw: object(), raising=False
-    )
-    monkeypatch.setattr(
-        cli_main, "_get_destination", lambda *_a, **_kw: object(), raising=False
-    )
+    monkeypatch.setattr(cli_main, "_get_source", lambda *_a, **_kw: object(), raising=False)
+    monkeypatch.setattr(cli_main, "_get_destination", lambda *_a, **_kw: object(), raising=False)
 
 
 # ---------------------------------------------------------------------------

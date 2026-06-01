@@ -202,12 +202,26 @@ class TestPayload:
             status="success",
         )
         forbidden = {
-            "sync_name", "name", "query", "sql",
-            "url", "endpoint", "destination_url",
-            "credentials", "password", "token", "api_secret",
-            "hostname", "username", "ip",
-            "path", "project_path", "project_dir",
-            "table", "column", "schema",
+            "sync_name",
+            "name",
+            "query",
+            "sql",
+            "url",
+            "endpoint",
+            "destination_url",
+            "credentials",
+            "password",
+            "token",
+            "api_secret",
+            "hostname",
+            "username",
+            "ip",
+            "path",
+            "project_path",
+            "project_dir",
+            "table",
+            "column",
+            "schema",
         }
         all_keys = set(payload.keys()) | set(payload.get("properties", {}).keys())
         leaks = all_keys & forbidden

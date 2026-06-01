@@ -63,10 +63,7 @@ class ClickHouseDestination:
         try:
             columns = list(records[0].keys())
 
-            if (
-                sync_options.mode == "replace"
-                and sync_options.replace_strategy == "swap"
-            ):
+            if sync_options.mode == "replace" and sync_options.replace_strategy == "swap":
                 result = self._load_replace_swap(
                     client,
                     records,
@@ -203,9 +200,7 @@ class ClickHouseDestination:
         try:
             # Use backtick quoting for ClickHouse table identifiers
             escaped_table = (
-                ".`".join(config.table.split("."))
-                if "." in config.table
-                else config.table
+                ".`".join(config.table.split(".")) if "." in config.table else config.table
             )
             result = client.query(f"SELECT COUNT(*) FROM `{escaped_table}`")
             # clickhouse_connect returns a QueryResult object

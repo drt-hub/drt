@@ -357,8 +357,7 @@ def print_diff_table(diff: object, sync_name: str) -> None:
         n_total = diff.total_source_rows
         more = f" ({n_total - n_shown} more not shown)" if n_total > n_shown else ""
         console.print(
-            f"  [bold]→ {n_total} record(s) would be sent.[/bold] "
-            f"Sample (first {n_shown}{more}):"
+            f"  [bold]→ {n_total} record(s) would be sent.[/bold] Sample (first {n_shown}{more}):"
         )
         for row in diff.sample:
             console.print(f"    {_format_row_keys(row)}")
@@ -407,8 +406,7 @@ def print_diff_table(diff: object, sync_name: str) -> None:
 
     if diff.truncated:
         console.print(
-            "\n  [dim]…some records omitted (limit reached). "
-            "Use --diff-limit N to see more.[/dim]"
+            "\n  [dim]…some records omitted (limit reached). Use --diff-limit N to see more.[/dim]"
         )
 
 

@@ -67,7 +67,7 @@ class TestHistoryAppendAndRead:
             mgr.append(
                 _entry(
                     sync_name="s",
-                    started_at=f"2026-05-{i+1:02d}T00:00:00+00:00",
+                    started_at=f"2026-05-{i + 1:02d}T00:00:00+00:00",
                 )
             )
         assert len(mgr.read(sync_name="s", limit=3)) == 3
@@ -210,8 +210,11 @@ class TestEngineHistoryIntegration:
                 "sync": {"batch_size": 10, "on_error": "skip"},
             }
         )
-        return FakeSource(), FakeDestination(), sync, BigQueryProfile(
-            type="bigquery", project="p", dataset="d"
+        return (
+            FakeSource(),
+            FakeDestination(),
+            sync,
+            BigQueryProfile(type="bigquery", project="p", dataset="d"),
         )
 
     def test_history_entry_appended_after_successful_run(self, tmp_path: Path) -> None:
@@ -238,9 +241,7 @@ class TestEngineHistoryIntegration:
 
         assert mgr.read(sync_name="history_demo") == []
 
-    def test_history_records_failure_status_when_destination_raises(
-        self, tmp_path: Path
-    ) -> None:
+    def test_history_records_failure_status_when_destination_raises(self, tmp_path: Path) -> None:
         import pytest
 
         from drt.config.credentials import BigQueryProfile
@@ -276,8 +277,9 @@ class TestEngineHistoryIntegration:
         mgr = HistoryManager(tmp_path)
 
         with pytest.raises(RuntimeError, match="upstream down"):
-            run_sync(sync, FakeSource(), ExplodingDestination(), profile, tmp_path,
-                     history_manager=mgr)
+            run_sync(
+                sync, FakeSource(), ExplodingDestination(), profile, tmp_path, history_manager=mgr
+            )
 
         entries = mgr.read(sync_name="explode_sync")
         assert len(entries) == 1

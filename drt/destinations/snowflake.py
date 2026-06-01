@@ -73,9 +73,7 @@ class SnowflakeDestination:
                     )
 
                     update_cols = [c for c in columns if c not in config.upsert_key]
-                    update_clause = ", ".join(
-                        [f"{c} = source.{c}" for c in update_cols]
-                    )
+                    update_clause = ", ".join([f"{c} = source.{c}" for c in update_cols])
 
                     insert_cols = col_list
                     insert_vals = ", ".join([f"source.{c}" for c in columns])
@@ -107,9 +105,7 @@ class SnowflakeDestination:
                                 raise
 
                     matched_clause = (
-                        f"WHEN MATCHED THEN UPDATE SET {update_clause}"
-                        if update_cols
-                        else ""
+                        f"WHEN MATCHED THEN UPDATE SET {update_clause}" if update_cols else ""
                     )
 
                     merge_sql = f"""
@@ -167,4 +163,4 @@ class SnowflakeDestination:
             warehouse=config.warehouse,
             database=config.database,
             schema=config.schema_,
-        )
+        )

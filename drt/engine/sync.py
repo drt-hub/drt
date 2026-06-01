@@ -434,9 +434,7 @@ def _run_sync_body(
                 total_result.success += finalize_result.success
                 total_result.failed += finalize_result.failed
                 total_result.errors.extend(finalize_result.errors)
-                total_result.row_errors.extend(
-                    getattr(finalize_result, "row_errors", [])
-                )
+                total_result.row_errors.extend(getattr(finalize_result, "row_errors", []))
 
     # Compute the record-level diff after extraction completes (#413).
     # Only meaningful when dry_run is set; the engine collected all
@@ -455,8 +453,6 @@ def _run_sync_body(
     # State + watermark persistence is the observer's responsibility (#548).
     # The CLI composes ``LoggingObserver`` + ``StatePersistingObserver`` so
     # default user-facing behaviour is unchanged.
-    observer.on_sync_completed(
-        sync.name, total_result, started_at, new_cursor_value, cursor_field
-    )
+    observer.on_sync_completed(sync.name, total_result, started_at, new_cursor_value, cursor_field)
 
     return total_result

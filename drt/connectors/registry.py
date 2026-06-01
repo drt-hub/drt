@@ -67,8 +67,7 @@ def register_source(
     """
     if type_name in _source_registry:
         raise ValueError(
-            f"Source type '{type_name}' already registered. "
-            f"Each connector type must be unique."
+            f"Source type '{type_name}' already registered. Each connector type must be unique."
         )
     _source_registry[type_name] = (profile_class, source_class)
 
@@ -92,8 +91,7 @@ def get_destination(config: DestinationConfig) -> Destination:
     # If not found, provide helpful error message
     available = sorted(_destination_registry.keys())
     raise ValueError(
-        f"Unknown destination type: '{config.type}'. "
-        f"Available destinations: {', '.join(available)}"
+        f"Unknown destination type: '{config.type}'. Available destinations: {', '.join(available)}"
     )
 
 
@@ -116,8 +114,7 @@ def get_source(profile: ProfileConfig) -> Source:
     # If not found, provide helpful error message
     available = sorted(_source_registry.keys())
     raise ValueError(
-        f"Unknown source type: '{profile.type}'. "
-        f"Available sources: {', '.join(available)}"
+        f"Unknown source type: '{profile.type}'. Available sources: {', '.join(available)}"
     )
 
 

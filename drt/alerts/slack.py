@@ -1,4 +1,5 @@
 """Slack incoming-webhook alert sender."""
+
 from __future__ import annotations
 
 import json
@@ -27,9 +28,7 @@ def send_slack_alert(cfg: SlackAlertConfig, context: dict[str, Any]) -> None:
         return
     text = cfg.message.format(**context)
     payload = json.dumps({"text": text}).encode()
-    req = urllib.request.Request(
-        url, data=payload, headers={"Content-Type": "application/json"}
-    )
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
     try:
         urllib.request.urlopen(req, timeout=10).close()
     except Exception as exc:  # noqa: BLE001 — best-effort

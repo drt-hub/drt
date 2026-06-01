@@ -130,9 +130,7 @@ def _walk_dataclass_fields(cls: type) -> list[_FieldInfo]:
     for f in dataclasses.fields(cls):
         if f.name == "type":
             continue  # discriminator, surfaced separately
-        is_required = (
-            f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING
-        )
+        is_required = f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING
         default_repr = _repr_dataclass_default(f)
         out.append(
             _FieldInfo(

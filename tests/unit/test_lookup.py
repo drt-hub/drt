@@ -303,9 +303,7 @@ class TestBuildLookupMapCheckOnly:
         config = MySQLDestinationConfig(
             type="mysql", host="h", dbname="d", table="t", upsert_key=["id"]
         )
-        lk = LookupConfig(
-            table="users", match={"user_id": "user_id"}, check_only=True
-        )
+        lk = LookupConfig(table="users", match={"user_id": "user_id"}, check_only=True)
 
         build_lookup_map(config, lk)
 
@@ -319,9 +317,7 @@ class TestBuildLookupMapCheckOnly:
         config = MySQLDestinationConfig(
             type="mysql", host="h", dbname="d", table="t", upsert_key=["id"]
         )
-        lk = LookupConfig(
-            table="users", match={"user_id": "user_id"}, check_only=True
-        )
+        lk = LookupConfig(table="users", match={"user_id": "user_id"}, check_only=True)
 
         result = build_lookup_map(config, lk)
 
@@ -764,12 +760,8 @@ class TestDetectAmbiguousLookupOrdering:
     def test_shared_source_same_on_miss_returns_no_warnings(self) -> None:
         # Same source column, same on_miss → order doesn't change fate
         lookups = {
-            "a": LookupConfig(
-                table="a", match={"user_id": "user_id"}, select="id", on_miss="skip"
-            ),
-            "b": LookupConfig(
-                table="b", match={"user_id": "user_id"}, select="id", on_miss="skip"
-            ),
+            "a": LookupConfig(table="a", match={"user_id": "user_id"}, select="id", on_miss="skip"),
+            "b": LookupConfig(table="b", match={"user_id": "user_id"}, select="id", on_miss="skip"),
         }
         assert detect_ambiguous_lookup_ordering(lookups) == []
 
@@ -819,18 +811,10 @@ class TestDetectAmbiguousLookupOrdering:
     def test_warning_per_ambiguous_source_column(self) -> None:
         # Two different source columns each ambiguous → two warnings
         lookups = {
-            "a": LookupConfig(
-                table="a", match={"id": "user_id"}, check_only=True, on_miss="skip"
-            ),
-            "b": LookupConfig(
-                table="b", match={"user_id": "user_id"}, select="id", on_miss="fail"
-            ),
-            "c": LookupConfig(
-                table="c", match={"id": "team_id"}, check_only=True, on_miss="skip"
-            ),
-            "d": LookupConfig(
-                table="d", match={"team_id": "team_id"}, select="id", on_miss="fail"
-            ),
+            "a": LookupConfig(table="a", match={"id": "user_id"}, check_only=True, on_miss="skip"),
+            "b": LookupConfig(table="b", match={"user_id": "user_id"}, select="id", on_miss="fail"),
+            "c": LookupConfig(table="c", match={"id": "team_id"}, check_only=True, on_miss="skip"),
+            "d": LookupConfig(table="d", match={"team_id": "team_id"}, select="id", on_miss="fail"),
         }
         warnings = detect_ambiguous_lookup_ordering(lookups)
         assert len(warnings) == 2

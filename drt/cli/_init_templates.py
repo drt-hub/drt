@@ -49,7 +49,7 @@ TEMPLATES: dict[str, TemplateInfo] = {
         description="DuckDB → REST API POST (httpbin.org for testing — no accounts needed)",
         next_steps=(
             "No env vars required — works out of the box once you have a DuckDB table.",
-            "Seed sample data: `python -c \"import duckdb; "
+            'Seed sample data: `python -c "import duckdb; '
             "c=duckdb.connect('warehouse.duckdb'); "
             "c.execute('CREATE TABLE users AS SELECT * FROM "
             "(VALUES (1,\\'a\\',\\'a@x.com\\'),(2,\\'b\\',\\'b@x.com\\')) t(id,name,email)')\"`",

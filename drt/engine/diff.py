@@ -53,9 +53,7 @@ class DiffResult:
     fallback_reason: str | None = None
 
     @staticmethod
-    def changed_fields(
-        old: dict[str, Any], new: dict[str, Any]
-    ) -> dict[str, tuple[Any, Any]]:
+    def changed_fields(old: dict[str, Any], new: dict[str, Any]) -> dict[str, tuple[Any, Any]]:
         """Return the columns that differ between *old* and *new* as
         ``{col: (old_value, new_value)}``. Equal columns are omitted.
 
@@ -160,13 +158,9 @@ def compute_diff(
     # be misleading.
     deleted: list[dict[str, Any]] = []
     if sync_options.mode == "replace":
-        deleted = [
-            row for key, row in dest_by_key.items() if key not in source_keys
-        ]
+        deleted = [row for key, row in dest_by_key.items() if key not in source_keys]
 
-    truncated = (
-        len(added) > limit or len(updated) > limit or len(deleted) > limit
-    )
+    truncated = len(added) > limit or len(updated) > limit or len(deleted) > limit
 
     return DiffResult(
         added=added[:limit],

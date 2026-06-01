@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, Optional, List
+from typing import Annotated, Literal
 
 try:
     from pydantic import BaseModel, Field, field_validator, model_validator
@@ -10,7 +10,7 @@ except Exception:
     # Fallback stubs for editor/static-analysis when pydantic is not installed.
     # These are intentionally minimal and only silence import diagnostics;
     # runtime behavior requires real pydantic.
-    from typing import Any, Callable
+    from collections.abc import Callable
 
     class BaseModel:  # minimal stub base class
         def __init_subclass__(cls, **kwargs):  # allow subclassing
@@ -22,11 +22,13 @@ except Exception:
     def field_validator(*args, **kwargs) -> Callable:
         def decorator(func: Callable) -> Callable:
             return func
+
         return decorator
 
     def model_validator(*args, **kwargs) -> Callable:
         def decorator(func: Callable) -> Callable:
             return func
+
         return decorator
 
 # ---------------------------------------------------------------------------
@@ -196,8 +198,8 @@ class TwilioDestinationConfig(BaseModel):
         if not (self.auth_token or self.auth_token_env):
             raise ValueError("auth_token or auth_token_env is required.")
         return self
-    
-    
+
+
 class DiscordDestinationConfig(BaseModel):
     type: Literal["discord"]
     webhook_url: str | None = None
@@ -303,9 +305,7 @@ class AmplitudeDestinationConfig(BaseModel):
     @model_validator(mode="after")
     def _check_event_endpoint(self) -> AmplitudeDestinationConfig:
         if self.endpoint == "event" and not self.event_type and not self.event_type_field:
-            raise ValueError(
-                "event_type or event_type_field is required when endpoint is 'event'."
-            )
+            raise ValueError("event_type or event_type_field is required when endpoint is 'event'.")
         return self
 
     @field_validator("batch_size", mode="after")
@@ -364,8 +364,8 @@ class SnowflakeDestinationConfig(BaseModel):
 
     def describe(self) -> str:
         return f"{self.type} ({self.database}.{self.schema_}.{self.table})"
-    
-    
+
+
 class LinearDestinationConfig(BaseModel):
     type: Literal["linear"]
     team_id: str | None = None
@@ -420,8 +420,7 @@ class LookupConfig(BaseModel):
             )
         if not self.check_only and self.select is None:
             raise ValueError(
-                "lookups.select is required (or set check_only=true for "
-                "existence-only filtering)."
+                "lookups.select is required (or set check_only=true for existence-only filtering)."
             )
         return self
 
@@ -711,28 +710,24 @@ class BigQueryDestinationConfig(BaseModel):
     table: str = Field(..., description="Target table name")
 
     # Write behavior
-    upsert_key: Optional[List[str]] = Field(
-        default=None,
-        description="Columns used for MERGE (upsert) operations"
+    upsert_key: list[str] | None = Field(
+        default=None, description="Columns used for MERGE (upsert) operations"
     )
 
     # Auth config
     method: Literal["application_default", "service_account"] = Field(
-        default="application_default",
-        description="Authentication method"
+        default="application_default", description="Authentication method"
     )
-    keyfile: Optional[str] = Field(
+    keyfile: str | None = Field(
         default=None,
-        description="Path to service account keyfile (required if method=service_account)"
+        description="Path to service account keyfile (required if method=service_account)",
     )
 
     def validate_auth(self):
         if self.method == "service_account" and not self.keyfile:
-            raise ValueError(
-                "keyfile must be provided when method='service_account'"
-            )
-            
-            
+            raise ValueError("keyfile must be provided when method='service_account'")
+
+
 # Discriminated union — add new destination types here
 DestinationConfig = Annotated[
     RestApiDestinationConfig
@@ -872,9 +867,7 @@ class SyncTest(BaseModel):
         ]
         configured_count = sum(test is not None for test in configured_tests)
         if configured_count != 1:
-            raise ValueError(
-                "Exactly one sync test must be configured in each tests entry."
-            )
+            raise ValueError("Exactly one sync test must be configured in each tests entry.")
         return self
 
 

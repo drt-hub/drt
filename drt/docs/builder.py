@@ -144,9 +144,9 @@ def build_manifest(project_dir: Path = Path("."), include_state: bool = False) -
     return Manifest(
         schema_version=SCHEMA_VERSION,
         drt_version=__version__,
-        generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
-            "+00:00", "Z"
-        ),
+        generated_at=datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
         project=Project(name=project.name, profile=project.profile),
         syncs=syncs,
         sources=[source],

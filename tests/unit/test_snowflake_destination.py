@@ -129,7 +129,7 @@ class TestSnowflakeDestinationLoad:
         monkeypatch.delenv("SF_USER", raising=False)
         monkeypatch.delenv("SF_PASSWORD", raising=False)
         monkeypatch.chdir(tmp_path)
-        
+
         secrets_dir = tmp_path / ".drt"
         secrets_dir.mkdir()
         (secrets_dir / "secrets.toml").write_text(
@@ -140,7 +140,7 @@ class TestSnowflakeDestinationLoad:
         modules = _mocked_snowflake_modules(conn)
         with patch.dict("sys.modules", modules):
             result = SnowflakeDestination().load([{"id": 1}], _config(), _options())
-            
+
         assert result.failed == 0
         conn_kwargs = modules["snowflake.connector"].connect.call_args[1]
         assert conn_kwargs["account"] == "acct"
@@ -187,17 +187,12 @@ class TestSnowflakeDestinationLoad:
             result = SnowflakeDestination().load(records, config, _options())
 
         assert result.success == 2
-        sqls = [
-            (call.args[0] if call.args else "")
-            for call in conn._cur.execute.call_args_list
-        ]
+        sqls = [(call.args[0] if call.args else "") for call in conn._cur.execute.call_args_list]
         assert any("CREATE TEMP TABLE" in s for s in sqls)
         assert any("MERGE INTO ANALYTICS.PUBLIC.USER_SCORES" in s for s in sqls)
         assert any("WHEN MATCHED THEN UPDATE" in s for s in sqls)
 
-    def test_merge_mode_requires_upsert_key(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_merge_mode_requires_upsert_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
         modules = _mocked_snowflake_modules(_fake_conn())
         config = _config(mode="merge", upsert_key=None)
@@ -205,9 +200,7 @@ class TestSnowflakeDestinationLoad:
             with pytest.raises(ValueError, match="upsert_key is required"):
                 SnowflakeDestination().load([{"id": 1}], config, _options())
 
-    def test_insert_row_error_on_error_skip(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_insert_row_error_on_error_skip(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
         conn = _fake_conn()
         conn._cur.execute.side_effect = [Exception("type mismatch"), None]
@@ -218,17 +211,13 @@ class TestSnowflakeDestinationLoad:
             {"id": 2, "score": 0.9},
         ]
         with patch.dict("sys.modules", modules):
-            result = SnowflakeDestination().load(
-                records, _config(), _options(on_error="skip")
-            )
+            result = SnowflakeDestination().load(records, _config(), _options(on_error="skip"))
         assert result.failed == 1
         assert result.success == 1
         assert len(result.row_errors) == 1
         assert "type mismatch" in result.row_errors[0].error_message
 
-    def test_merge_insert_partial_fail_on_error_skip(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_merge_insert_partial_fail_on_error_skip(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
         conn = _fake_conn()
         cur = conn._cur
@@ -251,14 +240,12 @@ class TestSnowflakeDestinationLoad:
         ]
         config = _config(mode="merge", upsert_key=["id"])
         with patch.dict("sys.modules", modules):
-            result = SnowflakeDestination().load(
-                records, config, _options(on_error="skip")
-            )
+            result = SnowflakeDestination().load(records, config, _options(on_error="skip"))
 
         assert result.failed == 1
         assert result.success == 1
         assert len(result.row_errors) == 1
-        
+
         sqls = [(call.args[0] if call.args else "") for call in cur.execute.call_args_list]
         assert any("MERGE INTO ANALYTICS.PUBLIC.USER_SCORES" in s for s in sqls)
 
@@ -272,10 +259,7 @@ class TestSnowflakeDestinationLoad:
         with patch.dict("sys.modules", modules):
             SnowflakeDestination().load(records, config, _options())
 
-        sqls = [
-            (call.args[0] if call.args else "")
-            for call in conn._cur.execute.call_args_list
-        ]
+        sqls = [(call.args[0] if call.args else "") for call in conn._cur.execute.call_args_list]
         merge_sql = next(s for s in sqls if "MERGE INTO" in s)
         assert "WHEN NOT MATCHED THEN INSERT" in merge_sql
         assert "WHEN MATCHED THEN UPDATE" not in merge_sql
@@ -286,11 +270,11 @@ class TestSnowflakeConnection:
         _set_creds(monkeypatch)
         conn = _fake_conn()
         modules = _mocked_snowflake_modules(conn)
-        
+
         with patch.dict("sys.modules", modules):
             dest = SnowflakeDestination()
             dest.test_connection(_config())
-        
+
         conn.close.assert_called_once()
         # Snowflake uses cursor.execute("SELECT 1")
         assert any("SELECT 1" in str(call.args[0]) for call in conn._cur.execute.call_args_list)

@@ -1,4 +1,5 @@
 """Routes AlertItems to per-type senders. Best-effort: never raises."""
+
 from __future__ import annotations
 
 import logging

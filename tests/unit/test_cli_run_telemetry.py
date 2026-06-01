@@ -268,9 +268,7 @@ def test_run_one_verbose_prints_row_errors(
     rows = [RowError(batch_index=0, record_preview="x", http_status=500, error_message="boom")]
     _wire_run_sync(
         monkeypatch,
-        lambda *_a, **_k: SyncResult(
-            rows_extracted=2, success=1, failed=1, row_errors=rows
-        ),
+        lambda *_a, **_k: SyncResult(rows_extracted=2, success=1, failed=1, row_errors=rows),
     )
     called: list[Any] = []
     monkeypatch.setattr("drt.cli.main.print_row_errors", lambda errs: called.append(errs))

@@ -97,9 +97,7 @@ def test_load_syncs_safe_incremental_missing_cursor(tmp_path: Path) -> None:
     assert any("cursor_field" in e for e in result.errors["no-cursor"])
 
 
-def test_load_syncs_safe_expands_env_vars(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_load_syncs_safe_expands_env_vars(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SAFE_URL", "https://safe.example.com")
     _write_sync(
         tmp_path / "syncs",

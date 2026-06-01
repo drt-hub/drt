@@ -1,17 +1,18 @@
-''' BigQueryDestination unit tests '''
+"""BigQueryDestination unit tests"""
+
+from unittest.mock import MagicMock, patch
 
 import pytest
-from unittest.mock import MagicMock, patch
 
 from drt.destinations.bigquery import (
     BigQueryDestination,
     BigQueryDestinationConfig,
 )
 
-
 # ----------------------------
 # Fixtures
 # ----------------------------
+
 
 @pytest.fixture
 def config_insert():
@@ -48,6 +49,7 @@ def sample_rows():
 # Client initialization
 # ----------------------------
 
+
 @patch("drt.destinations.bigquery.bigquery.Client")
 def test_client_initialization_adc(mock_client, config_insert):
     dest = BigQueryDestination(config_insert)
@@ -57,15 +59,11 @@ def test_client_initialization_adc(mock_client, config_insert):
 
 @patch("drt.destinations.bigquery.service_account.Credentials")
 @patch("drt.destinations.bigquery.bigquery.Client")
-def test_client_initialization_service_account(
-    mock_client, mock_credentials, config_insert
-):
+def test_client_initialization_service_account(mock_client, mock_credentials, config_insert):
     config_insert.method = "service_account"
     config_insert.keyfile = "/fake/key.json"
 
     mock_credentials.from_service_account_file.return_value = "creds"
-
-    dest = BigQueryDestination(config_insert)
 
     mock_credentials.from_service_account_file.assert_called_once()
     mock_client.assert_called_once_with(
@@ -77,6 +75,7 @@ def test_client_initialization_service_account(
 # ----------------------------
 # Insert mode
 # ----------------------------
+
 
 @patch("drt.destinations.bigquery.bigquery.Client")
 def test_insert_success(mock_client, config_insert, sample_rows):
@@ -105,6 +104,7 @@ def test_insert_failure(mock_client, config_insert, sample_rows):
 # ----------------------------
 # Merge mode
 # ----------------------------
+
 
 @patch("drt.destinations.bigquery.bigquery.Client")
 def test_merge_success(mock_client, config_merge, sample_rows):
@@ -141,6 +141,7 @@ def test_merge_without_key_raises(mock_client, config_insert, sample_rows):
 # ----------------------------
 # General behavior
 # ----------------------------
+
 
 @patch("drt.destinations.bigquery.bigquery.Client")
 def test_no_rows_noop(mock_client, config_insert):

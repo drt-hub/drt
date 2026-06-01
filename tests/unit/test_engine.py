@@ -247,14 +247,14 @@ class TestCursorStringification:
         state_mgr = StateManager(tmp_path)
 
         run_sync(
-        sync,
-        source,
-        dest,
-        _make_profile(),
-        tmp_path,
-        state_manager=state_mgr,
-        observer=StatePersistingObserver(state_mgr, None),
-    )
+            sync,
+            source,
+            dest,
+            _make_profile(),
+            tmp_path,
+            state_manager=state_mgr,
+            observer=StatePersistingObserver(state_mgr, None),
+        )
 
         state = state_mgr.get_last_sync("inc_sync")
         assert state is not None
@@ -264,9 +264,7 @@ class TestCursorStringification:
         assert "+00:00" not in state.last_cursor_value
         assert state.last_cursor_value == "2026-05-07 12:24:17"
 
-    def test_tz_aware_non_utc_normalized_to_utc_then_naive(
-        self, tmp_path: Path
-    ) -> None:
+    def test_tz_aware_non_utc_normalized_to_utc_then_naive(self, tmp_path: Path) -> None:
         """JST 21:24 → UTC 12:24 (naive) — preserves the instant."""
         from datetime import datetime, timedelta, timezone
 
@@ -281,14 +279,14 @@ class TestCursorStringification:
         state_mgr = StateManager(tmp_path)
 
         run_sync(
-        sync,
-        source,
-        dest,
-        _make_profile(),
-        tmp_path,
-        state_manager=state_mgr,
-        observer=StatePersistingObserver(state_mgr, None),
-    )
+            sync,
+            source,
+            dest,
+            _make_profile(),
+            tmp_path,
+            state_manager=state_mgr,
+            observer=StatePersistingObserver(state_mgr, None),
+        )
 
         state = state_mgr.get_last_sync("inc_sync")
         assert state is not None
@@ -308,14 +306,14 @@ class TestCursorStringification:
         state_mgr = StateManager(tmp_path)
 
         run_sync(
-        sync,
-        source,
-        dest,
-        _make_profile(),
-        tmp_path,
-        state_manager=state_mgr,
-        observer=StatePersistingObserver(state_mgr, None),
-    )
+            sync,
+            source,
+            dest,
+            _make_profile(),
+            tmp_path,
+            state_manager=state_mgr,
+            observer=StatePersistingObserver(state_mgr, None),
+        )
 
         state = state_mgr.get_last_sync("inc_sync")
         assert state is not None
@@ -335,14 +333,14 @@ class TestCursorStringification:
         state_mgr = StateManager(tmp_path)
 
         run_sync(
-        sync,
-        source,
-        dest,
-        _make_profile(),
-        tmp_path,
-        state_manager=state_mgr,
-        observer=StatePersistingObserver(state_mgr, None),
-    )
+            sync,
+            source,
+            dest,
+            _make_profile(),
+            tmp_path,
+            state_manager=state_mgr,
+            observer=StatePersistingObserver(state_mgr, None),
+        )
 
         state = state_mgr.get_last_sync("inc_sync")
         assert state is not None
@@ -359,14 +357,14 @@ class TestCursorStringification:
         state_mgr = StateManager(tmp_path)
 
         run_sync(
-        sync,
-        source,
-        dest,
-        _make_profile(),
-        tmp_path,
-        state_manager=state_mgr,
-        observer=StatePersistingObserver(state_mgr, None),
-    )
+            sync,
+            source,
+            dest,
+            _make_profile(),
+            tmp_path,
+            state_manager=state_mgr,
+            observer=StatePersistingObserver(state_mgr, None),
+        )
 
         state = state_mgr.get_last_sync("inc_sync")
         assert state is not None
@@ -833,11 +831,7 @@ def _make_sync_with_alerts() -> SyncConfig:
             "model": "ref('table')",
             "destination": {"type": "rest_api", "url": "https://example.com"},
             "sync": {"batch_size": 10, "on_error": "skip"},
-            "alerts": {
-                "on_failure": [
-                    {"type": "slack", "webhook_url": "https://hooks.example/x"}
-                ]
-            },
+            "alerts": {"on_failure": [{"type": "slack", "webhook_url": "https://hooks.example/x"}]},
         }
     )
 
@@ -882,9 +876,7 @@ class TestEngineAlertDispatch:
         assert event == "on_failure"
 
     @patch("drt.alerts.dispatch_alerts")
-    def test_alerts_not_fired_on_success(
-        self, mock_dispatch: MagicMock, tmp_path: Path
-    ) -> None:
+    def test_alerts_not_fired_on_success(self, mock_dispatch: MagicMock, tmp_path: Path) -> None:
         rows = [{"id": i} for i in range(10)]
         source = FakeSource(rows)
         result = SyncResult()
@@ -898,9 +890,7 @@ class TestEngineAlertDispatch:
         assert not mock_dispatch.called
 
     @patch("drt.alerts.dispatch_alerts")
-    def test_alerts_not_fired_on_dry_run(
-        self, mock_dispatch: MagicMock, tmp_path: Path
-    ) -> None:
+    def test_alerts_not_fired_on_dry_run(self, mock_dispatch: MagicMock, tmp_path: Path) -> None:
         rows = [{"id": i} for i in range(3)]
         source = FakeSource(rows)
         # Result irrelevant — dry_run skips destination entirely.
@@ -1032,9 +1022,7 @@ class _StopAfterBatchDestination:
 
 
 class TestGracefulShutdown:
-    def test_stop_event_set_before_first_batch_no_loads(
-        self, tmp_path: Path
-    ) -> None:
+    def test_stop_event_set_before_first_batch_no_loads(self, tmp_path: Path) -> None:
         rows = [{"id": i} for i in range(10)]
         source = FakeSource(rows)
         dest = FakeDestination()
@@ -1042,17 +1030,13 @@ class TestGracefulShutdown:
         stop_event = threading.Event()
         stop_event.set()  # already cancelled
 
-        result = run_sync(
-            sync, source, dest, _make_profile(), tmp_path, stop_event=stop_event
-        )
+        result = run_sync(sync, source, dest, _make_profile(), tmp_path, stop_event=stop_event)
 
         assert dest.calls == []  # no batches loaded
         assert result.interrupted is True
         assert result.success == 0
 
-    def test_stop_event_set_mid_sync_finishes_current_batch(
-        self, tmp_path: Path
-    ) -> None:
+    def test_stop_event_set_mid_sync_finishes_current_batch(self, tmp_path: Path) -> None:
         rows = [{"id": i} for i in range(15)]
         source = FakeSource(rows)
         stop_event = threading.Event()
@@ -1060,17 +1044,13 @@ class TestGracefulShutdown:
         dest = _StopAfterBatchDestination(stop_after_batch=1, stop_event=stop_event)
         sync = _make_sync(batch_size=5)
 
-        result = run_sync(
-            sync, source, dest, _make_profile(), tmp_path, stop_event=stop_event
-        )
+        result = run_sync(sync, source, dest, _make_profile(), tmp_path, stop_event=stop_event)
 
         assert len(dest.calls) == 1  # only batch 1 processed
         assert result.success == 5
         assert result.interrupted is True
 
-    def test_stop_event_none_default_no_behavior_change(
-        self, tmp_path: Path
-    ) -> None:
+    def test_stop_event_none_default_no_behavior_change(self, tmp_path: Path) -> None:
         """Backward compat: stop_event default (None) must not change behavior."""
         rows = [{"id": i} for i in range(7)]
         source = FakeSource(rows)

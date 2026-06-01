@@ -67,25 +67,27 @@ def _format_validation_errors(exc: ValidationError) -> list[str]:
 
 def _check_deprecated_keys(data: dict[str, Any]) -> list[dict[str, str]]:
     """Check for deprecated sync keys in the raw YAML data.
-    
+
     Returns a list of deprecation warnings for the given sync.
     """
     from drt.deprecations import DEPRECATED_SYNC_KEYS
-    
+
     warnings: list[dict[str, str]] = []
-    
+
     # Check top-level sync options
     sync_config = data.get("sync", {})
     if isinstance(sync_config, dict):
         for deprecated_key, feature in DEPRECATED_SYNC_KEYS.items():
             if deprecated_key in sync_config:
-                warnings.append({
-                    "key": f"sync.{deprecated_key}",
-                    "replacement": feature.replacement,
-                    "removed_in": feature.removed_in,
-                    "docs_link": feature.docs_link or "",
-                })
-    
+                warnings.append(
+                    {
+                        "key": f"sync.{deprecated_key}",
+                        "replacement": feature.replacement,
+                        "removed_in": feature.removed_in,
+                        "docs_link": feature.docs_link or "",
+                    }
+                )
+
     return warnings
 
 

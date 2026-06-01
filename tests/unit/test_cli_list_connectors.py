@@ -1,4 +1,4 @@
-﻿"""Tests for drt sources and drt destinations commands."""
+"""Tests for drt sources and drt destinations commands."""
 
 from __future__ import annotations
 

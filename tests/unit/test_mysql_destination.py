@@ -223,17 +223,13 @@ class TestMySQLDestinationLoad:
         assert values[4] == 0.9
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
-    def test_get_row_count_with_qualified_table(
-        self, mock_connect: MagicMock
-    ) -> None:
+    def test_get_row_count_with_qualified_table(self, mock_connect: MagicMock) -> None:
         conn = _fake_connection()
         cur = conn.cursor()
         cur.fetchone.return_value = (42,)
         mock_connect.return_value = conn
 
-        count = MySQLDestination().get_row_count(
-            _config(table="mydb.learning_profiles")
-        )
+        count = MySQLDestination().get_row_count(_config(table="mydb.learning_profiles"))
 
         assert count == 42
         sql = cur.execute.call_args.args[0]
@@ -340,9 +336,7 @@ class TestMySQLReplaceMode:
         assert "INSERT INTO" in insert_sql
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
-    def test_replace_uses_qualified_identifier(
-        self, mock_connect: MagicMock
-    ) -> None:
+    def test_replace_uses_qualified_identifier(self, mock_connect: MagicMock) -> None:
         conn = _fake_connection()
         cur = conn.cursor()
         mock_connect.return_value = conn
@@ -387,6 +381,7 @@ class TestJsonColumns:
         result = _serialize_value({"key": "val"}, "profile", ["profile"])
         assert isinstance(result, str)
         import json
+
         assert json.loads(result) == {"key": "val"}
 
     def test_json_columns_skips_unlisted_column_raises(self) -> None:
@@ -431,9 +426,7 @@ class TestMySQLReplaceSwap:
         sqls = [c[0][0] for c in cur.execute.call_args_list]
         assert any("DROP TABLE IF EXISTS" in s and "__drt_swap" in s for s in sqls)
         # MySQL: CREATE TABLE ... LIKE ... (NOT "INCLUDING ALL")
-        assert any(
-            "CREATE TABLE" in s and " LIKE " in s and "__drt_swap" in s for s in sqls
-        )
+        assert any("CREATE TABLE" in s and " LIKE " in s and "__drt_swap" in s for s in sqls)
         assert any("INSERT INTO" in s and "__drt_swap" in s for s in sqls)
         # No RENAME yet — happens in finalize_sync
         assert not any("RENAME TABLE" in s for s in sqls)
@@ -450,9 +443,7 @@ class TestMySQLReplaceSwap:
             _config(),
             _options(mode="replace", replace_strategy="swap"),
         )
-        dest.finalize_sync(
-            _config(), _options(mode="replace", replace_strategy="swap")
-        )
+        dest.finalize_sync(_config(), _options(mode="replace", replace_strategy="swap"))
 
         sqls = [c[0][0] for c in cur.execute.call_args_list]
         # MySQL: a SINGLE atomic multi-table RENAME statement
@@ -467,9 +458,7 @@ class TestMySQLReplaceSwap:
         assert any("DROP TABLE" in s and "__drt_old" in s for s in sqls)
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
-    def test_swap_finalize_noop_when_no_swap_in_progress(
-        self, mock_connect: MagicMock
-    ) -> None:
+    def test_swap_finalize_noop_when_no_swap_in_progress(self, mock_connect: MagicMock) -> None:
         dest = MySQLDestination()
         # finalize_sync without prior swap-mode load is a safe no-op
         result = dest.finalize_sync(_config(), _options(mode="full"))
@@ -478,9 +467,7 @@ class TestMySQLReplaceSwap:
         mock_connect.assert_not_called()
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
-    def test_swap_creates_shadow_only_once_across_batches(
-        self, mock_connect: MagicMock
-    ) -> None:
+    def test_swap_creates_shadow_only_once_across_batches(self, mock_connect: MagicMock) -> None:
         conn = _fake_connection()
         cur = conn.cursor()
         mock_connect.return_value = conn
@@ -498,9 +485,7 @@ class TestMySQLReplaceSwap:
         )
 
         sqls = [c[0][0] for c in cur.execute.call_args_list]
-        create_count = sum(
-            1 for s in sqls if "CREATE TABLE" in s and " LIKE " in s
-        )
+        create_count = sum(1 for s in sqls if "CREATE TABLE" in s and " LIKE " in s)
         assert create_count == 1
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
@@ -565,9 +550,7 @@ class TestMySQLReplaceSwapJsonColumns:
     """
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
-    def test_swap_serializes_dict_in_listed_json_column(
-        self, mock_connect: MagicMock
-    ) -> None:
+    def test_swap_serializes_dict_in_listed_json_column(self, mock_connect: MagicMock) -> None:
         conn = _fake_connection()
         cur = conn.cursor()
         mock_connect.return_value = conn
@@ -583,11 +566,14 @@ class TestMySQLReplaceSwapJsonColumns:
         config = _config(json_columns=["profile"])
 
         MySQLDestination().load(
-            records, config, _options(mode="replace", replace_strategy="swap"),
+            records,
+            config,
+            _options(mode="replace", replace_strategy="swap"),
         )
 
         insert_calls = [
-            c for c in cur.execute.call_args_list
+            c
+            for c in cur.execute.call_args_list
             if "INSERT INTO" in c[0][0] and "__drt_swap" in c[0][0]
         ]
         assert insert_calls, "expected at least one INSERT into shadow table"
@@ -596,9 +582,7 @@ class TestMySQLReplaceSwapJsonColumns:
         assert '{"lang": "ja"}' in bound_values
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
-    def test_swap_rejects_dict_in_unlisted_column(
-        self, mock_connect: MagicMock
-    ) -> None:
+    def test_swap_rejects_dict_in_unlisted_column(self, mock_connect: MagicMock) -> None:
         conn = _fake_connection()
         mock_connect.return_value = conn
 
@@ -613,7 +597,9 @@ class TestMySQLReplaceSwapJsonColumns:
         config = _config(json_columns=["profile"])  # 'extra' not listed
 
         result = MySQLDestination().load(
-            records, config, _options(mode="replace", replace_strategy="swap"),
+            records,
+            config,
+            _options(mode="replace", replace_strategy="swap"),
         )
 
         assert result.failed == 1
@@ -625,10 +611,10 @@ class TestMySQLConnection:
     def test_test_connection_success(self, mock_connect: MagicMock) -> None:
         conn = _fake_connection()
         mock_connect.return_value = conn
-        
+
         dest = MySQLDestination()
         dest.test_connection(_config())
-        
+
         mock_connect.assert_called_once()
         # Verify SELECT 1 was called
         cur = conn.cursor()

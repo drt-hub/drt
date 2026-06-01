@@ -97,9 +97,7 @@ def test_infer_stage_picks_deepest_drt_frame() -> None:
 
     # Patch this function into the engine module so its frame's co_filename
     # claims drt/engine path.
-    engine_wrapper.__code__ = engine_wrapper.__code__.replace(
-        co_filename=engine_sync.__file__
-    )
+    engine_wrapper.__code__ = engine_wrapper.__code__.replace(co_filename=engine_sync.__file__)
 
     try:
         engine_wrapper()
@@ -127,9 +125,7 @@ def test_infer_stage_picks_deepest_drt_frame() -> None:
         (Stage.STATE, "anything", ".drt/state.json"),
     ],
 )
-def test_suggest_returns_actionable_hint(
-    stage: Stage, message: str, hint_substring: str
-) -> None:
+def test_suggest_returns_actionable_hint(stage: Stage, message: str, hint_substring: str) -> None:
     hint = suggest(stage, RuntimeError(message))
     assert hint is not None
     assert hint_substring in hint

@@ -1,4 +1,5 @@
 """Generic HTTP webhook alert sender."""
+
 from __future__ import annotations
 
 import json

@@ -20,14 +20,8 @@ def test_rest_api_source_extract_records() -> None:
 
     # With result_path
     data = {
-        "response": {
-            "items": [{"id": 1}, {"id": 2}]
-        },
-        "data": {
-            "results": {
-                "items": [{"id": 3}]
-            }
-        }
+        "response": {"items": [{"id": 1}, {"id": 2}]},
+        "data": {"results": {"items": [{"id": 3}]}},
     }
     assert source._extract_records(data, "response.items") == [{"id": 1}, {"id": 2}]
     assert source._extract_records(data, "data.results.items") == [{"id": 3}]
@@ -65,7 +59,7 @@ def test_rest_api_source_extract_single_page(monkeypatch: Any) -> None:
         type="rest_api",
         url="https://api.example.com/data",
         auth={"type": "bearer", "token": "test-token"},
-        result_path="data"
+        result_path="data",
     )
 
     class MockResponse:
@@ -94,7 +88,7 @@ def test_rest_api_source_extract_single_page(monkeypatch: Any) -> None:
             url: str,
             headers: dict[str, str],
             params: dict[str, Any] | None,
-            **kwargs: Any
+            **kwargs: Any,
         ) -> MockResponse:
             assert url == "https://api.example.com/data"
             assert headers["Authorization"] == "Bearer test-token"
@@ -114,12 +108,7 @@ def test_rest_api_source_extract_offset_pagination(monkeypatch: Any) -> None:
     profile = RestApiProfile(
         type="rest_api",
         url="https://api.example.com/data",
-        pagination={
-            "type": "offset",
-            "limit": 2,
-            "offset_param": "skip",
-            "limit_param": "take"
-        }
+        pagination={"type": "offset", "limit": 2, "offset_param": "skip", "limit_param": "take"},
     )
 
     class MockClient:
@@ -138,11 +127,11 @@ def test_rest_api_source_extract_offset_pagination(monkeypatch: Any) -> None:
             url: str,
             headers: dict[str, str],
             params: dict[str, Any],
-            **kwargs: Any
+            **kwargs: Any,
         ) -> Any:
             skip = int(params["skip"])
             take = int(params["take"])
-            
+
             assert take == 2
 
             class MockResponse:
@@ -155,7 +144,7 @@ def test_rest_api_source_extract_offset_pagination(monkeypatch: Any) -> None:
 
                 def raise_for_status(self) -> None:
                     pass
-                    
+
                 @property
                 def headers(self) -> dict[str, str]:
                     return {}
@@ -180,8 +169,8 @@ def test_rest_api_source_extract_cursor_pagination(monkeypatch: Any) -> None:
             "limit": 2,
             "cursor_param": "after",
             "cursor_field": "next_cursor",
-            "limit_param": "limit"
-        }
+            "limit_param": "limit",
+        },
     )
 
     class MockClient:
@@ -200,7 +189,7 @@ def test_rest_api_source_extract_cursor_pagination(monkeypatch: Any) -> None:
             url: str,
             headers: dict[str, str],
             params: dict[str, Any],
-            **kwargs: Any
+            **kwargs: Any,
         ) -> Any:
             cursor = params.get("after")
 
@@ -232,11 +221,7 @@ def test_rest_api_source_extract_cursor_pagination(monkeypatch: Any) -> None:
 def test_rest_api_source_extract_link_header_pagination(monkeypatch: Any) -> None:
     source = RestApiSource()
     profile = RestApiProfile(
-        type="rest_api",
-        url="https://api.example.com/data",
-        pagination={
-            "type": "link_header"
-        }
+        type="rest_api", url="https://api.example.com/data", pagination={"type": "link_header"}
     )
 
     class MockClient:
@@ -255,7 +240,7 @@ def test_rest_api_source_extract_link_header_pagination(monkeypatch: Any) -> Non
             url: str,
             headers: dict[str, str],
             params: dict[str, Any] | None,
-            **kwargs: Any
+            **kwargs: Any,
         ) -> Any:
             class MockResponse:
                 def json(self) -> list[dict[str, Any]]:

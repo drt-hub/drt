@@ -23,9 +23,9 @@ destination:
   method: application_default
 """
 
-from typing import List, Dict, Any, Optional
-from dataclasses import dataclass
 import logging
+from dataclasses import dataclass
+from typing import Any
 
 from google.cloud import bigquery
 from google.oauth2 import service_account
@@ -39,9 +39,9 @@ class BigQueryDestinationConfig:
     project: str
     dataset: str
     table: str
-    upsert_key: Optional[List[str]] = None
+    upsert_key: list[str] | None = None
     method: str = "application_default"  # or "service_account"
-    keyfile: Optional[str] = None
+    keyfile: str | None = None
 
 
 class BigQueryDestination:
@@ -55,9 +55,7 @@ class BigQueryDestination:
             if not self.config.keyfile:
                 raise ValueError("keyfile must be provided for service_account auth")
 
-            credentials = service_account.Credentials.from_service_account_file(
-                self.config.keyfile
-            )
+            credentials = service_account.Credentials.from_service_account_file(self.config.keyfile)
             return bigquery.Client(
                 project=self.config.project,
                 credentials=credentials,
@@ -70,7 +68,7 @@ class BigQueryDestination:
     def table_id(self) -> str:
         return f"{self.config.project}.{self.config.dataset}.{self.config.table}"
 
-    def write(self, rows: List[Dict[str, Any]], mode: str = "insert"):
+    def write(self, rows: list[dict[str, Any]], mode: str = "insert"):
         """
         Write data to BigQuery.
 
@@ -91,7 +89,7 @@ class BigQueryDestination:
         else:
             raise ValueError(f"Unsupported mode: {mode}")
 
-    def _insert(self, rows: List[Dict[str, Any]]):
+    def _insert(self, rows: list[dict[str, Any]]):
         """Append rows to BigQuery table."""
         errors = self.client.insert_rows_json(self.table_id, rows)
 
@@ -101,7 +99,7 @@ class BigQueryDestination:
 
         logger.info(f"Inserted {len(rows)} rows into {self.table_id}")
 
-    def _merge(self, rows: List[Dict[str, Any]]):
+    def _merge(self, rows: list[dict[str, Any]]):
         """
         Perform MERGE (upsert) using a temporary table.
         """
@@ -115,14 +113,10 @@ class BigQueryDestination:
 
         # Step 2: Build MERGE query
         keys = self.config.upsert_key
-        on_clause = " AND ".join(
-            [f"T.{k} = S.{k}" for k in keys]
-        )
+        on_clause = " AND ".join([f"T.{k} = S.{k}" for k in keys])
 
         update_columns = rows[0].keys()
-        update_set = ", ".join(
-            [f"{col} = S.{col}" for col in update_columns if col not in keys]
-        )
+        update_set = ", ".join([f"{col} = S.{col}" for col in update_columns if col not in keys])
 
         insert_columns = ", ".join(update_columns)
         insert_values = ", ".join([f"S.{col}" for col in update_columns])

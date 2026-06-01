@@ -20,9 +20,7 @@ app.add_typer(docs_app)
 
 @docs_app.command(name="generate")
 def docs_generate(
-    output: Path = typer.Option(
-        Path("target/docs"), "--output", "-o", help="Output directory."
-    ),
+    output: Path = typer.Option(Path("target/docs"), "--output", "-o", help="Output directory."),
     format: str = typer.Option(
         "html", "--format", "-f", help="Output format: html | mermaid | json."
     ),

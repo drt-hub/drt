@@ -39,9 +39,5 @@ def test_display_name_unique_multi() -> None:
 
 
 def test_display_name_accepted_values() -> None:
-    t = SyncTest(
-        accepted_values=AcceptedValuesTest(
-            column="status", values=["active", "inactive"]
-        )
-    )
+    t = SyncTest(accepted_values=AcceptedValuesTest(column="status", values=["active", "inactive"]))
     assert _test_display_name(t) == "accepted_values(status: active, inactive)"

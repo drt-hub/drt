@@ -278,8 +278,7 @@ def test_engine_routes_alert_dispatch_failure_through_observer(
     run_sync(sync, FakeSource([{"id": 1}]), dest, _make_profile(), tmp_path, observer=obs)
 
     warning_calls = [
-        c for c in obs.on_warning.call_args_list
-        if "Alert dispatch outer failure" in c.args[1]
+        c for c in obs.on_warning.call_args_list if "Alert dispatch outer failure" in c.args[1]
     ]
     assert warning_calls, (
         f"Expected on_warning('Alert dispatch outer failure'...), "
@@ -309,8 +308,7 @@ def test_engine_routes_history_append_failure_through_observer(tmp_path: Path) -
     )
 
     warning_calls = [
-        c for c in obs.on_warning.call_args_list
-        if "History append outer failure" in c.args[1]
+        c for c in obs.on_warning.call_args_list if "History append outer failure" in c.args[1]
     ]
     assert warning_calls, (
         f"Expected on_warning('History append outer failure'...), "

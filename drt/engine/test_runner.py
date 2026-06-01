@@ -63,22 +63,17 @@ def _parse_max_age(max_age_str: str) -> timedelta:
     """Parse max_age string like '7 days', '1 hour', etc."""
     parts = max_age_str.strip().split()
     if len(parts) != 2:
-        msg = (
-            f"Invalid max_age format: {max_age_str!r}. "
-            "Use format like '7 days' or '1 hour'"
-        )
+        msg = f"Invalid max_age format: {max_age_str!r}. Use format like '7 days' or '1 hour'"
         raise ValueError(msg)
-    
+
     value_str, unit = parts
     try:
         value = int(value_str)
     except ValueError:
         raise ValueError(f"Invalid max_age value: {value_str!r}. Must be an integer.")
     if value <= 0:
-        raise ValueError(
-            f"Invalid max_age value: {value_str!r}. Must be a positive integer."
-        )
-    
+        raise ValueError(f"Invalid max_age value: {value_str!r}. Must be a positive integer.")
+
     unit_lower = unit.lower()
     if unit_lower in ("day", "days"):
         return timedelta(days=value)
@@ -91,10 +86,7 @@ def _parse_max_age(max_age_str: str) -> timedelta:
     elif unit_lower in ("week", "weeks"):
         return timedelta(weeks=value)
     else:
-        msg = (
-            f"Unknown time unit: {unit!r}. "
-            "Supported: days, hours, minutes, seconds, weeks"
-        )
+        msg = f"Unknown time unit: {unit!r}. Supported: days, hours, minutes, seconds, weeks"
         raise ValueError(msg)
 
 
@@ -135,7 +127,7 @@ def build_test_query(test: SyncTest, table: str) -> tuple[str, Callable[[int], b
         safe_col = _safe_column(fresh.column)
         max_age_delta = _parse_max_age(fresh.max_age)
         threshold = datetime.now(timezone.utc) - max_age_delta
-        
+
         # Count rows where column is older than max_age (stale data)
         query = f"SELECT COUNT(*) FROM {safe_table} WHERE {safe_col} < '{threshold.isoformat()}'"
 
@@ -178,4 +170,3 @@ def build_test_query(test: SyncTest, table: str) -> tuple[str, Callable[[int], b
         return query, check_accepted_values
 
     raise ValueError("No test type defined in SyncTest.")
-

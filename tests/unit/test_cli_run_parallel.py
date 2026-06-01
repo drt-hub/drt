@@ -178,17 +178,13 @@ def test_select_star_runs_every_sync(project: Path, patched_engine: dict[str, An
     assert set(patched_engine["calls"]) == {"sync_a", "sync_b", "sync_c"}
 
 
-def test_select_all_sentinel_runs_every_sync(
-    project: Path, patched_engine: dict[str, Any]
-) -> None:
+def test_select_all_sentinel_runs_every_sync(project: Path, patched_engine: dict[str, Any]) -> None:
     result = runner.invoke(app, ["run", "--select", "all", "--output", "json"])
     assert result.exit_code == 0
     assert set(patched_engine["calls"]) == {"sync_a", "sync_b", "sync_c"}
 
 
-def test_no_select_defaults_to_every_sync(
-    project: Path, patched_engine: dict[str, Any]
-) -> None:
+def test_no_select_defaults_to_every_sync(project: Path, patched_engine: dict[str, Any]) -> None:
     result = runner.invoke(app, ["run", "--output", "json"])
     assert result.exit_code == 0
     assert set(patched_engine["calls"]) == {"sync_a", "sync_b", "sync_c"}
@@ -218,9 +214,7 @@ def test_all_flag_was_removed(project: Path, patched_engine: dict[str, Any]) -> 
 # ---------------------------------------------------------------------------
 
 
-def test_threads_flag_actually_parallelises(
-    project: Path, patched_engine: dict[str, Any]
-) -> None:
+def test_threads_flag_actually_parallelises(project: Path, patched_engine: dict[str, Any]) -> None:
     result = runner.invoke(
         app,
         ["run", "--select", "*", "--threads", "3", "--output", "json"],
@@ -232,9 +226,7 @@ def test_threads_flag_actually_parallelises(
     assert len(patched_engine["threads_seen"]) > 1
 
 
-def test_threads_one_runs_sequentially(
-    project: Path, patched_engine: dict[str, Any]
-) -> None:
+def test_threads_one_runs_sequentially(project: Path, patched_engine: dict[str, Any]) -> None:
     result = runner.invoke(
         app,
         ["run", "--select", "*", "--threads", "1", "--output", "json"],

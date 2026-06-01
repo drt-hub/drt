@@ -192,16 +192,12 @@ class TestBuildManifestWithState:
 
 
 class TestDocsGenerateJsonCLI:
-    def test_writes_manifest_json_to_output_dir(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_writes_manifest_json_to_output_dir(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.chdir(tmp_path)
         _write_project(tmp_path)
         _write_sync(tmp_path, "users.yml", _pg_sync("users", "public.users"))
 
-        result = runner.invoke(
-            app, ["docs", "generate", "--format", "json", "--output", "out"]
-        )
+        result = runner.invoke(app, ["docs", "generate", "--format", "json", "--output", "out"])
 
         assert result.exit_code == 0
         manifest_path = tmp_path / "out" / "manifest.json"
@@ -214,9 +210,7 @@ class TestDocsGenerateJsonCLI:
         assert len(data["syncs"]) == 1
         assert data["syncs"][0]["name"] == "users"
 
-    def test_default_output_is_target_docs(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_default_output_is_target_docs(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.chdir(tmp_path)
         _write_project(tmp_path)
         result = runner.invoke(app, ["docs", "generate", "--format", "json"])

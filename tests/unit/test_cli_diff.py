@@ -52,9 +52,7 @@ def test_diff_requires_dry_run(project: Path) -> None:
     assert "--diff requires --dry-run" in result.output
 
 
-def test_diff_with_dry_run_runs(
-    project: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_diff_with_dry_run_runs(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """--dry-run --diff completes successfully on a non-queryable destination."""
     from drt.cli import main as cli_main
     from drt.config import credentials as creds
@@ -84,15 +82,13 @@ def test_diff_with_dry_run_runs(
 
     monkeypatch.setattr(sync_module, "run_sync", fake_run_sync, raising=False)
     monkeypatch.setattr(
-        creds, "load_profile", lambda *_a, **_k: creds.DuckDBProfile(type="duckdb"),
+        creds,
+        "load_profile",
+        lambda *_a, **_k: creds.DuckDBProfile(type="duckdb"),
         raising=False,
     )
-    monkeypatch.setattr(
-        cli_main, "_get_source", lambda *_a, **_k: object(), raising=False
-    )
-    monkeypatch.setattr(
-        cli_main, "_get_destination", lambda *_a, **_k: object(), raising=False
-    )
+    monkeypatch.setattr(cli_main, "_get_source", lambda *_a, **_k: object(), raising=False)
+    monkeypatch.setattr(cli_main, "_get_destination", lambda *_a, **_k: object(), raising=False)
 
     result = runner.invoke(app, ["run", "--dry-run", "--diff"])
     assert result.exit_code == 0
@@ -100,9 +96,7 @@ def test_diff_with_dry_run_runs(
     assert "no comparison available" in result.output
 
 
-def test_diff_json_mode_embeds_diff(
-    project: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_diff_json_mode_embeds_diff(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """--output json --dry-run --diff embeds diff dict in the per-sync entry."""
     import json as _json
 
@@ -136,15 +130,13 @@ def test_diff_json_mode_embeds_diff(
 
     monkeypatch.setattr(sync_module, "run_sync", fake_run_sync, raising=False)
     monkeypatch.setattr(
-        creds, "load_profile", lambda *_a, **_k: creds.DuckDBProfile(type="duckdb"),
+        creds,
+        "load_profile",
+        lambda *_a, **_k: creds.DuckDBProfile(type="duckdb"),
         raising=False,
     )
-    monkeypatch.setattr(
-        cli_main, "_get_source", lambda *_a, **_k: object(), raising=False
-    )
-    monkeypatch.setattr(
-        cli_main, "_get_destination", lambda *_a, **_k: object(), raising=False
-    )
+    monkeypatch.setattr(cli_main, "_get_source", lambda *_a, **_k: object(), raising=False)
+    monkeypatch.setattr(cli_main, "_get_destination", lambda *_a, **_k: object(), raising=False)
 
     result = runner.invoke(app, ["run", "--dry-run", "--diff", "--output", "json"])
     assert result.exit_code == 0

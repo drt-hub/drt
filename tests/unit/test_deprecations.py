@@ -63,7 +63,7 @@ def test_check_deprecated_keys_with_monkeypatched_deprecation(
             "mode": "full",
         },
     }
-    
+
     # Monkeypatch the registry with a fake deprecation
     fake_feature = DeprecatedFeature(
         key="old_field",
@@ -77,7 +77,7 @@ def test_check_deprecated_keys_with_monkeypatched_deprecation(
         "old_field",
         fake_feature,
     )
-    
+
     warnings = _check_deprecated_keys(fake_sync_data)
     assert len(warnings) == 1
     assert warnings[0]["key"] == "sync.old_field"
@@ -101,11 +101,11 @@ def test_load_syncs_safe_empty_deprecations_with_empty_registry(tmp_path: Path) 
     """Test that no deprecations are collected when registry is empty."""
     _write_sync(tmp_path / "syncs", "normal", VALID_SYNC)
     result = load_syncs_safe(tmp_path)
-    
+
     # Should have loaded the sync successfully
     assert len(result.syncs) == 1
     assert result.syncs[0].name == "test-sync"
-    
+
     # Should have no deprecations (registry is empty)
     assert len(result.deprecations) == 0
 
@@ -132,9 +132,9 @@ def test_validate_text_output_with_monkeypatched_deprecation(
             "mode": "full",
         },
     }
-    
+
     _write_sync(tmp_path / "syncs", "deprecated", sync_with_deprecated_field)
-    
+
     # Monkeypatch the registry
     fake_feature = DeprecatedFeature(
         key="old_field",
@@ -148,10 +148,10 @@ def test_validate_text_output_with_monkeypatched_deprecation(
         "old_field",
         fake_feature,
     )
-    
+
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["validate"], catch_exceptions=False)
-    
+
     assert result.exit_code == 0
     assert "deprecated-sync" in result.output
     assert "⚠️" in result.output
@@ -180,9 +180,9 @@ def test_validate_json_output_with_monkeypatched_deprecation(
             "mode": "full",
         },
     }
-    
+
     _write_sync(tmp_path / "syncs", "deprecated", sync_with_deprecated_field)
-    
+
     # Monkeypatch the registry
     fake_feature = DeprecatedFeature(
         key="old_field",
@@ -196,16 +196,16 @@ def test_validate_json_output_with_monkeypatched_deprecation(
         "old_field",
         fake_feature,
     )
-    
+
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["validate", "--output", "json"], catch_exceptions=False)
-    
+
     assert result.exit_code == 0
     output = json.loads(result.output)
-    
+
     # Find the result for the deprecated sync
     sync_result = next(r for r in output["results"] if r["name"] == "deprecated-sync")
-    
+
     assert "deprecations" in sync_result
     assert len(sync_result["deprecations"]) == 1
     assert sync_result["deprecations"][0]["key"] == "sync.old_field"
@@ -218,14 +218,14 @@ def test_validate_json_output_empty_deprecations_when_none(
     """Test that deprecations field is empty list when no deprecated keys."""
     _write_sync(tmp_path / "syncs", "normal", VALID_SYNC)
     monkeypatch.chdir(tmp_path)
-    
+
     result = runner.invoke(app, ["validate", "--output", "json"], catch_exceptions=False)
-    
+
     assert result.exit_code == 0
     output = json.loads(result.output)
-    
+
     sync_result = next(r for r in output["results"] if r["name"] == "test-sync")
-    
+
     assert "deprecations" in sync_result
     assert sync_result["deprecations"] == []
 
@@ -247,9 +247,9 @@ def test_validate_exit_code_zero_with_deprecations_only(
             "mode": "full",
         },
     }
-    
+
     _write_sync(tmp_path / "syncs", "deprecated", sync_with_deprecated_field)
-    
+
     # Monkeypatch the registry
     fake_feature = DeprecatedFeature(
         key="old_field",
@@ -263,10 +263,10 @@ def test_validate_exit_code_zero_with_deprecations_only(
         "old_field",
         fake_feature,
     )
-    
+
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["validate"], catch_exceptions=False)
-    
+
     # Exit code should be 0 even with deprecations (they're non-blocking)
     assert result.exit_code == 0
 
@@ -288,10 +288,10 @@ def test_validate_select_filters_deprecations(
             "mode": "full",
         },
     }
-    
+
     _write_sync(tmp_path / "syncs", "deprecated", sync_with_deprecated_field)
     _write_sync(tmp_path / "syncs", "normal", VALID_SYNC)
-    
+
     # Monkeypatch the registry
     fake_feature = DeprecatedFeature(
         key="old_field",
@@ -305,12 +305,10 @@ def test_validate_select_filters_deprecations(
         "old_field",
         fake_feature,
     )
-    
+
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(
-        app, ["validate", "--select", "deprecated-sync"], catch_exceptions=False
-    )
-    
+    result = runner.invoke(app, ["validate", "--select", "deprecated-sync"], catch_exceptions=False)
+
     assert result.exit_code == 0
     # Should show the deprecated sync
     assert "deprecated-sync" in result.output
@@ -325,7 +323,7 @@ def test_deprecation_check_with_empty_sync_section() -> None:
     """Test handling of syncs with empty sync section."""
     sync_data = VALID_SYNC.copy()
     sync_data["sync"] = {}
-    
+
     warnings = _check_deprecated_keys(sync_data)
     assert len(warnings) == 0
 
@@ -334,4 +332,3 @@ def test_deprecation_check_with_no_sync_section() -> None:
     """Test handling of syncs without sync section."""
     warnings = _check_deprecated_keys(VALID_SYNC)
     assert len(warnings) == 0
-

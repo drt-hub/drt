@@ -112,9 +112,7 @@ def test_double_preserved(httpserver, tmp_path: Path) -> None:
     assert by_id[2]["dbl"] == -1.7976931348623157e308
 
 
-def test_date_and_timestamp_currently_fail_serialization(
-    httpserver, tmp_path: Path
-) -> None:
+def test_date_and_timestamp_currently_fail_serialization(httpserver, tmp_path: Path) -> None:
     """DATE / TIMESTAMP fail at httpx JSON serialization today.
 
     The REST destination calls ``client.request(json=record)`` without a

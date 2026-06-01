@@ -49,9 +49,7 @@ class SyncObserver(Protocol):
         """Called once at the top of ``run_sync``."""
         ...
 
-    def on_watermark_resolved(
-        self, sync_name: str, source: str, cursor_value: str | None
-    ) -> None:
+    def on_watermark_resolved(self, sync_name: str, source: str, cursor_value: str | None) -> None:
         """Called when cursor value is resolved for an incremental sync.
 
         ``source`` is one of ``"cli_override"``, ``"storage"``,
@@ -122,9 +120,7 @@ class LoggingObserver:
         # The pre-refactor engine did not log sync start; keep parity.
         pass
 
-    def on_watermark_resolved(
-        self, sync_name: str, source: str, cursor_value: str | None
-    ) -> None:
+    def on_watermark_resolved(self, sync_name: str, source: str, cursor_value: str | None) -> None:
         # Storage-source resolutions used to not log (only CLI override /
         # default_value did). Preserve that asymmetry: it kept the log
         # signal:noise ratio reasonable for daily incremental runs.
@@ -199,11 +195,7 @@ class StatePersistingObserver:
 
         if self._state_manager is not None:
             status = (
-                "success"
-                if result.failed == 0
-                else "partial"
-                if result.success > 0
-                else "failed"
+                "success" if result.failed == 0 else "partial" if result.success > 0 else "failed"
             )
             try:
                 self._state_manager.save_sync(
@@ -219,17 +211,11 @@ class StatePersistingObserver:
             except Exception as exc:  # noqa: BLE001 — fire-and-forget contract
                 self._logger.warning("State persist failure for '%s': %s", sync_name, exc)
 
-        if (
-            self._watermark_storage is not None
-            and cursor_field
-            and new_cursor_value
-        ):
+        if self._watermark_storage is not None and cursor_field and new_cursor_value:
             try:
                 self._watermark_storage.save(sync_name, new_cursor_value)
             except Exception as exc:  # noqa: BLE001 — fire-and-forget contract
-                self._logger.warning(
-                    "Watermark save failure for '%s': %s", sync_name, exc
-                )
+                self._logger.warning("Watermark save failure for '%s': %s", sync_name, exc)
 
 
 class CompositeObserver:
@@ -259,9 +245,7 @@ class CompositeObserver:
     def on_sync_started(self, sync_name: str, started_at: str) -> None:
         self._broadcast("on_sync_started", sync_name, started_at)
 
-    def on_watermark_resolved(
-        self, sync_name: str, source: str, cursor_value: str | None
-    ) -> None:
+    def on_watermark_resolved(self, sync_name: str, source: str, cursor_value: str | None) -> None:
         self._broadcast("on_watermark_resolved", sync_name, source, cursor_value)
 
     def on_warning(self, sync_name: str, message: str) -> None:

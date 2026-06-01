@@ -294,9 +294,7 @@ class MySQLDestination:
         try:
             cur = conn.cursor()
             # MySQL's multi-table RENAME is atomic in a single statement.
-            cur.execute(
-                f"RENAME TABLE {table_q} TO {old_q}, {shadow_q} TO {table_q}"
-            )
+            cur.execute(f"RENAME TABLE {table_q} TO {old_q}, {shadow_q} TO {table_q}")
             conn.commit()
             # DROP old in separate tx (failure here doesn't break the swap).
             cur.execute(f"DROP TABLE {old_q}")
