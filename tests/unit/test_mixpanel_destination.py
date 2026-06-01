@@ -132,7 +132,8 @@ class TestPeopleSet:
         _, kwargs = client.post.call_args
         url = client.post.call_args[0][0] if client.post.call_args[0] else kwargs.get("url")
         assert url.endswith("/engage")
-        assert kwargs["auth"] is None
+        # people_set carries auth in the record ($token), so no HTTP auth is sent
+        assert "auth" not in kwargs
         body = kwargs["json"]
         assert body[0]["$token"] == "test-token"
         assert body[0]["$distinct_id"] == "u0"

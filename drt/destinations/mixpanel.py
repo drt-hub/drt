@@ -264,7 +264,7 @@ def _build_event(record: dict[str, Any], config: MixpanelDestinationConfig) -> d
     if config.time_field:
         time_value = record.get(config.time_field)
         if _has_value(time_value):
-            event_time = int(time_value)
+            event_time = int(str(time_value))
 
     properties: dict[str, Any] = {
         "distinct_id": str(distinct_id),
@@ -331,7 +331,12 @@ def _post_json(
     params: dict[str, str] | None = None,
 ) -> None:
     def do_post() -> httpx.Response:
-        response = client.post(url, json=payload, auth=auth, params=params)
+        kwargs: dict[str, Any] = {"json": payload}
+        if auth is not None:
+            kwargs["auth"] = auth
+        if params is not None:
+            kwargs["params"] = params
+        response = client.post(url, **kwargs)
         response.raise_for_status()
         return response
 
