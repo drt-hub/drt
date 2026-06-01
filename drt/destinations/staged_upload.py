@@ -103,6 +103,15 @@ class StagedUploadDestination:
         context: dict[str, str] = {}
         record_count = len(self._records)
 
+        # Empty-source short-circuit — no auth, no upload, no trigger, no
+        # poll. Mirrors the same guard at the top of
+        # SalesforceBulkDestination.finalize(). The engine calls
+        # finalize() regardless of whether stage() ever received records,
+        # so without this guard a transient empty source produces a
+        # zero-row upload + job that wastes the trigger / poll cycle.
+        if record_count == 0:
+            return result
+
         try:
             # Phase 1: Stage — serialize and upload file
             file_bytes = self._serialize(config.format)
