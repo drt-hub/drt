@@ -54,6 +54,7 @@ from drt.config.models import (
     IntercomDestinationConfig,
     JiraDestinationConfig,
     LinearDestinationConfig,
+    MixpanelDestinationConfig,
     NotionDestinationConfig,
     RateLimitConfig,
     SendGridDestinationConfig,
@@ -69,6 +70,7 @@ from drt.destinations.hubspot import HubSpotDestination
 from drt.destinations.intercom import IntercomDestination
 from drt.destinations.jira import JiraDestination
 from drt.destinations.linear import LinearDestination
+from drt.destinations.mixpanel import MixpanelDestination
 from drt.destinations.notion import NotionDestination
 from drt.destinations.sendgrid import SendGridDestination
 from drt.destinations.twilio import TwilioDestination
@@ -155,6 +157,16 @@ API_DESTINATIONS: list[Any] = [
         ),
         {},
         id="amplitude",
+    ),
+    pytest.param(
+        MixpanelDestination,
+        lambda: MixpanelDestinationConfig(
+            type="mixpanel",
+            endpoint="people_set",
+            project_token="dummy",
+        ),
+        {},
+        id="mixpanel",
     ),
     pytest.param(
         ZendeskDestination,
