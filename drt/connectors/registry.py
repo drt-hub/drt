@@ -153,6 +153,7 @@ def _register_all_connectors() -> None:
         IntercomDestinationConfig,
         JiraDestinationConfig,
         LinearDestinationConfig,
+        MixpanelDestinationConfig,
         MySQLDestinationConfig,
         NotionDestinationConfig,
         ParquetDestinationConfig,
@@ -181,6 +182,7 @@ def _register_all_connectors() -> None:
     from drt.destinations.intercom import IntercomDestination
     from drt.destinations.jira import JiraDestination
     from drt.destinations.linear import LinearDestination
+    from drt.destinations.mixpanel import MixpanelDestination
     from drt.destinations.mysql import MySQLDestination
     from drt.destinations.notion import NotionDestination
     from drt.destinations.parquet import ParquetDestination
@@ -216,6 +218,7 @@ def _register_all_connectors() -> None:
     register_destination("github_actions", GitHubActionsDestinationConfig, GitHubActionsDestination)
     register_destination("hubspot", HubSpotDestinationConfig, HubSpotDestination)
     register_destination("amplitude", AmplitudeDestinationConfig, AmplitudeDestination)
+    register_destination("mixpanel", MixpanelDestinationConfig, MixpanelDestination)
     register_destination("zendesk", ZendeskDestinationConfig, ZendeskDestination)
     register_destination("jira", JiraDestinationConfig, JiraDestination)
     register_destination("sendgrid", SendGridDestinationConfig, SendGridDestination)
