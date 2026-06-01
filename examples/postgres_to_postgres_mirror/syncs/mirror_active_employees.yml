@@ -1,0 +1,46 @@
+name: mirror_active_employees
+description: |
+  Mirror the curated active-employee directory from the HR warehouse
+  into the operational Postgres instance that downstream services read.
+
+  Why `sync.mode: mirror`:
+  - Employees added in the warehouse → upserted into ops_employees
+  - Employees updated in the warehouse → upserted into ops_employees
+  - Employees no longer in the warehouse query (terminated, transferred
+    out) → DELETEd from ops_employees in a single end-of-sync DELETE
+  - No TRUNCATE / re-insert overhead like `mode: replace`
+  - Single load() pass keeps the destination table available throughout
+
+model: |
+  SELECT
+    employee_id,
+    full_name,
+    department,
+    manager_employee_id,
+    work_email,
+    updated_at
+  FROM hr.dim_employees_curated
+  WHERE employment_status = 'active'
+
+destination:
+  type: postgres
+  host_env: OPS_PG_HOST
+  dbname_env: OPS_PG_DBNAME
+  user_env: OPS_PG_USER
+  password_env: OPS_PG_PASSWORD
+  table: public.ops_employees
+  # Required for mirror — identifies which destination rows to DELETE
+  # when the corresponding source row no longer appears in the result
+  # set above.
+  upsert_key: [employee_id]
+
+sync:
+  # mirror = upsert all source rows, then DELETE destination rows
+  # whose upsert_key was not observed in this sync.
+  mode: mirror
+  batch_size: 500
+  # A row-level upsert error during a mirror sync should fail the run.
+  # Silently skipping a row would cause its destination counterpart to
+  # be DELETEd as "not observed" — fail-fast keeps mirror semantics
+  # honest.
+  on_error: fail

@@ -1,0 +1,3 @@
+name: postgres-to-postgres-mirror
+version: "0.1"
+profile: hr_warehouse
