@@ -131,7 +131,7 @@ class TestPeopleSet:
         assert result.failed == 0
         _, kwargs = client.post.call_args
         url = client.post.call_args[0][0] if client.post.call_args[0] else kwargs.get("url")
-        assert url.endswith("/engage")
+        assert url == "https://api.mixpanel.com/engage"
         # people_set carries auth in the record ($token), so no HTTP auth is sent
         assert "auth" not in kwargs
         body = kwargs["json"]
@@ -150,7 +150,7 @@ class TestPeopleSet:
             MixpanelDestination().load(_records(1), config, _options())
 
         url = client.post.call_args[0][0]
-        assert "api-eu.mixpanel.com" in url
+        assert url == "https://api-eu.mixpanel.com/engage"
 
     def test_missing_distinct_id_is_row_error(self) -> None:
         config = _people_config()
@@ -178,7 +178,7 @@ class TestImportEvents:
         assert result.success == 1
         _, kwargs = client.post.call_args
         url = client.post.call_args[0][0]
-        assert url.endswith("/import")
+        assert url == "https://api.mixpanel.com/import"
         assert kwargs["auth"] == ("svc", "secret")
         assert kwargs["params"] == {"project_id": "1234567"}
         event = kwargs["json"][0]
