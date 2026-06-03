@@ -105,11 +105,15 @@ class ClickHouseDestination:
                         "(needed to identify which rows to DELETE)."
                     )
 
+                # clickhouse-connect's client.insert(table=...) interpolates
+                # the table raw into "INSERT INTO {table} ..." with no quoting
+                # (see clickhouse_connect/driver/insert.py), so pre-quote here.
+                table_q = self._quote_ident(config.table)
                 # TODO: batch insert with fallback to row-by-row on error
                 for i, record in enumerate(records):
                     try:
                         row = [[record.get(c) for c in columns]]
-                        client.insert(config.table, row, column_names=columns)
+                        client.insert(table_q, row, column_names=columns)
                         result.success += 1
                     except Exception as e:
                         result.failed += 1
@@ -175,7 +179,7 @@ class ClickHouseDestination:
         for i, record in enumerate(records):
             try:
                 row = [[record.get(c) for c in columns]]
-                client.insert(shadow, row, column_names=columns)
+                client.insert(shadow_q, row, column_names=columns)
                 result.success += 1
             except Exception as e:
                 result.failed += 1

@@ -184,7 +184,7 @@ class TestClickHouseDestinationLoad:
         ClickHouseDestination().load(records, _config(), _options())
 
         call_args = client.insert.call_args
-        assert call_args[0][0] == "analytics_scores"  # table name
+        assert call_args[0][0] == "`analytics_scores`"  # backtick-quoted (#512)
         assert call_args[1]["column_names"] == ["id", "name", "value"]
 
     @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
@@ -270,9 +270,9 @@ class TestClickHouseReplaceSwap:
             "CREATE TABLE" in s and "__drt_swap" in s and " AS " in s
             for s in commands
         )
-        # Insert goes to shadow, not the original table
+        # Insert goes to shadow, not the original table, backtick-quoted (#512)
         assert client.insert.call_count == 1
-        assert client.insert.call_args[0][0].endswith("__drt_swap")
+        assert client.insert.call_args[0][0] == "`analytics_scores__drt_swap`"
         assert client.insert.call_args[1]["column_names"] == ["id", "score"]
         # No EXCHANGE TABLES yet — that happens in finalize_sync
         assert not any("EXCHANGE TABLES" in s for s in commands)
@@ -499,4 +499,44 @@ class TestClickHouseIdentifierQuoting:
         assert not any(
             "analytics.scores" in s and "`analytics`.`scores" not in s
             for s in commands
+        )
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_insert_quotes_qualified_table_non_swap(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """clickhouse-connect's client.insert interpolates the table arg raw
+        into ``INSERT INTO {table} ...`` (see
+        clickhouse_connect/driver/insert.py), so the destination must
+        pre-quote (#512).
+        """
+        client = _fake_client()
+        mock_connect.return_value = client
+
+        dest = ClickHouseDestination()
+        dest.load(
+            [{"id": 1, "score": 0.5}],
+            _config(table="analytics.scores"),
+            _options(),
+        )
+
+        assert client.insert.call_args[0][0] == "`analytics`.`scores`"
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_insert_quotes_qualified_shadow_under_swap(
+        self, mock_connect: MagicMock
+    ) -> None:
+        client = _fake_client()
+        mock_connect.return_value = client
+
+        dest = ClickHouseDestination()
+        dest.load(
+            [{"id": 1, "score": 0.5}],
+            _config(table="analytics.scores"),
+            _options(mode="replace", replace_strategy="swap"),
+        )
+
+        assert (
+            client.insert.call_args[0][0]
+            == "`analytics`.`scores__drt_swap`"
         )
