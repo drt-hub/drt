@@ -91,7 +91,9 @@ class ClickHouseDestination:
                 )
             else:
                 if sync_options.mode == "replace" and not self._replace_truncated:
-                    client.command(f"TRUNCATE TABLE {config.table}")
+                    client.command(
+                        f"TRUNCATE TABLE {self._quote_ident(config.table)}"
+                    )
                     self._replace_truncated = True
 
                 # sync.mode: mirror (#340 Step 3) — validate upsert_key
@@ -161,10 +163,12 @@ class ClickHouseDestination:
         """
         result = SyncResult()
         shadow = f"{table}__drt_swap"
+        shadow_q = self._quote_ident(shadow)
+        table_q = self._quote_ident(table)
 
         if not self._swap_shadow_created:
-            client.command(f"DROP TABLE IF EXISTS {shadow}")
-            client.command(f"CREATE TABLE {shadow} AS {table}")
+            client.command(f"DROP TABLE IF EXISTS {shadow_q}")
+            client.command(f"CREATE TABLE {shadow_q} AS {table_q}")
             self._swap_shadow_created = True
             self._swap_table = table
 
@@ -189,7 +193,7 @@ class ClickHouseDestination:
                     # try/finally guarantees state reset even if DROP fails;
                     # at worst we leave an orphan shadow (tracked by #433).
                     try:
-                        client.command(f"DROP TABLE IF EXISTS {shadow}")
+                        client.command(f"DROP TABLE IF EXISTS {shadow_q}")
                     finally:
                         self._swap_shadow_created = False
                         self._swap_table = None
@@ -227,12 +231,14 @@ class ClickHouseDestination:
         assert isinstance(config, ClickHouseDestinationConfig)
         table = self._swap_table
         shadow = f"{table}__drt_swap"
+        table_q = self._quote_ident(table)
+        shadow_q = self._quote_ident(shadow)
 
         client = self._connect(config)
         try:
-            client.command(f"EXCHANGE TABLES {table} AND {shadow}")
+            client.command(f"EXCHANGE TABLES {table_q} AND {shadow_q}")
             # Shadow now contains the OLD data — drop it.
-            client.command(f"DROP TABLE {shadow}")
+            client.command(f"DROP TABLE {shadow_q}")
         finally:
             client.close()
             self._swap_shadow_created = False
@@ -336,13 +342,9 @@ class ClickHouseDestination:
         assert isinstance(config, ClickHouseDestinationConfig)
         client = self._connect(config)
         try:
-            # Use backtick quoting for ClickHouse table identifiers
-            escaped_table = (
-                ".`".join(config.table.split("."))
-                if "." in config.table
-                else config.table
+            result = client.query(
+                f"SELECT COUNT(*) FROM {self._quote_ident(config.table)}"
             )
-            result = client.query(f"SELECT COUNT(*) FROM `{escaped_table}`")
             # clickhouse_connect returns a QueryResult object
             # result.result_rows is a list of tuples
             if result.result_rows:

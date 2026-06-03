@@ -411,6 +411,38 @@ def test_clickhouse_destination_get_row_count_empty_table() -> None:
     mock_client.close.assert_called_once()
 
 
+def test_clickhouse_destination_get_row_count_with_qualified_table() -> None:
+    """get_row_count() backtick-quotes a database-qualified table (#512).
+
+    Regression: the previous inline ``".`".join(...)`` produced the
+    malformed ``\\`db.\\`scores\\``` (3 backticks); the fix renders the
+    valid ``\\`db\\`.\\`scores\\``` via ``_quote_ident``.
+    """
+    from drt.destinations.clickhouse import ClickHouseDestination
+
+    config = ClickHouseDestinationConfig(
+        type="clickhouse",
+        host="localhost",
+        database="default",
+        user="default",
+        table="analytics.scores",
+        upsert_key=["id"],
+    )
+
+    destination = ClickHouseDestination()
+    mock_client = MagicMock()
+    mock_result = MagicMock()
+    mock_result.result_rows = [(456,)]
+    mock_client.query.return_value = mock_result
+
+    with patch.object(destination, "_connect", return_value=mock_client):
+        result = destination.get_row_count(config)
+
+    assert result == 456
+    sql = mock_client.query.call_args[0][0]
+    assert "SELECT COUNT(*) FROM `analytics`.`scores`" == sql
+
+
 def test_get_row_count_for_destination_postgres() -> None:
     """Test get_row_count_for_destination() with Postgres config."""
     postgres_config = PostgresDestinationConfig(
