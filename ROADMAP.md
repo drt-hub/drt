@@ -54,6 +54,14 @@ Closes the **Tech Foundation Hardening epic** ([#538](https://github.com/drt-hub
 
 ---
 
+## v0.7.8 — Mixpanel destination + ClickHouse identifier fix + empty-batch contract completion ✅ Shipped 2026-06-05
+
+Released as **v0.7.8** on 2026-06-05. See [CHANGELOG.md](CHANGELOG.md#078---2026-06-05) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.7.8) for the full feature list.
+
+**Community follow-up patch.** Two contributor PRs accumulated since v0.7.7 — a new **Mixpanel destination** ([#608](https://github.com/drt-hub/drt/pull/608) by [@Pawansingh3889](https://github.com/Pawansingh3889), people_set + import_events endpoints, EU residency, deterministic `$insert_id`, closes [#417](https://github.com/drt-hub/drt/issues/417)) and a **ClickHouse `_quote_ident` identifier fix** ([#610](https://github.com/drt-hub/drt/pull/610) by [@yodakanohoshi](https://github.com/yodakanohoshi)) that closes the ClickHouse leg of the qualified-identifier fix family alongside Postgres ([#498](https://github.com/drt-hub/drt/pull/498)) / MySQL ([#514](https://github.com/drt-hub/drt/pull/514)). The ClickHouse fix is the urgency lever — v0.7.7 users running `database.table` syntax hit a server-side `Code: 62` syntax error from `get_row_count`'s malformed identifier. Also completes the **empty-batch contract suite** ([#604](https://github.com/drt-hub/drt/pull/604)–[#606](https://github.com/drt-hub/drt/pull/606), 25 of 25 registered destinations) which surfaced a real bug in `staged_upload.finalize()` fixed in the same PR, ships user-facing **`sync.mode: mirror` documentation** ([#607](https://github.com/drt-hub/drt/pull/607)), the post-#608 Mixpanel wiring ([#609](https://github.com/drt-hub/drt/pull/609)), and i18n marker bump ([#603](https://github.com/drt-hub/drt/pull/603)). BigQuery destination is in flight ([#584](https://github.com/drt-hub/drt/pull/584)) and will trigger v0.7.9. No breaking changes — drop-in upgrade from v0.7.7. v0.8 Cloud Destinations work continues in parallel.
+
+---
+
 ## v0.7.7 — `sync.mode: mirror` across SQL destinations ✅ Shipped 2026-06-01
 
 Released as **v0.7.7** on 2026-06-01. See [CHANGELOG.md](CHANGELOG.md#077---2026-06-01) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.7.7) for the full feature list.

@@ -11,7 +11,7 @@ license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
 dependencies = [
     "dagster>=1.6",
-    "drt-core>=0.5.3",
+    "drt-core>=0.7.7",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
