@@ -184,7 +184,7 @@ class TestClickHouseDestinationLoad:
         ClickHouseDestination().load(records, _config(), _options())
 
         call_args = client.insert.call_args
-        assert call_args[0][0] == "analytics_scores"  # table name
+        assert call_args[0][0] == "`analytics_scores`"  # backtick-quoted (#512)
         assert call_args[1]["column_names"] == ["id", "name", "value"]
 
     @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
@@ -219,7 +219,7 @@ class TestClickHouseReplaceMode:
 
         assert result.success == 2
         assert result.failed == 0
-        client.command.assert_called_once_with("TRUNCATE TABLE analytics_scores")
+        client.command.assert_called_once_with("TRUNCATE TABLE `analytics_scores`")
         assert client.insert.call_count == 2
 
     @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
@@ -270,9 +270,9 @@ class TestClickHouseReplaceSwap:
             "CREATE TABLE" in s and "__drt_swap" in s and " AS " in s
             for s in commands
         )
-        # Insert goes to shadow, not the original table
+        # Insert goes to shadow, not the original table, backtick-quoted (#512)
         assert client.insert.call_count == 1
-        assert client.insert.call_args[0][0].endswith("__drt_swap")
+        assert client.insert.call_args[0][0] == "`analytics_scores__drt_swap`"
         assert client.insert.call_args[1]["column_names"] == ["id", "score"]
         # No EXCHANGE TABLES yet — that happens in finalize_sync
         assert not any("EXCHANGE TABLES" in s for s in commands)
@@ -433,3 +433,110 @@ class TestClickHouseConnection:
         mock_connect.assert_called_once()
         # ClickHouse uses client.command("SELECT 1")
         client.command.assert_called_once_with("SELECT 1")
+
+
+# ---------------------------------------------------------------------------
+# Identifier quoting — schema-qualified table names (#512)
+# ---------------------------------------------------------------------------
+
+
+class TestClickHouseIdentifierQuoting:
+    """All SQL command paths must backtick-quote (possibly db-qualified)
+    table identifiers via ``_quote_ident`` so reserved words / mixed case /
+    ``db.table`` names render as valid ClickHouse references (#512).
+    """
+
+    def test_quote_ident_plain_and_qualified(self) -> None:
+        assert ClickHouseDestination._quote_ident("scores") == "`scores`"
+        assert (
+            ClickHouseDestination._quote_ident("db.scores") == "`db`.`scores`"
+        )
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_replace_truncate_quotes_qualified_table(
+        self, mock_connect: MagicMock
+    ) -> None:
+        client = _fake_client()
+        mock_connect.return_value = client
+
+        dest = ClickHouseDestination()
+        dest.load(
+            [{"id": 1, "score": 0.5}],
+            _config(table="analytics.scores"),
+            _options(mode="replace"),
+        )
+
+        client.command.assert_called_once_with(
+            "TRUNCATE TABLE `analytics`.`scores`"
+        )
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_swap_quotes_qualified_table_create_and_exchange(
+        self, mock_connect: MagicMock
+    ) -> None:
+        client = _fake_client()
+        mock_connect.return_value = client
+
+        dest = ClickHouseDestination()
+        opts = _options(mode="replace", replace_strategy="swap")
+        dest.load([{"id": 1, "score": 0.5}], _config(table="analytics.scores"), opts)
+        dest.finalize_sync(_config(table="analytics.scores"), opts)
+
+        commands = [c[0][0] for c in client.command.call_args_list]
+        # CREATE clones the qualified live table into a qualified shadow
+        assert any(
+            "CREATE TABLE `analytics`.`scores__drt_swap` AS `analytics`.`scores`"
+            == s
+            for s in commands
+        )
+        # EXCHANGE references both fully-quoted qualified identifiers
+        assert any(
+            "EXCHANGE TABLES `analytics`.`scores` AND "
+            "`analytics`.`scores__drt_swap`" == s
+            for s in commands
+        )
+        # No path leaks an unquoted qualified identifier
+        assert not any(
+            "analytics.scores" in s and "`analytics`.`scores" not in s
+            for s in commands
+        )
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_insert_quotes_qualified_table_non_swap(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """clickhouse-connect's client.insert interpolates the table arg raw
+        into ``INSERT INTO {table} ...`` (see
+        clickhouse_connect/driver/insert.py), so the destination must
+        pre-quote (#512).
+        """
+        client = _fake_client()
+        mock_connect.return_value = client
+
+        dest = ClickHouseDestination()
+        dest.load(
+            [{"id": 1, "score": 0.5}],
+            _config(table="analytics.scores"),
+            _options(),
+        )
+
+        assert client.insert.call_args[0][0] == "`analytics`.`scores`"
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_insert_quotes_qualified_shadow_under_swap(
+        self, mock_connect: MagicMock
+    ) -> None:
+        client = _fake_client()
+        mock_connect.return_value = client
+
+        dest = ClickHouseDestination()
+        dest.load(
+            [{"id": 1, "score": 0.5}],
+            _config(table="analytics.scores"),
+            _options(mode="replace", replace_strategy="swap"),
+        )
+
+        assert (
+            client.insert.call_args[0][0]
+            == "`analytics`.`scores__drt_swap`"
+        )
