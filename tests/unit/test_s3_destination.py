@@ -413,7 +413,9 @@ def test_missing_pyarrow_for_parquet_raises_helpful_import_error() -> None:
 class TestParquetFormat:
     def test_parquet_uploads_binary_body_with_octet_stream(self) -> None:
         # pandas + pyarrow are installed locally for parquet tests; on CI
-        # they're part of the [parquet] extra.
+        # they're part of the [parquet] extra. This test verifies the actual
+        # parquet binary (PAR1 magic bytes) — the orchestration-only sibling
+        # below runs without [parquet] so CI covers the same code path.
         pytest.importorskip("pandas")
         pytest.importorskip("pyarrow")
 
@@ -432,3 +434,83 @@ class TestParquetFormat:
         body = kwargs["Body"]
         assert body[:4] == b"PAR1"
         assert body[-4:] == b"PAR1"
+
+    def test_parquet_orchestration_with_mocked_pandas_runs_on_ci(self) -> None:
+        """Verify _serialise_parquet's orchestration without requiring [parquet].
+
+        Sibling to the end-to-end test above: that one validates the produced
+        binary (PAR1 magic bytes) and only runs when pandas/pyarrow are
+        installed. This one mocks both libraries via ``sys.modules`` so it
+        runs on CI's minimal install (no [parquet] extras), covering the
+        ``compression = ... if ... else None`` branch + the
+        ``pandas.DataFrame(records)`` / ``df.to_parquet(buf, engine=...,
+        compression=..., index=False)`` orchestration that's otherwise
+        skipped on CI. The split keeps the CI install line policy intact
+        (.github/workflows/ci.yml#L41-L43 — "parquet remain opt-in") while
+        closing the CI coverage hole for the parquet path.
+        """
+        client = MagicMock()
+        modules = _mock_boto3_modules(client)
+
+        # Mock pandas: DataFrame(records) → mock_df; mock_df.to_parquet writes
+        # PAR1 magic bytes to the BytesIO buffer so the downstream assertions
+        # on the put_object body remain meaningful even with mocks.
+        mock_df = MagicMock()
+
+        def fake_to_parquet(buf: Any, **_kwargs: Any) -> None:
+            buf.write(b"PAR1" + b"\x00" * 16 + b"PAR1")
+
+        mock_df.to_parquet.side_effect = fake_to_parquet
+        mock_pandas = MagicMock()
+        mock_pandas.DataFrame.return_value = mock_df
+        modules["pandas"] = mock_pandas
+        modules["pyarrow"] = MagicMock()
+
+        records = [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
+
+        with patch.dict("sys.modules", modules):
+            result = S3Destination().load(
+                records,
+                _config(format="parquet", parquet_compression="snappy"),
+                _options(),
+            )
+
+        assert result.success == 2
+        # pandas.DataFrame called with the records
+        mock_pandas.DataFrame.assert_called_once_with(records)
+        # to_parquet called with the expected kwargs
+        to_parquet_kwargs = mock_df.to_parquet.call_args.kwargs
+        assert to_parquet_kwargs["engine"] == "pyarrow"
+        assert to_parquet_kwargs["compression"] == "snappy"
+        assert to_parquet_kwargs["index"] is False
+        # Body uploaded as parquet
+        put_kwargs = client.put_object.call_args.kwargs
+        assert put_kwargs["ContentType"] == "application/octet-stream"
+        assert "ContentEncoding" not in put_kwargs
+        assert put_kwargs["Key"].endswith(".parquet")
+
+    def test_parquet_compression_none_maps_to_none(self) -> None:
+        """``parquet_compression: none`` translates to ``compression=None``
+        for ``df.to_parquet`` rather than passing the literal string ``"none"``.
+        """
+        client = MagicMock()
+        modules = _mock_boto3_modules(client)
+        mock_df = MagicMock()
+
+        def fake_to_parquet(buf: Any, **_kwargs: Any) -> None:
+            buf.write(b"PAR1PAR1")
+
+        mock_df.to_parquet.side_effect = fake_to_parquet
+        mock_pandas = MagicMock()
+        mock_pandas.DataFrame.return_value = mock_df
+        modules["pandas"] = mock_pandas
+        modules["pyarrow"] = MagicMock()
+
+        with patch.dict("sys.modules", modules):
+            S3Destination().load(
+                [{"id": 1}],
+                _config(format="parquet", parquet_compression="none"),
+                _options(),
+            )
+
+        assert mock_df.to_parquet.call_args.kwargs["compression"] is None
