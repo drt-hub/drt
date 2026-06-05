@@ -67,8 +67,7 @@ def register_source(
     """
     if type_name in _source_registry:
         raise ValueError(
-            f"Source type '{type_name}' already registered. "
-            f"Each connector type must be unique."
+            f"Source type '{type_name}' already registered. Each connector type must be unique."
         )
     _source_registry[type_name] = (profile_class, source_class)
 
@@ -92,8 +91,7 @@ def get_destination(config: DestinationConfig) -> Destination:
     # If not found, provide helpful error message
     available = sorted(_destination_registry.keys())
     raise ValueError(
-        f"Unknown destination type: '{config.type}'. "
-        f"Available destinations: {', '.join(available)}"
+        f"Unknown destination type: '{config.type}'. Available destinations: {', '.join(available)}"
     )
 
 
@@ -116,8 +114,7 @@ def get_source(profile: ProfileConfig) -> Source:
     # If not found, provide helpful error message
     available = sorted(_source_registry.keys())
     raise ValueError(
-        f"Unknown source type: '{profile.type}'. "
-        f"Available sources: {', '.join(available)}"
+        f"Unknown source type: '{profile.type}'. Available sources: {', '.join(available)}"
     )
 
 
@@ -159,6 +156,7 @@ def _register_all_connectors() -> None:
         ParquetDestinationConfig,
         PostgresDestinationConfig,
         RestApiDestinationConfig,
+        S3DestinationConfig,
         SalesforceBulkDestinationConfig,
         SendGridDestinationConfig,
         SlackDestinationConfig,
@@ -188,6 +186,7 @@ def _register_all_connectors() -> None:
     from drt.destinations.parquet import ParquetDestination
     from drt.destinations.postgres import PostgresDestination
     from drt.destinations.rest_api import RestApiDestination
+    from drt.destinations.s3 import S3Destination
     from drt.destinations.salesforce_bulk import SalesforceBulkDestination
     from drt.destinations.sendgrid import SendGridDestination
     from drt.destinations.slack import SlackDestination
@@ -229,6 +228,7 @@ def _register_all_connectors() -> None:
     register_destination("clickhouse", ClickHouseDestinationConfig, ClickHouseDestination)
     register_destination("parquet", ParquetDestinationConfig, ParquetDestination)
     register_destination("file", FileDestinationConfig, FileDestination)
+    register_destination("s3", S3DestinationConfig, S3Destination)
     register_destination("email_smtp", EmailSmtpDestinationConfig, EmailSmtpDestination)
     register_destination("linear", LinearDestinationConfig, LinearDestination)
     register_destination("google_ads", GoogleAdsDestinationConfig, GoogleAdsDestination)
