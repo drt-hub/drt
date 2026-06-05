@@ -340,6 +340,70 @@ class TestErrorPaths:
             with pytest.raises(ImportError, match=r"pip install drt-core\[s3\]"):
                 S3Destination().load([{"id": 1}], _config(), _options())
 
+    def test_serialisation_failure_records_row_errors_without_uploading(self) -> None:
+        """Serialisation error → row failures, no boto3 client created.
+
+        Any exception raised inside ``_serialise`` (bad pandas frame, encoding
+        error, etc.) must be captured into ``result.errors`` and short-circuit
+        BEFORE the upload phase, so no S3 client is ever constructed for a
+        non-uploadable payload.
+        """
+        client = MagicMock()
+        modules = _mock_boto3_modules(client)
+
+        with patch.object(
+            S3Destination,
+            "_serialise",
+            side_effect=RuntimeError("boom: bad row"),
+        ):
+            with patch.dict("sys.modules", modules):
+                result = S3Destination().load(
+                    [{"id": 1}, {"id": 2}], _config(), _options()
+                )
+
+        assert result.success == 0
+        assert result.failed == 2
+        assert any("boom: bad row" in e for e in result.errors)
+        # Upload phase never ran — no put_object call.
+        client.put_object.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Parquet ImportError path (no [parquet] extras installed)
+# ---------------------------------------------------------------------------
+
+
+def test_missing_pyarrow_for_parquet_raises_helpful_import_error() -> None:
+    """``format: parquet`` without the [parquet] extras raises with the
+    install hint.
+
+    Surfaces in CI's minimal install (no [parquet] in the install line).
+    The error message has to mention ``drt-core[parquet]`` so users know
+    which extra to add.
+    """
+    client = MagicMock()
+    modules = _mock_boto3_modules(client)
+    # Block pandas + pyarrow imports inside _serialise_parquet.
+    modules["pandas"] = None  # type: ignore[assignment]
+    modules["pyarrow"] = None  # type: ignore[assignment]
+
+    with patch.dict("sys.modules", modules):
+        result = S3Destination().load(
+            [{"id": 1}], _config(format="parquet"), _options()
+        )
+
+    # Serialisation failure path: ImportError from inside _serialise_parquet
+    # is caught by the outer try/except in load(), recorded as row failures
+    # with the helpful install hint preserved in result.errors. This matches
+    # the established Postgres / MySQL / ClickHouse missing-driver behaviour
+    # rather than crashing the whole sync — the user still gets a single
+    # clear "install drt-core[parquet]" message in the failure record.
+    assert result.success == 0
+    assert result.failed == 1
+    assert any("drt-core[parquet]" in e for e in result.errors)
+    # No boto3 client was created — _serialise failed before _client() ran.
+    client.put_object.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Parquet (only runs when [parquet] extras installed)
