@@ -53,6 +53,9 @@ jobs:
         # vuln data is python-version-independent.
         if: matrix.python-version == '3.12'
         run: |
+          # GitHub-hosted runners may ship a pip version with a known OSV
+          # advisory; upgrade before scanning so the audit passes cleanly.
+          pip install --upgrade "pip>=26.1.2"
           pip install "pip-audit==2.10.0"
           # Allow-list: pass `--ignore-vuln GHSA-xxxx` here when a finding is
           # triaged as a known false positive. Keep this list empty by default
