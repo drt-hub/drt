@@ -259,7 +259,10 @@ def _initialize_if_needed() -> None:
 
 
 def get_tracer() -> Tracer:
-    """Return the shared tracer, initializing OTEL lazily on first use."""
+    """Return the shared tracer, initializing OTEL lazily on first use.
+
+    Subsequent calls reuse the initialized provider.
+    """
 
     _initialize_if_needed()
     if _STATE.tracer is not None:
@@ -272,7 +275,10 @@ def get_tracer() -> Tracer:
 
 
 def get_meter() -> Meter:
-    """Return the shared meter, initializing OTEL lazily on first use."""
+    """Return the shared meter, initializing OTEL lazily on first use.
+
+    Subsequent calls reuse the initialized provider.
+    """
 
     _initialize_if_needed()
     if _STATE.meter is not None:
