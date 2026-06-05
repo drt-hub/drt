@@ -13,7 +13,7 @@ import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlparse
 
 from drt.config.credentials import ObservabilityConfig, _load_profiles_yaml
@@ -174,7 +174,10 @@ def _load_noop_tracer_and_meter() -> tuple[Tracer, Meter]:
         trace_api = importlib.import_module("opentelemetry.trace")
         metrics_api = importlib.import_module("opentelemetry.metrics")
     except ImportError:
-        return _FallbackNoOpTracer(), _FallbackNoOpMeter()
+        return cast(
+            tuple[Tracer, Meter],
+            (_FallbackNoOpTracer(), _FallbackNoOpMeter()),
+        )
 
     return trace_api.get_tracer(_TRACER_SCOPE), metrics_api.get_meter(_METER_SCOPE)
 
