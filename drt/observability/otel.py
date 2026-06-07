@@ -166,6 +166,8 @@ def _normalize_endpoint(endpoint: str) -> tuple[str, bool]:
     if parsed.scheme in {"http", "https"} and parsed.netloc:
         normalized = parsed.netloc + parsed.path
         return normalized, parsed.scheme == "http"
+    # Scheme-less endpoints (e.g. "localhost:4317") are returned as-is with
+    # insecure=False, which means default TLS — the correct gRPC OTLP convention.
     return endpoint, False
 
 
@@ -267,6 +269,8 @@ def get_tracer() -> Tracer:
     _initialize_if_needed()
     if _STATE.tracer is not None:
         return _STATE.tracer
+    # defensive: should not happen — every code path in _initialize_if_needed()
+    # sets _STATE.tracer to a non-None value. Guards against future refactors.
     tracer, meter = _load_noop_tracer_and_meter()
     _STATE.tracer = tracer
     if _STATE.meter is None:
@@ -283,6 +287,8 @@ def get_meter() -> Meter:
     _initialize_if_needed()
     if _STATE.meter is not None:
         return _STATE.meter
+    # defensive: should not happen — every code path in _initialize_if_needed()
+    # sets _STATE.meter to a non-None value. Guards against future refactors.
     tracer, meter = _load_noop_tracer_and_meter()
     if _STATE.tracer is None:
         _STATE.tracer = tracer

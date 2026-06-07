@@ -107,35 +107,16 @@ def test_get_tracer_returns_noop_when_otel_is_missing(monkeypatch: pytest.Monkey
         lambda _config_dir=None: {"otel": {"endpoint": "http://localhost:4317"}},
     )
 
-    class FakeNoOpTracer:
-        pass
-
-    class FakeNoOpMeter:
-        pass
-
-    class FakeNoOpTracerProvider:
-        def get_tracer(self, _scope: str) -> FakeNoOpTracer:
-            return FakeNoOpTracer()
-
-    class FakeNoOpMeterProvider:
-        def get_meter(self, _scope: str) -> FakeNoOpMeter:
-            return FakeNoOpMeter()
-
     def fail_import(name: str) -> Any:
-        if name.startswith("opentelemetry.sdk") or name.startswith("opentelemetry.exporter"):
-            raise ImportError(name)
-        return SimpleNamespace(
-            get_tracer=lambda _scope: FakeNoOpTracer(),
-            get_meter=lambda _scope: FakeNoOpMeter(),
-            NoOpTracerProvider=FakeNoOpTracerProvider,
-            NoOpMeterProvider=FakeNoOpMeterProvider,
-        )
+        # All opentelemetry imports fail — simulates package not installed.
+        # This forces _load_noop_tracer_and_meter() to return _FallbackNoOpTracer.
+        raise ImportError(name)
 
     monkeypatch.setattr(otel.importlib, "import_module", fail_import)
 
     tracer = otel.get_tracer()
 
-    assert tracer.__class__.__name__ in {"FakeNoOpTracer", "_FallbackNoOpTracer", "NoOpTracer"}
+    assert isinstance(tracer, otel._FallbackNoOpTracer)
 
 
 def test_get_tracer_uses_noop_when_otel_block_missing() -> None:
@@ -329,3 +310,70 @@ def test_get_meter_reuses_initialized_state(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert tracer is otel.get_tracer()
     assert meter is otel.get_meter()
+
+
+# ---------------------------------------------------------------------------
+# New tests to cover previously uncovered defensive paths
+# ---------------------------------------------------------------------------
+
+
+def test_parse_otlp_headers_env_raises_on_missing_equals() -> None:
+    """_parse_otlp_headers_env raises ValueError when an entry has no '='."""
+    with pytest.raises(ValueError, match="key=value"):
+        otel._parse_otlp_headers_env("Authorization")
+
+
+def test_parse_otlp_headers_env_raises_on_empty_key() -> None:
+    """_parse_otlp_headers_env raises ValueError when the key is empty."""
+    with pytest.raises(ValueError, match="key=value"):
+        otel._parse_otlp_headers_env("=Bearer secret")
+
+
+def test_expand_headers_raises_on_non_dict() -> None:
+    """_expand_headers raises ValueError when expand_env_vars returns a non-dict."""
+    import drt.observability.otel as otel_mod
+
+    original = otel_mod.expand_env_vars
+
+    def fake_expand(_headers: object) -> object:
+        return "not-a-dict"
+
+    otel_mod.expand_env_vars = fake_expand  # type: ignore[assignment]
+    try:
+        with pytest.raises(ValueError, match="mapping"):
+            otel._expand_headers({"key": "value"})
+    finally:
+        otel_mod.expand_env_vars = original
+
+
+def test_expand_headers_raises_on_non_string_value() -> None:
+    """_expand_headers raises ValueError when a value is not a string."""
+    import drt.observability.otel as otel_mod
+
+    original = otel_mod.expand_env_vars
+
+    def fake_expand(_headers: object) -> object:
+        return {"key": 123}
+
+    otel_mod.expand_env_vars = fake_expand  # type: ignore[assignment]
+    try:
+        with pytest.raises(ValueError, match="string keys and values"):
+            otel._expand_headers({"key": "value"})
+    finally:
+        otel_mod.expand_env_vars = original
+
+
+def test_fallback_noop_instrument_add_and_record() -> None:
+    """_FallbackNoOpInstrument.add and .record do not raise."""
+    instrument = otel._FallbackNoOpInstrument()
+    instrument.add(1, {"attr": "val"})
+    instrument.record(1.5, {"attr": "val"})
+
+
+def test_fallback_noop_meter_creates_instruments() -> None:
+    """_FallbackNoOpMeter creates _FallbackNoOpInstrument instances for all methods."""
+    meter = otel._FallbackNoOpMeter()
+    assert isinstance(meter.create_counter("c"), otel._FallbackNoOpInstrument)
+    assert isinstance(meter.create_up_down_counter("ud"), otel._FallbackNoOpInstrument)
+    assert isinstance(meter.create_histogram("h"), otel._FallbackNoOpInstrument)
+    assert isinstance(meter.create_gauge("g"), otel._FallbackNoOpInstrument)
