@@ -1,0 +1,101 @@
+# Weekly audit of .all-contributorsrc against current reality.
+#
+# Runs scripts/check_contributors.sh, which checks for:
+#   1. Profile URL drift between README.md and .all-contributorsrc
+#      (failure mode that hit us via #616 → #617 → #620).
+#   2. Contributors with merged PRs missing from .all-contributorsrc
+#      (failure mode that hit us via @yodakanohoshi / @Photon101 /
+#      @kiwamizamurai being absent at the time of the v0.7.8 cut).
+#   3. Contributors eligible for Triage Collaborator per GOVERNANCE.md
+#      criteria (5+ merged PRs, active last 30 days) who are not yet
+#      invited (failure mode that hit us when masukai initially
+#      thought Muawiya-contact still needed elevating — they didn't,
+#      but the only way to confirm that confidently was a manual
+#      collaborators check).
+#
+# When the script reports a mismatch, this workflow opens (or updates)
+# a GitHub issue with the detailed report so the gap is acted on
+# rather than silently accumulating.
+
+name: contributors-audit
+
+on:
+  schedule:
+    # Monday 00:30 UTC — slightly offset from the existing nightly /
+    # weekly schedules in ci.yml / codeql.yml so they don't all queue
+    # at the same minute.
+    - cron: '30 0 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Run contributors audit
+        id: audit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          OUTPUT=$(bash scripts/check_contributors.sh 2>&1)
+          EXIT_CODE=$?
+          set -e
+          {
+            echo "exit_code=$EXIT_CODE"
+            echo "report<<EOF"
+            echo "$OUTPUT"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          # Also dump to the Action log for quick inspection.
+          echo "$OUTPUT"
+
+      - name: Open / update tracking issue when audit finds gaps
+        if: steps.audit.outputs.exit_code != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TITLE="chore(contributors): weekly audit found gaps in .all-contributorsrc"
+          BODY=$(cat <<EOF
+          The weekly \`contributors-audit\` workflow flagged one or more issues with the \`.all-contributorsrc\` file. The detailed report from \`scripts/check_contributors.sh\` follows; please address the gaps either by editing \`.all-contributorsrc\` directly, requesting the \`@all-contributors\` bot to add missing contributors, or opening a Discussion to propose any overdue Triage Collaborator invitations.
+
+          See \`scripts/check_contributors.sh\` and [GOVERNANCE.md](../blob/main/GOVERNANCE.md) for the remediation paths.
+
+          <details>
+          <summary>Full report</summary>
+
+          \`\`\`
+          ${{ steps.audit.outputs.report }}
+          \`\`\`
+
+          </details>
+
+          ---
+
+          *This issue was opened automatically by the \`contributors-audit\` workflow. It will be updated rather than duplicated on subsequent runs.*
+          EOF
+          )
+
+          # Reuse an existing open issue if one already exists; otherwise create.
+          EXISTING=$(gh issue list \
+            --search "in:title \"chore(contributors): weekly audit found gaps\"" \
+            --state open \
+            --json number \
+            -q '.[0].number // empty')
+
+          if [[ -n "$EXISTING" ]]; then
+            echo "Updating existing audit issue #$EXISTING"
+            gh issue comment "$EXISTING" --body "$BODY"
+          else
+            echo "Opening new audit issue"
+            gh issue create \
+              --title "$TITLE" \
+              --body "$BODY" \
+              --label "chore,contributors"
+          fi

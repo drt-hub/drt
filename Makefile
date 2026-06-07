@@ -55,6 +55,9 @@ check-skills:  ## Verify .claude/commands/ matches skills (CI gate)
 check-i18n:  ## Check if translated *.{lang}.md files are in sync with English base
 	@bash scripts/check-i18n-sync.sh
 
+check-contributors:  ## Audit .all-contributorsrc for drift / missing entries / overdue Triage invitations
+	@bash scripts/check_contributors.sh
+
 check-changelog:  ## Verify every drt-core v* tag has a ## [X.Y.Z] section in CHANGELOG.md
 	@python3 scripts/check_changelog_monotonic.py
 
