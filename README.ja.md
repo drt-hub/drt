@@ -256,6 +256,7 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | MySQL (upsert) | ✅ v0.4 | `pip install drt-core[mysql]` | パスワード（環境変数） |
 | ClickHouse | ✅ v0.5 | `pip install drt-core[clickhouse]` | パスワード（環境変数） |
 | Parquet file | ✅ v0.5 | `pip install drt-core[parquet]` | ファイルパス |
+| Amazon S3 | ✅ v0.7.9 | `pip install drt-core[s3]` | AWS 認証チェイン / 環境変数 |
 | Microsoft Teams Webhook | ✅ v0.5 | (core) | Webhook URL |
 | CSV / JSON / JSONL file | ✅ v0.5 | (core) | ファイルパス |
 | Jira | ✅ v0.5 | (core) | Basic（メール + APIトークン） |

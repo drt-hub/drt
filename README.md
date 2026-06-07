@@ -283,6 +283,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | MySQL (upsert)          | ✅ v0.4   | `pip install drt-core[mysql]`      | Password (env var)                |
 | ClickHouse              | ✅ v0.5   | `pip install drt-core[clickhouse]` | Password (env var)                |
 | Parquet file            | ✅ v0.5   | `pip install drt-core[parquet]`    | File path                         |
+| Amazon S3               | ✅ v0.7.9 | `pip install drt-core[s3]`         | AWS credential chain / env vars   |
 | Microsoft Teams Webhook | ✅ v0.5   | (core)                             | Webhook URL                       |
 | CSV / JSON / JSONL file | ✅ v0.5   | (core)                             | File path                         |
 | Jira                    | ✅ v0.5   | (core)                             | Basic (email + API token)         |

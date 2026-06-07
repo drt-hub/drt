@@ -173,8 +173,8 @@ class TwilioDestinationConfig(BaseModel):
         if not (self.auth_token or self.auth_token_env):
             raise ValueError("auth_token or auth_token_env is required.")
         return self
-    
-    
+
+
 class DiscordDestinationConfig(BaseModel):
     type: Literal["discord"]
     webhook_url: str | None = None
@@ -280,9 +280,7 @@ class AmplitudeDestinationConfig(BaseModel):
     @model_validator(mode="after")
     def _check_event_endpoint(self) -> AmplitudeDestinationConfig:
         if self.endpoint == "event" and not self.event_type and not self.event_type_field:
-            raise ValueError(
-                "event_type or event_type_field is required when endpoint is 'event'."
-            )
+            raise ValueError("event_type or event_type_field is required when endpoint is 'event'.")
         return self
 
     @field_validator("batch_size", mode="after")
@@ -408,8 +406,8 @@ class SnowflakeDestinationConfig(BaseModel):
 
     def describe(self) -> str:
         return f"{self.type} ({self.database}.{self.schema_}.{self.table})"
-    
-    
+
+
 class LinearDestinationConfig(BaseModel):
     type: Literal["linear"]
     team_id: str | None = None
@@ -464,8 +462,7 @@ class LookupConfig(BaseModel):
             )
         if not self.check_only and self.select is None:
             raise ValueError(
-                "lookups.select is required (or set check_only=true for "
-                "existence-only filtering)."
+                "lookups.select is required (or set check_only=true for existence-only filtering)."
             )
         return self
 
@@ -643,6 +640,42 @@ class FileDestinationConfig(BaseModel):
         return f"{self.type} ({self.path})"
 
 
+class S3DestinationConfig(BaseModel):
+    """S3 destination — upload records as CSV / JSON / JSONL / Parquet to S3."""
+
+    type: Literal["s3"]
+    bucket: str
+    # Optional key prefix. The generated file name is appended to this prefix:
+    # e.g. prefix="drt/users/" → "drt/users/20260605T123000Z.csv". For
+    # per-sync routing, give each sync its own prefix.
+    prefix: str = ""
+    format: Literal["csv", "json", "jsonl", "parquet"] = "csv"
+    # gzip-compress csv / json / jsonl uploads ("none" disables). Parquet
+    # uses its native compression below; "gzip" here is ignored for parquet.
+    compression: Literal["none", "gzip"] = "none"
+    # Optional Parquet-specific compression (matches ParquetDestinationConfig).
+    parquet_compression: Literal["snappy", "gzip", "zstd", "none"] = "snappy"
+    region: str | None = None  # AWS region; defers to boto3 default if unset
+    # AWS auth: by default, falls back to boto3's standard credential chain
+    # (env vars, ~/.aws/credentials, instance profile, IAM role). Provide one
+    # of the following for explicit overrides:
+    aws_profile: str | None = None  # named profile in ~/.aws/credentials
+    aws_access_key_id_env: str | None = None
+    aws_secret_access_key_env: str | None = None
+    aws_session_token_env: str | None = None
+    # Optional endpoint URL — set when targeting an S3-compatible service
+    # (MinIO, LocalStack, R2, etc.). None → real AWS S3.
+    endpoint_url: str | None = None
+    # Optional file-name template (Jinja2-free, supports one placeholder:
+    # {timestamp} — UTC ISO 8601 basic format, e.g. "20260605T123000Z").
+    # Default produces "<prefix><timestamp>.<ext>". For per-sync naming,
+    # set ``prefix`` per sync (e.g. ``prefix: drt/active_users/``).
+    key_template: str | None = None
+
+    def describe(self) -> str:
+        return f"{self.type} (s3://{self.bucket}/{self.prefix})"
+
+
 class EmailSmtpDestinationConfig(BaseModel):
     type: Literal["email_smtp"] = "email_smtp"
     host: str
@@ -767,6 +800,7 @@ DestinationConfig = Annotated[
     | ParquetDestinationConfig
     | GoogleAdsDestinationConfig
     | FileDestinationConfig
+    | S3DestinationConfig
     | EmailSmtpDestinationConfig
     | NotionDestinationConfig
     | IntercomDestinationConfig
@@ -885,9 +919,7 @@ class SyncTest(BaseModel):
         ]
         configured_count = sum(test is not None for test in configured_tests)
         if configured_count != 1:
-            raise ValueError(
-                "Exactly one sync test must be configured in each tests entry."
-            )
+            raise ValueError("Exactly one sync test must be configured in each tests entry.")
         return self
 
 
