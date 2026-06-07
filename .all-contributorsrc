@@ -16,16 +16,41 @@
       "avatar_url": "https://avatars.githubusercontent.com/u/37993351?v=4",
       "profile": "https://masukai.github.io/portfolio/",
       "contributions": [
-        "code"
+        "code",
+        "doc",
+        "maintenance",
+        "ideas",
+        "tool",
+        "projectManagement",
+        "review",
+        "mentoring"
+      ]
+    },
+    {
+      "login": "yodakanohoshi",
+      "name": "yodakanohoshi",
+      "avatar_url": "https://avatars.githubusercontent.com/u/25799234?v=4",
+      "profile": "https://github.com/yodakanohoshi",
+      "contributions": [
+        "code",
+        "doc",
+        "maintenance",
+        "ideas",
+        "review",
+        "projectManagement"
       ]
     },
     {
       "login": "Muawiya-contact",
       "name": "Moavia Amir",
       "avatar_url": "https://avatars.githubusercontent.com/u/178013839?v=4",
-      "profile": "https://www.youtube.com/@Coding_Moves",
+      "profile": "https://muawiya-contact.github.io/muawiya-portfolio/",
       "contributions": [
-        "code"
+        "code",
+        "doc",
+        "infra",
+        "maintenance",
+        "ideas"
       ]
     },
     {
@@ -88,7 +113,9 @@
       "avatar_url": "https://avatars.githubusercontent.com/u/231972213?v=4",
       "profile": "https://github.com/cian-ps",
       "contributions": [
-        "code"
+        "code",
+        "bug",
+        "infra"
       ]
     },
     {
@@ -97,7 +124,7 @@
       "avatar_url": "https://avatars.githubusercontent.com/u/238762418?v=4",
       "profile": "https://github.com/xtreellaDev",
       "contributions": [
-        "code"
+        "test"
       ]
     },
     {
@@ -106,7 +133,7 @@
       "avatar_url": "https://avatars.githubusercontent.com/u/275152799?v=4",
       "profile": "https://github.com/Ai-chan-0411",
       "contributions": [
-        "code"
+        "doc"
       ]
     },
     {
