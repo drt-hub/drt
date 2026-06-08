@@ -144,6 +144,7 @@ def _register_all_connectors() -> None:
         DiscordDestinationConfig,
         EmailSmtpDestinationConfig,
         FileDestinationConfig,
+        GCSDestinationConfig,
         GitHubActionsDestinationConfig,
         GoogleAdsDestinationConfig,
         GoogleSheetsDestinationConfig,
@@ -175,6 +176,7 @@ def _register_all_connectors() -> None:
     from drt.destinations.discord import DiscordDestination
     from drt.destinations.email_smtp import EmailSmtpDestination
     from drt.destinations.file import FileDestination
+    from drt.destinations.gcs import GCSDestination
     from drt.destinations.github_actions import GitHubActionsDestination
     from drt.destinations.google_ads import GoogleAdsDestination
     from drt.destinations.google_sheets import GoogleSheetsDestination
@@ -231,6 +233,7 @@ def _register_all_connectors() -> None:
     register_destination("parquet", ParquetDestinationConfig, ParquetDestination)
     register_destination("file", FileDestinationConfig, FileDestination)
     register_destination("s3", S3DestinationConfig, S3Destination)
+    register_destination("gcs", GCSDestinationConfig, GCSDestination)
     register_destination("email_smtp", EmailSmtpDestinationConfig, EmailSmtpDestination)
     register_destination("linear", LinearDestinationConfig, LinearDestination)
     register_destination("google_ads", GoogleAdsDestinationConfig, GoogleAdsDestination)

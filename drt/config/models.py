@@ -714,6 +714,40 @@ class S3DestinationConfig(BaseModel):
         return f"{self.type} (s3://{self.bucket}/{self.prefix})"
 
 
+class GCSDestinationConfig(BaseModel):
+    """GCS destination — upload records as CSV / JSON / JSONL / Parquet to Google Cloud Storage."""
+
+    type: Literal["gcs"]
+    bucket: str
+    # Optional object-name prefix. The generated file name is appended:
+    # e.g. prefix="drt/users/" → "drt/users/20260605T123000Z.csv". For
+    # per-sync routing, give each sync its own prefix.
+    prefix: str = ""
+    format: Literal["csv", "json", "jsonl", "parquet"] = "csv"
+    # gzip-compress csv / json / jsonl uploads ("none" disables). Parquet
+    # uses its native compression below; "gzip" here is ignored for parquet.
+    compression: Literal["none", "gzip"] = "none"
+    # Optional Parquet-specific compression (matches ParquetDestinationConfig).
+    parquet_compression: Literal["snappy", "gzip", "zstd", "none"] = "snappy"
+    # GCP project to bill / scope the client to. Optional — the credentials
+    # file usually carries one, and ADC will use the project from
+    # ``gcloud config get-value project`` if neither is set.
+    project_id: str | None = None
+    # GCS auth: by default, falls back to Application Default Credentials
+    # (GOOGLE_APPLICATION_CREDENTIALS env → gcloud
+    # application-default → GCE/GKE/Cloud Run service account). For
+    # explicit overrides, point at a service-account JSON keyfile:
+    credentials_path: str | None = None
+    # Optional file-name template (Jinja2-free, supports one placeholder:
+    # {timestamp} — UTC ISO 8601 basic format, e.g. "20260605T123000Z").
+    # Default produces "<prefix><timestamp>.<ext>". For per-sync naming,
+    # set ``prefix`` per sync (e.g. ``prefix: drt/active_users/``).
+    key_template: str | None = None
+
+    def describe(self) -> str:
+        return f"{self.type} (gs://{self.bucket}/{self.prefix})"
+
+
 class EmailSmtpDestinationConfig(BaseModel):
     type: Literal["email_smtp"] = "email_smtp"
     host: str
@@ -839,6 +873,7 @@ DestinationConfig = Annotated[
     | GoogleAdsDestinationConfig
     | FileDestinationConfig
     | S3DestinationConfig
+    | GCSDestinationConfig
     | EmailSmtpDestinationConfig
     | NotionDestinationConfig
     | IntercomDestinationConfig
