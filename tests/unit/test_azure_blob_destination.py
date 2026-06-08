@@ -410,6 +410,35 @@ class TestErrorPaths:
             with pytest.raises(ImportError, match=r"pip install drt-core\[azure\]"):
                 AzureBlobDestination().load([{"id": 1}], _config(), _options())
 
+    def test_missing_azure_identity_on_account_url_path_raises_with_install_hint(self) -> None:
+        """`account_url` + no `azure.identity` → ImportError with the
+        `[azure]` install hint.
+
+        Defensive coverage: ``azure-storage-blob`` and
+        ``azure-identity`` ship together in the ``[azure]`` extra, so
+        in practice you'd see either both or neither. This guards the
+        edge case of a hand-rolled install where only
+        ``azure-storage-blob`` was pulled in — the `connection_string_env`
+        path keeps working, the `account_url` path raises with the
+        same install hint as the top-level missing-extras path rather
+        than emitting a cryptic ``ModuleNotFoundError: azure.identity``.
+        """
+        blob_client = MagicMock()
+        modules = _mock_azure_modules(blob_client)
+        # azure.storage.blob importable, azure.identity NOT.
+        partial = {**_azure_only(modules), "azure.identity": None}
+
+        with patch.dict("sys.modules", partial):
+            with pytest.raises(ImportError, match=r"pip install drt-core\[azure\]"):
+                AzureBlobDestination().load(
+                    [{"id": 1}],
+                    _config(
+                        connection_string_env=None,
+                        account_url="https://acct.blob.core.windows.net",
+                    ),
+                    _options(),
+                )
+
     def test_serialisation_failure_records_row_errors_without_uploading(self) -> None:
         blob_client = MagicMock()
         modules = _mock_azure_modules(blob_client)
