@@ -343,23 +343,20 @@ class TestErrorPaths:
     def test_serialisation_failure_records_row_errors_without_uploading(self) -> None:
         """Serialisation error → row failures, no boto3 client created.
 
-        Any exception raised inside ``_serialise`` (bad pandas frame, encoding
-        error, etc.) must be captured into ``result.errors`` and short-circuit
-        BEFORE the upload phase, so no S3 client is ever constructed for a
-        non-uploadable payload.
+        Any exception raised inside ``serialise_records`` (bad pandas frame,
+        encoding error, etc.) must be captured into ``result.errors`` and
+        short-circuit BEFORE the upload phase, so no S3 client is ever
+        constructed for a non-uploadable payload.
         """
         client = MagicMock()
         modules = _mock_boto3_modules(client)
 
-        with patch.object(
-            S3Destination,
-            "_serialise",
+        with patch(
+            "drt.destinations.s3.serialise_records",
             side_effect=RuntimeError("boom: bad row"),
         ):
             with patch.dict("sys.modules", modules):
-                result = S3Destination().load(
-                    [{"id": 1}, {"id": 2}], _config(), _options()
-                )
+                result = S3Destination().load([{"id": 1}, {"id": 2}], _config(), _options())
 
         assert result.success == 0
         assert result.failed == 2
@@ -388,9 +385,7 @@ def test_missing_pyarrow_for_parquet_raises_helpful_import_error() -> None:
     modules["pyarrow"] = None  # type: ignore[assignment]
 
     with patch.dict("sys.modules", modules):
-        result = S3Destination().load(
-            [{"id": 1}], _config(format="parquet"), _options()
-        )
+        result = S3Destination().load([{"id": 1}], _config(format="parquet"), _options())
 
     # Serialisation failure path: ImportError from inside _serialise_parquet
     # is caught by the outer try/except in load(), recorded as row failures
