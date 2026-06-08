@@ -50,23 +50,12 @@ Example sync YAML:
 
 from __future__ import annotations
 
-import csv
-import gzip
-import io
-import json
-from datetime import datetime, timezone
 from typing import Any
 
 from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, S3DestinationConfig, SyncOptions
+from drt.destinations._blob_serializer import build_object_key, serialise_records
 from drt.destinations.base import SyncResult
-
-_FORMAT_EXTENSIONS: dict[str, str] = {
-    "csv": "csv",
-    "json": "json",
-    "jsonl": "jsonl",
-    "parquet": "parquet",
-}
 
 
 class S3Destination:
@@ -88,8 +77,16 @@ class S3Destination:
         result = SyncResult()
 
         try:
-            body, content_type, content_encoding = self._serialise(records, config)
+            body, content_type, content_encoding = serialise_records(
+                records,
+                format=config.format,
+                compression=config.compression,
+                parquet_compression=config.parquet_compression,
+            )
         except Exception as e:
+            # Includes the [parquet] extras ImportError path — matches
+            # the established missing-driver row-failure behaviour the
+            # SQL destinations use rather than crashing the whole sync.
             result.failed = len(records)
             result.errors.append(f"S3 destination serialisation failed: {e}")
             return result
@@ -100,7 +97,12 @@ class S3Destination:
         # surface it once at the top rather than silently re-fail every
         # batch.
         client = self._client(config)
-        key = self._build_key(config, sync_options)
+        key = build_object_key(
+            prefix=config.prefix,
+            key_template=config.key_template,
+            format=config.format,
+            compression=config.compression,
+        )
         put_kwargs: dict[str, Any] = {
             "Bucket": config.bucket,
             "Key": key,
@@ -120,85 +122,6 @@ class S3Destination:
             result.errors.append(f"S3 destination upload failed: {e}")
 
         return result
-
-    # -- serialisation -------------------------------------------------------
-
-    @staticmethod
-    def _serialise(
-        records: list[dict[str, Any]],
-        config: S3DestinationConfig,
-    ) -> tuple[bytes, str, str | None]:
-        """Return ``(body_bytes, content_type, content_encoding | None)``.
-
-        Parquet is binary and ignores the gzip flag — Parquet has its
-        own column-level compression configured via
-        ``parquet_compression``.
-        """
-        if config.format == "parquet":
-            body = S3Destination._serialise_parquet(records, config)
-            return body, "application/octet-stream", None
-
-        if config.format == "csv":
-            text = S3Destination._serialise_csv(records)
-            content_type = "text/csv"
-        elif config.format == "json":
-            text = json.dumps(records, default=str)
-            content_type = "application/json"
-        else:  # jsonl
-            text = "\n".join(json.dumps(r, default=str) for r in records)
-            content_type = "application/x-ndjson"
-
-        raw = text.encode("utf-8")
-        if config.compression == "gzip":
-            return gzip.compress(raw), content_type, "gzip"
-        return raw, content_type, None
-
-    @staticmethod
-    def _serialise_csv(records: list[dict[str, Any]]) -> str:
-        buf = io.StringIO()
-        columns = list(records[0].keys())
-        writer = csv.DictWriter(buf, fieldnames=columns)
-        writer.writeheader()
-        writer.writerows(records)
-        return buf.getvalue()
-
-    @staticmethod
-    def _serialise_parquet(
-        records: list[dict[str, Any]],
-        config: S3DestinationConfig,
-    ) -> bytes:
-        try:
-            import pandas as pd  # type: ignore[import-untyped]
-            import pyarrow  # type: ignore[import-untyped]  # noqa: F401
-        except ImportError as e:
-            raise ImportError(
-                "S3 destination with format: parquet requires pip install drt-core[parquet]"
-            ) from e
-
-        compression = config.parquet_compression if config.parquet_compression != "none" else None
-        df = pd.DataFrame(records)
-        buf = io.BytesIO()
-        df.to_parquet(buf, engine="pyarrow", compression=compression, index=False)
-        return buf.getvalue()
-
-    # -- key naming ----------------------------------------------------------
-
-    @staticmethod
-    def _build_key(config: S3DestinationConfig, sync_options: SyncOptions) -> str:
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        extension = _FORMAT_EXTENSIONS[config.format]
-        if config.compression == "gzip" and config.format != "parquet":
-            extension = f"{extension}.gz"
-
-        if config.key_template:
-            file_part = config.key_template.format(timestamp=timestamp)
-            # If the template already supplies an extension, leave it
-            # alone; otherwise append the format-derived one.
-            if "." not in file_part.rsplit("/", 1)[-1]:
-                file_part = f"{file_part}.{extension}"
-            return f"{config.prefix}{file_part}" if config.prefix else file_part
-
-        return f"{config.prefix}{timestamp}.{extension}"
 
     # -- boto3 client --------------------------------------------------------
 
