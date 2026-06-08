@@ -139,6 +139,7 @@ def _register_all_connectors() -> None:
     )
     from drt.config.models import (
         AmplitudeDestinationConfig,
+        AzureBlobDestinationConfig,
         ClickHouseDestinationConfig,
         DatabricksDestinationConfig,
         DiscordDestinationConfig,
@@ -171,6 +172,7 @@ def _register_all_connectors() -> None:
 
     # Import destination classes
     from drt.destinations.amplitude import AmplitudeDestination
+    from drt.destinations.azure_blob import AzureBlobDestination
     from drt.destinations.clickhouse import ClickHouseDestination
     from drt.destinations.databricks import DatabricksDestination
     from drt.destinations.discord import DiscordDestination
@@ -234,6 +236,7 @@ def _register_all_connectors() -> None:
     register_destination("file", FileDestinationConfig, FileDestination)
     register_destination("s3", S3DestinationConfig, S3Destination)
     register_destination("gcs", GCSDestinationConfig, GCSDestination)
+    register_destination("azure_blob", AzureBlobDestinationConfig, AzureBlobDestination)
     register_destination("email_smtp", EmailSmtpDestinationConfig, EmailSmtpDestination)
     register_destination("linear", LinearDestinationConfig, LinearDestination)
     register_destination("google_ads", GoogleAdsDestinationConfig, GoogleAdsDestination)

@@ -289,6 +289,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | Parquet file            | ✅ v0.5   | `pip install drt-core[parquet]`    | File path                         |
 | Amazon S3               | ✅ v0.7.9 | `pip install drt-core[s3]`         | AWS credential chain / env vars   |
 | Google Cloud Storage    | ✅ v0.7.9 | `pip install drt-core[gcs]`        | Application Default / Service Account Keyfile |
+| Azure Blob Storage      | ✅ v0.7.9 | `pip install drt-core[azure]`      | Connection string env / DefaultAzureCredential |
 | Microsoft Teams Webhook | ✅ v0.5   | (core)                             | Webhook URL                       |
 | CSV / JSON / JSONL file | ✅ v0.5   | (core)                             | File path                         |
 | Jira                    | ✅ v0.5   | (core)                             | Basic (email + API token)         |

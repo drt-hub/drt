@@ -720,6 +720,12 @@ class GCSDestinationConfig(BaseModel):
     type: Literal["gcs"]
     bucket: str
     # Optional object-name prefix. The generated file name is appended:
+class AzureBlobDestinationConfig(BaseModel):
+    """Azure Blob destination — upload records as CSV / JSON / JSONL / Parquet."""
+
+    type: Literal["azure_blob"]
+    container: str
+    # Optional blob-name prefix. The generated file name is appended:
     # e.g. prefix="drt/users/" → "drt/users/20260605T123000Z.csv". For
     # per-sync routing, give each sync its own prefix.
     prefix: str = ""
@@ -738,6 +744,15 @@ class GCSDestinationConfig(BaseModel):
     # application-default → GCE/GKE/Cloud Run service account). For
     # explicit overrides, point at a service-account JSON keyfile:
     credentials_path: str | None = None
+    # Auth path 1: env-var name holding a storage-account connection
+    # string (DefaultEndpointsProtocol=...). Most common shape for
+    # non-Azure CI / cron deployments.
+    connection_string_env: str | None = None
+    # Auth path 2: storage account blob endpoint
+    # (https://<account>.blob.core.windows.net) — when set without
+    # connection_string_env, DefaultAzureCredential is used (env vars,
+    # managed identity, Azure CLI, ...).
+    account_url: str | None = None
     # Optional file-name template (Jinja2-free, supports one placeholder:
     # {timestamp} — UTC ISO 8601 basic format, e.g. "20260605T123000Z").
     # Default produces "<prefix><timestamp>.<ext>". For per-sync naming,
@@ -746,6 +761,7 @@ class GCSDestinationConfig(BaseModel):
 
     def describe(self) -> str:
         return f"{self.type} (gs://{self.bucket}/{self.prefix})"
+        return f"{self.type} ({self.container}/{self.prefix})"
 
 
 class EmailSmtpDestinationConfig(BaseModel):
@@ -874,6 +890,7 @@ DestinationConfig = Annotated[
     | FileDestinationConfig
     | S3DestinationConfig
     | GCSDestinationConfig
+    | AzureBlobDestinationConfig
     | EmailSmtpDestinationConfig
     | NotionDestinationConfig
     | IntercomDestinationConfig

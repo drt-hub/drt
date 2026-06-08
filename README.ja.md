@@ -262,6 +262,7 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | Parquet file | ✅ v0.5 | `pip install drt-core[parquet]` | ファイルパス |
 | Amazon S3 | ✅ v0.7.9 | `pip install drt-core[s3]` | AWS 認証チェイン / 環境変数 |
 | Google Cloud Storage | ✅ v0.7.9 | `pip install drt-core[gcs]` | Application Default / サービスアカウント JSON |
+| Azure Blob Storage | ✅ v0.7.9 | `pip install drt-core[azure]` | 接続文字列環境変数 / DefaultAzureCredential |
 | Microsoft Teams Webhook | ✅ v0.5 | (core) | Webhook URL |
 | CSV / JSON / JSONL file | ✅ v0.5 | (core) | ファイルパス |
 | Jira | ✅ v0.5 | (core) | Basic（メール + APIトークン） |
