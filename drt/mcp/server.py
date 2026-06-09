@@ -6,12 +6,14 @@ Start with:
 
 Tools:
     drt_list_syncs      — list all sync definitions
-    drt_run_sync        — run a specific sync (dry_run supported)
+    drt_run_sync        — run a specific sync (dry_run + compute_diff supported)
     drt_run_test        — run post-sync validation tests for a sync
     drt_get_status      — get last sync result for a sync
+    drt_get_history     — get recent sync run history (v0.7+)
     drt_validate        — validate all sync YAML configs (per-file errors)
     drt_get_schema      — return JSON Schema for drt_project.yml / sync.yml
     drt_list_connectors — list available source and destination connectors
+    drt_doctor          — environment diagnostics (mirrors `drt doctor` CLI)
 """
 
 from __future__ import annotations
@@ -68,21 +70,40 @@ def create_server(project_dir: Path | None = None) -> Any:
     # -----------------------------------------------------------------------
 
     @mcp.tool()
-    def drt_run_sync(sync_name: str, dry_run: bool = False) -> dict[str, Any]:
+    def drt_run_sync(
+        sync_name: str,
+        dry_run: bool = False,
+        compute_diff: bool = False,
+        diff_limit: int = 20,
+    ) -> dict[str, Any]:
         """Run a specific drt sync.
 
         Args:
             sync_name: Name of the sync to run (from drt_list_syncs).
             dry_run: If True, extracts data but does not write to destination.
+            compute_diff: When True (requires ``dry_run=True``), compute a
+                record-level diff (added / updated / deleted / unchanged)
+                against the destination. Queryable destinations get a true
+                diff; non-queryable destinations get a sample preview.
+                Mirrors ``drt run --dry-run --diff`` (v0.7.1+).
+            diff_limit: Cap on records per diff category (default 20).
 
         Returns:
-            Result summary with success count, failed count, and any errors.
+            Result summary with success count, failed count, errors, and
+            (when ``compute_diff=True``) a ``diff`` field with the
+            structured preview.
         """
         from drt.cli.main import _get_destination, _get_source
         from drt.config.credentials import load_profile
         from drt.config.parser import load_project, load_syncs
         from drt.engine.sync import run_sync
         from drt.state.manager import StateManager
+
+        if compute_diff and not dry_run:
+            return {
+                "error": "compute_diff requires dry_run=True (matches the "
+                "`drt run --dry-run --diff` CLI contract)."
+            }
 
         project = load_project(_project_dir)
         profile = load_profile(project.profile)
@@ -105,15 +126,23 @@ def create_server(project_dir: Path | None = None) -> Any:
             _project_dir,
             dry_run,
             state_mgr,
+            compute_diff=compute_diff,
+            diff_limit=diff_limit,
         )
 
-        return {
+        response: dict[str, Any] = {
             "sync_name": sync_name,
             "dry_run": dry_run,
             "success": result.success,
             "failed": result.failed,
             "errors": result.errors[:10],  # cap at 10 to avoid huge payloads
         }
+        diff_value = getattr(result, "diff", None)
+        if compute_diff and diff_value is not None:
+            from drt.cli.output import diff_to_dict
+
+            response["diff"] = diff_to_dict(diff_value)
+        return response
 
     # -----------------------------------------------------------------------
     # drt_run_test
@@ -360,6 +389,81 @@ def create_server(project_dir: Path | None = None) -> Any:
                 {"name": "Notion", "type": "notion", "install": "(core)"},
             ],
         }
+
+    # -----------------------------------------------------------------------
+    # drt_doctor
+    # -----------------------------------------------------------------------
+
+    @mcp.tool()
+    def drt_doctor() -> dict[str, Any]:
+        """Run environment diagnostics — the MCP equivalent of ``drt doctor``.
+
+        Mirrors the CLI ``drt doctor`` (v0.7.0+) but returns a structured
+        report instead of a console table. Useful for "why won't this drt
+        project run?" before reading any code — catches missing env vars,
+        malformed profile, uninstalled extras, etc.
+
+        Returns:
+            ``{"passed": bool, "checks": [{"category", "name", "ok",
+            "message"}, ...]}`` where ``passed`` is False if any required
+            check failed (project file / profile / Python version).
+        """
+        from drt import __version__ as drt_version
+        from drt.cli.doctor import (
+            _check_env_vars,
+            _check_extras,
+            _check_profile,
+            _check_project_file,
+            _check_python,
+            _check_syncs,
+        )
+
+        checks: list[dict[str, Any]] = []
+        required_ok = True
+
+        py_ok, py_msg = _check_python()
+        checks.append(
+            {"category": "runtime", "name": "Python version", "ok": py_ok, "message": py_msg}
+        )
+        required_ok = required_ok and py_ok
+
+        checks.append(
+            {
+                "category": "runtime",
+                "name": "drt version",
+                "ok": True,
+                "message": drt_version,
+            }
+        )
+
+        proj_ok, proj_msg, project_data = _check_project_file()
+        checks.append(
+            {"category": "project", "name": "Project file", "ok": proj_ok, "message": proj_msg}
+        )
+        required_ok = required_ok and proj_ok
+
+        if project_data:
+            prof_ok, prof_msg = _check_profile(project_data)
+            checks.append(
+                {"category": "project", "name": "Profile", "ok": prof_ok, "message": prof_msg}
+            )
+            required_ok = required_ok and prof_ok
+
+            _, syncs_ok, syncs_msg = _check_syncs(project_data)
+            checks.append(
+                {"category": "project", "name": "Syncs", "ok": syncs_ok, "message": syncs_msg}
+            )
+
+        for label, ok, msg in _check_extras():
+            # Extras are optional — they affect ``ok`` of the row but not
+            # overall ``passed``. A user can run a duckdb-only project with
+            # no other extras installed and that's fine.
+            checks.append({"category": "extras", "name": label, "ok": ok, "message": msg})
+
+        for var, ok, msg in _check_env_vars(project_data):
+            checks.append({"category": "env", "name": var, "ok": ok, "message": msg})
+
+        return {"passed": required_ok, "checks": checks}
 
     return mcp
 

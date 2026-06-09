@@ -224,3 +224,100 @@ async def test_get_schema_project(server: FastMCP) -> None:
     schema = await call(server, "drt_get_schema", schema_type="project")
     assert isinstance(schema, dict)
     assert "$defs" in schema or "properties" in schema
+
+
+# ---------------------------------------------------------------------------
+# drt_run_sync — compute_diff parameter (#413 parity)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_sync_compute_diff_requires_dry_run(server: FastMCP) -> None:
+    """``compute_diff=True`` without ``dry_run=True`` is a contract
+    violation — matches the CLI ``drt run --diff`` requiring
+    ``--dry-run``. Returns a structured error rather than executing
+    the sync against a live destination.
+    """
+    result = await call(
+        server, "drt_run_sync", sync_name="notify", compute_diff=True, dry_run=False
+    )
+    assert "error" in result
+    assert "dry_run" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# drt_doctor — environment diagnostics (mirrors `drt doctor` CLI)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_doctor_returns_structured_report(
+    project_dir: Path, monkeypatch: Any
+) -> None:
+    """``drt_doctor`` returns ``{passed, checks}`` with at minimum
+    Python version + drt version + project file rows.
+    """
+    # `_check_*` helpers in drt/cli/doctor.py read from CWD; cd into
+    # the temp project so project_file and profile checks see real
+    # files instead of whatever the test runner's CWD is.
+    monkeypatch.chdir(project_dir)
+    srv = create_server(project_dir)
+
+    result = await call(srv, "drt_doctor")
+    assert "passed" in result
+    assert "checks" in result
+    assert isinstance(result["checks"], list)
+    # At minimum: Python version, drt version, project file
+    names = {c["name"] for c in result["checks"]}
+    assert "Python version" in names
+    assert "drt version" in names
+    assert "Project file" in names
+    # Each check has the documented shape
+    for check in result["checks"]:
+        assert set(check.keys()) >= {"category", "name", "ok", "message"}
+
+
+@pytest.mark.asyncio
+async def test_doctor_passes_on_well_formed_project(
+    project_dir: Path, monkeypatch: Any
+) -> None:
+    """On a well-formed project (project file + profile file + syncs/),
+    ``passed`` is True. The fixture creates exactly this shape, so any
+    regression that breaks the happy path surfaces here."""
+    monkeypatch.chdir(project_dir)
+
+    # Profile fixture: ~/.drt/profiles.yml gets read by _check_profile.
+    # The fixture project references profile "default"; provide a
+    # minimal profiles.yml under a fake HOME to keep the test
+    # self-contained and avoid touching the developer's real
+    # ~/.drt/profiles.yml.
+    fake_home = project_dir / "fake_home"
+    (fake_home / ".drt").mkdir(parents=True)
+    (fake_home / ".drt" / "profiles.yml").write_text("default: { type: duckdb }\n")
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    srv = create_server(project_dir)
+    result = await call(srv, "drt_doctor")
+    assert result["passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_doctor_fails_without_project_file(tmp_path: Path, monkeypatch: Any) -> None:
+    """Outside a drt project, ``passed`` is False — the project-file
+    check is required for a green report."""
+    srv = create_server(tmp_path)
+    monkeypatch.chdir(tmp_path)  # empty dir, no drt_project.yml
+    result = await call(srv, "drt_doctor")
+    assert result["passed"] is False
+    project_file_row = next(c for c in result["checks"] if c["name"] == "Project file")
+    assert project_file_row["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_server_lists_drt_doctor_tool() -> None:
+    """The newly added `drt_doctor` is registered alongside the
+    existing tools."""
+    srv = create_server()
+    tools = await srv._local_provider._list_tools()
+    tool_names = {t.name for t in tools}
+    assert "drt_doctor" in tool_names

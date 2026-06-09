@@ -208,14 +208,17 @@ drt mcp run
 
 **Available MCP tools:**
 
-| Tool                  | What it does                            |
-| --------------------- | --------------------------------------- |
-| `drt_list_syncs`      | List all sync definitions               |
-| `drt_run_sync`        | Run a sync (supports `dry_run`)         |
-| `drt_get_status`      | Get last run result(s)                  |
-| `drt_validate`        | Validate sync YAML configs              |
-| `drt_get_schema`      | Return JSON Schema for config files     |
-| `drt_list_connectors` | List available sources and destinations |
+| Tool                  | What it does                                                                          |
+| --------------------- | ------------------------------------------------------------------------------------- |
+| `drt_list_syncs`      | List all sync definitions                                                             |
+| `drt_run_sync`        | Run a sync (supports `dry_run` + `compute_diff` for `--diff` parity)                  |
+| `drt_run_test`        | Run post-sync validation tests (mirrors `drt test`)                                   |
+| `drt_get_status`      | Get last run result(s)                                                                |
+| `drt_get_history`     | Get recent sync run history                                                           |
+| `drt_validate`        | Validate sync YAML configs                                                            |
+| `drt_get_schema`      | Return JSON Schema for config files                                                   |
+| `drt_list_connectors` | List available sources and destinations                                               |
+| `drt_doctor`          | Environment diagnostics (mirrors `drt doctor`)                                        |
 
 ---
 
