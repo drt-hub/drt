@@ -12,7 +12,7 @@ Help the user migrate from an existing Reverse ETL tool (Census, Hightouch, Poly
 
 1. Ask the user to share their existing sync configuration (screenshot, YAML, JSON, or description).
 
-2. Map their existing config to drt equivalents using the table below.
+2. Map their existing config to drt equivalents using the tables below.
 
 3. Generate a valid `syncs/<name>.yml` for each sync.
 
@@ -26,19 +26,33 @@ Help the user migrate from an existing Reverse ETL tool (Census, Hightouch, Poly
 |---------------------------|----------------|
 | Source (BigQuery model) | `model: ref('table')` or raw SQL |
 | Destination connection | `destination.type` + auth config |
-| Sync behavior: Full | `sync.mode: full` |
-| Sync behavior: Append | `sync.mode: incremental` + `cursor_field` |
-| Field mappings | `body_template` / `properties_template` (Jinja2) |
-| Run schedule | `drt run` via cron or CI |
-| Error notifications | `on_error: skip` + `drt status` |
+| Sync behavior: Full | `sync.mode: full` (every run, no dedup) |
+| Sync behavior: Append (incremental) | `sync.mode: incremental` + `cursor_field` |
+| Sync behavior: Mirror (upsert + delete-removed) | `sync.mode: mirror` (v0.7.7+) + `upsert_key` — supported on postgres / mysql / clickhouse / snowflake |
+| Sync behavior: Replace (overwrite table) | `sync.mode: replace` (TRUNCATE + INSERT, zero-downtime via `replace_strategy: swap` on supported DWHs) |
+| Field mappings (UI column picker) | `body_template` / `properties_template` (Jinja2) |
+| Run schedule | `drt run` via cron, CI, Dagster, Airflow, or Prefect |
+| Error notifications | `failure_alerts` (Slack / webhook, v0.7.0+) — fires on sync-level failures |
+| Per-row error policy | `on_error: skip` (continue past failures) vs `on_error: fail` (stop at first) |
+
+### Sync-mode picking guide (which `sync.mode` matches the source semantic)
+
+| User wants | drt mode | Notes |
+|------------|----------|-------|
+| "Re-send everything every run" | `full` | Default. Idempotent destinations only — REST API / Slack / file outputs. |
+| "Append new rows since last run" | `incremental` + `cursor_field` | Watermark-based. `--cursor-value` overrides for backfill. |
+| "Upsert by key" | `upsert` + `upsert_key` | Census's most common "Update" shape. |
+| "Upsert by key AND delete rows removed from source" | `mirror` + `upsert_key` | Census's "Full Sync with Deletion" / Hightouch's "Mirror" semantic. v0.7.7+, SQL destinations. Source key cardinality fits in memory. |
+| "Overwrite the destination table each run" | `replace` | TRUNCATE + INSERT. Set `replace_strategy: swap` (Postgres / Snowflake) for zero-downtime via staging-table swap. |
 
 ### Auth migration
 
 | Old tool style | drt equivalent |
 |---------------|----------------|
-| Stored API key in UI | `token_env: MY_TOKEN` + `export MY_TOKEN=...` |
+| Stored API key in UI | `token_env: MY_TOKEN` + `export MY_TOKEN=...` (never hardcode — `drt validate` flags hardcoded secrets) |
 | OAuth app | Use token from OAuth flow → `token_env` |
 | Service account JSON | Set `GOOGLE_APPLICATION_CREDENTIALS` for BigQuery source |
+| Connection string | Source profile field in `~/.drt/profiles.yml` (env-var-substituted via `${VAR}`) |
 
 ## Output Format
 
@@ -55,14 +69,17 @@ destination:
   # ... fields
 
 sync:
-  mode: full   # or incremental
+  mode: full   # or incremental / upsert / mirror / replace
   # ...
 ```
 
 Then summarize:
 - What manual steps are needed (env vars, `~/.drt/profiles.yml`)
 - Any features the old tool had that drt doesn't support yet (flag these clearly)
+- Whether the migration changes semantics (e.g. Census "Full Sync with Deletion" → drt `mirror` is the same shape; Census "Full Sync without Deletion" → drt `full` keeps stale rows in the destination, so the user may want `upsert` instead)
 
 ## Reference
 
-See `docs/llm/API_REFERENCE.md` for all destination types and fields.
+- `docs/llm/API_REFERENCE.md` — all destination types and fields
+- `docs/connectors/` — per-destination details (auth, supported modes)
+- `examples/postgres_to_postgres_mirror/` — runnable example for the `mirror` mode shape
