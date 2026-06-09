@@ -185,11 +185,14 @@ drt mcp run
 | ツール | 機能 |
 |------|-------------|
 | `drt_list_syncs` | 同期定義の一覧を表示 |
-| `drt_run_sync` | 同期を実行（`dry_run`対応） |
+| `drt_run_sync` | 同期を実行（`dry_run` + `compute_diff` で `--diff` 同等） |
+| `drt_run_test` | 同期後の検証テストを実行（`drt test` 相当） |
 | `drt_get_status` | 前回の実行結果を取得 |
+| `drt_get_history` | 直近の同期実行履歴を取得 |
 | `drt_validate` | 同期YAML設定を検証 |
 | `drt_get_schema` | 設定ファイルのJSONスキーマを返す |
 | `drt_list_connectors` | 利用可能なソースとデスティネーションを一覧 |
+| `drt_doctor` | 環境診断（`drt doctor` 相当） |
 
 ---
 
