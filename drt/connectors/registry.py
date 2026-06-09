@@ -140,6 +140,7 @@ def _register_all_connectors() -> None:
     from drt.config.models import (
         AmplitudeDestinationConfig,
         ClickHouseDestinationConfig,
+        DatabricksDestinationConfig,
         DiscordDestinationConfig,
         EmailSmtpDestinationConfig,
         FileDestinationConfig,
@@ -170,6 +171,7 @@ def _register_all_connectors() -> None:
     # Import destination classes
     from drt.destinations.amplitude import AmplitudeDestination
     from drt.destinations.clickhouse import ClickHouseDestination
+    from drt.destinations.databricks import DatabricksDestination
     from drt.destinations.discord import DiscordDestination
     from drt.destinations.email_smtp import EmailSmtpDestination
     from drt.destinations.file import FileDestination
@@ -239,6 +241,7 @@ def _register_all_connectors() -> None:
     register_destination("staged_upload", StagedUploadDestinationConfig, StagedUploadDestination)
     register_destination("intercom", IntercomDestinationConfig, IntercomDestination)
     register_destination("snowflake", SnowflakeDestinationConfig, SnowflakeDestination)
+    register_destination("databricks", DatabricksDestinationConfig, DatabricksDestination)
 
     # Register all sources
     register_source("bigquery", BigQueryProfile, BigQuerySource)
