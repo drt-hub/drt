@@ -232,6 +232,23 @@ async def test_get_schema_project(server: FastMCP) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_sync_returns_error_for_unknown_sync(
+    project_dir: Path, monkeypatch: Any
+) -> None:
+    """Unknown ``sync_name`` returns a structured error (no engine call).
+
+    Bypasses ``load_profile`` (which would otherwise try to read the
+    real ``~/.drt/profiles.yml`` on the developer's machine) — the
+    sync-name match happens after profile loading in the flow.
+    """
+    monkeypatch.setattr("drt.config.credentials.load_profile", lambda _name: object())
+    srv = create_server(project_dir)
+    result = await call(srv, "drt_run_sync", sync_name="nonexistent")
+    assert "error" in result
+    assert "nonexistent" in result["error"]
+
+
+@pytest.mark.asyncio
 async def test_run_sync_compute_diff_requires_dry_run(server: FastMCP) -> None:
     """``compute_diff=True`` without ``dry_run=True`` is a contract
     violation — matches the CLI ``drt run --diff`` requiring
@@ -243,6 +260,84 @@ async def test_run_sync_compute_diff_requires_dry_run(server: FastMCP) -> None:
     )
     assert "error" in result
     assert "dry_run" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_run_sync_compute_diff_threads_diff_into_response(
+    project_dir: Path, monkeypatch: Any
+) -> None:
+    """``compute_diff=True`` + ``dry_run=True`` → response carries a
+    ``diff`` field built from ``diff_to_dict``. This is the success
+    path that exercises the load_project / run_sync / response-with-diff
+    branch — which the error-path tests can't reach.
+
+    Patches the engine + source/destination factory functions at
+    their source modules so the inside-function imports resolve to
+    the test doubles, avoiding a real warehouse / HTTP destination.
+    """
+    from drt.engine.sync import SyncResult
+
+    fake_diff = object()  # diff_to_dict tolerates None / unknown shapes
+
+    def fake_run_sync(*_args: Any, **_kwargs: Any) -> SyncResult:
+        result = SyncResult()
+        result.success = 1
+        result.failed = 0
+        result.diff = fake_diff  # type: ignore[attr-defined]
+        return result
+
+    def fake_diff_to_dict(_diff: object) -> dict[str, Any]:
+        return {"added": [{"id": 1}], "updated": [], "deleted": [], "unchanged": []}
+
+    # Patch the engine + factory layers at their source modules so the
+    # inside-function imports inside `drt_run_sync` pick up the doubles.
+    monkeypatch.setattr("drt.engine.sync.run_sync", fake_run_sync)
+    monkeypatch.setattr("drt.cli.main._get_source", lambda _profile: object())
+    monkeypatch.setattr("drt.cli.main._get_destination", lambda _sync: object())
+    monkeypatch.setattr("drt.config.credentials.load_profile", lambda _name: object())
+    monkeypatch.setattr("drt.cli.output.diff_to_dict", fake_diff_to_dict)
+
+    srv = create_server(project_dir)
+    result = await call(
+        srv, "drt_run_sync", sync_name="notify", dry_run=True, compute_diff=True
+    )
+
+    assert "diff" in result
+    assert result["diff"] == {
+        "added": [{"id": 1}],
+        "updated": [],
+        "deleted": [],
+        "unchanged": [],
+    }
+    assert result["dry_run"] is True
+    assert result["success"] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_sync_dry_run_without_compute_diff_omits_diff_field(
+    project_dir: Path, monkeypatch: Any
+) -> None:
+    """``compute_diff=False`` → response has no ``diff`` field even
+    when ``dry_run=True``. Exercises the response-building path
+    without the diff serialisation branch."""
+    from drt.engine.sync import SyncResult
+
+    def fake_run_sync(*_args: Any, **_kwargs: Any) -> SyncResult:
+        result = SyncResult()
+        result.success = 1
+        return result
+
+    monkeypatch.setattr("drt.engine.sync.run_sync", fake_run_sync)
+    monkeypatch.setattr("drt.cli.main._get_source", lambda _profile: object())
+    monkeypatch.setattr("drt.cli.main._get_destination", lambda _sync: object())
+    monkeypatch.setattr("drt.config.credentials.load_profile", lambda _name: object())
+
+    srv = create_server(project_dir)
+    result = await call(srv, "drt_run_sync", sync_name="notify", dry_run=True)
+
+    assert "diff" not in result
+    assert result["dry_run"] is True
+    assert result["success"] == 1
 
 
 # ---------------------------------------------------------------------------
