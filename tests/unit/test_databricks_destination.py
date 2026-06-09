@@ -258,6 +258,91 @@ class TestDatabricksDestinationLoad:
             "target.tenant_id = source.tenant_id AND target.user_id = source.user_id" in merge_sql
         )
 
+    def test_merge_staging_insert_failure_on_error_skip(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Row failure during the staging INSERT lands in row_errors,
+        the sync continues, and the MERGE still runs against whatever
+        the staging table holds."""
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        cur = conn._cur
+
+        # Fail the FIRST staging INSERT (row 0), let everything else through.
+        # The CREATE OR REPLACE TABLE statement runs first, then per-row
+        # INSERT INTO __drt_staging_..., then MERGE INTO, then DROP TABLE.
+        insert_call_count = {"n": 0}
+
+        def execute_side_effect(sql: str, *args: Any) -> None:
+            if "INSERT INTO main.default.__drt_staging_user_scores" in sql:
+                insert_call_count["n"] += 1
+                if insert_call_count["n"] == 1:
+                    raise Exception("staging type mismatch")
+            return None
+
+        cur.execute.side_effect = execute_side_effect
+        modules = _mocked_databricks_modules(conn)
+
+        records = [
+            {"id": 1, "score": 0.5},
+            {"id": 2, "score": 0.9},
+        ]
+        config = _config(mode="merge", upsert_key=["id"])
+        with patch.dict("sys.modules", modules):
+            result = DatabricksDestination().load(
+                records, config, _options(on_error="skip")
+            )
+
+        assert result.failed == 1
+        assert result.success == 1
+        assert len(result.row_errors) == 1
+        assert "staging type mismatch" in result.row_errors[0].error_message
+        # The MERGE statement still ran (against the staging table that
+        # ended up with one row).
+        sqls = [(call.args[0] if call.args else "") for call in cur.execute.call_args_list]
+        assert any("MERGE INTO main.default.user_scores" in s for s in sqls)
+
+    def test_merge_staging_insert_failure_on_error_fail_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``on_error=fail`` re-raises the staging-INSERT exception
+        immediately. The connection is still closed via try/finally."""
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        cur = conn._cur
+
+        def execute_side_effect(sql: str, *args: Any) -> None:
+            if "INSERT INTO main.default.__drt_staging_user_scores" in sql:
+                raise Exception("staging type mismatch")
+            return None
+
+        cur.execute.side_effect = execute_side_effect
+        modules = _mocked_databricks_modules(conn)
+
+        config = _config(mode="merge", upsert_key=["id"])
+        with patch.dict("sys.modules", modules):
+            with pytest.raises(Exception, match="staging type mismatch"):
+                DatabricksDestination().load(
+                    [{"id": 1, "score": 0.5}], config, _options(on_error="fail")
+                )
+        conn.close.assert_called_once()
+
+    def test_unsupported_mode_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An invalid ``config.mode`` raises ``ValueError``. Pydantic
+        prevents this at config-load time so the path is defensive —
+        this test bypasses Pydantic to exercise the fallthrough branch."""
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        modules = _mocked_databricks_modules(conn)
+
+        config = _config(mode="insert")
+        # Bypass Pydantic Literal validation by mutating after construction.
+        object.__setattr__(config, "mode", "garbage")  # type: ignore[arg-type]
+
+        with patch.dict("sys.modules", modules):
+            with pytest.raises(ValueError, match="Unsupported mode: garbage"):
+                DatabricksDestination().load([{"id": 1}], config, _options())
+
     def test_merge_all_columns_are_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When every column is in upsert_key, the MERGE skips the
         UPDATE clause (no non-key columns to update)."""
@@ -352,6 +437,54 @@ class TestDatabricksMirrorMode:
         sqls = [(call.args[0] if call.args else "") for call in conn._cur.execute.call_args_list]
         delete_sql = next(s for s in sqls if s.startswith("DELETE FROM"))
         assert "WHERE (tenant_id, user_id) NOT IN" in delete_sql
+
+    def test_mirror_skips_failed_keys_from_delete_observed_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Mirror's ``_mirror_keys`` accumulator must skip records that
+        failed the staging INSERT — those rows never made it into the
+        destination, so they shouldn't count as "observed in source"
+        for the end-of-sync DELETE."""
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        cur = conn._cur
+
+        # First record's staging INSERT fails; second succeeds.
+        insert_call_count = {"n": 0}
+
+        def execute_side_effect(sql: str, *args: Any) -> None:
+            if "INSERT INTO main.default.__drt_staging_user_scores" in sql:
+                insert_call_count["n"] += 1
+                if insert_call_count["n"] == 1:
+                    raise Exception("staging type mismatch")
+            return None
+
+        cur.execute.side_effect = execute_side_effect
+        modules = _mocked_databricks_modules(conn)
+
+        config = _config(mode="merge", upsert_key=["id"])
+        dest = DatabricksDestination()
+        with patch.dict("sys.modules", modules):
+            dest.load(
+                [{"id": 1, "score": 0.5}, {"id": 2, "score": 0.9}],
+                config,
+                _options(mode="mirror", on_error="skip"),
+            )
+            dest.finalize_sync(config, _options(mode="mirror"))
+
+        # The DELETE was issued and includes only id=2 (the survivor),
+        # not id=1 (which failed staging).
+        sqls = [(call.args[0] if call.args else "") for call in cur.execute.call_args_list]
+        delete_call = next(
+            call
+            for call in cur.execute.call_args_list
+            if call.args and call.args[0].startswith("DELETE FROM")
+        )
+        delete_params = delete_call.args[1] if len(delete_call.args) > 1 else []
+        assert delete_params == [2]
+        # And the DELETE was actually issued (not skipped — at least one
+        # record made it through).
+        assert any(s.startswith("DELETE FROM") for s in sqls)
 
     def test_mirror_finalize_skipped_when_no_records_observed(
         self, monkeypatch: pytest.MonkeyPatch
