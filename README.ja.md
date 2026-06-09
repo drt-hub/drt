@@ -272,6 +272,7 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | Salesforce Bulk API 2.0 | ✅ v0.6 | (core) | OAuth2（username-password） |
 | Staged Upload | ✅ v0.6 | (core) | プロバイダーごとに設定 |
 | Snowflake | ✅ v0.7 | `pip install drt-core[snowflake]` | パスワード（環境変数） |
+| Databricks Delta Lake | ✅ v0.7.9 | `pip install drt-core[databricks]` | Personal Access Token（環境変数） |
 
 ### インテグレーション
 

@@ -408,6 +408,44 @@ class SnowflakeDestinationConfig(BaseModel):
         return f"{self.type} ({self.database}.{self.schema_}.{self.table})"
 
 
+class DatabricksDestinationConfig(BaseModel):
+    """Databricks Delta Lake destination — write data back to Databricks tables.
+
+    Auth via the Databricks SQL Connector: a SQL warehouse HTTP path
+    plus a personal access token (PAT). The token-bearing user needs
+    USAGE on the catalog + schema and INSERT/MODIFY on the target
+    table.
+    """
+
+    type: Literal["databricks"]
+
+    # Workspace hostname (env-var resolved), e.g.
+    # ``dbc-abc12345-1234.cloud.databricks.com``.
+    host_env: str
+    # SQL warehouse HTTP path (env-var resolved), e.g.
+    # ``/sql/1.0/warehouses/abc123def456``.
+    http_path_env: str
+    # Databricks personal access token (env-var resolved). Starts with ``dapi``.
+    token_env: str
+
+    # Three-part name (Unity Catalog). For Hive Metastore deployments
+    # use catalog="hive_metastore".
+    catalog: str
+    # Field alias because BaseModel.schema() shadows a plain `schema`
+    # attribute under mypy strict mode; YAML key stays `schema:`.
+    schema_: str = Field(alias="schema")
+    table: str
+
+    mode: Literal["insert", "merge"] = "insert"
+
+    # Required for merge mode and for ``sync.mode: mirror``. Composite
+    # keys supported (`upsert_key: [tenant_id, user_id]`).
+    upsert_key: list[str] | None = None
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.catalog}.{self.schema_}.{self.table})"
+
+
 class LinearDestinationConfig(BaseModel):
     type: Literal["linear"]
     team_id: str | None = None
@@ -807,7 +845,8 @@ DestinationConfig = Annotated[
     | StagedUploadDestinationConfig
     | SalesforceBulkDestinationConfig
     | TwilioDestinationConfig
-    | SnowflakeDestinationConfig,
+    | SnowflakeDestinationConfig
+    | DatabricksDestinationConfig,
     Field(discriminator="type"),
 ]
 
