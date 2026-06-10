@@ -13,19 +13,17 @@
 # Current entries: per-connector reference docs (docs/connectors/) were
 # introduced late (postgres first, then the v0.7.8+ wave: mysql /
 # clickhouse / snowflake / s3 / gcs / azure-blob / databricks ...).
-# The 14 destinations below predate that convention and never had a
+# The destinations below predate that convention and never had a
 # dedicated doc. Tracked as a docs backlog — good first issues.
+#
+# Burned down so far: teams / twilio / jira / linear / notion (batch 1).
+# 9 remaining.
 dest-doc:discord
 dest-doc:email_smtp
 dest-doc:file
 dest-doc:github_actions
 dest-doc:google_ads
 dest-doc:intercom
-dest-doc:jira
-dest-doc:linear
-dest-doc:notion
 dest-doc:parquet
 dest-doc:sendgrid
 dest-doc:staged_upload
-dest-doc:teams
-dest-doc:twilio
