@@ -51,6 +51,11 @@
   color: "c5def5"
   description: "State management and persistence"
 
+# ── Meta ─────────────────────────────────────────────────────────────────────
+- name: "contributors"
+  color: "5319e7"
+  description: "Contributor recognition & governance automation (all-contributors audit, etc.)"
+
 # ── Status ───────────────────────────────────────────────────────────────────
 - name: "good first issue"
   color: "7057ff"
