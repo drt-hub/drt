@@ -107,10 +107,22 @@ jobs:
             gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" \
               --body "Drift audit re-ran on $(date -u +%Y-%m-%d) and still finds gaps — issue body refreshed with the latest report."
           else
+            # Ensure the label exists before `gh issue create --label`,
+            # which hard-fails on a missing label. `.github/labels.yml`
+            # defines `docs` (not the GitHub default `documentation`),
+            # and sync-labels runs with skip-delete:false — so once it
+            # reconciles, `documentation` is removed and `docs` is the
+            # canonical docs label. The self-bootstrap guard (idempotent
+            # --force) means this workflow can open its issue regardless
+            # of whether sync-labels has run yet; labels.yml stays SSoT.
+            gh label create docs \
+              --color "0075ca" \
+              --description "Improvements or additions to documentation" \
+              --force || true
             gh issue create --repo "$GITHUB_REPOSITORY" \
               --title "$TITLE" \
               --body "$BODY" \
-              --label "documentation"
+              --label "docs"
           fi
 
       - name: Close tracking issue when drift is resolved
