@@ -16,16 +16,41 @@
       "avatar_url": "https://avatars.githubusercontent.com/u/37993351?v=4",
       "profile": "https://masukai.github.io/portfolio/",
       "contributions": [
-        "code"
+        "code",
+        "doc",
+        "maintenance",
+        "ideas",
+        "tool",
+        "projectManagement",
+        "review",
+        "mentoring"
+      ]
+    },
+    {
+      "login": "yodakanohoshi",
+      "name": "yodakanohoshi",
+      "avatar_url": "https://avatars.githubusercontent.com/u/25799234?v=4",
+      "profile": "https://github.com/yodakanohoshi",
+      "contributions": [
+        "code",
+        "doc",
+        "maintenance",
+        "ideas",
+        "review",
+        "projectManagement"
       ]
     },
     {
       "login": "Muawiya-contact",
       "name": "Moavia Amir",
       "avatar_url": "https://avatars.githubusercontent.com/u/178013839?v=4",
-      "profile": "https://www.youtube.com/@Coding_Moves",
+      "profile": "https://muawiya-contact.github.io/muawiya-portfolio/",
       "contributions": [
-        "code"
+        "code",
+        "doc",
+        "infra",
+        "maintenance",
+        "ideas"
       ]
     },
     {
@@ -53,6 +78,26 @@
       "profile": "https://github.com/PFCAaron12",
       "contributions": [
         "code"
+      ]
+    },
+    {
+      "login": "Photon101",
+      "name": "Semy Ingle",
+      "avatar_url": "https://avatars.githubusercontent.com/u/123910806?v=4",
+      "profile": "https://github.com/Photon101",
+      "contributions": [
+        "code",
+        "maintenance"
+      ]
+    },
+    {
+      "login": "kiwamizamurai",
+      "name": "きわみざむらい",
+      "avatar_url": "https://avatars.githubusercontent.com/u/24860100?v=4",
+      "profile": "https://kiwamizamurai.github.io/",
+      "contributions": [
+        "code",
+        "bug"
       ]
     },
     {
@@ -88,7 +133,9 @@
       "avatar_url": "https://avatars.githubusercontent.com/u/231972213?v=4",
       "profile": "https://github.com/cian-ps",
       "contributions": [
-        "code"
+        "code",
+        "bug",
+        "infra"
       ]
     },
     {
@@ -97,7 +144,7 @@
       "avatar_url": "https://avatars.githubusercontent.com/u/238762418?v=4",
       "profile": "https://github.com/xtreellaDev",
       "contributions": [
-        "code"
+        "test"
       ]
     },
     {
@@ -106,7 +153,7 @@
       "avatar_url": "https://avatars.githubusercontent.com/u/275152799?v=4",
       "profile": "https://github.com/Ai-chan-0411",
       "contributions": [
-        "code"
+        "doc"
       ]
     },
     {
