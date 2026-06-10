@@ -241,6 +241,7 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | MySQL | ✅ v0.5 | `pip install drt-core[mysql]` | パスワード（環境変数） |
 | Databricks | ✅ v0.6 | `pip install drt-core[databricks]` | Access Token（環境変数） |
 | SQL Server | ✅ v0.6 | `pip install drt-core[sqlserver]` | パスワード（環境変数） |
+| REST API | ✅ v0.7 | (core) | Bearer / API Key / Basic / OAuth2 |
 
 ### デスティネーション
 

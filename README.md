@@ -267,6 +267,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | MySQL      | ✅ v0.5   | `pip install drt-core[mysql]`      | Password (env var)                            |
 | Databricks | ✅ v0.6   | `pip install drt-core[databricks]` | Access Token (env var)                        |
 | SQL Server | ✅ v0.6   | `pip install drt-core[sqlserver]`  | Password (env var)                            |
+| REST API   | ✅ v0.7   | (core)                             | Bearer / API Key / Basic / OAuth2             |
 
 ### Destinations
 

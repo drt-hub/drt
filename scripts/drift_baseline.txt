@@ -1,0 +1,31 @@
+# drift_baseline.txt — known-accepted gaps for scripts/check_drift.sh.
+#
+# Format: one `check_id:item` per line. Lines starting with # are NOT
+# parsed as comments by the script (it uses exact-line matching), so
+# keep this header free of any `check_id:item`-shaped text.
+#
+# This file is a RATCHET, not a permanent allowlist: every entry is a
+# documentation debt to burn down. When you add the missing surface,
+# delete the line. Adding new entries is only appropriate when a gap
+# is intentional and short-lived (e.g. a connector staged behind a
+# feature flag before public docs).
+#
+# Current entries: per-connector reference docs (docs/connectors/) were
+# introduced late (postgres first, then the v0.7.8+ wave: mysql /
+# clickhouse / snowflake / s3 / gcs / azure-blob / databricks ...).
+# The 14 destinations below predate that convention and never had a
+# dedicated doc. Tracked as a docs backlog — good first issues.
+dest-doc:discord
+dest-doc:email_smtp
+dest-doc:file
+dest-doc:github_actions
+dest-doc:google_ads
+dest-doc:intercom
+dest-doc:jira
+dest-doc:linear
+dest-doc:notion
+dest-doc:parquet
+dest-doc:sendgrid
+dest-doc:staged_upload
+dest-doc:teams
+dest-doc:twilio
