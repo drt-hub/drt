@@ -94,6 +94,16 @@ jobs:
             gh issue comment "$EXISTING" --body "$BODY"
           else
             echo "Opening new audit issue"
+            # Ensure the labels exist before the issue create — otherwise
+            # `gh issue create --label` hard-fails if a label is missing
+            # (e.g. on the very first run, before `make sync-labels` has
+            # materialised .github/labels.yml). `--force` makes this
+            # idempotent (update-or-create); .github/labels.yml stays the
+            # source of truth and sync-labels reconciles colour/description.
+            gh label create contributors \
+              --color "5319e7" \
+              --description "Contributor recognition & governance automation (all-contributors audit, etc.)" \
+              --force || true
             gh issue create \
               --title "$TITLE" \
               --body "$BODY" \
