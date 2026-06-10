@@ -217,7 +217,8 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | スキル | トリガー | 説明 |
 |-------|---------|-------------|
 | `/drt-create-sync` | "create a sync" | インテントから有効な同期YAMLを生成 |
-| `/drt-debug` | "sync failed" | エラーを診断し、修正方法を提案 |
+| `/drt-debug` | "sync failed" | 特定のエラーを診断し、修正方法を提案 |
+| `/drt-troubleshoot` | "drt isn't working" | 上から下まで全体を診断するチェックリストを案内 |
 | `/drt-init` | "set up drt" | プロジェクト初期化を案内 |
 | `/drt-migrate` | "migrate from Census" | 既存の設定をdrt YAMLに変換 |
 
