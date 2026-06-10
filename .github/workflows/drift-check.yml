@@ -1,0 +1,139 @@
+# Docs / skills / MCP drift audit.
+#
+# Runs scripts/check_drift.sh, which audits the CURRENT STATE of the
+# repo (not a PR diff) for surfaces that lag behind the connector
+# registry and the MCP tool set:
+#   - destinations missing docs/connectors/*.md, /drt-create-sync
+#     skill mention, or a README Destinations row
+#   - sources missing a README Sources row or /drt-init skill mention
+#   - MCP tools missing from the server.py docstring or the README /
+#     README.ja MCP tables
+#   - registered connectors missing from drt_list_connectors' inventory
+#
+# Real drift this would have caught before it existed: the /drt-debug
+# skill going 3 months without `drt doctor`, the MCP server lagging
+# the CLI by 4 months, drt_list_connectors silently missing 10
+# connectors, and the README Sources table missing the REST API source.
+#
+# Trigger design — deliberately NOT `on: pull_request`: contributor
+# PRs must never get drift warnings (docs/skill upkeep is a maintainer
+# concern, and surfacing it on first-time contributors' PRs adds
+# onboarding friction). Instead this runs post-merge + weekly and
+# reports to a maintainer-facing tracking issue — the same model as
+# contributors-audit.yml.
+#
+# Known historical gaps live in scripts/drift_baseline.txt (a ratchet
+# to burn down, not a permanent allowlist); only NEW drift fails the
+# audit and opens / updates the tracking issue.
+
+name: drift-check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'drt/connectors/registry.py'
+      - 'drt/mcp/server.py'
+      - 'docs/connectors/**'
+      - 'skills/**'
+      - 'README.md'
+      - 'README.ja.md'
+      - 'scripts/check_drift.sh'
+      - 'scripts/drift_baseline.txt'
+  schedule:
+    # Monday 01:00 UTC — offset from contributors-audit (00:30) and the
+    # other weekly schedules so they don't all queue at the same minute.
+    - cron: '0 1 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Run drift check
+        id: drift
+        run: |
+          set +e
+          OUTPUT=$(bash scripts/check_drift.sh 2>&1)
+          EXIT_CODE=$?
+          set -e
+          {
+            echo "exit_code=$EXIT_CODE"
+            echo "report<<EOF"
+            echo "$OUTPUT"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          # Also dump to the Action log for quick inspection.
+          echo "$OUTPUT"
+
+      - name: Open / update tracking issue when drift is found
+        if: steps.drift.outputs.exit_code == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TITLE="chore(docs): drift audit found surfaces lagging the connector registry"
+          BODY=$(cat <<EOF
+          The \`drift-check\` workflow found docs / skills / MCP surfaces that lag behind the connector registry or the MCP tool set. The detailed report from \`scripts/check_drift.sh\` follows; fix the listed surfaces (connector doc, skill mention, README row, MCP inventory entry), or — only when a gap is intentional — record it in \`scripts/drift_baseline.txt\`.
+
+          Run \`make check-drift\` locally to reproduce.
+
+          <details>
+          <summary>Full report</summary>
+
+          \`\`\`
+          ${{ steps.drift.outputs.report }}
+          \`\`\`
+
+          </details>
+
+          ---
+          _Auto-filed by the \`drift-check\` workflow (post-merge + weekly). It updates this issue in place instead of opening duplicates._
+          EOF
+          )
+
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" \
+            --search "in:title \"drift audit found surfaces\"" \
+            --state open --json number --jq '.[0].number // empty')
+
+          if [ -n "$EXISTING" ]; then
+            gh issue edit "$EXISTING" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" \
+              --body "Drift audit re-ran on $(date -u +%Y-%m-%d) and still finds gaps — issue body refreshed with the latest report."
+          else
+            # Ensure the label exists before `gh issue create --label`,
+            # which hard-fails on a missing label. `.github/labels.yml`
+            # defines `docs` (not the GitHub default `documentation`),
+            # and sync-labels runs with skip-delete:false — so once it
+            # reconciles, `documentation` is removed and `docs` is the
+            # canonical docs label. The self-bootstrap guard (idempotent
+            # --force) means this workflow can open its issue regardless
+            # of whether sync-labels has run yet; labels.yml stays SSoT.
+            gh label create docs \
+              --color "0075ca" \
+              --description "Improvements or additions to documentation" \
+              --force || true
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "$TITLE" \
+              --body "$BODY" \
+              --label "docs"
+          fi
+
+      - name: Close tracking issue when drift is resolved
+        if: steps.drift.outputs.exit_code == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" \
+            --search "in:title \"drift audit found surfaces\"" \
+            --state open --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue close "$EXISTING" --repo "$GITHUB_REPOSITORY" \
+              --comment "Drift audit is clean again as of $(date -u +%Y-%m-%d) — closing."
+          fi

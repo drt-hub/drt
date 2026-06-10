@@ -5,8 +5,8 @@ Create a drt sync YAML configuration file for the user.
 
 1. Ask the user for the following (or infer from context if already provided):
    - **Source table or SQL**: what data to sync (e.g. `ref('new_users')` or a SQL query)
-   - **Destination**: where to send it (Slack, Discord, Microsoft Teams, REST API, HubSpot, GitHub Actions, Google Sheets, PostgreSQL, MySQL, ClickHouse, Snowflake, Parquet, CSV/JSON/JSONL, Amazon S3, Jira, Linear, SendGrid, Amplitude, Mixpanel, Notion, Twilio, Intercom, Zendesk, Google Ads, Email SMTP, Staged Upload (async bulk APIs), Salesforce Bulk, or other)
-   - **Sync mode**: full (every run), incremental (watermark-based, needs cursor column), upsert (dedup by key), replace (TRUNCATE + INSERT for full table refresh), or mirror (upsert + DELETE rows whose `upsert_key` was not observed in the source — differential delete, requires `upsert_key`; supported on postgres / mysql / clickhouse / snowflake as of v0.7.7)
+   - **Destination**: where to send it (Slack, Discord, Microsoft Teams, REST API, HubSpot, GitHub Actions, Google Sheets, PostgreSQL, MySQL, ClickHouse, Snowflake, Databricks Delta Lake, Parquet, CSV/JSON/JSONL, Amazon S3, Jira, Linear, SendGrid, Amplitude, Mixpanel, Notion, Twilio, Intercom, Zendesk, Google Ads, Email SMTP, Staged Upload (async bulk APIs), Salesforce Bulk, or other)
+   - **Sync mode**: full (every run), incremental (watermark-based, needs cursor column), upsert (dedup by key), replace (TRUNCATE + INSERT for full table refresh), or mirror (upsert + DELETE rows whose `upsert_key` was not observed in the source — differential delete, requires `upsert_key`; supported on postgres / mysql / clickhouse / snowflake as of v0.7.7, databricks as of v0.7.9)
    - **Frequency intent**: helps set `batch_size` and `rate_limit`
 
 2. Generate a valid sync YAML using the exact field names from `docs/llm/API_REFERENCE.md`.

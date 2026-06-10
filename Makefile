@@ -1,4 +1,4 @@
-.PHONY: install dev lint fmt test clean sync-skills check-skills check-i18n check-changelog sync-version release-check topics sync-labels
+.PHONY: install dev lint fmt test clean sync-skills check-skills check-i18n check-changelog check-drift sync-version release-check topics sync-labels
 
 # ── Development ────────────────────────────────────────────────────────────────
 
@@ -63,6 +63,9 @@ check-changelog:  ## Verify every drt-core v* tag has a ## [X.Y.Z] section in CH
 
 check-changelog-required:  ## Warn if drt/ or pyproject.toml changed without a CHANGELOG.md update
 	@python3 scripts/check_changelog_required.py origin/main HEAD
+
+check-drift:  ## Audit docs / skills / MCP surfaces for drift against the connector registry
+	@bash scripts/check_drift.sh
 
 sync-version:  ## Propagate version from pyproject.toml to all plugin JSONs
 	@python3 scripts/sync-version.py
