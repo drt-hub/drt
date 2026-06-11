@@ -22,6 +22,7 @@ from drt.destinations.lookup import (
     build_lookup_map,
     detect_ambiguous_lookup_ordering,
 )
+from drt.engine.field_mappings import apply_field_mappings
 from drt.engine.observer import NullObserver, SyncObserver
 from drt.engine.resolver import resolve_model_ref
 from drt.sources.base import Source
@@ -382,6 +383,12 @@ def _run_sync_body(
             total_result.skipped += batch_len_before - len(record_batch)
             if not record_batch:
                 continue
+
+        # Declarative column rename (#415). Applied last — after cursor
+        # tracking and lookups (both source-side) — so the mapped names
+        # are what the destination, upsert_key, and the diff engine see.
+        # Pure transform; no observer side effects.
+        record_batch = apply_field_mappings(record_batch, sync.sync.field_mappings)
 
         if dry_run:
             total_result.success += len(record_batch)

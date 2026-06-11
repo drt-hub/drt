@@ -903,6 +903,12 @@ class SyncOptions(BaseModel):
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
     retry: RetryConfig = Field(default_factory=RetryConfig)
     on_error: Literal["skip", "fail"] = "fail"
+    # Declarative column rename (#415): {source_column: destination_field}.
+    # Applied in the engine after extraction + cursor tracking + lookups,
+    # immediately before the record reaches the destination — so
+    # cursor_field and lookups still reference source-side column names,
+    # while upsert_key / destination columns reference the mapped names.
+    field_mappings: dict[str, str] | None = None
 
     @model_validator(mode="after")
     def _check_incremental_cursor(self) -> SyncOptions:
