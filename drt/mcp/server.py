@@ -385,6 +385,11 @@ def create_server(project_dir: Path | None = None) -> Any:
                 {"name": "Amplitude", "type": "amplitude", "install": "(core)"},
                 {"name": "Mixpanel", "type": "mixpanel", "install": "(core)"},
                 {"name": "Zendesk", "type": "zendesk", "install": "(core)"},
+                {
+                    "name": "Elasticsearch / OpenSearch",
+                    "type": "elasticsearch",
+                    "install": "(core)",
+                },
                 {"name": "Google Sheets", "type": "google_sheets", "install": "drt-core[sheets]"},
                 {"name": "PostgreSQL", "type": "postgres", "install": "drt-core[postgres]"},
                 {"name": "MySQL", "type": "mysql", "install": "drt-core[mysql]"},

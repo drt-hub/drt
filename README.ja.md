@@ -275,6 +275,7 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | Email SMTP | ✅ v0.6 | (core) | ユーザー名/パスワード（環境変数） |
 | Salesforce Bulk API 2.0 | ✅ v0.6 | (core) | OAuth2（username-password） |
 | Staged Upload | ✅ v0.6 | (core) | プロバイダーごとに設定 |
+| Elasticsearch / OpenSearch | ✅ v0.7.9 | (core) | API キー / HTTP Basic（環境変数） |
 | Snowflake | ✅ v0.7 | `pip install drt-core[snowflake]` | パスワード（環境変数） |
 | Databricks Delta Lake | ✅ v0.7.9 | `pip install drt-core[databricks]` | Personal Access Token（環境変数） |
 
