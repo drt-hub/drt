@@ -404,6 +404,12 @@ class SnowflakeDestinationConfig(BaseModel):
 
     upsert_key: list[str] | None = None
 
+    # FK resolution against the destination (#316/#354 lookup pattern,
+    # extended to Snowflake in #468). Also makes Snowflake queryable, so
+    # `drt run --dry-run --diff` produces a true diff and `drt test`
+    # validation queries run against the target table.
+    lookups: dict[str, LookupConfig] | None = None
+
     def describe(self) -> str:
         return f"{self.type} ({self.database}.{self.schema_}.{self.table})"
 
