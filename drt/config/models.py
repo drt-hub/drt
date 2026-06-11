@@ -748,6 +748,40 @@ class GCSDestinationConfig(BaseModel):
         return f"{self.type} (gs://{self.bucket}/{self.prefix})"
 
 
+class AzureBlobDestinationConfig(BaseModel):
+    """Azure Blob destination — upload records as CSV / JSON / JSONL / Parquet."""
+
+    type: Literal["azure_blob"]
+    container: str
+    # Optional blob-name prefix. The generated file name is appended:
+    # e.g. prefix="drt/users/" → "drt/users/20260605T123000Z.csv". For
+    # per-sync routing, give each sync its own prefix.
+    prefix: str = ""
+    format: Literal["csv", "json", "jsonl", "parquet"] = "csv"
+    # gzip-compress csv / json / jsonl uploads ("none" disables). Parquet
+    # uses its native compression below; "gzip" here is ignored for parquet.
+    compression: Literal["none", "gzip"] = "none"
+    # Optional Parquet-specific compression (matches ParquetDestinationConfig).
+    parquet_compression: Literal["snappy", "gzip", "zstd", "none"] = "snappy"
+    # Auth path 1: env-var name holding a storage-account connection
+    # string (DefaultEndpointsProtocol=...). Most common shape for
+    # non-Azure CI / cron deployments.
+    connection_string_env: str | None = None
+    # Auth path 2: storage account blob endpoint
+    # (https://<account>.blob.core.windows.net) — when set without
+    # connection_string_env, DefaultAzureCredential is used (env vars,
+    # managed identity, Azure CLI, ...).
+    account_url: str | None = None
+    # Optional file-name template (Jinja2-free, supports one placeholder:
+    # {timestamp} — UTC ISO 8601 basic format, e.g. "20260605T123000Z").
+    # Default produces "<prefix><timestamp>.<ext>". For per-sync naming,
+    # set ``prefix`` per sync (e.g. ``prefix: drt/active_users/``).
+    key_template: str | None = None
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.container}/{self.prefix})"
+
+
 class EmailSmtpDestinationConfig(BaseModel):
     type: Literal["email_smtp"] = "email_smtp"
     host: str
@@ -874,6 +908,7 @@ DestinationConfig = Annotated[
     | FileDestinationConfig
     | S3DestinationConfig
     | GCSDestinationConfig
+    | AzureBlobDestinationConfig
     | EmailSmtpDestinationConfig
     | NotionDestinationConfig
     | IntercomDestinationConfig

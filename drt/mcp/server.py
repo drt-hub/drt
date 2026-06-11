@@ -397,6 +397,7 @@ def create_server(project_dir: Path | None = None) -> Any:
                 },
                 {"name": "Amazon S3", "type": "s3", "install": "drt-core[s3]"},
                 {"name": "Google Cloud Storage", "type": "gcs", "install": "drt-core[gcs]"},
+                {"name": "Azure Blob Storage", "type": "azure_blob", "install": "drt-core[azure]"},
                 {"name": "Parquet", "type": "parquet", "install": "drt-core[parquet]"},
                 {"name": "CSV/JSON/JSONL", "type": "file", "install": "(core)"},
                 {"name": "Jira", "type": "jira", "install": "(core)"},
