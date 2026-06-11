@@ -40,7 +40,8 @@ Checks Python version, the `~/.drt/profiles.yml` file, the active
 ### 2. Profile + credentials
 
 ```bash
-cat ~/.drt/profiles.yml          # confirm the profile name matches drt_project.yml
+drt profile list                 # confirm the profile in drt_project.yml exists
+drt profile show <name>          # inspect it (secrets masked)
 echo "$YOUR_PASSWORD_ENV"        # confirm the referenced env vars are actually set
 ```
 
@@ -55,13 +56,15 @@ echo "$YOUR_PASSWORD_ENV"        # confirm the referenced env vars are actually 
 ### 3. Connectivity
 
 ```bash
+drt profile test <name>          # round-trip the SOURCE connection (SELECT 1)
 drt validate                     # also surfaces connection issues where supported
 ```
 
-For SQL sources/destinations, a connection round-trip is the cheapest way to
-separate "can't reach the warehouse" from "the data is wrong". If `drt
-validate` doesn't exercise a live connection for your connector, a one-off
-manual check works: `psql` / `curl -X POST <url>` / the warehouse console.
+`drt profile test` is the cheapest way to separate "can't reach the
+warehouse" from "the data is wrong" — it runs a real connection check against
+the source. For the destination side, `drt validate` exercises a live
+connection where supported; otherwise a one-off manual check works (`psql` /
+`curl -X POST <url>` / the warehouse console).
 
 - **✅ green when:** the source warehouse and the destination both accept a
   connection with the configured credentials.
