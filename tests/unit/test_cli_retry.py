@@ -131,6 +131,22 @@ def test_retry_dry_run_sends_nothing(project: Path, monkeypatch: pytest.MonkeyPa
     assert store.depth("post_users") == 2  # queue untouched
 
 
+def test_retry_dry_run_with_limit_notes_untouched(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _seed(project, [1, 2, 3])
+    dest = _FakeDestination(fail_ids=set())
+    _patch_dest(monkeypatch, dest)
+
+    result = runner.invoke(app, ["retry", "post_users", "--dry-run", "--limit", "1"])
+
+    assert result.exit_code == 0
+    assert "Would retry 1 of 3" in result.output
+    assert "2 record(s) left untouched" in result.output
+    assert dest.calls == []
+    assert store.depth("post_users") == 3  # queue untouched
+
+
 def test_retry_clear_empties_without_sending(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

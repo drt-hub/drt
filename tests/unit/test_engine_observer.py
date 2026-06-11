@@ -61,6 +61,16 @@ def test_logging_observer_emits_warning(caplog: pytest.LogCaptureFixture) -> Non
     assert any("lookup ambiguity detected" in r.message for r in caplog.records)
 
 
+def test_logging_observer_records_failed_is_silent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Failed records carry full payloads (possible PII) — must NOT be logged."""
+    obs = LoggingObserver()
+    with caplog.at_level(logging.DEBUG, logger="drt"):
+        obs.on_records_failed("s", [DeadLetter(record={"id": 1}, error_message="x")])
+    assert caplog.records == []
+
+
 def test_logging_observer_emits_interrupted_info(caplog: pytest.LogCaptureFixture) -> None:
     obs = LoggingObserver()
     with caplog.at_level(logging.INFO, logger="drt"):
