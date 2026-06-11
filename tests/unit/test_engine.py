@@ -1108,3 +1108,94 @@ class TestGracefulShutdown:
         saved = state_mgr.get_last_sync(sync.name)
         assert saved is not None
         assert saved.records_synced == 5  # partial
+
+
+# ---------------------------------------------------------------------------
+# field_mappings (#415)
+# ---------------------------------------------------------------------------
+
+
+def _make_sync_with_mappings(
+    field_mappings: dict[str, str], batch_size: int = 10
+) -> SyncConfig:
+    return SyncConfig.model_validate(
+        {
+            "name": "test_sync",
+            "model": "ref('table')",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {"batch_size": batch_size, "field_mappings": field_mappings},
+        }
+    )
+
+
+def test_field_mappings_renames_keys_before_destination(tmp_path: Path) -> None:
+    """The destination receives records with mapped (destination) field
+    names, not the source column names."""
+    rows = [{"user_id": 1, "full_name": "Alice"}, {"user_id": 2, "full_name": "Bob"}]
+    source = FakeSource(rows)
+    dest = FakeDestination()
+    sync = _make_sync_with_mappings({"user_id": "id", "full_name": "name"})
+
+    result = run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+    assert result.success == 2
+    # The destination saw the renamed keys.
+    received = [r for call in dest.calls for r in call]
+    assert received == [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
+
+
+def test_field_mappings_none_is_passthrough(tmp_path: Path) -> None:
+    rows = [{"id": 1, "name": "Alice"}]
+    source = FakeSource(rows)
+    dest = FakeDestination()
+    sync = _make_sync(batch_size=10)  # no field_mappings
+
+    run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+    received = [r for call in dest.calls for r in call]
+    assert received == [{"id": 1, "name": "Alice"}]
+
+
+def test_field_mappings_cursor_field_uses_source_name(tmp_path: Path) -> None:
+    """cursor_field references the SOURCE column and is tracked before the
+    rename — so incremental state is captured even when the cursor column
+    is itself remapped to a different destination name."""
+    rows = [
+        {"created_ts": "2026-01-01T00:00:00", "v": 1},
+        {"created_ts": "2026-01-02T00:00:00", "v": 2},
+    ]
+    source = FakeSource(rows)
+    dest = FakeDestination()
+    sync = SyncConfig.model_validate(
+        {
+            "name": "test_sync",
+            "model": "ref('table')",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {
+                "mode": "incremental",
+                "cursor_field": "created_ts",
+                "field_mappings": {"created_ts": "created_at"},
+            },
+        }
+    )
+    from drt.state.manager import StateManager
+
+    state_mgr = StateManager(tmp_path)
+
+    run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
+
+    # Destination got the renamed column...
+    received = [r for call in dest.calls for r in call]
+    assert all("created_at" in r and "created_ts" not in r for r in received)
+    # ...and the cursor (source-side) was still tracked to the max value.
+    saved = state_mgr.get_last_sync(sync.name)
+    assert saved is not None
+    assert saved.last_cursor_value == "2026-01-02T00:00:00"

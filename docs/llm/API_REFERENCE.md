@@ -130,6 +130,9 @@ sync:                       # optional: all fields have defaults
     default_value: "2026-01-01 00:00:00"  # optional: fallback cursor for first run (v0.6.2)
   batch_size: 100           # default: 100 — rows per destination call
   on_error: fail            # "fail" (default) | "skip"
+  field_mappings:           # optional (#415): declarative column rename {source_column: destination_field}
+    user_id: id             # applied after extraction + cursor tracking + lookups, just before the destination
+    full_name: name         # cursor_field / lookups use SOURCE names; upsert_key / destination columns use MAPPED names
   rate_limit:
     requests_per_second: 10 # default: 10 — set to 0 to disable rate limiting
   retry:                    # sync-level retry (applied unless destination overrides)
