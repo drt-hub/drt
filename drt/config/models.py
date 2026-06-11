@@ -720,12 +720,6 @@ class GCSDestinationConfig(BaseModel):
     type: Literal["gcs"]
     bucket: str
     # Optional object-name prefix. The generated file name is appended:
-class AzureBlobDestinationConfig(BaseModel):
-    """Azure Blob destination — upload records as CSV / JSON / JSONL / Parquet."""
-
-    type: Literal["azure_blob"]
-    container: str
-    # Optional blob-name prefix. The generated file name is appended:
     # e.g. prefix="drt/users/" → "drt/users/20260605T123000Z.csv". For
     # per-sync routing, give each sync its own prefix.
     prefix: str = ""
@@ -744,6 +738,31 @@ class AzureBlobDestinationConfig(BaseModel):
     # application-default → GCE/GKE/Cloud Run service account). For
     # explicit overrides, point at a service-account JSON keyfile:
     credentials_path: str | None = None
+    # Optional file-name template (Jinja2-free, supports one placeholder:
+    # {timestamp} — UTC ISO 8601 basic format, e.g. "20260605T123000Z").
+    # Default produces "<prefix><timestamp>.<ext>". For per-sync naming,
+    # set ``prefix`` per sync (e.g. ``prefix: drt/active_users/``).
+    key_template: str | None = None
+
+    def describe(self) -> str:
+        return f"{self.type} (gs://{self.bucket}/{self.prefix})"
+
+
+class AzureBlobDestinationConfig(BaseModel):
+    """Azure Blob destination — upload records as CSV / JSON / JSONL / Parquet."""
+
+    type: Literal["azure_blob"]
+    container: str
+    # Optional blob-name prefix. The generated file name is appended:
+    # e.g. prefix="drt/users/" → "drt/users/20260605T123000Z.csv". For
+    # per-sync routing, give each sync its own prefix.
+    prefix: str = ""
+    format: Literal["csv", "json", "jsonl", "parquet"] = "csv"
+    # gzip-compress csv / json / jsonl uploads ("none" disables). Parquet
+    # uses its native compression below; "gzip" here is ignored for parquet.
+    compression: Literal["none", "gzip"] = "none"
+    # Optional Parquet-specific compression (matches ParquetDestinationConfig).
+    parquet_compression: Literal["snappy", "gzip", "zstd", "none"] = "snappy"
     # Auth path 1: env-var name holding a storage-account connection
     # string (DefaultEndpointsProtocol=...). Most common shape for
     # non-Azure CI / cron deployments.
@@ -760,7 +779,6 @@ class AzureBlobDestinationConfig(BaseModel):
     key_template: str | None = None
 
     def describe(self) -> str:
-        return f"{self.type} (gs://{self.bucket}/{self.prefix})"
         return f"{self.type} ({self.container}/{self.prefix})"
 
 
