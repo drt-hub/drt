@@ -1,0 +1,148 @@
+---
+name: drt-troubleshoot
+description: >
+  Walk a drt setup through a full top-to-bottom diagnostic checklist when
+  something is off but the failing layer isn't obvious. Use this when a user
+  says "drt isn't working", a sync silently does nothing, results look wrong,
+  or they want to verify a fresh setup end-to-end — broader than /drt-debug,
+  which fixes a specific known error.
+---
+
+Systematically isolate which layer of a drt setup is failing, then hand off
+the specific fix.
+
+`/drt-debug` is reactive — the user has an error message and wants it fixed.
+`/drt-troubleshoot` is for when the symptom is vague ("nothing happens",
+"the data looks wrong", "I just set this up and want to confirm it works").
+Walk the layers **top to bottom**, confirming each one is green before
+moving on. The first layer that fails is where the problem lives — stop
+there and fix it (or invoke `/drt-debug` for a known error pattern).
+
+## The checklist
+
+Run these in order. Each step has a "✅ green when" condition — only proceed
+to the next step once the current one is green.
+
+### 1. Environment
+
+```bash
+drt doctor
+```
+
+Checks Python version, the `~/.drt/profiles.yml` file, the active
+`drt_project.yml`, installed extras, and common env-var gotchas (v0.7+).
+
+- **✅ green when:** every line is ✅ (extras you don't use can be ❌ — only
+  the ones your source/destination need must be installed).
+- **🔴 common failures:** missing `drt-core[<extra>]` for your connector;
+  `~/.drt/profiles.yml` not found (run `drt init`); wrong Python (<3.10).
+
+### 2. Profile + credentials
+
+```bash
+cat ~/.drt/profiles.yml          # confirm the profile name matches drt_project.yml
+echo "$YOUR_PASSWORD_ENV"        # confirm the referenced env vars are actually set
+```
+
+- **✅ green when:** the profile named in `drt_project.yml` exists in
+  `profiles.yml`, and every `${VAR}` / `*_env` it references resolves to a
+  non-empty value in the shell.
+- **🔴 common failures:** profile name mismatch (`drt run --profile <name>`
+  or `DRT_PROFILE` to override); env var unset or exported in a different
+  shell; secret hardcoded in YAML instead of an env reference (`drt validate`
+  flags this since v0.7.5).
+
+### 3. Connectivity
+
+```bash
+drt validate                     # also surfaces connection issues where supported
+```
+
+For SQL sources/destinations, a connection round-trip is the cheapest way to
+separate "can't reach the warehouse" from "the data is wrong". If `drt
+validate` doesn't exercise a live connection for your connector, a one-off
+manual check works: `psql` / `curl -X POST <url>` / the warehouse console.
+
+- **✅ green when:** the source warehouse and the destination both accept a
+  connection with the configured credentials.
+- **🔴 common failures:** wrong host/port/account; firewall / VPN; expired
+  token; for BigQuery, `GOOGLE_APPLICATION_CREDENTIALS` unset or pointing at
+  a stale keyfile; for non-US BigQuery datasets, a missing `location`.
+
+### 4. Config validity
+
+```bash
+drt validate                     # JSON-Schema + semantic checks on every sync YAML
+drt list                         # confirm your sync is actually discovered
+```
+
+- **✅ green when:** `drt validate` reports 0 errors and `drt list` shows the
+  sync you expect.
+- **🔴 common failures:** sync file outside `syncs/`; YAML indentation; a
+  `model: ref('table')` pointing at a table that doesn't exist; an
+  `upsert`/`mirror` mode without the required `upsert_key`; deprecation
+  warnings (v0.7.2+) that will become errors.
+
+### 5. Dry run (the data preview)
+
+```bash
+drt run --select <name> --dry-run            # config parses, rows extract, nothing is written
+drt run --select <name> --dry-run --diff     # record-level preview for queryable destinations (v0.7.1+)
+```
+
+This is the single most useful step for "the sync runs but the data looks
+wrong" — it shows exactly what would be written without touching the
+destination.
+
+- **✅ green when:** the row count is what you expect and the previewed
+  records / `--diff` look correct.
+- **🔴 common failures:** 0 rows (the source query / `model` filters
+  everything out, or `mode: incremental` already consumed the watermark —
+  check `drt status`, replay with `--cursor-value`); `{{ row.field }}`
+  referencing a column the source doesn't return (use `tojson_safe` for
+  datetime/Decimal/UUID, v0.7.6+); wrong column names in the template.
+
+### 6. First real run
+
+```bash
+drt run --select <name> --verbose            # row-level error detail
+drt status                                   # what actually happened
+drt status --output json                     # machine-readable, for CI
+```
+
+- **✅ green when:** `result.success` equals the dry-run row count and
+  `result.failed` is 0.
+- **🔴 common failures:** rate limit (429 — lower `rate_limit.requests_per_second`;
+  HubSpot max 9/s, GitHub Actions 5/s); per-row auth/permission errors
+  (`on_error: skip` to see the full failure count instead of stopping at the
+  first); partial success where some rows fail validation downstream.
+
+### 7. Post-sync correctness
+
+```bash
+drt test --select <name>                     # freshness / unique / accepted_values tests, if defined
+```
+
+- **✅ green when:** all declared tests pass (or there are none — that's not a
+  failure, just no assertions).
+- **🔴 common failures:** the sync reported success but downstream `unique` /
+  `freshness` tests fail — the data moved but isn't what was expected. This
+  usually points back to the source query (step 5), not the sync itself.
+
+## When you've found the failing layer
+
+- **A specific error message** → switch to `/drt-debug` for the known-pattern
+  fix.
+- **Silent / wrong-data** → the dry-run step (5) almost always localises it;
+  fix the source query or template and re-run the checklist from step 5.
+- **Still stuck after the checklist** → capture `drt doctor`, the sync YAML,
+  `drt_project.yml`, and `drt run --verbose --output json` output, and open a
+  discussion / issue with that bundle.
+
+## Reference
+
+- `docs/llm/CONTEXT.md` — architecture and key concepts
+- `docs/llm/API_REFERENCE.md` — all config fields
+- `docs/connectors/` — per-connector auth, sync modes, and gotchas
+- `/drt-debug` — the companion skill for fixing a specific error once this
+  checklist has localised it

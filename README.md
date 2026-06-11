@@ -242,10 +242,11 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 
 | Skill              | Trigger               | What it does                               |
 | ------------------ | --------------------- | ------------------------------------------ |
-| `/drt-create-sync` | "create a sync"       | Generates valid sync YAML from your intent |
-| `/drt-debug`       | "sync failed"         | Diagnoses errors and suggests fixes        |
-| `/drt-init`        | "set up drt"          | Guides through project initialization      |
-| `/drt-migrate`     | "migrate from Census" | Converts existing configs to drt YAML      |
+| `/drt-create-sync`  | "create a sync"        | Generates valid sync YAML from your intent       |
+| `/drt-debug`        | "sync failed"          | Diagnoses a specific error and suggests fixes    |
+| `/drt-troubleshoot` | "drt isn't working"    | Walks a full top-to-bottom diagnostic checklist  |
+| `/drt-init`         | "set up drt"           | Guides through project initialization            |
+| `/drt-migrate`      | "migrate from Census"  | Converts existing configs to drt YAML            |
 
 ---
 

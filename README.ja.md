@@ -1,4 +1,4 @@
-<!-- i18n-sync: base=README.md, hash=e1b1d150934f03d7e2c30fab260873f66a063c00 -->
+<!-- i18n-sync: base=README.md, hash=fe801bea667943e5cad36ff5fff3b13c48b41ef2 -->
 
 [English](./README.md) | [日本語](./README.ja.md)
 
@@ -217,7 +217,8 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | スキル | トリガー | 説明 |
 |-------|---------|-------------|
 | `/drt-create-sync` | "create a sync" | インテントから有効な同期YAMLを生成 |
-| `/drt-debug` | "sync failed" | エラーを診断し、修正方法を提案 |
+| `/drt-debug` | "sync failed" | 特定のエラーを診断し、修正方法を提案 |
+| `/drt-troubleshoot` | "drt isn't working" | 上から下まで全体を診断するチェックリストを案内 |
 | `/drt-init` | "set up drt" | プロジェクト初期化を案内 |
 | `/drt-migrate` | "migrate from Census" | 既存の設定をdrt YAMLに変換 |
 
