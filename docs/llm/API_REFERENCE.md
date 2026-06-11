@@ -133,6 +133,9 @@ sync:                       # optional: all fields have defaults
   field_mappings:           # optional (#415): declarative column rename {source_column: destination_field}
     user_id: id             # applied after extraction + cursor tracking + lookups, just before the destination
     full_name: name         # cursor_field / lookups use SOURCE names; upsert_key / destination columns use MAPPED names
+  dlq:                      # optional (#278): Dead Letter Queue — persist per-record load failures for replay
+    enabled: false          # default: false (opt-in) — writes FULL records to .drt/dlq/<sync>.jsonl (a PII decision)
+    max_records: 10000      # default: 10000 — cap queue size; oldest entries dropped past this (0 = unbounded)
   rate_limit:
     requests_per_second: 10 # default: 10 — set to 0 to disable rate limiting
   retry:                    # sync-level retry (applied unless destination overrides)

@@ -110,6 +110,11 @@ drt status --output json                     # machine-readable, for CI
   HubSpot max 9/s, GitHub Actions 5/s); per-row auth/permission errors
   (`on_error: skip` to see the full failure count instead of stopping at the
   first); partial success where some rows fail validation downstream.
+- **Recovering partial failures:** enable the dead letter queue
+  (`sync.dlq.enabled: true` + `on_error: skip`, v0.8+) so failed records
+  persist to `.drt/dlq/<sync>.jsonl` instead of being dropped. `drt status`
+  shows the queue depth; `drt retry <sync>` re-sends just the failures once
+  you've fixed the root cause. See `docs/guides/dead-letter-queue.md`.
 
 ### 7. Post-sync correctness
 

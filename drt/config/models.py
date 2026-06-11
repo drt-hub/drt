@@ -998,6 +998,26 @@ class WatermarkConfig(BaseModel):
         return self
 
 
+class DLQConfig(BaseModel):
+    """Dead Letter Queue — persist per-record load failures for replay (#278).
+
+    Opt-in: when ``enabled``, each record that fails during ``destination.load()``
+    is written verbatim to ``.drt/dlq/<sync_name>.jsonl`` so ``drt retry <sync>``
+    can re-send just the failures. Off by default because it writes full record
+    payloads to disk (a PII decision the operator makes explicitly).
+    """
+
+    enabled: bool = False
+    # Cap queue growth — oldest entries are dropped past this (0 = unbounded).
+    max_records: int = 10_000
+
+    @model_validator(mode="after")
+    def _check_max_records(self) -> DLQConfig:
+        if self.max_records < 0:
+            raise ValueError("dlq.max_records must be >= 0 (0 disables the cap).")
+        return self
+
+
 class SyncOptions(BaseModel):
     mode: Literal["full", "incremental", "upsert", "replace", "mirror"] = "full"
     replace_strategy: Literal["truncate", "swap"] = "truncate"
@@ -1013,6 +1033,9 @@ class SyncOptions(BaseModel):
     # cursor_field and lookups still reference source-side column names,
     # while upsert_key / destination columns reference the mapped names.
     field_mappings: dict[str, str] | None = None
+    # Dead Letter Queue (#278): opt-in persistence of failed records for
+    # `drt retry`. None means disabled (same as DLQConfig(enabled=False)).
+    dlq: DLQConfig | None = None
 
     @model_validator(mode="after")
     def _check_incremental_cursor(self) -> SyncOptions:

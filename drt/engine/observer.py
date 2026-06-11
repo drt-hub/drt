@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from drt.destinations.base import SyncResult
+    from drt.state.dlq import DeadLetter, DlqStore
     from drt.state.manager import StateManager
     from drt.state.watermark import WatermarkStorage
 
@@ -49,9 +50,7 @@ class SyncObserver(Protocol):
         """Called once at the top of ``run_sync``."""
         ...
 
-    def on_watermark_resolved(
-        self, sync_name: str, source: str, cursor_value: str | None
-    ) -> None:
+    def on_watermark_resolved(self, sync_name: str, source: str, cursor_value: str | None) -> None:
         """Called when cursor value is resolved for an incremental sync.
 
         ``source`` is one of ``"cli_override"``, ``"storage"``,
@@ -61,6 +60,18 @@ class SyncObserver(Protocol):
 
     def on_warning(self, sync_name: str, message: str) -> None:
         """Called for non-fatal warnings (lookup ambiguity, etc.)."""
+        ...
+
+    def on_records_failed(self, sync_name: str, dead_letters: list[DeadLetter]) -> None:
+        """Called after a batch load when individual records failed.
+
+        ``dead_letters`` pairs each failed record with its error detail —
+        the engine has already correlated ``RowError.batch_index`` back to
+        the full record it sent, so no record content is lost here. Fired
+        once per batch that had pinpointed per-record failures (never on a
+        clean batch). Observers that maintain a Dead Letter Queue persist
+        here; every other observer no-ops.
+        """
         ...
 
     def on_interrupted(self, sync_name: str, batches_processed: int) -> None:
@@ -97,6 +108,7 @@ class NullObserver:
         self, sync_name: str, source: str, cursor_value: str | None
     ) -> None: ...
     def on_warning(self, sync_name: str, message: str) -> None: ...
+    def on_records_failed(self, sync_name: str, dead_letters: list[DeadLetter]) -> None: ...
     def on_interrupted(self, sync_name: str, batches_processed: int) -> None: ...
     def on_sync_completed(
         self,
@@ -122,9 +134,7 @@ class LoggingObserver:
         # The pre-refactor engine did not log sync start; keep parity.
         pass
 
-    def on_watermark_resolved(
-        self, sync_name: str, source: str, cursor_value: str | None
-    ) -> None:
+    def on_watermark_resolved(self, sync_name: str, source: str, cursor_value: str | None) -> None:
         # Storage-source resolutions used to not log (only CLI override /
         # default_value did). Preserve that asymmetry: it kept the log
         # signal:noise ratio reasonable for daily incremental runs.
@@ -141,6 +151,13 @@ class LoggingObserver:
 
     def on_warning(self, sync_name: str, message: str) -> None:
         self._logger.warning("sync='%s' %s", sync_name, message)
+
+    def on_records_failed(self, sync_name: str, dead_letters: list[DeadLetter]) -> None:
+        # Intentionally silent: failed records carry full payloads (possible
+        # PII). Row-level errors already surface via RowError/--verbose with
+        # a truncated preview; the DLQ file is the durable record. Logging
+        # full rows here would defeat that privacy boundary.
+        pass
 
     def on_interrupted(self, sync_name: str, batches_processed: int) -> None:
         self._logger.info(
@@ -185,6 +202,7 @@ class StatePersistingObserver:
         self, sync_name: str, source: str, cursor_value: str | None
     ) -> None: ...
     def on_warning(self, sync_name: str, message: str) -> None: ...
+    def on_records_failed(self, sync_name: str, dead_letters: list[DeadLetter]) -> None: ...
     def on_interrupted(self, sync_name: str, batches_processed: int) -> None: ...
 
     def on_sync_completed(
@@ -199,11 +217,7 @@ class StatePersistingObserver:
 
         if self._state_manager is not None:
             status = (
-                "success"
-                if result.failed == 0
-                else "partial"
-                if result.success > 0
-                else "failed"
+                "success" if result.failed == 0 else "partial" if result.success > 0 else "failed"
             )
             try:
                 self._state_manager.save_sync(
@@ -219,17 +233,11 @@ class StatePersistingObserver:
             except Exception as exc:  # noqa: BLE001 — fire-and-forget contract
                 self._logger.warning("State persist failure for '%s': %s", sync_name, exc)
 
-        if (
-            self._watermark_storage is not None
-            and cursor_field
-            and new_cursor_value
-        ):
+        if self._watermark_storage is not None and cursor_field and new_cursor_value:
             try:
                 self._watermark_storage.save(sync_name, new_cursor_value)
             except Exception as exc:  # noqa: BLE001 — fire-and-forget contract
-                self._logger.warning(
-                    "Watermark save failure for '%s': %s", sync_name, exc
-                )
+                self._logger.warning("Watermark save failure for '%s': %s", sync_name, exc)
 
 
 class CompositeObserver:
@@ -259,13 +267,14 @@ class CompositeObserver:
     def on_sync_started(self, sync_name: str, started_at: str) -> None:
         self._broadcast("on_sync_started", sync_name, started_at)
 
-    def on_watermark_resolved(
-        self, sync_name: str, source: str, cursor_value: str | None
-    ) -> None:
+    def on_watermark_resolved(self, sync_name: str, source: str, cursor_value: str | None) -> None:
         self._broadcast("on_watermark_resolved", sync_name, source, cursor_value)
 
     def on_warning(self, sync_name: str, message: str) -> None:
         self._broadcast("on_warning", sync_name, message)
+
+    def on_records_failed(self, sync_name: str, dead_letters: list[DeadLetter]) -> None:
+        self._broadcast("on_records_failed", sync_name, dead_letters)
 
     def on_interrupted(self, sync_name: str, batches_processed: int) -> None:
         self._broadcast("on_interrupted", sync_name, batches_processed)
@@ -286,3 +295,42 @@ class CompositeObserver:
             new_cursor_value,
             cursor_field,
         )
+
+
+class DlqObserver:
+    """Persists per-record load failures to the Dead Letter Queue (#278).
+
+    Wired into the run path only for syncs that set ``sync.dlq.enabled``.
+    Like every other observer it is fire-and-forget: a DLQ write failure is
+    logged and swallowed so it can never fail an otherwise-OK sync. All
+    other event methods are no-ops — this observer only cares about
+    ``on_records_failed``.
+    """
+
+    def __init__(self, store: DlqStore, *, max_records: int = 10_000) -> None:
+        self._store = store
+        self._max_records = max_records
+        self._logger = logging.getLogger("drt")
+
+    def on_sync_started(self, sync_name: str, started_at: str) -> None: ...
+    def on_watermark_resolved(
+        self, sync_name: str, source: str, cursor_value: str | None
+    ) -> None: ...
+    def on_warning(self, sync_name: str, message: str) -> None: ...
+    def on_interrupted(self, sync_name: str, batches_processed: int) -> None: ...
+    def on_sync_completed(
+        self,
+        sync_name: str,
+        result: SyncResult,
+        started_at: str,
+        new_cursor_value: str | None,
+        cursor_field: str | None,
+    ) -> None: ...
+
+    def on_records_failed(self, sync_name: str, dead_letters: list[DeadLetter]) -> None:
+        if not dead_letters:
+            return
+        try:
+            self._store.append(sync_name, dead_letters, max_records=self._max_records)
+        except Exception as exc:  # noqa: BLE001 — fire-and-forget contract
+            self._logger.warning("DLQ persist failure for '%s': %s", sync_name, exc)

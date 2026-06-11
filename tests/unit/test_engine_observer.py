@@ -16,13 +16,16 @@ from unittest.mock import MagicMock
 import pytest
 
 from drt.destinations.base import SyncResult
+from drt.destinations.row_errors import RowError
 from drt.engine.observer import (
     CompositeObserver,
+    DlqObserver,
     LoggingObserver,
     NullObserver,
     StatePersistingObserver,
     SyncObserver,
 )
+from drt.state.dlq import DeadLetter, DlqStore
 from drt.state.manager import StateManager
 
 # ---------------------------------------------------------------------------
@@ -41,6 +44,7 @@ def test_null_observer_methods_do_nothing() -> None:
     obs.on_sync_started("s", "2026-05-24T00:00:00Z")
     obs.on_watermark_resolved("s", "storage", "v")
     obs.on_warning("s", "warn")
+    obs.on_records_failed("s", [])
     obs.on_interrupted("s", 3)
     obs.on_sync_completed("s", SyncResult(), "2026-05-24T00:00:00Z", None, None)
 
@@ -193,19 +197,21 @@ def test_composite_observer_broadcasts_to_all(tmp_path: Path) -> None:
 
 
 def test_composite_observer_forwards_every_event_method() -> None:
-    """All 5 broadcast methods reach every child — guards future event additions."""
+    """All 6 broadcast methods reach every child — guards future event additions."""
     child = MagicMock(spec=SyncObserver)
     obs = CompositeObserver([child])
 
     obs.on_sync_started("s", "ts")
     obs.on_watermark_resolved("s", "cli_override", "v")
     obs.on_warning("s", "msg")
+    obs.on_records_failed("s", [])
     obs.on_interrupted("s", 4)
     obs.on_sync_completed("s", SyncResult(), "ts", None, None)
 
     child.on_sync_started.assert_called_once_with("s", "ts")
     child.on_watermark_resolved.assert_called_once_with("s", "cli_override", "v")
     child.on_warning.assert_called_once_with("s", "msg")
+    child.on_records_failed.assert_called_once_with("s", [])
     child.on_interrupted.assert_called_once_with("s", 4)
     child.on_sync_completed.assert_called_once_with("s", SyncResult(), "ts", None, None)
 
@@ -278,8 +284,7 @@ def test_engine_routes_alert_dispatch_failure_through_observer(
     run_sync(sync, FakeSource([{"id": 1}]), dest, _make_profile(), tmp_path, observer=obs)
 
     warning_calls = [
-        c for c in obs.on_warning.call_args_list
-        if "Alert dispatch outer failure" in c.args[1]
+        c for c in obs.on_warning.call_args_list if "Alert dispatch outer failure" in c.args[1]
     ]
     assert warning_calls, (
         f"Expected on_warning('Alert dispatch outer failure'...), "
@@ -309,13 +314,140 @@ def test_engine_routes_history_append_failure_through_observer(tmp_path: Path) -
     )
 
     warning_calls = [
-        c for c in obs.on_warning.call_args_list
-        if "History append outer failure" in c.args[1]
+        c for c in obs.on_warning.call_args_list if "History append outer failure" in c.args[1]
     ]
     assert warning_calls, (
         f"Expected on_warning('History append outer failure'...), "
         f"got {obs.on_warning.call_args_list}"
     )
+
+
+# ---------------------------------------------------------------------------
+# DlqObserver (#278) — persists per-record load failures
+# ---------------------------------------------------------------------------
+
+
+def test_dlq_observer_implements_protocol() -> None:
+    assert isinstance(DlqObserver(DlqStore(Path("."))), SyncObserver)
+
+
+def _dead(value: int) -> DeadLetter:
+    return DeadLetter(record={"id": value}, error_message="boom", http_status=500)
+
+
+def test_dlq_observer_persists_failed_records(tmp_path: Path) -> None:
+    store = DlqStore(tmp_path)
+    obs = DlqObserver(store)
+
+    obs.on_records_failed("s", [_dead(1), _dead(2)])
+
+    assert store.depth("s") == 2
+    assert [e.record["id"] for e in store.read("s")] == [1, 2]
+
+
+def test_dlq_observer_empty_is_noop(tmp_path: Path) -> None:
+    store = DlqStore(tmp_path)
+    DlqObserver(store).on_records_failed("s", [])
+    assert store.depth("s") == 0
+
+
+def test_dlq_observer_honours_max_records(tmp_path: Path) -> None:
+    store = DlqStore(tmp_path)
+    obs = DlqObserver(store, max_records=2)
+    obs.on_records_failed("s", [_dead(1), _dead(2), _dead(3)])
+    assert [e.record["id"] for e in store.read("s")] == [2, 3]
+
+
+def test_dlq_observer_swallows_store_errors(caplog: pytest.LogCaptureFixture) -> None:
+    """Fire-and-forget: a broken DLQ store must NOT crash a sync."""
+    store = MagicMock()
+    store.append.side_effect = OSError("disk full")
+    obs = DlqObserver(store)
+
+    with caplog.at_level(logging.WARNING, logger="drt"):
+        obs.on_records_failed("s", [_dead(1)])  # must not raise
+
+    assert any("DLQ persist failure" in r.message for r in caplog.records)
+
+
+def test_dlq_observer_only_reacts_to_records_failed(tmp_path: Path) -> None:
+    """Every other event method is a no-op — DlqObserver writes nothing on them."""
+    store = DlqStore(tmp_path)
+    obs = DlqObserver(store)
+    obs.on_sync_started("s", "ts")
+    obs.on_watermark_resolved("s", "storage", "v")
+    obs.on_warning("s", "w")
+    obs.on_interrupted("s", 1)
+    obs.on_sync_completed("s", SyncResult(), "ts", None, None)
+    assert store.depth("s") == 0
+
+
+# ---------------------------------------------------------------------------
+# Engine emits on_records_failed with full records (#278)
+# ---------------------------------------------------------------------------
+
+
+class _RowErrorDestination:
+    """Fake destination that fails specific in-batch indices with RowErrors."""
+
+    def __init__(self, fail_indices: set[int]) -> None:
+        self._fail = fail_indices
+
+    def load(self, records, config, sync_options):  # type: ignore[no-untyped-def]
+        result = SyncResult()
+        for i, _ in enumerate(records):
+            if i in self._fail:
+                result.failed += 1
+                result.row_errors.append(
+                    RowError(
+                        batch_index=i,
+                        record_preview=str(records[i])[:200],
+                        http_status=503,
+                        error_message=f"rejected {i}",
+                    )
+                )
+            else:
+                result.success += 1
+        return result
+
+
+def test_engine_emits_records_failed_with_full_records(tmp_path: Path) -> None:
+    """The engine correlates RowError.batch_index back to the full record sent."""
+    from drt.engine.sync import run_sync
+    from tests.unit.test_engine import FakeSource, _make_profile, _make_sync
+
+    obs = MagicMock(spec=SyncObserver)
+    rows = [{"id": 0, "name": "a"}, {"id": 1, "name": "b"}, {"id": 2, "name": "c"}]
+    dest = _RowErrorDestination(fail_indices={1})
+    sync = _make_sync(batch_size=10, on_error="skip")
+
+    run_sync(sync, FakeSource(rows), dest, _make_profile(), tmp_path, observer=obs)
+
+    obs.on_records_failed.assert_called_once()
+    name_arg, dead_letters = obs.on_records_failed.call_args.args
+    assert name_arg == "test_sync"
+    assert len(dead_letters) == 1
+    # Full record recovered — not the 200-char preview.
+    assert dead_letters[0].record == {"id": 1, "name": "b"}
+    assert dead_letters[0].error_message == "rejected 1"
+    assert dead_letters[0].http_status == 503
+
+
+def test_engine_does_not_emit_when_no_row_errors(tmp_path: Path) -> None:
+    """A clean batch (or a destination that reports no per-record errors) is silent."""
+    from drt.engine.sync import run_sync
+    from tests.unit.test_engine import FakeDestination, FakeSource, _make_profile, _make_sync
+
+    obs = MagicMock(spec=SyncObserver)
+    run_sync(
+        _make_sync(),
+        FakeSource([{"id": 1}]),
+        FakeDestination(),  # all success, no row_errors
+        _make_profile(),
+        tmp_path,
+        observer=obs,
+    )
+    obs.on_records_failed.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

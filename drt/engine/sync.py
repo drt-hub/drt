@@ -26,6 +26,7 @@ from drt.engine.field_mappings import apply_field_mappings
 from drt.engine.observer import NullObserver, SyncObserver
 from drt.engine.resolver import resolve_model_ref
 from drt.sources.base import Source
+from drt.state.dlq import DeadLetter
 from drt.state.history import HistoryEntry, HistoryManager
 from drt.state.manager import StateManager
 from drt.state.watermark import WatermarkStorage
@@ -410,6 +411,25 @@ def _run_sync_body(
             total_result.skipped += result.skipped
             total_result.errors.extend(result.errors)
             total_result.row_errors.extend(getattr(result, "row_errors", []))
+
+            # Dead Letter Queue (#278): hand the engine's full failed records
+            # to the observer so a DlqObserver can persist them for `drt
+            # retry`. Pure pairing of each RowError (which carries batch_index)
+            # back to the record we sent — no I/O in the engine itself. Fired
+            # only when the destination reported pinpointed per-record errors.
+            if result.row_errors:
+                dead_letters = [
+                    DeadLetter(
+                        record=record_batch[err.batch_index],
+                        error_message=err.error_message,
+                        http_status=err.http_status,
+                        timestamp=err.timestamp,
+                    )
+                    for err in result.row_errors
+                    if 0 <= err.batch_index < len(record_batch)
+                ]
+                if dead_letters:
+                    observer.on_records_failed(sync.name, dead_letters)
 
             if sync.sync.on_error == "fail" and result.failed > 0:
                 break
