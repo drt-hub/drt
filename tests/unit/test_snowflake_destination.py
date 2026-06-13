@@ -294,3 +294,187 @@ class TestSnowflakeConnection:
         conn.close.assert_called_once()
         # Snowflake uses cursor.execute("SELECT 1")
         assert any("SELECT 1" in str(call.args[0]) for call in conn._cur.execute.call_args_list)
+
+
+# ---------------------------------------------------------------------------
+# sync.mode: replace  (#434 — truncate default + swap)
+# ---------------------------------------------------------------------------
+
+
+def _sqls(cur: MagicMock) -> list[str]:
+    return [(c.args[0] if c.args else "") for c in cur.execute.call_args_list]
+
+
+class TestSnowflakeReplaceMode:
+    @staticmethod
+    def _swap_opts(**kw: Any) -> SyncOptions:
+        return _options(mode="replace", replace_strategy="swap", **kw)
+
+    def test_replace_truncate_truncates_then_inserts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        modules = _mocked_snowflake_modules(conn)
+        records = [{"id": 1, "score": 0.95}, {"id": 2, "score": 0.80}]
+        with patch.dict("sys.modules", modules):
+            result = SnowflakeDestination().load(
+                records, _config(), _options(mode="replace")
+            )
+        assert result.success == 2
+        sqls = _sqls(conn._cur)
+        assert any(s.startswith("TRUNCATE TABLE ANALYTICS.PUBLIC.USER_SCORES") for s in sqls)
+        assert sum("INSERT INTO ANALYTICS.PUBLIC.USER_SCORES" in s for s in sqls) == 2
+
+    def test_replace_truncate_only_once_across_batches(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        modules = _mocked_snowflake_modules(conn)
+        dest = SnowflakeDestination()
+        with patch.dict("sys.modules", modules):
+            dest.load([{"id": 1}], _config(), _options(mode="replace"))
+            dest.load([{"id": 2}], _config(), _options(mode="replace"))
+        assert sum(s.startswith("TRUNCATE TABLE") for s in _sqls(conn._cur)) == 1
+
+    def test_replace_swap_creates_shadow_and_inserts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.fetchall.return_value = [("USER_SCORES",)]  # target exists
+        modules = _mocked_snowflake_modules(conn)
+        with patch.dict("sys.modules", modules):
+            result = SnowflakeDestination().load(
+                [{"id": 1, "score": 0.95}], _config(), self._swap_opts()
+            )
+        assert result.success == 1
+        sqls = _sqls(conn._cur)
+        assert any(
+            "CREATE OR REPLACE TABLE ANALYTICS.PUBLIC.USER_SCORES__drt_swap "
+            "LIKE ANALYTICS.PUBLIC.USER_SCORES" in s
+            for s in sqls
+        )
+        assert any("INSERT INTO ANALYTICS.PUBLIC.USER_SCORES__drt_swap" in s for s in sqls)
+
+    def test_replace_swap_finalize_swaps_and_drops(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.fetchall.return_value = [("USER_SCORES",)]
+        modules = _mocked_snowflake_modules(conn)
+        dest = SnowflakeDestination()
+        with patch.dict("sys.modules", modules):
+            dest.load([{"id": 1}], _config(), self._swap_opts())
+            fin = dest.finalize_sync(_config(), self._swap_opts())
+        assert fin is not None
+        sqls = _sqls(conn._cur)
+        assert any(
+            "ALTER TABLE ANALYTICS.PUBLIC.USER_SCORES SWAP WITH "
+            "ANALYTICS.PUBLIC.USER_SCORES__drt_swap" in s
+            for s in sqls
+        )
+        assert any(s.startswith("DROP TABLE ANALYTICS.PUBLIC.USER_SCORES__drt_swap") for s in sqls)
+        assert dest._swap_shadow_created is False
+        assert dest._swap_table is None
+
+    def test_replace_swap_first_run_target_absent_writes_direct(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.fetchall.return_value = []  # target does not exist
+        modules = _mocked_snowflake_modules(conn)
+        dest = SnowflakeDestination()
+        with patch.dict("sys.modules", modules):
+            result = dest.load([{"id": 1}], _config(), self._swap_opts())
+            fin = dest.finalize_sync(_config(), self._swap_opts())
+        assert result.success == 1
+        sqls = _sqls(conn._cur)
+        assert not any("__drt_swap" in s for s in sqls)  # no shadow involved
+        assert any("INSERT INTO ANALYTICS.PUBLIC.USER_SCORES" in s for s in sqls)
+        assert fin is None  # nothing to finalize
+
+    def test_replace_swap_on_error_fail_drops_shadow(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        cur = conn._cur
+        cur.fetchall.return_value = [("USER_SCORES",)]
+
+        def side_effect(sql: str, *args: Any) -> None:
+            if "INSERT INTO ANALYTICS.PUBLIC.USER_SCORES__drt_swap" in sql:
+                raise Exception("type mismatch")
+            return None
+
+        cur.execute.side_effect = side_effect
+        modules = _mocked_snowflake_modules(conn)
+        dest = SnowflakeDestination()
+        with patch.dict("sys.modules", modules):
+            with pytest.raises(Exception, match="type mismatch"):
+                dest.load([{"id": 1}], _config(), self._swap_opts(on_error="fail"))
+        assert any(
+            s.startswith("DROP TABLE IF EXISTS ANALYTICS.PUBLIC.USER_SCORES__drt_swap")
+            for s in _sqls(cur)
+        )
+        assert dest._swap_shadow_created is False
+
+    def test_finalize_noop_for_insert_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        modules = _mocked_snowflake_modules(conn)
+        dest = SnowflakeDestination()
+        with patch.dict("sys.modules", modules):
+            dest.load([{"id": 1}], _config(), _options())  # insert mode
+            fin = dest.finalize_sync(_config(), _options())
+        assert fin is None
+
+
+class TestSnowflakeOrphanCleanup:
+    def test_list_orphan_swap_tables_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.fetchall.return_value = [("USER_SCORES__drt_swap",)]
+        modules = _mocked_snowflake_modules(conn)
+        with patch.dict("sys.modules", modules):
+            orphans = SnowflakeDestination().list_orphan_swap_tables(_config(), "USER_SCORES")
+        assert orphans == ["ANALYTICS.PUBLIC.USER_SCORES__drt_swap"]
+
+    def test_list_orphan_swap_tables_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.fetchall.return_value = []
+        modules = _mocked_snowflake_modules(conn)
+        with patch.dict("sys.modules", modules):
+            orphans = SnowflakeDestination().list_orphan_swap_tables(_config(), "USER_SCORES")
+        assert orphans == []
+
+    def test_drop_orphan_only_drops_suffixed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        modules = _mocked_snowflake_modules(conn)
+        with patch.dict("sys.modules", modules):
+            dropped, failed = SnowflakeDestination().drop_orphan_swap_tables(
+                _config(),
+                ["ANALYTICS.PUBLIC.USER_SCORES__drt_swap", "ANALYTICS.PUBLIC.IMPORTANT_TABLE"],
+            )
+        assert dropped == ["ANALYTICS.PUBLIC.USER_SCORES__drt_swap"]
+        assert failed == ["ANALYTICS.PUBLIC.IMPORTANT_TABLE"]
+        sqls = _sqls(conn._cur)
+        assert any(s.startswith("DROP TABLE ANALYTICS.PUBLIC.USER_SCORES__drt_swap") for s in sqls)
+        assert not any("IMPORTANT_TABLE" in s for s in sqls)
+
+    def test_drop_orphan_reports_drop_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.execute.side_effect = Exception("permission denied")
+        modules = _mocked_snowflake_modules(conn)
+        with patch.dict("sys.modules", modules):
+            dropped, failed = SnowflakeDestination().drop_orphan_swap_tables(
+                _config(), ["ANALYTICS.PUBLIC.USER_SCORES__drt_swap"]
+            )
+        assert dropped == []
+        assert failed == ["ANALYTICS.PUBLIC.USER_SCORES__drt_swap"]
