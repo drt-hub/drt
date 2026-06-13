@@ -373,6 +373,23 @@ See [dagster-drt README](integrations/dagster-drt/README.md) for full API docs (
 
 ---
 
+## CI/CD: GitHub Action
+
+Run drt syncs straight from CI/CD with the official [**drt-hub/drt-action**](https://github.com/drt-hub/drt-action) — no infrastructure, just a few lines of YAML. Trigger on a schedule, on every push, or right after dbt finishes.
+
+```yaml
+- uses: drt-hub/drt-action@v1
+  with:
+    select: '*'
+    extras: postgres
+  env:
+    PG_PASSWORD: ${{ secrets.PG_PASSWORD }}
+```
+
+Inputs cover sync selection (`select`), connector `extras`, `profile`, `dry-run` and `threads`; outputs expose `status`, `succeeded`, `failed` and `duration-seconds` (plus a step-summary table). Secrets are passed via `env:` and resolved by drt's `*_env` keys. See the [action README](https://github.com/drt-hub/drt-action#readme) for the secrets pattern and more examples (run-after-dbt, PR preview).
+
+---
+
 ## Ecosystem
 
 drt is designed to work alongside, not against, the modern data stack:

@@ -1,4 +1,4 @@
-<!-- i18n-sync: base=README.md, hash=92b368ef0ff1f89f3a49844be1ca77746b07c7fc -->
+<!-- i18n-sync: base=README.md, hash=2afc8c6df5c0e7eacd060fed8fcff7e4418f8c7a -->
 
 [English](./README.md) | [日本語](./README.ja.md)
 
@@ -343,6 +343,23 @@ defs = Definitions(
 ```
 
 詳細な API ドキュメント（Translator、Pipes サポート、DrtConfig のドライラン、MaterializeResult）については、[dagster-drt README](integrations/dagster-drt/README.md) を参照してください。
+
+---
+
+## CI/CD: GitHub Action
+
+公式の [**drt-hub/drt-action**](https://github.com/drt-hub/drt-action) を使えば、CI/CD から直接 drt の同期を実行できます。インフラ不要、数行の YAML だけ。スケジュール実行・push ごと・dbt 完了直後など、好きなタイミングで起動できます。
+
+```yaml
+- uses: drt-hub/drt-action@v1
+  with:
+    select: '*'
+    extras: postgres
+  env:
+    PG_PASSWORD: ${{ secrets.PG_PASSWORD }}
+```
+
+入力は同期の選択（`select`）・コネクタの `extras`・`profile`・`dry-run`・`threads` などをカバーし、出力として `status` / `succeeded` / `failed` / `duration-seconds`（＋ステップサマリ表）が得られます。シークレットは `env:` 経由で渡し、drt の `*_env` キーで解決されます。シークレットの渡し方やその他の例（dbt 後の実行、PR プレビュー）は [action README](https://github.com/drt-hub/drt-action#readme) を参照してください。
 
 ---
 
