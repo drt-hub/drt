@@ -532,3 +532,181 @@ class TestDatabricksConnection:
 
         conn.close.assert_called_once()
         assert any("SELECT 1" in str(call.args[0]) for call in conn._cur.execute.call_args_list)
+
+
+# ---------------------------------------------------------------------------
+# sync.mode: replace  (#643 — truncate default + swap via INSERT OVERWRITE)
+# ---------------------------------------------------------------------------
+
+_FQ = "main.default.user_scores"
+_SHADOW = "main.default.user_scores__drt_swap"
+
+
+def _sqls(cur: MagicMock) -> list[str]:
+    return [(c.args[0] if c.args else "") for c in cur.execute.call_args_list]
+
+
+class TestDatabricksReplaceMode:
+    @staticmethod
+    def _swap_opts(**kw: Any) -> SyncOptions:
+        return _options(mode="replace", replace_strategy="swap", **kw)
+
+    def test_replace_truncate_truncates_then_inserts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        modules = _mocked_databricks_modules(conn)
+        records = [{"id": 1, "score": 0.95}, {"id": 2, "score": 0.80}]
+        with patch.dict("sys.modules", modules):
+            result = DatabricksDestination().load(
+                records, _config(), _options(mode="replace")
+            )
+        assert result.success == 2
+        sqls = _sqls(conn._cur)
+        assert any(s.startswith(f"TRUNCATE TABLE {_FQ}") for s in sqls)
+        assert sum(f"INSERT INTO {_FQ} (" in s for s in sqls) == 2
+
+    def test_replace_truncate_only_once_across_batches(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        modules = _mocked_databricks_modules(conn)
+        dest = DatabricksDestination()
+        with patch.dict("sys.modules", modules):
+            dest.load([{"id": 1}], _config(), _options(mode="replace"))
+            dest.load([{"id": 2}], _config(), _options(mode="replace"))
+        assert sum(s.startswith("TRUNCATE TABLE") for s in _sqls(conn._cur)) == 1
+
+    def test_replace_swap_creates_shadow_and_inserts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.fetchall.return_value = [("user_scores",)]  # target exists
+        modules = _mocked_databricks_modules(conn)
+        with patch.dict("sys.modules", modules):
+            result = DatabricksDestination().load(
+                [{"id": 1, "score": 0.95}], _config(), self._swap_opts()
+            )
+        assert result.success == 1
+        sqls = _sqls(conn._cur)
+        assert any(
+            f"CREATE OR REPLACE TABLE {_SHADOW} AS SELECT * FROM {_FQ} WHERE 1=0" in s
+            for s in sqls
+        )
+        assert any(f"INSERT INTO {_SHADOW} (" in s for s in sqls)
+
+    def test_replace_swap_finalize_overwrites_and_drops(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.fetchall.return_value = [("user_scores",)]
+        modules = _mocked_databricks_modules(conn)
+        dest = DatabricksDestination()
+        with patch.dict("sys.modules", modules):
+            dest.load([{"id": 1}], _config(), self._swap_opts())
+            fin = dest.finalize_sync(_config(), self._swap_opts())
+        assert fin is not None
+        sqls = _sqls(conn._cur)
+        assert any(f"INSERT OVERWRITE {_FQ} SELECT * FROM {_SHADOW}" in s for s in sqls)
+        assert any(s.startswith(f"DROP TABLE IF EXISTS {_SHADOW}") for s in sqls)
+        assert dest._swap_shadow_created is False
+        assert dest._swap_table is None
+
+    def test_replace_swap_first_run_target_absent_writes_direct(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.fetchall.return_value = []  # target does not exist
+        modules = _mocked_databricks_modules(conn)
+        dest = DatabricksDestination()
+        with patch.dict("sys.modules", modules):
+            result = dest.load([{"id": 1}], _config(), self._swap_opts())
+            fin = dest.finalize_sync(_config(), self._swap_opts())
+        assert result.success == 1
+        sqls = _sqls(conn._cur)
+        assert not any("__drt_swap" in s for s in sqls)  # no shadow involved
+        assert any(f"INSERT INTO {_FQ} (" in s for s in sqls)
+        assert fin is None
+
+    def test_replace_swap_on_error_fail_drops_shadow(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        cur = conn._cur
+        cur.fetchall.return_value = [("user_scores",)]
+
+        def side_effect(sql: str, *args: Any) -> None:
+            if f"INSERT INTO {_SHADOW} (" in sql:
+                raise Exception("type mismatch")
+            return None
+
+        cur.execute.side_effect = side_effect
+        modules = _mocked_databricks_modules(conn)
+        dest = DatabricksDestination()
+        with patch.dict("sys.modules", modules):
+            with pytest.raises(Exception, match="type mismatch"):
+                dest.load([{"id": 1}], _config(), self._swap_opts(on_error="fail"))
+        assert any(s.startswith(f"DROP TABLE IF EXISTS {_SHADOW}") for s in _sqls(cur))
+        assert dest._swap_shadow_created is False
+
+    def test_finalize_noop_for_insert_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        modules = _mocked_databricks_modules(conn)
+        dest = DatabricksDestination()
+        with patch.dict("sys.modules", modules):
+            dest.load([{"id": 1}], _config(), _options())  # insert mode
+            fin = dest.finalize_sync(_config(), _options())
+        assert fin is None
+
+
+class TestDatabricksOrphanCleanup:
+    def test_list_orphan_swap_tables_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.fetchall.return_value = [("user_scores__drt_swap",)]
+        modules = _mocked_databricks_modules(conn)
+        with patch.dict("sys.modules", modules):
+            orphans = DatabricksDestination().list_orphan_swap_tables(_config(), "user_scores")
+        assert orphans == [_SHADOW]
+
+    def test_list_orphan_swap_tables_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.fetchall.return_value = []
+        modules = _mocked_databricks_modules(conn)
+        with patch.dict("sys.modules", modules):
+            orphans = DatabricksDestination().list_orphan_swap_tables(_config(), "user_scores")
+        assert orphans == []
+
+    def test_drop_orphan_only_drops_suffixed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        modules = _mocked_databricks_modules(conn)
+        with patch.dict("sys.modules", modules):
+            dropped, failed = DatabricksDestination().drop_orphan_swap_tables(
+                _config(), [_SHADOW, "main.default.important_table"]
+            )
+        assert dropped == [_SHADOW]
+        assert failed == ["main.default.important_table"]
+        sqls = _sqls(conn._cur)
+        assert any(s.startswith(f"DROP TABLE {_SHADOW}") for s in sqls)
+        assert not any("important_table" in s for s in sqls)
+
+    def test_drop_orphan_reports_drop_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.execute.side_effect = Exception("permission denied")
+        modules = _mocked_databricks_modules(conn)
+        with patch.dict("sys.modules", modules):
+            dropped, failed = DatabricksDestination().drop_orphan_swap_tables(
+                _config(), [_SHADOW]
+            )
+        assert dropped == []
+        assert failed == [_SHADOW]
