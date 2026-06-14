@@ -151,8 +151,8 @@ sync:
   replace_strategy: swap
 ```
 
-- **Grants are preserved** — `SWAP WITH` exchanges the underlying objects, not the names, so privileges/policies on the original table name survive the swap. No grant re-application needed.
-- **Clustering keys are carried** by `CREATE … LIKE`.
+- **Grants are preserved** — `SWAP WITH` exchanges the underlying objects, not the names, so **role privileges (grants)** on the original table name survive the swap. No grant re-application needed.
+- **Clustering keys are carried** by `CREATE … LIKE` — but **masking / row-access policies and tags are not** (the shadow is built fresh via `LIKE`, which doesn't copy them). If your target table relies on column policies, re-apply them after the swap or front the table with a policy-bearing view.
 - **First run** (target table doesn't exist yet) falls through to a direct write into the target and skips the swap.
 - **Interrupted swaps** leave a `<table>__drt_swap` shadow; `drt clean --orphans` lists and drops them (only `__drt_swap`-suffixed tables are eligible).
 

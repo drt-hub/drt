@@ -6,10 +6,13 @@ Supports:
 - ``sync.mode: replace`` (#434) — full table replace, two strategies:
   - ``replace_strategy: truncate`` (default) — ``TRUNCATE`` (once) then INSERT.
   - ``replace_strategy: swap`` — write to a shadow ``<table>__drt_swap``
-    built with ``CREATE OR REPLACE TABLE ... LIKE`` (carries clustering
-    keys), then an atomic ``ALTER TABLE ... SWAP WITH`` in
-    :meth:`finalize_sync`. ``SWAP WITH`` preserves grants on the original
-    name. First run (target absent) falls through to a direct write.
+    built with ``CREATE OR REPLACE TABLE ... LIKE`` (copies clustering keys,
+    but NOT masking / row-access policies or tags), then an atomic
+    ``ALTER TABLE ... SWAP WITH`` in :meth:`finalize_sync`. ``SWAP WITH``
+    preserves grants (role privileges) on the original name; tables that rely
+    on column policies should re-apply them or front the table with a
+    policy-bearing view. First run (target absent) falls through to a
+    direct write.
 - ``sync.mode: mirror`` (#340 Step 4) — MERGE upsert, then end-of-sync
   ``DELETE FROM ... WHERE upsert_key NOT IN (observed)`` from
   :meth:`finalize_sync`. Mirror mode forces the MERGE write path
