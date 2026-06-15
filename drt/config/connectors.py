@@ -26,6 +26,7 @@ SOURCES = [
 # `tests/unit/test_cli_list_connectors.py::test_DESTINATIONS_matches_registry`
 # fails the build if a registered destination is missing here (or vice versa).
 DESTINATIONS = [
+    ("airtable", "Airtable"),
     ("amplitude", "Amplitude"),
     ("azure_blob", "Azure Blob Storage"),
     ("bigquery", "BigQuery"),

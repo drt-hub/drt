@@ -138,6 +138,7 @@ def _register_all_connectors() -> None:
         SQLServerProfile,
     )
     from drt.config.models import (
+        AirtableDestinationConfig,
         AmplitudeDestinationConfig,
         AzureBlobDestinationConfig,
         BigQueryDestinationConfig,
@@ -173,6 +174,7 @@ def _register_all_connectors() -> None:
     )
 
     # Import destination classes
+    from drt.destinations.airtable import AirtableDestination
     from drt.destinations.amplitude import AmplitudeDestination
     from drt.destinations.azure_blob import AzureBlobDestination
     from drt.destinations.bigquery import BigQueryDestination
@@ -254,6 +256,7 @@ def _register_all_connectors() -> None:
     register_destination("snowflake", SnowflakeDestinationConfig, SnowflakeDestination)
     register_destination("databricks", DatabricksDestinationConfig, DatabricksDestination)
     register_destination("bigquery", BigQueryDestinationConfig, BigQueryDestination)
+    register_destination("airtable", AirtableDestinationConfig, AirtableDestination)
 
     # Register all sources
     register_source("bigquery", BigQueryProfile, BigQuerySource)

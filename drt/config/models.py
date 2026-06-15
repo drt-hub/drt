@@ -289,6 +289,27 @@ class AmplitudeDestinationConfig(BaseModel):
         return max(1, min(value, 1000))
 
 
+class AirtableDestinationConfig(BaseModel):
+    type: Literal["airtable"]
+    access_token: str | None = None
+    access_token_env: str | None = "AIRTABLE_TOKEN"
+    base_id: str
+    table_name: str
+    # When set, records are upserted by matching this field (Airtable
+    # performUpsert / fieldsToMergeOn). Omit for append-only.
+    primary_key: str | None = None
+    retry: RetryConfig | None = None
+
+    def describe(self) -> str:
+        return f"airtable ({self.base_id}/{self.table_name})"
+
+    @model_validator(mode="after")
+    def _check_token(self) -> AirtableDestinationConfig:
+        if not self.access_token and not self.access_token_env:
+            raise ValueError("access_token or access_token_env is required.")
+        return self
+
+
 class MixpanelDestinationConfig(BaseModel):
     type: Literal["mixpanel"]
     # endpoint selects which Mixpanel API to target:
@@ -978,7 +999,8 @@ DestinationConfig = Annotated[
     | SnowflakeDestinationConfig
     | DatabricksDestinationConfig
     | ElasticsearchDestinationConfig
-    | BigQueryDestinationConfig,
+    | BigQueryDestinationConfig
+    | AirtableDestinationConfig,
     Field(discriminator="type"),
 ]
 
