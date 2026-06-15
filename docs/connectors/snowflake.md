@@ -104,14 +104,14 @@ sync:
 
 Mirror **forces the MERGE write path regardless of `config.mode`** — mirror semantics intrinsically require upsert, so users only need to set `destination.upsert_key` and `sync.mode: mirror`. Each batch is staged + MERGEd into the target (same as `mode: merge`); at end-of-sync `finalize_sync` issues a single `DELETE FROM <database>.<schema>.<table> WHERE key NOT IN (collected)` that removes destination rows whose `upsert_key` was not observed in the source.
 
-This is the **first-ever `finalize_sync` method on the Snowflake destination** — Snowflake previously had no swap-replace path, so `finalize_sync` returns `None` for any non-mirror mode and the engine's existing dispatch is unchanged.
+`finalize_sync` also drives the `replace_strategy: swap` atomic SWAP ([#434](https://github.com/drt-hub/drt/issues/434), see [Replace mode](#replace-mode-434)); for `insert` / `merge` / `truncate`-replace it returns `None` and the engine's existing dispatch is unchanged.
 
 The Snowflake connector uses `%s` placeholders (same family as psycopg2 / pymysql) and does **not** auto-expand a tuple-of-tuples, so the DELETE placeholder shape is built explicitly, identical to MySQL Step 2:
 
 - **single-column** form: `DELETE FROM <table_fq> WHERE col NOT IN (%s, %s, ...)` with a flat values list
 - **composite** form: `DELETE FROM <table_fq> WHERE (c1, c2) NOT IN ((%s, %s), (%s, %s), ...)` with values flattened row-major
 
-Mirror is appropriate when **rows disappearing from the source should disappear from the destination** — master tables (employees / SKUs / permissions) where deletions need to propagate without the TRUNCATE / re-insert cost of `replace` mode (which isn't available on Snowflake today — no swap path).
+Mirror is appropriate when **rows disappearing from the source should disappear from the destination** — master tables (employees / SKUs / permissions) where deletions need to propagate without the full-table rebuild cost of `replace` mode (see [Replace mode](#replace-mode-434) for that path).
 
 Comparison:
 
@@ -132,9 +132,31 @@ Memory constraint: the in-process key set is memory-bound to source key cardinal
 
 Same `sync.mode: mirror` is supported on **Postgres** (Step 1), **MySQL** (Step 2), and **ClickHouse** (Step 3). BigQuery follows once contributor PR [#584](https://github.com/drt-hub/drt/pull/584) lands.
 
-## Replace mode
+## Replace mode ([#434](https://github.com/drt-hub/drt/issues/434))
 
-Snowflake **does not currently support `sync.mode: replace`** — there is no swap-replace path on Snowflake (no shadow table mechanism), so `replace` mode and `replace_strategy: swap` are not honoured. To achieve "latest snapshot only", combine `sync.mode: mirror` with a query that returns every row you want present (mirror will DELETE everything else), or use a downstream view that filters by your update timestamp.
+`sync.mode: replace` rebuilds the destination table from the current source snapshot. Two strategies:
+
+**`replace_strategy: truncate`** (default) — `TRUNCATE TABLE` once at the start of the sync, then INSERT every batch.
+
+```yaml
+sync:
+  mode: replace            # replace_strategy defaults to truncate
+```
+
+**`replace_strategy: swap`** — zero-downtime via Snowflake's atomic `ALTER TABLE … SWAP WITH`. drt builds a shadow table `<table>__drt_swap` with `CREATE OR REPLACE TABLE … LIKE <table>` (which carries clustering keys), writes every batch into the shadow, then at end-of-sync swaps the shadow over the original in a single atomic step and drops the old table. Readers see either the full old table or the full new table — never an empty or half-written one.
+
+```yaml
+sync:
+  mode: replace
+  replace_strategy: swap
+```
+
+- **Grants are preserved** — `SWAP WITH` exchanges the underlying objects, not the names, so **role privileges (grants)** on the original table name survive the swap. No grant re-application needed.
+- **Clustering keys are carried** by `CREATE … LIKE` — but **masking / row-access policies and tags are not** (the shadow is built fresh via `LIKE`, which doesn't copy them). If your target table relies on column policies, re-apply them after the swap or front the table with a policy-bearing view.
+- **First run** (target table doesn't exist yet) falls through to a direct write into the target and skips the swap.
+- **Interrupted swaps** leave a `<table>__drt_swap` shadow; `drt clean --orphans` lists and drops them (only `__drt_swap`-suffixed tables are eligible).
+
+Swap requires `mode: replace` (enforced by config validation). The same `replace_strategy: swap` is supported on Postgres, MySQL, and ClickHouse.
 
 ## Notes
 
