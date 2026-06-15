@@ -10,20 +10,12 @@
 # is intentional and short-lived (e.g. a connector staged behind a
 # feature flag before public docs).
 #
-# Current entries: per-connector reference docs (docs/connectors/) were
-# introduced late (postgres first, then the v0.7.8+ wave: mysql /
-# clickhouse / snowflake / s3 / gcs / azure-blob / databricks ...).
-# The destinations below predate that convention and never had a
-# dedicated doc. Tracked as a docs backlog — good first issues.
-#
-# Burned down so far: teams / twilio / jira / linear / notion (batch 1).
-# 9 remaining.
-dest-doc:discord
-dest-doc:email_smtp
-dest-doc:file
-dest-doc:github_actions
-dest-doc:google_ads
-dest-doc:intercom
-dest-doc:parquet
-dest-doc:sendgrid
-dest-doc:staged_upload
+# Per-connector reference docs (docs/connectors/) were introduced late
+# (postgres first, then the v0.7.8+ wave). The remaining backlog was
+# burned down across two batches:
+#   batch 1: teams / twilio / jira / linear / notion
+#   batch 2: discord / email_smtp / file / github_actions / google_ads /
+#            intercom / parquet / sendgrid / staged_upload
+# Every registered destination now has a docs/connectors/ page —
+# the baseline is empty. Keep it that way: add the doc when you add
+# the connector.
