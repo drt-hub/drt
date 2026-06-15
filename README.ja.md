@@ -260,6 +260,7 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | HubSpot | ✅ v0.1 | (core) | Token（環境変数） |
 | Zendesk | ✅ v0.7 | (core) | Basic（メールアドレス + API トークン） |
 | Amplitude | ✅ v0.7 | (core) | プロジェクト API キー（環境変数） |
+| Klaviyo | ✅ v0.8 | (core) | Private API キー（環境変数） |
 | Google Ads | ✅ v0.6 | (core) | OAuth2 Client Credentials |
 | Google Sheets | ✅ v0.4 | `pip install drt-core[sheets]` | Service Account Keyfile |
 | PostgreSQL (upsert) | ✅ v0.4 | `pip install drt-core[postgres]` | パスワード（環境変数） |

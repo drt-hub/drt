@@ -155,6 +155,7 @@ def _register_all_connectors() -> None:
         HubSpotDestinationConfig,
         IntercomDestinationConfig,
         JiraDestinationConfig,
+        KlaviyoDestinationConfig,
         LinearDestinationConfig,
         MixpanelDestinationConfig,
         MySQLDestinationConfig,
@@ -191,6 +192,7 @@ def _register_all_connectors() -> None:
     from drt.destinations.hubspot import HubSpotDestination
     from drt.destinations.intercom import IntercomDestination
     from drt.destinations.jira import JiraDestination
+    from drt.destinations.klaviyo import KlaviyoDestination
     from drt.destinations.linear import LinearDestination
     from drt.destinations.mixpanel import MixpanelDestination
     from drt.destinations.mysql import MySQLDestination
@@ -257,6 +259,7 @@ def _register_all_connectors() -> None:
     register_destination("databricks", DatabricksDestinationConfig, DatabricksDestination)
     register_destination("bigquery", BigQueryDestinationConfig, BigQueryDestination)
     register_destination("airtable", AirtableDestinationConfig, AirtableDestination)
+    register_destination("klaviyo", KlaviyoDestinationConfig, KlaviyoDestination)
 
     # Register all sources
     register_source("bigquery", BigQueryProfile, BigQuerySource)
