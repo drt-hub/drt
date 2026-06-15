@@ -283,6 +283,7 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | Elasticsearch / OpenSearch | ✅ v0.7.9 | (core) | API キー / HTTP Basic（環境変数） |
 | Snowflake | ✅ v0.7 | `pip install drt-core[snowflake]` | パスワード（環境変数） |
 | Databricks Delta Lake | ✅ v0.7.9 | `pip install drt-core[databricks]` | Personal Access Token（環境変数） |
+| BigQuery | ✅ v0.8 | `pip install drt-core[bigquery]` | ADC / サービスアカウント keyfile |
 
 ### インテグレーション
 

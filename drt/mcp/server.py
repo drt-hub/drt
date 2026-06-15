@@ -400,6 +400,7 @@ def create_server(project_dir: Path | None = None) -> Any:
                     "type": "databricks",
                     "install": "drt-core[databricks]",
                 },
+                {"name": "BigQuery", "type": "bigquery", "install": "drt-core[bigquery]"},
                 {"name": "Amazon S3", "type": "s3", "install": "drt-core[s3]"},
                 {"name": "Google Cloud Storage", "type": "gcs", "install": "drt-core[gcs]"},
                 {"name": "Azure Blob Storage", "type": "azure_blob", "install": "drt-core[azure]"},

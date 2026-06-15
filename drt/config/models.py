@@ -414,6 +414,33 @@ class SnowflakeDestinationConfig(BaseModel):
         return f"{self.type} ({self.database}.{self.schema_}.{self.table})"
 
 
+class BigQueryDestinationConfig(BaseModel):
+    """BigQuery destination — write data back to BigQuery tables.
+
+    Auth mirrors the BigQuery source: Application Default Credentials by
+    default, or a service-account ``keyfile``. The principal needs
+    ``bigquery.tables.updateData`` on the target (plus ``bigquery.tables.create``
+    / ``bigquery.jobs.create`` for the merge-path temp table).
+    """
+
+    type: Literal["bigquery"]
+
+    project: str
+    dataset: str
+    table: str
+    location: str | None = None
+
+    mode: Literal["insert", "merge"] = "insert"
+    upsert_key: list[str] | None = None
+
+    # Auth — same convention as the BigQuery source (sources/bigquery.py).
+    method: Literal["application_default", "keyfile"] = "application_default"
+    keyfile: str | None = None
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.project}.{self.dataset}.{self.table})"
+
+
 class DatabricksDestinationConfig(BaseModel):
     """Databricks Delta Lake destination — write data back to Databricks tables.
 
@@ -950,7 +977,8 @@ DestinationConfig = Annotated[
     | TwilioDestinationConfig
     | SnowflakeDestinationConfig
     | DatabricksDestinationConfig
-    | ElasticsearchDestinationConfig,
+    | ElasticsearchDestinationConfig
+    | BigQueryDestinationConfig,
     Field(discriminator="type"),
 ]
 

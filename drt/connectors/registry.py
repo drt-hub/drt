@@ -140,6 +140,7 @@ def _register_all_connectors() -> None:
     from drt.config.models import (
         AmplitudeDestinationConfig,
         AzureBlobDestinationConfig,
+        BigQueryDestinationConfig,
         ClickHouseDestinationConfig,
         DatabricksDestinationConfig,
         DiscordDestinationConfig,
@@ -174,6 +175,7 @@ def _register_all_connectors() -> None:
     # Import destination classes
     from drt.destinations.amplitude import AmplitudeDestination
     from drt.destinations.azure_blob import AzureBlobDestination
+    from drt.destinations.bigquery import BigQueryDestination
     from drt.destinations.clickhouse import ClickHouseDestination
     from drt.destinations.databricks import DatabricksDestination
     from drt.destinations.discord import DiscordDestination
@@ -251,6 +253,7 @@ def _register_all_connectors() -> None:
     register_destination("intercom", IntercomDestinationConfig, IntercomDestination)
     register_destination("snowflake", SnowflakeDestinationConfig, SnowflakeDestination)
     register_destination("databricks", DatabricksDestinationConfig, DatabricksDestination)
+    register_destination("bigquery", BigQueryDestinationConfig, BigQueryDestination)
 
     # Register all sources
     register_source("bigquery", BigQueryProfile, BigQuerySource)
