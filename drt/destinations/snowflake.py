@@ -337,14 +337,20 @@ class SnowflakeDestination:
         try:
             with conn.cursor() as cur:
                 # Atomic exchange — preserves grants on the original name.
+                # Snowflake autocommits, so the SWAP commits before the DROP
+                # (mirrors the separate-transaction split in postgres.py).
                 cur.execute(f"ALTER TABLE {table_fq} SWAP WITH {shadow_fq}")
-                # Shadow now holds the old data; drop it.
+                # SWAP succeeded — the replace is committed. Reset in-memory
+                # state only now: a failed SWAP leaves it intact so the shadow
+                # stays recoverable (`drt clean --orphans`) and a retry is
+                # still possible.
+                self._swap_shadow_created = False
+                self._swap_table = None
+                self._swap_direct_write = False
+                # Best-effort cleanup of the now-old shadow.
                 cur.execute(f"DROP TABLE {shadow_fq}")
         finally:
             conn.close()
-            self._swap_shadow_created = False
-            self._swap_table = None
-            self._swap_direct_write = False
         return SyncResult()
 
     def _finalize_mirror(

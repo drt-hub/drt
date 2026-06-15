@@ -432,6 +432,24 @@ class TestSnowflakeReplaceMode:
             fin = dest.finalize_sync(_config(), _options())
         assert fin is None
 
+    def test_finalize_swap_failure_preserves_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # If SWAP raises, in-memory state is NOT reset — the shadow stays
+        # recoverable (drt clean --orphans) and a retry is possible.
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.fetchall.return_value = [("USER_SCORES",)]
+        modules = _mocked_snowflake_modules(conn)
+        dest = SnowflakeDestination()
+        with patch.dict("sys.modules", modules):
+            dest.load([{"id": 1}], _config(), self._swap_opts())  # shadow built
+            conn._cur.execute.side_effect = Exception("swap boom")
+            with pytest.raises(Exception, match="swap boom"):
+                dest.finalize_sync(_config(), self._swap_opts())
+        assert dest._swap_shadow_created is True
+        assert dest._swap_table == "ANALYTICS.PUBLIC.USER_SCORES"
+
 
 class TestSnowflakeOrphanCleanup:
     def test_list_orphan_swap_tables_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
