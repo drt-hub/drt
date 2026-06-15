@@ -302,6 +302,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | Email SMTP              | ✅ v0.6   | (core)                             | Username / Password (env var)     |
 | Salesforce Bulk API 2.0 | ✅ v0.6   | (core)                             | OAuth2 (username-password)        |
 | Staged Upload           | ✅ v0.6   | (core)                             | Configurable per provider         |
+| Elasticsearch / OpenSearch | ✅ v0.7.9 | (core)                          | API key / HTTP Basic (env var)    |
 | Snowflake               | ✅ v0.7   | `pip install drt-core[snowflake]`  | Password (env var)                |
 | Databricks Delta Lake   | ✅ v0.7.9 | `pip install drt-core[databricks]` | Personal Access Token (env var)   |
 

@@ -48,6 +48,7 @@ import pytest
 from drt.config.models import (
     AmplitudeDestinationConfig,
     BearerAuth,
+    ElasticsearchDestinationConfig,
     GitHubActionsDestinationConfig,
     GoogleAdsDestinationConfig,
     HubSpotDestinationConfig,
@@ -64,6 +65,7 @@ from drt.config.models import (
 )
 from drt.destinations.amplitude import AmplitudeDestination
 from drt.destinations.base import Destination, SyncResult
+from drt.destinations.elasticsearch import ElasticsearchDestination
 from drt.destinations.github_actions import GitHubActionsDestination
 from drt.destinations.google_ads import GoogleAdsDestination
 from drt.destinations.hubspot import HubSpotDestination
@@ -167,6 +169,17 @@ API_DESTINATIONS: list[Any] = [
         ),
         {},
         id="mixpanel",
+    ),
+    pytest.param(
+        ElasticsearchDestination,
+        lambda: ElasticsearchDestinationConfig(
+            type="elasticsearch",
+            url="https://localhost:9200",
+            index="customers",
+            api_key="dummy",
+        ),
+        {},
+        id="elasticsearch",
     ),
     pytest.param(
         ZendeskDestination,

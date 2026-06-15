@@ -143,6 +143,7 @@ def _register_all_connectors() -> None:
         ClickHouseDestinationConfig,
         DatabricksDestinationConfig,
         DiscordDestinationConfig,
+        ElasticsearchDestinationConfig,
         EmailSmtpDestinationConfig,
         FileDestinationConfig,
         GCSDestinationConfig,
@@ -176,6 +177,7 @@ def _register_all_connectors() -> None:
     from drt.destinations.clickhouse import ClickHouseDestination
     from drt.destinations.databricks import DatabricksDestination
     from drt.destinations.discord import DiscordDestination
+    from drt.destinations.elasticsearch import ElasticsearchDestination
     from drt.destinations.email_smtp import EmailSmtpDestination
     from drt.destinations.file import FileDestination
     from drt.destinations.gcs import GCSDestination
@@ -238,6 +240,7 @@ def _register_all_connectors() -> None:
     register_destination("gcs", GCSDestinationConfig, GCSDestination)
     register_destination("azure_blob", AzureBlobDestinationConfig, AzureBlobDestination)
     register_destination("email_smtp", EmailSmtpDestinationConfig, EmailSmtpDestination)
+    register_destination("elasticsearch", ElasticsearchDestinationConfig, ElasticsearchDestination)
     register_destination("linear", LinearDestinationConfig, LinearDestination)
     register_destination("google_ads", GoogleAdsDestinationConfig, GoogleAdsDestination)
     register_destination("notion", NotionDestinationConfig, NotionDestination)

@@ -446,6 +446,33 @@ class DatabricksDestinationConfig(BaseModel):
         return f"{self.type} ({self.catalog}.{self.schema_}.{self.table})"
 
 
+class ElasticsearchDestinationConfig(BaseModel):
+    """Elasticsearch / OpenSearch destination — bulk-index records via the ``_bulk`` API."""
+
+    type: Literal["elasticsearch"]
+    url: str  # cluster base URL, e.g. https://localhost:9200
+    index: str  # target index name
+    # Row field whose value becomes the document _id. None → the cluster
+    # auto-generates ids (only valid with op_type="index"/"create" where
+    # create without an id always inserts).
+    id_field: str | None = None
+    # "index" upserts (replace-if-exists); "create" fails the row if the
+    # _id already exists (409). OpenSearch shares the same API surface.
+    op_type: Literal["index", "create"] = "index"
+    # Auth — provide an API key (direct or env) OR HTTP Basic creds (env):
+    api_key: str | None = None
+    api_key_env: str | None = None
+    username_env: str | None = None
+    password_env: str | None = None
+    # TLS verification. Set False for self-signed dev clusters (local
+    # OpenSearch / Elasticsearch with the bundled cert).
+    verify_tls: bool = True
+    retry: RetryConfig | None = None  # destination-level override of sync.retry
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.index})"
+
+
 class LinearDestinationConfig(BaseModel):
     type: Literal["linear"]
     team_id: str | None = None
@@ -916,7 +943,8 @@ DestinationConfig = Annotated[
     | SalesforceBulkDestinationConfig
     | TwilioDestinationConfig
     | SnowflakeDestinationConfig
-    | DatabricksDestinationConfig,
+    | DatabricksDestinationConfig
+    | ElasticsearchDestinationConfig,
     Field(discriminator="type"),
 ]
 
