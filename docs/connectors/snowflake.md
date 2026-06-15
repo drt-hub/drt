@@ -32,6 +32,7 @@ destination:
 | `warehouse` | string | — | Warehouse to use for the connection. **Required** |
 | `mode` | `"insert"` \| `"merge"` | `"insert"` | Write strategy on the destination side. `insert` = append; `merge` = upsert via staging-table-plus-MERGE (requires `upsert_key`). Orthogonal to `sync.mode`. |
 | `upsert_key` | list[str] \| null | null | Columns to match on in the `MERGE INTO ... USING ... ON` clause. Required when `mode: merge`. |
+| `lookups` | dict \| null | null | FK resolution against the destination (same shape as Postgres/MySQL/ClickHouse — see [Destination Lookup](../guides/destination-lookup.md)). Added in v0.7.9 (#468). |
 
 > The YAML key is `schema:` for ergonomics, but the model field on `SnowflakeDestinationConfig` is `schema_` (alias) — `BaseModel.schema()` is a built-in pydantic method that would otherwise shadow a plain `schema` attribute under mypy strict mode.
 
@@ -141,5 +142,5 @@ Snowflake **does not currently support `sync.mode: replace`** — there is no sw
 - Tables are addressed fully-qualified as `<database>.<schema>.<table>` (e.g. `ANALYTICS.PUBLIC.USER_SCORES`)
 - The `schema:` YAML key maps to `schema_` on the model — see the model alias note above
 - `upsert_key` columns identify a logical primary key for `mode: merge` and `sync.mode: mirror`
-- `drt test` validators (row_count, not_null, freshness, unique, accepted_values) work with Snowflake
+- **Queryable (v0.7.9, [#468](https://github.com/drt-hub/drt/issues/468)):** Snowflake is now wired into the query infrastructure used by Postgres/MySQL/ClickHouse, which unlocks three things — `drt test` validators (row_count, not_null, freshness, unique, accepted_values) run real queries against the target table; `drt run --dry-run --diff` produces a **true record-level diff** instead of falling back to sample mode; and `lookups` FK resolution works. Test/diff queries address the table fully-qualified (`<database>.<schema>.<table>`).
 - `--dry-run` is honoured — `destination.load()` is never called when dry_run is on

@@ -9,12 +9,14 @@ from drt.config.models import (
     DestinationConfig,
     MySQLDestinationConfig,
     PostgresDestinationConfig,
+    SnowflakeDestinationConfig,
 )
 
 _QUERYABLE_TYPES = (
     PostgresDestinationConfig,
     MySQLDestinationConfig,
     ClickHouseDestinationConfig,
+    SnowflakeDestinationConfig,
 )
 
 
@@ -31,6 +33,11 @@ def get_table_name(config: DestinationConfig) -> str:
         return config.table
     if isinstance(config, ClickHouseDestinationConfig):
         return config.table
+    if isinstance(config, SnowflakeDestinationConfig):
+        # Snowflake needs the fully-qualified name; the connection sets the
+        # database/schema context but the FQN matches how the destination
+        # writes and is unambiguous for test / diff queries.
+        return f"{config.database}.{config.schema_}.{config.table}"
     raise TypeError(f"Cannot get table name from {type(config).__name__}")
 
 
@@ -42,6 +49,8 @@ def execute_test_query(config: DestinationConfig, query: str) -> int:
         return _query_mysql(config, query)
     if isinstance(config, ClickHouseDestinationConfig):
         return _query_clickhouse(config, query)
+    if isinstance(config, SnowflakeDestinationConfig):
+        return _query_snowflake(config, query)
     raise TypeError(f"Cannot query {type(config).__name__}")
 
 
@@ -84,6 +93,21 @@ def _query_clickhouse(config: ClickHouseDestinationConfig, query: str) -> int:
         client.close()
 
 
+def _query_snowflake(config: SnowflakeDestinationConfig, query: str) -> int:
+    from drt.destinations.snowflake import SnowflakeDestination
+
+    # _connect is an instance method on the Snowflake destination (unlike the
+    # staticmethod on Postgres); the no-arg constructor has no side effects.
+    conn = SnowflakeDestination()._connect(config)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            result: Any = cur.fetchone()[0]
+            return int(result)
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # fetch_rows — multi-row SELECT for destination_lookup
 # ---------------------------------------------------------------------------
@@ -101,6 +125,8 @@ def fetch_rows(
         return _fetch_rows_mysql(config, query, columns)
     if isinstance(config, ClickHouseDestinationConfig):
         return _fetch_rows_clickhouse(config, query, columns)
+    if isinstance(config, SnowflakeDestinationConfig):
+        return _fetch_rows_snowflake(config, query, columns)
     raise TypeError(f"Cannot fetch rows from {type(config).__name__}")
 
 
@@ -156,3 +182,19 @@ def _fetch_rows_clickhouse(
         return [dict(zip(columns, row)) for row in result.result_rows]
     finally:
         client.close()
+
+
+def _fetch_rows_snowflake(
+    config: SnowflakeDestinationConfig,
+    query: str,
+    columns: list[str],
+) -> list[dict[str, Any]]:
+    from drt.destinations.snowflake import SnowflakeDestination
+
+    conn = SnowflakeDestination()._connect(config)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            return [dict(zip(columns, row)) for row in cur.fetchall()]
+    finally:
+        conn.close()
