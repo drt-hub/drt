@@ -59,6 +59,10 @@ def retry(
         print_error(f"No sync named '{sync_name}' found.")
         raise typer.Exit(1)
 
+    if limit is not None and limit < 0:
+        print_error("--limit must be >= 0.")
+        raise typer.Exit(1)
+
     store = DlqStore(Path("."))
     entries = store.read(sync_name)
     if not entries:
@@ -70,8 +74,8 @@ def retry(
         console.print(f"[yellow]Cleared {len(entries)} record(s) from '{sync_name}' DLQ.[/yellow]")
         return
 
-    to_retry = entries if limit is None else entries[: max(0, limit)]
-    untouched = [] if limit is None else entries[max(0, limit) :]
+    to_retry = entries if limit is None else entries[:limit]
+    untouched = [] if limit is None else entries[limit:]
 
     if dry_run:
         console.print(
@@ -100,6 +104,9 @@ def retry(
         # row_errors fully account for result.failed. Otherwise the batch
         # failed in a way we can't attribute per-record, so conservatively
         # keep the whole chunk queued rather than silently dropping records.
+        # Trade-off: on an un-attributable batch, rows that actually succeeded
+        # get re-queued and may be re-sent on the next retry — we prefer a
+        # re-send (idempotent for upsert destinations) over a silent drop.
         failed_idx = {e.batch_index for e in result.row_errors if 0 <= e.batch_index < len(chunk)}
         pinpointed = len(failed_idx) == result.failed
         err_by_idx = {e.batch_index: e for e in result.row_errors}

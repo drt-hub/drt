@@ -46,9 +46,12 @@ class DeadLetter:
 class DlqStore:
     """Append / read / replace dead-letter entries under ``.drt/dlq/``.
 
-    One JSONL file per sync (``<sync_name>.jsonl``). All mutating methods
-    run under a process-local lock so ``drt run --threads N`` workers and
-    a concurrent ``drt retry`` don't clobber each other's rewrites.
+    One JSONL file per sync (``<sync_name>.jsonl``). All mutating methods run
+    under ``self._lock``, a **process-local** ``threading.Lock`` — it
+    serialises ``drt run --threads N`` workers within a single process, but
+    does **not** coordinate across processes: a concurrent ``drt run`` and
+    ``drt retry`` doing read-modify-write on the same file is last-writer-wins.
+    Single-writer-at-a-time is the expected operational model.
     """
 
     def __init__(self, project_dir: Path = Path(".")) -> None:

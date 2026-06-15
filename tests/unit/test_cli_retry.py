@@ -174,3 +174,10 @@ def test_retry_limit_only_replays_oldest_n(project: Path, monkeypatch: pytest.Mo
     remaining = store.read("post_users")
     assert [e.record["id"] for e in remaining] == [3, 4]
     assert [rec["id"] for call in dest.calls for rec in call] == [1, 2]
+
+
+def test_retry_negative_limit_errors(project: Path) -> None:
+    # A negative --limit used to silently clamp to 0 (a no-op); now it errors.
+    result = runner.invoke(app, ["retry", "post_users", "--limit", "-1"])
+    assert result.exit_code == 1
+    assert "--limit must be >= 0" in result.output
