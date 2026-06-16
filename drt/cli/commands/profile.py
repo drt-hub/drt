@@ -93,10 +93,10 @@ def _is_secret_key(key: str) -> bool:
 
 
 def _mask(value: object) -> str:
-    s = str(value)
-    if len(s) <= 4:
-        return "***"
-    return s[:2] + "***"
+    # Full mask — never reveal a prefix. Inline secret values are rare (drt
+    # keeps real secrets in env vars), but if one is present we don't want to
+    # leak even a recognisable prefix of it.
+    return "***"
 
 
 @profile_app.command("list")

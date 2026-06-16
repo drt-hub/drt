@@ -33,6 +33,13 @@ def _write_profiles(home: Path, profiles: dict) -> None:
         yaml.dump({"profiles": profiles}, f)
 
 
+def _write_flat_profiles(home: Path, profiles: dict) -> None:
+    """Write the legacy *flat* layout — profiles at the top level, no ``profiles:`` wrapper."""
+    home.mkdir(parents=True, exist_ok=True)
+    with (home / "profiles.yml").open("w") as f:
+        yaml.dump(profiles, f)
+
+
 # ---------------------------------------------------------------------------
 # list
 # ---------------------------------------------------------------------------
@@ -82,13 +89,15 @@ def test_show_masks_inline_secrets(drt_home: Path) -> None:
     assert result.exit_code == 0
     assert "db.internal" in result.output
     assert "analyst" in result.output
-    # The raw secret value never appears; the env var name does.
+    # The raw secret value never appears, and not even a prefix leaks —
+    # masking is full (`***`), not a `su***`-style head reveal.
     assert "supersecretpw" not in result.output
+    assert "su***" not in result.output
     assert "PG_PW" in result.output
 
 
 def test_show_masks_short_secret(drt_home: Path) -> None:
-    """A short inline secret (<= 4 chars) is fully masked to ``***``."""
+    """Any inline secret — short or long — is fully masked to ``***``."""
     _write_profiles(drt_home, {"x": {"type": "postgres", "password": "pw"}})
     result = runner.invoke(app, ["profile", "show", "x"])
     assert result.exit_code == 0
@@ -212,6 +221,41 @@ def test_add_overwrite_declined(drt_home: Path) -> None:
     # Original preserved.
     entry = yaml.safe_load((drt_home / "profiles.yml").read_text())["profiles"]["dev"]
     assert entry["database"] == ":memory:"
+
+
+# ---------------------------------------------------------------------------
+# legacy flat-layout migration (add / remove rewrite under `profiles:`)
+# ---------------------------------------------------------------------------
+
+
+def test_add_migrates_flat_layout_to_nested(drt_home: Path) -> None:
+    """`add` on a legacy flat profiles.yml rewrites it under `profiles:`, keeping the old entry."""
+    _write_flat_profiles(drt_home, {"old": {"type": "duckdb", "database": "./old.duckdb"}})
+
+    result = runner.invoke(app, ["profile", "add", "new"], input="duckdb\n./new.duckdb\n")
+    assert result.exit_code == 0, result.output
+
+    data = yaml.safe_load((drt_home / "profiles.yml").read_text())
+    # Now nested (top-level is just `profiles:`), and the pre-existing flat
+    # profile survived the migration alongside the newly-added one.
+    assert set(data) == {"profiles"}
+    assert data["profiles"]["old"]["database"] == "./old.duckdb"
+    assert data["profiles"]["new"]["database"] == "./new.duckdb"
+
+
+def test_remove_migrates_flat_layout_to_nested(drt_home: Path) -> None:
+    """`remove` on a legacy flat profiles.yml rewrites it under `profiles:`."""
+    _write_flat_profiles(
+        drt_home, {"dev": {"type": "duckdb"}, "prod": {"type": "bigquery"}}
+    )
+
+    result = runner.invoke(app, ["profile", "remove", "dev", "--yes"])
+    assert result.exit_code == 0, result.output
+
+    data = yaml.safe_load((drt_home / "profiles.yml").read_text())
+    assert set(data) == {"profiles"}
+    assert "dev" not in data["profiles"]
+    assert "prod" in data["profiles"]  # the other flat profile survived
 
 
 # ---------------------------------------------------------------------------
