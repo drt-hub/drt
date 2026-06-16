@@ -85,6 +85,29 @@ record is likely unrecoverable (bad data, a permanent `4xx`) rather than a
 transient blip. Use `--clear` to drop those once you've decided they can't
 be salvaged.
 
+## Make retries idempotent
+
+`drt retry` re-sends the stored payload as-is. If a record actually reached
+the destination but the response was *reported* as a failure (a timeout after
+a successful write, an ambiguous `5xx`), replaying it will write the row a
+second time — **unless the destination deduplicates on a key you've
+configured.** So before relying on the DLQ, give the destination a way to
+recognise a re-sent record:
+
+- **SQL destinations** (Postgres / MySQL / ClickHouse / Snowflake / BigQuery /
+  Databricks) — set `mode: merge` (or `upsert`) with an `upsert_key`; a replay
+  updates the existing row instead of inserting a duplicate.
+- **Elasticsearch / OpenSearch** — set `id_field` so each document gets a
+  stable `_id`; a replay re-indexes the same document (`op_type: index`)
+  rather than creating a new one with an auto-generated id.
+- **REST API and other HTTP destinations** — prefer an endpoint that upserts on
+  a natural key, or one that honours an idempotency key, so a duplicate POST is
+  a no-op server-side.
+
+Append-only sinks (a keyless INSERT, a file/Parquet append, a webhook that just
+records what it receives) can't dedupe a replay — there, treat a re-send as
+"at-least-once" and reconcile downstream.
+
 ## Scope and limits
 
 - **Capture requires per-record errors.** The DLQ captures records that the
