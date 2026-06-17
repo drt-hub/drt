@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`drt destinations` was missing 9 registered connectors** — `bigquery`, `databricks`, `snowflake`, `s3`, `gcs`, `azure_blob`, `elasticsearch`, `mixpanel`, and `salesforce_bulk` were registered in the connector registry but absent from the hand-maintained `DESTINATIONS` list in `drt/config/connectors.py`, so `drt destinations` / `drt destinations --detailed` / `--format json` silently listed only 23 of 32 (every cloud/DWH destination, including all six added in v0.7.9, was invisible to the CLI even though it worked in syncs). Synced both `DESTINATIONS` and the `DESTINATION_CONFIG_CLASSES` map in `drt/cli/_connector_detail.py` to the registry. **Closed the drift blind spot**: the existing parity tests only checked `DESTINATIONS ⊆ _connector_detail`, never `registry ⊆ DESTINATIONS` — new `test_DESTINATIONS_matches_registry` / `test_SOURCES_matches_registry` assert the CLI lists equal the registry exactly, failing the build at PR time (the post-merge `check_drift.sh` audit never covered this surface). `SOURCES` was already in sync.
+
 ## [0.7.9] - 2026-06-17
 
 ### Changed (Internal)
