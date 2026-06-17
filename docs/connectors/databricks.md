@@ -147,6 +147,30 @@ Mirror semantics fit the same shape as Postgres / MySQL / ClickHouse /
 Snowflake mirror destinations (see #340) — same `upsert_key` contract,
 same source-key-cardinality memory bound on `_mirror_keys`.
 
+### `sync.mode: replace` ([#643](https://github.com/drt-hub/drt/issues/643))
+
+Rebuilds the destination table from the current source snapshot. Two strategies:
+
+**`replace_strategy: truncate`** (default) — `TRUNCATE TABLE` once, then INSERT every batch.
+
+```yaml
+sync:
+  mode: replace            # replace_strategy defaults to truncate
+```
+
+**`replace_strategy: swap`** — zero-downtime. Delta has no `ALTER TABLE … SWAP WITH`, so drt stages every batch into a shadow `<table>__drt_swap` (`CREATE OR REPLACE TABLE … AS SELECT * … WHERE 1=0` clones the schema), then at end-of-sync runs an atomic `INSERT OVERWRITE <table> SELECT * FROM <shadow>` and drops the shadow. `INSERT OVERWRITE` commits a new Delta table version atomically (snapshot isolation), so readers always see the full old or full new data — never a half-written table — and the **target table object is preserved** (grants, properties, clustering / liquid clustering all survive; the table itself is never recreated).
+
+```yaml
+sync:
+  mode: replace
+  replace_strategy: swap
+```
+
+- **First run** (target table doesn't exist yet) falls through to a direct write into the target and skips the swap.
+- **Interrupted swaps** leave a `<table>__drt_swap` shadow; `drt clean --orphans` lists and drops them (only `__drt_swap`-suffixed tables are eligible).
+
+Swap requires `mode: replace` (enforced by config validation). The same `replace_strategy: swap` is supported on Postgres, MySQL, ClickHouse, and Snowflake.
+
 ## Sync modes
 
 | `sync.mode` | Behaviour on Databricks |
@@ -155,7 +179,7 @@ same source-key-cardinality memory bound on `_mirror_keys`.
 | `incremental` | Watermark-based — extracts rows with `cursor_field > last_value`, writes via `config.mode`. |
 | `upsert` | Same as `incremental` but with `upsert_key` enforced. |
 | `mirror` | Forces the MERGE write path + end-of-sync DELETE. `upsert_key` required. |
-| `replace` | Not yet supported on Databricks (use `mirror` for "everything in source = everything in dest" semantics). |
+| `replace` | Full table replace. `replace_strategy: truncate` (default) TRUNCATEs + re-inserts; `replace_strategy: swap` is zero-downtime via a shadow + atomic `INSERT OVERWRITE`. See above. |
 
 ## Notes
 
