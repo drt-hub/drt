@@ -54,6 +54,14 @@ Closes the **Tech Foundation Hardening epic** ([#538](https://github.com/drt-hub
 
 ---
 
+## v0.7.9 — Cloud Destinations land + Dead Letter Queue + `drt profile` ✅ Shipped 2026-06-17
+
+Released as **v0.7.9** on 2026-06-17. See [CHANGELOG.md](CHANGELOG.md#079---2026-06-17) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.7.9) for the full feature list.
+
+**The largest accumulation since v0.7.0 — the v0.8 "Cloud Destinations" half lands early on the 0.7 line.** Six new destinations: **Amazon S3** ([#168](https://github.com/drt-hub/drt/issues/168)), **Google Cloud Storage** ([#169](https://github.com/drt-hub/drt/issues/169)), **Azure Blob Storage** ([#170](https://github.com/drt-hub/drt/issues/170)) (csv/json/jsonl/parquet + gzip, on a shared blob serialiser), **Databricks Delta Lake** ([#167](https://github.com/drt-hub/drt/issues/167)), **BigQuery** ([#165](https://github.com/drt-hub/drt/issues/165) — the oldest open connector request, building on [@PFCAaron12](https://github.com/PFCAaron12)'s [#584](https://github.com/drt-hub/drt/pull/584)), and **Elasticsearch / OpenSearch** ([#420](https://github.com/drt-hub/drt/issues/420)). Reliability: the **Dead Letter Queue** + `drt retry` ([#278](https://github.com/drt-hub/drt/issues/278)) persists per-record failures for replay. CLI: **`drt profile`** ([#423](https://github.com/drt-hub/drt/issues/423)) manages credential profiles. Engine: **`sync.mode: replace`** (truncate + zero-downtime swap) on Snowflake ([#434](https://github.com/drt-hub/drt/issues/434)) and Databricks ([#643](https://github.com/drt-hub/drt/issues/643)), **`sync.field_mappings`** declarative column renaming ([#415](https://github.com/drt-hub/drt/issues/415)), and Snowflake made fully queryable for `--diff` / `lookups` / `drt test` ([#468](https://github.com/drt-hub/drt/issues/468)). Tooling/hygiene: a state-based **docs/skills/MCP drift audit** + weekly workflow (connector-docs backlog now burned to **zero**), MCP server catch-up (`drt_doctor` + `compute_diff` parity), OpenTelemetry Phase 2 (NoOpTracer global provider, [#531](https://github.com/drt-hub/drt/issues/531)), and the **`/drt-troubleshoot`** skill ([#369](https://github.com/drt-hub/drt/issues/369)). No breaking changes — drop-in upgrade from v0.7.8. **v0.8.0 now reduces to the Growth / README push** (hero redesign, Quickstart GIF, blogs, Discord/X, VS Code extension) + the INFORMATION_SCHEMA correctness epic ([#317](https://github.com/drt-hub/drt/issues/317)).
+
+---
+
 ## v0.7.8 — Mixpanel destination + ClickHouse identifier fix + empty-batch contract completion ✅ Shipped 2026-06-05
 
 Released as **v0.7.8** on 2026-06-05. See [CHANGELOG.md](CHANGELOG.md#078---2026-06-05) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.7.8) for the full feature list.
