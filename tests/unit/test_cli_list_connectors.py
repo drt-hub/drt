@@ -153,6 +153,50 @@ def test_every_destination_in_DESTINATIONS_has_a_registered_config_class() -> No
 
 
 # ---------------------------------------------------------------------------
+# Registry-parity — the OTHER direction (registry ⊆ connectors.py lists).
+# The two tests above guard DESTINATIONS/SOURCES ⊆ _connector_detail, but
+# nothing checked that every *registered* connector is actually listed here —
+# so bigquery/databricks/s3/gcs/azure_blob/elasticsearch/snowflake/mixpanel/
+# salesforce_bulk were registered yet invisible to `drt destinations` all the
+# way through v0.7.9. These lock the registry as the source of truth.
+# ---------------------------------------------------------------------------
+
+
+def test_DESTINATIONS_matches_registry() -> None:
+    """``connectors.py`` DESTINATIONS must list exactly the registered destinations.
+
+    A destination registered in ``drt/connectors/registry.py`` but absent from
+    ``DESTINATIONS`` silently vanishes from ``drt destinations`` /
+    ``--detailed`` / ``--format json``. This guards against that drift at PR
+    time (the post-merge ``check_drift.sh`` audit never covered this list).
+    """
+    import drt.connectors.registry as registry
+
+    registered = set(registry._destination_registry)
+    listed = {t for t, _ in DESTINATIONS}
+    assert listed == registered, (
+        "connectors.py DESTINATIONS is out of sync with the connector registry. "
+        f"Registered but not listed: {sorted(registered - listed)}; "
+        f"listed but not registered: {sorted(listed - registered)}. "
+        "Update DESTINATIONS in drt/config/connectors.py (and the config-class "
+        "map in drt/cli/_connector_detail.py)."
+    )
+
+
+def test_SOURCES_matches_registry() -> None:
+    """``connectors.py`` SOURCES must list exactly the registered sources."""
+    import drt.connectors.registry as registry
+
+    registered = set(registry._source_registry)
+    listed = {t for t, _ in SOURCES}
+    assert listed == registered, (
+        "connectors.py SOURCES is out of sync with the connector registry. "
+        f"Registered but not listed: {sorted(registered - listed)}; "
+        f"listed but not registered: {sorted(listed - registered)}."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Defensive paths — exercised directly so codecov sees them
 # ---------------------------------------------------------------------------
 

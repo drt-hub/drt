@@ -22,12 +22,20 @@ SOURCES = [
 ]
 
 # Available destination connectors: (type, display_name)
+# NOTE: must stay in sync with the connector registry (drt/connectors/registry.py).
+# `tests/unit/test_cli_list_connectors.py::test_DESTINATIONS_matches_registry`
+# fails the build if a registered destination is missing here (or vice versa).
 DESTINATIONS = [
     ("amplitude", "Amplitude"),
+    ("azure_blob", "Azure Blob Storage"),
+    ("bigquery", "BigQuery"),
     ("clickhouse", "ClickHouse"),
+    ("databricks", "Databricks"),
     ("discord", "Discord"),
+    ("elasticsearch", "Elasticsearch"),
     ("email_smtp", "Email"),
     ("file", "File"),
+    ("gcs", "Google Cloud Storage"),
     ("github_actions", "GitHub Actions"),
     ("google_ads", "Google Ads"),
     ("google_sheets", "Google Sheets"),
@@ -35,13 +43,17 @@ DESTINATIONS = [
     ("intercom", "Intercom"),
     ("jira", "Jira"),
     ("linear", "Linear"),
+    ("mixpanel", "Mixpanel"),
     ("mysql", "MySQL"),
     ("notion", "Notion"),
     ("parquet", "Parquet"),
     ("postgres", "PostgreSQL"),
     ("rest_api", "REST API"),
+    ("s3", "Amazon S3"),
+    ("salesforce_bulk", "Salesforce Bulk"),
     ("sendgrid", "SendGrid"),
     ("slack", "Slack"),
+    ("snowflake", "Snowflake"),
     ("staged_upload", "Staged Upload"),
     ("teams", "Microsoft Teams"),
     ("twilio", "Twilio"),
