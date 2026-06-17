@@ -1,22 +1,22 @@
 """Empty-batch contract for SQL destinations (Step 2b of #364 follow-up).
 
-Completes the empty-batch invariant suite for the four SQL destinations:
-``postgres`` / ``mysql`` / ``clickhouse`` / ``snowflake``. Together
-with Step 1 (HTTP, PR #593) and Step 2a (file, PR #594) this locks the
-empty-batch behaviour for 12 of drt's destinations.
+Completes the empty-batch invariant suite for the SQL / DWH destinations:
+``postgres`` / ``mysql`` / ``clickhouse`` / ``snowflake`` / ``bigquery``.
+Together with Step 1 (HTTP, PR #593) and Step 2a (file, PR #594) this
+locks the empty-batch behaviour across drt's destination set.
 
 Why no driver mocks
 -------------------
 
-The SQL destinations all use lazy driver imports inside their methods
+These destinations all use lazy driver imports inside their methods
 (``import psycopg2`` / ``pymysql`` / ``clickhouse_connect`` /
-``snowflake.connector`` lives **inside** ``_connect`` or directly
-inside ``load`` after the short-circuit), and their classes hold no
-top-level driver references. CI's minimal install (``[dev,mcp,duckdb]``)
-includes **none** of ``[postgres,mysql,clickhouse,snowflake]`` extras
-— so if a destination ever reaches the driver import on empty input,
-the test crashes with ``ModuleNotFoundError`` and surfaces the bug
-immediately. No mock infrastructure required.
+``snowflake.connector`` / ``from google.cloud import bigquery`` lives
+**inside** ``_connect`` / ``_build_client`` or directly inside ``load``
+after the short-circuit), and their classes hold no top-level driver
+references. CI's test install excludes the ``[snowflake]`` and
+``[bigquery]`` extras — so if either ever reaches the driver import on
+empty input, the test crashes with ``ModuleNotFoundError`` and surfaces
+the bug immediately. No mock infrastructure required.
 
 This means the two contracts here — Protocol satisfaction +
 ``SyncResult`` shape — carry a third implicit assertion: **the driver
@@ -39,6 +39,7 @@ from typing import Any
 import pytest
 
 from drt.config.models import (
+    BigQueryDestinationConfig,
     ClickHouseDestinationConfig,
     MySQLDestinationConfig,
     PostgresDestinationConfig,
@@ -47,6 +48,7 @@ from drt.config.models import (
     SyncOptions,
 )
 from drt.destinations.base import Destination, SyncResult
+from drt.destinations.bigquery import BigQueryDestination
 from drt.destinations.clickhouse import ClickHouseDestination
 from drt.destinations.mysql import MySQLDestination
 from drt.destinations.postgres import PostgresDestination
@@ -100,6 +102,17 @@ SQL_DESTINATIONS: list[Any] = [
             warehouse="wh",
         ),
         id="snowflake",
+    ),
+    pytest.param(
+        BigQueryDestination,
+        lambda: BigQueryDestinationConfig(
+            type="bigquery",
+            project="proj",
+            dataset="ds",
+            table="test",
+            upsert_key=["id"],
+        ),
+        id="bigquery",
     ),
 ]
 
