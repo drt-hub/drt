@@ -609,3 +609,84 @@ def save_profile(
         yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
 
     return profiles_path
+
+
+# ---------------------------------------------------------------------------
+# Raw profile access (for `drt profile` CLI — list / show / add / remove)
+#
+# These operate on the raw YAML mapping (name → dict) without parsing into a
+# typed ``ProfileConfig``. The CLI needs to display / edit profiles of any
+# type, including ones with fields the typed loaders don't model, so it works
+# at the dict level. ``load_profile`` / ``save_profile`` remain the typed path
+# used by the engine.
+# ---------------------------------------------------------------------------
+
+
+def load_raw_profiles(config_dir: Path | None = None) -> dict[str, Any]:
+    """Return ``{profile_name: raw_dict}`` from profiles.yml.
+
+    Returns an empty dict when the file doesn't exist (so the CLI can show
+    "no profiles" rather than raising). Unlike ``load_profile`` this does not
+    parse or validate the entries — it's for listing / display / editing.
+    """
+    profiles_path = _config_dir(config_dir) / "profiles.yml"
+    if not profiles_path.exists():
+        return {}
+    with profiles_path.open() as f:
+        data = yaml.safe_load(f) or {}
+    return _profiles_mapping(data)
+
+
+def _rewrite_profiles(
+    profiles: dict[str, Any], data: dict[str, Any], profiles_path: Path
+) -> None:
+    """Write ``profiles`` back to disk, preserving the observability block."""
+    observability = data.get("observability")
+    out: dict[str, Any] = {}
+    if observability is not None:
+        out["observability"] = observability
+    out["profiles"] = profiles
+    profiles_path.parent.mkdir(parents=True, exist_ok=True)
+    with profiles_path.open("w") as f:
+        yaml.dump(out, f, default_flow_style=False, allow_unicode=True)
+
+
+def write_raw_profile(
+    profile_name: str, entry: dict[str, Any], config_dir: Path | None = None
+) -> Path:
+    """Create or replace a raw profile entry in profiles.yml.
+
+    Writes the given ``entry`` dict verbatim under ``profile_name`` (the
+    ``drt profile add`` path builds the dict from prompted answers). Preserves
+    any existing profiles and the top-level ``observability`` block.
+    """
+    profiles_path = _config_dir(config_dir) / "profiles.yml"
+    data: dict[str, Any] = {}
+    if profiles_path.exists():
+        with profiles_path.open() as f:
+            data = yaml.safe_load(f) or {}
+    profiles = dict(_profiles_mapping(data))
+    profiles[profile_name] = entry
+    _rewrite_profiles(profiles, data, profiles_path)
+    return profiles_path
+
+
+def remove_profile(profile_name: str, config_dir: Path | None = None) -> Path:
+    """Delete a profile entry from profiles.yml.
+
+    Raises:
+        FileNotFoundError: profiles.yml does not exist.
+        KeyError: ``profile_name`` is not present.
+    """
+    profiles_path = _config_dir(config_dir) / "profiles.yml"
+    if not profiles_path.exists():
+        raise FileNotFoundError(f"profiles.yml not found at {profiles_path}.")
+    with profiles_path.open() as f:
+        data = yaml.safe_load(f) or {}
+    profiles = dict(_profiles_mapping(data))
+    if profile_name not in profiles:
+        available = ", ".join(profiles.keys()) or "(none)"
+        raise KeyError(f"Profile '{profile_name}' not found. Available: {available}")
+    del profiles[profile_name]
+    _rewrite_profiles(profiles, data, profiles_path)
+    return profiles_path

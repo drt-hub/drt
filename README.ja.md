@@ -1,4 +1,4 @@
-<!-- i18n-sync: base=README.md, hash=a05482930e95f0db036d95c9244a492650d91d18 -->
+<!-- i18n-sync: base=README.md, hash=890f28ae92ba1ab40f1240c5eafefba1ffea68b4 -->
 
 [English](./README.md) | [日本語](./README.ja.md)
 
@@ -132,6 +132,11 @@ drt test --select <name>    # 特定の同期テストを実行
 drt validate                # 同期YAML設定を検証
 drt status                  # 直近の同期ステータスを表示
 drt status --output json    # JSON形式でステータスを出力
+drt profile list            # ~/.drt/profiles.yml のプロファイル一覧
+drt profile show <name>     # プロファイルを表示（シークレットはマスク）
+drt profile test <name>     # プロファイルのソース接続を検証
+drt profile add <name>      # 対話形式でプロファイルを追加
+drt profile remove <name>   # プロファイルを削除
 drt serve                   # HTTPウェブフックエンドポイントを起動
 drt mcp run                 # MCPサーバーを起動（drt-core[mcp]が必要）
 drt --install-completion    # シェル補完をインストール（bash/zsh/fish）

@@ -130,6 +130,11 @@ drt test --select <name>    # test a specific sync
 drt validate                # validate sync YAML configs
 drt status                  # show recent sync status
 drt status --output json    # JSON output for status
+drt profile list            # list credential profiles in ~/.drt/profiles.yml
+drt profile show <name>     # show a profile (secrets masked)
+drt profile test <name>     # verify a profile's source connectivity
+drt profile add <name>      # interactively add a profile
+drt profile remove <name>   # remove a profile
 drt serve                   # start HTTP webhook endpoint
 drt docs generate --format mermaid  # print project DAG as Mermaid
 drt mcp run                 # start MCP server (requires drt-core[mcp])
