@@ -310,6 +310,48 @@ def test_sync_options_full_mode_still_works() -> None:
     assert opts.mode == "full"
 
 
+# ---------------------------------------------------------------------------
+# SyncOptions — Dead Letter Queue (#278)
+# ---------------------------------------------------------------------------
+
+
+def test_dlq_defaults_to_disabled() -> None:
+    """DLQ is opt-in: absent config means no queue (no surprise disk writes)."""
+    assert SyncOptions().dlq is None
+
+
+def test_dlq_config_parses_from_sync() -> None:
+    from drt.config.models import DLQConfig
+
+    cfg = SyncConfig(
+        **{
+            "name": "s",
+            "model": "ref('t')",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {"dlq": {"enabled": True, "max_records": 500}},
+        }
+    )
+    assert isinstance(cfg.sync.dlq, DLQConfig)
+    assert cfg.sync.dlq.enabled is True
+    assert cfg.sync.dlq.max_records == 500
+
+
+def test_dlq_max_records_defaults() -> None:
+    from drt.config.models import DLQConfig
+
+    dlq = DLQConfig(enabled=True)
+    assert dlq.max_records == 10_000
+
+
+def test_dlq_negative_max_records_rejected() -> None:
+    import pytest
+
+    from drt.config.models import DLQConfig
+
+    with pytest.raises(ValueError, match="dlq.max_records must be >= 0"):
+        DLQConfig(max_records=-1)
+
+
 def test_sync_options_upsert_in_sync_config() -> None:
     """mode='upsert' works end-to-end inside a SyncConfig."""
     raw = {

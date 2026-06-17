@@ -45,9 +45,11 @@ def status(
         _print_history(sync_name=sync_name, limit=limit, output=output)
         return
 
+    from drt.state.dlq import DlqStore
     from drt.state.manager import StateManager
 
     states = StateManager(Path(".")).get_all()
+    dlq_depths = DlqStore(Path(".")).all_depths()
 
     if output == "json":
         print(
@@ -61,6 +63,7 @@ def status(
                             "records_synced": state.records_synced,
                             "last_cursor_value": state.last_cursor_value,
                             "error": state.error,
+                            "dlq_depth": dlq_depths.get(name, 0),
                         }
                         for name, state in sorted(states.items())
                     ],
@@ -74,6 +77,17 @@ def status(
         print_status_verbose(states, {})
     else:
         print_status_table(states)
+
+    # Dead Letter Queue depth (#278): surface any queued failures so the
+    # operator knows there is something to `drt retry`. Includes queues for
+    # syncs that have no state row yet (e.g. first run failed outright).
+    if dlq_depths:
+        console.print()
+        for name in sorted(dlq_depths):
+            console.print(
+                f"[yellow]⚠ {name}: {dlq_depths[name]} record(s) in dead letter "
+                f"queue — run [bold]drt retry {name}[/bold] to replay.[/yellow]"
+            )
 
 
 def _print_history(*, sync_name: str | None, limit: int, output: str) -> None:

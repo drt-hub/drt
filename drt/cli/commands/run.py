@@ -145,6 +145,7 @@ def _run_one(
     from drt import telemetry
     from drt.engine.observer import (
         CompositeObserver,
+        DlqObserver,
         LoggingObserver,
         StatePersistingObserver,
     )
@@ -156,9 +157,20 @@ def _run_one(
     # ``drt`` logger (legacy parity) + state/watermark persistence on
     # sync_completed. The engine itself no longer reaches for state directly
     # (#548); CLI is responsible for wiring this up.
-    observer = CompositeObserver(
-        [LoggingObserver(), StatePersistingObserver(ctx.state_mgr, wm_storage)]
-    )
+    observers: list[Any] = [
+        LoggingObserver(),
+        StatePersistingObserver(ctx.state_mgr, wm_storage),
+    ]
+    # Dead Letter Queue (#278): opt-in per sync. Adds a DlqObserver that
+    # persists failed records to .drt/dlq/<sync>.jsonl for `drt retry`.
+    # Skipped on dry runs — nothing is actually sent, so nothing can fail.
+    if not ctx.dry_run and sync.sync.dlq is not None and sync.sync.dlq.enabled:
+        from drt.state.dlq import DlqStore
+
+        observers.append(
+            DlqObserver(DlqStore(Path(".")), max_records=sync.sync.dlq.max_records)
+        )
+    observer = CompositeObserver(observers)
     if not ctx.json_mode and not ctx.dry_run and not ctx.quiet:
         print_sync_start(sync.name, ctx.dry_run)
     t0 = time.monotonic()
