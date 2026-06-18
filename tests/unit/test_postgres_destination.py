@@ -38,6 +38,10 @@ def _config(**overrides: Any) -> PostgresDestinationConfig:
         "password": "testpass",
         "table": "public.scores",
         "upsert_key": ["id"],
+        # These tests assert exact driver call ordering; Layer-3 introspection
+        # (#317) would add an INFORMATION_SCHEMA round-trip. It has its own
+        # tests — keep it off here. Pass introspect_schema=True to opt in.
+        "introspect_schema": False,
     }
     defaults.update(overrides)
     return PostgresDestinationConfig(**defaults)
@@ -770,3 +774,76 @@ class TestPostgresConnection:
         # Verify SELECT 1 was called
         cur = conn.cursor()
         assert any("SELECT 1" in str(call.args[0]) for call in cur.execute.call_args_list)
+
+
+class TestPostgresSchemaIntrospection:
+    """Layer 3 (#317) — INFORMATION_SCHEMA-driven serialization wiring."""
+
+    def test_resolve_schema_disabled_when_introspect_schema_false(self) -> None:
+        with patch("drt.destinations.schema.describe_columns") as desc:
+            out = PostgresDestination()._resolve_schema(_config(introspect_schema=False))
+        assert out is None
+        desc.assert_not_called()
+
+    def test_resolve_schema_disabled_when_json_columns_set(self) -> None:
+        """Explicit json_columns (Layer 2) wins — introspection is skipped."""
+        with patch("drt.destinations.schema.describe_columns") as desc:
+            out = PostgresDestination()._resolve_schema(
+                _config(introspect_schema=True, json_columns=["payload"])
+            )
+        assert out is None
+        desc.assert_not_called()
+
+    def test_resolve_schema_caches_across_batches(self) -> None:
+        dest = PostgresDestination()
+        cfg = _config(introspect_schema=True)
+        with patch(
+            "drt.destinations.schema.describe_columns",
+            return_value={"payload": "json"},
+        ) as desc:
+            first = dest._resolve_schema(cfg)
+            second = dest._resolve_schema(cfg)
+        assert first == second == {"payload": "json"}
+        desc.assert_called_once()  # introspected once, reused across batches
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_introspection_encodes_list_into_jsonb_column(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """THE fix: a list bound for a JSONB column is encoded, not passed
+        through to the ARRAY adapter — discovered via introspection, no
+        json_columns needed."""
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        with patch(
+            "drt.destinations.schema.describe_columns",
+            return_value={"id": "scalar", "payload": "json"},
+        ):
+            PostgresDestination().load(
+                [{"id": 1, "payload": [1, 2, 3]}],
+                _config(introspect_schema=True),
+                _options(),
+            )
+
+        bound = [c.args[1] for c in cur.execute.call_args_list if len(c.args) == 2][-1]
+        payload = bound[1]
+        assert not isinstance(payload, list)  # encoded (Json wrapper or JSON string)
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_no_introspection_passes_list_through(self, mock_connect: MagicMock) -> None:
+        """Contrast: with introspection off, a list passes through to the driver's
+        ARRAY adapter (pre-#317 behaviour)."""
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        PostgresDestination().load(
+            [{"id": 1, "payload": [1, 2, 3]}],
+            _config(introspect_schema=False),
+            _options(),
+        )
+
+        bound = [c.args[1] for c in cur.execute.call_args_list if len(c.args) == 2][-1]
+        assert bound[1] == [1, 2, 3]  # untouched

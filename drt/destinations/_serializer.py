@@ -34,42 +34,72 @@ def serialize_complex_value(
     *,
     dict_encoder: Encoder,
     list_encoder: Encoder | None = None,
+    schema: dict[str, str] | None = None,
 ) -> Any:
-    """Serialize ``dict`` / ``list`` values, validating against ``json_columns``.
+    """Serialize ``dict`` / ``list`` values for an SQL destination.
+
+    Three layers of decision, in precedence order:
+
+    1. **Explicit ``json_columns`` (Layer 2, #316)** — when set, it is an
+       allowlist: a complex value in a listed column is encoded, in an
+       unlisted column raises early. The user's declaration always wins.
+    2. **Schema introspection (Layer 3, #317)** — when ``json_columns`` is
+       ``None`` and a ``schema`` map is supplied, route by the column's real
+       type: a ``json`` column encodes (dict *and* list), an ``array`` column
+       passes the list through to the driver's native adapter.
+    3. **Back-compat (pre-#316)** — when neither applies, every dict/list is
+       encoded. ``schema=None`` makes this function behave **exactly** as
+       before Layer 3, so existing callers are unaffected.
 
     Args:
         value: The cell value from the source row.
         column: Name of the column this value belongs to (None when unknown —
             tests, ad-hoc serialization).
-        json_columns: User-declared allowlist of columns permitted to hold
-            JSON-encoded complex values. When ``None``, all dict/list values
-            are encoded (back-compat with pre-#316 behaviour).
-        dict_encoder: Wire-format encoder for ``dict`` values (e.g.
-            ``psycopg2.extras.Json`` or ``json.dumps``).
-        list_encoder: Wire-format encoder for ``list`` values. When ``None``
-            (Postgres-style), lists pass through unchanged — the driver
-            handles them via its native ARRAY adapter. When supplied
-            (MySQL-style), lists are encoded.
+        json_columns: User-declared allowlist (Layer 2). ``None`` = no allowlist.
+        dict_encoder: Wire-format encoder for JSON values (``psycopg2.extras.Json``
+            or ``json.dumps``); also used to encode a ``list`` into a JSON column.
+        list_encoder: Wire-format encoder for ``list`` values in the back-compat
+            path. ``None`` (Postgres-style) passes lists through to the driver's
+            ARRAY adapter; supplied (MySQL-style) encodes them.
+        schema: ``{column: category}`` from :func:`drt.destinations.schema.describe_columns`,
+            where category is ``"json" | "array" | "scalar"``. ``None`` disables
+            Layer 3 (introspection unavailable / opted out).
 
     Returns:
         Encoded value for dict/list inputs, raw value for everything else.
 
     Raises:
-        ValueError: When ``json_columns`` is set and ``column`` is not in
-            the allowlist — fail early with a pointing error rather than
-            letting a "can't adapt type 'dict'" surface deep in the driver.
+        ValueError: When ``json_columns`` is set and ``column`` is not in it.
     """
-    if isinstance(value, dict):
+    if not isinstance(value, (dict, list)):
+        return value
+
+    # Layer 2: explicit json_columns allowlist always wins.
+    if json_columns is not None:
         if _column_allowed(column, json_columns):
+            return _encode(value, dict_encoder, list_encoder)
+        raise ValueError(_unlisted_error(column, value, json_columns))
+
+    # Layer 3: route by the destination column's real type.
+    if schema is not None and column is not None:
+        category = schema.get(column)
+        if category == "json":
+            # A JSON/JSONB column takes both dicts and lists as encoded JSON —
+            # this is what resolves the list→JSONB-vs-ARRAY ambiguity.
             return dict_encoder(value)
-        raise ValueError(_unlisted_error(column, value, json_columns))
+        if category == "array":
+            # Native array column — hand the list to the driver's adapter.
+            return value
+        # scalar / unknown / not in schema → fall through to back-compat.
 
-    if isinstance(value, list):
-        if _column_allowed(column, json_columns):
-            return list_encoder(value) if list_encoder is not None else value
-        raise ValueError(_unlisted_error(column, value, json_columns))
+    # Back-compat (and the Layer-3 fall-through): encode everything.
+    return _encode(value, dict_encoder, list_encoder)
 
-    return value
+
+def _encode(value: Any, dict_encoder: Encoder, list_encoder: Encoder | None) -> Any:
+    if isinstance(value, dict):
+        return dict_encoder(value)
+    return list_encoder(value) if list_encoder is not None else value
 
 
 def _column_allowed(column: str | None, json_columns: list[str] | None) -> bool:

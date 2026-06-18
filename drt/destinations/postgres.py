@@ -63,6 +63,7 @@ def _serialize_value(
     value: Any,
     column: str | None = None,
     json_columns: list[str] | None = None,
+    schema: dict[str, str] | None = None,
 ) -> Any:
     """Wrap dict values with psycopg2.extras.Json for JSONB columns.
 
@@ -90,6 +91,7 @@ def _serialize_value(
         json_columns,
         dict_encoder=_pg_dict_encoder,
         list_encoder=None,  # pass-through — psycopg2's ARRAY adapter takes over
+        schema=schema,
     )
 
 
@@ -142,6 +144,25 @@ class PostgresDestination:
         # records); finalize_sync treats that as "skip DELETE" — safety
         # against deleting everything when the source produced no data.
         self._mirror_keys: list[tuple[Any, ...]] | None = None
+        # Layer 3 (#317): INFORMATION_SCHEMA map, fetched once per table per
+        # sync. ``None`` value = introspection ran but is unavailable; the
+        # key being absent = not yet fetched.
+        self._schema_cache: dict[str, dict[str, str] | None] = {}
+
+    def _resolve_schema(self, config: PostgresDestinationConfig) -> dict[str, str] | None:
+        """Column → type-category map for the target table, cached per sync.
+
+        Returns ``None`` (Layer 3 inactive) when the user disabled
+        ``introspect_schema``, declared ``json_columns`` explicitly (Layer 2
+        wins), or introspection isn't available.
+        """
+        if not config.introspect_schema or config.json_columns is not None:
+            return None
+        if config.table not in self._schema_cache:
+            from drt.destinations.schema import describe_columns
+
+            self._schema_cache[config.table] = describe_columns(config)
+        return self._schema_cache[config.table]
 
     def load(
         self,
@@ -273,10 +294,14 @@ class PostgresDestination:
             self._replace_truncated = True
 
         query = self._build_insert_sql(table, columns)
+        schema_map = self._resolve_schema(config)
 
         for i, record in enumerate(records):
             try:
-                values = [_serialize_value(record.get(c), c, config.json_columns) for c in columns]
+                values = [
+                    _serialize_value(record.get(c), c, config.json_columns, schema_map)
+                    for c in columns
+                ]
                 cur.execute(query, values)
                 result.success += 1
             except Exception as e:
@@ -335,10 +360,14 @@ class PostgresDestination:
             self._swap_table = table
 
         sql = self._build_insert_sql(shadow, columns)
+        schema_map = self._resolve_schema(config)
 
         for i, record in enumerate(records):
             try:
-                values = [_serialize_value(record.get(c), c, config.json_columns) for c in columns]
+                values = [
+                    _serialize_value(record.get(c), c, config.json_columns, schema_map)
+                    for c in columns
+                ]
                 cur.execute(sql, values)
                 result.success += 1
             except Exception as e:
@@ -612,8 +641,8 @@ class PostgresDestination:
 
         return dropped, failed
 
-    @staticmethod
     def _load_upsert(
+        self,
         conn: Any,
         cur: Any,
         records: list[dict[str, Any]],
@@ -629,10 +658,14 @@ class PostgresDestination:
             config.upsert_key,
             update_cols,
         )
+        schema_map = self._resolve_schema(config)
 
         for i, record in enumerate(records):
             try:
-                values = [_serialize_value(record.get(c), c, config.json_columns) for c in columns]
+                values = [
+                    _serialize_value(record.get(c), c, config.json_columns, schema_map)
+                    for c in columns
+                ]
                 cur.execute(query, values)
                 result.success += 1
             except Exception as e:
