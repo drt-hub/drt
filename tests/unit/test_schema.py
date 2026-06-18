@@ -123,10 +123,14 @@ def test_mysql_maps_json_only(mock_connect: MagicMock) -> None:
 @patch("drt.destinations.mysql.MySQLDestination._connect")
 def test_mysql_dict_cursor_rows(mock_connect: MagicMock) -> None:
     """A DictCursor yields dict rows; values stay in SELECT order."""
-    mock_connect.return_value = _conn_returning(
-        [{"column_name": "data", "data_type": "json"}]
-    )
+    mock_connect.return_value = _conn_returning([{"column_name": "data", "data_type": "json"}])
     assert describe_columns(_mysql_config()) == {"data": "json"}
+
+
+@patch("drt.destinations.mysql.MySQLDestination._connect")
+def test_mysql_empty_result_returns_none(mock_connect: MagicMock) -> None:
+    mock_connect.return_value = _conn_returning([])
+    assert describe_columns(_mysql_config()) is None
 
 
 @patch("drt.destinations.mysql.MySQLDestination._connect")
@@ -136,6 +140,19 @@ def test_mysql_qualified_table_filters_by_schema(mock_connect: MagicMock) -> Non
     describe_columns(_mysql_config("appdb.events"))
     sql, params = conn.cursor.return_value.execute.call_args[0]
     assert params == ["events", "appdb"]
+
+
+@patch("drt.destinations.mysql.MySQLDestination._connect")
+def test_mysql_unqualified_table_scopes_to_current_database(mock_connect: MagicMock) -> None:
+    """Unqualified table must be scoped to DATABASE(); otherwise information_schema
+    spans every visible DB and a same-named table in another schema collides
+    (#317 review)."""
+    conn = _conn_returning([("id", "int")])
+    mock_connect.return_value = conn
+    describe_columns(_mysql_config("events"))
+    sql, params = conn.cursor.return_value.execute.call_args[0]
+    assert "table_schema = DATABASE()" in sql
+    assert params == ["events"]
 
 
 # ---------------------------------------------------------------------------

@@ -112,6 +112,12 @@ def _describe_mysql(config: MySQLDestinationConfig) -> dict[str, str] | None:
     if schema is not None:
         sql += " AND table_schema = %s"
         params.append(schema)
+    else:
+        # Unqualified: scope to the connection's current database. Without this,
+        # information_schema.columns spans every database the connection can see,
+        # so a same-named table in another schema collides and can mislabel a
+        # column's category (#317 review).
+        sql += " AND table_schema = DATABASE()"
 
     conn = MySQLDestination._connect(config)
     try:
