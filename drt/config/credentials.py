@@ -29,7 +29,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TextIO
 
 import yaml
 from pydantic import BaseModel, Field
@@ -487,6 +487,41 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
     )
 
 
+def _ensure_private_dir(dir_path: Path) -> None:
+    """Create ``dir_path`` (and parents), owner-only (0o700) on POSIX.
+
+    The chmod is best-effort and POSIX-only — NTFS ACLs differ, so it's a
+    no-op on Windows (guarded behind ``os.name``) rather than erroring.
+    """
+    dir_path.mkdir(parents=True, exist_ok=True)
+    if os.name == "posix":
+        try:
+            dir_path.chmod(0o700)
+        except OSError:
+            pass
+
+
+def _open_private(path: Path) -> TextIO:
+    """Open ``path`` for writing with owner-only (0o600) perms on POSIX.
+
+    ``~/.drt/profiles.yml`` can hold inline credentials, so it should never be
+    world-readable. ``os.open`` with ``O_CREAT`` + mode ``0o600`` means a newly
+    created file is private from the moment it exists (no umask-default
+    ``0o644`` window), and the explicit ``os.chmod`` on the descriptor also
+    tightens a *pre-existing* file that an older drt may have written
+    ``0o644``. No-op on Windows, where the call falls back to a plain text
+    write.
+    """
+    if os.name != "posix":
+        return path.open("w")
+    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    try:
+        os.chmod(fd, 0o600)  # descriptor-based: also tightens a pre-existing file
+    except OSError:
+        pass
+    return os.fdopen(fd, "w")
+
+
 def save_profile(
     profile_name: str,
     profile: ProfileConfig,
@@ -494,7 +529,7 @@ def save_profile(
 ) -> Path:
     """Append or update a profile in ~/.drt/profiles.yml."""
     dir_path = _config_dir(config_dir)
-    dir_path.mkdir(parents=True, exist_ok=True)
+    _ensure_private_dir(dir_path)
     profiles_path = dir_path / "profiles.yml"
 
     data: dict[str, Any] = {}
@@ -605,7 +640,7 @@ def save_profile(
         raise ValueError(f"Unknown profile type: {type(profile)}")
 
     profiles[profile_name] = entry
-    with profiles_path.open("w") as f:
+    with _open_private(profiles_path) as f:
         yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
 
     return profiles_path
@@ -646,8 +681,8 @@ def _rewrite_profiles(
     if observability is not None:
         out["observability"] = observability
     out["profiles"] = profiles
-    profiles_path.parent.mkdir(parents=True, exist_ok=True)
-    with profiles_path.open("w") as f:
+    _ensure_private_dir(profiles_path.parent)
+    with _open_private(profiles_path) as f:
         yaml.dump(out, f, default_flow_style=False, allow_unicode=True)
 
 
