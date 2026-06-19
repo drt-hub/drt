@@ -457,6 +457,12 @@ class SnowflakeDestinationConfig(BaseModel):
     # validation queries run against the target table.
     lookups: dict[str, LookupConfig] | None = None
 
+    # Layer 3 (#317): introspect INFORMATION_SCHEMA once per sync to wrap
+    # VARIANT/OBJECT/ARRAY columns with PARSE_JSON (so dict/list values land as
+    # proper semi-structured data, not a stringified repr). On by default; set
+    # false for roles without read access to information_schema.
+    introspect_schema: bool = True
+
     def describe(self) -> str:
         return f"{self.type} ({self.database}.{self.schema_}.{self.table})"
 

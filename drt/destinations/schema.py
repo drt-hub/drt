@@ -16,10 +16,11 @@ The JSON-serialization design space has three layers:
 locked-down ``information_schema``, or a table that doesn't exist yet on a
 first run — returns ``None`` so the caller silently keeps its prior behaviour.
 
-Implemented for Postgres and MySQL (the destinations that have a serialization
-layer). Snowflake / BigQuery / ClickHouse / Databricks defer complex-type
-encoding to their client libraries today; extending introspection to them is
-tracked as later phases of #317.
+Implemented for Postgres, MySQL, and Snowflake. For Snowflake, VARIANT / OBJECT /
+ARRAY map to the ``json`` category — semi-structured columns load via
+``PARSE_JSON``, so the destination wraps those bind sites accordingly. ClickHouse
+and BigQuery defer complex-type encoding to their client libraries (no gap today);
+extending introspection to them is tracked as later phases of #317.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from drt.config.models import (
         MySQLDestinationConfig,
         PostgresDestinationConfig,
+        SnowflakeDestinationConfig,
     )
 
 # Category vocabulary shared with the serializer.
@@ -46,13 +48,19 @@ def describe_columns(config: Any) -> dict[str, str] | None:
     its prior serialization behaviour. Never raises: a best-effort read of a
     metadata table must not break a sync.
     """
-    from drt.config.models import MySQLDestinationConfig, PostgresDestinationConfig
+    from drt.config.models import (
+        MySQLDestinationConfig,
+        PostgresDestinationConfig,
+        SnowflakeDestinationConfig,
+    )
 
     try:
         if isinstance(config, PostgresDestinationConfig):
             return _describe_postgres(config)
         if isinstance(config, MySQLDestinationConfig):
             return _describe_mysql(config)
+        if isinstance(config, SnowflakeDestinationConfig):
+            return _describe_snowflake(config)
     except Exception:
         # Locked-down information_schema, missing driver, transient connection
         # failure — degrade gracefully rather than fail the sync.
@@ -142,3 +150,38 @@ def _categorize_mysql(data_type: str | None) -> str:
     if dt == "json":
         return JSON
     return SCALAR  # MySQL has no native array type
+
+
+def _describe_snowflake(config: SnowflakeDestinationConfig) -> dict[str, str] | None:
+    from drt.destinations.snowflake import SnowflakeDestination
+
+    # Snowflake's INFORMATION_SCHEMA lives under each database. Unquoted
+    # identifiers are stored upper-cased; quoted ones keep their case — match
+    # case-insensitively so both styles resolve.
+    sql = (
+        f"SELECT column_name, data_type FROM {config.database}.information_schema.columns "
+        "WHERE UPPER(table_schema) = UPPER(%s) AND UPPER(table_name) = UPPER(%s)"
+    )
+    params: list[Any] = [config.schema_, config.table]
+
+    # _connect is an instance method on the Snowflake destination.
+    conn = SnowflakeDestination()._connect(config)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return None
+    return {str(col): _categorize_snowflake(data_type) for col, data_type in rows}
+
+
+def _categorize_snowflake(data_type: str | None) -> str:
+    # Snowflake's semi-structured types all load via PARSE_JSON, so VARIANT /
+    # OBJECT / ARRAY map to the "json" category. (Unlike Postgres, Snowflake has
+    # no driver-side typed-array adapter to pass a list through to.)
+    dt = (data_type or "").upper()
+    if dt in ("VARIANT", "OBJECT", "ARRAY"):
+        return JSON
+    return SCALAR
