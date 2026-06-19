@@ -307,6 +307,7 @@ class AirtableDestinationConfig(BaseModel):
     def _check_token(self) -> AirtableDestinationConfig:
         if not self.access_token and not self.access_token_env:
             raise ValueError("access_token or access_token_env is required.")
+        return self
 
 
 class KlaviyoDestinationConfig(BaseModel):
