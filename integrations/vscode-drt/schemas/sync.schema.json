@@ -1,0 +1,4260 @@
+{
+  "$defs": {
+    "AcceptedValuesTest": {
+      "properties": {
+        "column": {
+          "title": "Column",
+          "type": "string"
+        },
+        "values": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "column",
+        "values"
+      ],
+      "title": "AcceptedValuesTest",
+      "type": "object"
+    },
+    "AlertsConfig": {
+      "properties": {
+        "on_failure": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "slack": "#/$defs/SlackAlertConfig",
+                "webhook": "#/$defs/WebhookAlertConfig"
+              },
+              "propertyName": "type"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/SlackAlertConfig"
+              },
+              {
+                "$ref": "#/$defs/WebhookAlertConfig"
+              }
+            ]
+          },
+          "title": "On Failure",
+          "type": "array"
+        }
+      },
+      "title": "AlertsConfig",
+      "type": "object"
+    },
+    "AmplitudeDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "amplitude",
+          "title": "Type",
+          "type": "string"
+        },
+        "api_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Api Key"
+        },
+        "api_key_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "AMPLITUDE_API_KEY",
+          "title": "Api Key Env"
+        },
+        "region": {
+          "default": "default",
+          "enum": [
+            "default",
+            "eu"
+          ],
+          "title": "Region",
+          "type": "string"
+        },
+        "endpoint": {
+          "default": "identify",
+          "enum": [
+            "identify",
+            "event"
+          ],
+          "title": "Endpoint",
+          "type": "string"
+        },
+        "user_id_field": {
+          "default": "user_id",
+          "title": "User Id Field",
+          "type": "string"
+        },
+        "device_id_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Device Id Field"
+        },
+        "event_type_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event Type Field"
+        },
+        "event_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event Type"
+        },
+        "time_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Time Field"
+        },
+        "insert_id_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Insert Id Field"
+        },
+        "properties_template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Properties Template"
+        },
+        "batch_size": {
+          "default": 1000,
+          "title": "Batch Size",
+          "type": "integer"
+        },
+        "min_id_length": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Id Length"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "AmplitudeDestinationConfig",
+      "type": "object"
+    },
+    "ApiKeyAuth": {
+      "properties": {
+        "type": {
+          "const": "api_key",
+          "title": "Type",
+          "type": "string"
+        },
+        "header": {
+          "default": "X-API-Key",
+          "title": "Header",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value"
+        },
+        "value_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value Env"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "ApiKeyAuth",
+      "type": "object"
+    },
+    "AzureBlobDestinationConfig": {
+      "description": "Azure Blob destination \u2014 upload records as CSV / JSON / JSONL / Parquet.",
+      "properties": {
+        "type": {
+          "const": "azure_blob",
+          "title": "Type",
+          "type": "string"
+        },
+        "container": {
+          "title": "Container",
+          "type": "string"
+        },
+        "prefix": {
+          "default": "",
+          "title": "Prefix",
+          "type": "string"
+        },
+        "format": {
+          "default": "csv",
+          "enum": [
+            "csv",
+            "json",
+            "jsonl",
+            "parquet"
+          ],
+          "title": "Format",
+          "type": "string"
+        },
+        "compression": {
+          "default": "none",
+          "enum": [
+            "none",
+            "gzip"
+          ],
+          "title": "Compression",
+          "type": "string"
+        },
+        "parquet_compression": {
+          "default": "snappy",
+          "enum": [
+            "snappy",
+            "gzip",
+            "zstd",
+            "none"
+          ],
+          "title": "Parquet Compression",
+          "type": "string"
+        },
+        "connection_string_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Connection String Env"
+        },
+        "account_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Account Url"
+        },
+        "key_template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Key Template"
+        }
+      },
+      "required": [
+        "type",
+        "container"
+      ],
+      "title": "AzureBlobDestinationConfig",
+      "type": "object"
+    },
+    "BasicAuth": {
+      "properties": {
+        "type": {
+          "const": "basic",
+          "title": "Type",
+          "type": "string"
+        },
+        "username_env": {
+          "title": "Username Env",
+          "type": "string"
+        },
+        "password_env": {
+          "title": "Password Env",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "username_env",
+        "password_env"
+      ],
+      "title": "BasicAuth",
+      "type": "object"
+    },
+    "BearerAuth": {
+      "properties": {
+        "type": {
+          "const": "bearer",
+          "title": "Type",
+          "type": "string"
+        },
+        "token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Token"
+        },
+        "token_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Token Env"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "BearerAuth",
+      "type": "object"
+    },
+    "BigQueryDestinationConfig": {
+      "description": "BigQuery destination \u2014 write data back to BigQuery tables.\n\nAuth mirrors the BigQuery source: Application Default Credentials by\ndefault, or a service-account ``keyfile``. The principal needs\n``bigquery.tables.updateData`` on the target (plus ``bigquery.tables.create``\n/ ``bigquery.jobs.create`` for the merge-path temp table).",
+      "properties": {
+        "type": {
+          "const": "bigquery",
+          "title": "Type",
+          "type": "string"
+        },
+        "project": {
+          "title": "Project",
+          "type": "string"
+        },
+        "dataset": {
+          "title": "Dataset",
+          "type": "string"
+        },
+        "table": {
+          "title": "Table",
+          "type": "string"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Location"
+        },
+        "mode": {
+          "default": "insert",
+          "enum": [
+            "insert",
+            "merge"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "upsert_key": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Upsert Key"
+        },
+        "method": {
+          "default": "application_default",
+          "enum": [
+            "application_default",
+            "keyfile"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "keyfile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Keyfile"
+        }
+      },
+      "required": [
+        "type",
+        "project",
+        "dataset",
+        "table"
+      ],
+      "title": "BigQueryDestinationConfig",
+      "type": "object"
+    },
+    "ClickHouseDestinationConfig": {
+      "properties": {
+        "connection_string_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Connection String Env"
+        },
+        "host": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Host"
+        },
+        "host_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Host Env"
+        },
+        "port": {
+          "default": 8123,
+          "title": "Port",
+          "type": "integer"
+        },
+        "user": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "User"
+        },
+        "user_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "User Env"
+        },
+        "password": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Password"
+        },
+        "password_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Password Env"
+        },
+        "lookups": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/LookupConfig"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lookups"
+        },
+        "type": {
+          "const": "clickhouse",
+          "title": "Type",
+          "type": "string"
+        },
+        "database": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Database"
+        },
+        "database_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Database Env"
+        },
+        "table": {
+          "title": "Table",
+          "type": "string"
+        },
+        "upsert_key": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Upsert Key"
+        },
+        "secure": {
+          "default": false,
+          "title": "Secure",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "table"
+      ],
+      "title": "ClickHouseDestinationConfig",
+      "type": "object"
+    },
+    "CursorPaginationConfig": {
+      "properties": {
+        "type": {
+          "const": "cursor",
+          "title": "Type",
+          "type": "string"
+        },
+        "limit": {
+          "default": 100,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "cursor_param": {
+          "default": "cursor",
+          "title": "Cursor Param",
+          "type": "string"
+        },
+        "limit_param": {
+          "default": "limit",
+          "title": "Limit Param",
+          "type": "string"
+        },
+        "cursor_field": {
+          "title": "Cursor Field",
+          "type": "string"
+        },
+        "max_pages": {
+          "default": 100,
+          "title": "Max Pages",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "type",
+        "cursor_field"
+      ],
+      "title": "CursorPaginationConfig",
+      "type": "object"
+    },
+    "DLQConfig": {
+      "description": "Dead Letter Queue \u2014 persist per-record load failures for replay (#278).\n\nOpt-in: when ``enabled``, each record that fails during ``destination.load()``\nis written verbatim to ``.drt/dlq/<sync_name>.jsonl`` so ``drt retry <sync>``\ncan re-send just the failures. Off by default because it writes full record\npayloads to disk (a PII decision the operator makes explicitly).",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "max_records": {
+          "default": 10000,
+          "title": "Max Records",
+          "type": "integer"
+        }
+      },
+      "title": "DLQConfig",
+      "type": "object"
+    },
+    "DatabricksDestinationConfig": {
+      "description": "Databricks Delta Lake destination \u2014 write data back to Databricks tables.\n\nAuth via the Databricks SQL Connector: a SQL warehouse HTTP path\nplus a personal access token (PAT). The token-bearing user needs\nUSAGE on the catalog + schema and INSERT/MODIFY on the target\ntable.",
+      "properties": {
+        "type": {
+          "const": "databricks",
+          "title": "Type",
+          "type": "string"
+        },
+        "host_env": {
+          "title": "Host Env",
+          "type": "string"
+        },
+        "http_path_env": {
+          "title": "Http Path Env",
+          "type": "string"
+        },
+        "token_env": {
+          "title": "Token Env",
+          "type": "string"
+        },
+        "catalog": {
+          "title": "Catalog",
+          "type": "string"
+        },
+        "schema": {
+          "title": "Schema",
+          "type": "string"
+        },
+        "table": {
+          "title": "Table",
+          "type": "string"
+        },
+        "mode": {
+          "default": "insert",
+          "enum": [
+            "insert",
+            "merge"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "upsert_key": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Upsert Key"
+        }
+      },
+      "required": [
+        "type",
+        "host_env",
+        "http_path_env",
+        "token_env",
+        "catalog",
+        "schema",
+        "table"
+      ],
+      "title": "DatabricksDestinationConfig",
+      "type": "object"
+    },
+    "DiscordDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "discord",
+          "title": "Type",
+          "type": "string"
+        },
+        "webhook_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Webhook Url"
+        },
+        "webhook_url_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Webhook Url Env"
+        },
+        "message_template": {
+          "default": "{{ row }}",
+          "title": "Message Template",
+          "type": "string"
+        },
+        "embeds": {
+          "default": false,
+          "title": "Embeds",
+          "type": "boolean"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "DiscordDestinationConfig",
+      "type": "object"
+    },
+    "ElasticsearchDestinationConfig": {
+      "description": "Elasticsearch / OpenSearch destination \u2014 bulk-index records via the ``_bulk`` API.",
+      "properties": {
+        "type": {
+          "const": "elasticsearch",
+          "title": "Type",
+          "type": "string"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        },
+        "index": {
+          "title": "Index",
+          "type": "string"
+        },
+        "id_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Id Field"
+        },
+        "op_type": {
+          "default": "index",
+          "enum": [
+            "index",
+            "create"
+          ],
+          "title": "Op Type",
+          "type": "string"
+        },
+        "api_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Api Key"
+        },
+        "api_key_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Api Key Env"
+        },
+        "username_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Username Env"
+        },
+        "password_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Password Env"
+        },
+        "verify_tls": {
+          "default": true,
+          "title": "Verify Tls",
+          "type": "boolean"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type",
+        "url",
+        "index"
+      ],
+      "title": "ElasticsearchDestinationConfig",
+      "type": "object"
+    },
+    "EmailSmtpDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "email_smtp",
+          "default": "email_smtp",
+          "title": "Type",
+          "type": "string"
+        },
+        "host": {
+          "title": "Host",
+          "type": "string"
+        },
+        "port": {
+          "default": 587,
+          "title": "Port",
+          "type": "integer"
+        },
+        "sender": {
+          "title": "Sender",
+          "type": "string"
+        },
+        "recipients": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Recipients",
+          "type": "array"
+        },
+        "subject_template": {
+          "title": "Subject Template",
+          "type": "string"
+        },
+        "body_template": {
+          "title": "Body Template",
+          "type": "string"
+        },
+        "use_tls": {
+          "default": true,
+          "title": "Use Tls",
+          "type": "boolean"
+        },
+        "username": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Username"
+        },
+        "username_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Username Env"
+        },
+        "password": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Password"
+        },
+        "password_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Password Env"
+        }
+      },
+      "required": [
+        "host",
+        "sender",
+        "recipients",
+        "subject_template",
+        "body_template"
+      ],
+      "title": "EmailSmtpDestinationConfig",
+      "type": "object"
+    },
+    "FileDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "file",
+          "title": "Type",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "format": {
+          "default": "csv",
+          "enum": [
+            "csv",
+            "json",
+            "jsonl"
+          ],
+          "title": "Format",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "path"
+      ],
+      "title": "FileDestinationConfig",
+      "type": "object"
+    },
+    "FreshnessTest": {
+      "properties": {
+        "column": {
+          "title": "Column",
+          "type": "string"
+        },
+        "max_age": {
+          "title": "Max Age",
+          "type": "string"
+        }
+      },
+      "required": [
+        "column",
+        "max_age"
+      ],
+      "title": "FreshnessTest",
+      "type": "object"
+    },
+    "GCSDestinationConfig": {
+      "description": "GCS destination \u2014 upload records as CSV / JSON / JSONL / Parquet to Google Cloud Storage.",
+      "properties": {
+        "type": {
+          "const": "gcs",
+          "title": "Type",
+          "type": "string"
+        },
+        "bucket": {
+          "title": "Bucket",
+          "type": "string"
+        },
+        "prefix": {
+          "default": "",
+          "title": "Prefix",
+          "type": "string"
+        },
+        "format": {
+          "default": "csv",
+          "enum": [
+            "csv",
+            "json",
+            "jsonl",
+            "parquet"
+          ],
+          "title": "Format",
+          "type": "string"
+        },
+        "compression": {
+          "default": "none",
+          "enum": [
+            "none",
+            "gzip"
+          ],
+          "title": "Compression",
+          "type": "string"
+        },
+        "parquet_compression": {
+          "default": "snappy",
+          "enum": [
+            "snappy",
+            "gzip",
+            "zstd",
+            "none"
+          ],
+          "title": "Parquet Compression",
+          "type": "string"
+        },
+        "project_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project Id"
+        },
+        "credentials_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Credentials Path"
+        },
+        "key_template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Key Template"
+        }
+      },
+      "required": [
+        "type",
+        "bucket"
+      ],
+      "title": "GCSDestinationConfig",
+      "type": "object"
+    },
+    "GitHubActionsDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "github_actions",
+          "title": "Type",
+          "type": "string"
+        },
+        "owner": {
+          "title": "Owner",
+          "type": "string"
+        },
+        "repo": {
+          "title": "Repo",
+          "type": "string"
+        },
+        "workflow_id": {
+          "title": "Workflow Id",
+          "type": "string"
+        },
+        "ref": {
+          "default": "main",
+          "title": "Ref",
+          "type": "string"
+        },
+        "inputs_template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Inputs Template"
+        },
+        "auth": {
+          "$ref": "#/$defs/BearerAuth"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type",
+        "owner",
+        "repo",
+        "workflow_id"
+      ],
+      "title": "GitHubActionsDestinationConfig",
+      "type": "object"
+    },
+    "GoogleAdsDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "google_ads",
+          "title": "Type",
+          "type": "string"
+        },
+        "customer_id": {
+          "title": "Customer Id",
+          "type": "string"
+        },
+        "conversion_action": {
+          "title": "Conversion Action",
+          "type": "string"
+        },
+        "gclid_field": {
+          "default": "gclid",
+          "title": "Gclid Field",
+          "type": "string"
+        },
+        "conversion_time_field": {
+          "default": "conversion_time",
+          "title": "Conversion Time Field",
+          "type": "string"
+        },
+        "conversion_value_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Conversion Value Field"
+        },
+        "currency_code": {
+          "default": "USD",
+          "title": "Currency Code",
+          "type": "string"
+        },
+        "developer_token_env": {
+          "default": "GOOGLE_ADS_DEVELOPER_TOKEN",
+          "title": "Developer Token Env",
+          "type": "string"
+        },
+        "auth": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "api_key": "#/$defs/ApiKeyAuth",
+                  "basic": "#/$defs/BasicAuth",
+                  "bearer": "#/$defs/BearerAuth",
+                  "oauth2_client_credentials": "#/$defs/OAuth2ClientCredentialsAuth"
+                },
+                "propertyName": "type"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/BearerAuth"
+                },
+                {
+                  "$ref": "#/$defs/ApiKeyAuth"
+                },
+                {
+                  "$ref": "#/$defs/BasicAuth"
+                },
+                {
+                  "$ref": "#/$defs/OAuth2ClientCredentialsAuth"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Auth"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type",
+        "customer_id",
+        "conversion_action"
+      ],
+      "title": "GoogleAdsDestinationConfig",
+      "type": "object"
+    },
+    "GoogleSheetsDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "google_sheets",
+          "title": "Type",
+          "type": "string"
+        },
+        "spreadsheet_id": {
+          "title": "Spreadsheet Id",
+          "type": "string"
+        },
+        "sheet": {
+          "default": "Sheet1",
+          "title": "Sheet",
+          "type": "string"
+        },
+        "mode": {
+          "default": "overwrite",
+          "enum": [
+            "overwrite",
+            "append"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "credentials_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Credentials Path"
+        },
+        "credentials_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Credentials Env"
+        }
+      },
+      "required": [
+        "type",
+        "spreadsheet_id"
+      ],
+      "title": "GoogleSheetsDestinationConfig",
+      "type": "object"
+    },
+    "HubSpotDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "hubspot",
+          "title": "Type",
+          "type": "string"
+        },
+        "object_type": {
+          "default": "contacts",
+          "enum": [
+            "contacts",
+            "deals",
+            "companies"
+          ],
+          "title": "Object Type",
+          "type": "string"
+        },
+        "id_property": {
+          "default": "email",
+          "title": "Id Property",
+          "type": "string"
+        },
+        "properties_template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Properties Template"
+        },
+        "auth": {
+          "$ref": "#/$defs/BearerAuth"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "HubSpotDestinationConfig",
+      "type": "object"
+    },
+    "IntercomDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "intercom",
+          "title": "Type",
+          "type": "string"
+        },
+        "auth": {
+          "discriminator": {
+            "mapping": {
+              "api_key": "#/$defs/ApiKeyAuth",
+              "basic": "#/$defs/BasicAuth",
+              "bearer": "#/$defs/BearerAuth",
+              "oauth2_client_credentials": "#/$defs/OAuth2ClientCredentialsAuth"
+            },
+            "propertyName": "type"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/BearerAuth"
+            },
+            {
+              "$ref": "#/$defs/ApiKeyAuth"
+            },
+            {
+              "$ref": "#/$defs/BasicAuth"
+            },
+            {
+              "$ref": "#/$defs/OAuth2ClientCredentialsAuth"
+            }
+          ],
+          "title": "Auth"
+        },
+        "properties_template": {
+          "title": "Properties Template",
+          "type": "string"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type",
+        "auth",
+        "properties_template"
+      ],
+      "title": "IntercomDestinationConfig",
+      "type": "object"
+    },
+    "JiraDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "jira",
+          "title": "Type",
+          "type": "string"
+        },
+        "base_url_env": {
+          "title": "Base Url Env",
+          "type": "string"
+        },
+        "email_env": {
+          "title": "Email Env",
+          "type": "string"
+        },
+        "token_env": {
+          "title": "Token Env",
+          "type": "string"
+        },
+        "project_key": {
+          "title": "Project Key",
+          "type": "string"
+        },
+        "issue_type": {
+          "default": "Task",
+          "title": "Issue Type",
+          "type": "string"
+        },
+        "summary_template": {
+          "title": "Summary Template",
+          "type": "string"
+        },
+        "description_template": {
+          "title": "Description Template",
+          "type": "string"
+        },
+        "issue_id_field": {
+          "default": "issue_id",
+          "title": "Issue Id Field",
+          "type": "string"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type",
+        "base_url_env",
+        "email_env",
+        "token_env",
+        "project_key",
+        "summary_template",
+        "description_template"
+      ],
+      "title": "JiraDestinationConfig",
+      "type": "object"
+    },
+    "LinearDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "linear",
+          "title": "Type",
+          "type": "string"
+        },
+        "team_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Team Id"
+        },
+        "team_id_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Team Id Env"
+        },
+        "title_template": {
+          "title": "Title Template",
+          "type": "string"
+        },
+        "description_template": {
+          "title": "Description Template",
+          "type": "string"
+        },
+        "label_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Label Ids",
+          "type": "array"
+        },
+        "assignee_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Assignee Id"
+        },
+        "auth": {
+          "$ref": "#/$defs/BearerAuth"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type",
+        "title_template",
+        "description_template"
+      ],
+      "title": "LinearDestinationConfig",
+      "type": "object"
+    },
+    "LinkHeaderPaginationConfig": {
+      "properties": {
+        "type": {
+          "const": "link_header",
+          "title": "Type",
+          "type": "string"
+        },
+        "max_pages": {
+          "default": 100,
+          "title": "Max Pages",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "LinkHeaderPaginationConfig",
+      "type": "object"
+    },
+    "LookupConfig": {
+      "description": "Resolve a column value by querying the destination DB.\n\nUsed to resolve foreign key values when syncing related tables.\nThe destination DB is queried once per lookup to build an in-memory\nmapping, then each source row is enriched with the resolved value.\n\nExample YAML::\n\n    lookups:\n      interviewer_profile_id:\n        table: interviewer_profiles\n        match: { user_id: user_id }\n        select: id\n        on_miss: skip",
+      "properties": {
+        "table": {
+          "title": "Table",
+          "type": "string"
+        },
+        "match": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Match",
+          "type": "object"
+        },
+        "select": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Select"
+        },
+        "on_miss": {
+          "default": "skip",
+          "enum": [
+            "skip",
+            "fail",
+            "null"
+          ],
+          "title": "On Miss",
+          "type": "string"
+        },
+        "drop_match_columns": {
+          "default": true,
+          "title": "Drop Match Columns",
+          "type": "boolean"
+        },
+        "check_only": {
+          "default": false,
+          "title": "Check Only",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "table",
+        "match"
+      ],
+      "title": "LookupConfig",
+      "type": "object"
+    },
+    "MixpanelDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "mixpanel",
+          "title": "Type",
+          "type": "string"
+        },
+        "endpoint": {
+          "default": "people_set",
+          "enum": [
+            "people_set",
+            "import_events"
+          ],
+          "title": "Endpoint",
+          "type": "string"
+        },
+        "region": {
+          "default": "default",
+          "enum": [
+            "default",
+            "eu"
+          ],
+          "title": "Region",
+          "type": "string"
+        },
+        "project_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project Token"
+        },
+        "project_token_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "MIXPANEL_TOKEN",
+          "title": "Project Token Env"
+        },
+        "project_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project Id"
+        },
+        "service_account_username": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Service Account Username"
+        },
+        "service_account_username_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "MIXPANEL_SA_USERNAME",
+          "title": "Service Account Username Env"
+        },
+        "service_account_secret": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Service Account Secret"
+        },
+        "service_account_secret_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "MIXPANEL_SA_SECRET",
+          "title": "Service Account Secret Env"
+        },
+        "distinct_id_field": {
+          "default": "distinct_id",
+          "title": "Distinct Id Field",
+          "type": "string"
+        },
+        "event_name_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event Name Field"
+        },
+        "event_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event Name"
+        },
+        "time_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Time Field"
+        },
+        "insert_id_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Insert Id Field"
+        },
+        "properties_template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Properties Template"
+        },
+        "batch_size": {
+          "default": 2000,
+          "title": "Batch Size",
+          "type": "integer"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "MixpanelDestinationConfig",
+      "type": "object"
+    },
+    "MySQLDestinationConfig": {
+      "properties": {
+        "connection_string_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Connection String Env"
+        },
+        "host": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Host"
+        },
+        "host_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Host Env"
+        },
+        "port": {
+          "default": 3306,
+          "title": "Port",
+          "type": "integer"
+        },
+        "user": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "User"
+        },
+        "user_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "User Env"
+        },
+        "password": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Password"
+        },
+        "password_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Password Env"
+        },
+        "lookups": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/LookupConfig"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lookups"
+        },
+        "type": {
+          "const": "mysql",
+          "title": "Type",
+          "type": "string"
+        },
+        "dbname": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dbname"
+        },
+        "dbname_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dbname Env"
+        },
+        "table": {
+          "title": "Table",
+          "type": "string"
+        },
+        "upsert_key": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Upsert Key",
+          "type": "array"
+        },
+        "ssl": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SslConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "json_columns": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Json Columns"
+        }
+      },
+      "required": [
+        "type",
+        "table",
+        "upsert_key"
+      ],
+      "title": "MySQLDestinationConfig",
+      "type": "object"
+    },
+    "NotNullTest": {
+      "properties": {
+        "columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Columns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "columns"
+      ],
+      "title": "NotNullTest",
+      "type": "object"
+    },
+    "NotionDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "notion",
+          "title": "Type",
+          "type": "string"
+        },
+        "database_id": {
+          "title": "Database Id",
+          "type": "string"
+        },
+        "properties_template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Properties Template"
+        },
+        "auth": {
+          "$ref": "#/$defs/BearerAuth"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type",
+        "database_id"
+      ],
+      "title": "NotionDestinationConfig",
+      "type": "object"
+    },
+    "OAuth2ClientCredentialsAuth": {
+      "properties": {
+        "type": {
+          "const": "oauth2_client_credentials",
+          "title": "Type",
+          "type": "string"
+        },
+        "token_url": {
+          "title": "Token Url",
+          "type": "string"
+        },
+        "client_id_env": {
+          "title": "Client Id Env",
+          "type": "string"
+        },
+        "client_secret_env": {
+          "title": "Client Secret Env",
+          "type": "string"
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scope"
+        }
+      },
+      "required": [
+        "type",
+        "token_url",
+        "client_id_env",
+        "client_secret_env"
+      ],
+      "title": "OAuth2ClientCredentialsAuth",
+      "type": "object"
+    },
+    "OffsetPaginationConfig": {
+      "properties": {
+        "type": {
+          "const": "offset",
+          "title": "Type",
+          "type": "string"
+        },
+        "limit": {
+          "default": 100,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "offset_param": {
+          "default": "offset",
+          "title": "Offset Param",
+          "type": "string"
+        },
+        "limit_param": {
+          "default": "limit",
+          "title": "Limit Param",
+          "type": "string"
+        },
+        "max_pages": {
+          "default": 100,
+          "title": "Max Pages",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "OffsetPaginationConfig",
+      "type": "object"
+    },
+    "ParquetDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "parquet",
+          "title": "Type",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "partition_by": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Partition By"
+        },
+        "compression": {
+          "default": "snappy",
+          "enum": [
+            "snappy",
+            "gzip",
+            "zstd",
+            "none"
+          ],
+          "title": "Compression",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "path"
+      ],
+      "title": "ParquetDestinationConfig",
+      "type": "object"
+    },
+    "PostgresDestinationConfig": {
+      "properties": {
+        "connection_string_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Connection String Env"
+        },
+        "host": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Host"
+        },
+        "host_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Host Env"
+        },
+        "port": {
+          "default": 5432,
+          "title": "Port",
+          "type": "integer"
+        },
+        "user": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "User"
+        },
+        "user_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "User Env"
+        },
+        "password": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Password"
+        },
+        "password_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Password Env"
+        },
+        "lookups": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/LookupConfig"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lookups"
+        },
+        "type": {
+          "const": "postgres",
+          "title": "Type",
+          "type": "string"
+        },
+        "dbname": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dbname"
+        },
+        "dbname_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dbname Env"
+        },
+        "table": {
+          "title": "Table",
+          "type": "string"
+        },
+        "upsert_key": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Upsert Key",
+          "type": "array"
+        },
+        "ssl": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SslConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "json_columns": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Json Columns"
+        }
+      },
+      "required": [
+        "type",
+        "table",
+        "upsert_key"
+      ],
+      "title": "PostgresDestinationConfig",
+      "type": "object"
+    },
+    "RateLimitConfig": {
+      "properties": {
+        "requests_per_second": {
+          "default": 10,
+          "title": "Requests Per Second",
+          "type": "integer"
+        }
+      },
+      "title": "RateLimitConfig",
+      "type": "object"
+    },
+    "RestApiDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "rest_api",
+          "title": "Type",
+          "type": "string"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        },
+        "method": {
+          "default": "POST",
+          "enum": [
+            "GET",
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Headers",
+          "type": "object"
+        },
+        "body_template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Body Template"
+        },
+        "auth": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "api_key": "#/$defs/ApiKeyAuth",
+                  "basic": "#/$defs/BasicAuth",
+                  "bearer": "#/$defs/BearerAuth",
+                  "oauth2_client_credentials": "#/$defs/OAuth2ClientCredentialsAuth"
+                },
+                "propertyName": "type"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/BearerAuth"
+                },
+                {
+                  "$ref": "#/$defs/ApiKeyAuth"
+                },
+                {
+                  "$ref": "#/$defs/BasicAuth"
+                },
+                {
+                  "$ref": "#/$defs/OAuth2ClientCredentialsAuth"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Auth"
+        },
+        "pagination": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "cursor": "#/$defs/CursorPaginationConfig",
+                  "link_header": "#/$defs/LinkHeaderPaginationConfig",
+                  "offset": "#/$defs/OffsetPaginationConfig"
+                },
+                "propertyName": "type"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/OffsetPaginationConfig"
+                },
+                {
+                  "$ref": "#/$defs/CursorPaginationConfig"
+                },
+                {
+                  "$ref": "#/$defs/LinkHeaderPaginationConfig"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pagination"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type",
+        "url"
+      ],
+      "title": "RestApiDestinationConfig",
+      "type": "object"
+    },
+    "RetryConfig": {
+      "properties": {
+        "max_attempts": {
+          "default": 3,
+          "title": "Max Attempts",
+          "type": "integer"
+        },
+        "initial_backoff": {
+          "default": 1.0,
+          "title": "Initial Backoff",
+          "type": "number"
+        },
+        "backoff_multiplier": {
+          "default": 2.0,
+          "title": "Backoff Multiplier",
+          "type": "number"
+        },
+        "max_backoff": {
+          "default": 60.0,
+          "title": "Max Backoff",
+          "type": "number"
+        },
+        "retryable_status_codes": {
+          "default": [
+            429,
+            500,
+            502,
+            503,
+            504
+          ],
+          "items": {
+            "type": "integer"
+          },
+          "title": "Retryable Status Codes",
+          "type": "array"
+        }
+      },
+      "title": "RetryConfig",
+      "type": "object"
+    },
+    "RowCountTest": {
+      "properties": {
+        "min": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min"
+        },
+        "max": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max"
+        }
+      },
+      "title": "RowCountTest",
+      "type": "object"
+    },
+    "S3DestinationConfig": {
+      "description": "S3 destination \u2014 upload records as CSV / JSON / JSONL / Parquet to S3.",
+      "properties": {
+        "type": {
+          "const": "s3",
+          "title": "Type",
+          "type": "string"
+        },
+        "bucket": {
+          "title": "Bucket",
+          "type": "string"
+        },
+        "prefix": {
+          "default": "",
+          "title": "Prefix",
+          "type": "string"
+        },
+        "format": {
+          "default": "csv",
+          "enum": [
+            "csv",
+            "json",
+            "jsonl",
+            "parquet"
+          ],
+          "title": "Format",
+          "type": "string"
+        },
+        "compression": {
+          "default": "none",
+          "enum": [
+            "none",
+            "gzip"
+          ],
+          "title": "Compression",
+          "type": "string"
+        },
+        "parquet_compression": {
+          "default": "snappy",
+          "enum": [
+            "snappy",
+            "gzip",
+            "zstd",
+            "none"
+          ],
+          "title": "Parquet Compression",
+          "type": "string"
+        },
+        "region": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Region"
+        },
+        "aws_profile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Aws Profile"
+        },
+        "aws_access_key_id_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Aws Access Key Id Env"
+        },
+        "aws_secret_access_key_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Aws Secret Access Key Env"
+        },
+        "aws_session_token_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Aws Session Token Env"
+        },
+        "endpoint_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Endpoint Url"
+        },
+        "key_template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Key Template"
+        }
+      },
+      "required": [
+        "type",
+        "bucket"
+      ],
+      "title": "S3DestinationConfig",
+      "type": "object"
+    },
+    "SalesforceBulkDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "salesforce_bulk",
+          "title": "Type",
+          "type": "string"
+        },
+        "instance_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Instance Url"
+        },
+        "instance_url_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Instance Url Env"
+        },
+        "object_name": {
+          "title": "Object Name",
+          "type": "string"
+        },
+        "operation": {
+          "default": "upsert",
+          "enum": [
+            "insert",
+            "update",
+            "upsert",
+            "delete"
+          ],
+          "title": "Operation",
+          "type": "string"
+        },
+        "external_id_field": {
+          "default": "Id",
+          "title": "External Id Field",
+          "type": "string"
+        },
+        "poll_timeout_seconds": {
+          "default": 3600,
+          "title": "Poll Timeout Seconds",
+          "type": "integer"
+        },
+        "poll_interval_seconds": {
+          "default": 30,
+          "title": "Poll Interval Seconds",
+          "type": "integer"
+        },
+        "client_id_env": {
+          "title": "Client Id Env",
+          "type": "string"
+        },
+        "client_secret_env": {
+          "title": "Client Secret Env",
+          "type": "string"
+        },
+        "username_env": {
+          "title": "Username Env",
+          "type": "string"
+        },
+        "password_env": {
+          "title": "Password Env",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "object_name",
+        "client_id_env",
+        "client_secret_env",
+        "username_env",
+        "password_env"
+      ],
+      "title": "SalesforceBulkDestinationConfig",
+      "type": "object"
+    },
+    "SendGridDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "sendgrid",
+          "title": "Type",
+          "type": "string"
+        },
+        "from_email": {
+          "title": "From Email",
+          "type": "string"
+        },
+        "from_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "From Name"
+        },
+        "subject_template": {
+          "title": "Subject Template",
+          "type": "string"
+        },
+        "body_template": {
+          "title": "Body Template",
+          "type": "string"
+        },
+        "to_email_field": {
+          "default": "email",
+          "title": "To Email Field",
+          "type": "string"
+        },
+        "list_ids": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "List Ids"
+        },
+        "auth": {
+          "$ref": "#/$defs/BearerAuth"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type",
+        "from_email",
+        "subject_template",
+        "body_template"
+      ],
+      "title": "SendGridDestinationConfig",
+      "type": "object"
+    },
+    "SlackAlertConfig": {
+      "properties": {
+        "type": {
+          "const": "slack",
+          "title": "Type",
+          "type": "string"
+        },
+        "webhook_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Webhook Url"
+        },
+        "webhook_url_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Webhook Url Env"
+        },
+        "message": {
+          "default": "drt sync `{sync_name}` failed: {error}",
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "SlackAlertConfig",
+      "type": "object"
+    },
+    "SlackDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "slack",
+          "title": "Type",
+          "type": "string"
+        },
+        "webhook_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Webhook Url"
+        },
+        "webhook_url_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Webhook Url Env"
+        },
+        "message_template": {
+          "default": "{{ row }}",
+          "title": "Message Template",
+          "type": "string"
+        },
+        "block_kit": {
+          "default": false,
+          "title": "Block Kit",
+          "type": "boolean"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "SlackDestinationConfig",
+      "type": "object"
+    },
+    "SnowflakeDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "snowflake",
+          "title": "Type",
+          "type": "string"
+        },
+        "account_env": {
+          "title": "Account Env",
+          "type": "string"
+        },
+        "user_env": {
+          "title": "User Env",
+          "type": "string"
+        },
+        "password_env": {
+          "title": "Password Env",
+          "type": "string"
+        },
+        "database": {
+          "title": "Database",
+          "type": "string"
+        },
+        "schema": {
+          "title": "Schema",
+          "type": "string"
+        },
+        "table": {
+          "title": "Table",
+          "type": "string"
+        },
+        "warehouse": {
+          "title": "Warehouse",
+          "type": "string"
+        },
+        "mode": {
+          "default": "insert",
+          "enum": [
+            "insert",
+            "merge"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "upsert_key": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Upsert Key"
+        },
+        "lookups": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/LookupConfig"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lookups"
+        }
+      },
+      "required": [
+        "type",
+        "account_env",
+        "user_env",
+        "password_env",
+        "database",
+        "schema",
+        "table",
+        "warehouse"
+      ],
+      "title": "SnowflakeDestinationConfig",
+      "type": "object"
+    },
+    "SslConfig": {
+      "description": "SSL/TLS connection options for DB destinations.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "ca_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ca Env"
+        },
+        "cert_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cert Env"
+        },
+        "key_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Key Env"
+        }
+      },
+      "title": "SslConfig",
+      "type": "object"
+    },
+    "StagedUploadDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "staged_upload",
+          "title": "Type",
+          "type": "string"
+        },
+        "stage": {
+          "$ref": "#/$defs/StagedUploadPhaseConfig"
+        },
+        "trigger": {
+          "$ref": "#/$defs/StagedUploadPhaseConfig"
+        },
+        "poll": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StagedUploadPollConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "format": {
+          "default": "csv",
+          "enum": [
+            "csv",
+            "json",
+            "jsonl"
+          ],
+          "title": "Format",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "stage",
+        "trigger"
+      ],
+      "title": "StagedUploadDestinationConfig",
+      "type": "object"
+    },
+    "StagedUploadPhaseConfig": {
+      "properties": {
+        "url": {
+          "title": "Url",
+          "type": "string"
+        },
+        "method": {
+          "default": "POST",
+          "title": "Method",
+          "type": "string"
+        },
+        "headers": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Headers"
+        },
+        "auth": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "api_key": "#/$defs/ApiKeyAuth",
+                  "basic": "#/$defs/BasicAuth",
+                  "bearer": "#/$defs/BearerAuth",
+                  "oauth2_client_credentials": "#/$defs/OAuth2ClientCredentialsAuth"
+                },
+                "propertyName": "type"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/BearerAuth"
+                },
+                {
+                  "$ref": "#/$defs/ApiKeyAuth"
+                },
+                {
+                  "$ref": "#/$defs/BasicAuth"
+                },
+                {
+                  "$ref": "#/$defs/OAuth2ClientCredentialsAuth"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Auth"
+        },
+        "body_template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Body Template"
+        },
+        "response_extract": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response Extract"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "title": "StagedUploadPhaseConfig",
+      "type": "object"
+    },
+    "StagedUploadPollConfig": {
+      "properties": {
+        "url": {
+          "title": "Url",
+          "type": "string"
+        },
+        "method": {
+          "default": "GET",
+          "title": "Method",
+          "type": "string"
+        },
+        "headers": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Headers"
+        },
+        "auth": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "api_key": "#/$defs/ApiKeyAuth",
+                  "basic": "#/$defs/BasicAuth",
+                  "bearer": "#/$defs/BearerAuth",
+                  "oauth2_client_credentials": "#/$defs/OAuth2ClientCredentialsAuth"
+                },
+                "propertyName": "type"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/BearerAuth"
+                },
+                {
+                  "$ref": "#/$defs/ApiKeyAuth"
+                },
+                {
+                  "$ref": "#/$defs/BasicAuth"
+                },
+                {
+                  "$ref": "#/$defs/OAuth2ClientCredentialsAuth"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Auth"
+        },
+        "status_field": {
+          "default": "status",
+          "title": "Status Field",
+          "type": "string"
+        },
+        "success_values": {
+          "default": [
+            "SUCCEEDED",
+            "COMPLETED"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "title": "Success Values",
+          "type": "array"
+        },
+        "failure_values": {
+          "default": [
+            "FAILED",
+            "ERROR"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "title": "Failure Values",
+          "type": "array"
+        },
+        "interval_seconds": {
+          "default": 30,
+          "title": "Interval Seconds",
+          "type": "integer"
+        },
+        "timeout_seconds": {
+          "default": 3600,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "title": "StagedUploadPollConfig",
+      "type": "object"
+    },
+    "SyncOptions": {
+      "properties": {
+        "mode": {
+          "default": "full",
+          "enum": [
+            "full",
+            "incremental",
+            "upsert",
+            "replace",
+            "mirror"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "replace_strategy": {
+          "default": "truncate",
+          "enum": [
+            "truncate",
+            "swap"
+          ],
+          "title": "Replace Strategy",
+          "type": "string"
+        },
+        "cursor_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cursor Field"
+        },
+        "watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WatermarkConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "batch_size": {
+          "default": 100,
+          "title": "Batch Size",
+          "type": "integer"
+        },
+        "rate_limit": {
+          "$ref": "#/$defs/RateLimitConfig"
+        },
+        "retry": {
+          "$ref": "#/$defs/RetryConfig"
+        },
+        "on_error": {
+          "default": "fail",
+          "enum": [
+            "skip",
+            "fail"
+          ],
+          "title": "On Error",
+          "type": "string"
+        },
+        "field_mappings": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Field Mappings"
+        },
+        "dlq": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DLQConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "SyncOptions",
+      "type": "object"
+    },
+    "SyncTest": {
+      "properties": {
+        "row_count": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RowCountTest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "not_null": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NotNullTest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "freshness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FreshnessTest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "unique": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UniqueTest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "accepted_values": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AcceptedValuesTest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "SyncTest",
+      "type": "object"
+    },
+    "TeamsDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "teams",
+          "title": "Type",
+          "type": "string"
+        },
+        "webhook_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Webhook Url"
+        },
+        "webhook_url_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Webhook Url Env"
+        },
+        "message_template": {
+          "default": "{{ row }}",
+          "title": "Message Template",
+          "type": "string"
+        },
+        "adaptive_card": {
+          "default": false,
+          "title": "Adaptive Card",
+          "type": "boolean"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "TeamsDestinationConfig",
+      "type": "object"
+    },
+    "TwilioDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "twilio",
+          "title": "Type",
+          "type": "string"
+        },
+        "account_sid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Account Sid"
+        },
+        "account_sid_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Account Sid Env"
+        },
+        "auth_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Auth Token"
+        },
+        "auth_token_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Auth Token Env"
+        },
+        "from_number": {
+          "title": "From Number",
+          "type": "string"
+        },
+        "to_template": {
+          "title": "To Template",
+          "type": "string"
+        },
+        "message_template": {
+          "title": "Message Template",
+          "type": "string"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type",
+        "from_number",
+        "to_template",
+        "message_template"
+      ],
+      "title": "TwilioDestinationConfig",
+      "type": "object"
+    },
+    "UniqueTest": {
+      "properties": {
+        "columns": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Columns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "columns"
+      ],
+      "title": "UniqueTest",
+      "type": "object"
+    },
+    "WatermarkConfig": {
+      "description": "Configuration for remote watermark storage.",
+      "properties": {
+        "storage": {
+          "default": "local",
+          "enum": [
+            "local",
+            "gcs",
+            "bigquery"
+          ],
+          "title": "Storage",
+          "type": "string"
+        },
+        "bucket": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bucket"
+        },
+        "key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Key"
+        },
+        "project": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project"
+        },
+        "dataset": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dataset"
+        },
+        "default_value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Default Value"
+        }
+      },
+      "title": "WatermarkConfig",
+      "type": "object"
+    },
+    "WebhookAlertConfig": {
+      "properties": {
+        "type": {
+          "const": "webhook",
+          "title": "Type",
+          "type": "string"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        },
+        "url_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url Env"
+        },
+        "method": {
+          "default": "POST",
+          "enum": [
+            "POST",
+            "PUT"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Headers",
+          "type": "object"
+        },
+        "body_template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Body Template"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "WebhookAlertConfig",
+      "type": "object"
+    },
+    "ZendeskDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "zendesk",
+          "title": "Type",
+          "type": "string"
+        },
+        "subdomain": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subdomain"
+        },
+        "subdomain_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subdomain Env"
+        },
+        "email": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Email"
+        },
+        "email_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Email Env"
+        },
+        "api_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Api Token"
+        },
+        "api_token_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Api Token Env"
+        },
+        "object": {
+          "default": "user",
+          "enum": [
+            "user",
+            "organization"
+          ],
+          "title": "Object",
+          "type": "string"
+        },
+        "id_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Id Field"
+        },
+        "custom_fields_template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Custom Fields Template"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "ZendeskDestinationConfig",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "description": {
+      "default": "",
+      "title": "Description",
+      "type": "string"
+    },
+    "tags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Tags",
+      "type": "array"
+    },
+    "model": {
+      "title": "Model",
+      "type": "string"
+    },
+    "destination": {
+      "discriminator": {
+        "mapping": {
+          "amplitude": "#/$defs/AmplitudeDestinationConfig",
+          "azure_blob": "#/$defs/AzureBlobDestinationConfig",
+          "bigquery": "#/$defs/BigQueryDestinationConfig",
+          "clickhouse": "#/$defs/ClickHouseDestinationConfig",
+          "databricks": "#/$defs/DatabricksDestinationConfig",
+          "discord": "#/$defs/DiscordDestinationConfig",
+          "elasticsearch": "#/$defs/ElasticsearchDestinationConfig",
+          "email_smtp": "#/$defs/EmailSmtpDestinationConfig",
+          "file": "#/$defs/FileDestinationConfig",
+          "gcs": "#/$defs/GCSDestinationConfig",
+          "github_actions": "#/$defs/GitHubActionsDestinationConfig",
+          "google_ads": "#/$defs/GoogleAdsDestinationConfig",
+          "google_sheets": "#/$defs/GoogleSheetsDestinationConfig",
+          "hubspot": "#/$defs/HubSpotDestinationConfig",
+          "intercom": "#/$defs/IntercomDestinationConfig",
+          "jira": "#/$defs/JiraDestinationConfig",
+          "linear": "#/$defs/LinearDestinationConfig",
+          "mixpanel": "#/$defs/MixpanelDestinationConfig",
+          "mysql": "#/$defs/MySQLDestinationConfig",
+          "notion": "#/$defs/NotionDestinationConfig",
+          "parquet": "#/$defs/ParquetDestinationConfig",
+          "postgres": "#/$defs/PostgresDestinationConfig",
+          "rest_api": "#/$defs/RestApiDestinationConfig",
+          "s3": "#/$defs/S3DestinationConfig",
+          "salesforce_bulk": "#/$defs/SalesforceBulkDestinationConfig",
+          "sendgrid": "#/$defs/SendGridDestinationConfig",
+          "slack": "#/$defs/SlackDestinationConfig",
+          "snowflake": "#/$defs/SnowflakeDestinationConfig",
+          "staged_upload": "#/$defs/StagedUploadDestinationConfig",
+          "teams": "#/$defs/TeamsDestinationConfig",
+          "twilio": "#/$defs/TwilioDestinationConfig",
+          "zendesk": "#/$defs/ZendeskDestinationConfig"
+        },
+        "propertyName": "type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/RestApiDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/SlackDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/DiscordDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/GitHubActionsDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/HubSpotDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/ZendeskDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/AmplitudeDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/MixpanelDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/SendGridDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/LinearDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/GoogleSheetsDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/PostgresDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/MySQLDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/TeamsDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/JiraDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/ClickHouseDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/ParquetDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/GoogleAdsDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/FileDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/S3DestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/GCSDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/AzureBlobDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/EmailSmtpDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/NotionDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/IntercomDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/StagedUploadDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/SalesforceBulkDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/TwilioDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/SnowflakeDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/DatabricksDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/ElasticsearchDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/BigQueryDestinationConfig"
+        }
+      ],
+      "title": "Destination"
+    },
+    "sync": {
+      "$ref": "#/$defs/SyncOptions"
+    },
+    "tests": {
+      "items": {
+        "$ref": "#/$defs/SyncTest"
+      },
+      "title": "Tests",
+      "type": "array"
+    },
+    "alerts": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AlertsConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "name",
+    "model",
+    "destination"
+  ],
+  "title": "SyncConfig",
+  "type": "object",
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}
