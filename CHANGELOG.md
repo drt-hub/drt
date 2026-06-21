@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **`~/.drt/profiles.yml` is now written `0o600` (owner-only) on POSIX** (#650) — credential-adjacent files were written with the process umask (typically world-readable `0o644`). All `credentials.py` write sites (`save_profile` and the `drt profile add` / `remove` path via `_rewrite_profiles`) now create the file atomically with mode `0o600` via `os.open(..., O_CREAT, 0o600)` (no world-readable window) and `chmod` the descriptor to tighten a pre-existing `0o644` file; the `~/.drt` directory is created `0o700`. No-op on Windows (NTFS ACLs differ), guarded behind `os.name == "posix"`.
+
 ### Fixed
 
 - **`drt destinations` was missing 9 registered connectors** — `bigquery`, `databricks`, `snowflake`, `s3`, `gcs`, `azure_blob`, `elasticsearch`, `mixpanel`, and `salesforce_bulk` were registered in the connector registry but absent from the hand-maintained `DESTINATIONS` list in `drt/config/connectors.py`, so `drt destinations` / `drt destinations --detailed` / `--format json` silently listed only 23 of 32 (every cloud/DWH destination, including all six added in v0.7.9, was invisible to the CLI even though it worked in syncs). Synced both `DESTINATIONS` and the `DESTINATION_CONFIG_CLASSES` map in `drt/cli/_connector_detail.py` to the registry. **Closed the drift blind spot**: the existing parity tests only checked `DESTINATIONS ⊆ _connector_detail`, never `registry ⊆ DESTINATIONS` — new `test_DESTINATIONS_matches_registry` / `test_SOURCES_matches_registry` assert the CLI lists equal the registry exactly, failing the build at PR time (the post-merge `check_drift.sh` audit never covered this surface). `SOURCES` was already in sync.
