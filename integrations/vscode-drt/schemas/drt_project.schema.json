@@ -1,0 +1,113 @@
+{
+  "$defs": {
+    "HistoryConfig": {
+      "description": "Sync execution history retention (#276).",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "retention_days": {
+          "default": 30,
+          "title": "Retention Days",
+          "type": "integer"
+        }
+      },
+      "title": "HistoryConfig",
+      "type": "object"
+    },
+    "SourceConfig": {
+      "properties": {
+        "type": {
+          "enum": [
+            "bigquery",
+            "snowflake",
+            "postgres",
+            "duckdb",
+            "clickhouse"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "project": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project"
+        },
+        "dataset": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dataset"
+        },
+        "credentials": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Credentials"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "SourceConfig",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "version": {
+      "default": "0.1",
+      "title": "Version",
+      "type": "string"
+    },
+    "profile": {
+      "default": "default",
+      "title": "Profile",
+      "type": "string"
+    },
+    "source": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "history": {
+      "$ref": "#/$defs/HistoryConfig"
+    }
+  },
+  "required": [
+    "name"
+  ],
+  "title": "ProjectConfig",
+  "type": "object",
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

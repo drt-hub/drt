@@ -1,0 +1,57 @@
+{
+  "name": "vscode-drt",
+  "displayName": "drt \u2014 Reverse ETL",
+  "description": "YAML validation, autocomplete, and hover docs for drt sync files.",
+  "version": "0.1.0",
+  "publisher": "drt-hub",
+  "license": "Apache-2.0",
+  "icon": "icon.png",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Linters",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "drt",
+    "reverse-etl",
+    "elt",
+    "data-engineering",
+    "yaml"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/drt-hub/drt.git",
+    "directory": "integrations/vscode-drt"
+  },
+  "homepage": "https://github.com/drt-hub/drt/tree/main/integrations/vscode-drt#readme",
+  "bugs": {
+    "url": "https://github.com/drt-hub/drt/issues"
+  },
+  "extensionDependencies": [
+    "redhat.vscode-yaml"
+  ],
+  "contributes": {
+    "yamlValidation": [
+      {
+        "fileMatch": [
+          "drt_project.yml",
+          "drt_project.yaml",
+          "**/drt_project.yml",
+          "**/drt_project.yaml"
+        ],
+        "url": "./schemas/drt_project.schema.json"
+      },
+      {
+        "fileMatch": [
+          "syncs/*.yml",
+          "syncs/*.yaml",
+          "**/syncs/*.yml",
+          "**/syncs/*.yaml"
+        ],
+        "url": "./schemas/sync.schema.json"
+      }
+    ]
+  }
+}
