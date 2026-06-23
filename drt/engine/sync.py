@@ -25,6 +25,7 @@ from drt.destinations.lookup import (
 from drt.engine.field_mappings import apply_field_mappings
 from drt.engine.observer import NullObserver, SyncObserver
 from drt.engine.resolver import resolve_model_ref
+from drt.observability import build_status, get_tracer
 from drt.sources.base import Source
 from drt.state.dlq import DeadLetter
 from drt.state.history import HistoryEntry, HistoryManager
@@ -186,31 +187,56 @@ def run_sync(
     t0 = time.perf_counter()
     total_result = SyncResult()
     raised: BaseException | None = None
+    tracer = get_tracer()
 
     observer.on_sync_started(sync.name, started_at)
 
     try:
-        return _run_sync_body(
-            sync=sync,
-            source=source,
-            destination=destination,
-            profile=profile,
-            project_dir=project_dir,
-            dry_run=dry_run,
-            state_manager=state_manager,
-            watermark_storage=watermark_storage,
-            cursor_value_override=cursor_value_override,
-            stop_event=stop_event,
-            compute_diff=compute_diff,
-            diff_limit=diff_limit,
-            started_at=started_at,
-            t0=t0,
-            total_result=total_result,
-            observer=observer,
-        )
-    except BaseException as exc:
-        raised = exc
-        raise
+        # Top-level span for the whole sync. ``get_tracer()`` returns a no-op
+        # tracer when ``[otel]`` is absent or no endpoint is configured
+        # (Phase 2 contract), so this is unconditional — no ``if otel`` branch.
+        # ``record_exception``/``set_status_on_exception`` are disabled so the
+        # exception is recorded exactly once — explicitly, below — instead of a
+        # second time by the context manager's __exit__. This also makes the
+        # real-OTel and no-op paths behave identically (the no-op span's
+        # __exit__ records nothing).
+        with tracer.start_as_current_span(
+            "drt.sync.run",
+            record_exception=False,
+            set_status_on_exception=False,
+        ) as run_span:
+            run_span.set_attribute("sync.name", sync.name)
+            run_span.set_attribute("source.type", getattr(profile, "type", "unknown"))
+            run_span.set_attribute("destination.type", sync.destination.type)
+            run_span.set_attribute("sync.mode", sync.sync.mode)
+            run_span.set_attribute("batch_size", sync.sync.batch_size)
+            try:
+                result = _run_sync_body(
+                    sync=sync,
+                    source=source,
+                    destination=destination,
+                    profile=profile,
+                    project_dir=project_dir,
+                    dry_run=dry_run,
+                    state_manager=state_manager,
+                    watermark_storage=watermark_storage,
+                    cursor_value_override=cursor_value_override,
+                    stop_event=stop_event,
+                    compute_diff=compute_diff,
+                    diff_limit=diff_limit,
+                    started_at=started_at,
+                    t0=t0,
+                    total_result=total_result,
+                    observer=observer,
+                    tracer=tracer,
+                )
+            except BaseException as exc:
+                raised = exc
+                run_span.record_exception(exc)
+                run_span.set_status(build_status(ok=False, description=str(exc)))
+                raise
+            run_span.set_status(build_status(ok=True))
+            return result
     finally:
         duration_s = round(time.perf_counter() - t0, 3)
         if not dry_run and (raised is not None or total_result.failed > 0):
@@ -284,6 +310,7 @@ def _run_sync_body(
     t0: float,
     total_result: SyncResult,
     observer: SyncObserver,
+    tracer: Any,
 ) -> SyncResult:
     """Inner body of run_sync. Mutates `total_result` in place so the outer
     finally-block can read partial results when an exception propagates.
@@ -329,6 +356,9 @@ def _run_sync_body(
     is_staged = isinstance(destination, StagedDestination)
     staged_count = 0
     batches_processed = 0
+    # 0-based index of each batch handed to ``destination.load()`` — used as
+    # the ``batch_index`` attribute on the per-batch ``drt.sync.load`` span.
+    load_batch_index = 0
     # When dry_run + compute_diff, accumulate (post-lookup) records to feed
     # the diff engine after extraction completes (#413).
     dry_run_records: list[dict[str, Any]] = []
@@ -350,91 +380,115 @@ def _run_sync_body(
                 mapping = build_lookup_map(sync.destination, lk_config)
             lookup_maps[col_name] = (lk_config, mapping)
 
-    for record_batch in batch(records_iter, sync.sync.batch_size):
-        # Cooperative shutdown — break before processing this batch.
-        # Existing batches are already finalized; partial state save below
-        # stays consistent because the loop body never starts on this batch.
-        if stop_event is not None and stop_event.is_set():
-            total_result.interrupted = True
-            observer.on_interrupted(sync.name, batches_processed)
-            break
-
-        total_result.rows_extracted += len(record_batch)
-
-        # Track max cursor value seen across all batches.
-        # Stringify with tz-naive UTC normalization for tz-aware datetimes
-        # to avoid #475 (re-emit-at-boundary when user SQL is tz-naive).
-        if cursor_field:
-            for row in record_batch:
-                val = row.get(cursor_field)
-                if val is not None:
-                    str_val = _stringify_cursor_value(val)
-                    if new_cursor_value is None or _cursor_gt(str_val, new_cursor_value):
-                        new_cursor_value = str_val
-
-        # Apply destination lookups (FK resolution)
-        if lookup_maps:
-            batch_len_before = len(record_batch)
-            record_batch, lookup_errors = apply_lookups(
-                record_batch,
-                lookup_maps,
-                sync.sync.on_error,
-            )
-            total_result.row_errors.extend(lookup_errors)
-            total_result.skipped += batch_len_before - len(record_batch)
-            if not record_batch:
-                continue
-
-        # Declarative column rename (#415). Applied last — after cursor
-        # tracking and lookups (both source-side) — so the mapped names
-        # are what the destination, upsert_key, and the diff engine see.
-        # Pure transform; no observer side effects.
-        record_batch = apply_field_mappings(record_batch, sync.sync.field_mappings)
-
-        if dry_run:
-            total_result.success += len(record_batch)
-            if compute_diff:
-                dry_run_records.extend(record_batch)
-            continue
-
-        if is_staged:
-            assert isinstance(destination, StagedDestination)
-            with _stage_ctx("destination"):
-                destination.stage(record_batch, sync.destination, sync.sync)
-            staged_count += len(record_batch)
-        else:
-            assert isinstance(destination, Destination)
-            with _stage_ctx("destination"):
-                result = destination.load(record_batch, sync.destination, sync.sync)
-            total_result.success += result.success
-            total_result.failed += result.failed
-            total_result.skipped += result.skipped
-            total_result.errors.extend(result.errors)
-            total_result.row_errors.extend(getattr(result, "row_errors", []))
-
-            # Dead Letter Queue (#278): hand the engine's full failed records
-            # to the observer so a DlqObserver can persist them for `drt
-            # retry`. Pure pairing of each RowError (which carries batch_index)
-            # back to the record we sent — no I/O in the engine itself. Fired
-            # only when the destination reported pinpointed per-record errors.
-            if result.row_errors:
-                dead_letters = [
-                    DeadLetter(
-                        record=record_batch[err.batch_index],
-                        error_message=err.error_message,
-                        http_status=err.http_status,
-                        timestamp=err.timestamp,
-                    )
-                    for err in result.row_errors
-                    if 0 <= err.batch_index < len(record_batch)
-                ]
-                if dead_letters:
-                    observer.on_records_failed(sync.name, dead_letters)
-
-            if sync.sync.on_error == "fail" and result.failed > 0:
+    # Source-extraction span (child of drt.sync.run). Extraction is
+    # streamed and interleaved with loads, so this span temporally
+    # envelops the per-batch drt.sync.load spans rather than preceding
+    # them; both are direct children of drt.sync.run. start_span (not
+    # start_as_current_span) keeps it off the active context so the load
+    # spans parent to run, not to extract. The try/finally guarantees the
+    # span is ended (and rows_extracted recorded) on every exit path —
+    # clean completion, on_error=fail break, stop_event, or a raised
+    # source/destination error.
+    extract_span = tracer.start_span("drt.sync.extract")
+    try:
+        for record_batch in batch(records_iter, sync.sync.batch_size):
+            # Cooperative shutdown — break before processing this batch.
+            # Existing batches are already finalized; partial state save below
+            # stays consistent because the loop body never starts on this batch.
+            if stop_event is not None and stop_event.is_set():
+                total_result.interrupted = True
+                observer.on_interrupted(sync.name, batches_processed)
                 break
 
-        batches_processed += 1
+            total_result.rows_extracted += len(record_batch)
+
+            # Track max cursor value seen across all batches.
+            # Stringify with tz-naive UTC normalization for tz-aware datetimes
+            # to avoid #475 (re-emit-at-boundary when user SQL is tz-naive).
+            if cursor_field:
+                for row in record_batch:
+                    val = row.get(cursor_field)
+                    if val is not None:
+                        str_val = _stringify_cursor_value(val)
+                        if new_cursor_value is None or _cursor_gt(str_val, new_cursor_value):
+                            new_cursor_value = str_val
+
+            # Apply destination lookups (FK resolution)
+            if lookup_maps:
+                batch_len_before = len(record_batch)
+                record_batch, lookup_errors = apply_lookups(
+                    record_batch,
+                    lookup_maps,
+                    sync.sync.on_error,
+                )
+                total_result.row_errors.extend(lookup_errors)
+                total_result.skipped += batch_len_before - len(record_batch)
+                if not record_batch:
+                    continue
+
+            # Declarative column rename (#415). Applied last — after cursor
+            # tracking and lookups (both source-side) — so the mapped names
+            # are what the destination, upsert_key, and the diff engine see.
+            # Pure transform; no observer side effects.
+            record_batch = apply_field_mappings(record_batch, sync.sync.field_mappings)
+
+            if dry_run:
+                total_result.success += len(record_batch)
+                if compute_diff:
+                    dry_run_records.extend(record_batch)
+                continue
+
+            if is_staged:
+                assert isinstance(destination, StagedDestination)
+                with _stage_ctx("destination"):
+                    destination.stage(record_batch, sync.destination, sync.sync)
+                staged_count += len(record_batch)
+            else:
+                assert isinstance(destination, Destination)
+                # Per-batch load span (child of drt.sync.run). Only the
+                # ``destination.load()`` path is wrapped — staged destinations use
+                # stage()/finalize() and are out of scope for this span (#619).
+                with tracer.start_as_current_span("drt.sync.load") as load_span:
+                    load_span.set_attribute("batch_index", load_batch_index)
+                    load_span.set_attribute("batch_size", len(record_batch))
+                    with _stage_ctx("destination"):
+                        result = destination.load(record_batch, sync.destination, sync.sync)
+                    load_span.set_attribute("load.success", result.success)
+                    load_span.set_attribute("load.failed", result.failed)
+                    load_span.set_attribute("load.skipped", result.skipped)
+                load_batch_index += 1
+                total_result.success += result.success
+                total_result.failed += result.failed
+                total_result.skipped += result.skipped
+                total_result.errors.extend(result.errors)
+                total_result.row_errors.extend(getattr(result, "row_errors", []))
+
+                # Dead Letter Queue (#278): hand the engine's full failed records
+                # to the observer so a DlqObserver can persist them for `drt
+                # retry`. Pure pairing of each RowError (which carries batch_index)
+                # back to the record we sent — no I/O in the engine itself. Fired
+                # only when the destination reported pinpointed per-record errors.
+                if result.row_errors:
+                    dead_letters = [
+                        DeadLetter(
+                            record=record_batch[err.batch_index],
+                            error_message=err.error_message,
+                            http_status=err.http_status,
+                            timestamp=err.timestamp,
+                        )
+                        for err in result.row_errors
+                        if 0 <= err.batch_index < len(record_batch)
+                    ]
+                    if dead_letters:
+                        observer.on_records_failed(sync.name, dead_letters)
+
+                if sync.sync.on_error == "fail" and result.failed > 0:
+                    break
+
+            batches_processed += 1
+    finally:
+        extract_span.set_attribute("extract.rows_extracted", total_result.rows_extracted)
+        extract_span.end()
 
     # Finalize staged destinations (upload file, trigger job, poll).
     # finalize() is authoritative for staged success/failed counts —

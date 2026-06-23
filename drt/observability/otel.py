@@ -69,6 +69,12 @@ class _FallbackNoOpSpan:
     def set_status(self, *_args: object, **_kwargs: object) -> None:
         return None
 
+    def end(self, *_args: object, **_kwargs: object) -> None:
+        # Present so call sites can manage a non-current span's lifetime with
+        # ``tracer.start_span(...)`` + ``span.end()`` (as the engine does for
+        # the ``drt.sync.extract`` span) on the zero-cost no-op path too.
+        return None
+
 
 class _FallbackNoOpTracer:
     def start_as_current_span(self, *_args: object, **_kwargs: object) -> _FallbackNoOpSpan:
@@ -258,6 +264,27 @@ def _initialize_if_needed() -> None:
             _STATE.tracer, _STATE.meter = _load_noop_tracer_and_meter()
 
         _STATE.initialized = True
+
+
+def build_status(*, ok: bool, description: str = "") -> Any:
+    """Build an OTel ``Status`` for ``span.set_status(...)``.
+
+    Returns ``None`` when the OpenTelemetry API isn't importable — which is
+    exactly the case where :func:`get_tracer` hands back a
+    ``_FallbackNoOpTracer`` whose spans ignore ``set_status`` entirely. So the
+    ``(span, status)`` pair is always consistent: a real span receives a real
+    ``Status``; a no-op span receives ``None`` and discards it. This lets call
+    sites set status unconditionally (no ``if otel_enabled:`` branch) and keeps
+    every OpenTelemetry import inside this module.
+    """
+
+    try:
+        status_mod = importlib.import_module("opentelemetry.trace.status")
+    except ImportError:
+        return None
+
+    code = status_mod.StatusCode.OK if ok else status_mod.StatusCode.ERROR
+    return status_mod.Status(code, description or None)
 
 
 def get_tracer() -> Tracer:
