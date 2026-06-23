@@ -28,16 +28,25 @@ class _FakeSpanProcessor:
         self.exporter = exporter
 
 
+class _FakeBatchSpanProcessor:
+    def __init__(self, exporter: Any) -> None:
+        self.exporter = exporter
+
+
 class _FakeTracerProvider:
     def __init__(self, *, resource: _FakeResource) -> None:
         self.resource = resource
         self.span_processors: list[Any] = []
+        self.shutdown_calls = 0
 
     def add_span_processor(self, processor: Any) -> None:
         self.span_processors.append(processor)
 
     def get_tracer(self, scope: str) -> Any:
         return SimpleNamespace(scope=scope, provider=self)
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
 
 
 class _FakeOTLPSpanExporter:
@@ -56,9 +65,13 @@ class _FakeMeterProvider:
     def __init__(self, *, resource: _FakeResource, metric_readers: list[Any]) -> None:
         self.resource = resource
         self.metric_readers = metric_readers
+        self.shutdown_calls = 0
 
     def get_meter(self, scope: str) -> Any:
         return SimpleNamespace(scope=scope, provider=self)
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
 
 
 class _FakeOTLPMetricExporter:
@@ -157,6 +170,7 @@ def test_get_tracer_initializes_real_provider_and_expands_headers(
             ),
             "opentelemetry.sdk.trace.export": SimpleNamespace(
                 SimpleSpanProcessor=_FakeSpanProcessor,
+                BatchSpanProcessor=_FakeBatchSpanProcessor,
             ),
             "opentelemetry.exporter.otlp.proto.grpc.trace_exporter": SimpleNamespace(
                 OTLPSpanExporter=_FakeOTLPSpanExporter,
@@ -212,6 +226,7 @@ def test_get_tracer_uses_env_fallback_when_observability_block_missing(
             ),
             "opentelemetry.sdk.trace.export": SimpleNamespace(
                 SimpleSpanProcessor=_FakeSpanProcessor,
+                BatchSpanProcessor=_FakeBatchSpanProcessor,
             ),
             "opentelemetry.exporter.otlp.proto.grpc.trace_exporter": SimpleNamespace(
                 OTLPSpanExporter=_FakeOTLPSpanExporter,
@@ -267,6 +282,7 @@ def test_get_tracer_falls_back_when_exporter_init_fails(
             ),
             "opentelemetry.sdk.trace.export": SimpleNamespace(
                 SimpleSpanProcessor=_FakeSpanProcessor,
+                BatchSpanProcessor=_FakeBatchSpanProcessor,
             ),
             "opentelemetry.exporter.otlp.proto.grpc.trace_exporter": SimpleNamespace(
                 OTLPSpanExporter=BrokenSpanExporter,
@@ -377,3 +393,122 @@ def test_fallback_noop_meter_creates_instruments() -> None:
     assert isinstance(meter.create_up_down_counter("ud"), otel._FallbackNoOpInstrument)
     assert isinstance(meter.create_histogram("h"), otel._FallbackNoOpInstrument)
     assert isinstance(meter.create_gauge("g"), otel._FallbackNoOpInstrument)
+
+def _build_fake_import(
+    trace_api: Any,
+    metrics_api: Any,
+    fake_resource_mod: Any,
+) -> Any:
+    """Shared fake importlib.import_module for the BatchSpanProcessor tests (#658)."""
+
+    def fake_import(name: str) -> Any:
+        mapping = {
+            "opentelemetry.trace": trace_api,
+            "opentelemetry.metrics": metrics_api,
+            "opentelemetry.sdk.resources": fake_resource_mod,
+            "opentelemetry.sdk.trace": SimpleNamespace(TracerProvider=_FakeTracerProvider),
+            "opentelemetry.sdk.trace.export": SimpleNamespace(
+                SimpleSpanProcessor=_FakeSpanProcessor,
+                BatchSpanProcessor=_FakeBatchSpanProcessor,
+            ),
+            "opentelemetry.exporter.otlp.proto.grpc.trace_exporter": SimpleNamespace(
+                OTLPSpanExporter=_FakeOTLPSpanExporter,
+            ),
+            "opentelemetry.sdk.metrics": SimpleNamespace(MeterProvider=_FakeMeterProvider),
+            "opentelemetry.sdk.metrics.export": SimpleNamespace(
+                PeriodicExportingMetricReader=_FakeMetricReader,
+            ),
+            "opentelemetry.exporter.otlp.proto.grpc.metric_exporter": SimpleNamespace(
+                OTLPMetricExporter=_FakeOTLPMetricExporter,
+            ),
+        }
+        return mapping[name]
+
+    return fake_import
+
+
+def test_default_uses_batch_span_processor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With an endpoint configured and no span_processor override, the tracer uses
+    BatchSpanProcessor (off-critical-path export), not the blocking SimpleSpanProcessor."""
+    monkeypatch.setattr(
+        otel,
+        "_load_observability_block",
+        lambda _config_dir=None: {"otel": {"endpoint": "localhost:4317"}},
+    )
+    monkeypatch.setattr(
+        otel.importlib,
+        "import_module",
+        _build_fake_import(_FakeTraceApi(), _FakeMetricsApi(), _FakeResourceModule()),
+    )
+
+    tracer = otel.get_tracer()
+
+    processor = tracer.provider.span_processors[0]
+    assert isinstance(processor, _FakeBatchSpanProcessor)
+    assert not isinstance(processor, _FakeSpanProcessor)
+    assert processor.exporter.endpoint == "localhost:4317"
+
+
+def test_simple_span_processor_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """span_processor: simple restores synchronous SimpleSpanProcessor for local debugging."""
+    monkeypatch.setattr(
+        otel,
+        "_load_observability_block",
+        lambda _config_dir=None: {
+            "otel": {"endpoint": "localhost:4317", "span_processor": "simple"}
+        },
+    )
+    monkeypatch.setattr(
+        otel.importlib,
+        "import_module",
+        _build_fake_import(_FakeTraceApi(), _FakeMetricsApi(), _FakeResourceModule()),
+    )
+
+    tracer = otel.get_tracer()
+
+    processor = tracer.provider.span_processors[0]
+    assert isinstance(processor, _FakeSpanProcessor)
+    assert not isinstance(processor, _FakeBatchSpanProcessor)
+
+
+def test_shutdown_telemetry_flushes_providers_and_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """shutdown_telemetry() shuts down both providers once; a second call is a no-op."""
+    monkeypatch.setattr(
+        otel,
+        "_load_observability_block",
+        lambda _config_dir=None: {"otel": {"endpoint": "localhost:4317"}},
+    )
+    monkeypatch.setattr(
+        otel.importlib,
+        "import_module",
+        _build_fake_import(_FakeTraceApi(), _FakeMetricsApi(), _FakeResourceModule()),
+    )
+
+    otel.get_tracer()
+    trace_provider = otel._STATE.trace_provider
+    meter_provider = otel._STATE.meter_provider
+    assert trace_provider is not None and meter_provider is not None
+
+    otel.shutdown_telemetry()
+    assert trace_provider.shutdown_calls == 1
+    assert meter_provider.shutdown_calls == 1
+    assert otel._STATE.trace_provider is None
+    assert otel._STATE.meter_provider is None
+
+    # Second call must not shut down again (idempotent).
+    otel.shutdown_telemetry()
+    assert trace_provider.shutdown_calls == 1
+    assert meter_provider.shutdown_calls == 1
+
+
+def test_shutdown_telemetry_noop_when_otel_inactive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """shutdown_telemetry() is a safe no-op when OTel was never activated (no endpoint)."""
+    monkeypatch.setattr(otel, "_load_observability_block", lambda _config_dir=None: None)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+
+    otel.get_tracer()  # no-op path
+    assert otel._STATE.trace_provider is None
+
+    otel.shutdown_telemetry()  # must not raise

@@ -7,6 +7,7 @@ return no-op objects and never raise.
 
 from __future__ import annotations
 
+import atexit
 import importlib
 import logging
 import os
@@ -39,6 +40,11 @@ class _ProviderState:
     tracer: Tracer | None = None
     meter: Meter | None = None
     warned: bool = False
+    # Real SDK providers are retained so shutdown_telemetry() can flush buffered
+    # spans/metrics on exit (required once export is batched). None on the no-op
+    # path, so shutdown is a guaranteed no-op when OTel isn't active.
+    trace_provider: Any = None
+    meter_provider: Any = None
 
 
 _STATE = _ProviderState()
@@ -140,18 +146,19 @@ def _parse_otlp_headers_env(raw: str | None) -> dict[str, str]:
 
 def _resolve_otel_settings(
     observability_raw: dict[str, Any] | None,
-) -> tuple[str | None, str, dict[str, str]]:
+) -> tuple[str | None, str, dict[str, str], str]:
     if observability_raw is not None:
         config = ObservabilityConfig.model_validate(observability_raw)
         return (
             config.otel.endpoint,
             config.otel.service_name or _DEFAULT_SERVICE_NAME,
             dict(config.otel.headers),
+            config.otel.span_processor,
         )
 
     endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
     headers = _parse_otlp_headers_env(os.environ.get("OTEL_EXPORTER_OTLP_HEADERS"))
-    return endpoint, _DEFAULT_SERVICE_NAME, headers
+    return endpoint, _DEFAULT_SERVICE_NAME, headers, "batch"
 
 
 def _expand_headers(headers: dict[str, str]) -> dict[str, str]:
@@ -205,7 +212,9 @@ def _initialize_if_needed() -> None:
             return
 
         observability_raw = _load_observability_block()
-        endpoint, service_name, headers = _resolve_otel_settings(observability_raw)
+        endpoint, service_name, headers, span_processor = _resolve_otel_settings(
+            observability_raw
+        )
         if not endpoint:
             _STATE.tracer, _STATE.meter = _load_noop_tracer_and_meter()
             _STATE.initialized = True
@@ -236,9 +245,15 @@ def _initialize_if_needed() -> None:
                 insecure=insecure,
             )
             trace_provider = trace_sdk.TracerProvider(resource=resource)
-            trace_provider.add_span_processor(
-                trace_export_mod.SimpleSpanProcessor(tracer_exporter)
-            )
+            # BatchSpanProcessor (default) exports on a background thread, off
+            # the sync's critical path — so per-batch spans (#619) don't block
+            # the run thread on a synchronous gRPC export per span. "simple"
+            # restores synchronous export for local debugging (#658).
+            if span_processor == "simple":
+                processor = trace_export_mod.SimpleSpanProcessor(tracer_exporter)
+            else:
+                processor = trace_export_mod.BatchSpanProcessor(tracer_exporter)
+            trace_provider.add_span_processor(processor)
 
             metric_exporter = metric_exporter_mod.OTLPMetricExporter(
                 endpoint=endpoint,
@@ -256,6 +271,15 @@ def _initialize_if_needed() -> None:
 
             _STATE.tracer = trace_api.get_tracer(_TRACER_SCOPE)
             _STATE.meter = metrics_api.get_meter(_METER_SCOPE)
+            # Retain providers and flush on exit. With batched export, buffered
+            # spans would otherwise be lost when a short-lived `drt run` process
+            # exits before the exporter drains. atexit fires on normal completion
+            # and on the #279 graceful-shutdown path (which exits cleanly after
+            # finishing the current batch); only the 30s watchdog os._exit skips
+            # it, which is an intentional hard-kill.
+            _STATE.trace_provider = trace_provider
+            _STATE.meter_provider = meter_provider
+            atexit.register(shutdown_telemetry)
         except ImportError:
             _warn_once("OTEL extras are unavailable; falling back to no-op tracing.")
             _STATE.tracer, _STATE.meter = _load_noop_tracer_and_meter()
@@ -264,6 +288,30 @@ def _initialize_if_needed() -> None:
             _STATE.tracer, _STATE.meter = _load_noop_tracer_and_meter()
 
         _STATE.initialized = True
+
+
+def shutdown_telemetry() -> None:
+    """Flush and shut down the OTel providers so buffered spans and metrics are
+    exported before the process exits.
+
+    Registered via ``atexit`` at provider init, and safe to call directly. It is
+    idempotent and a guaranteed no-op when OTel is not active (no endpoint, extras
+    missing, or exporter init failed) — in those cases the providers are ``None``.
+    """
+    trace_provider = _STATE.trace_provider
+    meter_provider = _STATE.meter_provider
+    # Clear first so a second call (atexit + an explicit call) is a no-op.
+    _STATE.trace_provider = None
+    _STATE.meter_provider = None
+    for provider in (trace_provider, meter_provider):
+        if provider is None:
+            continue
+        try:
+            # TracerProvider.shutdown() / MeterProvider.shutdown() force-flush
+            # their processors/readers before stopping the background worker.
+            provider.shutdown()
+        except Exception:
+            logger.debug("OTel provider shutdown failed", exc_info=True)
 
 
 def build_status(*, ok: bool, description: str = "") -> Any:
