@@ -46,6 +46,7 @@ SOURCE_CONFIG_CLASSES: dict[str, type] = {
 
 
 DESTINATION_CONFIG_CLASSES: dict[str, type[BaseModel]] = {
+    "airtable": _models.AirtableDestinationConfig,
     "amplitude": _models.AmplitudeDestinationConfig,
     "azure_blob": _models.AzureBlobDestinationConfig,
     "bigquery": _models.BigQueryDestinationConfig,

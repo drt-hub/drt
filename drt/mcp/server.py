@@ -410,6 +410,7 @@ def create_server(project_dir: Path | None = None) -> Any:
                 {"name": "Linear", "type": "linear", "install": "(core)"},
                 {"name": "SendGrid", "type": "sendgrid", "install": "(core)"},
                 {"name": "Notion", "type": "notion", "install": "(core)"},
+                {"name": "Airtable", "type": "airtable", "install": "(core)"},
                 {"name": "Twilio SMS", "type": "twilio", "install": "(core)"},
                 {"name": "Intercom", "type": "intercom", "install": "(core)"},
                 {"name": "Email SMTP", "type": "email_smtp", "install": "(core)"},

@@ -6,6 +6,7 @@ import inspect
 
 import pytest
 
+from drt.destinations.airtable import AirtableDestination
 from drt.destinations.base import ConnectionTestable, Destination, SyncResult
 from drt.destinations.clickhouse import ClickHouseDestination
 from drt.destinations.discord import DiscordDestination
@@ -24,6 +25,7 @@ from drt.destinations.teams import TeamsDestination
 from drt.destinations.zendesk import ZendeskDestination
 
 ALL_DESTINATIONS = [
+    AirtableDestination,
     ClickHouseDestination,
     DiscordDestination,
     FileDestination,
@@ -41,6 +43,7 @@ ALL_DESTINATIONS = [
 ]
 
 CONNECTION_TESTABLE_DESTINATIONS = [
+    AirtableDestination,  # first non-SQL ConnectionTestable
     ClickHouseDestination,
     MySQLDestination,
     PostgresDestination,
@@ -81,7 +84,7 @@ def test_load_return_annotation(cls: type) -> None:
 
 
 @pytest.mark.parametrize("cls", CONNECTION_TESTABLE_DESTINATIONS, ids=lambda c: c.__name__)
-def test_sql_destinations_implement_connection_testable(cls: type) -> None:
+def test_connection_testable_destinations_implement_protocol(cls: type) -> None:
     assert isinstance(cls(), ConnectionTestable)
 
 

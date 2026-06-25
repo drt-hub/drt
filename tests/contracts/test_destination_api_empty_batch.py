@@ -46,6 +46,7 @@ from typing import Any
 import pytest
 
 from drt.config.models import (
+    AirtableDestinationConfig,
     AmplitudeDestinationConfig,
     BearerAuth,
     ElasticsearchDestinationConfig,
@@ -63,6 +64,7 @@ from drt.config.models import (
     TwilioDestinationConfig,
     ZendeskDestinationConfig,
 )
+from drt.destinations.airtable import AirtableDestination
 from drt.destinations.amplitude import AmplitudeDestination
 from drt.destinations.base import Destination, SyncResult
 from drt.destinations.elasticsearch import ElasticsearchDestination
@@ -88,6 +90,17 @@ def _bearer(token: str = "dummy-token") -> BearerAuth:
 # destinations that resolve credentials at load-time find a value to
 # read (even though no request ever leaves the process).
 API_DESTINATIONS: list[Any] = [
+    pytest.param(
+        AirtableDestination,
+        lambda: AirtableDestinationConfig(
+            type="airtable",
+            base_id="appXXXXXXXXXXXXXX",
+            table_name="Contacts",
+            access_token_env="AIRTABLE_TOKEN_TEST",
+        ),
+        {"AIRTABLE_TOKEN_TEST": "dummy"},
+        id="airtable",
+    ),
     pytest.param(
         HubSpotDestination,
         lambda: HubSpotDestinationConfig(

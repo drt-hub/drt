@@ -302,6 +302,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | Linear                  | ✅ v0.5   | (core)                             | API Key (env var)                 |
 | SendGrid                | ✅ v0.5   | (core)                             | API Key (env var)                 |
 | Notion                  | ✅ v0.6   | (core)                             | Bearer Token (env var)            |
+| Airtable                | ✅ v0.8   | (core)                             | Personal Access Token (env var)   |
 | Twilio SMS              | ✅ v0.6   | (core)                             | Basic (Account SID + Auth Token)  |
 | Intercom                | ✅ v0.6   | (core)                             | Bearer Token (env var)            |
 | Email SMTP              | ✅ v0.6   | (core)                             | Username / Password (env var)     |

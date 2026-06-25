@@ -275,6 +275,7 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | Linear | ✅ v0.5 | (core) | API Key（環境変数） |
 | SendGrid | ✅ v0.5 | (core) | API Key（環境変数） |
 | Notion | ✅ v0.6 | (core) | Bearer Token（環境変数） |
+| Airtable | ✅ v0.8 | (core) | Personal Access Token（環境変数） |
 | Twilio SMS | ✅ v0.6 | (core) | Basic（Account SID + Auth Token） |
 | Intercom | ✅ v0.6 | (core) | Bearer Token（環境変数） |
 | Email SMTP | ✅ v0.6 | (core) | ユーザー名/パスワード（環境変数） |
