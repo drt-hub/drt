@@ -45,6 +45,7 @@ def _serialize_value(
     value: Any,
     column: str | None = None,
     json_columns: list[str] | None = None,
+    schema: dict[str, str] | None = None,
 ) -> Any:
     """Serialize dict/list values to JSON strings for pymysql.
 
@@ -68,6 +69,7 @@ def _serialize_value(
         json_columns,
         dict_encoder=_mysql_json_encoder,
         list_encoder=_mysql_json_encoder,  # MySQL encodes both dicts and lists
+        schema=schema,
     )
 
 
@@ -87,6 +89,22 @@ class MySQLDestination:
         # records); finalize_sync treats that as "skip DELETE" — safety
         # against deleting everything when the source produced no data.
         self._mirror_keys: list[tuple[Any, ...]] | None = None
+        # Layer 3 (#317): INFORMATION_SCHEMA map, fetched once per table per sync.
+        self._schema_cache: dict[str, dict[str, str] | None] = {}
+
+    def _resolve_schema(self, config: MySQLDestinationConfig) -> dict[str, str] | None:
+        """Column → type-category map for the target table, cached per sync.
+
+        Returns ``None`` (Layer 3 inactive) when ``introspect_schema`` is off,
+        ``json_columns`` is set (Layer 2 wins), or introspection isn't available.
+        """
+        if not config.introspect_schema or config.json_columns is not None:
+            return None
+        if config.table not in self._schema_cache:
+            from drt.destinations.schema import describe_columns
+
+            self._schema_cache[config.table] = describe_columns(config)
+        return self._schema_cache[config.table]
 
     def load(
         self,
@@ -222,10 +240,14 @@ class MySQLDestination:
             self._replace_truncated = True
 
         sql = self._build_insert_sql(table, columns)
+        schema_map = self._resolve_schema(config)
 
         for i, record in enumerate(records):
             try:
-                values = [_serialize_value(record.get(c), c, config.json_columns) for c in columns]
+                values = [
+                    _serialize_value(record.get(c), c, config.json_columns, schema_map)
+                    for c in columns
+                ]
                 cur.execute(sql, values)
                 result.success += 1
             except Exception as e:
@@ -273,10 +295,14 @@ class MySQLDestination:
             self._swap_table = table
 
         sql = self._build_insert_sql(shadow, columns)
+        schema_map = self._resolve_schema(config)
 
         for i, record in enumerate(records):
             try:
-                values = [_serialize_value(record.get(c), c, config.json_columns) for c in columns]
+                values = [
+                    _serialize_value(record.get(c), c, config.json_columns, schema_map)
+                    for c in columns
+                ]
                 cur.execute(sql, values)
                 result.success += 1
             except Exception as e:
@@ -415,8 +441,8 @@ class MySQLDestination:
         # ran successfully" to the engine without inflating success/failed.
         return SyncResult()
 
-    @staticmethod
     def _load_upsert(
+        self,
         conn: Any,
         cur: Any,
         records: list[dict[str, Any]],
@@ -427,10 +453,14 @@ class MySQLDestination:
         result = SyncResult()
         update_cols = [c for c in columns if c not in config.upsert_key]
         sql = MySQLDestination._build_upsert_sql(config.table, columns, update_cols)
+        schema_map = self._resolve_schema(config)
 
         for i, record in enumerate(records):
             try:
-                values = [_serialize_value(record.get(c), c, config.json_columns) for c in columns]
+                values = [
+                    _serialize_value(record.get(c), c, config.json_columns, schema_map)
+                    for c in columns
+                ]
                 cur.execute(sql, values)
                 result.success += 1
             except Exception as e:

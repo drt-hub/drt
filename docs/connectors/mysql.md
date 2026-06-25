@@ -65,7 +65,11 @@ table: user_skills
 upsert_key: [user_id, skill_id]
 ```
 
-The MySQL connector serialises `dict` / `list` values to JSON strings via the shared `_serializer` module (consolidated in v0.7.5 alongside Postgres) — both encode through `json.dumps`. Use `json_columns` to allowlist which columns are expected to carry JSON and surface errors early when unlisted complex values appear:
+The MySQL connector serialises `dict` / `list` values to JSON strings via the shared `_serializer` module (consolidated in v0.7.5 alongside Postgres) — both encode through `json.dumps`.
+
+**Schema-aware by default (`introspect_schema: true`).** At sync start drt reads `INFORMATION_SCHEMA.COLUMNS` for the target table once and routes each value by the column's real type — so a `dict`/`list` lands as JSON in a `JSON` column with **no configuration**. Introspection is best-effort: if `information_schema` isn't readable (locked-down grants) or the table doesn't exist yet, drt silently falls back to encoding every complex value. Set `introspect_schema: false` to disable it.
+
+Use `json_columns` to **override** introspection with an explicit allowlist — it always takes priority and surfaces an early error when an unlisted column carries a complex value:
 
 ```yaml
 json_columns: [preferences, metadata]

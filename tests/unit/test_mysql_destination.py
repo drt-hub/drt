@@ -31,6 +31,10 @@ def _config(**overrides: Any) -> MySQLDestinationConfig:
         "password": "testpass",
         "table": "learning_profiles",
         "upsert_key": ["user_id", "company_id"],
+        # These tests assert exact driver call ordering; Layer-3 introspection
+        # (#317) would add an INFORMATION_SCHEMA round-trip. It has its own
+        # tests — keep it off here. Pass introspect_schema=True to opt in.
+        "introspect_schema": False,
     }
     defaults.update(overrides)
     return MySQLDestinationConfig(**defaults)

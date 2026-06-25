@@ -661,6 +661,11 @@ class BaseSqlDestinationConfig(BaseModel):
     password: str | None = None
     password_env: str | None = None
     lookups: dict[str, LookupConfig] | None = None
+    # Layer 3 (#317): introspect INFORMATION_SCHEMA once per sync to route
+    # dict/list values by the column's real type (no json_columns needed).
+    # On by default; set false for locked-down environments without read
+    # access to information_schema. Explicit json_columns always takes priority.
+    introspect_schema: bool = True
 
 
 class PostgresDestinationConfig(BaseSqlDestinationConfig):

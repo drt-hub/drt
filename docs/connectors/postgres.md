@@ -130,6 +130,24 @@ lookups:
     on_miss: skip
 ```
 
+## Complex types (JSON / JSONB / arrays)
+
+`dict` and `list` values need different wire formats depending on the destination column: a `JSONB` column wants JSON, a native `ARRAY` column wants the list handed to the driver's array adapter. A bare Python `list` is ambiguous — it could mean either.
+
+**Schema-aware by default (`introspect_schema: true`).** At sync start drt reads `INFORMATION_SCHEMA.COLUMNS` for the target table once and routes each value by the column's real type:
+
+- `json` / `jsonb` column → the dict **or list** is JSON-encoded (via `psycopg2.extras.Json`),
+- `ARRAY` column → the list passes through to psycopg2's array adapter,
+- anything else → unchanged.
+
+This resolves the list→JSONB-vs-ARRAY ambiguity with **no configuration**. Introspection is best-effort: if `information_schema` isn't readable or the table doesn't exist yet, drt falls back to its prior behaviour (encode dicts, pass lists through). Disable with `introspect_schema: false`.
+
+`json_columns` is an explicit **override** that always wins over introspection — list the columns allowed to hold JSON and unlisted complex values raise an early, pointing error:
+
+```yaml
+json_columns: [profile, preferences]
+```
+
 ## Notes
 
 - Requires `pip install drt-core[postgres]` (uses `psycopg2`)

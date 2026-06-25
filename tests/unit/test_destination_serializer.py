@@ -196,3 +196,98 @@ def test_error_message_names_column_value_type_and_allowlist() -> None:
     assert "json_columns=['a', 'b']" in msg
     # Concrete remediation
     assert "Add 'profile' to json_columns" in msg
+
+
+# ---------------------------------------------------------------------------
+# Layer 3 (#317) — schema-driven dispatch when json_columns is None
+# ---------------------------------------------------------------------------
+
+
+def test_schema_json_column_encodes_dict() -> None:
+    out = serialize_complex_value(
+        {"k": "v"},
+        column="profile",
+        json_columns=None,
+        dict_encoder=_tag_encoder,
+        list_encoder=None,
+        schema={"profile": "json"},
+    )
+    assert out == ("encoded", {"k": "v"})
+
+
+def test_schema_json_column_encodes_list_postgres_style() -> None:
+    """THE key fix: a list bound for a JSONB column is JSON-encoded, not passed
+    through to the ARRAY adapter — even with a Postgres-style list_encoder=None."""
+    out = serialize_complex_value(
+        [1, 2, 3],
+        column="payload",
+        json_columns=None,
+        dict_encoder=_tag_encoder,  # used as the JSON encoder for lists too
+        list_encoder=None,
+        schema={"payload": "json"},
+    )
+    assert out == ("encoded", [1, 2, 3])
+
+
+def test_schema_array_column_passes_list_through() -> None:
+    """A native ARRAY column → hand the list to the driver's adapter."""
+    out = serialize_complex_value(
+        [1, 2, 3],
+        column="tags",
+        json_columns=None,
+        dict_encoder=_tag_encoder,
+        list_encoder=None,
+        schema={"tags": "array"},
+    )
+    assert out == [1, 2, 3]
+
+
+def test_schema_scalar_column_falls_back_to_backcompat() -> None:
+    """A scalar/unknown category isn't special-cased — back-compat encode applies."""
+    out = serialize_complex_value(
+        {"k": "v"},
+        column="note",
+        json_columns=None,
+        dict_encoder=_tag_encoder,
+        schema={"note": "scalar"},
+    )
+    assert out == ("encoded", {"k": "v"})
+
+
+def test_schema_column_absent_falls_back_to_backcompat() -> None:
+    """Column not present in the introspected map → back-compat path."""
+    out = serialize_complex_value(
+        [1, 2, 3],
+        column="mystery",
+        json_columns=None,
+        dict_encoder=_json_encoder,
+        list_encoder=_json_encoder,
+        schema={"other": "json"},
+    )
+    assert out == "[1, 2, 3]"
+
+
+def test_explicit_json_columns_wins_over_schema() -> None:
+    """Layer 2 precedence: an explicit json_columns allowlist overrides the
+    schema — an unlisted column still raises even if the schema says json."""
+    with pytest.raises(ValueError, match="not listed in json_columns"):
+        serialize_complex_value(
+            {"k": "v"},
+            column="profile",
+            json_columns=["other"],
+            dict_encoder=_tag_encoder,
+            schema={"profile": "json"},
+        )
+
+
+def test_schema_none_is_identical_to_backcompat() -> None:
+    """schema=None must behave exactly as before Layer 3 existed."""
+    out = serialize_complex_value(
+        [1, 2, 3],
+        column="tags",
+        json_columns=None,
+        dict_encoder=_tag_encoder,
+        list_encoder=None,
+        schema=None,
+    )
+    assert out == [1, 2, 3]  # postgres-style pass-through, unchanged
