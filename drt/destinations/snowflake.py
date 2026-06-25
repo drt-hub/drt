@@ -24,6 +24,7 @@ Install: snowflake-connector-python.
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 from typing import Any
 
@@ -33,6 +34,44 @@ from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 
 _SWAP_SUFFIX = "__drt_swap"
+
+
+def _value_clause(columns: list[str], schema_map: dict[str, str] | None) -> tuple[str, list[str]]:
+    """Build the per-row value clause for an INSERT and the JSON column list.
+
+    Layer 3 (#317): VARIANT / OBJECT / ARRAY columns (category ``json``) must be
+    loaded via ``PARSE_JSON``. Snowflake **disallows functions in a ``VALUES``
+    clause**, so when any column needs wrapping we switch to the ``SELECT`` form
+    (``INSERT INTO t (cols) SELECT %s, PARSE_JSON(%s)``). With no JSON columns
+    the clause is the unchanged ``VALUES (%s, %s, ...)`` — byte-identical to
+    pre-#317 behaviour.
+
+    Returns ``(clause, json_columns)`` where ``clause`` already includes the
+    ``VALUES (...)`` / ``SELECT ...`` keyword.
+    """
+    exprs: list[str] = []
+    json_columns: list[str] = []
+    # Snowflake's INFORMATION_SCHEMA returns column names in their stored case
+    # (UPPERCASE for unquoted DDL) while source record keys are usually
+    # lowercase — fold both sides so PARSE_JSON wrapping actually fires for the
+    # common unquoted-table + lowercase-key pipeline (#317 review).
+    folded = {str(k).lower(): v for k, v in schema_map.items()} if schema_map is not None else None
+    for col in columns:
+        if folded is not None and folded.get(str(col).lower()) == "json":
+            exprs.append("PARSE_JSON(%s)")
+            json_columns.append(col)
+        else:
+            exprs.append("%s")
+    if json_columns:
+        return "SELECT " + ", ".join(exprs), json_columns
+    return "VALUES (" + ", ".join(exprs) + ")", json_columns
+
+
+def _bind_row(row: dict[str, Any], columns: list[str], json_columns: list[str]) -> list[Any]:
+    """Order a row's values to ``columns``; ``json.dumps`` the JSON columns so
+    ``PARSE_JSON`` receives a JSON string."""
+    js = set(json_columns)
+    return [json.dumps(row.get(c), default=str) if c in js else row.get(c) for c in columns]
 
 
 class SnowflakeDestination:
@@ -56,6 +95,23 @@ class SnowflakeDestination:
         self._swap_shadow_created: bool = False
         self._swap_table: str | None = None  # fully-qualified target name
         self._swap_direct_write: bool = False
+
+        # Layer 3 (#317): INFORMATION_SCHEMA map, fetched once per table per sync.
+        self._schema_cache: dict[str, dict[str, str] | None] = {}
+
+    def _resolve_schema(self, config: SnowflakeDestinationConfig) -> dict[str, str] | None:
+        """Column → type-category map for the target table, cached per sync.
+
+        Returns ``None`` (Layer 3 inactive) when ``introspect_schema`` is off or
+        introspection is unavailable.
+        """
+        if not config.introspect_schema:
+            return None
+        if config.table not in self._schema_cache:
+            from drt.destinations.schema import describe_columns
+
+            self._schema_cache[config.table] = describe_columns(config)
+        return self._schema_cache[config.table]
 
     def load(
         self,
@@ -84,33 +140,42 @@ class SnowflakeDestination:
             with conn.cursor() as cur:
                 columns = list(records[0].keys())
                 table_fq = f"{config.database}.{config.schema_}.{config.table}"
+                # Layer 3 (#317): map columns to type categories once per sync.
+                schema_map = self._resolve_schema(config)
 
                 # sync.mode: replace (#434) — full-table replace, dispatched
                 # before the insert/merge/mirror write paths.
                 if sync_options.mode == "replace":
                     if sync_options.replace_strategy == "swap":
                         self._load_replace_swap(
-                            cur, records, columns, config, table_fq, sync_options, result
+                            cur,
+                            records,
+                            columns,
+                            config,
+                            table_fq,
+                            sync_options,
+                            result,
+                            schema_map,
                         )
                     else:
                         self._load_replace_truncate(
-                            cur, records, columns, table_fq, sync_options, result
+                            cur, records, columns, table_fq, sync_options, result, schema_map
                         )
                     return result
 
                 effective_mode = "merge" if is_mirror else config.mode
                 col_list = ", ".join(columns)
-                placeholders = ", ".join(["%s"] * len(columns))
+                value_clause, json_cols = _value_clause(columns, schema_map)
 
                 if effective_mode == "insert":
                     sql = f"""
                         INSERT INTO {table_fq} ({col_list})
-                        VALUES ({placeholders})
+                        {value_clause}
                     """
 
                     for i, row in enumerate(records):
                         try:
-                            cur.execute(sql, list(row.values()))
+                            cur.execute(sql, _bind_row(row, columns, json_cols))
                             result.success += 1
                         except Exception as e:
                             result.failed += 1
@@ -134,9 +199,7 @@ class SnowflakeDestination:
                     )
 
                     update_cols = [c for c in columns if c not in config.upsert_key]
-                    update_clause = ", ".join(
-                        [f"{c} = source.{c}" for c in update_cols]
-                    )
+                    update_clause = ", ".join([f"{c} = source.{c}" for c in update_cols])
 
                     insert_cols = col_list
                     insert_vals = ", ".join([f"source.{c}" for c in columns])
@@ -150,9 +213,9 @@ class SnowflakeDestination:
                             cur.execute(
                                 f"""
                                 INSERT INTO {staging_table} ({col_list})
-                                VALUES ({placeholders})
+                                {value_clause}
                                 """,
-                                list(row.values()),
+                                _bind_row(row, columns, json_cols),
                             )
                         except Exception as e:
                             result.failed += 1
@@ -168,9 +231,7 @@ class SnowflakeDestination:
                                 raise
 
                     matched_clause = (
-                        f"WHEN MATCHED THEN UPDATE SET {update_clause}"
-                        if update_cols
-                        else ""
+                        f"WHEN MATCHED THEN UPDATE SET {update_clause}" if update_cols else ""
                     )
 
                     merge_sql = f"""
@@ -218,6 +279,7 @@ class SnowflakeDestination:
         table_fq: str,
         sync_options: SyncOptions,
         result: SyncResult,
+        schema_map: dict[str, str] | None = None,
     ) -> None:
         """``replace_strategy: truncate`` — TRUNCATE once, then INSERT rows."""
         if not self._replace_truncated:
@@ -225,9 +287,9 @@ class SnowflakeDestination:
             self._replace_truncated = True
 
         col_list = ", ".join(columns)
-        placeholders = ", ".join(["%s"] * len(columns))
-        sql = f"INSERT INTO {table_fq} ({col_list}) VALUES ({placeholders})"
-        self._insert_rows(cur, sql, records, sync_options, result)
+        value_clause, json_cols = _value_clause(columns, schema_map)
+        sql = f"INSERT INTO {table_fq} ({col_list}) {value_clause}"
+        self._insert_rows(cur, sql, records, sync_options, result, columns, json_cols)
 
     def _load_replace_swap(
         self,
@@ -238,6 +300,7 @@ class SnowflakeDestination:
         table_fq: str,
         sync_options: SyncOptions,
         result: SyncResult,
+        schema_map: dict[str, str] | None = None,
     ) -> None:
         """``replace_strategy: swap`` — write to a shadow table; SWAP in finalize.
 
@@ -258,11 +321,11 @@ class SnowflakeDestination:
 
         write_fq = table_fq if self._swap_direct_write else shadow_fq
         col_list = ", ".join(columns)
-        placeholders = ", ".join(["%s"] * len(columns))
-        sql = f"INSERT INTO {write_fq} ({col_list}) VALUES ({placeholders})"
+        value_clause, json_cols = _value_clause(columns, schema_map)
+        sql = f"INSERT INTO {write_fq} ({col_list}) {value_clause}"
 
         try:
-            self._insert_rows(cur, sql, records, sync_options, result)
+            self._insert_rows(cur, sql, records, sync_options, result, columns, json_cols)
         except Exception:
             # on_error=fail mid-swap: drop the half-built shadow and reset so a
             # re-run starts clean. (Direct-write path has no shadow to drop.)
@@ -279,11 +342,23 @@ class SnowflakeDestination:
         records: list[dict[str, Any]],
         sync_options: SyncOptions,
         result: SyncResult,
+        columns: list[str] | None = None,
+        json_cols: list[str] | None = None,
     ) -> None:
-        """Execute a parameterised INSERT per row, honouring ``on_error``."""
+        """Execute a parameterised INSERT per row, honouring ``on_error``.
+
+        When ``columns`` is given, values are ordered to it and JSON columns
+        (``json_cols``) are ``json.dumps``'d to feed the ``PARSE_JSON`` bind
+        sites; otherwise the row's values are bound positionally (legacy path).
+        """
         for i, row in enumerate(records):
             try:
-                cur.execute(sql, list(row.values()))
+                bound = (
+                    _bind_row(row, columns, json_cols or [])
+                    if columns is not None
+                    else list(row.values())
+                )
+                cur.execute(sql, bound)
                 result.success += 1
             except Exception as e:
                 result.failed += 1
@@ -393,19 +468,13 @@ class SnowflakeDestination:
             with conn.cursor() as cur:
                 if len(upsert_cols) == 1:
                     placeholders = ", ".join(["%s"] * len(keys))
-                    stmt = (
-                        f"DELETE FROM {table_fq} "
-                        f"WHERE {upsert_cols[0]} NOT IN ({placeholders})"
-                    )
+                    stmt = f"DELETE FROM {table_fq} WHERE {upsert_cols[0]} NOT IN ({placeholders})"
                     params: list[Any] = [k[0] for k in keys]
                 else:
                     col_tuple = "(" + ", ".join(upsert_cols) + ")"
                     row_placeholder = "(" + ", ".join(["%s"] * len(upsert_cols)) + ")"
                     placeholders = ", ".join([row_placeholder] * len(keys))
-                    stmt = (
-                        f"DELETE FROM {table_fq} WHERE {col_tuple} "
-                        f"NOT IN ({placeholders})"
-                    )
+                    stmt = f"DELETE FROM {table_fq} WHERE {col_tuple} NOT IN ({placeholders})"
                     params = [v for key in keys for v in key]
                 cur.execute(stmt, params)
         finally:

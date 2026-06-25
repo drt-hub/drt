@@ -160,16 +160,86 @@ def test_mysql_unqualified_table_scopes_to_current_database(mock_connect: MagicM
 # ---------------------------------------------------------------------------
 
 
-def test_non_pg_mysql_config_returns_none() -> None:
-    """DWH destinations (Snowflake/BigQuery/...) are later phases of #317."""
-    cfg = SnowflakeDestinationConfig(
+# ---------------------------------------------------------------------------
+# Snowflake — VARIANT/OBJECT/ARRAY → json (semi-structured loads via PARSE_JSON)
+# ---------------------------------------------------------------------------
+
+
+def _sf_config() -> SnowflakeDestinationConfig:
+    return SnowflakeDestinationConfig(
         type="snowflake",
         account_env="A",
         user_env="U",
         password_env="P",
-        database="db",
-        **{"schema": "public"},
-        table="t",
-        warehouse="wh",
+        database="DB",
+        **{"schema": "PUBLIC"},
+        table="EVENTS",
+        warehouse="WH",
     )
+
+
+def _sf_conn_returning(rows: list[Any]) -> MagicMock:
+    """Snowflake uses ``with conn.cursor() as cur`` — wire the context manager."""
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.fetchall.return_value = rows
+    conn.cursor.return_value.__enter__.return_value = cur
+    return conn
+
+
+@patch("drt.destinations.snowflake.SnowflakeDestination._connect")
+def test_snowflake_maps_semi_structured_to_json(mock_connect: MagicMock) -> None:
+    mock_connect.return_value = _sf_conn_returning(
+        [
+            ("ID", "NUMBER"),
+            ("PAYLOAD", "VARIANT"),
+            ("PROFILE", "OBJECT"),
+            ("TAGS", "ARRAY"),
+            ("NAME", "TEXT"),
+        ]
+    )
+    assert describe_columns(_sf_config()) == {
+        "ID": "scalar",
+        "PAYLOAD": "json",
+        "PROFILE": "json",
+        "TAGS": "json",
+        "NAME": "scalar",
+    }
+
+
+@patch("drt.destinations.snowflake.SnowflakeDestination._connect")
+def test_snowflake_query_targets_db_information_schema_case_insensitively(
+    mock_connect: MagicMock,
+) -> None:
+    conn = _sf_conn_returning([("ID", "NUMBER")])
+    mock_connect.return_value = conn
+    describe_columns(_sf_config())
+    cur = conn.cursor.return_value.__enter__.return_value
+    sql, params = cur.execute.call_args[0]
+    assert "DB.information_schema.columns" in sql
+    assert "UPPER(table_schema) = UPPER(%s)" in sql
+    assert params == ["PUBLIC", "EVENTS"]
+
+
+@patch("drt.destinations.snowflake.SnowflakeDestination._connect")
+def test_snowflake_empty_result_returns_none(mock_connect: MagicMock) -> None:
+    mock_connect.return_value = _sf_conn_returning([])
+    assert describe_columns(_sf_config()) is None
+
+
+@patch("drt.destinations.snowflake.SnowflakeDestination._connect")
+def test_snowflake_failure_returns_none(mock_connect: MagicMock) -> None:
+    mock_connect.side_effect = RuntimeError("insufficient privileges")
+    assert describe_columns(_sf_config()) is None
+
+
+# ---------------------------------------------------------------------------
+# Unsupported configs — ClickHouse/BigQuery/Databricks are later phases of #317
+# ---------------------------------------------------------------------------
+
+
+def test_unsupported_config_returns_none() -> None:
+    from drt.config.models import ClickHouseDestinationConfig
+
+    cfg = ClickHouseDestinationConfig(type="clickhouse", host="h", database="d", table="t")
     assert describe_columns(cfg) is None

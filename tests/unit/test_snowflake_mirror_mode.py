@@ -46,6 +46,8 @@ def _config(**overrides: Any) -> SnowflakeDestinationConfig:
         "table": "USER_SCORES",
         "warehouse": "COMPUTE_WH",
         "upsert_key": ["id"],
+        # Isolate from Layer-3 introspection (#317) — asserts exact SQL ordering.
+        "introspect_schema": False,
     }
     defaults.update(overrides)
     return SnowflakeDestinationConfig.model_validate(defaults)

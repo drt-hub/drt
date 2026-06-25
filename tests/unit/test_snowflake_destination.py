@@ -34,6 +34,10 @@ def _config(**overrides: Any) -> SnowflakeDestinationConfig:
         "schema": "PUBLIC",  # alias form — populated into schema_ on the model
         "table": "USER_SCORES",
         "warehouse": "COMPUTE_WH",
+        # These tests assert exact SQL / driver call ordering; Layer-3
+        # introspection (#317) would add an INFORMATION_SCHEMA round-trip and
+        # rewrite VARIANT binds. It has its own tests — keep it off here.
+        "introspect_schema": False,
     }
     defaults.update(overrides)
     return SnowflakeDestinationConfig.model_validate(defaults)
@@ -129,7 +133,7 @@ class TestSnowflakeDestinationLoad:
         monkeypatch.delenv("SF_USER", raising=False)
         monkeypatch.delenv("SF_PASSWORD", raising=False)
         monkeypatch.chdir(tmp_path)
-        
+
         secrets_dir = tmp_path / ".drt"
         secrets_dir.mkdir()
         (secrets_dir / "secrets.toml").write_text(
@@ -140,7 +144,7 @@ class TestSnowflakeDestinationLoad:
         modules = _mocked_snowflake_modules(conn)
         with patch.dict("sys.modules", modules):
             result = SnowflakeDestination().load([{"id": 1}], _config(), _options())
-            
+
         assert result.failed == 0
         conn_kwargs = modules["snowflake.connector"].connect.call_args[1]
         assert conn_kwargs["account"] == "acct"
@@ -187,17 +191,12 @@ class TestSnowflakeDestinationLoad:
             result = SnowflakeDestination().load(records, config, _options())
 
         assert result.success == 2
-        sqls = [
-            (call.args[0] if call.args else "")
-            for call in conn._cur.execute.call_args_list
-        ]
+        sqls = [(call.args[0] if call.args else "") for call in conn._cur.execute.call_args_list]
         assert any("CREATE TEMP TABLE" in s for s in sqls)
         assert any("MERGE INTO ANALYTICS.PUBLIC.USER_SCORES" in s for s in sqls)
         assert any("WHEN MATCHED THEN UPDATE" in s for s in sqls)
 
-    def test_merge_mode_requires_upsert_key(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_merge_mode_requires_upsert_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
         modules = _mocked_snowflake_modules(_fake_conn())
         config = _config(mode="merge", upsert_key=None)
@@ -205,9 +204,7 @@ class TestSnowflakeDestinationLoad:
             with pytest.raises(ValueError, match="upsert_key is required"):
                 SnowflakeDestination().load([{"id": 1}], config, _options())
 
-    def test_insert_row_error_on_error_skip(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_insert_row_error_on_error_skip(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
         conn = _fake_conn()
         conn._cur.execute.side_effect = [Exception("type mismatch"), None]
@@ -218,17 +215,13 @@ class TestSnowflakeDestinationLoad:
             {"id": 2, "score": 0.9},
         ]
         with patch.dict("sys.modules", modules):
-            result = SnowflakeDestination().load(
-                records, _config(), _options(on_error="skip")
-            )
+            result = SnowflakeDestination().load(records, _config(), _options(on_error="skip"))
         assert result.failed == 1
         assert result.success == 1
         assert len(result.row_errors) == 1
         assert "type mismatch" in result.row_errors[0].error_message
 
-    def test_merge_insert_partial_fail_on_error_skip(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_merge_insert_partial_fail_on_error_skip(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
         conn = _fake_conn()
         cur = conn._cur
@@ -251,14 +244,12 @@ class TestSnowflakeDestinationLoad:
         ]
         config = _config(mode="merge", upsert_key=["id"])
         with patch.dict("sys.modules", modules):
-            result = SnowflakeDestination().load(
-                records, config, _options(on_error="skip")
-            )
+            result = SnowflakeDestination().load(records, config, _options(on_error="skip"))
 
         assert result.failed == 1
         assert result.success == 1
         assert len(result.row_errors) == 1
-        
+
         sqls = [(call.args[0] if call.args else "") for call in cur.execute.call_args_list]
         assert any("MERGE INTO ANALYTICS.PUBLIC.USER_SCORES" in s for s in sqls)
 
@@ -272,10 +263,7 @@ class TestSnowflakeDestinationLoad:
         with patch.dict("sys.modules", modules):
             SnowflakeDestination().load(records, config, _options())
 
-        sqls = [
-            (call.args[0] if call.args else "")
-            for call in conn._cur.execute.call_args_list
-        ]
+        sqls = [(call.args[0] if call.args else "") for call in conn._cur.execute.call_args_list]
         merge_sql = next(s for s in sqls if "MERGE INTO" in s)
         assert "WHEN NOT MATCHED THEN INSERT" in merge_sql
         assert "WHEN MATCHED THEN UPDATE" not in merge_sql
@@ -286,11 +274,11 @@ class TestSnowflakeConnection:
         _set_creds(monkeypatch)
         conn = _fake_conn()
         modules = _mocked_snowflake_modules(conn)
-        
+
         with patch.dict("sys.modules", modules):
             dest = SnowflakeDestination()
             dest.test_connection(_config())
-        
+
         conn.close.assert_called_once()
         # Snowflake uses cursor.execute("SELECT 1")
         assert any("SELECT 1" in str(call.args[0]) for call in conn._cur.execute.call_args_list)
@@ -310,17 +298,13 @@ class TestSnowflakeReplaceMode:
     def _swap_opts(**kw: Any) -> SyncOptions:
         return _options(mode="replace", replace_strategy="swap", **kw)
 
-    def test_replace_truncate_truncates_then_inserts(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_replace_truncate_truncates_then_inserts(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
         conn = _fake_conn()
         modules = _mocked_snowflake_modules(conn)
         records = [{"id": 1, "score": 0.95}, {"id": 2, "score": 0.80}]
         with patch.dict("sys.modules", modules):
-            result = SnowflakeDestination().load(
-                records, _config(), _options(mode="replace")
-            )
+            result = SnowflakeDestination().load(records, _config(), _options(mode="replace"))
         assert result.success == 2
         sqls = _sqls(conn._cur)
         assert any(s.startswith("TRUNCATE TABLE ANALYTICS.PUBLIC.USER_SCORES") for s in sqls)
@@ -338,9 +322,7 @@ class TestSnowflakeReplaceMode:
             dest.load([{"id": 2}], _config(), _options(mode="replace"))
         assert sum(s.startswith("TRUNCATE TABLE") for s in _sqls(conn._cur)) == 1
 
-    def test_replace_swap_creates_shadow_and_inserts(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_replace_swap_creates_shadow_and_inserts(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
         conn = _fake_conn()
         conn._cur.fetchall.return_value = [("USER_SCORES",)]  # target exists
@@ -358,9 +340,7 @@ class TestSnowflakeReplaceMode:
         )
         assert any("INSERT INTO ANALYTICS.PUBLIC.USER_SCORES__drt_swap" in s for s in sqls)
 
-    def test_replace_swap_finalize_swaps_and_drops(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_replace_swap_finalize_swaps_and_drops(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
         conn = _fake_conn()
         conn._cur.fetchall.return_value = [("USER_SCORES",)]
@@ -397,9 +377,7 @@ class TestSnowflakeReplaceMode:
         assert any("INSERT INTO ANALYTICS.PUBLIC.USER_SCORES" in s for s in sqls)
         assert fin is None  # nothing to finalize
 
-    def test_replace_swap_on_error_fail_drops_shadow(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_replace_swap_on_error_fail_drops_shadow(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
         conn = _fake_conn()
         cur = conn._cur
@@ -432,9 +410,7 @@ class TestSnowflakeReplaceMode:
             fin = dest.finalize_sync(_config(), _options())
         assert fin is None
 
-    def test_finalize_swap_failure_preserves_state(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_finalize_swap_failure_preserves_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # If SWAP raises, in-memory state is NOT reset — the shadow stays
         # recoverable (drt clean --orphans) and a retry is possible.
         _set_creds(monkeypatch)
@@ -496,3 +472,93 @@ class TestSnowflakeOrphanCleanup:
             )
         assert dropped == []
         assert failed == ["ANALYTICS.PUBLIC.USER_SCORES__drt_swap"]
+
+
+class TestSnowflakeSchemaIntrospection:
+    """Layer 3 (#317) — INFORMATION_SCHEMA-driven VARIANT serialization."""
+
+    def test_introspect_disabled_skips_describe(self) -> None:
+        with patch("drt.destinations.schema.describe_columns") as desc:
+            out = SnowflakeDestination()._resolve_schema(_config(introspect_schema=False))
+        assert out is None
+        desc.assert_not_called()
+
+    def test_resolve_schema_caches_across_batches(self) -> None:
+        dest = SnowflakeDestination()
+        cfg = _config(introspect_schema=True)
+        with patch(
+            "drt.destinations.schema.describe_columns",
+            return_value={"PAYLOAD": "json"},
+        ) as desc:
+            assert dest._resolve_schema(cfg) == {"PAYLOAD": "json"}
+            assert dest._resolve_schema(cfg) == {"PAYLOAD": "json"}
+        desc.assert_called_once()
+
+    def test_variant_column_uses_parse_json_and_dumps_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A VARIANT column → INSERT ... SELECT PARSE_JSON(%s), value json.dumps'd."""
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        with (
+            patch.dict("sys.modules", _mocked_snowflake_modules(conn)),
+            patch(
+                "drt.destinations.schema.describe_columns",
+                return_value={"id": "scalar", "payload": "json"},
+            ),
+        ):
+            result = SnowflakeDestination().load(
+                [{"id": 1, "payload": {"a": 1}}],
+                _config(introspect_schema=True),
+                _options(),
+            )
+        assert result.success == 1
+        sql, bound = conn._cur.execute.call_args_list[0][0]
+        assert "SELECT %s, PARSE_JSON(%s)" in sql
+        assert "VALUES" not in sql
+        assert bound == [1, '{"a": 1}']  # id raw, payload JSON-encoded
+
+    def test_variant_match_is_case_insensitive(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Snowflake reports UPPERCASE column names for unquoted DDL while source
+        keys are lowercase — PARSE_JSON wrapping must still fire (#317 review)."""
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        with (
+            patch.dict("sys.modules", _mocked_snowflake_modules(conn)),
+            patch(
+                "drt.destinations.schema.describe_columns",
+                # UPPERCASE keys, exactly as Snowflake's INFORMATION_SCHEMA reports them.
+                return_value={"ID": "scalar", "PAYLOAD": "json"},
+            ),
+        ):
+            result = SnowflakeDestination().load(
+                [{"id": 1, "payload": {"a": 1}}],  # lowercase source keys
+                _config(introspect_schema=True),
+                _options(),
+            )
+        assert result.success == 1
+        sql, bound = conn._cur.execute.call_args_list[0][0]
+        assert "SELECT %s, PARSE_JSON(%s)" in sql
+        assert "VALUES" not in sql
+        assert bound == [1, '{"a": 1}']
+
+    def test_no_variant_keeps_values_form(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """All-scalar schema → unchanged VALUES form, values bound as-is."""
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        with (
+            patch.dict("sys.modules", _mocked_snowflake_modules(conn)),
+            patch(
+                "drt.destinations.schema.describe_columns",
+                return_value={"id": "scalar", "score": "scalar"},
+            ),
+        ):
+            SnowflakeDestination().load(
+                [{"id": 1, "score": 0.5}],
+                _config(introspect_schema=True),
+                _options(),
+            )
+        sql, bound = conn._cur.execute.call_args_list[0][0]
+        assert "VALUES (%s, %s)" in sql
+        assert "PARSE_JSON" not in sql
+        assert bound == [1, 0.5]

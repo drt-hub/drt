@@ -158,6 +158,17 @@ sync:
 
 Swap requires `mode: replace` (enforced by config validation). The same `replace_strategy: swap` is supported on Postgres, MySQL, and ClickHouse.
 
+## Semi-structured columns (VARIANT / OBJECT / ARRAY)
+
+`dict` and `list` values bound for a Snowflake `VARIANT` / `OBJECT` / `ARRAY` column can't be inserted as plain parameters — Snowflake needs them parsed with `PARSE_JSON`. By default (`introspect_schema: true`) drt reads `INFORMATION_SCHEMA.COLUMNS` for the target table **once per sync**, detects the semi-structured columns, and rewrites the INSERT to wrap them:
+
+```sql
+-- a VARIANT column "payload" is loaded as:
+INSERT INTO db.schema.t (id, payload) SELECT %s, PARSE_JSON(%s)
+```
+
+so a `dict`/`list` lands as proper semi-structured data instead of a stringified `repr` — with **no configuration**. When no column needs wrapping, the INSERT is the unchanged `VALUES (...)` form. Introspection is best-effort: if `information_schema` isn't readable for the role, drt falls back to binding values directly. Disable with `introspect_schema: false`.
+
 ## Notes
 
 - Requires `pip install drt-core[snowflake]` (uses `snowflake-connector-python`)
