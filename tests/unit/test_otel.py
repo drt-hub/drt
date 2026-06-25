@@ -512,3 +512,17 @@ def test_shutdown_telemetry_noop_when_otel_inactive(monkeypatch: pytest.MonkeyPa
     assert otel._STATE.trace_provider is None
 
     otel.shutdown_telemetry()  # must not raise
+
+def test_shutdown_telemetry_swallows_provider_shutdown_errors() -> None:
+    """A provider whose shutdown() raises is caught and logged, never propagated."""
+
+    class _RaisingProvider:
+        def shutdown(self) -> None:
+            raise RuntimeError("boom")
+
+    otel._STATE.trace_provider = _RaisingProvider()
+    otel._STATE.meter_provider = None
+
+    # Must not raise, and must still clear the retained provider.
+    otel.shutdown_telemetry()
+    assert otel._STATE.trace_provider is None
