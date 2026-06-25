@@ -39,6 +39,7 @@ class OtelConfig(BaseModel):
     endpoint: str | None = None
     service_name: str = "drt"
     headers: dict[str, str] = Field(default_factory=dict)
+    span_processor: Literal["batch", "simple"] = "batch"
 
 
 class ObservabilityConfig(BaseModel):
