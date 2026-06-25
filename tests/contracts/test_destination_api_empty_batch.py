@@ -55,6 +55,7 @@ from drt.config.models import (
     HubSpotDestinationConfig,
     IntercomDestinationConfig,
     JiraDestinationConfig,
+    KlaviyoDestinationConfig,
     LinearDestinationConfig,
     MixpanelDestinationConfig,
     NotionDestinationConfig,
@@ -73,6 +74,7 @@ from drt.destinations.google_ads import GoogleAdsDestination
 from drt.destinations.hubspot import HubSpotDestination
 from drt.destinations.intercom import IntercomDestination
 from drt.destinations.jira import JiraDestination
+from drt.destinations.klaviyo import KlaviyoDestination
 from drt.destinations.linear import LinearDestination
 from drt.destinations.mixpanel import MixpanelDestination
 from drt.destinations.notion import NotionDestination
@@ -100,6 +102,15 @@ API_DESTINATIONS: list[Any] = [
         ),
         {"AIRTABLE_TOKEN_TEST": "dummy"},
         id="airtable",
+    ),
+    pytest.param(
+        KlaviyoDestination,
+        lambda: KlaviyoDestinationConfig(
+            type="klaviyo",
+            api_key_env="KLAVIYO_API_KEY_TEST",
+        ),
+        {"KLAVIYO_API_KEY_TEST": "dummy"},
+        id="klaviyo",
     ),
     pytest.param(
         HubSpotDestination,

@@ -310,6 +310,32 @@ class AirtableDestinationConfig(BaseModel):
         return self
 
 
+class KlaviyoDestinationConfig(BaseModel):
+    type: Literal["klaviyo"]
+    api_key: str | None = None
+    api_key_env: str | None = "KLAVIYO_API_KEY"
+    # Row field used as the profile identifier (email).
+    email_field: str = "email"
+    # Jinja2 JSON template → custom profile properties. When omitted, all
+    # row fields except email_field are sent as custom properties.
+    properties_template: str | None = None
+    # Optional: add each upserted profile to this Klaviyo list.
+    list_id: str | None = None
+    list_id_env: str | None = None
+    # Klaviyo API revision (sent as the `revision` header).
+    revision: str = "2024-10-15"
+    retry: RetryConfig | None = None
+
+    def describe(self) -> str:
+        return "klaviyo (profiles)"
+
+    @model_validator(mode="after")
+    def _check_api_key(self) -> KlaviyoDestinationConfig:
+        if not self.api_key and not self.api_key_env:
+            raise ValueError("api_key or api_key_env is required.")
+        return self
+
+
 class MixpanelDestinationConfig(BaseModel):
     type: Literal["mixpanel"]
     # endpoint selects which Mixpanel API to target:
@@ -1000,7 +1026,8 @@ DestinationConfig = Annotated[
     | DatabricksDestinationConfig
     | ElasticsearchDestinationConfig
     | BigQueryDestinationConfig
-    | AirtableDestinationConfig,
+    | AirtableDestinationConfig
+    | KlaviyoDestinationConfig,
     Field(discriminator="type"),
 ]
 

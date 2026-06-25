@@ -383,6 +383,7 @@ def create_server(project_dir: Path | None = None) -> Any:
                 {"name": "GitHub Actions", "type": "github_actions", "install": "(core)"},
                 {"name": "HubSpot", "type": "hubspot", "install": "(core)"},
                 {"name": "Amplitude", "type": "amplitude", "install": "(core)"},
+                {"name": "Klaviyo", "type": "klaviyo", "install": "(core)"},
                 {"name": "Mixpanel", "type": "mixpanel", "install": "(core)"},
                 {"name": "Zendesk", "type": "zendesk", "install": "(core)"},
                 {

@@ -43,6 +43,7 @@ DESTINATIONS = [
     ("hubspot", "HubSpot"),
     ("intercom", "Intercom"),
     ("jira", "Jira"),
+    ("klaviyo", "Klaviyo"),
     ("linear", "Linear"),
     ("mixpanel", "Mixpanel"),
     ("mysql", "MySQL"),

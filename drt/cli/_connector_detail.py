@@ -63,6 +63,7 @@ DESTINATION_CONFIG_CLASSES: dict[str, type[BaseModel]] = {
     "hubspot": _models.HubSpotDestinationConfig,
     "intercom": _models.IntercomDestinationConfig,
     "jira": _models.JiraDestinationConfig,
+    "klaviyo": _models.KlaviyoDestinationConfig,
     "linear": _models.LinearDestinationConfig,
     "mixpanel": _models.MixpanelDestinationConfig,
     "mysql": _models.MySQLDestinationConfig,

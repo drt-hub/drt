@@ -14,6 +14,7 @@ from drt.destinations.file import FileDestination
 from drt.destinations.github_actions import GitHubActionsDestination
 from drt.destinations.google_sheets import GoogleSheetsDestination
 from drt.destinations.hubspot import HubSpotDestination
+from drt.destinations.klaviyo import KlaviyoDestination
 from drt.destinations.mysql import MySQLDestination
 from drt.destinations.notion import NotionDestination
 from drt.destinations.parquet import ParquetDestination
@@ -32,6 +33,7 @@ ALL_DESTINATIONS = [
     GitHubActionsDestination,
     GoogleSheetsDestination,
     HubSpotDestination,
+    KlaviyoDestination,
     MySQLDestination,
     NotionDestination,
     ParquetDestination,
@@ -45,6 +47,7 @@ ALL_DESTINATIONS = [
 CONNECTION_TESTABLE_DESTINATIONS = [
     AirtableDestination,  # first non-SQL ConnectionTestable
     ClickHouseDestination,
+    KlaviyoDestination,  # non-SQL ConnectionTestable
     MySQLDestination,
     PostgresDestination,
     SnowflakeDestination,
