@@ -18,6 +18,8 @@
 [![Python](https://img.shields.io/pypi/pyversions/drt-core)](https://pypi.org/project/drt-core/)
 [![GitHub Sponsors](https://img.shields.io/static/v1?label=Sponsor&message=%E2%9D%A4&logo=GitHub&color=%23fe8e86)](https://github.com/sponsors/masukai)
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/drt-hub/drt)
+[![Website](https://img.shields.io/badge/website-drt--hub.github.io-7C3AED)](https://drt-hub.github.io/drt-web/)
+[![X](https://img.shields.io/badge/X-%40drt__hub-000000?logo=x&logoColor=white)](https://x.com/drt_hub)
 
 <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
 [![All Contributors](https://img.shields.io/badge/all_contributors-15-orange.svg?style=flat-square)](#contributors-)
