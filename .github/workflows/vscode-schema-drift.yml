@@ -1,0 +1,70 @@
+# Guard the bundled VS Code extension schemas against drt-core drift (#662).
+#
+# The extension (integrations/vscode-drt/) ships two JSON Schemas that are
+# GENERATED from drt-core and committed, because the extension runs with no
+# Python at runtime:
+#   - integrations/vscode-drt/schemas/sync.schema.json
+#   - integrations/vscode-drt/schemas/drt_project.schema.json
+#
+# They match drt-core byte-for-byte at merge time, but as the config models
+# evolve the committed copies can silently drift, and the extension would then
+# validate against a stale schema with no signal. This job regenerates them and
+# fails the build on any diff, so a drt-core change that alters the schema must
+# also regenerate the bundled copies (and bump the extension version + CHANGELOG,
+# as regenerate-schemas.sh already reminds).
+#
+# Unlike drift-check.yml (maintainer-facing, post-merge, opens a tracking issue),
+# this is a hard PR gate by design: stale bundled schemas should block merge.
+# The paths filter keeps it cheap — it only runs when the config models or the
+# bundled schemas / generator change.
+
+name: vscode-schema-drift
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'drt/config/**'
+      - 'integrations/vscode-drt/schemas/**'
+      - 'integrations/vscode-drt/scripts/regenerate-schemas.sh'
+      - '.github/workflows/vscode-schema-drift.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'drt/config/**'
+      - 'integrations/vscode-drt/schemas/**'
+      - 'integrations/vscode-drt/scripts/regenerate-schemas.sh'
+      - '.github/workflows/vscode-schema-drift.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  schema-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install drt-core
+        run: uv pip install --system -e .
+
+      - name: Regenerate bundled schemas
+        working-directory: integrations/vscode-drt
+        run: ./scripts/regenerate-schemas.sh
+
+      - name: Fail if bundled schemas drifted from drt-core
+        working-directory: integrations/vscode-drt
+        run: |
+          if ! git diff --exit-code -- schemas/; then
+            echo "::error::Bundled VS Code schemas are out of sync with drt-core. Run integrations/vscode-drt/scripts/regenerate-schemas.sh, commit the result, and bump the extension version + CHANGELOG."
+            exit 1
+          fi
