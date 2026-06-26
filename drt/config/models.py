@@ -1121,6 +1121,12 @@ class SyncOptions(BaseModel):
     # cursor_field and lookups still reference source-side column names,
     # while upsert_key / destination columns reference the mapped names.
     field_mappings: dict[str, str] | None = None
+    # PII masking (#427): {field_name: "hash" | "redact"}. Applied in the engine
+    # at the same seam as field_mappings (just before the destination), so keys
+    # reference the post-rename field name. "hash" = SHA-256 hex digest;
+    # "redact" = "[REDACTED]". Null passes through; non-strings are stringified
+    # before hashing. Param-bearing strategies (e.g. truncate) are a follow-up (#660).
+    mask: dict[str, Literal["hash", "redact"]] | None = None
     # Dead Letter Queue (#278): opt-in persistence of failed records for
     # `drt retry`. None means disabled (same as DLQConfig(enabled=False)).
     dlq: DLQConfig | None = None

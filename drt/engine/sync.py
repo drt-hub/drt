@@ -23,6 +23,7 @@ from drt.destinations.lookup import (
     detect_ambiguous_lookup_ordering,
 )
 from drt.engine.field_mappings import apply_field_mappings
+from drt.engine.masking import apply_mask
 from drt.engine.observer import NullObserver, SyncObserver
 from drt.engine.resolver import resolve_model_ref
 from drt.observability import build_status, get_tracer
@@ -431,6 +432,11 @@ def _run_sync_body(
             # are what the destination, upsert_key, and the diff engine see.
             # Pure transform; no observer side effects.
             record_batch = apply_field_mappings(record_batch, sync.sync.field_mappings)
+
+            # PII masking (#427). Applied after field_mappings, so mask keys
+            # reference the destination-facing (post-rename) field names.
+            # Pure transform; no observer side effects.
+            record_batch = apply_mask(record_batch, sync.sync.mask)
 
             if dry_run:
                 total_result.success += len(record_batch)
