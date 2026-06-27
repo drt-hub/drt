@@ -22,6 +22,77 @@
       "title": "AcceptedValuesTest",
       "type": "object"
     },
+    "AirtableDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "airtable",
+          "title": "Type",
+          "type": "string"
+        },
+        "access_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Access Token"
+        },
+        "access_token_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "AIRTABLE_TOKEN",
+          "title": "Access Token Env"
+        },
+        "base_id": {
+          "title": "Base Id",
+          "type": "string"
+        },
+        "table_name": {
+          "title": "Table Name",
+          "type": "string"
+        },
+        "primary_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Primary Key"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type",
+        "base_id",
+        "table_name"
+      ],
+      "title": "AirtableDestinationConfig",
+      "type": "object"
+    },
     "AlertsConfig": {
       "properties": {
         "on_failure": {
@@ -599,6 +670,11 @@
           ],
           "default": null,
           "title": "Lookups"
+        },
+        "introspect_schema": {
+          "default": true,
+          "title": "Introspect Schema",
+          "type": "boolean"
         },
         "type": {
           "const": "clickhouse",
@@ -1589,6 +1665,101 @@
       "title": "JiraDestinationConfig",
       "type": "object"
     },
+    "KlaviyoDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "klaviyo",
+          "title": "Type",
+          "type": "string"
+        },
+        "api_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Api Key"
+        },
+        "api_key_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "KLAVIYO_API_KEY",
+          "title": "Api Key Env"
+        },
+        "email_field": {
+          "default": "email",
+          "title": "Email Field",
+          "type": "string"
+        },
+        "properties_template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Properties Template"
+        },
+        "list_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "List Id"
+        },
+        "list_id_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "List Id Env"
+        },
+        "revision": {
+          "default": "2024-10-15",
+          "title": "Revision",
+          "type": "string"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "KlaviyoDestinationConfig",
+      "type": "object"
+    },
     "LinearDestinationConfig": {
       "properties": {
         "type": {
@@ -2047,6 +2218,11 @@
           "default": null,
           "title": "Lookups"
         },
+        "introspect_schema": {
+          "default": true,
+          "title": "Introspect Schema",
+          "type": "boolean"
+        },
         "type": {
           "const": "mysql",
           "title": "Type",
@@ -2408,6 +2584,11 @@
           ],
           "default": null,
           "title": "Lookups"
+        },
+        "introspect_schema": {
+          "default": true,
+          "title": "Introspect Schema",
+          "type": "boolean"
         },
         "type": {
           "const": "postgres",
@@ -3169,6 +3350,11 @@
           ],
           "default": null,
           "title": "Lookups"
+        },
+        "introspect_schema": {
+          "default": true,
+          "title": "Introspect Schema",
+          "type": "boolean"
         }
       },
       "required": [
@@ -4092,6 +4278,7 @@
     "destination": {
       "discriminator": {
         "mapping": {
+          "airtable": "#/$defs/AirtableDestinationConfig",
           "amplitude": "#/$defs/AmplitudeDestinationConfig",
           "azure_blob": "#/$defs/AzureBlobDestinationConfig",
           "bigquery": "#/$defs/BigQueryDestinationConfig",
@@ -4108,6 +4295,7 @@
           "hubspot": "#/$defs/HubSpotDestinationConfig",
           "intercom": "#/$defs/IntercomDestinationConfig",
           "jira": "#/$defs/JiraDestinationConfig",
+          "klaviyo": "#/$defs/KlaviyoDestinationConfig",
           "linear": "#/$defs/LinearDestinationConfig",
           "mixpanel": "#/$defs/MixpanelDestinationConfig",
           "mysql": "#/$defs/MySQLDestinationConfig",
@@ -4223,6 +4411,12 @@
         },
         {
           "$ref": "#/$defs/BigQueryDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/AirtableDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/KlaviyoDestinationConfig"
         }
       ],
       "title": "Destination"
