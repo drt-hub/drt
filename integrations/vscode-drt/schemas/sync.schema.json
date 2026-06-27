@@ -3740,6 +3740,25 @@
           "default": null,
           "title": "Field Mappings"
         },
+        "mask": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "enum": [
+                  "hash",
+                  "redact"
+                ],
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mask"
+        },
         "dlq": {
           "anyOf": [
             {
