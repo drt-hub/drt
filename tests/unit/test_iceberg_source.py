@@ -121,3 +121,29 @@ def test_load_profile_requires_table(tmp_path: Any) -> None:
     (tmp_path / "profiles.yml").write_text("bad:\n  type: iceberg\n")
     with pytest.raises(ValueError, match="table"):
         load_profile("bad", config_dir=tmp_path)
+
+
+def test_connection_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    catalog = MagicMock()
+    pyiceberg_catalog = MagicMock()
+    pyiceberg_catalog.load_catalog.return_value = catalog
+    monkeypatch.setitem(sys.modules, "pyiceberg", MagicMock())
+    monkeypatch.setitem(sys.modules, "pyiceberg.catalog", pyiceberg_catalog)
+    cfg = IcebergProfile(type="iceberg", table="ns.users")
+    assert IcebergSource().test_connection(cfg) is True
+    catalog.load_table.assert_called_once_with("ns.users")
+
+
+def test_connection_false_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    pyiceberg_catalog = MagicMock()
+    pyiceberg_catalog.load_catalog.side_effect = RuntimeError("no catalog")
+    monkeypatch.setitem(sys.modules, "pyiceberg", MagicMock())
+    monkeypatch.setitem(sys.modules, "pyiceberg.catalog", pyiceberg_catalog)
+    cfg = IcebergProfile(type="iceberg", table="ns.users")
+    assert IcebergSource().test_connection(cfg) is False
+
+
+def test_connection_false_without_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "pyiceberg.catalog", None)
+    cfg = IcebergProfile(type="iceberg", table="ns.users")
+    assert IcebergSource().test_connection(cfg) is False

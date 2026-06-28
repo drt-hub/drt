@@ -107,3 +107,28 @@ def test_load_profile_requires_location(tmp_path: Any) -> None:
     (tmp_path / "profiles.yml").write_text("bad:\n  type: deltalake\n")
     with pytest.raises(ValueError, match="location"):
         load_profile("bad", config_dir=tmp_path)
+
+
+def test_connection_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    dt = MagicMock()
+    dt.version.return_value = 3
+    deltalake_mod = MagicMock()
+    deltalake_mod.DeltaTable.return_value = dt
+    monkeypatch.setitem(sys.modules, "deltalake", deltalake_mod)
+    cfg = DeltaLakeProfile(type="deltalake", location="/x/users")
+    assert DeltaLakeSource().test_connection(cfg) is True
+    deltalake_mod.DeltaTable.assert_called_once_with("/x/users", storage_options=None)
+
+
+def test_connection_false_when_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    deltalake_mod = MagicMock()
+    deltalake_mod.DeltaTable.side_effect = RuntimeError("table not found")
+    monkeypatch.setitem(sys.modules, "deltalake", deltalake_mod)
+    cfg = DeltaLakeProfile(type="deltalake", location="/x/missing")
+    assert DeltaLakeSource().test_connection(cfg) is False
+
+
+def test_connection_false_without_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "deltalake", None)
+    cfg = DeltaLakeProfile(type="deltalake", location="/x/users")
+    assert DeltaLakeSource().test_connection(cfg) is False
