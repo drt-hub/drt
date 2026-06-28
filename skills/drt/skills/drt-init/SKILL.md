@@ -20,6 +20,8 @@ Guide the user through initializing a new drt project.
    pip install drt-core[snowflake]      # Snowflake source
    pip install drt-core[databricks]     # Databricks source
    pip install drt-core[sqlserver]      # SQL Server source
+   pip install drt-core[deltalake]     # Delta Lake source
+   pip install drt-core[iceberg]       # Iceberg source
    ```
    (Or `uv add drt-core[...]` if the user prefers uv.)
 
@@ -43,7 +45,7 @@ Guide the user through initializing a new drt project.
    mkdir my-drt-project && cd my-drt-project
    drt init
    ```
-   Prompts for project name, source type (any of: **bigquery / duckdb / sqlite / postgres / redshift / clickhouse / snowflake / mysql / databricks / sqlserver / rest_api**), source-specific connection fields, and auth method.
+   Prompts for project name, source type (any of: **bigquery / duckdb / sqlite / postgres / redshift / clickhouse / snowflake / mysql / databricks / sqlserver / deltalake / iceberg / rest_api**), source-specific connection fields, and auth method.
 
    Either flow writes:
    ```

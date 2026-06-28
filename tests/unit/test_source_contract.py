@@ -10,7 +10,9 @@ from drt.sources.base import Source
 from drt.sources.bigquery import BigQuerySource
 from drt.sources.clickhouse import ClickHouseSource
 from drt.sources.databricks import DatabricksSource
+from drt.sources.deltalake import DeltaLakeSource
 from drt.sources.duckdb import DuckDBSource
+from drt.sources.iceberg import IcebergSource
 from drt.sources.mysql import MySQLSource
 from drt.sources.postgres import PostgresSource
 from drt.sources.redshift import RedshiftSource
@@ -29,6 +31,8 @@ ALL_SOURCES = [
     SnowflakeSource,
     SQLiteSource,
     SQLServerSource,
+    DeltaLakeSource,
+    IcebergSource,
 ]
 
 

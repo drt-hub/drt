@@ -274,6 +274,8 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | ClickHouse | ✅ v0.4.3 | `pip install drt-core[clickhouse]` | Password (env var)                            |
 | MySQL      | ✅ v0.5   | `pip install drt-core[mysql]`      | Password (env var)                            |
 | Databricks | ✅ v0.6   | `pip install drt-core[databricks]` | Access Token (env var)                        |
+| Delta Lake | ✅ v0.8   | `pip install drt-core[deltalake]` | Storage options (env var)                     |
+| Iceberg    | ✅ v0.8   | `pip install drt-core[iceberg]`    | Catalog properties (env var)                  |
 | SQL Server | ✅ v0.6   | `pip install drt-core[sqlserver]`  | Password (env var)                            |
 | REST API   | ✅ v0.7   | (core)                             | Bearer / API Key / Basic / OAuth2             |
 

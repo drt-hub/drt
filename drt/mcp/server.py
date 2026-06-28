@@ -374,6 +374,8 @@ def create_server(project_dir: Path | None = None) -> Any:
                 {"name": "Databricks", "type": "databricks", "install": "drt-core[databricks]"},
                 {"name": "SQL Server", "type": "sqlserver", "install": "drt-core[sqlserver]"},
                 {"name": "REST API", "type": "rest_api", "install": "(core)"},
+                {"name": "Delta Lake", "type": "deltalake", "install": "drt-core[deltalake]"},
+                {"name": "Iceberg", "type": "iceberg", "install": "drt-core[iceberg]"},
             ],
             "destinations": [
                 {"name": "REST API", "type": "rest_api", "install": "(core)"},
