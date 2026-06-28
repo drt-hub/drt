@@ -134,3 +134,78 @@ def test_empty_project_renders_without_crashing(tmp_path: Path) -> None:
     render_html(empty, out)
     assert (out / "index.html").exists()
     assert "No syncs found" in (out / "dag.html").read_text(encoding="utf-8")
+
+
+def _hostile() -> str:
+    return "x</script><script>alert(1)</script>&<img src=y onerror=alert(2)>"
+
+
+def test_manifest_strings_are_escaped_no_xss(tmp_path: Path) -> None:
+    """Hostile names/description/error must not produce executable markup."""
+    bad = _hostile()
+    manifest = Manifest(
+        schema_version=SCHEMA_VERSION,
+        drt_version="9.9.9",
+        generated_at="2026-06-28T00:00:00Z",
+        project=Project(name=bad, profile="default"),
+        sources=[Source(name="default", type="duckdb")],
+        destinations=[Destination(name="dest_x", type="discord", label=bad)],
+        syncs=[
+            Sync(
+                name=bad,
+                source="default",
+                destination="dest_x",
+                mode="full",
+                description=bad,
+                tags=(bad,),
+                state=SyncStateSnapshot(
+                    last_sync_at="2026-06-27T00:00:00Z",
+                    last_cursor_value=None,
+                    rows_synced=0,
+                    last_status="failed",
+                    last_error=bad,
+                ),
+            )
+        ],
+    )
+    out = tmp_path / "docs"
+    render_html(manifest, out)
+    for f in out.rglob("*.html"):
+        text = f.read_text(encoding="utf-8")
+        # No un-escaped hostile <script> anywhere in the markup.
+        assert "<script>alert(1)</script>" not in text
+        # The inline JSON island must not be broken out of by a "</script>".
+        m = re.search(r'id="drt-data">(.*?)</script>', text, re.S)
+        if m:
+            assert "</script>" not in m.group(1)
+            json.loads(m.group(1))  # still valid JSON
+
+
+def test_removed_sync_leaves_no_orphan_page(tmp_path: Path) -> None:
+    """Re-rendering with a sync removed must not leave its old page behind."""
+    out = tmp_path / "docs"
+    render_html(_manifest(), out)  # two syncs
+    assert (out / "sync/users-to-pg.html").exists()
+
+    one_sync = Manifest(
+        schema_version=SCHEMA_VERSION,
+        drt_version="9.9.9",
+        generated_at="2026-06-28T00:00:00Z",
+        project=Project(name="acme", profile="default"),
+        sources=[Source(name="default", type="duckdb")],
+        destinations=[
+            Destination(name="dest_discord_x", type="discord", label="discord (webhook)")
+        ],
+        syncs=[
+            Sync(
+                name="customers_to_discord",
+                source="default",
+                destination="dest_discord_x",
+                mode="full",
+            )
+        ],
+    )
+    render_html(one_sync, out)  # re-render with users-to-pg gone
+    assert (out / "sync/customers-to-discord.html").exists()
+    assert not (out / "sync/users-to-pg.html").exists()
+    assert not (out / "destination/dest-pg-users.html").exists()

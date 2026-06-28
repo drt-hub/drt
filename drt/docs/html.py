@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path
 
 import yaml
-from jinja2 import DictLoader, Environment, select_autoescape
+from jinja2 import DictLoader, Environment
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import YamlLexer
@@ -99,7 +100,7 @@ _BASE = """\
   </main>
 </div>
 <script type="application/json"
-  id="drt-data">{{ data_json }}</script>
+  id="drt-data">{{ data_json|safe }}</script>
 <script src="{{ root }}assets/app.js"></script>
 {% block scripts %}{% endblock %}
 </body>
@@ -170,7 +171,7 @@ _SYNC = """\
 </dl>
 {% endif %}
 <h2>Definition</h2>
-{{ yaml_html }}
+{{ yaml_html|safe }}
 {% endblock %}
 """
 
@@ -225,7 +226,7 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
                 "destination": _DESTINATION,
             }
         ),
-        autoescape=select_autoescape(["html"]),
+        autoescape=True,
     )
 
     # Stable slugs for filenames + cross-links.
@@ -252,6 +253,11 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
 
     written: list[Path] = []
 
+    # Clear any previous build so a removed sync/source/destination doesn't
+    # leave an orphan page behind.
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+
     def write(rel: str, html: str) -> None:
         path = output_dir / rel
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -269,7 +275,15 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
     write("manifest.json", json.dumps(manifest.to_dict(), indent=2))
 
     def dumps(view: dict[str, object]) -> str:
-        return json.dumps(view, separators=(",", ":"))
+        # Escape <, >, & to their \u00xx forms so an embedded "</script>"
+        # (or stray markup) can't break out of the inline JSON block. Stays
+        # valid JSON for JSON.parse().
+        return (
+            json.dumps(view, separators=(",", ":"))
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026")
+        )
 
     # index.html
     index_syncs = [
