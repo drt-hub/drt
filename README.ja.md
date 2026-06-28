@@ -248,6 +248,8 @@ Claude Codeの公式スキルをインストールすると、チャットイン
 | ClickHouse | ✅ v0.4.3 | `pip install drt-core[clickhouse]` | パスワード（環境変数） |
 | MySQL | ✅ v0.5 | `pip install drt-core[mysql]` | パスワード（環境変数） |
 | Databricks | ✅ v0.6 | `pip install drt-core[databricks]` | Access Token（環境変数） |
+| Delta Lake | ✅ v0.8 | `pip install drt-core[deltalake]` | Storage options（環境変数） |
+| Iceberg | ✅ v0.8 | `pip install drt-core[iceberg]` | Catalog properties（環境変数） |
 | SQL Server | ✅ v0.6 | `pip install drt-core[sqlserver]` | パスワード（環境変数） |
 | REST API | ✅ v0.7 | (core) | Bearer / API Key / Basic / OAuth2 |
 

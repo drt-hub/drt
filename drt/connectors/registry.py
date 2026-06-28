@@ -128,7 +128,9 @@ def _register_all_connectors() -> None:
         BigQueryProfile,
         ClickHouseProfile,
         DatabricksProfile,
+        DeltaLakeProfile,
         DuckDBProfile,
+        IcebergProfile,
         MySQLProfile,
         PostgresProfile,
         RedshiftProfile,
@@ -214,7 +216,9 @@ def _register_all_connectors() -> None:
     from drt.sources.bigquery import BigQuerySource
     from drt.sources.clickhouse import ClickHouseSource
     from drt.sources.databricks import DatabricksSource
+    from drt.sources.deltalake import DeltaLakeSource
     from drt.sources.duckdb import DuckDBSource
+    from drt.sources.iceberg import IcebergSource
     from drt.sources.mysql import MySQLSource
     from drt.sources.postgres import PostgresSource
     from drt.sources.redshift import RedshiftSource
@@ -273,6 +277,8 @@ def _register_all_connectors() -> None:
     register_source("databricks", DatabricksProfile, DatabricksSource)
     register_source("sqlserver", SQLServerProfile, SQLServerSource)
     register_source("rest_api", RestApiProfile, RestApiSource)
+    register_source("deltalake", DeltaLakeProfile, DeltaLakeSource)
+    register_source("iceberg", IcebergProfile, IcebergSource)
 
 
 # Auto-register all connectors on import
