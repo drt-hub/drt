@@ -7,7 +7,7 @@ import hashlib
 import pytest
 from pydantic import ValidationError
 
-from drt.config.models import SyncOptions
+from drt.config.models import MaskRule, SyncOptions
 from drt.engine.masking import apply_mask
 
 # ---------------------------------------------------------------------------
@@ -24,10 +24,25 @@ class TestMaskConfig:
         with pytest.raises(ValidationError):
             SyncOptions(mask={"email": "encrypt"})
 
-    def test_rejects_object_form(self) -> None:
-        # v1 is flat only; the object form (truncate etc.) is a follow-up (#660).
+    def test_accepts_object_form_truncate(self) -> None:
+        opts = SyncOptions(mask={"name": {"strategy": "truncate", "length": 2}})
+        assert opts.mask == {"name": MaskRule(strategy="truncate", length=2)}
+
+    def test_truncate_requires_length(self) -> None:
         with pytest.raises(ValidationError):
-            SyncOptions(mask={"name": {"strategy": "redact"}})
+            SyncOptions(mask={"name": {"strategy": "truncate"}})
+
+    def test_rejects_negative_truncate_length(self) -> None:
+        with pytest.raises(ValidationError):
+            SyncOptions(mask={"name": {"strategy": "truncate", "length": -1}})
+
+    def test_rejects_length_on_parameterless_strategy(self) -> None:
+        with pytest.raises(ValidationError):
+            SyncOptions(mask={"email": {"strategy": "hash", "length": 4}})
+
+    def test_rejects_unknown_strategy_object_form(self) -> None:
+        with pytest.raises(ValidationError):
+            SyncOptions(mask={"email": {"strategy": "encrypt"}})
 
     def test_defaults_to_none(self) -> None:
         assert SyncOptions().mask is None
@@ -94,3 +109,43 @@ class TestApplyMask:
         assert out[1]["name"] == "[REDACTED]"
         assert out[0]["id"] == 1
         assert out[0]["email"] == hashlib.sha256(b"a@b.com").hexdigest()
+
+
+class TestTruncate:
+    def test_keeps_first_n_chars(self) -> None:
+        out = apply_mask(
+            [{"name": "Robert"}], {"name": MaskRule(strategy="truncate", length=2)}
+        )
+        assert out == [{"name": "Ro"}]
+
+    def test_length_zero_empties(self) -> None:
+        out = apply_mask(
+            [{"name": "Robert"}], {"name": MaskRule(strategy="truncate", length=0)}
+        )
+        assert out == [{"name": ""}]
+
+    def test_length_longer_than_value_returns_as_is(self) -> None:
+        out = apply_mask(
+            [{"name": "Bob"}], {"name": MaskRule(strategy="truncate", length=10)}
+        )
+        assert out == [{"name": "Bob"}]
+
+    def test_stringifies_non_string(self) -> None:
+        out = apply_mask(
+            [{"pin": 123456}], {"pin": MaskRule(strategy="truncate", length=3)}
+        )
+        assert out == [{"pin": "123"}]
+
+    def test_none_passes_through(self) -> None:
+        out = apply_mask(
+            [{"name": None}], {"name": MaskRule(strategy="truncate", length=2)}
+        )
+        assert out == [{"name": None}]
+
+    def test_object_and_flat_forms_together(self) -> None:
+        out = apply_mask(
+            [{"email": "a@b.com", "name": "Robert"}],
+            {"email": "hash", "name": MaskRule(strategy="truncate", length=3)},
+        )
+        assert out[0]["email"] == hashlib.sha256(b"a@b.com").hexdigest()
+        assert out[0]["name"] == "Rob"
