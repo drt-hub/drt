@@ -9,6 +9,7 @@ file and exposes its path as ``DRT_SMOKE_BIGQUERY_KEYFILE``.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -57,12 +58,25 @@ def test_bigquery_insert_roundtrip(tmp_path: Path) -> None:
 
     client = bigquery.Client.from_service_account_json(keyfile, project=project)
     try:
+        # drt's insert mode streams into an existing table (insert_rows_json);
+        # it doesn't create one, so pre-create with the seed schema.
+        client.query(
+            f"CREATE TABLE {fqn} (id INT64, name STRING, email STRING)"
+        ).result()
+
         result = run_sync(sync, source, BigQueryDestination(), profile, tmp_path)
         assert result.success == 3, f"expected 3 loaded rows, got {result.success}"
         assert result.failed == 0
 
-        rows = client.query(f"SELECT name FROM {fqn}").result()
-        names = {row["name"] for row in rows}
+        # Streaming inserts land in a buffer that isn't immediately visible to
+        # SQL SELECT — poll briefly until all three rows are queryable.
+        names: set[str] = set()
+        for _ in range(12):
+            rows = client.query(f"SELECT name FROM {fqn}").result()
+            names = {row["name"] for row in rows}
+            if names == {"Alice", "Bob", "Carol"}:
+                break
+            time.sleep(5)
         assert names == {"Alice", "Bob", "Carol"}
     finally:
         client.query(f"DROP TABLE IF EXISTS {fqn}").result()

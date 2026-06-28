@@ -66,6 +66,17 @@ def test_databricks_insert_roundtrip(tmp_path: Path) -> None:
         sync=SyncOptions(batch_size=10),
     )
 
+    # drt's insert mode appends into an existing table — pre-create it. Must be
+    # a Delta table (the destination relies on Delta for merge/replace paths).
+    conn = _connect(creds)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"CREATE TABLE {fqn} (id INT, name STRING, email STRING) USING DELTA"
+            )
+    finally:
+        conn.close()
+
     try:
         result = run_sync(sync, source, DatabricksDestination(), profile, tmp_path)
         assert result.success == 3, f"expected 3 loaded rows, got {result.success}"

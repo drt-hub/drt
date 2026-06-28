@@ -47,9 +47,32 @@ def _readback_count_and_names(creds: dict[str, str], table: str) -> tuple[int, s
     )
     try:
         with conn.cursor() as cur:
-            cur.execute(f'SELECT "name" FROM "{table}"')
+            # Unquoted to match the destination's unquoted INSERT, which
+            # Snowflake folds to UPPERCASE (quoted lowercase wouldn't match).
+            cur.execute(f"SELECT name FROM {table}")
             names = {row[0] for row in cur.fetchall()}
         return len(names), names
+    finally:
+        conn.close()
+
+
+def _create_table(creds: dict[str, str], table: str) -> None:
+    """Pre-create the target table — drt's insert mode INSERTs into an existing
+    table, it doesn't create one. Unquoted identifiers so Snowflake folds them
+    to UPPERCASE, matching the destination's unquoted INSERT column list."""
+    conn = snowflake_connector.connect(
+        account=creds[ACCOUNT_ENV],
+        user=creds[USER_ENV],
+        password=creds[PASSWORD_ENV],
+        warehouse=creds["DRT_SMOKE_SNOWFLAKE_WAREHOUSE"],
+        database=creds["DRT_SMOKE_SNOWFLAKE_DATABASE"],
+        schema=creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"],
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"CREATE TABLE {table} (id INTEGER, name VARCHAR, email VARCHAR)"
+            )
     finally:
         conn.close()
 
@@ -65,7 +88,7 @@ def _drop_table(creds: dict[str, str], table: str) -> None:
     )
     try:
         with conn.cursor() as cur:
-            cur.execute(f'DROP TABLE IF EXISTS "{table}"')
+            cur.execute(f"DROP TABLE IF EXISTS {table}")
     finally:
         conn.close()
 
@@ -105,6 +128,7 @@ def test_snowflake_insert_roundtrip(tmp_path: Path) -> None:
     )
 
     try:
+        _create_table(creds, table)
         result = run_sync(sync, source, SnowflakeDestination(), profile, tmp_path)
 
         assert result.success == 3, f"expected 3 loaded rows, got {result.success}"
