@@ -27,7 +27,7 @@ Example ~/.drt/profiles.yml:
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, TextIO
 
@@ -232,6 +232,34 @@ class RestApiProfile:
         return f"{self.type} ({self.url})"
 
 
+@dataclass
+class DeltaLakeProfile:
+    """Delta Lake source — read Delta tables from local / S3 / GCS via delta-rs."""
+
+    type: Literal["deltalake"]
+    location: str = ""  # local path, s3://bucket/table, gs://bucket/table
+    table: str | None = None  # SQL name to query it as (default: last path segment)
+    storage_options: dict[str, str] = field(default_factory=dict)  # cloud auth; *_ENV resolved
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.location})"
+
+
+@dataclass
+class IcebergProfile:
+    """Apache Iceberg source — read Iceberg tables via pyiceberg."""
+
+    type: Literal["iceberg"]
+    table: str = ""  # "namespace.table"
+    catalog_uri: str | None = None  # REST catalog URI
+    warehouse: str | None = None  # s3://... warehouse root
+    catalog_name: str = "default"
+    properties: dict[str, str] = field(default_factory=dict)  # extra catalog props; *_ENV resolved
+
+    def describe(self) -> str:
+        return f"{self.type} ({self.table})"
+
+
 # Union type — used throughout the codebase
 ProfileConfig = (
     BigQueryProfile
@@ -245,6 +273,8 @@ ProfileConfig = (
     | DatabricksProfile
     | SQLServerProfile
     | RestApiProfile
+    | DeltaLakeProfile
+    | IcebergProfile
 )
 
 
@@ -307,6 +337,22 @@ def resolve_env(value: str | None, env_var: str | None) -> str | None:
             return env_val
         return _lookup_secrets_toml(env_var)
     return None
+
+
+def resolve_env_dict(options: dict[str, str]) -> dict[str, str]:
+    """Resolve cloud storage / catalog options. A key ending in ``_ENV`` is read
+    from the environment and re-keyed without the suffix, e.g.
+    ``{"AWS_ACCESS_KEY_ID_ENV": "AWS_KEY"}`` -> ``{"AWS_ACCESS_KEY_ID": <$AWS_KEY>}``.
+    Other keys pass through unchanged; a missing env var drops that key."""
+    resolved: dict[str, str] = {}
+    for key, value in options.items():
+        if key.endswith("_ENV"):
+            env_val = os.environ.get(value)
+            if env_val is not None:
+                resolved[key[:-4]] = env_val
+        else:
+            resolved[key] = value
+    return resolved
 
 
 def _load_profiles_yaml(config_dir: Path | None = None) -> dict[str, Any]:
@@ -481,10 +527,34 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             schema=raw.get("schema") or "default",
         )
 
+    if source_type == "deltalake":
+        location = raw.get("location", "")
+        if not location:
+            raise ValueError("Delta Lake profile requires 'location'.")
+        return DeltaLakeProfile(
+            type="deltalake",
+            location=location,
+            table=raw.get("table"),
+            storage_options=raw.get("storage_options") or {},
+        )
+
+    if source_type == "iceberg":
+        table = raw.get("table", "")
+        if not table:
+            raise ValueError("Iceberg profile requires 'table' (namespace.table).")
+        return IcebergProfile(
+            type="iceberg",
+            table=table,
+            catalog_uri=raw.get("catalog_uri"),
+            warehouse=raw.get("warehouse"),
+            catalog_name=raw.get("catalog_name") or "default",
+            properties=raw.get("properties") or {},
+        )
+
     raise ValueError(
         f"Unsupported source type '{source_type}'. "
         "Supported: bigquery, duckdb, sqlite, postgres, redshift, clickhouse, "
-        "mysql, snowflake, databricks, sqlserver"
+        "mysql, snowflake, databricks, sqlserver, deltalake, iceberg"
     )
 
 
@@ -637,6 +707,22 @@ def save_profile(
             entry["access_token_env"] = profile.access_token_env
         if profile.catalog:
             entry["catalog"] = profile.catalog
+    elif isinstance(profile, DeltaLakeProfile):
+        entry = {"type": "deltalake", "location": profile.location}
+        if profile.table:
+            entry["table"] = profile.table
+        if profile.storage_options:
+            entry["storage_options"] = profile.storage_options
+    elif isinstance(profile, IcebergProfile):
+        entry = {"type": "iceberg", "table": profile.table}
+        if profile.catalog_uri:
+            entry["catalog_uri"] = profile.catalog_uri
+        if profile.warehouse:
+            entry["warehouse"] = profile.warehouse
+        if profile.catalog_name and profile.catalog_name != "default":
+            entry["catalog_name"] = profile.catalog_name
+        if profile.properties:
+            entry["properties"] = profile.properties
     else:
         raise ValueError(f"Unknown profile type: {type(profile)}")
 
