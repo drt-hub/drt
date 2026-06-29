@@ -106,8 +106,27 @@ pre.code { background:var(--surface); border:1px solid var(--line); border-radiu
 
 .footer { color:var(--muted); font-size:12px; margin-top:36px; padding-top:14px; border-top:1px solid var(--line); }
 
+/* Overview — type-distribution bars */
+.two-col { display:grid; grid-template-columns:1fr 1fr; gap:32px; margin-bottom:8px; }
+.bar-row { display:flex; align-items:center; gap:10px; margin:7px 0; font-size:13px; }
+.bar-row__label { width:9rem; color:var(--fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.bar-row__bar-bg { flex:1; background:var(--chip); height:8px; border-radius:999px; overflow:hidden; }
+.bar-row__bar-fill { background:var(--brand-600); height:100%; border-radius:999px; }
+.bar-row__count { width:2.5rem; text-align:right; color:var(--muted); }
+
+/* Recent runs + status */
+td.right, th.right { text-align:right; }
+.font-mono { font-family:var(--mono); font-size:12px; color:var(--muted); }
+:root { --success:#15803d; --warning:#b45309; --error:#b91c1c; }
+@media (prefers-color-scheme: dark) { :root { --success:#4ade80; --warning:#fbbf24; --error:#f87171; } }
+.status-success { color:var(--success); font-weight:500; }
+.status-partial { color:var(--warning); font-weight:500; }
+.status-failed { color:var(--error); font-weight:500; }
+.empty { border:1px dashed var(--line); padding:32px; text-align:center; border-radius:var(--radius); color:var(--muted); }
+
 @media (max-width:860px) {
   .cards { grid-template-columns:1fr; }
+  .two-col { grid-template-columns:1fr; }
   .sidebar { display:none; }
   .topnav { display:none; }
 }

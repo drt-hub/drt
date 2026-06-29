@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+from collections import Counter
 from pathlib import Path
 
 import yaml
@@ -118,17 +119,49 @@ _INDEX = """\
   <div class="card"><div class="num">{{ nav.sources|length }}</div><div class="lbl">Sources</div></div>
   <div class="card"><div class="num">{{ nav.destinations|length }}</div><div class="lbl">Destinations</div></div>
 </div>
-<h2>Syncs</h2>
+<div class="two-col">
+  <div>
+    <h2>Source types</h2>
+    {% set max_src = source_type_counts.values()|max|default(1) %}
+    {% for type, count in source_type_counts.items() %}
+    <div class="bar-row">
+      <div class="bar-row__label">{{ type }}</div>
+      <div class="bar-row__bar-bg"><div class="bar-row__bar-fill" style="width:{{ (count*100/max_src)|round(0,'floor') }}%"></div></div>
+      <div class="bar-row__count">{{ count }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  <div>
+    <h2>Destination types</h2>
+    {% set max_dst = destination_type_counts.values()|max|default(1) %}
+    {% for type, count in destination_type_counts.items() %}
+    <div class="bar-row">
+      <div class="bar-row__label">{{ type }}</div>
+      <div class="bar-row__bar-bg"><div class="bar-row__bar-fill" style="width:{{ (count*100/max_dst)|round(0,'floor') }}%"></div></div>
+      <div class="bar-row__count">{{ count }}</div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+<h2>Recent runs</h2>
+{% if recent_runs %}
 <table>
-  <tr><th>Name</th><th>Source</th><th>Destination</th><th>Mode</th></tr>
-  {% for s in syncs %}
+  <tr><th>Time (UTC)</th><th>Sync</th><th>Status</th><th class="right">Rows</th></tr>
+  {% for run in recent_runs %}
   <tr>
-    <td><a href="sync/{{ s.slug }}.html">{{ s.name }}</a></td>
-    <td>{{ s.source }}</td><td>{{ s.destination_label }}</td>
-    <td><span class="mode">{{ s.mode }}</span></td>
+    <td class="font-mono">{{ run.last_sync_at }}</td>
+    <td><a href="sync/{{ run.slug }}.html">{{ run.name }}</a></td>
+    <td>{% if run.last_status=='success' %}<span class="status-success">&#10003; success</span>
+      {%- elif run.last_status=='partial' %}<span class="status-partial">&#9888; partial</span>
+      {%- elif run.last_status=='failed' %}<span class="status-failed">&#10007; failed</span>
+      {%- else %}{{ run.last_status }}{% endif %}</td>
+    <td class="right">{{ run.rows_synced }}</td>
   </tr>
   {% endfor %}
 </table>
+{% else %}
+<div class="empty">No run history yet &mdash; run <code>drt run</code> to populate state.</div>
+{% endif %}
 {% endblock %}
 """
 
@@ -285,18 +318,32 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
             .replace("&", "\\u0026")
         )
 
-    # index.html
-    index_syncs = [
+    # index.html — overview with type-distribution bars + recent runs.
+    # Bars count *syncs* by the type of their source / destination (how many
+    # syncs read from bigquery, write to postgres, …) — more telling than the
+    # bare node count, and matches the ADR #500 mockup.
+    src_type = {s.name: s.type for s in manifest.sources}
+    dst_type = {d.name: d.type for d in manifest.destinations}
+    source_type_counts = dict(
+        Counter(src_type.get(s.source, s.source) for s in manifest.syncs)
+    )
+    destination_type_counts = dict(
+        Counter(dst_type.get(s.destination, s.destination) for s in manifest.syncs)
+    )
+    runs_with_state = sorted(
+        (s for s in manifest.syncs if s.state is not None),
+        key=lambda s: (s.state.last_sync_at if s.state else "") or "",
+        reverse=True,
+    )
+    recent_runs = [
         {
             "name": s.name,
             "slug": sync_slugs[s.name],
-            "source": s.source,
-            "destination_label": dest_by_id[s.destination].label
-            if s.destination in dest_by_id
-            else s.destination,
-            "mode": s.mode,
+            "last_sync_at": s.state.last_sync_at if s.state else "",
+            "last_status": s.state.last_status if s.state else "",
+            "rows_synced": s.state.rows_synced if s.state else 0,
         }
-        for s in manifest.syncs
+        for s in runs_with_state[:10]
     ]
     write(
         "index.html",
@@ -305,7 +352,9 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
             active="overview",
             root="",
             current_slug="",
-            syncs=index_syncs,
+            source_type_counts=source_type_counts,
+            destination_type_counts=destination_type_counts,
+            recent_runs=recent_runs,
             data_json=dumps({"project": common["project_name"], "counts": {
                 "syncs": len(manifest.syncs),
                 "sources": len(manifest.sources),
