@@ -1,0 +1,143 @@
+# DWH smoke validation — real-warehouse end-to-end checks (#674, part of #654).
+#
+# The cloud-warehouse destinations (Snowflake / Databricks / BigQuery) are
+# CI-tested only with sys.modules-injected mocks — that covers drt's own logic
+# but can't catch dialect-specific behaviour only a live service exercises.
+# This workflow runs a minimal seeded-DuckDB -> engine -> real-warehouse sync
+# and reads the rows back, mirroring the v0.7.5 DuckDB E2E harness.
+#
+# Credential-agnostic by design:
+#   * Only runs on the upstream repo (forks have no secrets).
+#   * Each job checks whether its DRT_SMOKE_* secrets are present and, if not,
+#     no-ops green — so this is safe to merge before any secrets exist and
+#     "activates" per-warehouse as masukai adds them.
+# Cloud secrets + the "verified on a real service" sign-off are owned by the
+# maintainer (his accounts / repo secrets); see #671 / #672 / #673.
+#
+# Required repo secrets (per warehouse) are listed in
+# tests/integration/dwh/README.md.
+
+name: dwh-smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Nightly 03:00 UTC — offset from CI (00:00) and the weekly audits.
+    - cron: '0 3 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  snowflake:
+    name: Snowflake smoke
+    runs-on: ubuntu-latest
+    if: github.repository == 'drt-hub/drt'
+    env:
+      DRT_SMOKE_SNOWFLAKE_ACCOUNT: ${{ secrets.SMOKE_SNOWFLAKE_ACCOUNT }}
+      DRT_SMOKE_SNOWFLAKE_USER: ${{ secrets.SMOKE_SNOWFLAKE_USER }}
+      DRT_SMOKE_SNOWFLAKE_PASSWORD: ${{ secrets.SMOKE_SNOWFLAKE_PASSWORD }}
+      DRT_SMOKE_SNOWFLAKE_DATABASE: ${{ secrets.SMOKE_SNOWFLAKE_DATABASE }}
+      DRT_SMOKE_SNOWFLAKE_SCHEMA: ${{ secrets.SMOKE_SNOWFLAKE_SCHEMA }}
+      DRT_SMOKE_SNOWFLAKE_WAREHOUSE: ${{ secrets.SMOKE_SNOWFLAKE_WAREHOUSE }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check credentials
+        id: creds
+        run: |
+          if [ -z "$DRT_SMOKE_SNOWFLAKE_ACCOUNT" ]; then
+            echo "No Snowflake smoke secrets configured — skipping (no-op)."
+            echo "has_creds=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_creds=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Set up Python
+        if: steps.creds.outputs.has_creds == 'true'
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install uv
+        if: steps.creds.outputs.has_creds == 'true'
+        run: pip install uv
+      - name: Install drt-core[dev,duckdb,snowflake]
+        if: steps.creds.outputs.has_creds == 'true'
+        run: uv pip install --system -e ".[dev,duckdb,snowflake]"
+      - name: Run Snowflake smoke
+        if: steps.creds.outputs.has_creds == 'true'
+        run: pytest -m dwh_smoke tests/integration/dwh/test_snowflake_smoke.py -v
+
+  databricks:
+    name: Databricks smoke
+    runs-on: ubuntu-latest
+    if: github.repository == 'drt-hub/drt'
+    env:
+      DRT_SMOKE_DATABRICKS_HOST: ${{ secrets.SMOKE_DATABRICKS_HOST }}
+      DRT_SMOKE_DATABRICKS_HTTP_PATH: ${{ secrets.SMOKE_DATABRICKS_HTTP_PATH }}
+      DRT_SMOKE_DATABRICKS_TOKEN: ${{ secrets.SMOKE_DATABRICKS_TOKEN }}
+      DRT_SMOKE_DATABRICKS_CATALOG: ${{ secrets.SMOKE_DATABRICKS_CATALOG }}
+      DRT_SMOKE_DATABRICKS_SCHEMA: ${{ secrets.SMOKE_DATABRICKS_SCHEMA }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check credentials
+        id: creds
+        run: |
+          if [ -z "$DRT_SMOKE_DATABRICKS_HOST" ]; then
+            echo "No Databricks smoke secrets configured — skipping (no-op)."
+            echo "has_creds=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_creds=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Set up Python
+        if: steps.creds.outputs.has_creds == 'true'
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install uv
+        if: steps.creds.outputs.has_creds == 'true'
+        run: pip install uv
+      - name: Install drt-core[dev,duckdb,databricks]
+        if: steps.creds.outputs.has_creds == 'true'
+        run: uv pip install --system -e ".[dev,duckdb,databricks]"
+      - name: Run Databricks smoke
+        if: steps.creds.outputs.has_creds == 'true'
+        run: pytest -m dwh_smoke tests/integration/dwh/test_databricks_smoke.py -v
+
+  bigquery:
+    name: BigQuery smoke
+    runs-on: ubuntu-latest
+    if: github.repository == 'drt-hub/drt'
+    env:
+      DRT_SMOKE_BIGQUERY_PROJECT: ${{ secrets.SMOKE_BIGQUERY_PROJECT }}
+      DRT_SMOKE_BIGQUERY_DATASET: ${{ secrets.SMOKE_BIGQUERY_DATASET }}
+      # Service-account JSON (whole file contents) stored as a secret.
+      SMOKE_BIGQUERY_KEYFILE_JSON: ${{ secrets.SMOKE_BIGQUERY_KEYFILE_JSON }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check credentials
+        id: creds
+        run: |
+          if [ -z "$DRT_SMOKE_BIGQUERY_PROJECT" ]; then
+            echo "No BigQuery smoke secrets configured — skipping (no-op)."
+            echo "has_creds=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_creds=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Set up Python
+        if: steps.creds.outputs.has_creds == 'true'
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install uv
+        if: steps.creds.outputs.has_creds == 'true'
+        run: pip install uv
+      - name: Install drt-core[dev,duckdb,bigquery]
+        if: steps.creds.outputs.has_creds == 'true'
+        run: uv pip install --system -e ".[dev,duckdb,bigquery]"
+      - name: Write service-account keyfile
+        if: steps.creds.outputs.has_creds == 'true'
+        run: |
+          echo "$SMOKE_BIGQUERY_KEYFILE_JSON" > "$RUNNER_TEMP/bq-sa.json"
+          echo "DRT_SMOKE_BIGQUERY_KEYFILE=$RUNNER_TEMP/bq-sa.json" >> "$GITHUB_ENV"
+      - name: Run BigQuery smoke
+        if: steps.creds.outputs.has_creds == 'true'
+        run: pytest -m dwh_smoke tests/integration/dwh/test_bigquery_smoke.py -v

@@ -123,4 +123,7 @@ disallow_untyped_decorators = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "dwh_smoke: real cloud-warehouse smoke checks (Snowflake/Databricks/BigQuery); skip without DRT_SMOKE_* secrets (#674).",
+]
 asyncio_mode = "auto"
