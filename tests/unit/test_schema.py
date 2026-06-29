@@ -17,7 +17,7 @@ from drt.config.models import (
     PostgresDestinationConfig,
     SnowflakeDestinationConfig,
 )
-from drt.destinations.schema import describe_columns
+from drt.destinations.schema import describe_columns, describe_databricks_ddls
 
 
 def _pg_config(table: str = "public.events") -> PostgresDestinationConfig:
@@ -288,6 +288,43 @@ def test_databricks_query_targets_catalog_information_schema(
 def test_databricks_empty_result_returns_none(mock_connect: MagicMock) -> None:
     mock_connect.return_value = _sf_conn_returning([])
     assert describe_columns(_dbx_config()) is None
+
+
+@patch("drt.destinations.databricks.DatabricksDestination._connect")
+def test_databricks_ddls_returns_struct_array_map_only(mock_connect: MagicMock) -> None:
+    # full_data_type carries the parameterised DDL from_json() needs. VARIANT
+    # (parse_json, no DDL) and scalars are excluded.
+    conn = _sf_conn_returning(
+        [
+            ("id", "BIGINT"),
+            ("payload", "VARIANT"),
+            ("profile", "STRUCT<name: STRING, age: INT>"),
+            ("attrs", "MAP<STRING, STRING>"),
+            ("tags", "ARRAY<STRING>"),
+            ("name", "STRING"),
+        ]
+    )
+    mock_connect.return_value = conn
+    assert describe_databricks_ddls(_dbx_config()) == {
+        "profile": "STRUCT<name: STRING, age: INT>",
+        "attrs": "MAP<STRING, STRING>",
+        "tags": "ARRAY<STRING>",
+    }
+    # the query must read full_data_type (not data_type)
+    sql, _ = conn.cursor.return_value.__enter__.return_value.execute.call_args[0]
+    assert "full_data_type" in sql
+
+
+@patch("drt.destinations.databricks.DatabricksDestination._connect")
+def test_databricks_ddls_none_when_no_complex_columns(mock_connect: MagicMock) -> None:
+    mock_connect.return_value = _sf_conn_returning([("id", "BIGINT"), ("payload", "VARIANT")])
+    assert describe_databricks_ddls(_dbx_config()) is None
+
+
+@patch("drt.destinations.databricks.DatabricksDestination._connect")
+def test_databricks_ddls_none_on_failure(mock_connect: MagicMock) -> None:
+    mock_connect.side_effect = RuntimeError("information_schema locked down")
+    assert describe_databricks_ddls(_dbx_config()) is None
 
 
 @patch("drt.destinations.snowflake.SnowflakeDestination._connect")
