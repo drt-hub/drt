@@ -1915,6 +1915,37 @@
       "title": "LookupConfig",
       "type": "object"
     },
+    "MaskRule": {
+      "description": "Object form of a mask rule, for strategies that take a parameter (#660).\n\nThe flat form (``field: \"hash\" | \"redact\"``) covers parameter-less strategies.\nThis object form is used when a strategy needs options, for example\n``{strategy: \"truncate\", length: 2}``.",
+      "properties": {
+        "strategy": {
+          "enum": [
+            "hash",
+            "redact",
+            "truncate"
+          ],
+          "title": "Strategy",
+          "type": "string"
+        },
+        "length": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Length"
+        }
+      },
+      "required": [
+        "strategy"
+      ],
+      "title": "MaskRule",
+      "type": "object"
+    },
     "MixpanelDestinationConfig": {
       "properties": {
         "type": {
@@ -3744,11 +3775,18 @@
           "anyOf": [
             {
               "additionalProperties": {
-                "enum": [
-                  "hash",
-                  "redact"
-                ],
-                "type": "string"
+                "anyOf": [
+                  {
+                    "enum": [
+                      "hash",
+                      "redact"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "$ref": "#/$defs/MaskRule"
+                  }
+                ]
               },
               "type": "object"
             },

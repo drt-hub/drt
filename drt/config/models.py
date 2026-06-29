@@ -1106,6 +1106,35 @@ class DLQConfig(BaseModel):
         return self
 
 
+class MaskRule(BaseModel):
+    """Object form of a mask rule, for strategies that take a parameter (#660).
+
+    The flat form (``field: "hash" | "redact"``) covers parameter-less strategies.
+    This object form is used when a strategy needs options, for example
+    ``{strategy: "truncate", length: 2}``.
+    """
+
+    strategy: Literal["hash", "redact", "truncate"]
+    length: int | None = None
+
+    @model_validator(mode="after")
+    def _validate_length(self) -> MaskRule:
+        if self.strategy == "truncate":
+            if self.length is None or self.length < 0:
+                raise ValueError(
+                    "the 'truncate' strategy requires a non-negative 'length'"
+                )
+        elif self.length is not None:
+            raise ValueError(
+                f"'length' is not valid for the '{self.strategy}' strategy"
+            )
+        return self
+
+
+# A mask rule is either a flat strategy name (no params) or the object form above.
+MaskSpec = Literal["hash", "redact"] | MaskRule
+
+
 class SyncOptions(BaseModel):
     mode: Literal["full", "incremental", "upsert", "replace", "mirror"] = "full"
     replace_strategy: Literal["truncate", "swap"] = "truncate"
@@ -1121,12 +1150,14 @@ class SyncOptions(BaseModel):
     # cursor_field and lookups still reference source-side column names,
     # while upsert_key / destination columns reference the mapped names.
     field_mappings: dict[str, str] | None = None
-    # PII masking (#427): {field_name: "hash" | "redact"}. Applied in the engine
-    # at the same seam as field_mappings (just before the destination), so keys
-    # reference the post-rename field name. "hash" = SHA-256 hex digest;
-    # "redact" = "[REDACTED]". Null passes through; non-strings are stringified
-    # before hashing. Param-bearing strategies (e.g. truncate) are a follow-up (#660).
-    mask: dict[str, Literal["hash", "redact"]] | None = None
+    # PII masking (#427, #660): {field_name: spec}, where spec is a flat strategy
+    # name ("hash" | "redact") or the object form {strategy, length} for
+    # param-bearing strategies (truncate). Applied in the engine at the same seam
+    # as field_mappings (just before the destination), so keys reference the
+    # post-rename field name. "hash" = SHA-256 hex digest; "redact" = "[REDACTED]";
+    # "truncate" = the first `length` characters. Null passes through; non-strings
+    # are stringified first.
+    mask: dict[str, MaskSpec] | None = None
     # Dead Letter Queue (#278): opt-in persistence of failed records for
     # `drt retry`. None means disabled (same as DLQConfig(enabled=False)).
     dlq: DLQConfig | None = None
