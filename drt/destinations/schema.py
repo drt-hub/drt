@@ -230,3 +230,46 @@ def _categorize_databricks(data_type: str | None) -> str:
     if dt in ("STRUCT", "MAP", "ARRAY", "VARIANT"):
         return JSON
     return SCALAR
+
+
+def describe_databricks_ddls(
+    config: DatabricksDestinationConfig,
+) -> dict[str, str] | None:
+    """Map each STRUCT / ARRAY / MAP column to its full type DDL (for ``from_json``).
+
+    :func:`describe_columns` returns the *category* (``json`` / ``scalar``) — enough
+    to decide *whether* a value needs JSON encoding. Databricks' ``from_json``
+    additionally needs the target type's DDL (e.g. ``ARRAY<STRING>``,
+    ``STRUCT<a: INT, b: STRING>``) to reconstruct the value, which
+    ``information_schema`` exposes as ``full_data_type``.
+
+    Only STRUCT / ARRAY / MAP columns are returned. VARIANT columns load via
+    ``parse_json`` (no DDL needed), so a ``json``-category column *absent* from
+    this map is a VARIANT — the write path should ``parse_json`` it. Best-effort
+    like :func:`describe_columns`: returns ``None`` on any failure or no matches.
+    """
+    from drt.destinations.databricks import DatabricksDestination
+
+    sql = (
+        f"SELECT column_name, full_data_type FROM {config.catalog}.information_schema.columns "
+        "WHERE lower(table_schema) = lower(%s) AND lower(table_name) = lower(%s)"
+    )
+    params: list[Any] = [config.schema_, config.table]
+    try:
+        conn = DatabricksDestination()._connect(config)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        # Best-effort: a locked-down information_schema or transient failure
+        # must not break a sync — the write path falls back to its prior behaviour.
+        return None
+    out = {
+        str(col): str(ddl)
+        for col, ddl in rows
+        if (ddl or "").strip().upper().startswith(("STRUCT", "ARRAY", "MAP"))
+    }
+    return out or None
