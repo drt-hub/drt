@@ -1,3 +1,5 @@
+<!-- i18n-sync: base=GOVERNANCE.md, hash=c0f6b55b945d8bbaddb83b9ebc579a7314b4efe1 -->
+
 [English](./GOVERNANCE.md) | [日本語](./GOVERNANCE.ja.md)
 
 # ガバナンス
@@ -91,6 +93,12 @@ drt は **lazy consensus** モデルに従います:
 - Owner にメッセージを送る
 
 理由の説明は不要です。後日再度参加することも歓迎します。
+
+## オープンコアモデル
+
+常に無償で提供されるもの (コネクタ、CLI、同期エンジン、MCP サーバー) と、エンタープライズ境界を定義するもの (RBAC、監査ログ、プラグインシステム、クラウドホスティング) の詳細は [OPEN_CORE.md](./OPEN_CORE.md) を参照してください。
+
+この境界は同ドキュメントに示された原則に基づいて決定され、lazy consensus (上記「意思決定の方法」を参照) によって承認されます。
 
 ## 本ドキュメントの変更
 
