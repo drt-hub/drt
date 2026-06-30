@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # check-i18n-sync.sh — Detect stale i18n translations.
 #
-# Scans for translated files matching *.{lang}.md (e.g. README.ja.md)
+# Scans for translated files in two layouts:
+#   1. Root-level suffix form:  *.{lang}.md           (e.g. README.ja.md)
+#   2. docs/ subdirectory form: docs/**/{lang}/*.md   (e.g. docs/ja/configuration.md)
 # and checks whether the English base file has been updated since the
 # translation was last synced.
 #
 # Each translation file must contain a marker in its first 5 lines:
 #   <!-- i18n-sync: base=README.md, hash=<commit-hash> -->
+# The base is a repo-root-relative path. For docs/ translations it may point
+# at any English source — e.g. base=docs/llm/API_REFERENCE.md.
 #
 # The script compares the recorded hash against the latest commit that
 # touched the base file.  If they differ, a warning is printed.
@@ -23,8 +27,23 @@ cd "$REPO_ROOT"
 stale=0
 checked=0
 
-# Find all *.{lang}.md files (2-letter language codes).
-for translated in *.??.md; do
+# Collect translation files from both layouts:
+#   1. root-level    *.{lang}.md          (e.g. README.ja.md)
+#   2. docs/ subdir  docs/**/{lang}/*.md  (e.g. docs/ja/configuration.md)
+translations=()
+for f in *.??.md; do
+    if [ -f "$f" ]; then translations+=("$f"); fi
+done
+while IFS= read -r f; do
+    if [ -n "$f" ]; then translations+=("$f"); fi
+done < <(find docs -type f -path '*/[a-z][a-z]/*.md' 2>/dev/null | sort)
+
+if [ "${#translations[@]}" -eq 0 ]; then
+    echo "No translation files found."
+    exit 0
+fi
+
+for translated in "${translations[@]}"; do
     [ -f "$translated" ] || continue
 
     # Extract the i18n-sync marker from the first 5 lines.
