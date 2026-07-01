@@ -33,6 +33,11 @@ def _config(**overrides: Any) -> DatabricksDestinationConfig:
         "catalog": "main",
         "schema": "default",  # alias form — populated into schema_
         "table": "user_scores",
+        # Layer 3 (#317) is on by default; these pre-existing tests assert exact
+        # mock call counts, so disable introspection here (schema-aware behaviour
+        # is covered in test_databricks_schema_aware.py). Mirrors the Snowflake
+        # destination tests.
+        "introspect_schema": False,
     }
     defaults.update(overrides)
     return DatabricksDestinationConfig.model_validate(defaults)
