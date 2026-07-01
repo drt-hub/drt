@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -249,8 +250,11 @@ class TestDocsGenerateJsonCLI:
         data = json.loads((tmp_path / "out" / "manifest.json").read_text())
         assert "state" not in data["syncs"][0]
 
-    def test_html_still_raises_not_implemented(self) -> None:
+    def test_html_writes_static_site(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        _write_project(tmp_path)
         result = runner.invoke(app, ["docs", "generate", "--format", "html"])
-        assert result.exit_code != 0
-        # P2 message no longer mentions json since json now works
-        assert "P3" in str(result.exception) or "P3" in (result.output or "")
+        assert result.exit_code == 0, result.output
+        assert (tmp_path / "target" / "docs" / "index.html").exists()
