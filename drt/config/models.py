@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # Auth (shared across destination types)
@@ -1135,6 +1135,22 @@ class MaskRule(BaseModel):
 MaskSpec = Literal["hash", "redact"] | MaskRule
 
 
+class MirrorConfig(BaseModel):
+    """``sync.mirror`` — mirror-mode delete behaviour (#686).
+
+    - ``strategy: destination`` (default) — the original #340 behaviour:
+      DELETE destination rows whose ``upsert_key`` was not observed this
+      run. Correct only when drt exclusively owns the table.
+    - ``strategy: tracked`` — DELETE only rows drt itself previously
+      synced, tracked per sync in a drt-managed ``_drt_synced_keys`` side
+      table in the destination. Safe on tables the application also
+      writes to (Census-style semantics: first run baselines without
+      deleting; lost state re-baselines with a warning).
+    """
+
+    strategy: Literal["destination", "tracked"] = "destination"
+
+
 class SyncOptions(BaseModel):
     mode: Literal["full", "incremental", "upsert", "replace", "mirror"] = "full"
     replace_strategy: Literal["truncate", "swap"] = "truncate"
@@ -1161,11 +1177,24 @@ class SyncOptions(BaseModel):
     # Dead Letter Queue (#278): opt-in persistence of failed records for
     # `drt retry`. None means disabled (same as DLQConfig(enabled=False)).
     dlq: DLQConfig | None = None
+    # Mirror-mode delete behaviour (#686). None = destination strategy (#340).
+    mirror: MirrorConfig | None = None
+
+    # The owning sync's name, injected by SyncConfig after validation (not a
+    # YAML field). Tracked mirror (#686) uses it to scope the per-sync key
+    # state in the destination-side ``_drt_synced_keys`` table.
+    _sync_name: str | None = PrivateAttr(default=None)
 
     @model_validator(mode="after")
     def _check_incremental_cursor(self) -> SyncOptions:
         if self.mode == "incremental" and not self.cursor_field:
             raise ValueError("cursor_field is required when mode is 'incremental'.")
+        return self
+
+    @model_validator(mode="after")
+    def _check_mirror_config(self) -> SyncOptions:
+        if self.mirror is not None and self.mode != "mirror":
+            raise ValueError("sync.mirror requires mode='mirror'.")
         return self
 
     @model_validator(mode="after")
@@ -1267,3 +1296,12 @@ class SyncConfig(BaseModel):
     sync: SyncOptions = Field(default_factory=SyncOptions)
     tests: list[SyncTest] = Field(default_factory=list)
     alerts: AlertsConfig | None = None
+
+    @model_validator(mode="after")
+    def _inject_sync_name(self) -> SyncConfig:
+        # Destinations need the sync name to scope tracked-mirror state
+        # (#686), but the Destination protocol only receives SyncOptions —
+        # so carry it on a private attr rather than widening the protocol
+        # or exposing a user-settable YAML field.
+        self.sync._sync_name = self.name
+        return self
