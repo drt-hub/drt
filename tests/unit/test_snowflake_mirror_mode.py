@@ -410,3 +410,21 @@ def test_finalize_sync_returns_none_for_non_mirror_mode(
     # No sys.modules patch: any connect attempt would raise.
     result = dest.finalize_sync(config, insert_opts)
     assert result is None
+
+
+def test_tracked_strategy_rejected_on_snowflake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``mirror.strategy: tracked`` (#686) is Postgres/MySQL-only for now.
+
+    Must fail fast rather than silently falling back to the destination
+    diff, whose delete semantics are co-writer-unsafe.
+    """
+    _set_creds(monkeypatch)
+    dest = SnowflakeDestination()
+    conn = _fake_conn()
+    opts = _options(mirror={"strategy": "tracked"})
+
+    with patch.dict("sys.modules", _mocked_snowflake_modules(conn)):
+        with pytest.raises(ValueError, match="tracked is not yet supported"):
+            dest.load([{"id": 1, "score": 100}], _config(), opts)

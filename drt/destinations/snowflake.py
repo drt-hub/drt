@@ -136,6 +136,19 @@ class SnowflakeDestination:
                 "sync.mode: mirror requires destination.upsert_key "
                 "(needed to identify which rows to DELETE)."
             )
+        # mirror.strategy: tracked (#686) is Postgres/MySQL-only for now —
+        # fail fast rather than silently falling back to the destination
+        # diff, which has different (co-writer-unsafe) delete semantics.
+        if (
+            is_mirror
+            and sync_options.mirror is not None
+            and sync_options.mirror.strategy == "tracked"
+        ):
+            conn.close()
+            raise ValueError(
+                "mirror.strategy: tracked is not yet supported on snowflake "
+                "(supported: postgres, mysql — see #686 follow-ups)."
+            )
         try:
             with conn.cursor() as cur:
                 columns = list(records[0].keys())

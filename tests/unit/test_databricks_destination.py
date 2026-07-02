@@ -710,3 +710,22 @@ class TestDatabricksOrphanCleanup:
             )
         assert dropped == []
         assert failed == [_SHADOW]
+
+
+def test_tracked_mirror_strategy_rejected_on_databricks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``mirror.strategy: tracked`` (#686) is Postgres/MySQL-only for now.
+
+    Must fail fast rather than silently falling back to the destination
+    diff, whose delete semantics are co-writer-unsafe.
+    """
+    _set_creds(monkeypatch)
+    dest = DatabricksDestination()
+    conn = _fake_conn()
+    config = _config(upsert_key=["id"])
+    opts = _options(mode="mirror", mirror={"strategy": "tracked"})
+
+    with patch.dict("sys.modules", _mocked_databricks_modules(conn)):
+        with pytest.raises(ValueError, match="tracked is not yet supported"):
+            dest.load([{"id": 1, "score": 100}], config, opts)
