@@ -142,11 +142,11 @@ class SnowflakeDestination:
         if (
             is_mirror
             and sync_options.mirror is not None
-            and sync_options.mirror.strategy == "tracked"
+            and (sync_options.mirror.strategy == "tracked" or sync_options.mirror.scope)
         ):
             conn.close()
             raise ValueError(
-                "mirror.strategy: tracked is not yet supported on snowflake "
+                "mirror.strategy: tracked / mirror.scope are not yet supported on snowflake "
                 "(supported: postgres, mysql — see #686 follow-ups)."
             )
         try:

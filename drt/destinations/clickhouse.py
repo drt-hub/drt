@@ -110,10 +110,10 @@ class ClickHouseDestination:
                 if (
                     sync_options.mode == "mirror"
                     and sync_options.mirror is not None
-                    and sync_options.mirror.strategy == "tracked"
+                    and (sync_options.mirror.strategy == "tracked" or sync_options.mirror.scope)
                 ):
                     raise ValueError(
-                        "mirror.strategy: tracked is not yet supported on "
+                        "mirror.strategy: tracked / mirror.scope are not yet supported on "
                         "clickhouse (supported: postgres, mysql — see #686 "
                         "follow-ups)."
                     )

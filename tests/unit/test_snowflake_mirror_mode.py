@@ -426,5 +426,17 @@ def test_tracked_strategy_rejected_on_snowflake(
     opts = _options(mirror={"strategy": "tracked"})
 
     with patch.dict("sys.modules", _mocked_snowflake_modules(conn)):
-        with pytest.raises(ValueError, match="tracked is not yet supported"):
+        with pytest.raises(ValueError, match="not yet supported"):
             dest.load([{"id": 1, "score": 100}], _config(), opts)
+
+
+def test_scope_rejected_on_snowflake(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``mirror.scope`` (#687) is Postgres/MySQL-only for now — fail fast."""
+    _set_creds(monkeypatch)
+    dest = SnowflakeDestination()
+    conn = _fake_conn()
+    opts = _options(mirror={"scope": ["parent_id"]})
+
+    with patch.dict("sys.modules", _mocked_snowflake_modules(conn)):
+        with pytest.raises(ValueError, match="mirror.scope are not yet supported"):
+            dest.load([{"id": 1, "parent_id": 10}], _config(), opts)
