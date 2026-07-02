@@ -528,6 +528,12 @@ class DatabricksDestinationConfig(BaseModel):
     # keys supported (`upsert_key: [tenant_id, user_id]`).
     upsert_key: list[str] | None = None
 
+    # Layer 3 (#317): introspect information_schema once per sync to wrap
+    # STRUCT/MAP/ARRAY columns with from_json (and VARIANT with parse_json), so
+    # dict/list values land as proper complex types, not a stringified repr. On
+    # by default; set false for roles without read access to information_schema.
+    introspect_schema: bool = True
+
     def describe(self) -> str:
         return f"{self.type} ({self.catalog}.{self.schema_}.{self.table})"
 
