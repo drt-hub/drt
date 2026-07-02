@@ -54,6 +54,14 @@ Closes the **Tech Foundation Hardening epic** ([#538](https://github.com/drt-hub
 
 ---
 
+## v0.7.10 — Co-writer-safe mirror + lakehouse sources + PII masking ✅ Shipped 2026-07-02
+
+Released as **v0.7.10** on 2026-07-02. See [CHANGELOG.md](CHANGELOG.md#0710---2026-07-02) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.7.10) for the full feature list.
+
+**Mirror grows co-writer-safe delete semantics — the biggest correctness gap vs the SaaS tools closes.** `sync.mirror.strategy: tracked` ([#686](https://github.com/drt-hub/drt/issues/686)) adopts Census/Hightouch semantics: deletions are computed against the keys drt itself previously synced (drt-managed `_drt_synced_keys` state table in the destination, first-run baseline, lost-state re-baseline), so `mode: mirror` is finally safe on operational tables the application also writes to. `sync.mirror.scope` ([#687](https://github.com/drt-hub/drt/issues/687)) adds the stateless variant for 1:N parent/child regeneration — deletes restricted to parents observed in the run. Both Postgres + MySQL first (#317-style phasing). Sources: **Delta Lake + Apache Iceberg** ([#172](https://github.com/drt-hub/drt/issues/172) / [#173](https://github.com/drt-hub/drt/issues/173)) read lakehouse tables from local / S3 / GCS. Engine: **PII masking** `sync.mask` ([#427](https://github.com/drt-hub/drt/issues/427)) with hash / redact / truncate ([#660](https://github.com/drt-hub/drt/issues/660)). Correctness: **#317 Layer 3 schema-aware serialization** lands for Postgres / MySQL (INFORMATION_SCHEMA introspection) and Snowflake (`PARSE_JSON`); Databricks leg in flight ([#680](https://github.com/drt-hub/drt/pull/680)). Destinations: **Klaviyo** ([#418](https://github.com/drt-hub/drt/issues/418)) + **Airtable** ([#419](https://github.com/drt-hub/drt/issues/419)). Growth-adjacent: **VS Code extension** ([#293](https://github.com/drt-hub/drt/issues/293)) with bundled-schema drift CI guard, refreshed Quickstart GIF ([#377](https://github.com/drt-hub/drt/issues/377)), official site + X badges, first Japanese doc under `docs/` ([#95](https://github.com/drt-hub/drt/issues/95)) + weekly i18n staleness audit. Hardening: `~/.drt` credentials `0o600` ([#650](https://github.com/drt-hub/drt/issues/650)), OTel Phase 3 engine spans + batch export, gated real-warehouse smoke harness ([#674](https://github.com/drt-hub/drt/issues/674)), `drt destinations` 9-connector listing fix. No breaking changes — drop-in upgrade from v0.7.9.
+
+---
+
 ## v0.7.9 — Cloud Destinations land + Dead Letter Queue + `drt profile` ✅ Shipped 2026-06-17
 
 Released as **v0.7.9** on 2026-06-17. See [CHANGELOG.md](CHANGELOG.md#079---2026-06-17) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.7.9) for the full feature list.

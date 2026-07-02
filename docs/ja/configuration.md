@@ -1,4 +1,4 @@
-<!-- i18n-sync: base=docs/llm/API_REFERENCE.md, hash=7f951bd08b1e46e0cfc1dd77e1b29315288c108a -->
+<!-- i18n-sync: base=docs/llm/API_REFERENCE.md, hash=5be29ec57d85ab15877e4eeeb45ca13bbcf60c52 -->
 
 [English (API Reference)](../llm/API_REFERENCE.md) | 日本語
 
