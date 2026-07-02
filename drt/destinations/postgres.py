@@ -144,6 +144,10 @@ class PostgresDestination:
         # records); finalize_sync treats that as "skip DELETE" — safety
         # against deleting everything when the source produced no data.
         self._mirror_keys: list[tuple[Any, ...]] | None = None
+        # mirror.scope (#687) — distinct scope-column value tuples observed
+        # across batches; the destination-strategy DELETE is restricted to
+        # rows whose scope values are in this set.
+        self._mirror_scopes: set[tuple[Any, ...]] | None = None
         # Layer 3 (#317): INFORMATION_SCHEMA map, fetched once per table per
         # sync. ``None`` value = introspection ran but is unavailable; the
         # key being absent = not yet fetched.
@@ -173,6 +177,22 @@ class PostgresDestination:
         assert isinstance(config, PostgresDestinationConfig)
         if not records:
             return SyncResult()
+
+        # mirror.scope (#687) — a scope column absent from the model output
+        # is a config error; fail fast before any row is written.
+        if (
+            sync_options.mode == "mirror"
+            and sync_options.mirror is not None
+            and sync_options.mirror.scope
+        ):
+            missing = [
+                c for c in sync_options.mirror.scope if c not in records[0]
+            ]
+            if missing:
+                raise ValueError(
+                    "mirror.scope columns missing from the model output: "
+                    f"{missing} (available: {sorted(records[0].keys())})"
+                )
 
         conn = self._connect(config)
         result = SyncResult()
@@ -227,12 +247,27 @@ class PostgresDestination:
                     failed_indices = {
                         re.batch_index for re in result.row_errors
                     }
+                    # mirror.scope (#687) — also collect distinct scope
+                    # value tuples so the DELETE can be pruned to parents
+                    # observed in this run.
+                    scope_cols = (
+                        sync_options.mirror.scope
+                        if sync_options.mirror is not None
+                        else None
+                    )
+                    if scope_cols and self._mirror_scopes is None:
+                        self._mirror_scopes = set()
                     for idx, record in enumerate(records):
                         if idx in failed_indices:
                             continue
                         self._mirror_keys.append(
                             tuple(record.get(k) for k in config.upsert_key)
                         )
+                        if scope_cols:
+                            assert self._mirror_scopes is not None
+                            self._mirror_scopes.add(
+                                tuple(record.get(c) for c in scope_cols)
+                            )
         finally:
             conn.close()
 
@@ -418,6 +453,7 @@ class PostgresDestination:
             result = self._finalize_mirror(config, sync_options)
             # Reset mirror state regardless of result so a re-run starts fresh.
             self._mirror_keys = None
+            self._mirror_scopes = None
             return result
 
         if not self._swap_shadow_created or self._swap_table is None:
@@ -495,26 +531,56 @@ class PostgresDestination:
         keys = list({tuple(k) for k in self._mirror_keys})
         upsert_cols = config.upsert_key
 
+        # mirror.scope (#687) — prepend "scope IN (observed)" so the diff
+        # only touches rows under parents this run actually saw. Rows under
+        # unobserved parents (other pipelines / the application) stay put.
+        scope_cols = (
+            sync_options.mirror.scope if sync_options.mirror is not None else None
+        )
+        # list(), not sorted() — scope values may include None (unorderable).
+        scopes = list(self._mirror_scopes or set()) if scope_cols else None
+
         conn = self._connect(config)
         try:
             cur = conn.cursor()
+            scope_clause = _pgsql.SQL("")
+            scope_params: tuple[Any, ...] = ()
+            if scope_cols and scopes:
+                if len(scope_cols) == 1:
+                    scope_clause = _pgsql.SQL("{} IN %s AND ").format(
+                        _pgsql.Identifier(scope_cols[0])
+                    )
+                    scope_params = (tuple(s[0] for s in scopes),)
+                else:
+                    scope_tuple = _pgsql.SQL("({})").format(
+                        _pgsql.SQL(", ").join(
+                            _pgsql.Identifier(c) for c in scope_cols
+                        )
+                    )
+                    scope_clause = _pgsql.SQL("{} IN %s AND ").format(scope_tuple)
+                    scope_params = (tuple(tuple(s) for s in scopes),)
             if len(upsert_cols) == 1:
-                # Single-column form: DELETE WHERE col NOT IN %s
-                stmt = _pgsql.SQL("DELETE FROM {} WHERE {} NOT IN %s").format(
+                # Single-column form: DELETE WHERE [scope IN %s AND] col NOT IN %s
+                stmt = _pgsql.SQL("DELETE FROM {} WHERE {}{} NOT IN %s").format(
                     _qualified_ident(config.table),
+                    scope_clause,
                     _pgsql.Identifier(upsert_cols[0]),
                 )
-                params: tuple[Any, ...] = (tuple(k[0] for k in keys),)
+                params: tuple[Any, ...] = (
+                    *scope_params,
+                    tuple(k[0] for k in keys),
+                )
             else:
-                # Composite form: DELETE WHERE (c1, c2) NOT IN %s
+                # Composite form: DELETE WHERE [scope IN %s AND] (c1, c2) NOT IN %s
                 col_tuple = _pgsql.SQL("({})").format(
                     _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in upsert_cols)
                 )
-                stmt = _pgsql.SQL("DELETE FROM {} WHERE {} NOT IN %s").format(
+                stmt = _pgsql.SQL("DELETE FROM {} WHERE {}{} NOT IN %s").format(
                     _qualified_ident(config.table),
+                    scope_clause,
                     col_tuple,
                 )
-                params = (tuple(keys),)
+                params = (*scope_params, tuple(keys))
             cur.execute(stmt, params)
             conn.commit()
         finally:

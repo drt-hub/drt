@@ -89,6 +89,10 @@ class MySQLDestination:
         # records); finalize_sync treats that as "skip DELETE" — safety
         # against deleting everything when the source produced no data.
         self._mirror_keys: list[tuple[Any, ...]] | None = None
+        # mirror.scope (#687) — distinct scope-column value tuples observed
+        # across batches; the destination-strategy DELETE is restricted to
+        # rows whose scope values are in this set.
+        self._mirror_scopes: set[tuple[Any, ...]] | None = None
         # Layer 3 (#317): INFORMATION_SCHEMA map, fetched once per table per sync.
         self._schema_cache: dict[str, dict[str, str] | None] = {}
 
@@ -115,6 +119,22 @@ class MySQLDestination:
         assert isinstance(config, MySQLDestinationConfig)
         if not records:
             return SyncResult()
+
+        # mirror.scope (#687) — a scope column absent from the model output
+        # is a config error; fail fast before any row is written.
+        if (
+            sync_options.mode == "mirror"
+            and sync_options.mirror is not None
+            and sync_options.mirror.scope
+        ):
+            missing = [
+                c for c in sync_options.mirror.scope if c not in records[0]
+            ]
+            if missing:
+                raise ValueError(
+                    "mirror.scope columns missing from the model output: "
+                    f"{missing} (available: {sorted(records[0].keys())})"
+                )
 
         conn = self._connect(config)
         result = SyncResult()
@@ -168,12 +188,27 @@ class MySQLDestination:
                     failed_indices = {
                         re.batch_index for re in result.row_errors
                     }
+                    # mirror.scope (#687) — also collect distinct scope
+                    # value tuples so the DELETE can be pruned to parents
+                    # observed in this run.
+                    scope_cols = (
+                        sync_options.mirror.scope
+                        if sync_options.mirror is not None
+                        else None
+                    )
+                    if scope_cols and self._mirror_scopes is None:
+                        self._mirror_scopes = set()
                     for idx, record in enumerate(records):
                         if idx in failed_indices:
                             continue
                         self._mirror_keys.append(
                             tuple(record.get(k) for k in config.upsert_key)
                         )
+                        if scope_cols:
+                            assert self._mirror_scopes is not None
+                            self._mirror_scopes.add(
+                                tuple(record.get(c) for c in scope_cols)
+                            )
         finally:
             conn.close()
 
@@ -347,6 +382,7 @@ class MySQLDestination:
             result = self._finalize_mirror(config, sync_options)
             # Reset mirror state regardless of result so a re-run starts fresh.
             self._mirror_keys = None
+            self._mirror_scopes = None
             return result
 
         if not self._swap_shadow_created or self._swap_table is None:
@@ -421,25 +457,54 @@ class MySQLDestination:
         upsert_cols = config.upsert_key
         table_q = self._quote_ident(config.table)
 
+        # mirror.scope (#687) — prepend "scope IN (observed)" so the diff
+        # only touches rows under parents this run actually saw. Rows under
+        # unobserved parents (other pipelines / the application) stay put.
+        scope_cols = (
+            sync_options.mirror.scope if sync_options.mirror is not None else None
+        )
+        # list(), not sorted() — scope values may include None (unorderable).
+        scopes = list(self._mirror_scopes or set()) if scope_cols else None
+
         conn = self._connect(config)
         try:
             cur = conn.cursor()
+            scope_clause = ""
+            scope_params: list[Any] = []
+            if scope_cols and scopes:
+                if len(scope_cols) == 1:
+                    s_placeholders = ", ".join(["%s"] * len(scopes))
+                    scope_clause = (
+                        f"`{scope_cols[0]}` IN ({s_placeholders}) AND "
+                    )
+                    scope_params = [sc[0] for sc in scopes]
+                else:
+                    s_col_tuple = (
+                        "(" + ", ".join(f"`{c}`" for c in scope_cols) + ")"
+                    )
+                    s_row = "(" + ", ".join(["%s"] * len(scope_cols)) + ")"
+                    s_placeholders = ", ".join([s_row] * len(scopes))
+                    scope_clause = (
+                        f"{s_col_tuple} IN ({s_placeholders}) AND "
+                    )
+                    scope_params = [v for sc in scopes for v in sc]
             if len(upsert_cols) == 1:
                 placeholders = ", ".join(["%s"] * len(keys))
                 col_q = f"`{upsert_cols[0]}`"
                 stmt = (
-                    f"DELETE FROM {table_q} WHERE {col_q} NOT IN ({placeholders})"
+                    f"DELETE FROM {table_q} WHERE {scope_clause}{col_q} "
+                    f"NOT IN ({placeholders})"
                 )
-                params: list[Any] = [k[0] for k in keys]
+                params: list[Any] = scope_params + [k[0] for k in keys]
             else:
                 col_tuple = "(" + ", ".join(f"`{c}`" for c in upsert_cols) + ")"
                 row_placeholder = "(" + ", ".join(["%s"] * len(upsert_cols)) + ")"
                 placeholders = ", ".join([row_placeholder] * len(keys))
                 stmt = (
-                    f"DELETE FROM {table_q} WHERE {col_tuple} "
+                    f"DELETE FROM {table_q} WHERE {scope_clause}{col_tuple} "
                     f"NOT IN ({placeholders})"
                 )
-                params = [v for key in keys for v in key]
+                params = scope_params + [v for key in keys for v in key]
             cur.execute(stmt, params)
             conn.commit()
         finally:

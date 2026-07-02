@@ -747,3 +747,24 @@ class TestMirrorConfig:
 
     def test_sync_name_defaults_to_none_without_sync_config(self) -> None:
         assert SyncOptions(mode="mirror")._sync_name is None
+
+
+class TestMirrorScope:
+    """``sync.mirror.scope`` — scoped mirror deletes (#687)."""
+
+    def test_scope_accepted_with_destination_strategy(self) -> None:
+        opts = SyncOptions(mode="mirror", mirror={"scope": ["parent_id"]})
+        assert opts.mirror is not None
+        assert opts.mirror.scope == ["parent_id"]
+        assert opts.mirror.strategy == "destination"
+
+    def test_scope_with_tracked_strategy_rejected_for_now(self) -> None:
+        with pytest.raises(ValueError, match="scope.*tracked|tracked.*scope"):
+            SyncOptions(
+                mode="mirror",
+                mirror={"strategy": "tracked", "scope": ["parent_id"]},
+            )
+
+    def test_empty_scope_list_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            SyncOptions(mode="mirror", mirror={"scope": []})

@@ -114,11 +114,11 @@ class DatabricksDestination:
         if (
             is_mirror
             and sync_options.mirror is not None
-            and sync_options.mirror.strategy == "tracked"
+            and (sync_options.mirror.strategy == "tracked" or sync_options.mirror.scope)
         ):
             conn.close()
             raise ValueError(
-                "mirror.strategy: tracked is not yet supported on databricks "
+                "mirror.strategy: tracked / mirror.scope are not yet supported on databricks "
                 "(supported: postgres, mysql — see #686 follow-ups)."
             )
         try:

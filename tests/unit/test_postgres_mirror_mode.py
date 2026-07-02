@@ -468,3 +468,92 @@ def test_tracked_baseline_logs_warning(caplog: pytest.LogCaptureFixture) -> None
         dest.finalize_sync(_config(), _tracked_options())
 
     assert any("baselin" in r.message.lower() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# mirror.scope (#687)
+# ---------------------------------------------------------------------------
+
+
+def _scoped_options() -> SyncOptions:
+    return _options(mirror={"scope": ["parent_id"]})
+
+
+def test_scope_missing_column_fails_fast() -> None:
+    """A scope column absent from the model output is a config error at load."""
+    dest = PostgresDestination()
+    conn = _fake_connection()
+
+    with patch.object(PostgresDestination, "_connect", return_value=conn):
+        with pytest.raises(ValueError, match="parent_id"):
+            dest.load(
+                [{"id": 1, "score": 100}],
+                _config(upsert_key=["id"]),
+                _scoped_options(),
+            )
+
+
+def test_scoped_mirror_deletes_within_observed_parents_only() -> None:
+    """DELETE gains `scope IN %s AND key NOT IN %s` with observed values."""
+    dest = PostgresDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    config = _config(upsert_key=["id"])
+    opts = _scoped_options()
+
+    with patch.object(PostgresDestination, "_connect", return_value=load_conn):
+        dest.load(
+            [
+                {"id": 1, "parent_id": 10},
+                {"id": 2, "parent_id": 10},
+                {"id": 3, "parent_id": 20},
+            ],
+            config,
+            opts,
+        )
+    with patch.object(PostgresDestination, "_connect", return_value=finalize_conn):
+        result = dest.finalize_sync(config, opts)
+
+    assert result is not None
+    cur = finalize_conn.cursor.return_value
+    assert cur.execute.call_count == 1
+    stmt, params = cur.execute.call_args.args
+    stmt_s = str(stmt)
+    assert "IN" in stmt_s and "NOT IN" in stmt_s
+    scopes, keys = params
+    assert set(scopes) == {10, 20}
+    assert set(keys) == {1, 2, 3}
+
+
+def test_scoped_mirror_composite_scope_uses_tuple_form() -> None:
+    """Composite scope -> (s1, s2) IN %s with tuple-of-tuples params."""
+    dest = PostgresDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    config = _config(upsert_key=["id"])
+    opts = _options(mirror={"scope": ["tenant_id", "parent_id"]})
+
+    with patch.object(PostgresDestination, "_connect", return_value=load_conn):
+        dest.load(
+            [{"id": 1, "tenant_id": "t1", "parent_id": 10}],
+            config,
+            opts,
+        )
+    with patch.object(PostgresDestination, "_connect", return_value=finalize_conn):
+        dest.finalize_sync(config, opts)
+
+    cur = finalize_conn.cursor.return_value
+    _stmt, params = cur.execute.call_args.args
+    scopes, _keys = params
+    assert scopes == (("t1", 10),)
+
+
+def test_scoped_mirror_empty_source_still_skips_delete() -> None:
+    """The #340 empty-source guard applies to scoped mirror unchanged."""
+    dest = PostgresDestination()
+    finalize_conn = _fake_connection()
+
+    with patch.object(PostgresDestination, "_connect", return_value=finalize_conn):
+        assert dest.finalize_sync(_config(), _scoped_options()) is None
+
+    finalize_conn.cursor.return_value.execute.assert_not_called()

@@ -1146,9 +1146,26 @@ class MirrorConfig(BaseModel):
       table in the destination. Safe on tables the application also
       writes to (Census-style semantics: first run baselines without
       deleting; lost state re-baselines with a warning).
+    - ``scope`` (#687) — restrict destination-strategy deletes to rows
+      whose scope-column values appeared in this run's source. The
+      stateless fit for 1:N regeneration (parent + child link rows):
+      stale children under observed parents are deleted, rows under
+      unobserved parents are untouched.
     """
 
     strategy: Literal["destination", "tracked"] = "destination"
+    scope: list[str] | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _check_scope_strategy(self) -> MirrorConfig:
+        # Composing scope with tracked (pruning the state diff to observed
+        # parents) is a #687 follow-up — reject rather than half-apply.
+        if self.scope is not None and self.strategy == "tracked":
+            raise ValueError(
+                "mirror.scope with strategy: tracked is not supported yet — "
+                "use scope (stateless) or tracked (stateful), not both."
+            )
+        return self
 
 
 class SyncOptions(BaseModel):

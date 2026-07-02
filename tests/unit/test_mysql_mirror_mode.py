@@ -468,3 +468,81 @@ def test_tracked_state_table_in_target_database_mysql() -> None:
 
     executed = " | ".join(str(c.args[0]) for c in cur.execute.call_args_list)
     assert "`mydb`.`_drt_synced_keys`" in executed
+
+
+# ---------------------------------------------------------------------------
+# mirror.scope (#687)
+# ---------------------------------------------------------------------------
+
+
+def _scoped_options() -> SyncOptions:
+    return _options(mirror={"scope": ["parent_id"]})
+
+
+def test_scope_missing_column_fails_fast_mysql() -> None:
+    """A scope column absent from the model output is a config error at load."""
+    dest = MySQLDestination()
+    conn = _fake_connection()
+
+    with patch.object(MySQLDestination, "_connect", return_value=conn):
+        with pytest.raises(ValueError, match="parent_id"):
+            dest.load(
+                [{"id": 1, "score": 100}],
+                _config(upsert_key=["id"]),
+                _scoped_options(),
+            )
+
+
+def test_scoped_mirror_deletes_within_observed_parents_only_mysql() -> None:
+    """DELETE gains `` `parent_id` IN (...) AND `id` NOT IN (...) `` w/ params."""
+    dest = MySQLDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    config = _config(upsert_key=["id"])
+    opts = _scoped_options()
+
+    with patch.object(MySQLDestination, "_connect", return_value=load_conn):
+        dest.load(
+            [
+                {"id": 1, "parent_id": 10},
+                {"id": 2, "parent_id": 10},
+                {"id": 3, "parent_id": 20},
+            ],
+            config,
+            opts,
+        )
+    with patch.object(MySQLDestination, "_connect", return_value=finalize_conn):
+        result = dest.finalize_sync(config, opts)
+
+    assert result is not None
+    cur = finalize_conn.cursor.return_value
+    assert cur.execute.call_count == 1
+    stmt, params = cur.execute.call_args.args
+    assert "`parent_id` IN (%s, %s)" in stmt
+    assert "NOT IN (%s, %s, %s)" in stmt
+    # scope params first, then key params
+    assert set(params[:2]) == {10, 20}
+    assert set(params[2:]) == {1, 2, 3}
+
+
+def test_scoped_mirror_composite_scope_flattens_params_mysql() -> None:
+    """Composite scope -> (`t`, `p`) IN ((%s, %s)) with flattened params."""
+    dest = MySQLDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    config = _config(upsert_key=["id"])
+    opts = _options(mirror={"scope": ["tenant_id", "parent_id"]})
+
+    with patch.object(MySQLDestination, "_connect", return_value=load_conn):
+        dest.load(
+            [{"id": 1, "tenant_id": "t1", "parent_id": 10}],
+            config,
+            opts,
+        )
+    with patch.object(MySQLDestination, "_connect", return_value=finalize_conn):
+        dest.finalize_sync(config, opts)
+
+    cur = finalize_conn.cursor.return_value
+    stmt, params = cur.execute.call_args.args
+    assert "(`tenant_id`, `parent_id`) IN ((%s, %s))" in stmt
+    assert params[:2] == ["t1", 10]
