@@ -703,3 +703,68 @@ class TestReplaceStrategy:
     def test_replace_strategy_swap_requires_replace_mode(self) -> None:
         with pytest.raises(ValueError, match="replace_strategy"):
             SyncOptions(mode="full", replace_strategy="swap")
+
+
+class TestMirrorConfig:
+    """``sync.mirror`` — tracked mirror config surface (#686)."""
+
+    def test_defaults_to_destination_strategy(self) -> None:
+        from drt.config.models import MirrorConfig
+
+        opts = SyncOptions(mode="mirror", mirror=MirrorConfig())
+        assert opts.mirror is not None
+        assert opts.mirror.strategy == "destination"
+
+    def test_tracked_strategy_accepted(self) -> None:
+        opts = SyncOptions(mode="mirror", mirror={"strategy": "tracked"})
+        assert opts.mirror is not None
+        assert opts.mirror.strategy == "tracked"
+
+    def test_unknown_strategy_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            SyncOptions(mode="mirror", mirror={"strategy": "census"})
+
+    def test_mirror_block_requires_mirror_mode(self) -> None:
+        with pytest.raises(ValueError, match="sync.mirror"):
+            SyncOptions(mode="full", mirror={"strategy": "tracked"})
+
+    def test_sync_config_injects_sync_name_into_options(self) -> None:
+        cfg = SyncConfig(
+            name="scores_sync",
+            model="SELECT 1",
+            destination={
+                "type": "postgres",
+                "host": "localhost",
+                "dbname": "db",
+                "user": "u",
+                "password": "p",
+                "table": "public.scores",
+                "upsert_key": ["id"],
+            },
+            sync={"mode": "mirror", "mirror": {"strategy": "tracked"}},
+        )
+        assert cfg.sync._sync_name == "scores_sync"
+
+    def test_sync_name_defaults_to_none_without_sync_config(self) -> None:
+        assert SyncOptions(mode="mirror")._sync_name is None
+
+
+class TestMirrorScope:
+    """``sync.mirror.scope`` — scoped mirror deletes (#687)."""
+
+    def test_scope_accepted_with_destination_strategy(self) -> None:
+        opts = SyncOptions(mode="mirror", mirror={"scope": ["parent_id"]})
+        assert opts.mirror is not None
+        assert opts.mirror.scope == ["parent_id"]
+        assert opts.mirror.strategy == "destination"
+
+    def test_scope_with_tracked_strategy_rejected_for_now(self) -> None:
+        with pytest.raises(ValueError, match="scope.*tracked|tracked.*scope"):
+            SyncOptions(
+                mode="mirror",
+                mirror={"strategy": "tracked", "scope": ["parent_id"]},
+            )
+
+    def test_empty_scope_list_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            SyncOptions(mode="mirror", mirror={"scope": []})

@@ -104,6 +104,19 @@ class ClickHouseDestination:
                         "sync.mode: mirror requires destination.upsert_key "
                         "(needed to identify which rows to DELETE)."
                     )
+                # mirror.strategy: tracked (#686) is Postgres/MySQL-only for
+                # now — fail fast rather than silently falling back to the
+                # destination diff, whose delete semantics differ.
+                if (
+                    sync_options.mode == "mirror"
+                    and sync_options.mirror is not None
+                    and (sync_options.mirror.strategy == "tracked" or sync_options.mirror.scope)
+                ):
+                    raise ValueError(
+                        "mirror.strategy: tracked / mirror.scope are not yet supported on "
+                        "clickhouse (supported: postgres, mysql — see #686 "
+                        "follow-ups)."
+                    )
 
                 # clickhouse-connect's client.insert(table=...) interpolates
                 # the table raw into "INSERT INTO {table} ..." with no quoting

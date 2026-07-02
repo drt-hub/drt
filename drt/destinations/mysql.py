@@ -89,6 +89,10 @@ class MySQLDestination:
         # records); finalize_sync treats that as "skip DELETE" — safety
         # against deleting everything when the source produced no data.
         self._mirror_keys: list[tuple[Any, ...]] | None = None
+        # mirror.scope (#687) — distinct scope-column value tuples observed
+        # across batches; the destination-strategy DELETE is restricted to
+        # rows whose scope values are in this set.
+        self._mirror_scopes: set[tuple[Any, ...]] | None = None
         # Layer 3 (#317): INFORMATION_SCHEMA map, fetched once per table per sync.
         self._schema_cache: dict[str, dict[str, str] | None] = {}
 
@@ -115,6 +119,22 @@ class MySQLDestination:
         assert isinstance(config, MySQLDestinationConfig)
         if not records:
             return SyncResult()
+
+        # mirror.scope (#687) — a scope column absent from the model output
+        # is a config error; fail fast before any row is written.
+        if (
+            sync_options.mode == "mirror"
+            and sync_options.mirror is not None
+            and sync_options.mirror.scope
+        ):
+            missing = [
+                c for c in sync_options.mirror.scope if c not in records[0]
+            ]
+            if missing:
+                raise ValueError(
+                    "mirror.scope columns missing from the model output: "
+                    f"{missing} (available: {sorted(records[0].keys())})"
+                )
 
         conn = self._connect(config)
         result = SyncResult()
@@ -168,12 +188,27 @@ class MySQLDestination:
                     failed_indices = {
                         re.batch_index for re in result.row_errors
                     }
+                    # mirror.scope (#687) — also collect distinct scope
+                    # value tuples so the DELETE can be pruned to parents
+                    # observed in this run.
+                    scope_cols = (
+                        sync_options.mirror.scope
+                        if sync_options.mirror is not None
+                        else None
+                    )
+                    if scope_cols and self._mirror_scopes is None:
+                        self._mirror_scopes = set()
                     for idx, record in enumerate(records):
                         if idx in failed_indices:
                             continue
                         self._mirror_keys.append(
                             tuple(record.get(k) for k in config.upsert_key)
                         )
+                        if scope_cols:
+                            assert self._mirror_scopes is not None
+                            self._mirror_scopes.add(
+                                tuple(record.get(c) for c in scope_cols)
+                            )
         finally:
             conn.close()
 
@@ -347,6 +382,7 @@ class MySQLDestination:
             result = self._finalize_mirror(config, sync_options)
             # Reset mirror state regardless of result so a re-run starts fresh.
             self._mirror_keys = None
+            self._mirror_scopes = None
             return result
 
         if not self._swap_shadow_created or self._swap_table is None:
@@ -407,30 +443,68 @@ class MySQLDestination:
         if not self._mirror_keys:
             return None
 
+        # mirror.strategy: tracked (#686) — state-based diff instead of the
+        # destination-table diff below. Shares the empty-source guard above,
+        # so a transient empty source also keeps the tracked baseline intact.
+        if (
+            sync_options.mirror is not None
+            and sync_options.mirror.strategy == "tracked"
+        ):
+            return self._finalize_mirror_tracked(config, sync_options)
+
         # Dedupe to keep the IN list compact when batches overlap.
         keys = list({tuple(k) for k in self._mirror_keys})
         upsert_cols = config.upsert_key
         table_q = self._quote_ident(config.table)
 
+        # mirror.scope (#687) — prepend "scope IN (observed)" so the diff
+        # only touches rows under parents this run actually saw. Rows under
+        # unobserved parents (other pipelines / the application) stay put.
+        scope_cols = (
+            sync_options.mirror.scope if sync_options.mirror is not None else None
+        )
+        # list(), not sorted() — scope values may include None (unorderable).
+        scopes = list(self._mirror_scopes or set()) if scope_cols else None
+
         conn = self._connect(config)
         try:
             cur = conn.cursor()
+            scope_clause = ""
+            scope_params: list[Any] = []
+            if scope_cols and scopes:
+                if len(scope_cols) == 1:
+                    s_placeholders = ", ".join(["%s"] * len(scopes))
+                    scope_clause = (
+                        f"`{scope_cols[0]}` IN ({s_placeholders}) AND "
+                    )
+                    scope_params = [sc[0] for sc in scopes]
+                else:
+                    s_col_tuple = (
+                        "(" + ", ".join(f"`{c}`" for c in scope_cols) + ")"
+                    )
+                    s_row = "(" + ", ".join(["%s"] * len(scope_cols)) + ")"
+                    s_placeholders = ", ".join([s_row] * len(scopes))
+                    scope_clause = (
+                        f"{s_col_tuple} IN ({s_placeholders}) AND "
+                    )
+                    scope_params = [v for sc in scopes for v in sc]
             if len(upsert_cols) == 1:
                 placeholders = ", ".join(["%s"] * len(keys))
                 col_q = f"`{upsert_cols[0]}`"
                 stmt = (
-                    f"DELETE FROM {table_q} WHERE {col_q} NOT IN ({placeholders})"
+                    f"DELETE FROM {table_q} WHERE {scope_clause}{col_q} "
+                    f"NOT IN ({placeholders})"
                 )
-                params: list[Any] = [k[0] for k in keys]
+                params: list[Any] = scope_params + [k[0] for k in keys]
             else:
                 col_tuple = "(" + ", ".join(f"`{c}`" for c in upsert_cols) + ")"
                 row_placeholder = "(" + ", ".join(["%s"] * len(upsert_cols)) + ")"
                 placeholders = ", ".join([row_placeholder] * len(keys))
                 stmt = (
-                    f"DELETE FROM {table_q} WHERE {col_tuple} "
+                    f"DELETE FROM {table_q} WHERE {scope_clause}{col_tuple} "
                     f"NOT IN ({placeholders})"
                 )
-                params = [v for key in keys for v in key]
+                params = scope_params + [v for key in keys for v in key]
             cur.execute(stmt, params)
             conn.commit()
         finally:
@@ -439,6 +513,109 @@ class MySQLDestination:
         # SyncResult has no dedicated `deleted` field; future work tracks
         # this separately. Returning a bare SyncResult signals "finalize
         # ran successfully" to the engine without inflating success/failed.
+        return SyncResult()
+
+    def _finalize_mirror_tracked(
+        self,
+        config: MySQLDestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult | None:
+        """``mirror.strategy: tracked`` (#686) — delete only rows drt synced.
+
+        MySQL counterpart of the Postgres implementation: reads the
+        previously-synced key set for this sync from the drt-managed
+        ``_drt_synced_keys`` table (created lazily in the target's database),
+        deletes ``previous - current`` from the target, and rewrites the
+        state — one transaction. First run / lost state baselines with a
+        WARN and no deletes. pymysql does not auto-expand tuple-of-tuples,
+        so IN placeholder lists are built explicitly like the destination
+        strategy above.
+        """
+        import logging
+
+        from drt.destinations._mirror_state import (
+            STATE_TABLE,
+            diff_keys,
+            key_hash,
+            key_json,
+        )
+
+        sync_name = sync_options._sync_name or config.table
+        current = list({tuple(k) for k in self._mirror_keys or []})
+        upsert_cols = config.upsert_key
+        table_q = self._quote_ident(config.table)
+        if "." in config.table:
+            database = config.table.rsplit(".", 1)[0]
+            state_q = self._quote_ident(f"{database}.{STATE_TABLE}")
+        else:
+            state_q = self._quote_ident(STATE_TABLE)
+
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                f"CREATE TABLE IF NOT EXISTS {state_q} ("
+                "sync_name VARCHAR(255) NOT NULL, "
+                "key_hash CHAR(64) NOT NULL, "
+                "key_json TEXT NOT NULL, "
+                "PRIMARY KEY (sync_name, key_hash))"
+            )
+            cur.execute(
+                f"SELECT key_hash, key_json FROM {state_q} WHERE sync_name = %s",
+                (sync_name,),
+            )
+            previous = {row[0]: row[1] for row in cur.fetchall()}
+
+            if previous:
+                to_delete = diff_keys(previous, current)
+                if to_delete:
+                    if len(upsert_cols) == 1:
+                        placeholders = ", ".join(["%s"] * len(to_delete))
+                        col_q = f"`{upsert_cols[0]}`"
+                        stmt = (
+                            f"DELETE FROM {table_q} WHERE {col_q} "
+                            f"IN ({placeholders})"
+                        )
+                        params: list[Any] = [k[0] for k in to_delete]
+                    else:
+                        col_tuple = (
+                            "(" + ", ".join(f"`{c}`" for c in upsert_cols) + ")"
+                        )
+                        row_placeholder = (
+                            "(" + ", ".join(["%s"] * len(upsert_cols)) + ")"
+                        )
+                        placeholders = ", ".join(
+                            [row_placeholder] * len(to_delete)
+                        )
+                        stmt = (
+                            f"DELETE FROM {table_q} WHERE {col_tuple} "
+                            f"IN ({placeholders})"
+                        )
+                        params = [v for key in to_delete for v in key]
+                    cur.execute(stmt, params)
+            else:
+                logging.getLogger(__name__).warning(
+                    "tracked mirror: no prior state for sync %r in %s — "
+                    "baselining this run's %d key(s); no deletes this run.",
+                    sync_name,
+                    STATE_TABLE,
+                    len(current),
+                )
+
+            # Rewrite this sync's state to the current key set.
+            cur.execute(
+                f"DELETE FROM {state_q} WHERE sync_name = %s",
+                (sync_name,),
+            )
+            cur.executemany(
+                f"INSERT INTO {state_q} (sync_name, key_hash, key_json) "
+                "VALUES (%s, %s, %s)",
+                [(sync_name, key_hash(k), key_json(k)) for k in current],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
         return SyncResult()
 
     def _load_upsert(

@@ -134,9 +134,15 @@ class TestDatabricksDestinationLoad:
 
     def test_import_error_when_extras_missing(self) -> None:
         """No [databricks] extras → ImportError with the install hint."""
+        # Build config/options BEFORE patching __import__ — pydantic may
+        # lazily finish a deferred validator on first model_validate, and
+        # under a global import patch that surfaces as a bare ImportError
+        # instead of the connector-extra message under test.
+        config = _config()
+        options = _options()
         with patch("builtins.__import__", side_effect=ImportError):
             with pytest.raises(ImportError, match=r"drt-core\[databricks\]"):
-                DatabricksDestination().load([{"id": 1}], _config(), _options())
+                DatabricksDestination().load([{"id": 1}], config, options)
 
     def test_connect_uses_databricks_sql_kwargs(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Confirm the connect() call uses the Databricks SQL Connector
@@ -710,3 +716,35 @@ class TestDatabricksOrphanCleanup:
             )
         assert dropped == []
         assert failed == [_SHADOW]
+
+
+def test_tracked_mirror_strategy_rejected_on_databricks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``mirror.strategy: tracked`` (#686) is Postgres/MySQL-only for now.
+
+    Must fail fast rather than silently falling back to the destination
+    diff, whose delete semantics are co-writer-unsafe.
+    """
+    _set_creds(monkeypatch)
+    dest = DatabricksDestination()
+    conn = _fake_conn()
+    config = _config(upsert_key=["id"])
+    opts = _options(mode="mirror", mirror={"strategy": "tracked"})
+
+    with patch.dict("sys.modules", _mocked_databricks_modules(conn)):
+        with pytest.raises(ValueError, match="not yet supported"):
+            dest.load([{"id": 1, "score": 100}], config, opts)
+
+
+def test_scope_rejected_on_databricks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``mirror.scope`` (#687) is Postgres/MySQL-only for now — fail fast."""
+    _set_creds(monkeypatch)
+    dest = DatabricksDestination()
+    conn = _fake_conn()
+    config = _config(upsert_key=["id"])
+    opts = _options(mode="mirror", mirror={"scope": ["parent_id"]})
+
+    with patch.dict("sys.modules", _mocked_databricks_modules(conn)):
+        with pytest.raises(ValueError, match="mirror.scope are not yet supported"):
+            dest.load([{"id": 1, "parent_id": 10}], config, opts)

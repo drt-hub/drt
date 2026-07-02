@@ -120,6 +120,9 @@ destination:                # required: see Destination Configs below
 
 sync:                       # optional: all fields have defaults
   mode: full                # "full" (default) | "incremental" | "upsert" | "replace" | "mirror"  # "upsert" is alias for "full" when upsert_key is set; "replace" does TRUNCATE + INSERT; "mirror" upserts then DELETEs destination rows whose upsert_key was not in the source (#340 — Postgres / MySQL / ClickHouse / Snowflake)
+  mirror:                   # optional (#686): mirror-mode delete behaviour — only valid with mode: mirror
+    strategy: destination   # "destination" (default, #340: diff against the whole destination table — requires drt to own the table) | "tracked" (#686: only DELETE rows drt itself synced, tracked per sync in a drt-managed _drt_synced_keys table in the destination; safe when the application also writes to the table. First run baselines without deleting; lost state re-baselines with a WARN. Postgres / MySQL only for now)
+    scope: [parent_id]      # optional (#687): restrict destination-strategy deletes to rows whose scope-column values appeared in this run's source — the stateless fit for 1:N regeneration (parent + child link rows). Rows under unobserved parents are never touched. Not combinable with strategy: tracked yet. Postgres / MySQL only for now
   cursor_field: updated_at  # required when mode=incremental — column name for watermark
   watermark:                # optional: remote watermark storage for stateless environments
     storage: local          # "local" (default) | "gcs" | "bigquery"
