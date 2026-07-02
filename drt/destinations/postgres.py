@@ -482,6 +482,15 @@ class PostgresDestination:
         if not self._mirror_keys:
             return None
 
+        # mirror.strategy: tracked (#686) — state-based diff instead of the
+        # destination-table diff below. Shares the empty-source guard above,
+        # so a transient empty source also keeps the tracked baseline intact.
+        if (
+            sync_options.mirror is not None
+            and sync_options.mirror.strategy == "tracked"
+        ):
+            return self._finalize_mirror_tracked(config, sync_options)
+
         # Dedupe to keep the IN list compact when batches overlap.
         keys = list({tuple(k) for k in self._mirror_keys})
         upsert_cols = config.upsert_key
@@ -514,6 +523,114 @@ class PostgresDestination:
         # SyncResult has no dedicated `deleted` field; future work tracks
         # this separately. Returning a bare SyncResult signals "finalize
         # ran successfully" to the engine without inflating success/failed.
+        return SyncResult()
+
+    def _finalize_mirror_tracked(
+        self,
+        config: PostgresDestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult | None:
+        """``mirror.strategy: tracked`` (#686) — delete only rows drt synced.
+
+        Reads the previously-synced key set for this sync from the
+        drt-managed ``_drt_synced_keys`` table (created lazily in the target
+        table's schema), deletes ``previous - current`` from the target, and
+        rewrites the state to the current key set. Target delete and state
+        rewrite share one transaction, so they commit or roll back together.
+
+        First run (or lost state) baselines: record keys, delete nothing,
+        WARN — matching Census semantics ("the first sync will be an upsert
+        for all records; the second and following account for deletions").
+        Rows the application wrote are never candidates for deletion because
+        they were never in the tracked set.
+        """
+        from psycopg2 import sql as _pgsql
+
+        from drt.destinations._mirror_state import (
+            STATE_TABLE,
+            diff_keys,
+            key_hash,
+            key_json,
+        )
+
+        sync_name = sync_options._sync_name or config.table
+        current = list({tuple(k) for k in self._mirror_keys or []})
+        schema, _relation = _split_qualified(config.table)
+        state_ident = _qualified_ident(_join_qualified(schema, STATE_TABLE))
+        upsert_cols = config.upsert_key
+
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                _pgsql.SQL(
+                    "CREATE TABLE IF NOT EXISTS {} ("
+                    "sync_name VARCHAR(255) NOT NULL, "
+                    "key_hash CHAR(64) NOT NULL, "
+                    "key_json TEXT NOT NULL, "
+                    "PRIMARY KEY (sync_name, key_hash))"
+                ).format(state_ident)
+            )
+            cur.execute(
+                _pgsql.SQL(
+                    "SELECT key_hash, key_json FROM {} WHERE sync_name = %s"
+                ).format(state_ident),
+                (sync_name,),
+            )
+            previous = {row[0]: row[1] for row in cur.fetchall()}
+
+            if previous:
+                to_delete = diff_keys(previous, current)
+                if to_delete:
+                    if len(upsert_cols) == 1:
+                        # Single-column form: DELETE WHERE col IN %s
+                        stmt = _pgsql.SQL("DELETE FROM {} WHERE {} IN %s").format(
+                            _qualified_ident(config.table),
+                            _pgsql.Identifier(upsert_cols[0]),
+                        )
+                        params: tuple[Any, ...] = (
+                            tuple(k[0] for k in to_delete),
+                        )
+                    else:
+                        # Composite form: DELETE WHERE (c1, c2) IN %s
+                        col_tuple = _pgsql.SQL("({})").format(
+                            _pgsql.SQL(", ").join(
+                                _pgsql.Identifier(c) for c in upsert_cols
+                            )
+                        )
+                        stmt = _pgsql.SQL("DELETE FROM {} WHERE {} IN %s").format(
+                            _qualified_ident(config.table),
+                            col_tuple,
+                        )
+                        params = (tuple(tuple(k) for k in to_delete),)
+                    cur.execute(stmt, params)
+            else:
+                logging.getLogger(__name__).warning(
+                    "tracked mirror: no prior state for sync %r in %s — "
+                    "baselining this run's %d key(s); no deletes this run.",
+                    sync_name,
+                    STATE_TABLE,
+                    len(current),
+                )
+
+            # Rewrite this sync's state to the current key set.
+            cur.execute(
+                _pgsql.SQL("DELETE FROM {} WHERE sync_name = %s").format(
+                    state_ident
+                ),
+                (sync_name,),
+            )
+            cur.executemany(
+                _pgsql.SQL(
+                    "INSERT INTO {} (sync_name, key_hash, key_json) "
+                    "VALUES (%s, %s, %s)"
+                ).format(state_ident),
+                [(sync_name, key_hash(k), key_json(k)) for k in current],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
         return SyncResult()
 
     def list_orphan_swap_tables(

@@ -314,3 +314,157 @@ def test_finalize_sync_swap_still_works_when_mode_not_mirror() -> None:
     assert result is not None
     assert dest._swap_shadow_created is False
     assert dest._swap_table is None
+
+
+# ---------------------------------------------------------------------------
+# mirror.strategy: tracked (#686)
+# ---------------------------------------------------------------------------
+
+
+def _tracked_options() -> SyncOptions:
+    opts = _options(mirror={"strategy": "tracked"})
+    opts._sync_name = "scores_sync"
+    return opts
+
+
+def _executed_sql(cur: MagicMock) -> str:
+    """Concatenated repr of every execute/executemany statement."""
+    calls = cur.execute.call_args_list + cur.executemany.call_args_list
+    return " | ".join(str(c.args[0]) for c in calls)
+
+
+def test_tracked_first_run_baselines_without_deleting() -> None:
+    """No prior state: current keys are inserted, the target sees no DELETE."""
+    dest = PostgresDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    cur = finalize_conn.cursor.return_value
+    cur.fetchall.return_value = []  # state read: empty -> baseline
+
+    with patch.object(PostgresDestination, "_connect", return_value=load_conn):
+        dest.load([{"id": 1}, {"id": 2}], _config(), _tracked_options())
+    with patch.object(PostgresDestination, "_connect", return_value=finalize_conn):
+        result = dest.finalize_sync(_config(), _tracked_options())
+
+    assert result is not None
+    executed = _executed_sql(cur)
+    assert "_drt_synced_keys" in executed
+    # the only DELETE statements target the state table, never 'scores'
+    for call in cur.execute.call_args_list:
+        stmt = str(call.args[0])
+        if "DELETE" in stmt:
+            assert "scores" not in stmt
+    # state rewrite recorded both current keys
+    rows = cur.executemany.call_args.args[1]
+    assert [r[0] for r in rows] == ["scores_sync", "scores_sync"]
+    finalize_conn.commit.assert_called_once()
+
+
+def test_tracked_second_run_deletes_only_stale_tracked_keys() -> None:
+    """prev={1,2,3}, current={1,2} -> DELETE scores WHERE id IN ((3,)) only."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    dest = PostgresDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    cur = finalize_conn.cursor.return_value
+    cur.fetchall.return_value = [
+        (key_hash((k,)), key_json((k,))) for k in (1, 2, 3)
+    ]
+
+    with patch.object(PostgresDestination, "_connect", return_value=load_conn):
+        dest.load([{"id": 1}, {"id": 2}], _config(), _tracked_options())
+    with patch.object(PostgresDestination, "_connect", return_value=finalize_conn):
+        dest.finalize_sync(_config(), _tracked_options())
+
+    target_deletes = [
+        c
+        for c in cur.execute.call_args_list
+        if "DELETE" in str(c.args[0]) and "scores" in str(c.args[0])
+    ]
+    assert len(target_deletes) == 1
+    assert target_deletes[0].args[1] == ((3,),)
+    finalize_conn.commit.assert_called_once()
+
+
+def test_tracked_second_run_all_keys_still_present_deletes_nothing() -> None:
+    """prev == current -> no target DELETE, state simply rewritten."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    dest = PostgresDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    cur = finalize_conn.cursor.return_value
+    cur.fetchall.return_value = [
+        (key_hash((k,)), key_json((k,))) for k in (1, 2)
+    ]
+
+    with patch.object(PostgresDestination, "_connect", return_value=load_conn):
+        dest.load([{"id": 1}, {"id": 2}], _config(), _tracked_options())
+    with patch.object(PostgresDestination, "_connect", return_value=finalize_conn):
+        dest.finalize_sync(_config(), _tracked_options())
+
+    for call in cur.execute.call_args_list:
+        stmt = str(call.args[0])
+        if "DELETE" in stmt:
+            assert "scores" not in stmt
+
+
+def test_tracked_empty_source_keeps_state_and_deletes_nothing() -> None:
+    """No batches observed -> finalize is a no-op (baseline preserved)."""
+    dest = PostgresDestination()
+    finalize_conn = _fake_connection()
+
+    with patch.object(PostgresDestination, "_connect", return_value=finalize_conn):
+        result = dest.finalize_sync(_config(), _tracked_options())
+
+    assert result is None
+    finalize_conn.cursor.return_value.execute.assert_not_called()
+
+
+def test_tracked_composite_key_uses_tuple_in_form() -> None:
+    """Composite upsert_key -> DELETE WHERE (c1, c2) IN %s with tuple params."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    dest = PostgresDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    cur = finalize_conn.cursor.return_value
+    cur.fetchall.return_value = [
+        (key_hash((1, "a")), key_json((1, "a"))),
+        (key_hash((2, "b")), key_json((2, "b"))),
+    ]
+    config = _config(upsert_key=["tenant_id", "user_id"])
+
+    with patch.object(PostgresDestination, "_connect", return_value=load_conn):
+        dest.load(
+            [{"tenant_id": 1, "user_id": "a"}], config, _tracked_options()
+        )
+    with patch.object(PostgresDestination, "_connect", return_value=finalize_conn):
+        dest.finalize_sync(config, _tracked_options())
+
+    target_deletes = [
+        c
+        for c in cur.execute.call_args_list
+        if "DELETE" in str(c.args[0]) and "scores" in str(c.args[0])
+    ]
+    assert len(target_deletes) == 1
+    assert target_deletes[0].args[1] == (((2, "b"),),)
+
+
+def test_tracked_baseline_logs_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """First run / lost state must be loudly visible, not silent."""
+    dest = PostgresDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    finalize_conn.cursor.return_value.fetchall.return_value = []
+
+    with patch.object(PostgresDestination, "_connect", return_value=load_conn):
+        dest.load([{"id": 1}], _config(), _tracked_options())
+    with (
+        patch.object(PostgresDestination, "_connect", return_value=finalize_conn),
+        caplog.at_level("WARNING"),
+    ):
+        dest.finalize_sync(_config(), _tracked_options())
+
+    assert any("baselin" in r.message.lower() for r in caplog.records)
