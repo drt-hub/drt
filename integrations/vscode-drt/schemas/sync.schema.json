@@ -848,6 +848,11 @@
           ],
           "default": null,
           "title": "Upsert Key"
+        },
+        "introspect_schema": {
+          "default": true,
+          "title": "Introspect Schema",
+          "type": "boolean"
         }
       },
       "required": [
