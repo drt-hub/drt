@@ -134,9 +134,15 @@ class TestDatabricksDestinationLoad:
 
     def test_import_error_when_extras_missing(self) -> None:
         """No [databricks] extras → ImportError with the install hint."""
+        # Build config/options BEFORE patching __import__ — pydantic may
+        # lazily finish a deferred validator on first model_validate, and
+        # under a global import patch that surfaces as a bare ImportError
+        # instead of the connector-extra message under test.
+        config = _config()
+        options = _options()
         with patch("builtins.__import__", side_effect=ImportError):
             with pytest.raises(ImportError, match=r"drt-core\[databricks\]"):
-                DatabricksDestination().load([{"id": 1}], _config(), _options())
+                DatabricksDestination().load([{"id": 1}], config, options)
 
     def test_connect_uses_databricks_sql_kwargs(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Confirm the connect() call uses the Databricks SQL Connector

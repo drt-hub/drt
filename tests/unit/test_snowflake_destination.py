@@ -152,9 +152,15 @@ class TestSnowflakeDestinationLoad:
         assert conn_kwargs["password"] == "pwd"
 
     def test_import_error_when_extras_missing(self) -> None:
+        # Build config/options BEFORE patching __import__ — pydantic may
+        # lazily finish a deferred validator on first model_validate, and
+        # under a global import patch that surfaces as a bare ImportError
+        # instead of the connector-extra message under test.
+        config = _config()
+        options = _options()
         with patch("builtins.__import__", side_effect=ImportError):
             with pytest.raises(ImportError, match="drt-core\\[snowflake\\]"):
-                SnowflakeDestination().load([{"id": 1}], _config(), _options())
+                SnowflakeDestination().load([{"id": 1}], config, options)
 
     def test_insert_mode_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)

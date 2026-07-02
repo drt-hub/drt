@@ -110,9 +110,15 @@ class TestBigQueryDestinationLoad:
         assert result.failed == 0
 
     def test_import_error_when_extras_missing(self) -> None:
+        # Build config/options BEFORE patching __import__ — pydantic may
+        # lazily finish a deferred validator on first model_validate, and
+        # under a global import patch that surfaces as a bare ImportError
+        # instead of the connector-extra message under test.
+        config = _config()
+        options = _options()
         with patch("builtins.__import__", side_effect=ImportError):
             with pytest.raises(ImportError, match="drt-core\\[bigquery\\]"):
-                BigQueryDestination().load([{"id": 1}], _config(), _options())
+                BigQueryDestination().load([{"id": 1}], config, options)
 
     def test_client_init_adc(self) -> None:
         client = _fake_client()
