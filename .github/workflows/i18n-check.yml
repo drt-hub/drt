@@ -1,0 +1,144 @@
+# i18n translation staleness audit.
+#
+# Runs scripts/check-i18n-sync.sh, which audits the CURRENT STATE of the
+# repo (not a PR diff) for translated docs whose English base file has
+# moved on since the translation was last synced:
+#   - root-level    *.{lang}.md          (README.ja.md, CONTRIBUTING.ja.md, …)
+#   - docs/ subdir   docs/**/{lang}/*.md  (docs/ja/configuration.md, …)
+# A translation is "stale" when its `i18n-sync` marker hash no longer
+# matches the latest commit that touched its base file.
+#
+# Real drift this would have caught before it existed: README.ja.md sat
+# stale for three merged PRs (badges + Klaviyo/Airtable/Delta Lake/
+# Iceberg rows) because the translation content was updated but the
+# marker hash bump was forgotten — invisible until someone ran
+# `make check-i18n` by hand.
+#
+# Trigger design — deliberately NOT `on: pull_request`: keeping a
+# translation in sync is a maintainer concern, and a non-Japanese
+# contributor who edits README.md must never have their PR blocked or
+# warned for a JA translation they can't write. Instead this runs
+# post-merge (when a base or translation file lands on main) + weekly,
+# and reports to a maintainer-facing tracking issue — the same model as
+# drift-check.yml and contributors-audit.yml.
+#
+# Note: needs `fetch-depth: 0` — the script resolves each base file's
+# latest commit via `git log`, which a shallow checkout cannot see.
+
+name: i18n-check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'README.md'
+      - 'README.ja.md'
+      - 'CONTRIBUTING.md'
+      - 'CONTRIBUTING.ja.md'
+      - 'GOVERNANCE.md'
+      - 'GOVERNANCE.ja.md'
+      - 'docs/llm/API_REFERENCE.md'
+      - 'docs/ja/**'
+      - 'scripts/check-i18n-sync.sh'
+  schedule:
+    # Monday 02:00 UTC — offset from contributors-audit (00:30) and
+    # drift-check (01:00) so the weekly jobs don't queue on the same minute.
+    - cron: '0 2 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  i18n:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          # Full history so `git log -1 -- <base>` can find the latest
+          # commit that touched each English base file.
+          fetch-depth: 0
+
+      - name: Run i18n sync check
+        id: i18n
+        run: |
+          set +e
+          OUTPUT=$(bash scripts/check-i18n-sync.sh 2>&1)
+          EXIT_CODE=$?
+          set -e
+          {
+            echo "exit_code=$EXIT_CODE"
+            echo "report<<EOF"
+            echo "$OUTPUT"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          # Also dump to the Action log for quick inspection.
+          echo "$OUTPUT"
+
+      - name: Open / update tracking issue when a translation is stale
+        if: steps.i18n.outputs.exit_code == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TITLE="chore(i18n): translations out of sync with their English base"
+          BODY=$(cat <<EOF
+          The \`i18n-check\` workflow found translated docs whose English base file has moved on since the translation was last synced. For each \`STALE\` entry below: update the translation content to match the base file, then bump the \`i18n-sync\` marker hash in the translation's first 5 lines:
+
+          \`\`\`
+          git log -1 --format='%H' -- <base-file>
+          \`\`\`
+
+          Run \`make check-i18n\` locally to reproduce.
+
+          <details>
+          <summary>Full report</summary>
+
+          \`\`\`
+          ${{ steps.i18n.outputs.report }}
+          \`\`\`
+
+          </details>
+
+          ---
+          _Auto-filed by the \`i18n-check\` workflow (post-merge + weekly). It updates this issue in place instead of opening duplicates._
+          EOF
+          )
+
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" \
+            --search "in:title \"translations out of sync\"" \
+            --state open --json number --jq '.[0].number // empty')
+
+          if [ -n "$EXISTING" ]; then
+            gh issue edit "$EXISTING" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" \
+              --body "i18n audit re-ran on $(date -u +%Y-%m-%d) and still finds stale translations — issue body refreshed with the latest report."
+          else
+            # Ensure the label exists before `gh issue create --label`,
+            # which hard-fails on a missing label. `docs` is the canonical
+            # documentation label in `.github/labels.yml`; the idempotent
+            # --force self-bootstrap lets this workflow file its issue
+            # regardless of whether sync-labels has run yet.
+            gh label create docs \
+              --color "0075ca" \
+              --description "Improvements or additions to documentation" \
+              --force || true
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "$TITLE" \
+              --body "$BODY" \
+              --label "docs"
+          fi
+
+      - name: Close tracking issue when translations are back in sync
+        if: steps.i18n.outputs.exit_code == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" \
+            --search "in:title \"translations out of sync\"" \
+            --state open --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue close "$EXISTING" --repo "$GITHUB_REPOSITORY" \
+              --comment "All translations are in sync again as of $(date -u +%Y-%m-%d) — closing."
+          fi
