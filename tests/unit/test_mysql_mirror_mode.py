@@ -343,3 +343,128 @@ def test_finalize_sync_swap_still_works_when_mode_not_mirror() -> None:
     assert result is not None
     assert dest._swap_shadow_created is False
     assert dest._swap_table is None
+
+
+# ---------------------------------------------------------------------------
+# mirror.strategy: tracked (#686)
+# ---------------------------------------------------------------------------
+
+
+def _tracked_options() -> SyncOptions:
+    opts = _options(mirror={"strategy": "tracked"})
+    opts._sync_name = "scores_sync"
+    return opts
+
+
+def test_tracked_first_run_baselines_without_deleting_mysql() -> None:
+    """No prior state: keys inserted into _drt_synced_keys, target untouched."""
+    dest = MySQLDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    cur = finalize_conn.cursor.return_value
+    cur.fetchall.return_value = []
+
+    with patch.object(MySQLDestination, "_connect", return_value=load_conn):
+        dest.load([{"id": 1}, {"id": 2}], _config(), _tracked_options())
+    with patch.object(MySQLDestination, "_connect", return_value=finalize_conn):
+        result = dest.finalize_sync(_config(), _tracked_options())
+
+    assert result is not None
+    for call in cur.execute.call_args_list:
+        stmt = str(call.args[0])
+        if "DELETE" in stmt:
+            assert "`scores`" not in stmt
+    rows = cur.executemany.call_args.args[1]
+    assert [r[0] for r in rows] == ["scores_sync", "scores_sync"]
+    finalize_conn.commit.assert_called_once()
+
+
+def test_tracked_second_run_deletes_only_stale_tracked_keys_mysql() -> None:
+    """prev={1,2,3}, current={1,2} -> DELETE `scores` WHERE `id` IN (%s) w/ [3]."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    dest = MySQLDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    cur = finalize_conn.cursor.return_value
+    cur.fetchall.return_value = [
+        (key_hash((k,)), key_json((k,))) for k in (1, 2, 3)
+    ]
+
+    with patch.object(MySQLDestination, "_connect", return_value=load_conn):
+        dest.load([{"id": 1}, {"id": 2}], _config(), _tracked_options())
+    with patch.object(MySQLDestination, "_connect", return_value=finalize_conn):
+        dest.finalize_sync(_config(), _tracked_options())
+
+    target_deletes = [
+        c
+        for c in cur.execute.call_args_list
+        if "DELETE" in str(c.args[0]) and "`scores`" in str(c.args[0])
+    ]
+    assert len(target_deletes) == 1
+    stmt, params = target_deletes[0].args
+    assert "IN (%s)" in stmt and "NOT IN" not in stmt
+    assert params == [3]
+    finalize_conn.commit.assert_called_once()
+
+
+def test_tracked_composite_key_flattens_params_mysql() -> None:
+    """Composite key -> (`c1`, `c2`) IN ((%s, %s)) with flattened params."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    dest = MySQLDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    cur = finalize_conn.cursor.return_value
+    cur.fetchall.return_value = [
+        (key_hash((1, "a")), key_json((1, "a"))),
+        (key_hash((2, "b")), key_json((2, "b"))),
+    ]
+    config = _config(upsert_key=["tenant_id", "user_id"])
+
+    with patch.object(MySQLDestination, "_connect", return_value=load_conn):
+        dest.load(
+            [{"tenant_id": 1, "user_id": "a"}], config, _tracked_options()
+        )
+    with patch.object(MySQLDestination, "_connect", return_value=finalize_conn):
+        dest.finalize_sync(config, _tracked_options())
+
+    target_deletes = [
+        c
+        for c in cur.execute.call_args_list
+        if "DELETE" in str(c.args[0]) and "`scores`" in str(c.args[0])
+    ]
+    assert len(target_deletes) == 1
+    stmt, params = target_deletes[0].args
+    assert "(`tenant_id`, `user_id`) IN ((%s, %s))" in stmt
+    assert params == [2, "b"]
+
+
+def test_tracked_empty_source_is_noop_mysql() -> None:
+    """No batches observed -> finalize no-op, baseline preserved."""
+    dest = MySQLDestination()
+    finalize_conn = _fake_connection()
+
+    with patch.object(MySQLDestination, "_connect", return_value=finalize_conn):
+        result = dest.finalize_sync(_config(), _tracked_options())
+
+    assert result is None
+    finalize_conn.cursor.return_value.execute.assert_not_called()
+
+
+def test_tracked_state_table_in_target_database_mysql() -> None:
+    """Qualified target `mydb.scores` -> state table `mydb`.`_drt_synced_keys`."""
+    dest = MySQLDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    cur = finalize_conn.cursor.return_value
+    cur.fetchall.return_value = []
+    config = _config(table="mydb.scores")
+
+    with patch.object(MySQLDestination, "_connect", return_value=load_conn):
+        dest.load([{"id": 1}], config, _tracked_options())
+    with patch.object(MySQLDestination, "_connect", return_value=finalize_conn):
+        dest.finalize_sync(config, _tracked_options())
+
+    executed = " | ".join(str(c.args[0]) for c in cur.execute.call_args_list)
+    assert "`mydb`.`_drt_synced_keys`" in executed
