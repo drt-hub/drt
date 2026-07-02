@@ -1946,6 +1946,22 @@
       "title": "MaskRule",
       "type": "object"
     },
+    "MirrorConfig": {
+      "description": "``sync.mirror`` \u2014 mirror-mode delete behaviour (#686).\n\n- ``strategy: destination`` (default) \u2014 the original #340 behaviour:\n  DELETE destination rows whose ``upsert_key`` was not observed this\n  run. Correct only when drt exclusively owns the table.\n- ``strategy: tracked`` \u2014 DELETE only rows drt itself previously\n  synced, tracked per sync in a drt-managed ``_drt_synced_keys`` side\n  table in the destination. Safe on tables the application also\n  writes to (Census-style semantics: first run baselines without\n  deleting; lost state re-baselines with a warning).",
+      "properties": {
+        "strategy": {
+          "default": "destination",
+          "enum": [
+            "destination",
+            "tracked"
+          ],
+          "title": "Strategy",
+          "type": "string"
+        }
+      },
+      "title": "MirrorConfig",
+      "type": "object"
+    },
     "MixpanelDestinationConfig": {
       "properties": {
         "type": {
@@ -3801,6 +3817,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/DLQConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "mirror": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MirrorConfig"
             },
             {
               "type": "null"
