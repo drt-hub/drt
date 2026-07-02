@@ -1947,7 +1947,7 @@
       "type": "object"
     },
     "MirrorConfig": {
-      "description": "``sync.mirror`` \u2014 mirror-mode delete behaviour (#686).\n\n- ``strategy: destination`` (default) \u2014 the original #340 behaviour:\n  DELETE destination rows whose ``upsert_key`` was not observed this\n  run. Correct only when drt exclusively owns the table.\n- ``strategy: tracked`` \u2014 DELETE only rows drt itself previously\n  synced, tracked per sync in a drt-managed ``_drt_synced_keys`` side\n  table in the destination. Safe on tables the application also\n  writes to (Census-style semantics: first run baselines without\n  deleting; lost state re-baselines with a warning).",
+      "description": "``sync.mirror`` \u2014 mirror-mode delete behaviour (#686).\n\n- ``strategy: destination`` (default) \u2014 the original #340 behaviour:\n  DELETE destination rows whose ``upsert_key`` was not observed this\n  run. Correct only when drt exclusively owns the table.\n- ``strategy: tracked`` \u2014 DELETE only rows drt itself previously\n  synced, tracked per sync in a drt-managed ``_drt_synced_keys`` side\n  table in the destination. Safe on tables the application also\n  writes to (Census-style semantics: first run baselines without\n  deleting; lost state re-baselines with a warning).\n- ``scope`` (#687) \u2014 restrict destination-strategy deletes to rows\n  whose scope-column values appeared in this run's source. The\n  stateless fit for 1:N regeneration (parent + child link rows):\n  stale children under observed parents are deleted, rows under\n  unobserved parents are untouched.",
       "properties": {
         "strategy": {
           "default": "destination",
@@ -1957,6 +1957,22 @@
           ],
           "title": "Strategy",
           "type": "string"
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scope"
         }
       },
       "title": "MirrorConfig",

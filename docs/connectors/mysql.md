@@ -146,6 +146,8 @@ sync:
 
 Instead of diffing against the whole destination table (only correct when drt exclusively owns it), `tracked` persists the set of `upsert_key` tuples drt has itself synced in a drt-managed `_drt_synced_keys` table (created lazily in the target's database) and deletes only `previously-synced − current-source` keys — so rows the application wrote are never deletion candidates. First run baselines without deleting; lost state re-baselines with a WARN; target delete + state rewrite share one transaction. See the [Postgres tracked-mirror section](postgres.md) for the full semantics — the MySQL implementation is identical apart from placeholder building (explicit `%s` lists).
 
+**Scoped mirror (`mirror.scope`, [#687](https://github.com/drt-hub/drt/issues/687)):** `scope: [parent_id]` restricts the mirror DELETE to rows whose scope values appeared in this run's source — the stateless fit for 1:N regeneration (delete stale children under regenerated parents, never touch rows under unobserved parents). See the [Postgres scoped-mirror section](postgres.md) for the full semantics.
+
 Same `sync.mode: mirror` is supported on **Postgres** (Step 1 — psycopg2's tuple-of-tuples auto-expansion), **ClickHouse** (Step 3 — `ALTER TABLE ... DELETE WHERE` mutation with `mutations_sync=1`), and **Snowflake** (Step 4 — forces the MERGE write path regardless of `config.mode`). BigQuery follows once contributor PR [#584](https://github.com/drt-hub/drt/pull/584) lands. `mirror.strategy: tracked` is currently **Postgres + MySQL only**.
 
 ## Schema-qualified table identifiers
