@@ -124,6 +124,27 @@ td.right, th.right { text-align:right; }
 .status-failed { color:var(--error); font-weight:500; }
 .empty { border:1px dashed var(--line); padding:32px; text-align:center; border-radius:var(--radius); color:var(--muted); }
 
+/* Sync detail — KPI cards, tabs (progressive: stacked without JS), ego lineage */
+.kpi { border:1px solid var(--line); border-radius:var(--radius); padding:12px 16px; }
+.kpi__label { font-size:11px; text-transform:uppercase; letter-spacing:0.05em; color:var(--muted); font-weight:600; }
+.crumb { font-size:12px; color:var(--muted); margin-bottom:2px; }
+.crumb a { color:var(--brand-700); }
+.tabs { display:none; gap:2px; border-bottom:1px solid var(--line); margin:26px 0 14px; }
+.js .tabs { display:flex; }
+.tab-btn { appearance:none; background:none; border:none; border-bottom:2px solid transparent;
+  padding:7px 12px; font:inherit; font-size:13px; font-weight:500; color:var(--muted); cursor:pointer; }
+.tab-btn:hover { color:var(--fg); }
+.tab-btn.active { color:var(--brand-700); border-bottom-color:var(--brand-600); }
+.tab-panel > h2:first-child { margin-top:26px; }
+.js .tab-panel > h2:first-child { display:none; }
+.js .tab-panel:not(.active) { display:none; }
+.ego { border:1px solid var(--line); border-radius:var(--radius); background:var(--surface);
+  padding:10px; overflow-x:auto; }
+.ego svg text { font-family:var(--sans); }
+.ego svg .mono { font-family:var(--mono); }
+:root { --edge:#9aa0a8; --edge-lookup:var(--brand-500); --zone-drt-line:var(--brand-200); }
+@media (prefers-color-scheme: dark) { :root { --edge:#6a707a; --zone-drt-line:rgba(139,92,246,0.35); } }
+
 @media (max-width:860px) {
   .cards { grid-template-columns:1fr; }
   .two-col { grid-template-columns:1fr; }
@@ -170,9 +191,28 @@ APP_JS = """\
     });
   }
 
+  // Tabs — progressive enhancement. Without JS the panels render stacked
+  // with their headings; with JS the .js class hides inactive panels.
+  function wireTabs() {
+    document.querySelectorAll(".tabs").forEach(function (group) {
+      var buttons = group.querySelectorAll(".tab-btn");
+      buttons.forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var target = btn.getAttribute("data-tab");
+          buttons.forEach(function (b) { b.classList.toggle("active", b === btn); });
+          group.parentElement.querySelectorAll(".tab-panel").forEach(function (p) {
+            p.classList.toggle("active", p.getAttribute("data-tab") === target);
+          });
+        });
+      });
+    });
+  }
+
+  document.documentElement.classList.add("js");
   document.addEventListener("DOMContentLoaded", function () {
     restoreGroups();
     wireSearch();
+    wireTabs();
   });
 })();
 """

@@ -22,6 +22,8 @@ from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import YamlLexer
 
+from html import escape
+
 from drt.docs._html_assets import APP_JS, STYLE_CSS
 from drt.docs.manifest import Manifest, Sync
 from drt.docs.mermaid import render_mermaid
@@ -31,6 +33,173 @@ _SLUG_RE = re.compile(r"[^A-Za-z0-9]+")
 
 def _slug(value: str) -> str:
     return _SLUG_RE.sub("-", value).strip("-").lower() or "x"
+
+
+# Connector badges — brand-color initials (decision: docs design pass 1).
+# Curated map for known types; anything else falls back to a neutral brand
+# badge with the first two letters, so new plugins render without changes.
+_BADGES: dict[str, tuple[str, str, str]] = {
+    "bigquery": ("BQ", "#4285f4", "#ffffff"),
+    "postgres": ("PG", "#336791", "#ffffff"),
+    "duckdb": ("DK", "#fff100", "#3a3a00"),
+    "snowflake": ("SF", "#29b5e8", "#062d3d"),
+    "databricks": ("DX", "#ff3621", "#ffffff"),
+    "clickhouse": ("CH", "#faff69", "#3a3d00"),
+    "sqlite": ("SQ", "#0f80cc", "#ffffff"),
+    "mysql": ("MY", "#00758f", "#ffffff"),
+    "elasticsearch": ("ES", "#00bfb3", "#00312e"),
+    "s3": ("S3", "#ff9900", "#3e2500"),
+    "gcs": ("GC", "#4285f4", "#ffffff"),
+    "azure_blob": ("AZ", "#0078d4", "#ffffff"),
+    "slack": ("SL", "#4a154b", "#ffffff"),
+    "discord": ("DC", "#5865f2", "#ffffff"),
+    "hubspot": ("HS", "#ff7a59", "#3e1c00"),
+    "salesforce": ("SF", "#00a1e0", "#ffffff"),
+    "airtable": ("AT", "#fcb400", "#3d2c00"),
+    "klaviyo": ("KL", "#232426", "#ffffff"),
+    "rest_api": ("API", "#5a6068", "#ffffff"),
+    "webhook": ("WH", "#5a6068", "#ffffff"),
+}
+
+
+def _badge(conn_type: str) -> tuple[str, str, str]:
+    known = _BADGES.get(conn_type)
+    if known:
+        return known
+    initials = (conn_type[:2] or "??").upper()
+    return (initials, "#7c3aed", "#ffffff")
+
+
+def _badge_svg(conn_type: str, x: int, y: int) -> str:
+    """A 26x26 brand-initial badge at (x, y). All text escaped."""
+    initials, bg, fg = _badge(conn_type)
+    fs = 9 if len(initials) > 2 else 10
+    return (
+        f'<rect x="{x}" y="{y}" width="26" height="26" rx="7" fill="{bg}"/>'
+        f'<text x="{x + 13}" y="{y + 17}" font-size="{fs}" font-weight="700" '
+        f'class="mono" fill="{fg}" text-anchor="middle">{escape(initials)}</text>'
+    )
+
+
+def _clip(value: str, limit: int = 24) -> str:
+    return value if len(value) <= limit else value[: limit - 1] + "…"
+
+
+def _node_card(x: int, y: int, w: int, conn_type: str, name: str, sub: str,
+               href: str | None, *, code: bool = False) -> str:
+    """One ego-graph node card. `code=True` renders the drt-managed sync style."""
+    accent = ('<rect x="%d" y="%d" width="3" height="54" rx="1.5" fill="var(--brand-600)"/>'
+              % (x, y)) if code else ""
+    stroke = "var(--zone-drt-line)" if code else "var(--line)"
+    if code:
+        icon = (
+            f'<g transform="translate({x + 13},{y + 14})">'
+            '<path d="M0,1.5 a1.5,1.5 0 0 1 1.5,-1.5 h6 l4,4 v11 a1.5,1.5 0 0 1 -1.5,1.5 '
+            'h-8.5 a1.5,1.5 0 0 1 -1.5,-1.5 z" fill="none" stroke="var(--brand-600)" '
+            'stroke-width="1.4" stroke-linejoin="round"/>'
+            '<path d="M7.5,0 v4 h4" fill="none" stroke="var(--brand-600)" '
+            'stroke-width="1.4" stroke-linejoin="round"/>'
+            '<path d="M3,9 h6 M3,12 h4" stroke="#a78bfa" stroke-width="1.2" '
+            'stroke-linecap="round"/></g>'
+        )
+        tx = x + 34
+    else:
+        icon = _badge_svg(conn_type, x + 12, y + 14)
+        tx = x + 48
+    name = _clip(name)
+    sub = _clip(sub, 30)
+    body = (
+        f'<rect x="{x}" y="{y}" width="{w}" height="54" rx="8" '
+        f'fill="var(--surface)" stroke="{stroke}"/>'
+        f"{accent}{icon}"
+        f'<text x="{tx}" y="{y + 23}" font-size="12.5" font-weight="600" '
+        f'class="mono" fill="var(--fg)">{escape(name)}</text>'
+        f'<text x="{tx}" y="{y + 40}" font-size="10" letter-spacing="0.6" '
+        f'fill="var(--muted)">{escape(sub.upper())}</text>'
+    )
+    if href:
+        return f'<a href="{escape(href, quote=True)}">{body}</a>'
+    return body
+
+
+def _ego_svg(sync: Sync, manifest: Manifest, sync_slugs: dict[str, str],
+             source_slugs: dict[str, str], dest_slugs: dict[str, str]) -> str:
+    """Static ego-graph for one sync: reads on the left, writes on the right.
+
+    Deterministic single-fan layout (no crossing possible), emitted as inline
+    themeable SVG. Names are escaped here — the template injects with |safe.
+    """
+    dest_by_id = {d.name: d for d in manifest.destinations}
+    src_type = {s.name: s.type for s in manifest.sources}
+    sync_by_name = {s.name: s for s in manifest.syncs}
+
+    upstream = [e.from_ for e in manifest.edges if e.kind == "lookup" and e.to == sync.name]
+    downstream = [e.to for e in manifest.edges if e.kind == "lookup" and e.from_ == sync.name]
+
+    w_card, x_l, x_m, x_r = 230, 10, 330, 650
+    rows = max(len(upstream), len(downstream))
+    height = 84 + 84 * rows
+    parts: list[str] = [
+        f'<svg viewBox="0 0 890 {height}" width="890" height="{height}" role="img" '
+        f'aria-label="Lineage for {escape(sync.name, quote=True)}">',
+        '<defs>'
+        '<marker id="ego-arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" '
+        'markerHeight="6" orient="auto-start-reverse">'
+        '<path d="M0,0.6 L7.4,4 L0,7.4 Z" fill="var(--edge)"/></marker>'
+        '<marker id="ego-arr-lk" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" '
+        'markerHeight="6" orient="auto-start-reverse">'
+        '<path d="M0,0.6 L7.4,4 L0,7.4 Z" fill="var(--edge-lookup)"/></marker>'
+        "</defs>",
+    ]
+
+    # main row: source → sync → destination
+    y0 = 16
+    parts.append(_node_card(x_l, y0, w_card, src_type.get(sync.source, "configured"),
+                            sync.source, src_type.get(sync.source, "source"),
+                            f"../source/{source_slugs.get(sync.source, _slug(sync.source))}.html"))
+    parts.append(_node_card(x_m, y0, w_card, "", sync.name, sync.mode, None, code=True))
+    dest = dest_by_id.get(sync.destination)
+    dest_label = dest.label if dest else sync.destination
+    dest_type = dest.type if dest else "destination"
+    parts.append(_node_card(x_r, y0, w_card, dest_type, dest_label, dest_type,
+                            f"../destination/{dest_slugs.get(sync.destination, _slug(sync.destination))}.html"))
+    parts.append(f'<g fill="none" stroke="var(--edge)" stroke-width="1.5" marker-end="url(#ego-arr)">'
+                 f'<line x1="{x_l + w_card}" y1="{y0 + 27}" x2="{x_m - 2}" y2="{y0 + 27}"/>'
+                 f'<line x1="{x_m + w_card}" y1="{y0 + 27}" x2="{x_r - 2}" y2="{y0 + 27}"/></g>')
+
+    # upstream lookups: destination tables this sync reads, below the source column
+    for i, producer in enumerate(upstream):
+        y = y0 + 84 * (i + 1)
+        p_sync = sync_by_name.get(producer)
+        p_dest = dest_by_id.get(p_sync.destination) if p_sync else None
+        label = p_dest.label if p_dest else producer
+        p_type = p_dest.type if p_dest else "table"
+        href = (f"../destination/{dest_slugs.get(p_sync.destination, _slug(producer))}.html"
+                if p_sync else None)
+        parts.append(_node_card(x_l, y, w_card, p_type, label, f"lookup · via {producer}", href))
+        port_x = x_m + 30 + i * 44
+        parts.append(
+            f'<path d="M{x_l + w_card},{y + 27} C{x_l + w_card + 70},{y + 27} '
+            f'{port_x},{y - 10} {port_x},{y0 + 58}" fill="none" '
+            f'stroke="var(--edge-lookup)" stroke-width="1.5" stroke-dasharray="5 4" '
+            f'marker-end="url(#ego-arr-lk)"/>'
+            f'<circle cx="{port_x}" cy="{y0 + 54}" r="2.5" fill="var(--edge-lookup)"/>')
+
+    # downstream consumers: syncs that look up this sync's destination, below it
+    for i, consumer in enumerate(downstream):
+        y = y0 + 84 * (i + 1)
+        c_sync = sync_by_name.get(consumer)
+        parts.append(_node_card(x_r, y, w_card, "", consumer,
+                                (c_sync.mode if c_sync else "sync") + " · lookup",
+                                f"../sync/{sync_slugs.get(consumer, _slug(consumer))}.html", code=True))
+        parts.append(
+            f'<path d="M{x_r + 30},{y0 + 70} C{x_r - 30},{y0 + 100} '
+            f'{x_r - 30},{y + 27} {x_r - 2},{y + 27}" fill="none" '
+            f'stroke="var(--edge-lookup)" stroke-width="1.5" stroke-dasharray="5 4" '
+            f'marker-end="url(#ego-arr-lk)"/>')
+
+    parts.append("</svg>")
+    return "".join(parts)
 
 
 def _sync_yaml(sync: Sync) -> str:
@@ -185,26 +354,61 @@ _DAG = """\
 _SYNC = """\
 {% extends "base" %}
 {% block main %}
-<div class="eyebrow">Sync</div>
+<div class="crumb"><a href="../index.html">Syncs</a> / {{ sync.name }}</div>
 <h1>{{ sync.name }}</h1>
 {% if sync.description %}<p class="lede">{{ sync.description }}</p>{% endif %}
-<dl class="kv">
-  <dt>Source</dt><dd><a href="../source/{{ source_slug }}.html">{{ sync.source }}</a></dd>
-  <dt>Destination</dt><dd><a href="../destination/{{ destination_slug }}.html">{{ destination_label }}</a></dd>
-  <dt>Mode</dt><dd><span class="mode">{{ sync.mode }}</span></dd>
-  {% if sync.tags %}<dt>Tags</dt><dd>{% for t in sync.tags %}<span class="chip">{{ t }}</span> {% endfor %}</dd>{% endif %}
-</dl>
-{% if state %}
-<h2>Last run</h2>
-<dl class="kv">
-  <dt>Status</dt><dd class="status-{{ state.last_status }}">{{ state.last_status }}</dd>
-  <dt>At</dt><dd>{{ state.last_sync_at }}</dd>
-  <dt>Rows synced</dt><dd>{{ state.rows_synced }}</dd>
-  {% if state.last_error %}<dt>Error</dt><dd>{{ state.last_error }}</dd>{% endif %}
-</dl>
-{% endif %}
-<h2>Definition</h2>
-{{ yaml_html|safe }}
+{% if sync.tags %}<p>{% for t in sync.tags %}<span class="chip">{{ t }}</span> {% endfor %}</p>{% endif %}
+<div class="two-col">
+  <div class="kpi">
+    <div class="kpi__label">Last run</div>
+    {% if state %}
+    <div>{{ state.last_sync_at }} &middot; <span class="status-{{ state.last_status }}">{{ state.last_status }}</span></div>
+    <div class="font-mono">{{ state.rows_synced }} rows</div>
+    {% else %}<div class="empty" style="padding:8px">No runs yet</div>{% endif %}
+  </div>
+  <div class="kpi">
+    <div class="kpi__label">Configuration</div>
+    <div>source: <code>{{ sync.source }}</code> &middot; mode: <code>{{ sync.mode }}</code></div>
+    <div class="font-mono">&rarr; {{ destination_label }}</div>
+  </div>
+</div>
+
+<div class="tabs" role="tablist">
+  <button class="tab-btn active" data-tab="yaml">YAML</button>
+  <button class="tab-btn" data-tab="lineage">Lineage</button>
+  <button class="tab-btn" data-tab="state">State</button>
+</div>
+
+<div class="tab-panel active" data-tab="yaml">
+  <h2>Definition</h2>
+  {{ yaml_html|safe }}
+</div>
+
+<div class="tab-panel" data-tab="lineage">
+  <h2>Lineage</h2>
+  <div class="ego">{{ ego_svg|safe }}</div>
+  <p class="lede" style="font-size:12.5px;margin-top:10px">
+    Reads <a href="../source/{{ source_slug }}.html">{{ sync.source }}</a>
+    {%- for up in upstream %} + <a href="../destination/{{ up.slug }}.html">{{ up.label }}</a> (lookup){% endfor %} &middot;
+    writes <a href="../destination/{{ destination_slug }}.html">{{ destination_label }}</a>
+    {%- if downstream %} &middot; read by {% for d in downstream %}<a href="../sync/{{ d.slug }}.html">{{ d.name }}</a>{{ ", " if not loop.last }}{% endfor %}{% endif %}.
+  </p>
+</div>
+
+<div class="tab-panel" data-tab="state">
+  <h2>State</h2>
+  {% if state %}
+  <table>
+    <tr><td>last_sync_at</td><td class="font-mono">{{ state.last_sync_at }}</td></tr>
+    <tr><td>last_cursor_value</td><td class="font-mono">{{ state.last_cursor_value or "—" }}</td></tr>
+    <tr><td>rows_synced</td><td class="font-mono">{{ state.rows_synced }}</td></tr>
+    <tr><td>last_status</td><td class="font-mono status-{{ state.last_status }}">{{ state.last_status }}</td></tr>
+    <tr><td>last_error</td><td class="font-mono">{{ state.last_error or "—" }}</td></tr>
+  </table>
+  {% else %}
+  <div class="empty">No state recorded yet. Run <code>drt run --select {{ sync.name }}</code> to populate.</div>
+  {% endif %}
+</div>
 {% endblock %}
 """
 
@@ -380,6 +584,7 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
 
     # per-sync pages
     formatter = HtmlFormatter(cssclass="highlight")
+    sync_by_name = {s.name: s for s in manifest.syncs}
     for s in manifest.syncs:
         yaml_text = _sync_yaml(s)
         yaml_html = highlight(yaml_text, YamlLexer(), formatter)
@@ -390,8 +595,24 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
                 "last_status": s.state.last_status,
                 "last_sync_at": s.state.last_sync_at,
                 "rows_synced": s.state.rows_synced,
+                "last_cursor_value": s.state.last_cursor_value,
                 "last_error": s.state.last_error,
             }
+        upstream = []
+        for e in manifest.edges:
+            if e.kind == "lookup" and e.to == s.name:
+                p_sync = sync_by_name.get(e.from_)
+                p_dest = dest_by_id.get(p_sync.destination) if p_sync else None
+                upstream.append({
+                    "label": p_dest.label if p_dest else e.from_,
+                    "slug": dest_slugs.get(p_sync.destination, _slug(e.from_))
+                    if p_sync else _slug(e.from_),
+                })
+        downstream = [
+            {"name": e.to, "slug": sync_slugs.get(e.to, _slug(e.to))}
+            for e in manifest.edges
+            if e.kind == "lookup" and e.from_ == s.name
+        ]
         write(
             f"sync/{sync_slugs[s.name]}.html",
             env.get_template("sync").render(
@@ -405,6 +626,9 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
                 destination_label=dest.label if dest else s.destination,
                 yaml_html=yaml_html,
                 state=state,
+                ego_svg=_ego_svg(s, manifest, sync_slugs, source_slugs, dest_slugs),
+                upstream=upstream,
+                downstream=downstream,
                 data_json=dumps({"sync": s.name, "nav": nav}),
                 **common,
             ),
