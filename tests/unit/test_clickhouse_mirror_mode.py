@@ -339,3 +339,33 @@ def test_finalize_sync_swap_still_works_when_mode_not_mirror() -> None:
     commands = [c.args[0] for c in client.command.call_args_list]
     assert any("EXCHANGE TABLES" in cmd for cmd in commands)
     assert any("DROP TABLE" in cmd for cmd in commands)
+
+
+def test_tracked_strategy_rejected_on_clickhouse() -> None:
+    """``mirror.strategy: tracked`` (#686) is Postgres/MySQL-only for now.
+
+    Must fail fast rather than silently falling back to the destination
+    diff, whose delete semantics are co-writer-unsafe.
+    """
+    dest = ClickHouseDestination()
+    client = _fake_client()
+    opts = _options(mirror={"strategy": "tracked"})
+
+    with patch.object(ClickHouseDestination, "_connect", return_value=client):
+        with pytest.raises(ValueError, match="not yet supported"):
+            dest.load([{"id": 1, "score": 100}], _config(), opts)
+
+    client.insert.assert_not_called()
+
+
+def test_scope_rejected_on_clickhouse() -> None:
+    """``mirror.scope`` (#687) is Postgres/MySQL-only for now — fail fast."""
+    dest = ClickHouseDestination()
+    client = _fake_client()
+    opts = _options(mirror={"scope": ["parent_id"]})
+
+    with patch.object(ClickHouseDestination, "_connect", return_value=client):
+        with pytest.raises(ValueError, match="mirror.scope are not yet supported"):
+            dest.load([{"id": 1, "parent_id": 10}], _config(), opts)
+
+    client.insert.assert_not_called()

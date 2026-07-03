@@ -118,6 +118,39 @@ Safety guards:
 
 Memory constraint: the in-process key set is memory-bound to source key cardinality. For tables with **more than a few million keys** the temp-table strategy ([#340 follow-up](https://github.com/drt-hub/drt/issues/340)) will be more appropriate. Mirror as shipped today is appropriate for small/medium reference tables.
 
+**Tracked mirror (`mirror.strategy: tracked`, [#686](https://github.com/drt-hub/drt/issues/686)) — for tables the application also writes to:**
+
+```yaml
+sync:
+  mode: mirror
+  mirror:
+    strategy: tracked   # default: "destination" (the behaviour described above)
+```
+
+The default (`destination`) strategy diffs against the **whole destination table**, which is only correct when drt exclusively owns it. The canonical Reverse ETL destination, though, is a product's operational database where the application also inserts rows — and there, a destination diff would delete application-written rows. `strategy: tracked` closes that gap with Census-style semantics: drt persists the set of `upsert_key` tuples **it has itself synced** in a drt-managed `_drt_synced_keys` table (created lazily in the target table's schema), and each run deletes only `previously-synced − current-source` keys. Rows drt never wrote are never deletion candidates.
+
+Tracked-specific behaviour:
+
+- **First run baselines** — records the key set, deletes nothing (the second and subsequent runs account for deletions).
+- **Lost / missing state re-baselines** — a WARN is logged and no deletes happen that run; the state is rebuilt from the current run.
+- **Target delete + state rewrite are one transaction** — they commit or roll back together, so the bookkeeping can't drift from the data.
+- **State survives ephemeral runners** — it lives in the destination next to the data (`sync_name`, `key_hash`, `key_json` — one row per synced key, scoped per sync), not in local `.drt/` state.
+- **Key types** — int / str keys round-trip exactly; non-JSON-native key types (datetime, Decimal, UUID) are stringified in the state table, a documented limitation.
+- The empty-source and failed-rows guards above apply to tracked as well — a transient empty source also leaves the tracked baseline untouched.
+
+Choose `destination` when drt owns the table (slightly cheaper: no state I/O). Choose `tracked` when anything else writes to the table. Currently supported on **Postgres and MySQL**; ClickHouse / Snowflake / Databricks reject `strategy: tracked` with a clear error until their follow-ups land.
+
+**Scoped mirror (`mirror.scope`, [#687](https://github.com/drt-hub/drt/issues/687)) — for 1:N regeneration:**
+
+```yaml
+sync:
+  mode: mirror
+  mirror:
+    scope: [parent_id]
+```
+
+The stateless fit for the parent + child-link shape: a parent entity is periodically regenerated together with its child rows, so stale children **under that parent** must go — but rows under parents *not present in this run* (other pipelines, the application) must not be touched. With `scope`, the mirror DELETE becomes `WHERE parent_id IN (observed parents) AND upsert_key NOT IN (observed keys)` — every run recomputes the diff within the observed scope, so there is no state to lose. A scope column missing from the model output fails fast before any write. Composite scopes (`scope: [tenant_id, parent_id]`) are supported. `scope` still assumes drt owns all rows *under the observed parents* — if co-writers touch the same parents, use `strategy: tracked` instead (combining the two is a follow-up). Postgres + MySQL only for now.
+
 Same `sync.mode: mirror` is supported on **MySQL** (explicit `%s` placeholder list), **ClickHouse** (`ALTER TABLE ... DELETE WHERE` mutation with `mutations_sync=1`), and **Snowflake** (forces the MERGE write path regardless of `config.mode`). BigQuery follows once contributor PR [#584](https://github.com/drt-hub/drt/pull/584) lands.
 
 **FK resolution with destination_lookup:**

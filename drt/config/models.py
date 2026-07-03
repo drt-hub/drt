@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # Auth (shared across destination types)
@@ -1106,6 +1106,68 @@ class DLQConfig(BaseModel):
         return self
 
 
+class MaskRule(BaseModel):
+    """Object form of a mask rule, for strategies that take a parameter (#660).
+
+    The flat form (``field: "hash" | "redact"``) covers parameter-less strategies.
+    This object form is used when a strategy needs options, for example
+    ``{strategy: "truncate", length: 2}``.
+    """
+
+    strategy: Literal["hash", "redact", "truncate"]
+    length: int | None = None
+
+    @model_validator(mode="after")
+    def _validate_length(self) -> MaskRule:
+        if self.strategy == "truncate":
+            if self.length is None or self.length < 0:
+                raise ValueError(
+                    "the 'truncate' strategy requires a non-negative 'length'"
+                )
+        elif self.length is not None:
+            raise ValueError(
+                f"'length' is not valid for the '{self.strategy}' strategy"
+            )
+        return self
+
+
+# A mask rule is either a flat strategy name (no params) or the object form above.
+MaskSpec = Literal["hash", "redact"] | MaskRule
+
+
+class MirrorConfig(BaseModel):
+    """``sync.mirror`` — mirror-mode delete behaviour (#686).
+
+    - ``strategy: destination`` (default) — the original #340 behaviour:
+      DELETE destination rows whose ``upsert_key`` was not observed this
+      run. Correct only when drt exclusively owns the table.
+    - ``strategy: tracked`` — DELETE only rows drt itself previously
+      synced, tracked per sync in a drt-managed ``_drt_synced_keys`` side
+      table in the destination. Safe on tables the application also
+      writes to (Census-style semantics: first run baselines without
+      deleting; lost state re-baselines with a warning).
+    - ``scope`` (#687) — restrict destination-strategy deletes to rows
+      whose scope-column values appeared in this run's source. The
+      stateless fit for 1:N regeneration (parent + child link rows):
+      stale children under observed parents are deleted, rows under
+      unobserved parents are untouched.
+    """
+
+    strategy: Literal["destination", "tracked"] = "destination"
+    scope: list[str] | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _check_scope_strategy(self) -> MirrorConfig:
+        # Composing scope with tracked (pruning the state diff to observed
+        # parents) is a #687 follow-up — reject rather than half-apply.
+        if self.scope is not None and self.strategy == "tracked":
+            raise ValueError(
+                "mirror.scope with strategy: tracked is not supported yet — "
+                "use scope (stateless) or tracked (stateful), not both."
+            )
+        return self
+
+
 class SyncOptions(BaseModel):
     mode: Literal["full", "incremental", "upsert", "replace", "mirror"] = "full"
     replace_strategy: Literal["truncate", "swap"] = "truncate"
@@ -1121,20 +1183,35 @@ class SyncOptions(BaseModel):
     # cursor_field and lookups still reference source-side column names,
     # while upsert_key / destination columns reference the mapped names.
     field_mappings: dict[str, str] | None = None
-    # PII masking (#427): {field_name: "hash" | "redact"}. Applied in the engine
-    # at the same seam as field_mappings (just before the destination), so keys
-    # reference the post-rename field name. "hash" = SHA-256 hex digest;
-    # "redact" = "[REDACTED]". Null passes through; non-strings are stringified
-    # before hashing. Param-bearing strategies (e.g. truncate) are a follow-up (#660).
-    mask: dict[str, Literal["hash", "redact"]] | None = None
+    # PII masking (#427, #660): {field_name: spec}, where spec is a flat strategy
+    # name ("hash" | "redact") or the object form {strategy, length} for
+    # param-bearing strategies (truncate). Applied in the engine at the same seam
+    # as field_mappings (just before the destination), so keys reference the
+    # post-rename field name. "hash" = SHA-256 hex digest; "redact" = "[REDACTED]";
+    # "truncate" = the first `length` characters. Null passes through; non-strings
+    # are stringified first.
+    mask: dict[str, MaskSpec] | None = None
     # Dead Letter Queue (#278): opt-in persistence of failed records for
     # `drt retry`. None means disabled (same as DLQConfig(enabled=False)).
     dlq: DLQConfig | None = None
+    # Mirror-mode delete behaviour (#686). None = destination strategy (#340).
+    mirror: MirrorConfig | None = None
+
+    # The owning sync's name, injected by SyncConfig after validation (not a
+    # YAML field). Tracked mirror (#686) uses it to scope the per-sync key
+    # state in the destination-side ``_drt_synced_keys`` table.
+    _sync_name: str | None = PrivateAttr(default=None)
 
     @model_validator(mode="after")
     def _check_incremental_cursor(self) -> SyncOptions:
         if self.mode == "incremental" and not self.cursor_field:
             raise ValueError("cursor_field is required when mode is 'incremental'.")
+        return self
+
+    @model_validator(mode="after")
+    def _check_mirror_config(self) -> SyncOptions:
+        if self.mirror is not None and self.mode != "mirror":
+            raise ValueError("sync.mirror requires mode='mirror'.")
         return self
 
     @model_validator(mode="after")
@@ -1236,3 +1313,12 @@ class SyncConfig(BaseModel):
     sync: SyncOptions = Field(default_factory=SyncOptions)
     tests: list[SyncTest] = Field(default_factory=list)
     alerts: AlertsConfig | None = None
+
+    @model_validator(mode="after")
+    def _inject_sync_name(self) -> SyncConfig:
+        # Destinations need the sync name to scope tracked-mirror state
+        # (#686), but the Destination protocol only receives SyncOptions —
+        # so carry it on a private attr rather than widening the protocol
+        # or exposing a user-settable YAML field.
+        self.sync._sync_name = self.name
+        return self
