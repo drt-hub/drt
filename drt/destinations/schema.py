@@ -16,11 +16,14 @@ The JSON-serialization design space has three layers:
 locked-down ``information_schema``, or a table that doesn't exist yet on a
 first run — returns ``None`` so the caller silently keeps its prior behaviour.
 
-Implemented for Postgres, MySQL, and Snowflake. For Snowflake, VARIANT / OBJECT /
-ARRAY map to the ``json`` category — semi-structured columns load via
-``PARSE_JSON``, so the destination wraps those bind sites accordingly. ClickHouse
-and BigQuery defer complex-type encoding to their client libraries (no gap today);
-extending introspection to them is tracked as later phases of #317.
+Implemented for Postgres, MySQL, Snowflake, and Databricks. For Snowflake,
+VARIANT / OBJECT / ARRAY map to the ``json`` category — semi-structured columns
+load via ``PARSE_JSON``, so the destination wraps those bind sites accordingly.
+Databricks introspection lands here too (STRUCT / MAP / ARRAY / VARIANT →
+``json``); wiring it into the Databricks write path (the ``from_json`` /
+``parse_json`` bind sites) is the remaining step of the #317 Databricks phase.
+ClickHouse and BigQuery defer complex-type encoding to their client libraries
+(no gap today); extending introspection to them is tracked as later phases of #317.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from drt.config.models import (
+        DatabricksDestinationConfig,
         MySQLDestinationConfig,
         PostgresDestinationConfig,
         SnowflakeDestinationConfig,
@@ -49,6 +53,7 @@ def describe_columns(config: Any) -> dict[str, str] | None:
     metadata table must not break a sync.
     """
     from drt.config.models import (
+        DatabricksDestinationConfig,
         MySQLDestinationConfig,
         PostgresDestinationConfig,
         SnowflakeDestinationConfig,
@@ -61,6 +66,8 @@ def describe_columns(config: Any) -> dict[str, str] | None:
             return _describe_mysql(config)
         if isinstance(config, SnowflakeDestinationConfig):
             return _describe_snowflake(config)
+        if isinstance(config, DatabricksDestinationConfig):
+            return _describe_databricks(config)
     except Exception:
         # Locked-down information_schema, missing driver, transient connection
         # failure — degrade gracefully rather than fail the sync.
@@ -185,3 +192,84 @@ def _categorize_snowflake(data_type: str | None) -> str:
     if dt in ("VARIANT", "OBJECT", "ARRAY"):
         return JSON
     return SCALAR
+
+
+def _describe_databricks(config: DatabricksDestinationConfig) -> dict[str, str] | None:
+    from drt.destinations.databricks import DatabricksDestination
+
+    # Unity Catalog exposes ``information_schema`` under each catalog. Identifiers
+    # are case-insensitive (stored lower-cased), so match case-insensitively for
+    # both quoted and unquoted table definitions. ``data_type`` reports the
+    # top-level type name (e.g. ``ARRAY`` / ``STRUCT``); ``full_data_type`` would
+    # carry the parameterised form, which we don't need for categorisation.
+    sql = (
+        f"SELECT column_name, data_type FROM {config.catalog}.information_schema.columns "
+        "WHERE lower(table_schema) = lower(%s) AND lower(table_name) = lower(%s)"
+    )
+    params: list[Any] = [config.schema_, config.table]
+
+    # ``_connect`` is an instance method on the Databricks destination.
+    conn = DatabricksDestination()._connect(config)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return None
+    return {str(col): _categorize_databricks(data_type) for col, data_type in rows}
+
+
+def _categorize_databricks(data_type: str | None) -> str:
+    # Databricks' complex types load via ``from_json`` / ``parse_json`` — the SQL
+    # connector has no typed adapter to pass a Python list/dict straight through,
+    # so STRUCT / MAP / ARRAY / VARIANT map to the "json" category (the write path
+    # wraps those bind sites). Mirrors the Snowflake treatment above.
+    dt = (data_type or "").upper()
+    if dt in ("STRUCT", "MAP", "ARRAY", "VARIANT"):
+        return JSON
+    return SCALAR
+
+
+def describe_databricks_ddls(
+    config: DatabricksDestinationConfig,
+) -> dict[str, str] | None:
+    """Map each STRUCT / ARRAY / MAP column to its full type DDL (for ``from_json``).
+
+    :func:`describe_columns` returns the *category* (``json`` / ``scalar``) — enough
+    to decide *whether* a value needs JSON encoding. Databricks' ``from_json``
+    additionally needs the target type's DDL (e.g. ``ARRAY<STRING>``,
+    ``STRUCT<a: INT, b: STRING>``) to reconstruct the value, which
+    ``information_schema`` exposes as ``full_data_type``.
+
+    Only STRUCT / ARRAY / MAP columns are returned. VARIANT columns load via
+    ``parse_json`` (no DDL needed), so a ``json``-category column *absent* from
+    this map is a VARIANT — the write path should ``parse_json`` it. Best-effort
+    like :func:`describe_columns`: returns ``None`` on any failure or no matches.
+    """
+    from drt.destinations.databricks import DatabricksDestination
+
+    sql = (
+        f"SELECT column_name, full_data_type FROM {config.catalog}.information_schema.columns "
+        "WHERE lower(table_schema) = lower(%s) AND lower(table_name) = lower(%s)"
+    )
+    params: list[Any] = [config.schema_, config.table]
+    try:
+        conn = DatabricksDestination()._connect(config)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        # Best-effort: a locked-down information_schema or transient failure
+        # must not break a sync — the write path falls back to its prior behaviour.
+        return None
+    out = {
+        str(col): str(ddl)
+        for col, ddl in rows
+        if (ddl or "").strip().upper().startswith(("STRUCT", "ARRAY", "MAP"))
+    }
+    return out or None

@@ -181,6 +181,18 @@ Swap requires `mode: replace` (enforced by config validation). The same `replace
 | `mirror` | Forces the MERGE write path + end-of-sync DELETE. `upsert_key` required. |
 | `replace` | Full table replace. `replace_strategy: truncate` (default) TRUNCATEs + re-inserts; `replace_strategy: swap` is zero-downtime via a shadow + atomic `INSERT OVERWRITE`. See above. |
 
+## Complex columns (STRUCT / ARRAY / MAP / VARIANT)
+
+`dict` and `list` values bound for a Databricks `STRUCT` / `ARRAY` / `MAP` / `VARIANT` column can't be inserted as plain parameters — Databricks needs them reconstructed with `from_json` (or `parse_json` for `VARIANT`). By default (`introspect_schema: true`) drt reads `<catalog>.information_schema.columns` for the target table **once per sync**, detects the complex columns, and rewrites the INSERT to wrap them:
+
+```sql
+-- a STRUCT column "profile" and a VARIANT column "doc" are loaded as:
+INSERT INTO main.default.t (id, profile, doc)
+SELECT %s, from_json(%s, 'struct<city: string, zip: string>'), parse_json(%s)
+```
+
+The `from_json` DDL (e.g. `array<string>`, `struct<...>`) comes from the column's `full_data_type` in `information_schema`; `VARIANT` columns use `parse_json` (no DDL). The value itself stays a bind — the DDL is a literal read verbatim from `information_schema`. So a `dict`/`list` lands as a proper complex value instead of a stringified `repr`, with **no configuration**. When no column needs wrapping, the INSERT is the unchanged `VALUES (...)` form. Introspection is best-effort: if `information_schema` isn't readable for the token's principal, drt falls back to binding values directly. Disable with `introspect_schema: false`.
+
 ## Notes
 
 - Requires `pip install drt-core[databricks]` (depends on `databricks-sql-connector>=3.0`).
