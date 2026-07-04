@@ -61,6 +61,21 @@ the cloud accounts and the "verified ✓" sign-off are the maintainer's
 | `SMOKE_BIGQUERY_DATASET` | a throwaway dataset |
 | `SMOKE_BIGQUERY_KEYFILE_JSON` | full service-account JSON; the workflow writes it to a temp file |
 
+BigQuery prerequisites (#673):
+
+- A **billing-enabled** project (BigQuery jobs require an active billing account,
+  even for tiny throwaway tables).
+- **Service-account keyfile** auth. The BigQuery leg drives two write paths — the
+  streaming `insert` path and the temp-table `MERGE` path (`<table>_drt_tmp` →
+  `MERGE` → drop, #645) — both against a throwaway dataset.
+- Least-privilege roles for the service account: `roles/bigquery.jobUser` on the
+  project (to run load/query/MERGE jobs) **plus** dataset-scoped
+  `roles/bigquery.dataEditor` on the smoke dataset (to create/insert/drop the
+  target + `_drt_tmp` tables). Avoid granting project-wide `dataEditor`.
+- Caveat: if the org enforces the `iam.disableServiceAccountKeyCreation`
+  constraint, a keyfile can't be minted for the SA — provision the key in a
+  project/folder where that policy is not enforced, or use an exempted SA.
+
 ## Adding a warehouse leg
 
 `test_snowflake_smoke.py` is the reference shape. To add another, copy it and
