@@ -55,10 +55,15 @@ def docs_generate(
         return
 
     if fmt == "html":
-        raise NotImplementedError(
-            "--format html is scheduled for P3 of #499. "
-            "Use --format mermaid or --format json for now."
+        from drt.docs.html import render_html
+
+        manifest = build_manifest(Path("."), include_state=include_state)
+        written = render_html(manifest, output)
+        console.print(
+            f"Wrote [bold]{len(written)}[/bold] file(s) to [bold]{output}[/bold] "
+            f"({len(manifest.syncs)} sync(s)). Open [bold]{output / 'index.html'}[/bold]."
         )
+        return
 
     raise typer.BadParameter(
         f"Unknown --format value: {format!r}. Expected: html | mermaid | json."
