@@ -10,14 +10,24 @@ Theme is light/dark via ``prefers-color-scheme`` (no JS toggle).
 from __future__ import annotations
 
 STYLE_CSS = """\
-/* drt docs — vendored, no runtime framework. Tokens from the ADR mockup. */
+/* drt docs — vendored, no runtime framework.
+ * DESIGN TOKENS live in the single :root block below (+ its dark override).
+ * Add new tokens here, never mid-file. Base palette from the ADR #500 mockup. */
 :root {
-  --brand-50:#f5f3ff; --brand-100:#ede9fe; --brand-200:#ddd6fe;
+  /* brand */
+  --brand-50:#f5f3ff; --brand-100:#ede9fe; --brand-200:#ddd6fe; --brand-400:#a78bfa;
   --brand-500:#8b5cf6; --brand-600:#7c3aed; --brand-700:#6d28d9; --brand-900:#1e1b4b;
+  /* neutrals */
   --ink-50:#f7f8fa; --ink-100:#eef0f3; --ink-200:#e3e6eb; --ink-500:#5a6068;
   --ink-700:#262b33; --ink-800:#1a1d22; --ink-900:#0f1115;
+  /* surfaces & text */
   --bg:#ffffff; --fg:var(--ink-800); --muted:var(--ink-500);
   --line:var(--ink-200); --surface:#ffffff; --chip:var(--ink-100);
+  /* status (dot/word pairs — never color-alone) */
+  --success:#15803d; --warning:#b45309; --error:#b91c1c;
+  /* lineage */
+  --edge:#9aa0a8; --edge-lookup:var(--brand-500); --zone-drt-line:var(--brand-200);
+  /* shape & type */
   --radius:8px;
   --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,monospace;
   --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
@@ -26,6 +36,8 @@ STYLE_CSS = """\
   :root {
     --bg:var(--ink-900); --fg:var(--ink-50); --muted:#c4c7cc;
     --line:var(--ink-700); --surface:var(--ink-800); --chip:var(--ink-700);
+    --success:#4ade80; --warning:#fbbf24; --error:#f87171;
+    --edge:#6a707a; --zone-drt-line:rgba(139,92,246,0.35);
   }
 }
 * { box-sizing:border-box; }
@@ -96,10 +108,9 @@ th { color:var(--muted); font-weight:600; }
 .kv { display:grid; grid-template-columns:160px 1fr; gap:6px 14px; font-size:13px; margin:0 0 8px; }
 .kv dt { color:var(--muted); }
 .kv dd { margin:0; }
-.status-success { color:#0a7d33; } .status-failed { color:#b3261e; }
-@media (prefers-color-scheme: dark) {
-  .status-success { color:#4ade80; } .status-failed { color:#f87171; }
-}
+.badge { display:inline-grid; place-items:center; width:26px; height:26px; border-radius:7px;
+  font:700 10px var(--mono); color:#fff; vertical-align:-4px; }
+.dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:5px; }
 
 pre.code { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:14px; overflow-x:auto; font-size:12.5px; }
 .mermaid { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:16px; }
@@ -117,8 +128,6 @@ pre.code { background:var(--surface); border:1px solid var(--line); border-radiu
 /* Recent runs + status */
 td.right, th.right { text-align:right; }
 .font-mono { font-family:var(--mono); font-size:12px; color:var(--muted); }
-:root { --success:#15803d; --warning:#b45309; --error:#b91c1c; }
-@media (prefers-color-scheme: dark) { :root { --success:#4ade80; --warning:#fbbf24; --error:#f87171; } }
 .status-success { color:var(--success); font-weight:500; }
 .status-partial { color:var(--warning); font-weight:500; }
 .status-failed { color:var(--error); font-weight:500; }
@@ -142,8 +151,7 @@ td.right, th.right { text-align:right; }
   padding:10px; overflow-x:auto; }
 .ego svg text { font-family:var(--sans); }
 .ego svg .mono { font-family:var(--mono); }
-:root { --edge:#9aa0a8; --edge-lookup:var(--brand-500); --zone-drt-line:var(--brand-200); }
-@media (prefers-color-scheme: dark) { :root { --edge:#6a707a; --zone-drt-line:rgba(139,92,246,0.35); } }
+.group a .count { float:right; }
 
 @media (max-width:860px) {
   .cards { grid-template-columns:1fr; }

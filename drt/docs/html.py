@@ -263,10 +263,19 @@ _BASE = """\
         {{ 'class=current' if d.slug==current_slug and active=='destination' }}>{{ d.label }}</a></li>
       {% endfor %}</ul>
     </details>
+    {% if nav.tags %}
+    <details class="group" data-group="tags" open>
+      <summary>Tags <span class="count">{{ nav.tags|length }}</span></summary>
+      <ul>{% for t in nav.tags %}<li><a href="{{ root }}tag/{{ t.slug }}.html"
+        {{ 'class=current' if t.slug==current_slug and active=='tag' }}>#{{ t.name }} <span class="count">{{ t.count }}</span></a></li>
+      {% endfor %}</ul>
+    </details>
+    {% endif %}
   </aside>
   <main class="main">
     {% block main %}{% endblock %}
-    <div class="footer">Generated {{ generated_at }} · drt {{ drt_version }} · schema v{{ schema_version }}</div>
+    {# no timestamp here — pages stay byte-identical across regens (#697); generated_at lives in manifest.json #}
+    <div class="footer">drt docs · static · drt {{ drt_version }} · manifest schema v{{ schema_version }}</div>
   </main>
 </div>
 <script type="application/json"
@@ -282,7 +291,7 @@ _INDEX = """\
 {% block main %}
 <div class="eyebrow">Overview</div>
 <h1>{{ project_name }}</h1>
-<p class="lede">Sync catalog generated from the drt project manifest.</p>
+<p class="lede">drt {{ drt_version }} &middot; profile <code>{{ profile }}</code> &middot; manifest schema v{{ schema_version }}</p>
 <div class="cards">
   <div class="card"><div class="num">{{ nav.syncs|length }}</div><div class="lbl">Syncs</div></div>
   <div class="card"><div class="num">{{ nav.sources|length }}</div><div class="lbl">Sources</div></div>
@@ -412,17 +421,25 @@ _SYNC = """\
 {% endblock %}
 """
 
+_STATUS_TD = (
+    '<td>{% if s.status %}'
+    '<span class="dot" style="background:var(--{{ s.status_var }})"></span>'
+    '<span class="status-{{ s.status }}">{{ s.status }}</span>'
+    '{% else %}<span class="font-mono">—</span>{% endif %}</td>'
+)
+
 _SOURCE = """\
 {% extends "base" %}
 {% block main %}
-<div class="eyebrow">Source</div>
-<h1>{{ source.name }}</h1>
-<dl class="kv"><dt>Type</dt><dd>{{ source.type }}</dd></dl>
+<div class="crumb"><a href="../index.html">Sources</a> / {{ source.name }}</div>
+<h1><span class="badge" style="background:{{ badge.bg }};color:{{ badge.fg }}">{{ badge.initials }}</span> {{ source.name }}</h1>
+<p class="lede">{{ source.type }} &middot; external &middot; read by {{ syncs|length }} sync{{ 's' if syncs|length != 1 }}</p>
 <h2>Used by</h2>
 <table>
-  <tr><th>Sync</th><th>Destination</th><th>Mode</th></tr>
+  <tr><th>Sync</th><th>Destination</th><th>Mode</th><th>Last status</th></tr>
   {% for s in syncs %}
-  <tr><td><a href="../sync/{{ s.slug }}.html">{{ s.name }}</a></td><td>{{ s.destination_label }}</td><td><span class="mode">{{ s.mode }}</span></td></tr>
+  <tr><td><a href="../sync/{{ s.slug }}.html">{{ s.name }}</a></td><td>{{ s.destination_label }}</td>
+  <td><span class="mode">{{ s.mode }}</span></td>""" + _STATUS_TD + """</tr>
   {% endfor %}
 </table>
 {% endblock %}
@@ -431,14 +448,31 @@ _SOURCE = """\
 _DESTINATION = """\
 {% extends "base" %}
 {% block main %}
-<div class="eyebrow">Destination</div>
-<h1>{{ destination.label }}</h1>
-<dl class="kv"><dt>Type</dt><dd>{{ destination.type }}</dd></dl>
+<div class="crumb"><a href="../index.html">Destinations</a> / {{ destination.label }}</div>
+<h1><span class="badge" style="background:{{ badge.bg }};color:{{ badge.fg }}">{{ badge.initials }}</span> {{ destination.label }}</h1>
+<p class="lede">{{ destination.type }} &middot; external &middot; fed by {{ syncs|length }} sync{{ 's' if syncs|length != 1 }}</p>
 <h2>Fed by</h2>
 <table>
-  <tr><th>Sync</th><th>Source</th><th>Mode</th></tr>
+  <tr><th>Sync</th><th>Source</th><th>Mode</th><th>Last status</th></tr>
   {% for s in syncs %}
-  <tr><td><a href="../sync/{{ s.slug }}.html">{{ s.name }}</a></td><td>{{ s.source }}</td><td><span class="mode">{{ s.mode }}</span></td></tr>
+  <tr><td><a href="../sync/{{ s.slug }}.html">{{ s.name }}</a></td><td>{{ s.source }}</td>
+  <td><span class="mode">{{ s.mode }}</span></td>""" + _STATUS_TD + """</tr>
+  {% endfor %}
+</table>
+{% endblock %}
+"""
+
+_TAG = """\
+{% extends "base" %}
+{% block main %}
+<div class="crumb"><a href="../index.html">Tags</a> / #{{ tag }}</div>
+<h1><span class="chip">#{{ tag }}</span></h1>
+<p class="lede">{{ syncs|length }} tagged sync{{ 's' if syncs|length != 1 }}</p>
+<table>
+  <tr><th>Sync</th><th>Destination</th><th>Mode</th><th>Last status</th></tr>
+  {% for s in syncs %}
+  <tr><td><a href="../sync/{{ s.slug }}.html">{{ s.name }}</a></td><td>{{ s.destination_label }}</td>
+  <td><span class="mode">{{ s.mode }}</span></td>""" + _STATUS_TD + """</tr>
   {% endfor %}
 </table>
 {% endblock %}
@@ -461,10 +495,23 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
                 "sync": _SYNC,
                 "source": _SOURCE,
                 "destination": _DESTINATION,
+                "tag": _TAG,
             }
         ),
         autoescape=True,
     )
+
+    _status_vars = {"success": "success", "partial": "warning", "failed": "error"}
+
+    def _status_fields(s: Sync) -> dict:
+        if s.state is None:
+            return {"status": None, "status_var": None}
+        st = s.state.last_status
+        return {"status": st, "status_var": _status_vars.get(st, "muted")}
+
+    def _badge_dict(conn_type: str) -> dict:
+        initials, bg, fg = _badge(conn_type)
+        return {"initials": initials, "bg": bg, "fg": fg}
 
     # Stable slugs for filenames + cross-links.
     sync_slugs = {s.name: _slug(s.name) for s in manifest.syncs}
@@ -472,11 +519,21 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
     dest_slugs = {d.name: _slug(d.name) for d in manifest.destinations}
     dest_by_id = {d.name: d for d in manifest.destinations}
 
+    tag_syncs: dict[str, list[Sync]] = {}
+    for s in manifest.syncs:
+        for t in s.tags:
+            tag_syncs.setdefault(t, []).append(s)
+    tag_slugs = {t: _slug(t) for t in tag_syncs}
+
     nav = {
         "syncs": [{"name": s.name, "slug": sync_slugs[s.name]} for s in manifest.syncs],
         "sources": [{"name": s.name, "slug": source_slugs[s.name]} for s in manifest.sources],
         "destinations": [
             {"label": d.label, "slug": dest_slugs[d.name]} for d in manifest.destinations
+        ],
+        "tags": [
+            {"name": t, "slug": tag_slugs[t], "count": len(tag_syncs[t])}
+            for t in sorted(tag_syncs)
         ],
     }
 
@@ -485,6 +542,7 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
         "drt_version": manifest.drt_version,
         "generated_at": manifest.generated_at,
         "schema_version": manifest.schema_version,
+        "profile": manifest.project.profile if manifest.project else "",
         "nav": nav,
     }
 
@@ -644,6 +702,7 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
                 if s.destination in dest_by_id
                 else s.destination,
                 "mode": s.mode,
+                **_status_fields(s),
             }
             for s in manifest.syncs
             if s.source == src.name
@@ -656,6 +715,7 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
                 root="../",
                 current_slug=source_slugs[src.name],
                 source=src,
+                badge=_badge_dict(src.type),
                 syncs=used_by,
                 data_json=dumps({"source": src.name, "nav": nav}),
                 **common,
@@ -665,7 +725,13 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
     # per-destination pages
     for d in manifest.destinations:
         fed_by = [
-            {"name": s.name, "slug": sync_slugs[s.name], "source": s.source, "mode": s.mode}
+            {
+                "name": s.name,
+                "slug": sync_slugs[s.name],
+                "source": s.source,
+                "mode": s.mode,
+                **_status_fields(s),
+            }
             for s in manifest.syncs
             if s.destination == d.name
         ]
@@ -677,8 +743,37 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
                 root="../",
                 current_slug=dest_slugs[d.name],
                 destination=d,
+                badge=_badge_dict(d.type),
                 syncs=fed_by,
                 data_json=dumps({"destination": d.name, "nav": nav}),
+                **common,
+            ),
+        )
+
+    # per-tag pages
+    for t in sorted(tag_syncs):
+        tagged = [
+            {
+                "name": s.name,
+                "slug": sync_slugs[s.name],
+                "destination_label": dest_by_id[s.destination].label
+                if s.destination in dest_by_id
+                else s.destination,
+                "mode": s.mode,
+                **_status_fields(s),
+            }
+            for s in tag_syncs[t]
+        ]
+        write(
+            f"tag/{tag_slugs[t]}.html",
+            env.get_template("tag").render(
+                page_title=f"#{t}",
+                active="tag",
+                root="../",
+                current_slug=tag_slugs[t],
+                tag=t,
+                syncs=tagged,
+                data_json=dumps({"tag": t, "nav": nav}),
                 **common,
             ),
         )

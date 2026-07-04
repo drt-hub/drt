@@ -178,6 +178,8 @@ td.right, th.right { text-align:right; }
     <span class="item"><span class="dot" style="background:var(--success)"></span> success</span>
     <span class="item"><span class="dot" style="background:var(--warning)"></span> partial</span>
     <span class="item"><span class="dot" style="background:var(--error)"></span> failed</span>
+    <span class="item"><span style="display:inline-block;padding:0 7px;border-radius:999px;background:rgba(185,28,28,0.12);color:var(--error);font:600 10px var(--mono);line-height:16px">3 &#8594; DLQ</span> dead-letter rows</span>
+    <span class="item"><span style="display:inline-block;padding:0 7px;border-radius:999px;background:rgba(180,83,9,0.14);color:var(--warning);font:600 10px var(--mono);line-height:16px">&#9888; drift</span> schema drift (audit)</span>
   </div>
 
   <div class="panel">
@@ -288,6 +290,8 @@ td.right, th.right { text-align:right; }
       <text x="420" y="352" font-size="11" class="mono" fill="var(--muted)">upsert</text>
       <circle cx="506" cy="348.5" r="3.5" fill="var(--warning)"/>
       <text x="514" y="352" font-size="11" fill="var(--warning)" font-weight="500">partial</text>
+      <rect x="546" y="340.5" width="50" height="15" rx="7.5" fill="rgba(185,28,28,0.12)"/>
+      <text x="571" y="351.5" font-size="8.5" class="mono" font-weight="600" fill="var(--error)" text-anchor="middle">3&#8201;&#8594;&#8201;DLQ</text>
     </g>
     <!-- alerts_to_slack · append · failed -->
     <g>
@@ -298,6 +302,8 @@ td.right, th.right { text-align:right; }
       <text x="420" y="472" font-size="11" class="mono" fill="var(--muted)">incremental</text>
       <circle cx="506" cy="468.5" r="3.5" fill="var(--error)"/>
       <text x="514" y="472" font-size="11" fill="var(--error)" font-weight="500">failed</text>
+      <rect x="542" y="460.5" width="54" height="15" rx="7.5" fill="rgba(185,28,28,0.12)"/>
+      <text x="569" y="471.5" font-size="8.5" class="mono" font-weight="600" fill="var(--error)" text-anchor="middle">12&#8201;&#8594;&#8201;DLQ</text>
     </g>
     <!-- users_to_hubspot · incremental · success -->
     <g>
@@ -334,6 +340,8 @@ td.right, th.right { text-align:right; }
       </g>
       <text x="860" y="334" font-size="13" font-weight="600" fill="var(--fg)">public.orders</text>
       <text x="860" y="350" font-size="10.5" letter-spacing="0.6" fill="var(--muted)">POSTGRES</text>
+      <rect x="964" y="340" width="56" height="15" rx="7.5" fill="rgba(180,83,9,0.14)"/>
+      <text x="992" y="351" font-size="8.5" class="mono" font-weight="600" fill="var(--warning)" text-anchor="middle">&#9888; drift</text>
     </g>
     <g>
       <rect x="816" y="430" width="216" height="56" rx="8" fill="var(--surface)" stroke="var(--line)"/>
@@ -427,7 +435,7 @@ td.right, th.right { text-align:right; }
   </svg>
   </div>
 
-  <div class="footer">Visual-direction mock — hand-positioned SVG. The real thing is emitted by the layout engine (#677 follow-up); every node links to its detail page.</div>
+  <div class="footer">Visual-direction mock — hand-positioned SVG. The real thing is emitted by the layout engine (#677 follow-up); every node links to its detail page. DLQ counts arrive via manifest schema v2 (#698); drift badges need a persisted drift-audit artifact (storage TBD).</div>
 </div>
 </body>
 </html>
