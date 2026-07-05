@@ -654,8 +654,19 @@ class DatabricksDestination:
                 f"({config.host_env}, {config.http_path_env}, {config.token_env})."
             )
 
+        # databricks-sql-connector >=3.0 defaults to *native* paramstyle
+        # (`?` / `:name` markers, server-side binding) and forwards pyformat
+        # `%s` markers to the server unexpanded — every parameterised
+        # statement in this destination then dies server-side with
+        # PARSE_SYNTAX_ERROR. Opt back into client-side inline rendering,
+        # which this destination's `%s` binds were written against (the
+        # connector renders values into the SQL text, matching the
+        # snowflake-connector default this file's SQL was modelled on).
+        # "silent" suppresses the per-connection deprecation warning; the
+        # native-`?` migration is tracked as a follow-up.
         return sql.connect(
             server_hostname=host,
             http_path=http_path,
             access_token=token,
+            use_inline_params="silent",
         )

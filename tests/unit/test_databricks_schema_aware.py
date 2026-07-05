@@ -223,5 +223,5 @@ def test_from_json_ddl_single_quotes_are_escaped() -> None:
     clause, _ = _value_clause(
         ["c"], {"c": "json"}, {"c": "struct<n: string, it's: int>"}
     )
-    assert "it''s" in clause  # single quote doubled
+    assert "it''s" in clause
     assert "from_json(%s, 'struct<n: string, it''s: int>')" in clause

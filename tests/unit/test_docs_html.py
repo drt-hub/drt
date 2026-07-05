@@ -215,7 +215,6 @@ def test_removed_sync_leaves_no_orphan_page(tmp_path: Path) -> None:
 
 
 def test_slug_collision_fails_fast(tmp_path: Path) -> None:
-    """Two names that slugify to the same page must raise, not silently clobber."""
     manifest = Manifest(
         schema_version=SCHEMA_VERSION,
         drt_version="9.9.9",
@@ -233,14 +232,13 @@ def test_slug_collision_fails_fast(tmp_path: Path) -> None:
 
 
 def test_rmtree_guard_refuses_non_docs_directory(tmp_path: Path) -> None:
-    """render_html must not wipe a populated directory that isn't a drt-docs build."""
     target = tmp_path / "precious"
     target.mkdir()
     keep = target / "thesis.txt"
     keep.write_text("do not delete", encoding="utf-8")
     with pytest.raises(ValueError, match="Refusing to delete"):
         render_html(_manifest(), target)
-    assert keep.exists()  # untouched
+    assert keep.exists()
 
 
 def test_rmtree_guard_errors_on_file_target(tmp_path: Path) -> None:
@@ -251,25 +249,21 @@ def test_rmtree_guard_errors_on_file_target(tmp_path: Path) -> None:
 
 
 def test_rmtree_guard_allows_empty_and_prior_build(tmp_path: Path) -> None:
-    # Empty dir is fine.
     empty = tmp_path / "docs"
     empty.mkdir()
     render_html(_manifest(), empty)
     assert (empty / "index.html").exists()
-    # Re-rendering over a prior drt-docs build is fine (has index.html + assets/).
     render_html(_manifest(), empty)
     assert (empty / "index.html").exists()
 
 
 def test_html_format_missing_extra_prints_hint(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--format html without the [docs] extra prints an install hint, not a traceback."""
     import sys
 
     from typer.testing import CliRunner
 
     from drt.cli.main import app
 
-    # Force the deferred import to fail as if pygments/jinja2 weren't installed.
     monkeypatch.setitem(sys.modules, "drt.docs.html", None)
     result = CliRunner().invoke(app, ["docs", "generate", "--format", "html"])
     assert result.exit_code == 1
