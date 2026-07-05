@@ -14,6 +14,7 @@ import json
 import re
 import shutil
 from collections import Counter
+from html import escape
 from pathlib import Path
 
 import yaml
@@ -21,8 +22,6 @@ from jinja2 import DictLoader, Environment
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import YamlLexer
-
-from html import escape
 
 from drt.docs._html_assets import APP_JS, STYLE_CSS
 from drt.docs.manifest import Manifest, Sync
@@ -85,11 +84,23 @@ def _clip(value: str, limit: int = 24) -> str:
     return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
-def _node_card(x: int, y: int, w: int, conn_type: str, name: str, sub: str,
-               href: str | None, *, code: bool = False) -> str:
+def _node_card(
+    x: int,
+    y: int,
+    w: int,
+    conn_type: str,
+    name: str,
+    sub: str,
+    href: str | None,
+    *,
+    code: bool = False,
+) -> str:
     """One ego-graph node card. `code=True` renders the drt-managed sync style."""
-    accent = ('<rect x="%d" y="%d" width="3" height="54" rx="1.5" fill="var(--brand-600)"/>'
-              % (x, y)) if code else ""
+    accent = (
+        f'<rect x="{x}" y="{y}" width="3" height="54" rx="1.5" fill="var(--brand-600)"/>'
+        if code
+        else ""
+    )
     stroke = "var(--zone-drt-line)" if code else "var(--line)"
     if code:
         icon = (
@@ -122,8 +133,13 @@ def _node_card(x: int, y: int, w: int, conn_type: str, name: str, sub: str,
     return body
 
 
-def _ego_svg(sync: Sync, manifest: Manifest, sync_slugs: dict[str, str],
-             source_slugs: dict[str, str], dest_slugs: dict[str, str]) -> str:
+def _ego_svg(
+    sync: Sync,
+    manifest: Manifest,
+    sync_slugs: dict[str, str],
+    source_slugs: dict[str, str],
+    dest_slugs: dict[str, str],
+) -> str:
     """Static ego-graph for one sync: reads on the left, writes on the right.
 
     Deterministic single-fan layout (no crossing possible), emitted as inline
@@ -142,7 +158,7 @@ def _ego_svg(sync: Sync, manifest: Manifest, sync_slugs: dict[str, str],
     parts: list[str] = [
         f'<svg viewBox="0 0 890 {height}" width="890" height="{height}" role="img" '
         f'aria-label="Lineage for {escape(sync.name, quote=True)}">',
-        '<defs>'
+        "<defs>"
         '<marker id="ego-arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" '
         'markerHeight="6" orient="auto-start-reverse">'
         '<path d="M0,0.6 L7.4,4 L0,7.4 Z" fill="var(--edge)"/></marker>'
@@ -154,18 +170,37 @@ def _ego_svg(sync: Sync, manifest: Manifest, sync_slugs: dict[str, str],
 
     # main row: source → sync → destination
     y0 = 16
-    parts.append(_node_card(x_l, y0, w_card, src_type.get(sync.source, "configured"),
-                            sync.source, src_type.get(sync.source, "source"),
-                            f"../source/{source_slugs.get(sync.source, _slug(sync.source))}.html"))
+    parts.append(
+        _node_card(
+            x_l,
+            y0,
+            w_card,
+            src_type.get(sync.source, "configured"),
+            sync.source,
+            src_type.get(sync.source, "source"),
+            f"../source/{source_slugs.get(sync.source, _slug(sync.source))}.html",
+        )
+    )
     parts.append(_node_card(x_m, y0, w_card, "", sync.name, sync.mode, None, code=True))
     dest = dest_by_id.get(sync.destination)
     dest_label = dest.label if dest else sync.destination
     dest_type = dest.type if dest else "destination"
-    parts.append(_node_card(x_r, y0, w_card, dest_type, dest_label, dest_type,
-                            f"../destination/{dest_slugs.get(sync.destination, _slug(sync.destination))}.html"))
-    parts.append(f'<g fill="none" stroke="var(--edge)" stroke-width="1.5" marker-end="url(#ego-arr)">'
-                 f'<line x1="{x_l + w_card}" y1="{y0 + 27}" x2="{x_m - 2}" y2="{y0 + 27}"/>'
-                 f'<line x1="{x_m + w_card}" y1="{y0 + 27}" x2="{x_r - 2}" y2="{y0 + 27}"/></g>')
+    parts.append(
+        _node_card(
+            x_r,
+            y0,
+            w_card,
+            dest_type,
+            dest_label,
+            dest_type,
+            f"../destination/{dest_slugs.get(sync.destination, _slug(sync.destination))}.html",
+        )
+    )
+    parts.append(
+        f'<g fill="none" stroke="var(--edge)" stroke-width="1.5" marker-end="url(#ego-arr)">'
+        f'<line x1="{x_l + w_card}" y1="{y0 + 27}" x2="{x_m - 2}" y2="{y0 + 27}"/>'
+        f'<line x1="{x_m + w_card}" y1="{y0 + 27}" x2="{x_r - 2}" y2="{y0 + 27}"/></g>'
+    )
 
     # upstream lookups: destination tables this sync reads, below the source column
     for i, producer in enumerate(upstream):
@@ -174,8 +209,11 @@ def _ego_svg(sync: Sync, manifest: Manifest, sync_slugs: dict[str, str],
         p_dest = dest_by_id.get(p_sync.destination) if p_sync else None
         label = p_dest.label if p_dest else producer
         p_type = p_dest.type if p_dest else "table"
-        href = (f"../destination/{dest_slugs.get(p_sync.destination, _slug(producer))}.html"
-                if p_sync else None)
+        href = (
+            f"../destination/{dest_slugs.get(p_sync.destination, _slug(producer))}.html"
+            if p_sync
+            else None
+        )
         parts.append(_node_card(x_l, y, w_card, p_type, label, f"lookup · via {producer}", href))
         port_x = x_m + 30 + i * 44
         parts.append(
@@ -183,20 +221,31 @@ def _ego_svg(sync: Sync, manifest: Manifest, sync_slugs: dict[str, str],
             f'{port_x},{y - 10} {port_x},{y0 + 58}" fill="none" '
             f'stroke="var(--edge-lookup)" stroke-width="1.5" stroke-dasharray="5 4" '
             f'marker-end="url(#ego-arr-lk)"/>'
-            f'<circle cx="{port_x}" cy="{y0 + 54}" r="2.5" fill="var(--edge-lookup)"/>')
+            f'<circle cx="{port_x}" cy="{y0 + 54}" r="2.5" fill="var(--edge-lookup)"/>'
+        )
 
     # downstream consumers: syncs that look up this sync's destination, below it
     for i, consumer in enumerate(downstream):
         y = y0 + 84 * (i + 1)
         c_sync = sync_by_name.get(consumer)
-        parts.append(_node_card(x_r, y, w_card, "", consumer,
-                                (c_sync.mode if c_sync else "sync") + " · lookup",
-                                f"../sync/{sync_slugs.get(consumer, _slug(consumer))}.html", code=True))
+        parts.append(
+            _node_card(
+                x_r,
+                y,
+                w_card,
+                "",
+                consumer,
+                (c_sync.mode if c_sync else "sync") + " · lookup",
+                f"../sync/{sync_slugs.get(consumer, _slug(consumer))}.html",
+                code=True,
+            )
+        )
         parts.append(
             f'<path d="M{x_r + 30},{y0 + 70} C{x_r - 30},{y0 + 100} '
             f'{x_r - 30},{y + 27} {x_r - 2},{y + 27}" fill="none" '
             f'stroke="var(--edge-lookup)" stroke-width="1.5" stroke-dasharray="5 4" '
-            f'marker-end="url(#ego-arr-lk)"/>')
+            f'marker-end="url(#ego-arr-lk)"/>'
+        )
 
     parts.append("</svg>")
     return "".join(parts)
@@ -422,13 +471,14 @@ _SYNC = """\
 """
 
 _STATUS_TD = (
-    '<td>{% if s.status %}'
+    "<td>{% if s.status %}"
     '<span class="dot" style="background:var(--{{ s.status_var }})"></span>'
     '<span class="status-{{ s.status }}">{{ s.status }}</span>'
     '{% else %}<span class="font-mono">—</span>{% endif %}</td>'
 )
 
-_SOURCE = """\
+_SOURCE = (
+    """\
 {% extends "base" %}
 {% block main %}
 <div class="crumb"><a href="../index.html">Sources</a> / {{ source.name }}</div>
@@ -439,13 +489,17 @@ _SOURCE = """\
   <tr><th>Sync</th><th>Destination</th><th>Mode</th><th>Last status</th></tr>
   {% for s in syncs %}
   <tr><td><a href="../sync/{{ s.slug }}.html">{{ s.name }}</a></td><td>{{ s.destination_label }}</td>
-  <td><span class="mode">{{ s.mode }}</span></td>""" + _STATUS_TD + """</tr>
+  <td><span class="mode">{{ s.mode }}</span></td>"""
+    + _STATUS_TD
+    + """</tr>
   {% endfor %}
 </table>
 {% endblock %}
 """
+)
 
-_DESTINATION = """\
+_DESTINATION = (
+    """\
 {% extends "base" %}
 {% block main %}
 <div class="crumb"><a href="../index.html">Destinations</a> / {{ destination.label }}</div>
@@ -456,13 +510,17 @@ _DESTINATION = """\
   <tr><th>Sync</th><th>Source</th><th>Mode</th><th>Last status</th></tr>
   {% for s in syncs %}
   <tr><td><a href="../sync/{{ s.slug }}.html">{{ s.name }}</a></td><td>{{ s.source }}</td>
-  <td><span class="mode">{{ s.mode }}</span></td>""" + _STATUS_TD + """</tr>
+  <td><span class="mode">{{ s.mode }}</span></td>"""
+    + _STATUS_TD
+    + """</tr>
   {% endfor %}
 </table>
 {% endblock %}
 """
+)
 
-_TAG = """\
+_TAG = (
+    """\
 {% extends "base" %}
 {% block main %}
 <div class="crumb"><a href="../index.html">Tags</a> / #{{ tag }}</div>
@@ -472,11 +530,14 @@ _TAG = """\
   <tr><th>Sync</th><th>Destination</th><th>Mode</th><th>Last status</th></tr>
   {% for s in syncs %}
   <tr><td><a href="../sync/{{ s.slug }}.html">{{ s.name }}</a></td><td>{{ s.destination_label }}</td>
-  <td><span class="mode">{{ s.mode }}</span></td>""" + _STATUS_TD + """</tr>
+  <td><span class="mode">{{ s.mode }}</span></td>"""
+    + _STATUS_TD
+    + """</tr>
   {% endfor %}
 </table>
 {% endblock %}
 """
+)
 
 
 def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
@@ -503,13 +564,13 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
 
     _status_vars = {"success": "success", "partial": "warning", "failed": "error"}
 
-    def _status_fields(s: Sync) -> dict:
+    def _status_fields(s: Sync) -> dict[str, str | None]:
         if s.state is None:
             return {"status": None, "status_var": None}
         st = s.state.last_status
         return {"status": st, "status_var": _status_vars.get(st, "muted")}
 
-    def _badge_dict(conn_type: str) -> dict:
+    def _badge_dict(conn_type: str) -> dict[str, str]:
         initials, bg, fg = _badge(conn_type)
         return {"initials": initials, "bg": bg, "fg": fg}
 
@@ -532,8 +593,7 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
             {"label": d.label, "slug": dest_slugs[d.name]} for d in manifest.destinations
         ],
         "tags": [
-            {"name": t, "slug": tag_slugs[t], "count": len(tag_syncs[t])}
-            for t in sorted(tag_syncs)
+            {"name": t, "slug": tag_slugs[t], "count": len(tag_syncs[t])} for t in sorted(tag_syncs)
         ],
     }
 
@@ -586,9 +646,7 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
     # bare node count, and matches the ADR #500 mockup.
     src_type = {s.name: s.type for s in manifest.sources}
     dst_type = {d.name: d.type for d in manifest.destinations}
-    source_type_counts = dict(
-        Counter(src_type.get(s.source, s.source) for s in manifest.syncs)
-    )
+    source_type_counts = dict(Counter(src_type.get(s.source, s.source) for s in manifest.syncs))
     destination_type_counts = dict(
         Counter(dst_type.get(s.destination, s.destination) for s in manifest.syncs)
     )
@@ -617,11 +675,17 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
             source_type_counts=source_type_counts,
             destination_type_counts=destination_type_counts,
             recent_runs=recent_runs,
-            data_json=dumps({"project": common["project_name"], "counts": {
-                "syncs": len(manifest.syncs),
-                "sources": len(manifest.sources),
-                "destinations": len(manifest.destinations),
-            }, "nav": nav}),
+            data_json=dumps(
+                {
+                    "project": common["project_name"],
+                    "counts": {
+                        "syncs": len(manifest.syncs),
+                        "sources": len(manifest.sources),
+                        "destinations": len(manifest.destinations),
+                    },
+                    "nav": nav,
+                }
+            ),
             **common,
         ),
     )
@@ -661,11 +725,14 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
             if e.kind == "lookup" and e.to == s.name:
                 p_sync = sync_by_name.get(e.from_)
                 p_dest = dest_by_id.get(p_sync.destination) if p_sync else None
-                upstream.append({
-                    "label": p_dest.label if p_dest else e.from_,
-                    "slug": dest_slugs.get(p_sync.destination, _slug(e.from_))
-                    if p_sync else _slug(e.from_),
-                })
+                upstream.append(
+                    {
+                        "label": p_dest.label if p_dest else e.from_,
+                        "slug": dest_slugs.get(p_sync.destination, _slug(e.from_))
+                        if p_sync
+                        else _slug(e.from_),
+                    }
+                )
         downstream = [
             {"name": e.to, "slug": sync_slugs.get(e.to, _slug(e.to))}
             for e in manifest.edges
