@@ -341,6 +341,15 @@ _INDEX = """\
 <div class="eyebrow">Overview</div>
 <h1>{{ project_name }}</h1>
 <p class="lede">drt {{ drt_version }} &middot; profile <code>{{ profile }}</code> &middot; manifest schema v{{ schema_version }}</p>
+{% if not nav.syncs %}
+<div class="empty empty--hero">
+  <div class="empty__title">No syncs yet</div>
+  <p>This project has no sync definitions. Create one and regenerate:</p>
+  <pre class="code">drt init          # scaffold a sync YAML
+drt run           # execute it
+drt docs generate # rebuild this site</pre>
+</div>
+{% else %}
 <div class="cards">
   <div class="card"><div class="num">{{ nav.syncs|length }}</div><div class="lbl">Syncs</div></div>
   <div class="card"><div class="num">{{ nav.sources|length }}</div><div class="lbl">Sources</div></div>
@@ -389,6 +398,7 @@ _INDEX = """\
 {% else %}
 <div class="empty">No run history yet &mdash; run <code>drt run</code> to populate state.</div>
 {% endif %}
+{% endif %}
 {% endblock %}
 """
 
@@ -397,8 +407,15 @@ _DAG = """\
 {% block main %}
 <div class="eyebrow">Lineage</div>
 <h1>DAG</h1>
+{% if nav.syncs %}
 <p class="lede">Source → sync → destination lineage. Dashed edges are destination lookups.</p>
 <pre class="mermaid">{{ mermaid }}</pre>
+{% else %}
+<div class="empty empty--hero">
+  <div class="empty__title">No syncs found</div>
+  <p>The lineage graph appears once the project has at least one sync.</p>
+</div>
+{% endif %}
 {% endblock %}
 {% block scripts %}
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
@@ -422,6 +439,7 @@ _SYNC = """\
     {% if state %}
     <div>{{ state.last_sync_at }} &middot; <span class="status-{{ state.last_status }}">{{ state.last_status }}</span></div>
     <div class="font-mono">{{ state.rows_synced }} rows</div>
+    {% if state.last_error %}<div class="kpi__error" title="{{ state.last_error }}">{{ state.last_error|truncate(80) }}</div>{% endif %}
     {% else %}<div class="empty" style="padding:8px">No runs yet</div>{% endif %}
   </div>
   <div class="kpi">
