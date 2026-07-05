@@ -32,6 +32,27 @@ def _slug(value: str) -> str:
     return _SLUG_RE.sub("-", value).strip("-").lower() or "x"
 
 
+def _slug_map(names: list[str], kind: str) -> dict[str, str]:
+    """Map each name to a stable slug, failing fast on a collision.
+
+    ``_slug`` collapses runs of non-alphanumerics, so punctuation-only-distinct
+    names (``a_b`` vs ``a__b``) can slugify to the same file — which would
+    silently overwrite a page and break cross-links. Detect that and raise.
+    """
+    out: dict[str, str] = {}
+    seen: dict[str, str] = {}
+    for name in names:
+        slug = _slug(name)
+        if slug in seen and seen[slug] != name:
+            raise ValueError(
+                f"Two {kind} names slugify to the same page {slug!r}: "
+                f"{seen[slug]!r} and {name!r}. Rename one so their pages don't collide."
+            )
+        seen[slug] = name
+        out[name] = slug
+    return out
+
+
 def _sync_yaml(sync: Sync) -> str:
     """A readable YAML view of the sync's catalog entry (manifest schema v1).
 
@@ -230,9 +251,9 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
     )
 
     # Stable slugs for filenames + cross-links.
-    sync_slugs = {s.name: _slug(s.name) for s in manifest.syncs}
-    source_slugs = {s.name: _slug(s.name) for s in manifest.sources}
-    dest_slugs = {d.name: _slug(d.name) for d in manifest.destinations}
+    sync_slugs = _slug_map([s.name for s in manifest.syncs], "sync")
+    source_slugs = _slug_map([s.name for s in manifest.sources], "source")
+    dest_slugs = _slug_map([d.name for d in manifest.destinations], "destination")
     dest_by_id = {d.name: d for d in manifest.destinations}
 
     nav = {
@@ -254,8 +275,21 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
     written: list[Path] = []
 
     # Clear any previous build so a removed sync/source/destination doesn't
-    # leave an orphan page behind.
+    # leave an orphan page behind — but guard against wiping an unrelated
+    # directory a user may have pointed --output at.
     if output_dir.exists():
+        if output_dir.is_file():
+            raise ValueError(f"--output must be a directory, but {output_dir} is a file.")
+        looks_like_docs = (output_dir / "index.html").exists() and (
+            output_dir / "assets"
+        ).is_dir()
+        is_empty = not any(output_dir.iterdir())
+        if not (looks_like_docs or is_empty):
+            raise ValueError(
+                f"Refusing to delete {output_dir}: it isn't empty and doesn't look like "
+                f"a previous drt docs build (expected index.html + assets/). Point "
+                f"--output at an empty or regenerable directory."
+            )
         shutil.rmtree(output_dir)
 
     def write(rel: str, html: str) -> None:

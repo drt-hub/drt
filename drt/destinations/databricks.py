@@ -103,7 +103,11 @@ def _value_clause(
             ddl = ddl_map.get(key) if ddl_map is not None else None
             if ddl:
                 # STRUCT / ARRAY / MAP — reconstruct via the target DDL.
-                exprs.append(f"from_json(%s, '{ddl}')")
+                # Escape single quotes so a pathological column DDL can't break
+                # out of the string literal (defence-in-depth — the DDL already
+                # comes verbatim from information_schema).
+                safe_ddl = ddl.replace("'", "''")
+                exprs.append(f"from_json(%s, '{safe_ddl}')")
             else:
                 # VARIANT — no DDL form.
                 exprs.append("parse_json(%s)")
@@ -650,19 +654,8 @@ class DatabricksDestination:
                 f"({config.host_env}, {config.http_path_env}, {config.token_env})."
             )
 
-        # databricks-sql-connector >=3.0 defaults to *native* paramstyle
-        # (`?` / `:name` markers, server-side binding) and forwards pyformat
-        # `%s` markers to the server unexpanded — every parameterised
-        # statement in this destination then dies server-side with
-        # PARSE_SYNTAX_ERROR. Opt back into client-side inline rendering,
-        # which this destination's `%s` binds were written against (the
-        # connector renders values into the SQL text, matching the
-        # snowflake-connector default this file's SQL was modelled on).
-        # "silent" suppresses the per-connection deprecation warning; the
-        # native-`?` migration is tracked as a follow-up.
         return sql.connect(
             server_hostname=host,
             http_path=http_path,
             access_token=token,
-            use_inline_params="silent",
         )

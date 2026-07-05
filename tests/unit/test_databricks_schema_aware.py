@@ -216,3 +216,12 @@ def test_merge_staging_path_wraps() -> None:
         s for s, _ in calls if s.startswith("INSERT INTO main.default.__drt_staging")
     )
     assert "from_json(%s, 'array<string>')" in staging
+
+
+def test_from_json_ddl_single_quotes_are_escaped() -> None:
+    """A DDL containing a single quote must be doubled so it can't break the literal (#703)."""
+    clause, _ = _value_clause(
+        ["c"], {"c": "json"}, {"c": "struct<n: string, it's: int>"}
+    )
+    assert "it''s" in clause  # single quote doubled
+    assert "from_json(%s, 'struct<n: string, it''s: int>')" in clause
