@@ -6,6 +6,19 @@ seeded DuckDB ``users`` -> engine -> live Snowflake table -> read back -> verify
 This is the canonical per-warehouse leg. Databricks (#672) and BigQuery (#673)
 mirror this file; only the destination config + read-back/cleanup driver change.
 
+Covers the #671 verification set (Priority 1 under epic #654):
+
+- ``test_snowflake_insert_roundtrip`` — the ``mode: insert`` append leg.
+- ``test_snowflake_replace_swap_roundtrip`` — ``ALTER TABLE ... SWAP WITH``
+  atomicity for ``replace_strategy: swap`` (#434): a pre-seeded stale row is
+  replaced by the atomic finalize-time swap and the ``<table>__drt_swap`` shadow
+  is cleaned up.
+- ``test_snowflake_complex_type_serialization`` — VARIANT / OBJECT / ARRAY
+  serialization via ``PARSE_JSON`` (#317 Layer 3 / #653): a Python ``list`` +
+  ``dict`` are reconstructed as real semi-structured values, proven by reading
+  typed sub-fields (``tags[0]``, ``attrs:theme``, ``meta:source``) back.
+- ``test_snowflake_connection`` — fast credential check via ``test_connection``.
+
 Runs only when the ``DRT_SMOKE_SNOWFLAKE_*`` secrets are present (injected by the
 dwh-smoke workflow). Otherwise it skips — safe no-op for forks / local runs.
 See tests/integration/dwh/README.md for the secret list.
@@ -17,9 +30,11 @@ from pathlib import Path
 
 import pytest
 
+from drt.config.credentials import DuckDBProfile
 from drt.config.models import SnowflakeDestinationConfig, SyncConfig, SyncOptions
 from drt.destinations.snowflake import SnowflakeDestination
 from drt.engine.sync import run_sync
+from drt.sources.duckdb import DuckDBSource
 
 from .conftest import require_env, seed_duckdb_users, unique_table
 
@@ -35,9 +50,9 @@ USER_ENV = "DRT_SMOKE_SNOWFLAKE_USER"
 PASSWORD_ENV = "DRT_SMOKE_SNOWFLAKE_PASSWORD"
 
 
-def _readback_count_and_names(creds: dict[str, str], table: str) -> tuple[int, set[str]]:
-    """Open a fresh Snowflake connection and read the rows the sync wrote."""
-    conn = snowflake_connector.connect(
+def _connect(creds: dict[str, str]):
+    """Open a fresh Snowflake connection from the smoke creds."""
+    return snowflake_connector.connect(
         account=creds[ACCOUNT_ENV],
         user=creds[USER_ENV],
         password=creds[PASSWORD_ENV],
@@ -45,6 +60,11 @@ def _readback_count_and_names(creds: dict[str, str], table: str) -> tuple[int, s
         database=creds["DRT_SMOKE_SNOWFLAKE_DATABASE"],
         schema=creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"],
     )
+
+
+def _readback_count_and_names(creds: dict[str, str], table: str) -> tuple[int, set[str]]:
+    """Open a fresh Snowflake connection and read the rows the sync wrote."""
+    conn = _connect(creds)
     try:
         with conn.cursor() as cur:
             # Unquoted to match the destination's unquoted INSERT, which
@@ -60,32 +80,16 @@ def _create_table(creds: dict[str, str], table: str) -> None:
     """Pre-create the target table — drt's insert mode INSERTs into an existing
     table, it doesn't create one. Unquoted identifiers so Snowflake folds them
     to UPPERCASE, matching the destination's unquoted INSERT column list."""
-    conn = snowflake_connector.connect(
-        account=creds[ACCOUNT_ENV],
-        user=creds[USER_ENV],
-        password=creds[PASSWORD_ENV],
-        warehouse=creds["DRT_SMOKE_SNOWFLAKE_WAREHOUSE"],
-        database=creds["DRT_SMOKE_SNOWFLAKE_DATABASE"],
-        schema=creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"],
-    )
+    conn = _connect(creds)
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                f"CREATE TABLE {table} (id INTEGER, name VARCHAR, email VARCHAR)"
-            )
+            cur.execute(f"CREATE TABLE {table} (id INTEGER, name VARCHAR, email VARCHAR)")
     finally:
         conn.close()
 
 
 def _drop_table(creds: dict[str, str], table: str) -> None:
-    conn = snowflake_connector.connect(
-        account=creds[ACCOUNT_ENV],
-        user=creds[USER_ENV],
-        password=creds[PASSWORD_ENV],
-        warehouse=creds["DRT_SMOKE_SNOWFLAKE_WAREHOUSE"],
-        database=creds["DRT_SMOKE_SNOWFLAKE_DATABASE"],
-        schema=creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"],
-    )
+    conn = _connect(creds)
     try:
         with conn.cursor() as cur:
             cur.execute(f"DROP TABLE IF EXISTS {table}")
@@ -137,6 +141,192 @@ def test_snowflake_insert_roundtrip(tmp_path: Path) -> None:
         count, names = _readback_count_and_names(creds, table)
         assert count == 3
         assert names == {"Alice", "Bob", "Carol"}
+    finally:
+        _drop_table(creds, table)
+
+
+def test_snowflake_replace_swap_roundtrip(tmp_path: Path) -> None:
+    """``replace_strategy: swap`` — atomic ``ALTER TABLE ... SWAP WITH`` (#434).
+
+    Drives one non-``insert`` write path end-to-end (the Snowflake analogue of the
+    BigQuery MERGE leg #700 / the Databricks INSERT OVERWRITE leg #705). Pre-seeds
+    a stale row the source never emits, runs ``sync.mode: replace`` with
+    ``replace_strategy: swap``, then asserts (a) the stale row is gone — the
+    finalize-time ``SWAP WITH`` atomically exchanged the freshly written shadow
+    for the target — and (b) the ``<table>__drt_swap`` shadow was dropped in
+    ``finalize_sync`` (orphan cleanup, #434).
+    """
+    creds = require_env(
+        ACCOUNT_ENV,
+        USER_ENV,
+        PASSWORD_ENV,
+        "DRT_SMOKE_SNOWFLAKE_DATABASE",
+        "DRT_SMOKE_SNOWFLAKE_SCHEMA",
+        "DRT_SMOKE_SNOWFLAKE_WAREHOUSE",
+    )
+    source, profile = seed_duckdb_users(tmp_path)
+    table = unique_table("DRT_SMOKE")
+    shadow = f"{table}__drt_swap"
+
+    dest = SnowflakeDestinationConfig(
+        **{
+            "type": "snowflake",
+            "account_env": ACCOUNT_ENV,
+            "user_env": USER_ENV,
+            "password_env": PASSWORD_ENV,
+            "database": creds["DRT_SMOKE_SNOWFLAKE_DATABASE"],
+            "schema": creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"],
+            "table": table,
+            "warehouse": creds["DRT_SMOKE_SNOWFLAKE_WAREHOUSE"],
+            "mode": "insert",
+        }
+    )
+    sync = SyncConfig(
+        name="snowflake_swap_smoke",
+        model="ref('users')",
+        destination=dest,
+        sync=SyncOptions(mode="replace", replace_strategy="swap", batch_size=10),
+    )
+
+    # Pre-create the target and seed a stale row. The target must exist for the
+    # shadow path to engage — a first run with no target falls through to a
+    # direct write and never builds a shadow.
+    conn = _connect(creds)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"CREATE TABLE {table} (id INTEGER, name VARCHAR, email VARCHAR)")
+            cur.execute(f"INSERT INTO {table} VALUES (99, 'Stale', 'stale@example.com')")
+    finally:
+        conn.close()
+
+    try:
+        result = run_sync(sync, source, SnowflakeDestination(), profile, tmp_path)
+        assert result.success == 3, f"expected 3 loaded rows, got {result.success}"
+        assert result.failed == 0
+
+        count, names = _readback_count_and_names(creds, table)
+        # Stale row replaced atomically; only the 3 source rows remain.
+        assert count == 3
+        assert names == {"Alice", "Bob", "Carol"}
+
+        # Shadow must be gone — finalize_sync SWAPs then drops it (#434).
+        conn = _connect(creds)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SHOW TABLES LIKE '{shadow}' IN SCHEMA "
+                    f"{creds['DRT_SMOKE_SNOWFLAKE_DATABASE']}."
+                    f"{creds['DRT_SMOKE_SNOWFLAKE_SCHEMA']}"
+                )
+                shadow_rows = cur.fetchall()
+        finally:
+            conn.close()
+        assert shadow_rows == [], "swap shadow was not cleaned up in finalize_sync"
+    finally:
+        _drop_table(creds, table)
+        _drop_table(creds, shadow)
+
+
+def test_snowflake_complex_type_serialization(tmp_path: Path) -> None:
+    """VARIANT / OBJECT / ARRAY serialization on a real account (#317 Layer 3 / #653).
+
+    Seeds a DuckDB source whose row carries a Python ``list`` and ``dict`` and
+    syncs it into a Snowflake table with ARRAY / OBJECT / VARIANT columns. The
+    write path introspects ``INFORMATION_SCHEMA`` (``introspect_schema`` on by
+    default), maps those columns to the ``json`` category, and wraps their binds
+    with ``PARSE_JSON`` — switching the INSERT to the ``SELECT`` form because
+    Snowflake disallows functions in a ``VALUES`` clause. Reading typed sub-fields
+    back proves the values reconstructed as real semi-structured types rather than
+    opaque JSON strings.
+    """
+    creds = require_env(
+        ACCOUNT_ENV,
+        USER_ENV,
+        PASSWORD_ENV,
+        "DRT_SMOKE_SNOWFLAKE_DATABASE",
+        "DRT_SMOKE_SNOWFLAKE_SCHEMA",
+        "DRT_SMOKE_SNOWFLAKE_WAREHOUSE",
+    )
+    table = unique_table("DRT_SMOKE")
+
+    # Source: DuckDB LIST -> Python list, STRUCT -> Python dict. `tags` targets
+    # ARRAY, `attrs` targets OBJECT, `meta` targets VARIANT — one row exercises
+    # all three PARSE_JSON wrap sites.
+    duckdb = pytest.importorskip("duckdb")
+    db_path = str(tmp_path / "complex_source.duckdb")
+    dconn = duckdb.connect(db_path)
+    try:
+        dconn.execute(
+            "CREATE TABLE events ("
+            "  id INTEGER,"
+            "  tags VARCHAR[],"
+            "  attrs STRUCT(theme VARCHAR, level INTEGER),"
+            "  meta STRUCT(source VARCHAR, verified BOOLEAN)"
+            ")"
+        )
+        dconn.execute(
+            "INSERT INTO events VALUES "
+            "(1, ['a', 'b'], {'theme': 'dark', 'level': 3}, "
+            "{'source': 'crm', 'verified': true})"
+        )
+    finally:
+        dconn.close()
+    source = DuckDBSource()
+    profile = DuckDBProfile(type="duckdb", database=db_path)
+
+    dest = SnowflakeDestinationConfig(
+        **{
+            "type": "snowflake",
+            "account_env": ACCOUNT_ENV,
+            "user_env": USER_ENV,
+            "password_env": PASSWORD_ENV,
+            "database": creds["DRT_SMOKE_SNOWFLAKE_DATABASE"],
+            "schema": creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"],
+            "table": table,
+            "warehouse": creds["DRT_SMOKE_SNOWFLAKE_WAREHOUSE"],
+            "mode": "insert",
+        }
+    )
+    sync = SyncConfig(
+        name="snowflake_complex_smoke",
+        model="ref('events')",
+        destination=dest,
+        sync=SyncOptions(batch_size=10),
+    )
+
+    conn = _connect(creds)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"CREATE TABLE {table} (id INTEGER, tags ARRAY, attrs OBJECT, meta VARIANT)"
+            )
+    finally:
+        conn.close()
+
+    try:
+        result = run_sync(sync, source, SnowflakeDestination(), profile, tmp_path)
+        assert result.success == 1, f"expected 1 loaded row, got {result.success}"
+        assert result.failed == 0
+
+        conn = _connect(creds)
+        try:
+            with conn.cursor() as cur:
+                # Access typed sub-fields: an ARRAY element, OBJECT paths, and a
+                # VARIANT path. If serialization had stored raw JSON strings,
+                # these semi-structured accessors would fail or return null.
+                cur.execute(
+                    f"SELECT tags[0]::STRING, attrs:theme::STRING, "
+                    f"attrs:level::INT, meta:source::STRING FROM {table} WHERE id = 1"
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        assert row is not None, "row did not land"
+        first_tag, theme, level, meta_source = row
+        assert first_tag == "a"
+        assert theme == "dark"
+        assert int(level) == 3
+        assert meta_source == "crm"
     finally:
         _drop_table(creds, table)
 

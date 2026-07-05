@@ -45,6 +45,23 @@ the cloud accounts and the "verified ✓" sign-off are the maintainer's
 | `SMOKE_SNOWFLAKE_SCHEMA` | |
 | `SMOKE_SNOWFLAKE_WAREHOUSE` | |
 
+Snowflake prerequisites (#671):
+
+- A **throwaway database + schema** the role can `CREATE`/`DROP` tables in, plus a
+  running **virtual warehouse** for compute. Scope the grants to the throwaway
+  schema, not the whole account — the swap leg builds and drops a
+  `<table>__drt_swap` shadow, and the complex-type leg creates ARRAY / OBJECT /
+  VARIANT tables.
+- Least-privilege grants for the role: `USAGE` on the warehouse + database +
+  schema, and `CREATE TABLE` on the schema (`ALTER TABLE ... SWAP WITH` needs
+  ownership/`OWNERSHIP`-equivalent on both names, which the creating role holds
+  for tables it created).
+- The Snowflake leg drives four paths against the throwaway schema — `mode: insert`,
+  `replace_strategy: swap` (`ALTER TABLE ... SWAP WITH` #434), complex-type
+  `PARSE_JSON` serialization (VARIANT / OBJECT / ARRAY #317 Layer 3 / #653), and
+  `test_connection` — and drops everything it creates (target + `__drt_swap`
+  shadow) in `finally`.
+
 **Databricks** (#672)
 | Secret | Notes |
 | --- | --- |
