@@ -54,6 +54,24 @@ the cloud accounts and the "verified ✓" sign-off are the maintainer's
 | `SMOKE_DATABRICKS_CATALOG` | |
 | `SMOKE_DATABRICKS_SCHEMA` | |
 
+Databricks prerequisites (#672):
+
+- A **Unity Catalog** catalog + schema the token principal can write to (Hive
+  Metastore works too — set the catalog to `hive_metastore`). All tables are
+  created **Delta** (`USING DELTA`): the `replace_strategy: swap` leg relies on
+  Delta `INSERT OVERWRITE` snapshot-isolation atomicity.
+- A running **SQL warehouse**; its HTTP path is `SMOKE_DATABRICKS_HTTP_PATH`.
+  The complex-type leg uses a `VARIANT` column, so the warehouse must be on a
+  channel that supports VARIANT (current serverless/pro warehouses do).
+- Least-privilege grants for the token principal: `USE CATALOG` + `USE SCHEMA`,
+  plus `CREATE TABLE` / `MODIFY` on the smoke schema — the swap leg builds and
+  drops a `<table>__drt_swap` shadow, and the complex-type leg creates ARRAY /
+  STRUCT / VARIANT tables. Scope the grants to the throwaway schema, not the
+  whole catalog.
+- The `insert` + `replace_strategy: swap` + complex-type (`from_json` /
+  `parse_json`) + `test_connection` legs all run against the same throwaway
+  schema and drop everything they create in `finally`.
+
 **BigQuery** (#673)
 | Secret | Notes |
 | --- | --- |
