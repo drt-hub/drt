@@ -70,8 +70,11 @@ def _readback_count_and_names(creds: dict[str, str], table: str) -> tuple[int, s
             # Unquoted to match the destination's unquoted INSERT, which
             # Snowflake folds to UPPERCASE (quoted lowercase wouldn't match).
             cur.execute(f"SELECT name FROM {table}")
-            names = {row[0] for row in cur.fetchall()}
-        return len(names), names
+            rows = cur.fetchall()
+        # Count the fetched rows (not distinct names) so a duplicate-row
+        # regression can't be masked by set dedup; names stays for value checks.
+        names = {row[0] for row in rows}
+        return len(rows), names
     finally:
         conn.close()
 
@@ -210,18 +213,21 @@ def test_snowflake_replace_swap_roundtrip(tmp_path: Path) -> None:
         assert names == {"Alice", "Bob", "Carol"}
 
         # Shadow must be gone — finalize_sync SWAPs then drops it (#434).
+        # Exact-match lookup via INFORMATION_SCHEMA (not SHOW TABLES LIKE, whose
+        # '_' is a single-char wildcard that could over-match in a shared schema).
         conn = _connect(creds)
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"SHOW TABLES LIKE '{shadow}' IN SCHEMA "
-                    f"{creds['DRT_SMOKE_SNOWFLAKE_DATABASE']}."
-                    f"{creds['DRT_SMOKE_SNOWFLAKE_SCHEMA']}"
+                    "SELECT COUNT(*) FROM "
+                    f"{creds['DRT_SMOKE_SNOWFLAKE_DATABASE']}.INFORMATION_SCHEMA.TABLES "
+                    "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s",
+                    (creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"], shadow.upper()),
                 )
-                shadow_rows = cur.fetchall()
+                shadow_count = cur.fetchone()[0]
         finally:
             conn.close()
-        assert shadow_rows == [], "swap shadow was not cleaned up in finalize_sync"
+        assert shadow_count == 0, "swap shadow was not cleaned up in finalize_sync"
     finally:
         _drop_table(creds, table)
         _drop_table(creds, shadow)
