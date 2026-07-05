@@ -29,6 +29,14 @@ export DRT_SMOKE_SNOWFLAKE_ACCOUNT=...        # see the secret list below
 pytest -m dwh_smoke tests/integration/dwh/test_snowflake_smoke.py -v
 ```
 
+## Provisioning the accounts
+
+Reproducible setup scripts for the throwaway accounts these secrets come from
+live in [`provisioning/`](./provisioning/) — one per warehouse, plus a
+step-by-step runbook (sign up → provision → collect → register → dispatch).
+They create only the empty vessel + cost guardrails; the tests seed and clean
+up their own tables.
+
 ## Required repo secrets (maintainer-owned)
 
 Add these under **Settings → Secrets and variables → Actions**. Per the split,

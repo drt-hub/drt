@@ -53,3 +53,7 @@ credentials.json
 secrets.toml
 service_account.json
 docs/plans/
+
+# DWH smoke provisioning — never commit generated keyfiles
+drt-smoke-bq-key.json
+tests/integration/dwh/provisioning/*.json
