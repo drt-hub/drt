@@ -1,4 +1,4 @@
-[English](./README.md) | [日本語](./README.ja.md)
+<div align="center">
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/drt-hub/.github/main/profile/assets/logo-dark.svg">
@@ -7,23 +7,25 @@
 
 # drt — data reverse tool
 
-> Reverse ETL for the code-first data stack.
+**Reverse ETL for the code-first data stack.**
 
-[![CI](https://github.com/drt-hub/drt/actions/workflows/ci.yml/badge.svg)](https://github.com/drt-hub/drt/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/drt-hub/drt/graph/badge.svg)](https://codecov.io/gh/drt-hub/drt)
-[![PyPI](https://img.shields.io/pypi/v/drt-core)](https://pypi.org/project/drt-core/)
-[![drt-core downloads](https://img.shields.io/pepy/dt/drt-core?label=drt-core%20downloads)](https://pepy.tech/projects/drt-core)
-[![dagster-drt downloads](https://img.shields.io/pepy/dt/dagster-drt?label=dagster-drt%20downloads)](https://pepy.tech/projects/dagster-drt)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
-[![Python](https://img.shields.io/pypi/pyversions/drt-core)](https://pypi.org/project/drt-core/)
-[![GitHub Sponsors](https://img.shields.io/static/v1?label=Sponsor&message=%E2%9D%A4&logo=GitHub&color=%23fe8e86)](https://github.com/sponsors/masukai)
-[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/drt-hub/drt)
-[![Website](https://img.shields.io/badge/website-drt--hub.github.io-7C3AED)](https://drt-hub.github.io/drt-web/)
-[![X](https://img.shields.io/badge/X-%40drt__hub-000000?logo=x&logoColor=white)](https://x.com/drt_hub)
+[![CI](https://img.shields.io/github/actions/workflow/status/drt-hub/drt/ci.yml?branch=main&style=flat-square&logo=githubactions&logoColor=white&label=CI)](https://github.com/drt-hub/drt/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/codecov/c/github/drt-hub/drt?style=flat-square&logo=codecov&logoColor=white&label=coverage)](https://codecov.io/gh/drt-hub/drt)
+[![PyPI](https://img.shields.io/pypi/v/drt-core?style=flat-square&logo=pypi&logoColor=white&label=PyPI)](https://pypi.org/project/drt-core/)
+[![Python](https://img.shields.io/pypi/pyversions/drt-core?style=flat-square&logo=python&logoColor=white)](https://pypi.org/project/drt-core/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square)](LICENSE)
+
+[![drt-core downloads](https://img.shields.io/pepy/dt/drt-core?style=flat-square&logo=pypi&logoColor=white&label=drt-core%20downloads)](https://pepy.tech/projects/drt-core)
+[![dagster-drt downloads](https://img.shields.io/pepy/dt/dagster-drt?style=flat-square&label=dagster-drt%20downloads)](https://pepy.tech/projects/dagster-drt)
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-fe8e86?style=flat-square&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/masukai)
+[![Website](https://img.shields.io/badge/website-drt--hub.github.io-7C3AED?style=flat-square)](https://drt-hub.github.io/drt-web/)
+[![X](https://img.shields.io/badge/X-%40drt__hub-000000?style=flat-square&logo=x&logoColor=white)](https://x.com/drt_hub)
 
 <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
 [![All Contributors](https://img.shields.io/badge/all_contributors-15-orange.svg?style=flat-square)](#contributors-)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
+
+</div>
 
 **drt** syncs data from your data warehouse to external services — declaratively, via YAML and CLI.
 Think `dbt run` → `drt run`. Same developer experience, opposite data direction.
@@ -36,6 +38,10 @@ Think `dbt run` → `drt run`. Same developer experience, opposite data directio
 pip install drt-core          # core (DuckDB included)
 drt init && drt run
 ```
+
+<p align="center">
+  <a href="https://codespaces.new/drt-hub/drt"><img src="https://img.shields.io/badge/Open_in-GitHub_Codespaces-24292e?style=flat-square&logo=github&logoColor=white" alt="Open in GitHub Codespaces"></a> — or try it in your browser, zero local setup.
+</p>
 
 ---
 
@@ -281,6 +287,9 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 
 ### Destinations
 
+<details>
+<summary><b>34 destinations</b> — warehouses, SaaS APIs, cloud storage, files &amp; webhooks (click to expand)</summary>
+
 | Connector               | Status    | Install                            | Auth                              |
 | ----------------------- | --------- | ---------------------------------- | --------------------------------- |
 | REST API                | ✅ v0.1   | (core)                             | Bearer / API Key / Basic / OAuth2 |
@@ -318,6 +327,8 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | Databricks Delta Lake   | ✅ v0.7.9 | `pip install drt-core[databricks]` | Personal Access Token (env var)   |
 | BigQuery                | ✅ v0.8   | `pip install drt-core[bigquery]`   | ADC / Service Account keyfile     |
 
+</details>
+
 ### Integrations
 
 | Connector           | Status  | Install                   |
@@ -335,26 +346,14 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 > **Issue-level tracking → [GitHub Milestones](https://github.com/drt-hub/drt/milestones)**
 > **Looking to contribute? → [Good First Issues](https://github.com/drt-hub/drt/issues?q=is%3Aopen+label%3A%22good+first+issue%22)**
 
-**Shipped:**
+**Shipped:** now on **v0.7.10** — co-writer-safe mirror · Delta Lake + Iceberg sources · PII masking · Klaviyo + Airtable · VS Code extension. Grouped milestones below; the full per-release changelog lives in [CHANGELOG.md](CHANGELOG.md) and [GitHub Releases](https://github.com/drt-hub/drt/releases).
 
-| Version       | Focus                                                                                                                                                                                                                                                                                                                                                                                                              |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **v0.1** ✅   | BigQuery / DuckDB / Postgres sources · REST API / Slack / GitHub Actions / HubSpot destinations · CLI · dry-run                                                                                                                                                                                                                                                                                                    |
-| **v0.2** ✅   | Incremental sync (`cursor_field` watermark) · retry config per-sync                                                                                                                                                                                                                                                                                                                                                |
-| **v0.3** ✅   | MCP Server (`drt mcp run`) · AI Skills for Claude Code · LLM-readable docs · row-level errors · security hardening · Redshift source                                                                                                                                                                                                                                                                               |
-| **v0.4** ✅   | Google Sheets / PostgreSQL / MySQL destinations · dagster-drt · dbt manifest reader · type safety overhaul                                                                                                                                                                                                                                                                                                         |
-| **v0.5** ✅   | Snowflake / MySQL sources · ClickHouse / Parquet / Teams / CSV+JSON / Jira / Linear / SendGrid destinations · `drt test` · `--output json` · `--profile` · `${VAR}` substitution · dbt manifest · secrets.toml · Docker                                                                                                                                                                                            |
-| **v0.5.4** ✅ | `destination_lookup` — resolve FK values by querying destination DB during sync (MySQL / Postgres / ClickHouse)                                                                                                                                                                                                                                                                                                    |
-| **v0.6** ✅   | Databricks / SQL Server sources · Notion / Twilio / Intercom / Email SMTP / Salesforce Bulk / Staged Upload destinations · Airflow / Prefect integrations · `drt serve` · `drt sources` / `drt destinations` · `--threads` parallel execution · `--log-format json` · `--cursor-value` · `watermark.default_value` · test validators (freshness, unique, accepted_values) · JSON Schema validation · GOVERNANCE.md |
-| **v0.7** ✅   | **Production Ready** — graceful shutdown on SIGTERM/SIGINT · per-destination retry override · sync execution history · zero-downtime atomic table swap · `json_columns` config · FK existence check (`lookups.check_only`) · Slack/webhook failure alerts · `drt doctor` · `--quiet` flag · `drt test --output json` / `--dry-run` · Snowflake destination · GitHub Codespaces playground · `OPEN_CORE.md`                                                                                                                                                                                                                                                              |
-| **v0.7.1** ✅ | `drt run --dry-run --diff` for record-level preview · tz-aware cursor stringification fix · `on_error=fail` alignment for Notion / REST API / Email SMTP · `VERSIONING.md` semver & deprecation policy                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| **v0.7.2** ✅ | **Opt-in anonymous telemetry** (PostHog Cloud EU, off by default, allow-list payload, `DO_NOT_TRACK` honored) · deprecation warnings in `drt validate` · Postgres destination `psycopg2.sql` SQL composition                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| **v0.7.3** ✅ | **Patch** — Postgres schema-qualified `Identifier()` composition fix (#442, PR #498): `marketing.events` was being double-quoted as a single identifier; now correctly composed as separate schema + relation parts                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| **v0.7.4** ✅ | **Patch** — MySQL schema-qualified `_quote_ident` fix (#511, PR #514): `mydb.scores` now produces `` `mydb`.`scores` `` across replace / insert / upsert / row-count paths. PR #514 landed on `main` two days after the v0.7.3 tag so the `drt-core==0.7.3` wheel does not contain it — upgrade to `drt-core>=0.7.4` to get the fix                                                                                                                                                                                                                                                                                                                                  |
-| **v0.7.5** ✅ | **Production Ready follow-up #3 + Tech Foundation Hardening** — closes the [Tech Foundation Hardening epic (#538)](https://github.com/drt-hub/drt/issues/538) (11 child issues): CI nightly + publish gate + CodeQL + pip-audit + SBOM · DuckDB E2E harness + boundary tests · `ErrorFormatter` + `drt sources/destinations --detailed` + `drt init --template` UX · `SyncObserver` engine I/O boundary · destinations serializer + config base class consolidation · `cli/main.py` split Phase 1. Also ships REST API source polish · sync catalog (#499 P1+P2) · `drt_run_test` MCP tool · OpenTelemetry Phase 1 config · hardcoded secret detection · orphan shadow cleanup. No new connectors, no breaking changes. |
-| **v0.7.6** ✅ | **Small follow-up** — **Amplitude destination** (#574, Identify API + HTTP V2 events API) · **`tojson_safe` Jinja2 filter** (#580, PR #581) for REST API `body_template` rendering of `datetime` / `Decimal` / `UUID` columns without `CAST(... AS STRING)` workarounds · `drt run --log-format` typer 0.26.1 compatibility fix (#577, PR #578) · `ErrorFormatter` stage detection retrofitted to engine-emitted attr (PR #571, supersedes #544's traceback-walk heuristic) · `cli/main.py` split Phase 2a (PR #572). No breaking changes — drop-in upgrade from v0.7.5. |
-| **v0.7.7** ✅ | **`sync.mode: mirror` across the SQL destination set** — new differential-delete sync mode that upserts source rows and DELETEs destination rows whose `upsert_key` was not observed in the source, without the TRUNCATE / re-insert overhead of `replace`. Lands across **Postgres (#596) · MySQL (#597) · ClickHouse (#598) · Snowflake (#599)** — `#340` closed for the SQL set. Also lands the **`cli/main.py` split completion** (Phase 2b PR (a) + PR (b) + tighten — 1706 → 164 LOC, -90% from v0.7.5 baseline), `FakeSource` + destination contract test framework (#592–#595), CI `check-changelog-required` warn-only guard (#590), GCS storage import mypy fix (#588, reported by @cian-ps), and CI install line extension that unlocked ~102 silently-skipped SQL destination tests (total coverage 82.68 → 85.29). No breaking changes — drop-in upgrade from v0.7.6. |
-| **v0.7.8** ✅ | **Community follow-up: Mixpanel destination + ClickHouse identifier fix + empty-batch contract completion** — new **Mixpanel destination** ([#608](https://github.com/drt-hub/drt/pull/608) by [@Pawansingh3889](https://github.com/Pawansingh3889), people_set + import_events, EU residency, deterministic insert_id, closes [#417](https://github.com/drt-hub/drt/issues/417)). **ClickHouse `_quote_ident` fix** ([#610](https://github.com/drt-hub/drt/pull/610) by [@yodakanohoshi](https://github.com/yodakanohoshi)) — resolves a server-side `Code: 62` syntax error on `database.table` syntax via `get_row_count`, closing the ClickHouse leg of the qualified-identifier fix family (Postgres #498 / MySQL #514). **Empty-batch contract suite complete** (#604–#606, 25 of 25 registered destinations) — surfaced + fixed a real bug in `staged_upload.finalize()`. `sync.mode: mirror` user-facing docs (#607, postgres.md section + runnable example + skill option), post-#608 Mixpanel wiring (#609), i18n marker bump (#603). No breaking changes — drop-in upgrade from v0.7.7. |
+| Milestone            | Highlights                                                                                                                                                             |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **v0.1–0.3**         | Core CLI · BigQuery / DuckDB / Postgres sources · REST / Slack / HubSpot destinations · incremental sync · MCP server + AI Skills for Claude Code                       |
+| **v0.4–0.6**         | 20+ destinations (Sheets, SQL upserts, Notion, Twilio, Salesforce…) · dagster-drt / Airflow / Prefect · `drt test` · parallel `--threads` · JSON Schema validation     |
+| **v0.7** ✅          | **Production Ready** — graceful shutdown · sync history · atomic table swaps · `drt doctor` · opt-in telemetry · `sync.mode: mirror` · DLQ + `drt profile`              |
+| **v0.7.9–0.7.10** ✅ | Cloud destinations (S3 / GCS / Azure / Databricks / BigQuery / Elasticsearch) · Delta Lake + Iceberg sources · tracked & scoped mirror · PII masking · VS Code extension |
 
 **Next:** [v0.8 Cloud Destinations & Growth](ROADMAP.md#v08--cloud-destinations--growth) → [v0.9 Enterprise Foundation](ROADMAP.md#v09--enterprise-foundation) → [v1.0 Stable Release](ROADMAP.md#v10--stable-release) → [v1.x Rust Engine](ROADMAP.md#v1x--rust-engine)
 
@@ -442,7 +441,18 @@ We welcome contributions of all sizes — from typo fixes to new connectors. drt
 
 ## Contributors ✨
 
-Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
+Every contribution — code, docs, bug reports, ideas — makes drt better. Thank you 💜
+
+<p align="center">
+  <a href="https://github.com/drt-hub/drt/graphs/contributors">
+    <img src="https://contrib.rocks/image?repo=drt-hub/drt" alt="drt contributors" />
+  </a>
+</p>
+
+<details>
+<summary>Full credits by contribution type (<a href="https://allcontributors.org/docs/en/emoji-key">emoji key</a>)</summary>
+
+<br>
 
 <!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
 <!-- prettier-ignore-start -->
@@ -486,6 +496,8 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
 <!-- prettier-ignore-end -->
 
 <!-- ALL-CONTRIBUTORS-LIST:END -->
+
+</details>
 
 ## Disclaimer
 

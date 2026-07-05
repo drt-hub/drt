@@ -41,20 +41,17 @@ Check that all documentation and version references are consistent before a dags
 
 8. **Main project references** — verify these files have up-to-date dagster-drt content:
    - `README.md` — dagster-drt section uses new API (`@drt_assets` decorator pattern)
-   - `README.ja.md` — Japanese translation matches README.md dagster-drt section
    - `CLAUDE.md` — lists dagster-drt in integrations
    - `docs/llm/CONTEXT.md` — dagster-drt section uses new API
    - `docs/guides/using-with-dbt.md` — dagster-drt link is valid
    - `SECURITY.md` — supported versions table includes current dagster-drt version
 
-9. **i18n sync** — run `make check-i18n` and verify README.ja.md is in sync
-
-10. **GitHub Release** — create (or verify exists):
+9. **GitHub Release** — create (or verify exists):
     - `gh release create dagster-drt-v{VERSION} --latest=false` with title `dagster-drt v{VERSION}`
     - **MUST pass `--latest=false`** — otherwise it steals Latest from drt-core
     - Include migration guide if breaking changes
 
-11. **Verify Latest flag** — after release:
+10. **Verify Latest flag** — after release:
     - `gh release list --limit 5` — confirm drt-core shows `Latest`, dagster-drt does not
     - If wrong: `gh release edit dagster-drt-v{VERSION} --latest=false && gh release edit v{CORE_VERSION} --latest`
 

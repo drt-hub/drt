@@ -75,9 +75,6 @@ jobs:
       - name: Check skills sync
         run: make check-skills
 
-      - name: Check i18n sync
-        run: make check-i18n || echo "::warning::Some translations are stale. Run 'make check-i18n' for details."
-
       - name: Check CHANGELOG covers all tagged versions
         # Requires git fetch --unshallow so the script can see v* tags
         # (checkout@v6 uses a shallow clone by default; tags are not

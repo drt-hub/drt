@@ -6,8 +6,8 @@
 #   - destinations missing docs/connectors/*.md, /drt-create-sync
 #     skill mention, or a README Destinations row
 #   - sources missing a README Sources row or /drt-init skill mention
-#   - MCP tools missing from the server.py docstring or the README /
-#     README.ja MCP tables
+#   - MCP tools missing from the server.py docstring or the README
+#     MCP tools table
 #   - registered connectors missing from drt_list_connectors' inventory
 #
 # Real drift this would have caught before it existed: the /drt-debug
@@ -37,7 +37,6 @@ on:
       - 'docs/connectors/**'
       - 'skills/**'
       - 'README.md'
-      - 'README.ja.md'
       - 'scripts/check_drift.sh'
       - 'scripts/drift_baseline.txt'
   schedule:
