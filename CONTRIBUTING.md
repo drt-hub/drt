@@ -1,5 +1,3 @@
-[English](./CONTRIBUTING.md) | [日本語](./CONTRIBUTING.ja.md)
-
 # Contributing to drt
 
 Thank you for your interest in contributing!
