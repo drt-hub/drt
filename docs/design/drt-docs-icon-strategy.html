@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Icon strategy A/B · drt docs design</title>
+<style>
+/* inlined from drt/docs/_html_assets.py STYLE_CSS */
+/* drt docs — vendored, no runtime framework. Tokens from the ADR mockup. */
+:root {
+  --brand-50:#f5f3ff; --brand-100:#ede9fe; --brand-200:#ddd6fe;
+  --brand-500:#8b5cf6; --brand-600:#7c3aed; --brand-700:#6d28d9; --brand-900:#1e1b4b;
+  --ink-50:#f7f8fa; --ink-100:#eef0f3; --ink-200:#e3e6eb; --ink-500:#5a6068;
+  --ink-700:#262b33; --ink-800:#1a1d22; --ink-900:#0f1115;
+  --bg:#ffffff; --fg:var(--ink-800); --muted:var(--ink-500);
+  --line:var(--ink-200); --surface:#ffffff; --chip:var(--ink-100);
+  --radius:8px;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,monospace;
+  --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:var(--ink-900); --fg:var(--ink-50); --muted:#c4c7cc;
+    --line:var(--ink-700); --surface:var(--ink-800); --chip:var(--ink-700);
+  }
+}
+* { box-sizing:border-box; }
+html,body { margin:0; padding:0; }
+body { background:var(--bg); color:var(--fg); font-family:var(--sans); font-size:14px; line-height:1.55; }
+a { color:var(--brand-700); text-decoration:none; }
+a:hover { text-decoration:underline; }
+code,pre,.mono { font-family:var(--mono); }
+
+/* top bar */
+.topbar {
+  display:flex; align-items:center; gap:16px; padding:10px 16px;
+  border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); z-index:10;
+}
+.brand { display:flex; align-items:center; gap:10px; font-weight:700; }
+.brand .logo { width:26px; height:26px; border-radius:6px; background:var(--brand-600); display:inline-grid; place-items:center; color:#fff; font-size:13px; }
+.project { color:var(--muted); border-left:1px solid var(--line); padding-left:12px; font-size:13px; }
+.project .ver { font-size:11px; }
+.topnav { display:flex; gap:4px; margin-left:8px; }
+.navbtn { padding:4px 10px; border-radius:6px; color:var(--muted); }
+.navbtn:hover { background:var(--brand-50); color:var(--brand-700); text-decoration:none; }
+.navbtn.active { background:var(--brand-600); color:#fff; }
+@media (prefers-color-scheme: dark) {
+  .navbtn:hover { background:var(--brand-900); color:var(--brand-200); }
+}
+.search { margin-left:auto; }
+.search input {
+  border:1px solid var(--line); background:var(--surface); color:var(--fg);
+  border-radius:6px; padding:5px 10px; font-size:13px; width:240px;
+}
+
+/* layout */
+.shell { display:flex; }
+.sidebar {
+  width:256px; flex-shrink:0; border-right:1px solid var(--line); padding:16px;
+  height:calc(100vh - 53px); overflow-y:auto; position:sticky; top:53px;
+}
+.group { margin-bottom:14px; }
+.group > summary, .group-title {
+  font-weight:600; color:var(--fg); display:flex; justify-content:space-between;
+  cursor:pointer; list-style:none; padding:2px 0;
+}
+.group > summary::-webkit-details-marker { display:none; }
+.group .count { color:var(--muted); font-weight:400; }
+.group ul { list-style:none; margin:6px 0 0; padding:0 0 0 8px; }
+.group li { padding:2px 0; }
+.group a { color:var(--fg); display:block; padding:2px 4px; border-radius:4px; }
+.group a:hover { background:var(--chip); text-decoration:none; }
+.group a.current { color:var(--brand-700); font-weight:500; }
+
+/* main */
+.main { flex:1; padding:28px 32px; max-width:980px; }
+.eyebrow { font-size:12px; color:var(--muted); margin-bottom:2px; }
+h1 { font-size:28px; font-weight:700; margin:0 0 4px; letter-spacing:-0.02em; }
+h2 { font-size:14px; font-weight:600; text-transform:uppercase; letter-spacing:0.04em; color:var(--muted); margin:28px 0 12px; }
+.lede { color:var(--muted); margin:0 0 22px; }
+
+.cards { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-bottom:24px; }
+.card { border:1px solid var(--line); border-radius:var(--radius); padding:16px; }
+.card .num { font-size:28px; font-weight:700; }
+.card .lbl { font-size:13px; color:var(--muted); }
+
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+th { color:var(--muted); font-weight:600; }
+.chip { display:inline-block; padding:1px 8px; border-radius:999px; background:var(--chip); font-size:12px; }
+.mode { font-family:var(--mono); font-size:12px; }
+.kv { display:grid; grid-template-columns:160px 1fr; gap:6px 14px; font-size:13px; margin:0 0 8px; }
+.kv dt { color:var(--muted); }
+.kv dd { margin:0; }
+.status-success { color:#0a7d33; } .status-failed { color:#b3261e; }
+@media (prefers-color-scheme: dark) {
+  .status-success { color:#4ade80; } .status-failed { color:#f87171; }
+}
+
+pre.code { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:14px; overflow-x:auto; font-size:12.5px; }
+.mermaid { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:16px; }
+
+.footer { color:var(--muted); font-size:12px; margin-top:36px; padding-top:14px; border-top:1px solid var(--line); }
+
+/* Overview — type-distribution bars */
+.two-col { display:grid; grid-template-columns:1fr 1fr; gap:32px; margin-bottom:8px; }
+.bar-row { display:flex; align-items:center; gap:10px; margin:7px 0; font-size:13px; }
+.bar-row__label { width:9rem; color:var(--fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.bar-row__bar-bg { flex:1; background:var(--chip); height:8px; border-radius:999px; overflow:hidden; }
+.bar-row__bar-fill { background:var(--brand-600); height:100%; border-radius:999px; }
+.bar-row__count { width:2.5rem; text-align:right; color:var(--muted); }
+
+/* Recent runs + status */
+td.right, th.right { text-align:right; }
+.font-mono { font-family:var(--mono); font-size:12px; color:var(--muted); }
+:root { --success:#15803d; --warning:#b45309; --error:#b91c1c; }
+@media (prefers-color-scheme: dark) { :root { --success:#4ade80; --warning:#fbbf24; --error:#f87171; } }
+.status-success { color:var(--success); font-weight:500; }
+.status-partial { color:var(--warning); font-weight:500; }
+.status-failed { color:var(--error); font-weight:500; }
+.empty { border:1px dashed var(--line); padding:32px; text-align:center; border-radius:var(--radius); color:var(--muted); }
+
+/* Sync detail — KPI cards, tabs (progressive: stacked without JS), ego lineage */
+.kpi { border:1px solid var(--line); border-radius:var(--radius); padding:12px 16px; }
+.kpi__label { font-size:11px; text-transform:uppercase; letter-spacing:0.05em; color:var(--muted); font-weight:600; }
+.crumb { font-size:12px; color:var(--muted); margin-bottom:2px; }
+.crumb a { color:var(--brand-700); }
+.tabs { display:none; gap:2px; border-bottom:1px solid var(--line); margin:26px 0 14px; }
+.js .tabs { display:flex; }
+.tab-btn { appearance:none; background:none; border:none; border-bottom:2px solid transparent;
+  padding:7px 12px; font:inherit; font-size:13px; font-weight:500; color:var(--muted); cursor:pointer; }
+.tab-btn:hover { color:var(--fg); }
+.tab-btn.active { color:var(--brand-700); border-bottom-color:var(--brand-600); }
+.tab-panel > h2:first-child { margin-top:26px; }
+.js .tab-panel > h2:first-child { display:none; }
+.js .tab-panel:not(.active) { display:none; }
+.ego { border:1px solid var(--line); border-radius:var(--radius); background:var(--surface);
+  padding:10px; overflow-x:auto; }
+.ego svg text { font-family:var(--sans); }
+.ego svg .mono { font-family:var(--mono); }
+:root { --edge:#9aa0a8; --edge-lookup:var(--brand-500); --zone-drt-line:var(--brand-200); }
+@media (prefers-color-scheme: dark) { :root { --edge:#6a707a; --zone-drt-line:rgba(139,92,246,0.35); } }
+
+@media (max-width:860px) {
+  .cards { grid-template-columns:1fr; }
+  .two-col { grid-template-columns:1fr; }
+  .sidebar { display:none; }
+  .topnav { display:none; }
+}
+</style>
+<style>
+  .mock-main { max-width: 1180px; margin: 0 auto; padding: 28px 32px; }
+  .variant { margin-bottom: 30px; }
+  .variant h2 { margin-top: 0; }
+  .row { display: flex; gap: 14px; flex-wrap: wrap; }
+  .node { display: flex; align-items: center; gap: 12px; width: 205px;
+    border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--surface); padding: 12px 14px; }
+  .node .nm { font-weight: 600; font-size: 13px; }
+  .node .tp { font-size: 10.5px; letter-spacing: 0.6px; color: var(--muted); }
+  .glyph { color: var(--muted); flex-shrink: 0; display: grid; place-items: center; width: 28px; height: 28px; }
+  .badge { flex-shrink: 0; width: 28px; height: 28px; border-radius: 8px;
+    display: grid; place-items: center; font-size: 11px; font-weight: 700;
+    font-family: var(--mono); color: #fff; }
+  .badge.mono-brand { background: var(--chip); color: var(--fg); border: 1px solid var(--line); }
+  .note { font-size: 12.5px; color: var(--muted); max-width: 760px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <span class="brand"><span class="logo">d</span>drt docs</span>
+  <span class="project">design lab<br><span class="ver">icon strategy</span></span>
+</header>
+<div class="mock-main">
+  <div class="eyebrow">Design lab</div>
+  <h1>Connector icons — A/B/C <span style="font-size:13px;font-weight:400;color:var(--muted)">— decided: B (2026-07-03)</span></h1>
+  <p class="lede">Same node cards, three icon strategies. Judge at a glance: which tells you "that's BigQuery" fastest, and which stays classy at 20+ connectors?</p>
+
+  <div class="variant">
+    <h2>A — generic glyphs</h2>
+    <div class="row">
+      <div class="node"><span class="glyph"><svg width="22" height="24" viewBox="0 0 20 24" fill="none" stroke="currentColor" stroke-width="1.5"><ellipse cx="10" cy="5" rx="8" ry="3.6"/><path d="M2 5 V19 A8 3.6 0 0 0 18 19 V5"/></svg></span><span><div class="nm">bq_prod</div><div class="tp">BIGQUERY</div></span></div>
+      <div class="node"><span class="glyph"><svg width="22" height="24" viewBox="0 0 20 24" fill="none" stroke="currentColor" stroke-width="1.5"><ellipse cx="10" cy="5" rx="8" ry="3.6"/><path d="M2 5 V19 A8 3.6 0 0 0 18 19 V5"/></svg></span><span><div class="nm">pg_replica</div><div class="tp">POSTGRES</div></span></div>
+      <div class="node"><span class="glyph"><svg width="22" height="22" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="1" width="18" height="18" rx="4.5"/><circle cx="10" cy="10" r="2.6" fill="currentColor" stroke="none"/></svg></span><span><div class="nm">#alerts</div><div class="tp">SLACK</div></span></div>
+      <div class="node"><span class="glyph"><svg width="22" height="22" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="1" width="18" height="18" rx="4.5"/><circle cx="10" cy="10" r="2.6" fill="currentColor" stroke="none"/></svg></span><span><div class="nm">contacts</div><div class="tp">HUBSPOT</div></span></div>
+      <div class="node"><span class="glyph"><svg width="22" height="24" viewBox="0 0 20 24" fill="none" stroke="currentColor" stroke-width="1.5"><ellipse cx="10" cy="5" rx="8" ry="3.6"/><path d="M2 5 V19 A8 3.6 0 0 0 18 19 V5"/></svg></span><span><div class="nm">exports</div><div class="tp">S3</div></span></div>
+    </div>
+    <p class="note">Pro: zero maintenance, perfectly consistent, no trademark questions. Con: every DB looks identical — you must read the type label.</p>
+  </div>
+
+  <div class="variant">
+    <h2>B — brand-color initial badges ✅ adopted</h2>
+    <div class="row">
+      <div class="node"><span class="badge" style="background:#4285f4">BQ</span><span><div class="nm">bq_prod</div><div class="tp">BIGQUERY</div></span></div>
+      <div class="node"><span class="badge" style="background:#336791">PG</span><span><div class="nm">pg_replica</div><div class="tp">POSTGRES</div></span></div>
+      <div class="node"><span class="badge" style="background:#4a154b">SL</span><span><div class="nm">#alerts</div><div class="tp">SLACK</div></span></div>
+      <div class="node"><span class="badge" style="background:#ff7a59;color:#3e1c00">HS</span><span><div class="nm">contacts</div><div class="tp">HUBSPOT</div></span></div>
+      <div class="node"><span class="badge" style="background:#ff9900;color:#3e2500">S3</span><span><div class="nm">exports</div><div class="tp">S3</div></span></div>
+    </div>
+    <p class="note">Pro: instant recognition via brand color, scales automatically to ANY connector (initials derived from the type string), no logo files, no trademark art. Con: colors are "borrowed" branding; two-letter codes need a collision rule; palette needs a contrast pass per badge (dark text on light brands, as HS/S3 above). Adopted as the system — the curated map + neutral fallback lives in <code>drt/docs/html.py</code> (<code>_BADGES</code>).</p>
+  </div>
+
+  <div class="variant">
+    <h2>C — vendored official logos (dbt docs / dagster style)</h2>
+    <div class="row">
+      <div class="node"><span class="badge mono-brand" style="font-size:9px">logo<br>svg</span><span><div class="nm">bq_prod</div><div class="tp">BIGQUERY</div></span></div>
+      <div class="node"><span class="badge mono-brand" style="font-size:9px">logo<br>svg</span><span><div class="nm">pg_replica</div><div class="tp">POSTGRES</div></span></div>
+      <div class="node"><span class="badge mono-brand" style="font-size:9px">logo<br>svg</span><span><div class="nm">#alerts</div><div class="tp">SLACK</div></span></div>
+    </div>
+    <p class="note">(placeholders — not drawing trademarks by hand) Pro: best recognition, the "rich" look dbt/dagster have. Con: vendor ~20 SVGs + licence/trademark review per logo, ongoing maintenance as connectors land, monochrome/dark variants needed, and a fallback badge is still required for unknown plugins — so C in practice = B + logo overrides. Possible later enhancement on top of B.</p>
+  </div>
+
+  <div class="footer">Design lab — icon strategy comparison for the docs site node cards. Decision: B, with C as a possible per-connector override later.</div>
+</div>
+</body>
+</html>

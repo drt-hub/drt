@@ -1,4 +1,4 @@
-.PHONY: install dev lint fmt test clean sync-skills check-skills check-i18n check-changelog check-drift sync-version release-check topics sync-labels
+.PHONY: install dev lint fmt test clean sync-skills check-skills check-changelog check-drift sync-version release-check topics sync-labels
 
 # ── Development ────────────────────────────────────────────────────────────────
 
@@ -51,9 +51,6 @@ check-skills:  ## Verify .claude/commands/ matches skills (CI gate)
 		exit 1; \
 	fi; \
 	echo "✓ All skills in sync"
-
-check-i18n:  ## Check if translated *.{lang}.md files are in sync with English base
-	@bash scripts/check-i18n-sync.sh
 
 check-contributors:  ## Audit .all-contributorsrc for drift / missing entries / overdue Triage invitations
 	@bash scripts/check_contributors.sh

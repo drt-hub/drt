@@ -268,3 +268,56 @@ def test_html_format_missing_extra_prints_hint(monkeypatch: pytest.MonkeyPatch) 
     result = CliRunner().invoke(app, ["docs", "generate", "--format", "html"])
     assert result.exit_code == 1
     assert "pip install drt-core[docs]" in result.output
+def test_lookup_edges_render_in_ego_lineage(tmp_path: Path) -> None:
+    """Lookup edges surface on BOTH ends of the relationship.
+
+    Consumer sync page: the producer's destination table shows up as a dashed
+    upstream read with its own port. Producer sync page: the consumer hangs off
+    the destination as a downstream reader.
+    """
+    m = _manifest()
+    m.edges.append(Edge(kind="lookup", from_="users_to_pg", to="customers_to_discord"))
+    out = tmp_path / "docs"
+    render_html(m, out)
+
+    consumer = (out / "sync" / "customers-to-discord.html").read_text(encoding="utf-8")
+    # upstream card: producer's destination table, labelled as a lookup read
+    assert "LOOKUP · VIA USERS_TO_PG" in consumer
+    assert "postgres (public.users)" in consumer
+    # dashed lookup edge + distinct port marker
+    assert "stroke-dasharray" in consumer
+    assert "ego-arr-lk" in consumer
+    # textual fallback line links the lookup read too
+    assert "(lookup)" in consumer
+
+    producer = (out / "sync" / "users-to-pg.html").read_text(encoding="utf-8")
+    # downstream consumer card hangs off the destination
+    assert "customers_to_discord" in producer
+    assert "UPSERT · LOOKUP" not in producer  # consumer card carries ITS mode…
+    assert "FULL · LOOKUP" in producer  # …which is customers_to_discord's "full"
+    assert "read by" in producer
+
+
+def test_unknown_connector_type_falls_back_to_neutral_badge(tmp_path: Path) -> None:
+    """A plugin type outside _BADGES still renders: first-two-letters initials
+    on the neutral brand badge, in the heading badge and the ego-graph alike."""
+    m = Manifest(
+        schema_version=SCHEMA_VERSION,
+        drt_version="9.9.9",
+        generated_at="2026-06-28T00:00:00Z",
+        project=Project(name="acme", profile="default"),
+        sources=[Source(name="warehouse", type="customdb")],
+        destinations=[Destination(name="dest_z", type="zephyrapp", label="zephyrapp (rooms)")],
+        syncs=[Sync(name="a_to_z", source="warehouse", destination="dest_z", mode="full")],
+        edges=[],
+    )
+    out = tmp_path / "docs"
+    render_html(m, out)
+
+    source_page = (out / "source" / "warehouse.html").read_text(encoding="utf-8")
+    assert "background:#7c3aed" in source_page  # neutral fallback badge
+    assert ">CU</span>" in source_page or "CU" in source_page
+
+    sync_page = (out / "sync" / "a-to-z.html").read_text(encoding="utf-8")
+    assert ">CU</text>" in sync_page  # ego-graph badge, source side
+    assert ">ZE</text>" in sync_page  # ego-graph badge, destination side
