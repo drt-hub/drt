@@ -62,7 +62,11 @@ def docs_generate(
             raise typer.Exit(1)
 
         manifest = build_manifest(Path("."), include_state=include_state)
-        written = render_html(manifest, output)
+        try:
+            written = render_html(manifest, output)
+        except ValueError as e:
+            print_error(str(e))
+            raise typer.Exit(1) from e
         console.print(
             f"Wrote [bold]{len(written)}[/bold] file(s) to [bold]{output}[/bold] "
             f"({len(manifest.syncs)} sync(s)). Open [bold]{output / 'index.html'}[/bold]."
