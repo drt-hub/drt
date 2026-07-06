@@ -10,14 +10,24 @@ Theme is light/dark via ``prefers-color-scheme`` (no JS toggle).
 from __future__ import annotations
 
 STYLE_CSS = """\
-/* drt docs — vendored, no runtime framework. Tokens from the ADR mockup. */
+/* drt docs — vendored, no runtime framework.
+ * DESIGN TOKENS live in the single :root block below (+ its dark override).
+ * Add new tokens here, never mid-file. Base palette from the ADR #500 mockup. */
 :root {
-  --brand-50:#f5f3ff; --brand-100:#ede9fe; --brand-200:#ddd6fe;
+  /* brand */
+  --brand-50:#f5f3ff; --brand-100:#ede9fe; --brand-200:#ddd6fe; --brand-400:#a78bfa;
   --brand-500:#8b5cf6; --brand-600:#7c3aed; --brand-700:#6d28d9; --brand-900:#1e1b4b;
+  /* neutrals */
   --ink-50:#f7f8fa; --ink-100:#eef0f3; --ink-200:#e3e6eb; --ink-500:#5a6068;
   --ink-700:#262b33; --ink-800:#1a1d22; --ink-900:#0f1115;
+  /* surfaces & text */
   --bg:#ffffff; --fg:var(--ink-800); --muted:var(--ink-500);
   --line:var(--ink-200); --surface:#ffffff; --chip:var(--ink-100);
+  /* status (dot/word pairs — never color-alone) */
+  --success:#15803d; --warning:#b45309; --error:#b91c1c;
+  /* lineage */
+  --edge:#9aa0a8; --edge-lookup:var(--brand-500); --zone-drt-line:var(--brand-200);
+  /* shape & type */
   --radius:8px;
   --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,monospace;
   --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
@@ -26,6 +36,8 @@ STYLE_CSS = """\
   :root {
     --bg:var(--ink-900); --fg:var(--ink-50); --muted:#c4c7cc;
     --line:var(--ink-700); --surface:var(--ink-800); --chip:var(--ink-700);
+    --success:#4ade80; --warning:#fbbf24; --error:#f87171;
+    --edge:#6a707a; --zone-drt-line:rgba(139,92,246,0.35);
   }
 }
 * { box-sizing:border-box; }
@@ -96,18 +108,54 @@ th { color:var(--muted); font-weight:600; }
 .kv { display:grid; grid-template-columns:160px 1fr; gap:6px 14px; font-size:13px; margin:0 0 8px; }
 .kv dt { color:var(--muted); }
 .kv dd { margin:0; }
-.status-success { color:#0a7d33; } .status-failed { color:#b3261e; }
-@media (prefers-color-scheme: dark) {
-  .status-success { color:#4ade80; } .status-failed { color:#f87171; }
-}
+.badge { display:inline-grid; place-items:center; width:26px; height:26px; border-radius:7px;
+  font:700 10px var(--mono); color:#fff; vertical-align:-4px; }
+.dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:5px; }
 
 pre.code { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:14px; overflow-x:auto; font-size:12.5px; }
 .mermaid { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:16px; }
 
 .footer { color:var(--muted); font-size:12px; margin-top:36px; padding-top:14px; border-top:1px solid var(--line); }
 
+/* Overview — type-distribution bars */
+.two-col { display:grid; grid-template-columns:1fr 1fr; gap:32px; margin-bottom:8px; }
+.bar-row { display:flex; align-items:center; gap:10px; margin:7px 0; font-size:13px; }
+.bar-row__label { width:9rem; color:var(--fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.bar-row__bar-bg { flex:1; background:var(--chip); height:8px; border-radius:999px; overflow:hidden; }
+.bar-row__bar-fill { background:var(--brand-600); height:100%; border-radius:999px; }
+.bar-row__count { width:2.5rem; text-align:right; color:var(--muted); }
+
+/* Recent runs + status */
+td.right, th.right { text-align:right; }
+.font-mono { font-family:var(--mono); font-size:12px; color:var(--muted); }
+.status-success { color:var(--success); font-weight:500; }
+.status-partial { color:var(--warning); font-weight:500; }
+.status-failed { color:var(--error); font-weight:500; }
+.empty { border:1px dashed var(--line); padding:32px; text-align:center; border-radius:var(--radius); color:var(--muted); }
+
+/* Sync detail — KPI cards, tabs (progressive: stacked without JS), ego lineage */
+.kpi { border:1px solid var(--line); border-radius:var(--radius); padding:12px 16px; }
+.kpi__label { font-size:11px; text-transform:uppercase; letter-spacing:0.05em; color:var(--muted); font-weight:600; }
+.crumb { font-size:12px; color:var(--muted); margin-bottom:2px; }
+.crumb a { color:var(--brand-700); }
+.tabs { display:none; gap:2px; border-bottom:1px solid var(--line); margin:26px 0 14px; }
+.js .tabs { display:flex; }
+.tab-btn { appearance:none; background:none; border:none; border-bottom:2px solid transparent;
+  padding:7px 12px; font:inherit; font-size:13px; font-weight:500; color:var(--muted); cursor:pointer; }
+.tab-btn:hover { color:var(--fg); }
+.tab-btn.active { color:var(--brand-700); border-bottom-color:var(--brand-600); }
+.tab-panel > h2:first-child { margin-top:26px; }
+.js .tab-panel > h2:first-child { display:none; }
+.js .tab-panel:not(.active) { display:none; }
+.ego { border:1px solid var(--line); border-radius:var(--radius); background:var(--surface);
+  padding:10px; overflow-x:auto; }
+.ego svg text { font-family:var(--sans); }
+.ego svg .mono { font-family:var(--mono); }
+.group a .count { float:right; }
+
 @media (max-width:860px) {
   .cards { grid-template-columns:1fr; }
+  .two-col { grid-template-columns:1fr; }
   .sidebar { display:none; }
   .topnav { display:none; }
 }
@@ -151,9 +199,28 @@ APP_JS = """\
     });
   }
 
+  // Tabs — progressive enhancement. Without JS the panels render stacked
+  // with their headings; with JS the .js class hides inactive panels.
+  function wireTabs() {
+    document.querySelectorAll(".tabs").forEach(function (group) {
+      var buttons = group.querySelectorAll(".tab-btn");
+      buttons.forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var target = btn.getAttribute("data-tab");
+          buttons.forEach(function (b) { b.classList.toggle("active", b === btn); });
+          group.parentElement.querySelectorAll(".tab-panel").forEach(function (p) {
+            p.classList.toggle("active", p.getAttribute("data-tab") === target);
+          });
+        });
+      });
+    });
+  }
+
+  document.documentElement.classList.add("js");
   document.addEventListener("DOMContentLoaded", function () {
     restoreGroups();
     wireSearch();
+    wireTabs();
   });
 })();
 """

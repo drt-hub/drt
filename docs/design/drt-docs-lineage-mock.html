@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lineage — visual direction mock · drt docs</title>
+<style>
+/* inlined from drt/docs/_html_assets.py STYLE_CSS */
+/* drt docs — vendored, no runtime framework. Tokens from the ADR mockup. */
+:root {
+  --brand-50:#f5f3ff; --brand-100:#ede9fe; --brand-200:#ddd6fe;
+  --brand-500:#8b5cf6; --brand-600:#7c3aed; --brand-700:#6d28d9; --brand-900:#1e1b4b;
+  --ink-50:#f7f8fa; --ink-100:#eef0f3; --ink-200:#e3e6eb; --ink-500:#5a6068;
+  --ink-700:#262b33; --ink-800:#1a1d22; --ink-900:#0f1115;
+  --bg:#ffffff; --fg:var(--ink-800); --muted:var(--ink-500);
+  --line:var(--ink-200); --surface:#ffffff; --chip:var(--ink-100);
+  --radius:8px;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,monospace;
+  --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:var(--ink-900); --fg:var(--ink-50); --muted:#c4c7cc;
+    --line:var(--ink-700); --surface:var(--ink-800); --chip:var(--ink-700);
+  }
+}
+* { box-sizing:border-box; }
+html,body { margin:0; padding:0; }
+body { background:var(--bg); color:var(--fg); font-family:var(--sans); font-size:14px; line-height:1.55; }
+a { color:var(--brand-700); text-decoration:none; }
+a:hover { text-decoration:underline; }
+code,pre,.mono { font-family:var(--mono); }
+
+/* top bar */
+.topbar {
+  display:flex; align-items:center; gap:16px; padding:10px 16px;
+  border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); z-index:10;
+}
+.brand { display:flex; align-items:center; gap:10px; font-weight:700; }
+.brand .logo { width:26px; height:26px; border-radius:6px; background:var(--brand-600); display:inline-grid; place-items:center; color:#fff; font-size:13px; }
+.project { color:var(--muted); border-left:1px solid var(--line); padding-left:12px; font-size:13px; }
+.project .ver { font-size:11px; }
+.topnav { display:flex; gap:4px; margin-left:8px; }
+.navbtn { padding:4px 10px; border-radius:6px; color:var(--muted); }
+.navbtn:hover { background:var(--brand-50); color:var(--brand-700); text-decoration:none; }
+.navbtn.active { background:var(--brand-600); color:#fff; }
+@media (prefers-color-scheme: dark) {
+  .navbtn:hover { background:var(--brand-900); color:var(--brand-200); }
+}
+.search { margin-left:auto; }
+.search input {
+  border:1px solid var(--line); background:var(--surface); color:var(--fg);
+  border-radius:6px; padding:5px 10px; font-size:13px; width:240px;
+}
+
+/* layout */
+.shell { display:flex; }
+.sidebar {
+  width:256px; flex-shrink:0; border-right:1px solid var(--line); padding:16px;
+  height:calc(100vh - 53px); overflow-y:auto; position:sticky; top:53px;
+}
+.group { margin-bottom:14px; }
+.group > summary, .group-title {
+  font-weight:600; color:var(--fg); display:flex; justify-content:space-between;
+  cursor:pointer; list-style:none; padding:2px 0;
+}
+.group > summary::-webkit-details-marker { display:none; }
+.group .count { color:var(--muted); font-weight:400; }
+.group ul { list-style:none; margin:6px 0 0; padding:0 0 0 8px; }
+.group li { padding:2px 0; }
+.group a { color:var(--fg); display:block; padding:2px 4px; border-radius:4px; }
+.group a:hover { background:var(--chip); text-decoration:none; }
+.group a.current { color:var(--brand-700); font-weight:500; }
+
+/* main */
+.main { flex:1; padding:28px 32px; max-width:980px; }
+.eyebrow { font-size:12px; color:var(--muted); margin-bottom:2px; }
+h1 { font-size:28px; font-weight:700; margin:0 0 4px; letter-spacing:-0.02em; }
+h2 { font-size:14px; font-weight:600; text-transform:uppercase; letter-spacing:0.04em; color:var(--muted); margin:28px 0 12px; }
+.lede { color:var(--muted); margin:0 0 22px; }
+
+.cards { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-bottom:24px; }
+.card { border:1px solid var(--line); border-radius:var(--radius); padding:16px; }
+.card .num { font-size:28px; font-weight:700; }
+.card .lbl { font-size:13px; color:var(--muted); }
+
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+th { color:var(--muted); font-weight:600; }
+.chip { display:inline-block; padding:1px 8px; border-radius:999px; background:var(--chip); font-size:12px; }
+.mode { font-family:var(--mono); font-size:12px; }
+.kv { display:grid; grid-template-columns:160px 1fr; gap:6px 14px; font-size:13px; margin:0 0 8px; }
+.kv dt { color:var(--muted); }
+.kv dd { margin:0; }
+.status-success { color:#0a7d33; } .status-failed { color:#b3261e; }
+@media (prefers-color-scheme: dark) {
+  .status-success { color:#4ade80; } .status-failed { color:#f87171; }
+}
+
+pre.code { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:14px; overflow-x:auto; font-size:12.5px; }
+.mermaid { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:16px; }
+
+.footer { color:var(--muted); font-size:12px; margin-top:36px; padding-top:14px; border-top:1px solid var(--line); }
+
+/* Overview — type-distribution bars */
+.two-col { display:grid; grid-template-columns:1fr 1fr; gap:32px; margin-bottom:8px; }
+.bar-row { display:flex; align-items:center; gap:10px; margin:7px 0; font-size:13px; }
+.bar-row__label { width:9rem; color:var(--fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.bar-row__bar-bg { flex:1; background:var(--chip); height:8px; border-radius:999px; overflow:hidden; }
+.bar-row__bar-fill { background:var(--brand-600); height:100%; border-radius:999px; }
+.bar-row__count { width:2.5rem; text-align:right; color:var(--muted); }
+
+/* Recent runs + status */
+td.right, th.right { text-align:right; }
+.font-mono { font-family:var(--mono); font-size:12px; color:var(--muted); }
+:root { --success:#15803d; --warning:#b45309; --error:#b91c1c; }
+@media (prefers-color-scheme: dark) { :root { --success:#4ade80; --warning:#fbbf24; --error:#f87171; } }
+.status-success { color:var(--success); font-weight:500; }
+.status-partial { color:var(--warning); font-weight:500; }
+.status-failed { color:var(--error); font-weight:500; }
+.empty { border:1px dashed var(--line); padding:32px; text-align:center; border-radius:var(--radius); color:var(--muted); }
+
+@media (max-width:860px) {
+  .cards { grid-template-columns:1fr; }
+  .two-col { grid-template-columns:1fr; }
+  .sidebar { display:none; }
+  .topnav { display:none; }
+}
+</style>
+<style>
+  /* mock-only styles — candidates for the real token file if adopted */
+  :root {
+    --zone-drt-bg: var(--brand-50);
+    --zone-drt-line: var(--brand-200);
+    --edge: color-mix(in oklab, var(--muted) 55%, transparent);
+    --edge-lookup: var(--brand-500);
+    --edge-col: color-mix(in oklab, var(--muted) 40%, transparent);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --zone-drt-bg: rgba(124, 58, 237, 0.10);
+      --zone-drt-line: rgba(139, 92, 246, 0.35);
+    }
+  }
+  .mock-main { max-width: 1180px; margin: 0 auto; padding: 28px 32px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center;
+    font-size: 12px; color: var(--muted); margin: 0 0 14px; }
+  .legend .item { display: inline-flex; align-items: center; gap: 6px; }
+  .legend .swatch-sync { width: 14px; height: 10px; border: 1px solid var(--line);
+    border-left: 3px solid var(--brand-600); border-radius: 2px; background: var(--surface); }
+  .legend .dash { width: 22px; height: 0; border-top: 2px dashed var(--edge-lookup); }
+  .legend .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+  .panel { border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--surface); padding: 10px; overflow-x: auto; }
+  svg text { font-family: var(--sans); }
+  svg .mono { font-family: var(--mono); }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <span class="brand"><span class="logo">d</span>drt docs</span>
+  <span class="project">my-drt-project<br><span class="ver">drt 0.7.10</span></span>
+  <nav class="topnav">
+    <a class="navbtn" href="#">Overview</a>
+    <a class="navbtn active" href="#">DAG</a>
+  </nav>
+</header>
+<div class="mock-main">
+  <div class="eyebrow">Lineage</div>
+  <h1>DAG <span style="font-size:13px;font-weight:400;color:var(--muted)">— visual direction mock v2 (hand-positioned)</span></h1>
+  <p class="lede">Ownership at a glance: what drt manages, what it reads, what it writes.</p>
+
+  <div class="legend">
+    <span class="item"><span class="swatch-sync"></span> sync — drt-managed code</span>
+    <span class="item"><svg width="16" height="14" viewBox="0 0 16 14"><ellipse cx="8" cy="3.4" rx="6" ry="2.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M2 3.4 V10.4 A6 2.6 0 0 0 14 10.4 V3.4" fill="none" stroke="currentColor" stroke-width="1.3"/></svg> data store</span>
+    <span class="item"><svg width="14" height="14" viewBox="0 0 14 14"><rect x="1" y="1" width="12" height="12" rx="3" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="7" cy="7" r="1.8" fill="currentColor"/></svg> external app</span>
+    <span class="item"><span class="dash"></span> lookup — sync reads a destination</span>
+    <span class="item"><span class="dot" style="background:var(--success)"></span> success</span>
+    <span class="item"><span class="dot" style="background:var(--warning)"></span> partial</span>
+    <span class="item"><span class="dot" style="background:var(--error)"></span> failed</span>
+    <span class="item"><span style="display:inline-block;padding:0 7px;border-radius:999px;background:rgba(185,28,28,0.12);color:var(--error);font:600 10px var(--mono);line-height:16px">3 &#8594; DLQ</span> dead-letter rows</span>
+    <span class="item"><span style="display:inline-block;padding:0 7px;border-radius:999px;background:rgba(180,83,9,0.14);color:var(--warning);font:600 10px var(--mono);line-height:16px">&#9888; drift</span> schema drift (audit)</span>
+  </div>
+
+  <div class="panel">
+  <svg viewBox="0 0 1080 660" width="1080" height="660" role="img"
+       aria-label="Lineage graph: sources feed drt-managed syncs which write to destinations">
+    <defs>
+      <marker id="arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0.6 L7.4,4 L0,7.4 Z" fill="var(--edge)"/>
+      </marker>
+      <marker id="arr-lookup" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0.6 L7.4,4 L0,7.4 Z" fill="var(--edge-lookup)"/>
+      </marker>
+      <!-- document icon: file with folded corner -->
+      <g id="icon-doc">
+        <path d="M0,0 h7.5 l4,4 v11 a1.5,1.5 0 0 1 -1.5,1.5 h-8.5 a1.5,1.5 0 0 1 -1.5,-1.5 v-13.5 a1.5,1.5 0 0 1 1.5,-1.5 z"
+              transform="translate(1.5,0.8)" fill="none" stroke="var(--brand-600)" stroke-width="1.4" stroke-linejoin="round"/>
+        <path d="M9,0.8 v4 h4" fill="none" stroke="var(--brand-600)" stroke-width="1.4" stroke-linejoin="round"/>
+        <path d="M4.5,9 h6 M4.5,12 h4" stroke="var(--brand-400,#a78bfa)" stroke-width="1.2" stroke-linecap="round"/>
+      </g>
+    </defs>
+
+    <!-- ============ ownership zones ============ -->
+    <rect x="24" y="36" width="224" height="600" rx="10" fill="none" stroke="var(--line)"/>
+    <text x="40" y="60" font-size="11" letter-spacing="1.2" fill="var(--muted)" font-weight="600">SOURCES</text>
+    <text x="232" y="60" font-size="11" fill="var(--muted)" text-anchor="end">external · read</text>
+
+    <rect x="336" y="36" width="368" height="600" rx="10" fill="var(--zone-drt-bg)" stroke="var(--zone-drt-line)"/>
+    <text x="352" y="60" font-size="11" letter-spacing="1.2" fill="var(--brand-700)" font-weight="600">SYNCS</text>
+    <rect x="404" y="46" width="92" height="18" rx="9" fill="var(--brand-600)"/>
+    <text x="450" y="59" font-size="10.5" fill="#fff" text-anchor="middle" font-weight="600">managed by drt</text>
+    <text x="688" y="60" font-size="11" fill="var(--muted)" text-anchor="end">version-controlled YAML</text>
+
+    <rect x="792" y="36" width="264" height="600" rx="10" fill="none" stroke="var(--line)"/>
+    <text x="808" y="60" font-size="11" letter-spacing="1.2" fill="var(--muted)" font-weight="600">DESTINATIONS</text>
+    <text x="1040" y="60" font-size="11" fill="var(--muted)" text-anchor="end">external · write</text>
+
+    <!-- ============ forward edges (source → sync) ============ -->
+    <g fill="none" stroke="var(--edge)" stroke-width="1.5" marker-end="url(#arr)">
+      <path d="M232,200 C300,180 320,130 382,118"/>
+      <path d="M232,212 C300,214 316,218 382,218"/>
+      <path d="M232,224 C300,250 320,320 382,338"/>
+      <path d="M232,236 C310,300 310,520 382,558"/>
+      <path d="M232,458 C290,458 320,458 382,458"/>
+    </g>
+    <!-- ============ forward edges (sync → destination) ============ -->
+    <g fill="none" stroke="var(--edge)" stroke-width="1.5" marker-end="url(#arr)">
+      <path d="M608,118 C700,110 730,100 814,98"/>
+      <path d="M608,218 C700,218 730,218 814,218"/>
+      <path d="M608,338 C700,338 730,338 814,338"/>
+      <path d="M608,458 C700,458 730,458 814,458"/>
+      <path d="M608,558 C700,562 730,572 814,578"/>
+    </g>
+
+    <!-- ============ lookup back-edges (destination → sync), distinct top ports ============ -->
+    <g fill="none" stroke="var(--edge-lookup)" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arr-lookup)">
+      <path d="M820,130 C730,215 600,240 560,306"/>
+      <path d="M820,250 C750,300 590,288 500,306"/>
+    </g>
+    <circle cx="500" cy="310" r="3" fill="var(--edge-lookup)"/>
+    <circle cx="560" cy="310" r="3" fill="var(--edge-lookup)"/>
+    <text x="676" y="262" font-size="10.5" fill="var(--edge-lookup)" font-style="italic">lookup</text>
+
+    <!-- ============ sources ============ -->
+    <g>
+      <rect x="40" y="190" width="192" height="56" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <g transform="translate(56,204)" fill="none" stroke="var(--muted)" stroke-width="1.4">
+        <ellipse cx="9" cy="5" rx="8" ry="3.6"/><path d="M1 5 V17 A8 3.6 0 0 0 17 17 V5"/>
+      </g>
+      <text x="84" y="214" font-size="13" font-weight="600" fill="var(--fg)">bq_prod</text>
+      <text x="84" y="230" font-size="10.5" letter-spacing="0.6" fill="var(--muted)">BIGQUERY</text>
+    </g>
+    <g>
+      <rect x="40" y="430" width="192" height="56" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <g transform="translate(56,444)" fill="none" stroke="var(--muted)" stroke-width="1.4">
+        <ellipse cx="9" cy="5" rx="8" ry="3.6"/><path d="M1 5 V17 A8 3.6 0 0 0 17 17 V5"/>
+      </g>
+      <text x="84" y="454" font-size="13" font-weight="600" fill="var(--fg)">pg_replica</text>
+      <text x="84" y="470" font-size="10.5" letter-spacing="0.6" fill="var(--muted)">POSTGRES</text>
+    </g>
+
+    <!-- ============ syncs (drt-managed code cards) ============ -->
+    <!-- users_to_pg · incremental · success -->
+    <g>
+      <rect x="384" y="90" width="224" height="56" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <rect x="384" y="90" width="3" height="56" rx="1.5" fill="var(--brand-600)"/>
+      <use href="#icon-doc" x="398" y="101"/>
+      <text x="420" y="113" font-size="13" font-weight="600" class="mono" fill="var(--fg)">users_to_pg</text>
+      <text x="420" y="132" font-size="11" class="mono" fill="var(--muted)">incremental</text>
+      <circle cx="506" cy="128.5" r="3.5" fill="var(--success)"/>
+      <text x="514" y="132" font-size="11" fill="var(--success)" font-weight="500">success</text>
+    </g>
+    <!-- products_to_pg · full · success -->
+    <g>
+      <rect x="384" y="190" width="224" height="56" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <rect x="384" y="190" width="3" height="56" rx="1.5" fill="var(--brand-600)"/>
+      <use href="#icon-doc" x="398" y="201"/>
+      <text x="420" y="213" font-size="13" font-weight="600" class="mono" fill="var(--fg)">products_to_pg</text>
+      <text x="420" y="232" font-size="11" class="mono" fill="var(--muted)">full</text>
+      <circle cx="456" cy="228.5" r="3.5" fill="var(--success)"/>
+      <text x="464" y="232" font-size="11" fill="var(--success)" font-weight="500">success</text>
+    </g>
+    <!-- orders_to_pg · incremental · partial -->
+    <g>
+      <rect x="384" y="310" width="224" height="56" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <rect x="384" y="310" width="3" height="56" rx="1.5" fill="var(--brand-600)"/>
+      <use href="#icon-doc" x="398" y="321"/>
+      <text x="420" y="333" font-size="13" font-weight="600" class="mono" fill="var(--fg)">orders_to_pg</text>
+      <text x="420" y="352" font-size="11" class="mono" fill="var(--muted)">upsert</text>
+      <circle cx="506" cy="348.5" r="3.5" fill="var(--warning)"/>
+      <text x="514" y="352" font-size="11" fill="var(--warning)" font-weight="500">partial</text>
+      <rect x="546" y="340.5" width="50" height="15" rx="7.5" fill="rgba(185,28,28,0.12)"/>
+      <text x="571" y="351.5" font-size="8.5" class="mono" font-weight="600" fill="var(--error)" text-anchor="middle">3&#8201;&#8594;&#8201;DLQ</text>
+    </g>
+    <!-- alerts_to_slack · append · failed -->
+    <g>
+      <rect x="384" y="430" width="224" height="56" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <rect x="384" y="430" width="3" height="56" rx="1.5" fill="var(--brand-600)"/>
+      <use href="#icon-doc" x="398" y="441"/>
+      <text x="420" y="453" font-size="13" font-weight="600" class="mono" fill="var(--fg)">alerts_to_slack</text>
+      <text x="420" y="472" font-size="11" class="mono" fill="var(--muted)">incremental</text>
+      <circle cx="506" cy="468.5" r="3.5" fill="var(--error)"/>
+      <text x="514" y="472" font-size="11" fill="var(--error)" font-weight="500">failed</text>
+      <rect x="542" y="460.5" width="54" height="15" rx="7.5" fill="rgba(185,28,28,0.12)"/>
+      <text x="569" y="471.5" font-size="8.5" class="mono" font-weight="600" fill="var(--error)" text-anchor="middle">12&#8201;&#8594;&#8201;DLQ</text>
+    </g>
+    <!-- users_to_hubspot · incremental · success -->
+    <g>
+      <rect x="384" y="530" width="224" height="56" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <rect x="384" y="530" width="3" height="56" rx="1.5" fill="var(--brand-600)"/>
+      <use href="#icon-doc" x="398" y="541"/>
+      <text x="420" y="553" font-size="13" font-weight="600" class="mono" fill="var(--fg)">users_to_hubspot</text>
+      <text x="420" y="572" font-size="11" class="mono" fill="var(--muted)">mirror</text>
+      <circle cx="506" cy="568.5" r="3.5" fill="var(--success)"/>
+      <text x="514" y="572" font-size="11" fill="var(--success)" font-weight="500">success</text>
+    </g>
+
+    <!-- ============ destinations ============ -->
+    <g>
+      <rect x="816" y="70" width="216" height="56" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <g transform="translate(832,84)" fill="none" stroke="var(--muted)" stroke-width="1.4">
+        <ellipse cx="9" cy="5" rx="8" ry="3.6"/><path d="M1 5 V17 A8 3.6 0 0 0 17 17 V5"/>
+      </g>
+      <text x="860" y="94" font-size="13" font-weight="600" fill="var(--fg)">public.users</text>
+      <text x="860" y="110" font-size="10.5" letter-spacing="0.6" fill="var(--muted)">POSTGRES</text>
+    </g>
+    <g>
+      <rect x="816" y="190" width="216" height="56" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <g transform="translate(832,204)" fill="none" stroke="var(--muted)" stroke-width="1.4">
+        <ellipse cx="9" cy="5" rx="8" ry="3.6"/><path d="M1 5 V17 A8 3.6 0 0 0 17 17 V5"/>
+      </g>
+      <text x="860" y="214" font-size="13" font-weight="600" fill="var(--fg)">public.products</text>
+      <text x="860" y="230" font-size="10.5" letter-spacing="0.6" fill="var(--muted)">POSTGRES</text>
+    </g>
+    <g>
+      <rect x="816" y="310" width="216" height="56" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <g transform="translate(832,324)" fill="none" stroke="var(--muted)" stroke-width="1.4">
+        <ellipse cx="9" cy="5" rx="8" ry="3.6"/><path d="M1 5 V17 A8 3.6 0 0 0 17 17 V5"/>
+      </g>
+      <text x="860" y="334" font-size="13" font-weight="600" fill="var(--fg)">public.orders</text>
+      <text x="860" y="350" font-size="10.5" letter-spacing="0.6" fill="var(--muted)">POSTGRES</text>
+      <rect x="964" y="340" width="56" height="15" rx="7.5" fill="rgba(180,83,9,0.14)"/>
+      <text x="992" y="351" font-size="8.5" class="mono" font-weight="600" fill="var(--warning)" text-anchor="middle">&#9888; drift</text>
+    </g>
+    <g>
+      <rect x="816" y="430" width="216" height="56" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <g transform="translate(832,444)">
+        <rect x="0" y="0" width="18" height="18" rx="4.5" fill="none" stroke="var(--muted)" stroke-width="1.4"/>
+        <circle cx="9" cy="9" r="2.6" fill="var(--muted)"/>
+      </g>
+      <text x="860" y="454" font-size="13" font-weight="600" fill="var(--fg)">#alerts</text>
+      <text x="860" y="470" font-size="10.5" letter-spacing="0.6" fill="var(--muted)">SLACK</text>
+    </g>
+    <g>
+      <rect x="816" y="550" width="216" height="56" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <g transform="translate(832,564)">
+        <rect x="0" y="0" width="18" height="18" rx="4.5" fill="none" stroke="var(--muted)" stroke-width="1.4"/>
+        <circle cx="9" cy="9" r="2.6" fill="var(--muted)"/>
+      </g>
+      <text x="860" y="574" font-size="13" font-weight="600" fill="var(--fg)">contacts</text>
+      <text x="860" y="590" font-size="10.5" letter-spacing="0.6" fill="var(--muted)">HUBSPOT</text>
+    </g>
+  </svg>
+  </div>
+
+  <h2 style="margin-top:32px">Drill-down — table &amp; column level (concept)</h2>
+  <p class="lede" style="margin-bottom:12px">Click a sync (or expand in place) to open its ego-graph at column grain.
+    Column facts are <em>declared</em> in <code>field_mappings</code> / <code>mask</code> — no SQL parsing needed on the write side.</p>
+
+  <div class="panel">
+  <svg viewBox="0 0 1080 300" width="1080" height="300" role="img" aria-label="Column-level lineage for orders_to_pg">
+    <defs>
+      <marker id="arr2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0.6 L7.4,4 L0,7.4 Z" fill="var(--edge-col)"/>
+      </marker>
+    </defs>
+
+    <!-- source table (planned: parsed from model SQL) -->
+    <g>
+      <rect x="50" y="100" width="220" height="64" rx="8" fill="none" stroke="var(--line)" stroke-dasharray="4 3"/>
+      <g transform="translate(66,116)" fill="none" stroke="var(--muted)" stroke-width="1.4">
+        <ellipse cx="9" cy="5" rx="8" ry="3.6"/><path d="M1 5 V17 A8 3.6 0 0 0 17 17 V5"/>
+      </g>
+      <text x="94" y="126" font-size="13" font-weight="600" fill="var(--fg)">sales.orders</text>
+      <text x="94" y="142" font-size="10.5" letter-spacing="0.6" fill="var(--muted)">BIGQUERY · TABLE</text>
+      <text x="50" y="186" font-size="10.5" fill="var(--muted)" font-style="italic">from model SQL — planned (manifest schema v2)</text>
+    </g>
+    <path d="M270,132 C310,132 330,132 368,132" fill="none" stroke="var(--edge-col)" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arr2)"/>
+
+    <!-- sync expanded: columns as declared in field_mappings -->
+    <g>
+      <rect x="370" y="34" width="260" height="228" rx="8" fill="var(--surface)" stroke="var(--zone-drt-line)"/>
+      <rect x="370" y="34" width="3" height="228" rx="1.5" fill="var(--brand-600)"/>
+      <use href="#icon-doc" x="386" y="48"/>
+      <text x="408" y="60" font-size="13" font-weight="600" class="mono" fill="var(--fg)">orders_to_pg</text>
+      <circle cx="560" cy="56" r="3.5" fill="var(--warning)"/>
+      <text x="568" y="60" font-size="11" fill="var(--warning)" font-weight="500">partial</text>
+      <line x1="386" y1="76" x2="614" y2="76" stroke="var(--line)"/>
+      <text x="386" y="96" font-size="10" letter-spacing="1" fill="var(--muted)" font-weight="600">FIELD_MAPPINGS</text>
+
+      <text x="386" y="122" font-size="12" class="mono" fill="var(--fg)">order_id</text>
+      <text x="386" y="152" font-size="12" class="mono" fill="var(--fg)">customer_id</text>
+      <text x="386" y="182" font-size="12" class="mono" fill="var(--fg)">email</text>
+      <rect x="432" y="170" width="40" height="16" rx="8" fill="var(--brand-100)"/>
+      <text x="452" y="182" font-size="10" fill="var(--brand-700)" text-anchor="middle" font-weight="600">mask</text>
+      <text x="386" y="212" font-size="12" class="mono" fill="var(--fg)">amount</text>
+      <text x="386" y="242" font-size="11" class="mono" fill="var(--muted)">… 4 more columns</text>
+    </g>
+
+    <!-- destination table expanded -->
+    <g>
+      <rect x="780" y="34" width="250" height="228" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <g transform="translate(796,48)" fill="none" stroke="var(--muted)" stroke-width="1.4">
+        <ellipse cx="9" cy="5" rx="8" ry="3.6"/><path d="M1 5 V17 A8 3.6 0 0 0 17 17 V5"/>
+      </g>
+      <text x="824" y="60" font-size="13" font-weight="600" fill="var(--fg)">public.orders</text>
+      <text x="988" y="60" font-size="10.5" letter-spacing="0.6" fill="var(--muted)" text-anchor="end">POSTGRES</text>
+      <line x1="796" y1="76" x2="1014" y2="76" stroke="var(--line)"/>
+      <text x="796" y="96" font-size="10" letter-spacing="1" fill="var(--muted)" font-weight="600">COLUMNS</text>
+
+      <text x="796" y="122" font-size="12" class="mono" fill="var(--fg)">id</text>
+      <text x="796" y="152" font-size="12" class="mono" fill="var(--fg)">customer_id</text>
+      <text x="796" y="182" font-size="12" class="mono" fill="var(--fg)">email</text>
+      <text x="796" y="212" font-size="12" class="mono" fill="var(--fg)">amount_usd</text>
+    </g>
+
+    <!-- column-to-column mapping lines -->
+    <g fill="none" stroke="var(--edge-col)" stroke-width="1.3" marker-end="url(#arr2)">
+      <line x1="632" y1="118" x2="778" y2="118"/>
+      <line x1="632" y1="148" x2="778" y2="148"/>
+      <line x1="632" y1="178" x2="778" y2="178"/>
+      <line x1="632" y1="208" x2="778" y2="208"/>
+    </g>
+  </svg>
+  </div>
+
+  <div class="footer">Visual-direction mock — hand-positioned SVG. The real thing is emitted by the layout engine (#677 follow-up); every node links to its detail page. DLQ counts arrive via manifest schema v2 (#698); drift badges need a persisted drift-audit artifact (storage TBD).</div>
+</div>
+</body>
+</html>
