@@ -102,8 +102,11 @@ mentions() {
     return 1
 }
 
-destinations=$(grep -oE 'register_destination\("[a-z_0-9]+"' "$REGISTRY" | grep -oE '"[a-z_0-9]+"' | tr -d '"' | sort)
-sources=$(grep -oE 'register_source\("[a-z_0-9]+"' "$REGISTRY" | grep -oE '"[a-z_0-9]+"' | tr -d '"' | sort)
+# Registrations may span multiple lines (e.g. salesforce_bulk), so collapse
+# newlines before matching — a single-line regex silently drops those entries
+# and skips every downstream check for them (doc / skill / README / MCP).
+destinations=$(tr '\n' ' ' < "$REGISTRY" | grep -oE 'register_destination\(\s*"[a-z_0-9]+"' | grep -oE '"[a-z_0-9]+"' | tr -d '"' | sort)
+sources=$(tr '\n' ' ' < "$REGISTRY" | grep -oE 'register_source\(\s*"[a-z_0-9]+"' | grep -oE '"[a-z_0-9]+"' | tr -d '"' | sort)
 mcp_tools=$(grep -oE '    def (drt_[a-z_]+)\(' "$MCP_SERVER" | grep -oE 'drt_[a-z_]+' | sort)
 
 echo "== drift check: $(echo "$destinations" | wc -l | tr -d ' ') destinations, $(echo "$sources" | wc -l | tr -d ' ') sources, $(echo "$mcp_tools" | wc -l | tr -d ' ') MCP tools =="
