@@ -176,3 +176,46 @@ def test_custom_config_scales_geometry() -> None:
     tight = compute_layout(_linear(), config=LayoutConfig(col_w=100.0))
     wide = compute_layout(_linear(), config=LayoutConfig(col_w=400.0))
     assert wide.width > tight.width
+
+
+def test_lookup_risers_stay_clear_of_node_columns() -> None:
+    """Riser vertical segments must travel in the inter-column gutter, never
+    inside a node's x-span (masukai's gutter-routing fix)."""
+    m = _manifest(
+        sources=[Source(name="wh", type="duckdb")],
+        syncs=[
+            Sync(name="consumer", source="wh", destination="d0", mode="full"),
+            Sync(name="prod_a", source="wh", destination="d1", mode="full"),
+            Sync(name="prod_b", source="wh", destination="d2", mode="full"),
+        ],
+        destinations=[
+            Destination(name="d0", type="discord", label="discord"),
+            Destination(name="d1", type="postgres", label="postgres"),
+            Destination(name="d2", type="s3", label="s3"),
+        ],
+        edges=[
+            Edge(kind="source_to_sync", from_="wh", to="consumer"),
+            Edge(kind="source_to_sync", from_="wh", to="prod_a"),
+            Edge(kind="source_to_sync", from_="wh", to="prod_b"),
+            Edge(kind="sync_to_destination", from_="consumer", to="d0"),
+            Edge(kind="sync_to_destination", from_="prod_a", to="d1"),
+            Edge(kind="sync_to_destination", from_="prod_b", to="d2"),
+            Edge(kind="lookup", from_="prod_a", to="consumer"),
+            Edge(kind="lookup", from_="prod_b", to="consumer"),
+        ],
+    )
+    cfg = LayoutConfig()
+    lay = compute_layout(m, config=cfg)
+    half = cfg.node_w / 2
+    # every node's occupied horizontal span
+    spans = [(n.x - half, n.x + half) for n in lay.nodes]
+    for e in lay.edges:
+        if e.lane is None:
+            continue
+        # the vertical riser segment is points[1]->points[2]; they share an x
+        assert e.points[1][0] == e.points[2][0]
+        riser_x = e.points[1][0]
+        for lo, hi in spans:
+            assert not (lo < riser_x < hi), (
+                f"riser at x={riser_x} falls inside a node column [{lo}, {hi}]"
+            )

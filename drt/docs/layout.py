@@ -28,8 +28,6 @@ from dataclasses import dataclass
 
 from drt.docs.manifest import Manifest
 
-# rank = node kind. sources feed syncs feed destinations.
-_RANK: dict[str, int] = {"source": 0, "sync": 1, "destination": 2}
 _COORD_PRECISION = 2  # round coords so output is byte-identical across builds
 
 
@@ -166,7 +164,15 @@ def _reorder(
 
 
 def _count_inversions(seq: Sequence[int]) -> int:
-    """Number of out-of-order pairs — i.e. edge crossings for a bipartite layer."""
+    """Number of out-of-order pairs — i.e. edge crossings for a bipartite layer.
+
+    Intentionally the plain O(n^2) double loop, not an O(n log n) merge count:
+    the docs DAG is the reverse-ETL last-mile subset (bounded small — dozens,
+    low-hundreds worst case) and this is offline docs-gen, not a sync hot path,
+    so the quadratic never bites. The binding constraint is byte-identical
+    determinism; the double loop is trivially correct + deterministic with no
+    tie-handling surface. Swap for a merge count only if a real project hurts.
+    """
     total = 0
     for i in range(len(seq)):
         for j in range(i + 1, len(seq)):
@@ -320,18 +326,28 @@ def _route_lookups(
             frac = 0.0 if n == 1 else (k / (n - 1) - 0.5)
             port_x[idx] = cx + frac * span
 
+    # Reserved gutter: the clear inter-column channel to the left of the sync
+    # column (between the source and sync columns). Each lane rises vertically at
+    # a distinct x *inside* this gutter, so risers never enter a node column —
+    # they stay clear by construction rather than by luck of ordering.
+    gutter_left = cfg.margin + cfg.node_w  # right edge of the rank-0 column
+    gutter_right = cfg.margin + cfg.col_w  # left edge of the rank-1 column
+    gutter_w = gutter_right - gutter_left
+
     edges: list[LayoutEdge] = []
     for lane, (producer, consumer) in enumerate(valid):
         pnode, cnode = placed[producer], placed[consumer]
         lane_y = cfg.margin + lanes_height - (lane + 1) * cfg.lane_gap
-        start = (pnode.x, pnode.y - cfg.node_h / 2)  # producer top
-        end_x = port_x[lane]
-        end = (end_x, cnode.y - cfg.node_h / 2)  # consumer top port
+        gutter_x = gutter_left + (lane + 1) / (lanes_total + 1) * gutter_w
+        p_top = pnode.y - cfg.node_h / 2  # producer top
+        c_top = cnode.y - cfg.node_h / 2  # consumer top
+        px = port_x[lane]
         points = (
-            (_round(start[0]), _round(start[1])),
-            (_round(start[0]), _round(lane_y)),
-            (_round(end_x), _round(lane_y)),
-            (_round(end[0]), _round(end[1])),
+            (_round(pnode.x), _round(p_top)),  # producer top
+            (_round(gutter_x), _round(p_top)),  # jog into the reserved gutter
+            (_round(gutter_x), _round(lane_y)),  # rise vertically in the gutter
+            (_round(px), _round(lane_y)),  # across the lane band to the port
+            (_round(px), _round(c_top)),  # down into the consumer top port
         )
         edges.append(
             LayoutEdge(src=producer, dst=consumer, kind="lookup", points=points, lane=lane)
