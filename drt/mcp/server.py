@@ -418,6 +418,7 @@ def create_server(project_dir: Path | None = None) -> Any:
                 {"name": "Intercom", "type": "intercom", "install": "(core)"},
                 {"name": "Email SMTP", "type": "email_smtp", "install": "(core)"},
                 {"name": "Google Ads", "type": "google_ads", "install": "(core)"},
+                {"name": "Salesforce Bulk", "type": "salesforce_bulk", "install": "(core)"},
                 {"name": "Staged Upload", "type": "staged_upload", "install": "(core)"},
             ],
         }
