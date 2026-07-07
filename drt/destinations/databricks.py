@@ -103,7 +103,11 @@ def _value_clause(
             ddl = ddl_map.get(key) if ddl_map is not None else None
             if ddl:
                 # STRUCT / ARRAY / MAP — reconstruct via the target DDL.
-                exprs.append(f"from_json(%s, '{ddl}')")
+                # Escape single quotes so a pathological column DDL can't break
+                # out of the string literal (defence-in-depth — the DDL already
+                # comes verbatim from information_schema).
+                safe_ddl = ddl.replace("'", "''")
+                exprs.append(f"from_json(%s, '{safe_ddl}')")
             else:
                 # VARIANT — no DDL form.
                 exprs.append("parse_json(%s)")

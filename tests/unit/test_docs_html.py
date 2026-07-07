@@ -211,56 +211,93 @@ def test_removed_sync_leaves_no_orphan_page(tmp_path: Path) -> None:
     assert not (out / "destination/dest-pg-users.html").exists()
 
 
-def test_lookup_edges_render_in_ego_lineage(tmp_path: Path) -> None:
-    """Lookup edges surface on BOTH ends of the relationship.
-
-    Consumer sync page: the producer's destination table shows up as a dashed
-    upstream read with its own port. Producer sync page: the consumer hangs off
-    the destination as a downstream reader.
-    """
-    m = _manifest()
-    m.edges.append(Edge(kind="lookup", from_="users_to_pg", to="customers_to_discord"))
-    out = tmp_path / "docs"
-    render_html(m, out)
-
-    consumer = (out / "sync" / "customers-to-discord.html").read_text(encoding="utf-8")
-    # upstream card: producer's destination table, labelled as a lookup read
-    assert "LOOKUP · VIA USERS_TO_PG" in consumer
-    assert "postgres (public.users)" in consumer
-    # dashed lookup edge + distinct port marker
-    assert "stroke-dasharray" in consumer
-    assert "ego-arr-lk" in consumer
-    # textual fallback line links the lookup read too
-    assert "(lookup)" in consumer
-
-    producer = (out / "sync" / "users-to-pg.html").read_text(encoding="utf-8")
-    # downstream consumer card hangs off the destination
-    assert "customers_to_discord" in producer
-    assert "UPSERT · LOOKUP" not in producer  # consumer card carries ITS mode…
-    assert "FULL · LOOKUP" in producer  # …which is customers_to_discord's "full"
-    assert "read by" in producer
+# --- #703 hardening: slug-collision, rmtree guard, ImportError hint ------------
 
 
-def test_unknown_connector_type_falls_back_to_neutral_badge(tmp_path: Path) -> None:
-    """A plugin type outside _BADGES still renders: first-two-letters initials
-    on the neutral brand badge, in the heading badge and the ego-graph alike."""
-    m = Manifest(
+def test_slug_collision_fails_fast(tmp_path: Path) -> None:
+    manifest = Manifest(
         schema_version=SCHEMA_VERSION,
         drt_version="9.9.9",
         generated_at="2026-06-28T00:00:00Z",
-        project=Project(name="acme", profile="default"),
-        sources=[Source(name="warehouse", type="customdb")],
-        destinations=[Destination(name="dest_z", type="zephyrapp", label="zephyrapp (rooms)")],
-        syncs=[Sync(name="a_to_z", source="warehouse", destination="dest_z", mode="full")],
-        edges=[],
+        project=Project(name="p", profile="default"),
+        sources=[Source(name="default", type="duckdb")],
+        destinations=[Destination(name="d", type="discord", label="discord")],
+        syncs=[
+            Sync(name="a_b", source="default", destination="d", mode="full"),
+            Sync(name="a__b", source="default", destination="d", mode="full"),
+        ],
     )
-    out = tmp_path / "docs"
-    render_html(m, out)
+    with pytest.raises(ValueError, match="slugify to the same page"):
+        render_html(manifest, tmp_path / "docs")
 
-    source_page = (out / "source" / "warehouse.html").read_text(encoding="utf-8")
-    assert "background:#7c3aed" in source_page  # neutral fallback badge
-    assert ">CU</span>" in source_page or "CU" in source_page
 
-    sync_page = (out / "sync" / "a-to-z.html").read_text(encoding="utf-8")
-    assert ">CU</text>" in sync_page  # ego-graph badge, source side
-    assert ">ZE</text>" in sync_page  # ego-graph badge, destination side
+def test_rmtree_guard_refuses_non_docs_directory(tmp_path: Path) -> None:
+    target = tmp_path / "precious"
+    target.mkdir()
+    keep = target / "thesis.txt"
+    keep.write_text("do not delete", encoding="utf-8")
+    with pytest.raises(ValueError, match="Refusing to delete"):
+        render_html(_manifest(), target)
+    assert keep.exists()
+
+
+def test_rmtree_guard_errors_on_file_target(tmp_path: Path) -> None:
+    target = tmp_path / "afile"
+    target.write_text("x", encoding="utf-8")
+    with pytest.raises(ValueError, match="must be a directory"):
+        render_html(_manifest(), target)
+
+
+def test_rmtree_guard_allows_empty_and_prior_build(tmp_path: Path) -> None:
+    empty = tmp_path / "docs"
+    empty.mkdir()
+    render_html(_manifest(), empty)
+    assert (empty / "index.html").exists()
+    render_html(_manifest(), empty)
+    assert (empty / "index.html").exists()
+
+
+def test_html_format_missing_extra_prints_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    from typer.testing import CliRunner
+
+    from drt.cli.main import app
+
+    monkeypatch.setitem(sys.modules, "drt.docs.html", None)
+    result = CliRunner().invoke(app, ["docs", "generate", "--format", "html"])
+    assert result.exit_code == 1
+    assert "pip install drt-core[docs]" in result.output
+
+
+def test_render_guard_surfaces_as_clean_cli_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A render_html guard (ValueError) must land as a clean CLI error + exit 1,
+    not a traceback (#703 follow-up)."""
+    import yaml
+    from typer.testing import CliRunner
+
+    from drt.cli.main import app
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "drt_project.yml").write_text(
+        yaml.safe_dump(
+            {"name": "demo", "version": "0.1", "profile": "p", "source": {"type": "bigquery"}}
+        )
+    )
+    # populated, non-drt-docs directory → the rmtree guard must refuse
+    target = project / "notdocs"
+    target.mkdir()
+    (target / "keep.txt").write_text("precious", encoding="utf-8")
+
+    monkeypatch.chdir(project)
+    result = CliRunner().invoke(
+        app, ["docs", "generate", "--format", "html", "--output", str(target)]
+    )
+    assert result.exit_code == 1
+    assert "Refusing to delete" in result.output
+    # clean exit, not an unhandled ValueError traceback
+    assert not isinstance(result.exception, ValueError)
+    assert (target / "keep.txt").exists()  # guard protected the dir

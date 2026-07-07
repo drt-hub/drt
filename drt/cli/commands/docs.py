@@ -8,7 +8,7 @@ from pathlib import Path
 import typer
 
 from drt.cli._app import app
-from drt.cli.output import console
+from drt.cli.output import console, print_error
 
 docs_app = typer.Typer(
     name="docs",
@@ -55,10 +55,18 @@ def docs_generate(
         return
 
     if fmt == "html":
-        from drt.docs.html import render_html
+        try:
+            from drt.docs.html import render_html
+        except ImportError:
+            print_error("HTML docs generation requires: pip install drt-core[docs]")
+            raise typer.Exit(1)
 
         manifest = build_manifest(Path("."), include_state=include_state)
-        written = render_html(manifest, output)
+        try:
+            written = render_html(manifest, output)
+        except ValueError as e:
+            print_error(str(e))
+            raise typer.Exit(1) from e
         console.print(
             f"Wrote [bold]{len(written)}[/bold] file(s) to [bold]{output}[/bold] "
             f"({len(manifest.syncs)} sync(s)). Open [bold]{output / 'index.html'}[/bold]."
