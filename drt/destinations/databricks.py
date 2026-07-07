@@ -48,6 +48,7 @@ Example sync YAML:
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 from typing import Any
 
@@ -57,6 +58,69 @@ from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 
 _SWAP_SUFFIX = "__drt_swap"
+
+
+def _value_clause(
+    columns: list[str],
+    category_map: dict[str, str] | None,
+    ddls: dict[str, str] | None,
+) -> tuple[str, list[str]]:
+    """Build the per-row value clause for an INSERT and the JSON column list.
+
+    Layer 3 (#317): json-category columns are wrapped so Databricks reconstructs
+    the complex value from a JSON string —
+
+    - STRUCT / ARRAY / MAP -> ``from_json(%s, '<ddl>')`` (DDL from ``information_schema``)
+    - VARIANT -> ``parse_json(%s)`` (no DDL form)
+
+    Scalars pass straight through (``%s``). Databricks — like Snowflake — won't
+    accept these functions in a ``VALUES`` clause, so any wrapping switches the
+    statement to the ``SELECT`` form (``INSERT INTO t (cols) SELECT %s,
+    from_json(%s, '<ddl>')``). With no json columns the clause is the unchanged
+    ``VALUES (%s, %s, ...)`` — byte-identical to pre-#317 behaviour.
+
+    The DDL is interpolated as a literal (it comes verbatim from
+    ``information_schema``, so there is no injection surface); the value itself
+    stays a ``%s`` bind. Returns ``(clause, json_columns)`` where ``clause``
+    already includes the ``VALUES (...)`` / ``SELECT ...`` keyword.
+    """
+    exprs: list[str] = []
+    json_columns: list[str] = []
+    # information_schema reports column names lower-cased; source record keys may
+    # differ in case — fold both sides so wrapping fires for the common pipeline.
+    cats = (
+        {str(k).lower(): v for k, v in category_map.items()}
+        if category_map is not None
+        else None
+    )
+    ddl_map = (
+        {str(k).lower(): v for k, v in ddls.items()} if ddls is not None else None
+    )
+    for col in columns:
+        key = str(col).lower()
+        if cats is not None and cats.get(key) == "json":
+            json_columns.append(col)
+            ddl = ddl_map.get(key) if ddl_map is not None else None
+            if ddl:
+                # STRUCT / ARRAY / MAP — reconstruct via the target DDL.
+                exprs.append(f"from_json(%s, '{ddl}')")
+            else:
+                # VARIANT — no DDL form.
+                exprs.append("parse_json(%s)")
+        else:
+            exprs.append("%s")
+    if json_columns:
+        return "SELECT " + ", ".join(exprs), json_columns
+    return "VALUES (" + ", ".join(exprs) + ")", json_columns
+
+
+def _bind_row(row: dict[str, Any], columns: list[str], json_columns: list[str]) -> list[Any]:
+    """Order a row's values to ``columns``; ``json.dumps`` the json columns so the
+    ``from_json`` / ``parse_json`` bind receives a JSON string."""
+    js = set(json_columns)
+    return [
+        json.dumps(row.get(c), default=str) if c in js else row.get(c) for c in columns
+    ]
 
 
 class DatabricksDestination:
@@ -80,6 +144,40 @@ class DatabricksDestination:
         self._swap_shadow_created: bool = False
         self._swap_table: str | None = None  # fully-qualified target name
         self._swap_direct_write: bool = False
+
+        # Layer 3 (#317): information_schema maps, fetched once per table per sync.
+        # ``_schema_cache`` -> column category (json / scalar);
+        # ``_ddl_cache`` -> STRUCT/ARRAY/MAP column -> full type DDL for from_json.
+        self._schema_cache: dict[str, dict[str, str] | None] = {}
+        self._ddl_cache: dict[str, dict[str, str] | None] = {}
+
+    def _resolve_schema(self, config: DatabricksDestinationConfig) -> dict[str, str] | None:
+        """Column -> type-category map for the target table, cached per sync.
+
+        Returns ``None`` (Layer 3 inactive) when ``introspect_schema`` is off or
+        introspection is unavailable.
+        """
+        if not config.introspect_schema:
+            return None
+        if config.table not in self._schema_cache:
+            from drt.destinations.schema import describe_columns
+
+            self._schema_cache[config.table] = describe_columns(config)
+        return self._schema_cache[config.table]
+
+    def _resolve_ddls(self, config: DatabricksDestinationConfig) -> dict[str, str] | None:
+        """STRUCT/ARRAY/MAP column -> full type DDL, cached per sync.
+
+        Used to build ``from_json(%s, '<ddl>')``. VARIANT columns are absent (they
+        load via ``parse_json``). ``None`` when introspection is off/unavailable.
+        """
+        if not config.introspect_schema:
+            return None
+        if config.table not in self._ddl_cache:
+            from drt.destinations.schema import describe_databricks_ddls
+
+            self._ddl_cache[config.table] = describe_databricks_ddls(config)
+        return self._ddl_cache[config.table]
 
     def load(
         self,
@@ -125,30 +223,36 @@ class DatabricksDestination:
             with conn.cursor() as cur:
                 columns = list(records[0].keys())
                 table_fq = f"{config.catalog}.{config.schema_}.{config.table}"
+                # Layer 3 (#317): map columns to type categories + json DDLs once
+                # per sync (cached), then wrap json-category binds accordingly.
+                category_map = self._resolve_schema(config)
+                ddls = self._resolve_ddls(config)
 
                 # sync.mode: replace (#643) — full-table replace, dispatched
                 # before the insert/merge/mirror write paths.
                 if sync_options.mode == "replace":
                     if sync_options.replace_strategy == "swap":
                         self._load_replace_swap(
-                            cur, records, columns, config, table_fq, sync_options, result
+                            cur, records, columns, config, table_fq, sync_options,
+                            result, category_map, ddls,
                         )
                     else:
                         self._load_replace_truncate(
-                            cur, records, columns, table_fq, sync_options, result
+                            cur, records, columns, table_fq, sync_options, result,
+                            category_map, ddls,
                         )
                     return result
 
                 effective_mode = "merge" if is_mirror else config.mode
                 col_list = ", ".join(columns)
-                placeholders = ", ".join(["%s"] * len(columns))
+                value_clause, json_cols = _value_clause(columns, category_map, ddls)
 
                 if effective_mode == "insert":
-                    sql = f"INSERT INTO {table_fq} ({col_list}) VALUES ({placeholders})"
+                    sql = f"INSERT INTO {table_fq} ({col_list}) {value_clause}"
 
                     for i, row in enumerate(records):
                         try:
-                            cur.execute(sql, list(row.values()))
+                            cur.execute(sql, _bind_row(row, columns, json_cols))
                             result.success += 1
                         except Exception as e:
                             result.failed += 1
@@ -192,12 +296,12 @@ class DatabricksDestination:
                         f"AS SELECT * FROM {table_fq} WHERE 1=0"
                     )
 
+                    staging_sql = (
+                        f"INSERT INTO {staging_table} ({col_list}) {value_clause}"
+                    )
                     for i, row in enumerate(records):
                         try:
-                            cur.execute(
-                                f"INSERT INTO {staging_table} ({col_list}) VALUES ({placeholders})",
-                                list(row.values()),
-                            )
+                            cur.execute(staging_sql, _bind_row(row, columns, json_cols))
                         except Exception as e:
                             result.failed += 1
                             result.row_errors.append(
@@ -263,6 +367,8 @@ class DatabricksDestination:
         table_fq: str,
         sync_options: SyncOptions,
         result: SyncResult,
+        category_map: dict[str, str] | None = None,
+        ddls: dict[str, str] | None = None,
     ) -> None:
         """``replace_strategy: truncate`` — TRUNCATE once, then INSERT rows."""
         if not self._replace_truncated:
@@ -270,9 +376,9 @@ class DatabricksDestination:
             self._replace_truncated = True
 
         col_list = ", ".join(columns)
-        placeholders = ", ".join(["%s"] * len(columns))
-        sql = f"INSERT INTO {table_fq} ({col_list}) VALUES ({placeholders})"
-        self._insert_rows(cur, sql, records, sync_options, result)
+        value_clause, json_cols = _value_clause(columns, category_map, ddls)
+        sql = f"INSERT INTO {table_fq} ({col_list}) {value_clause}"
+        self._insert_rows(cur, sql, records, sync_options, result, columns, json_cols)
 
     def _load_replace_swap(
         self,
@@ -283,6 +389,8 @@ class DatabricksDestination:
         table_fq: str,
         sync_options: SyncOptions,
         result: SyncResult,
+        category_map: dict[str, str] | None = None,
+        ddls: dict[str, str] | None = None,
     ) -> None:
         """``replace_strategy: swap`` — stage to a shadow; INSERT OVERWRITE in finalize.
 
@@ -306,11 +414,11 @@ class DatabricksDestination:
 
         write_fq = table_fq if self._swap_direct_write else shadow_fq
         col_list = ", ".join(columns)
-        placeholders = ", ".join(["%s"] * len(columns))
-        sql = f"INSERT INTO {write_fq} ({col_list}) VALUES ({placeholders})"
+        value_clause, json_cols = _value_clause(columns, category_map, ddls)
+        sql = f"INSERT INTO {write_fq} ({col_list}) {value_clause}"
 
         try:
-            self._insert_rows(cur, sql, records, sync_options, result)
+            self._insert_rows(cur, sql, records, sync_options, result, columns, json_cols)
         except Exception:
             # on_error=fail mid-swap: drop the half-built shadow and reset so a
             # re-run starts clean. (Direct-write path has no shadow to drop.)
@@ -327,11 +435,23 @@ class DatabricksDestination:
         records: list[dict[str, Any]],
         sync_options: SyncOptions,
         result: SyncResult,
+        columns: list[str] | None = None,
+        json_cols: list[str] | None = None,
     ) -> None:
-        """Execute a parameterised INSERT per row, honouring ``on_error``."""
+        """Execute a parameterised INSERT per row, honouring ``on_error``.
+
+        When ``columns`` is given, values are ordered to it and json columns
+        (``json_cols``) are ``json.dumps``'d so the ``from_json`` / ``parse_json``
+        bind receives a JSON string (Layer 3, #317).
+        """
         for i, row in enumerate(records):
             try:
-                cur.execute(sql, list(row.values()))
+                values = (
+                    _bind_row(row, columns, json_cols or [])
+                    if columns is not None
+                    else list(row.values())
+                )
+                cur.execute(sql, values)
                 result.success += 1
             except Exception as e:
                 result.failed += 1
@@ -530,8 +650,19 @@ class DatabricksDestination:
                 f"({config.host_env}, {config.http_path_env}, {config.token_env})."
             )
 
+        # databricks-sql-connector >=3.0 defaults to *native* paramstyle
+        # (`?` / `:name` markers, server-side binding) and forwards pyformat
+        # `%s` markers to the server unexpanded — every parameterised
+        # statement in this destination then dies server-side with
+        # PARSE_SYNTAX_ERROR. Opt back into client-side inline rendering,
+        # which this destination's `%s` binds were written against (the
+        # connector renders values into the SQL text, matching the
+        # snowflake-connector default this file's SQL was modelled on).
+        # "silent" suppresses the per-connection deprecation warning; the
+        # native-`?` migration is tracked as a follow-up.
         return sql.connect(
             server_hostname=host,
             http_path=http_path,
             access_token=token,
+            use_inline_params="silent",
         )

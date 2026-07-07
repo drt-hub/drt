@@ -29,6 +29,14 @@ export DRT_SMOKE_SNOWFLAKE_ACCOUNT=...        # see the secret list below
 pytest -m dwh_smoke tests/integration/dwh/test_snowflake_smoke.py -v
 ```
 
+## Provisioning the accounts
+
+Reproducible setup scripts for the throwaway accounts these secrets come from
+live in [`provisioning/`](./provisioning/) — one per warehouse, plus a
+step-by-step runbook (sign up → provision → collect → register → dispatch).
+They create only the empty vessel + cost guardrails; the tests seed and clean
+up their own tables.
+
 ## Required repo secrets (maintainer-owned)
 
 Add these under **Settings → Secrets and variables → Actions**. Per the split,
@@ -45,6 +53,23 @@ the cloud accounts and the "verified ✓" sign-off are the maintainer's
 | `SMOKE_SNOWFLAKE_SCHEMA` | |
 | `SMOKE_SNOWFLAKE_WAREHOUSE` | |
 
+Snowflake prerequisites (#671):
+
+- A **throwaway database + schema** the role can `CREATE`/`DROP` tables in, plus a
+  running **virtual warehouse** for compute. Scope the grants to the throwaway
+  schema, not the whole account — the swap leg builds and drops a
+  `<table>__drt_swap` shadow, and the complex-type leg creates ARRAY / OBJECT /
+  VARIANT tables.
+- Least-privilege grants for the role: `USAGE` on the warehouse + database +
+  schema, and `CREATE TABLE` on the schema (`ALTER TABLE ... SWAP WITH` needs
+  ownership/`OWNERSHIP`-equivalent on both names, which the creating role holds
+  for tables it created).
+- The Snowflake leg drives four paths against the throwaway schema — `mode: insert`,
+  `replace_strategy: swap` (`ALTER TABLE ... SWAP WITH` #434), complex-type
+  `PARSE_JSON` serialization (VARIANT / OBJECT / ARRAY #317 Layer 3 / #653), and
+  `test_connection` — and drops everything it creates (target + `__drt_swap`
+  shadow) in `finally`.
+
 **Databricks** (#672)
 | Secret | Notes |
 | --- | --- |
@@ -54,12 +79,45 @@ the cloud accounts and the "verified ✓" sign-off are the maintainer's
 | `SMOKE_DATABRICKS_CATALOG` | |
 | `SMOKE_DATABRICKS_SCHEMA` | |
 
+Databricks prerequisites (#672):
+
+- A **Unity Catalog** catalog + schema the token principal can write to (Hive
+  Metastore works too — set the catalog to `hive_metastore`). All tables are
+  created **Delta** (`USING DELTA`): the `replace_strategy: swap` leg relies on
+  Delta `INSERT OVERWRITE` snapshot-isolation atomicity.
+- A running **SQL warehouse**; its HTTP path is `SMOKE_DATABRICKS_HTTP_PATH`.
+  The complex-type leg uses a `VARIANT` column, so the warehouse must be on a
+  channel that supports VARIANT (current serverless/pro warehouses do).
+- Least-privilege grants for the token principal: `USE CATALOG` + `USE SCHEMA`,
+  plus `CREATE TABLE` / `MODIFY` on the smoke schema — the swap leg builds and
+  drops a `<table>__drt_swap` shadow, and the complex-type leg creates ARRAY /
+  STRUCT / VARIANT tables. Scope the grants to the throwaway schema, not the
+  whole catalog.
+- The `insert` + `replace_strategy: swap` + complex-type (`from_json` /
+  `parse_json`) + `test_connection` legs all run against the same throwaway
+  schema and drop everything they create in `finally`.
+
 **BigQuery** (#673)
 | Secret | Notes |
 | --- | --- |
 | `SMOKE_BIGQUERY_PROJECT` | |
 | `SMOKE_BIGQUERY_DATASET` | a throwaway dataset |
 | `SMOKE_BIGQUERY_KEYFILE_JSON` | full service-account JSON; the workflow writes it to a temp file |
+
+BigQuery prerequisites (#673):
+
+- A **billing-enabled** project (BigQuery jobs require an active billing account,
+  even for tiny throwaway tables).
+- **Service-account keyfile** auth. The BigQuery leg drives two write paths — the
+  streaming `insert` path and the temp-table `MERGE` path (`<table>_drt_tmp` →
+  `MERGE` → drop, #645) — both against a throwaway dataset.
+- Least-privilege roles for the service account: `roles/bigquery.jobUser` on the
+  project (to run load/query/MERGE jobs) **plus** dataset-scoped
+  `roles/bigquery.dataEditor` on the smoke dataset (to create/insert/drop the
+  target + `_drt_tmp` tables). Avoid granting project-wide `dataEditor`.
+- Caveat: if the org enforces the `iam.disableServiceAccountKeyCreation`
+  constraint, a keyfile can't be minted for the SA — provision the key in a
+  project/folder where that policy is not enforced, or use an exempted SA.
 
 ## Adding a warehouse leg
 

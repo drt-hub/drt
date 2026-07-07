@@ -33,6 +33,11 @@ def _config(**overrides: Any) -> DatabricksDestinationConfig:
         "catalog": "main",
         "schema": "default",  # alias form — populated into schema_
         "table": "user_scores",
+        # Layer 3 (#317) is on by default; these pre-existing tests assert exact
+        # mock call counts, so disable introspection here (schema-aware behaviour
+        # is covered in test_databricks_schema_aware.py). Mirrors the Snowflake
+        # destination tests.
+        "introspect_schema": False,
     }
     defaults.update(overrides)
     return DatabricksDestinationConfig.model_validate(defaults)
@@ -160,6 +165,11 @@ class TestDatabricksDestinationLoad:
         assert conn_kwargs["server_hostname"] == "dbc-abc123.cloud.databricks.com"
         assert conn_kwargs["http_path"] == "/sql/1.0/warehouses/xyz789"
         assert conn_kwargs["access_token"] == "dapi-test-token"
+        # Connector >=3.0 defaults to native paramstyle (`?`) and forwards the
+        # destination's pyformat `%s` markers unexpanded -> server-side
+        # PARSE_SYNTAX_ERROR on every parameterised write. The inline opt-in
+        # is load-bearing; losing it breaks all writes on a live warehouse.
+        assert conn_kwargs["use_inline_params"] == "silent"
 
     def test_insert_mode_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)

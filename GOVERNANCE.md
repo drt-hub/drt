@@ -1,5 +1,3 @@
-[English](./GOVERNANCE.md) | [日本語](./GOVERNANCE.ja.md)
-
 # Governance
 
 drt is an open-source project. This document explains how decisions are made, who has what permissions, and how contributors grow into trusted roles.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -205,10 +206,15 @@ class TestDocsGenerateCLI:
         assert result.exit_code != 0
         assert "v0.8.x" in str(result.exception) or "v0.8.x" in (result.output or "")
 
-    def test_generate_html_not_yet_implemented(self) -> None:
+    def test_generate_html_writes_static_site(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        _write_project(tmp_path)
         result = runner.invoke(app, ["docs", "generate", "--format", "html"])
-        assert result.exit_code != 0
-        assert "P3" in str(result.exception) or "P3" in (result.output or "")
+        assert result.exit_code == 0, result.output
+        assert (tmp_path / "target" / "docs" / "index.html").exists()
+        assert (tmp_path / "target" / "docs" / "assets" / "style.css").exists()
 
     def test_generate_unknown_format_is_bad_param(self) -> None:
         result = runner.invoke(app, ["docs", "generate", "--format", "xml"])

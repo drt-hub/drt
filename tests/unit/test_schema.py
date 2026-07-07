@@ -12,11 +12,12 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 from drt.config.models import (
+    DatabricksDestinationConfig,
     MySQLDestinationConfig,
     PostgresDestinationConfig,
     SnowflakeDestinationConfig,
 )
-from drt.destinations.schema import describe_columns
+from drt.destinations.schema import describe_columns, describe_databricks_ddls
 
 
 def _pg_config(table: str = "public.events") -> PostgresDestinationConfig:
@@ -225,6 +226,105 @@ def test_snowflake_query_targets_db_information_schema_case_insensitively(
 def test_snowflake_empty_result_returns_none(mock_connect: MagicMock) -> None:
     mock_connect.return_value = _sf_conn_returning([])
     assert describe_columns(_sf_config()) is None
+
+
+# ---------------------------------------------------------------------------
+# Databricks — STRUCT/MAP/ARRAY/VARIANT → json (load via from_json / parse_json)
+# ---------------------------------------------------------------------------
+
+
+def _dbx_config() -> DatabricksDestinationConfig:
+    return DatabricksDestinationConfig(
+        type="databricks",
+        host_env="H",
+        http_path_env="HP",
+        token_env="T",
+        catalog="main",
+        **{"schema": "analytics"},
+        table="events",
+        upsert_key=["id"],
+    )
+
+
+@patch("drt.destinations.databricks.DatabricksDestination._connect")
+def test_databricks_maps_complex_types_to_json(mock_connect: MagicMock) -> None:
+    # Databricks uses ``with conn.cursor() as cur`` — same context-manager wiring
+    # as Snowflake, so reuse that helper.
+    mock_connect.return_value = _sf_conn_returning(
+        [
+            ("id", "BIGINT"),
+            ("payload", "VARIANT"),
+            ("profile", "STRUCT"),
+            ("attrs", "MAP"),
+            ("tags", "ARRAY"),
+            ("name", "STRING"),
+        ]
+    )
+    assert describe_columns(_dbx_config()) == {
+        "id": "scalar",
+        "payload": "json",
+        "profile": "json",
+        "attrs": "json",
+        "tags": "json",
+        "name": "scalar",
+    }
+
+
+@patch("drt.destinations.databricks.DatabricksDestination._connect")
+def test_databricks_query_targets_catalog_information_schema(
+    mock_connect: MagicMock,
+) -> None:
+    conn = _sf_conn_returning([("id", "BIGINT")])
+    mock_connect.return_value = conn
+    describe_columns(_dbx_config())
+    cur = conn.cursor.return_value.__enter__.return_value
+    sql, params = cur.execute.call_args[0]
+    assert "main.information_schema.columns" in sql
+    assert "lower(table_schema) = lower(%s)" in sql
+    assert params == ["analytics", "events"]
+
+
+@patch("drt.destinations.databricks.DatabricksDestination._connect")
+def test_databricks_empty_result_returns_none(mock_connect: MagicMock) -> None:
+    mock_connect.return_value = _sf_conn_returning([])
+    assert describe_columns(_dbx_config()) is None
+
+
+@patch("drt.destinations.databricks.DatabricksDestination._connect")
+def test_databricks_ddls_returns_struct_array_map_only(mock_connect: MagicMock) -> None:
+    # full_data_type carries the parameterised DDL from_json() needs. VARIANT
+    # (parse_json, no DDL) and scalars are excluded.
+    conn = _sf_conn_returning(
+        [
+            ("id", "BIGINT"),
+            ("payload", "VARIANT"),
+            ("profile", "STRUCT<name: STRING, age: INT>"),
+            ("attrs", "MAP<STRING, STRING>"),
+            ("tags", "ARRAY<STRING>"),
+            ("name", "STRING"),
+        ]
+    )
+    mock_connect.return_value = conn
+    assert describe_databricks_ddls(_dbx_config()) == {
+        "profile": "STRUCT<name: STRING, age: INT>",
+        "attrs": "MAP<STRING, STRING>",
+        "tags": "ARRAY<STRING>",
+    }
+    # the query must read full_data_type (not data_type)
+    sql, _ = conn.cursor.return_value.__enter__.return_value.execute.call_args[0]
+    assert "full_data_type" in sql
+
+
+@patch("drt.destinations.databricks.DatabricksDestination._connect")
+def test_databricks_ddls_none_when_no_complex_columns(mock_connect: MagicMock) -> None:
+    mock_connect.return_value = _sf_conn_returning([("id", "BIGINT"), ("payload", "VARIANT")])
+    assert describe_databricks_ddls(_dbx_config()) is None
+
+
+@patch("drt.destinations.databricks.DatabricksDestination._connect")
+def test_databricks_ddls_none_on_failure(mock_connect: MagicMock) -> None:
+    mock_connect.side_effect = RuntimeError("information_schema locked down")
+    assert describe_databricks_ddls(_dbx_config()) is None
 
 
 @patch("drt.destinations.snowflake.SnowflakeDestination._connect")

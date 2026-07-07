@@ -21,8 +21,7 @@
 #   5. Every registered source is mentioned in the /drt-init skill
 #   6. Every MCP tool is listed in drt/mcp/server.py's module docstring
 #   7. Every MCP tool appears in README.md's MCP tools table
-#   8. Every MCP tool appears in README.ja.md's MCP tools table
-#   9. Every registered connector appears in the drt_list_connectors inventory
+#   8. Every registered connector appears in the drt_list_connectors inventory
 #
 # Baseline: scripts/drift_baseline.txt holds known-accepted gaps, one
 # `check_id:item` per line (e.g. `dest-doc:discord`). Baselined items
@@ -47,7 +46,7 @@ CREATE_SYNC_SKILL="skills/drt/skills/drt-create-sync/SKILL.md"
 INIT_SKILL="skills/drt/skills/drt-init/SKILL.md"
 BASELINE="scripts/drift_baseline.txt"
 
-for f in "$REGISTRY" "$MCP_SERVER" "$CREATE_SYNC_SKILL" "$INIT_SKILL" README.md README.ja.md; do
+for f in "$REGISTRY" "$MCP_SERVER" "$CREATE_SYNC_SKILL" "$INIT_SKILL" README.md; do
     if [ ! -f "$f" ]; then
         echo "ERROR: expected file not found: $f" >&2
         exit 2
@@ -174,19 +173,16 @@ for tool in $mcp_tools; do
 done
 
 # ---------------------------------------------------------------------------
-# Check 7 + 8: MCP tool → README.md / README.ja.md MCP tools table
+# Check 7: MCP tool → README.md MCP tools table
 # ---------------------------------------------------------------------------
 for tool in $mcp_tools; do
     if ! grep -q "\`$tool\`" README.md; then
         report "mcp-readme" "$tool" "not in README.md MCP tools table"
     fi
-    if ! grep -q "\`$tool\`" README.ja.md; then
-        report "mcp-readme-ja" "$tool" "not in README.ja.md MCP tools table"
-    fi
 done
 
 # ---------------------------------------------------------------------------
-# Check 9: registered connector → drt_list_connectors inventory
+# Check 8: registered connector → drt_list_connectors inventory
 # The sources and destinations blocks are matched separately so a type
 # key present in one list can't mask its absence from the other (e.g.
 # "snowflake" in sources must not satisfy the destinations check).
