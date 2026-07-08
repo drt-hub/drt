@@ -231,6 +231,11 @@ drt mcp run
 | `drt_validate`        | Validate sync YAML configs                                                            |
 | `drt_get_schema`      | Return JSON Schema for config files                                                   |
 | `drt_list_connectors` | List available sources and destinations                                               |
+| `drt_dlq`             | Inspect a sync's Dead Letter Queue (depth + failed records)                           |
+| `drt_retry`           | Replay a sync's Dead Letter Queue (mirrors `drt retry`)                               |
+| `drt_get_manifest`    | Machine-readable sync catalog + lineage (`drt docs` JSON)                             |
+| `drt_list_profiles`   | List credential profiles (name + type, no secrets)                                    |
+| `drt_test_profile`    | Connectivity check for a credential profile                                            |
 | `drt_doctor`          | Environment diagnostics (mirrors `drt doctor`)                                        |
 
 ---
