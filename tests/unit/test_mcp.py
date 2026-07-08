@@ -416,3 +416,249 @@ async def test_server_lists_drt_doctor_tool() -> None:
     tools = await srv._local_provider._list_tools()
     tool_names = {t.name for t in tools}
     assert "drt_doctor" in tool_names
+
+
+# ---------------------------------------------------------------------------
+# drt_list_connectors — inventory / registry parity (#718)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_connectors_matches_connector_ssot(server: FastMCP) -> None:
+    """The MCP inventory must list *exactly* the registered connector types.
+
+    This is the test-time guard against the drift that let `salesforce_bulk`
+    silently fall out of the inventory: comparing against the `drt.config.
+    connectors` SSoT (kept in lockstep with the registry by
+    `test_cli_list_connectors`) catches both missing and extra entries.
+    """
+    from drt.config.connectors import DESTINATIONS, SOURCES
+
+    result = await call(server, "drt_list_connectors")
+    assert {c["type"] for c in result["destinations"]} == {t for t, _ in DESTINATIONS}
+    assert {c["type"] for c in result["sources"]} == {t for t, _ in SOURCES}
+
+
+# ---------------------------------------------------------------------------
+# drt_dlq — Dead Letter Queue inspection (#718, v0.7.9 parity)
+# ---------------------------------------------------------------------------
+
+
+def _seed_dlq(project_dir: Path, ids: list[int]) -> None:
+    from drt.state.dlq import DeadLetter, DlqStore
+
+    DlqStore(project_dir).append(
+        "notify",
+        [DeadLetter(record={"id": i}, error_message="boom") for i in ids],
+    )
+
+
+@pytest.mark.asyncio
+async def test_dlq_empty_project_reports_no_depths(server: FastMCP) -> None:
+    result = await call(server, "drt_dlq")
+    assert result == {"depths": {}}
+
+
+@pytest.mark.asyncio
+async def test_dlq_reports_depth_and_records(server: FastMCP, project_dir: Path) -> None:
+    _seed_dlq(project_dir, [1, 2, 3])
+    result = await call(server, "drt_dlq", sync_name="notify")
+    assert result["depth"] == 3
+    assert [r["record"]["id"] for r in result["records"]] == [1, 2, 3]
+    assert result["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_dlq_truncates_records_to_limit(server: FastMCP, project_dir: Path) -> None:
+    _seed_dlq(project_dir, [1, 2, 3, 4, 5])
+    result = await call(server, "drt_dlq", sync_name="notify", limit=2)
+    assert result["depth"] == 5
+    assert len(result["records"]) == 2
+    assert result["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_dlq_all_depths(server: FastMCP, project_dir: Path) -> None:
+    _seed_dlq(project_dir, [1, 2])
+    result = await call(server, "drt_dlq")
+    assert result["depths"] == {"notify": 2}
+
+
+# ---------------------------------------------------------------------------
+# drt_retry — Dead Letter Queue replay (#718, mirrors `drt retry`)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_retry_empty_queue(server: FastMCP) -> None:
+    result = await call(server, "drt_retry", sync_name="notify")
+    assert result["status"] == "empty"
+
+
+@pytest.mark.asyncio
+async def test_retry_unknown_sync(server: FastMCP) -> None:
+    result = await call(server, "drt_retry", sync_name="nope")
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_retry_negative_limit(server: FastMCP) -> None:
+    result = await call(server, "drt_retry", sync_name="notify", limit=-1)
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_retry_dry_run_sends_nothing(server: FastMCP, project_dir: Path) -> None:
+    _seed_dlq(project_dir, [1, 2, 3])
+    result = await call(server, "drt_retry", sync_name="notify", dry_run=True)
+    assert result["status"] == "dry_run"
+    assert result["would_retry"] == 3
+    from drt.state.dlq import DlqStore
+
+    assert DlqStore(project_dir).depth("notify") == 3  # untouched
+
+
+@pytest.mark.asyncio
+async def test_retry_clear(server: FastMCP, project_dir: Path) -> None:
+    _seed_dlq(project_dir, [1, 2, 3])
+    result = await call(server, "drt_retry", sync_name="notify", clear=True)
+    assert result["status"] == "cleared"
+    assert result["cleared"] == 3
+    from drt.state.dlq import DlqStore
+
+    assert DlqStore(project_dir).depth("notify") == 0
+
+
+# ---------------------------------------------------------------------------
+# drt_get_manifest — sync catalog + lineage (#718, `drt docs` JSON)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_manifest_returns_catalog(server: FastMCP) -> None:
+    result = await call(server, "drt_get_manifest")
+    assert isinstance(result, dict)
+    assert "schema_version" in result
+    assert [s["name"] for s in result["syncs"]] == ["notify"]
+
+
+# ---------------------------------------------------------------------------
+# drt_list_profiles / drt_test_profile — credential diagnostics (#718)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_profiles(server: FastMCP, monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        "drt.config.credentials.load_raw_profiles",
+        lambda: {"default": {"type": "duckdb"}, "prod": {"type": "bigquery"}},
+    )
+    result = await call(server, "drt_list_profiles")
+    assert result["profiles"] == [
+        {"name": "default", "type": "duckdb"},
+        {"name": "prod", "type": "bigquery"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_test_profile_not_found(server: FastMCP, monkeypatch: Any) -> None:
+    def _raise(_name: str) -> Any:
+        raise KeyError("Profile 'nope' not found.")
+
+    monkeypatch.setattr("drt.config.credentials.load_profile", _raise)
+    result = await call(server, "drt_test_profile", name="nope")
+    assert result["ok"] is False
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_test_profile_ok(server: FastMCP, monkeypatch: Any) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "drt.config.credentials.load_profile",
+        lambda _name: SimpleNamespace(type="duckdb"),
+    )
+    monkeypatch.setattr(
+        "drt.connectors.registry.get_source",
+        lambda _profile: SimpleNamespace(test_connection=lambda _p: True),
+    )
+    result = await call(server, "drt_test_profile", name="default")
+    assert result == {"name": "default", "type": "duckdb", "ok": True}
+
+
+@pytest.mark.asyncio
+async def test_test_profile_connection_error(server: FastMCP, monkeypatch: Any) -> None:
+    """A source whose test_connection raises → ok=False with the error message
+    (the profile loaded fine, so `type` is still reported)."""
+    from types import SimpleNamespace
+
+    def _boom(_profile: object) -> bool:
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(
+        "drt.config.credentials.load_profile",
+        lambda _name: SimpleNamespace(type="postgres"),
+    )
+    monkeypatch.setattr(
+        "drt.connectors.registry.get_source",
+        lambda _profile: SimpleNamespace(test_connection=_boom),
+    )
+    result = await call(server, "drt_test_profile", name="prod")
+    assert result["ok"] is False
+    assert result["type"] == "postgres"
+    assert "connection refused" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# drt_run_sync — cursor_value / profile_name overrides (#718)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_sync_threads_profile_override_and_full_mode_cursor_guard(
+    project_dir: Path, monkeypatch: Any
+) -> None:
+    """`profile_name` is resolved via `resolve_profile_name(override, default)`,
+    and `cursor_value` is suppressed for a non-incremental sync (the fixture
+    `notify` is full-mode), mirroring the `drt run` guard."""
+    from drt.engine.sync import SyncResult
+
+    resolve_args: dict[str, Any] = {}
+    captured: dict[str, Any] = {}
+
+    def fake_resolve(override: str | None, default: str) -> str:
+        resolve_args["value"] = (override, default)
+        return "default"
+
+    def fake_run_sync(*_args: Any, **kwargs: Any) -> SyncResult:
+        captured.update(kwargs)
+        return SyncResult()
+
+    monkeypatch.setattr("drt.cli._helpers.resolve_profile_name", fake_resolve)
+    monkeypatch.setattr("drt.engine.sync.run_sync", fake_run_sync)
+    monkeypatch.setattr("drt.cli.main._get_source", lambda _profile: object())
+    monkeypatch.setattr("drt.cli.main._get_destination", lambda _sync: object())
+    monkeypatch.setattr("drt.config.credentials.load_profile", lambda _name: object())
+
+    srv = create_server(project_dir)
+    await call(
+        srv, "drt_run_sync", sync_name="notify", cursor_value="100", profile_name="prod"
+    )
+
+    assert resolve_args["value"] == ("prod", "default")
+    assert captured["cursor_value_override"] is None  # full-mode sync → guarded off
+
+
+@pytest.mark.asyncio
+async def test_server_lists_new_parity_tools() -> None:
+    srv = create_server()
+    tools = await srv._local_provider._list_tools()
+    names = {t.name for t in tools}
+    assert {
+        "drt_dlq",
+        "drt_retry",
+        "drt_get_manifest",
+        "drt_list_profiles",
+        "drt_test_profile",
+    } <= names
