@@ -1,41 +1,76 @@
-"""SQL utility functions for row count operations.
+"""Shared utilities for SQL destinations.
 
-Provides consistent interface for querying row counts across SQL destinations.
+Identifier quoting, row-count capability discovery, and mirror-mode guard
+messages — factored out so the SQL destinations don't each hand-roll them.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
-from drt.config.models import (
-    ClickHouseDestinationConfig,
-    DestinationConfig,
-    MySQLDestinationConfig,
-    PostgresDestinationConfig,
-)
+from drt.config.models import DestinationConfig
+
+
+def backtick_quote_ident(table: str) -> str:
+    """Backtick-quote a (possibly qualified) identifier.
+
+    ``mydb.scores`` -> ``\\`mydb\\`.\\`scores\\``` ; ``scores`` -> ``\\`scores\\```.
+
+    Shared by the MySQL and ClickHouse destinations, whose quoting rules are
+    identical.
+    """
+    if "." in table:
+        return "`" + "`.`".join(table.split(".")) + "`"
+    return f"`{table}`"
+
+
+@runtime_checkable
+class RowCountable(Protocol):
+    """A destination that can report its current table row count.
+
+    Capability is discovered structurally (``isinstance(dest, RowCountable)``)
+    rather than enumerated, so a new SQL destination that implements
+    ``get_row_count`` is picked up automatically.
+    """
+
+    def get_row_count(self, config: Any) -> int: ...
 
 
 def get_row_count_for_destination(
     destination: Any,
     config: DestinationConfig,
 ) -> int | None:
-    """Get current row count from a SQL destination table.
+    """Get the current row count from a SQL destination table.
 
     Args:
-        destination: Destination instance (must be a SQL destination class).
+        destination: Destination instance.
         config: Destination configuration with table name.
 
     Returns:
-        Row count as integer, or None if unable to determine (e.g., non-SQL destination).
+        Row count, or ``None`` when the destination can't report one
+        (e.g. REST API, Slack — anything without ``get_row_count``).
 
     Raises:
         Exception: If connection or query fails (should be caught by caller).
     """
-    if isinstance(config, PostgresDestinationConfig):
+    if isinstance(destination, RowCountable):
         return int(destination.get_row_count(config))
-    elif isinstance(config, MySQLDestinationConfig):
-        return int(destination.get_row_count(config))
-    elif isinstance(config, ClickHouseDestinationConfig):
-        return int(destination.get_row_count(config))
-    # Non-SQL destinations (REST API, Slack, etc.) don't support row count
     return None
+
+
+# Mirror-mode guard messages — centralized so the wording stays identical
+# across every SQL destination that raises them (the tests assert these
+# strings, so a per-file copy would silently drift).
+MIRROR_UPSERT_KEY_MSG = (
+    "sync.mode: mirror requires destination.upsert_key "
+    "(needed to identify which rows to DELETE)."
+)
+
+
+def unsupported_tracked_scope_msg(dialect: str) -> str:
+    """Message for ``mirror.strategy: tracked`` / ``mirror.scope`` on a
+    destination that doesn't support them yet (Postgres/MySQL only, #686)."""
+    return (
+        f"mirror.strategy: tracked / mirror.scope are not yet supported on {dialect} "
+        "(supported: postgres, mysql — see #686 follow-ups)."
+    )

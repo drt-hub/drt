@@ -205,11 +205,10 @@ class DatabricksDestination:
         # row touches Databricks.
         is_mirror = sync_options.mode == "mirror"
         if is_mirror and not config.upsert_key:
+            from drt.destinations.sql_utils import MIRROR_UPSERT_KEY_MSG
+
             conn.close()
-            raise ValueError(
-                "sync.mode: mirror requires destination.upsert_key "
-                "(needed to identify which rows to DELETE)."
-            )
+            raise ValueError(MIRROR_UPSERT_KEY_MSG)
         # mirror.strategy: tracked (#686) is Postgres/MySQL-only for now —
         # fail fast rather than silently falling back to the destination
         # diff, which has different (co-writer-unsafe) delete semantics.
@@ -218,11 +217,10 @@ class DatabricksDestination:
             and sync_options.mirror is not None
             and (sync_options.mirror.strategy == "tracked" or sync_options.mirror.scope)
         ):
+            from drt.destinations.sql_utils import unsupported_tracked_scope_msg
+
             conn.close()
-            raise ValueError(
-                "mirror.strategy: tracked / mirror.scope are not yet supported on databricks "
-                "(supported: postgres, mysql — see #686 follow-ups)."
-            )
+            raise ValueError(unsupported_tracked_scope_msg("databricks"))
         try:
             with conn.cursor() as cur:
                 columns = list(records[0].keys())

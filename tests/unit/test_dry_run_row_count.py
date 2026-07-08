@@ -16,7 +16,7 @@ from drt.config.models import (
     SyncConfig,
     SyncOptions,
 )
-from drt.destinations.sql_utils import get_row_count_for_destination
+from drt.destinations.sql_utils import RowCountable, get_row_count_for_destination
 
 
 @pytest.fixture
@@ -137,7 +137,7 @@ def test_print_row_count_diff_handles_connection_error(
 ) -> None:
     """Test that connection errors are handled gracefully."""
     # Mock destination that raises an exception
-    bad_destination = Mock()
+    bad_destination = Mock(spec=RowCountable)
     bad_destination.get_row_count.side_effect = ConnectionError("Connection failed")
 
     _print_row_count_diff(mock_sync_config, bad_destination, new_rows=100)
@@ -454,7 +454,7 @@ def test_get_row_count_for_destination_postgres() -> None:
         upsert_key=["id"],
     )
 
-    mock_destination = Mock()
+    mock_destination = Mock(spec=RowCountable)
     mock_destination.get_row_count.return_value = 100
 
     result = get_row_count_for_destination(mock_destination, postgres_config)
@@ -474,7 +474,7 @@ def test_get_row_count_for_destination_mysql() -> None:
         upsert_key=["id"],
     )
 
-    mock_destination = Mock()
+    mock_destination = Mock(spec=RowCountable)
     mock_destination.get_row_count.return_value = 200
 
     result = get_row_count_for_destination(mock_destination, mysql_config)
@@ -494,7 +494,7 @@ def test_get_row_count_for_destination_clickhouse() -> None:
         upsert_key=["id"],
     )
 
-    mock_destination = Mock()
+    mock_destination = Mock(spec=RowCountable)
     mock_destination.get_row_count.return_value = 300
 
     result = get_row_count_for_destination(mock_destination, clickhouse_config)
@@ -504,13 +504,17 @@ def test_get_row_count_for_destination_clickhouse() -> None:
 
 
 def test_get_row_count_for_destination_non_sql_returns_none() -> None:
-    """Test get_row_count_for_destination() returns None for non-SQL destination."""
-    # Use a mock config that's not a SQL destination type
-    mock_config = Mock(spec=DestinationConfig)
-    mock_destination = Mock()
+    """A destination without get_row_count (REST API, Slack, …) returns None.
 
-    result = get_row_count_for_destination(mock_destination, mock_config)
+    Uses a real object, not a bare ``Mock()``: a ``Mock`` auto-creates a
+    ``get_row_count`` attribute, so whether it satisfies the ``RowCountable``
+    protocol varies by Python/mock patch version. A class that genuinely lacks
+    the method is deterministically not row-countable in every environment.
+    """
+
+    class _NonSqlDestination:
+        pass  # no get_row_count → not RowCountable
+
+    result = get_row_count_for_destination(_NonSqlDestination(), Mock(spec=DestinationConfig))
 
     assert result is None
-    # Should not call get_row_count on non-SQL destination
-    mock_destination.get_row_count.assert_not_called()

@@ -237,10 +237,9 @@ class PostgresDestination:
                 # don't count as "source state").
                 if sync_options.mode == "mirror":
                     if not config.upsert_key:
-                        raise ValueError(
-                            "sync.mode: mirror requires destination.upsert_key "
-                            "(needed to identify which rows to DELETE)."
-                        )
+                        from drt.destinations.sql_utils import MIRROR_UPSERT_KEY_MSG
+
+                        raise ValueError(MIRROR_UPSERT_KEY_MSG)
                     if self._mirror_keys is None:
                         self._mirror_keys = []
                     # Re-extract from records minus the ones in row_errors.

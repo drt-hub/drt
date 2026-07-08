@@ -100,10 +100,9 @@ class ClickHouseDestination:
                 # before any INSERT so a misconfigured sync fails fast
                 # rather than after partially populating the table.
                 if sync_options.mode == "mirror" and not config.upsert_key:
-                    raise ValueError(
-                        "sync.mode: mirror requires destination.upsert_key "
-                        "(needed to identify which rows to DELETE)."
-                    )
+                    from drt.destinations.sql_utils import MIRROR_UPSERT_KEY_MSG
+
+                    raise ValueError(MIRROR_UPSERT_KEY_MSG)
                 # mirror.strategy: tracked (#686) is Postgres/MySQL-only for
                 # now — fail fast rather than silently falling back to the
                 # destination diff, whose delete semantics differ.
@@ -112,11 +111,9 @@ class ClickHouseDestination:
                     and sync_options.mirror is not None
                     and (sync_options.mirror.strategy == "tracked" or sync_options.mirror.scope)
                 ):
-                    raise ValueError(
-                        "mirror.strategy: tracked / mirror.scope are not yet supported on "
-                        "clickhouse (supported: postgres, mysql — see #686 "
-                        "follow-ups)."
-                    )
+                    from drt.destinations.sql_utils import unsupported_tracked_scope_msg
+
+                    raise ValueError(unsupported_tracked_scope_msg("clickhouse"))
 
                 # clickhouse-connect's client.insert(table=...) interpolates
                 # the table raw into "INSERT INTO {table} ..." with no quoting
@@ -337,12 +334,11 @@ class ClickHouseDestination:
     def _quote_ident(table: str) -> str:
         """Backtick-quote a (possibly database-qualified) identifier.
 
-        ``mydb.scores`` -> ``\\`mydb\\`.\\`scores\\```
-        ``scores``      -> ``\\`scores\\```
+        ``mydb.scores`` -> ``\\`mydb\\`.\\`scores\\``` ; ``scores`` -> ``\\`scores\\```.
         """
-        if "." in table:
-            return "`" + "`.`".join(table.split(".")) + "`"
-        return f"`{table}`"
+        from drt.destinations.sql_utils import backtick_quote_ident
+
+        return backtick_quote_ident(table)
 
     def get_row_count(self, config: DestinationConfig) -> int:
         """Get the current row count from the destination table.
