@@ -371,71 +371,12 @@ def create_server(project_dir: Path | None = None) -> Any:
             Dict with 'sources' and 'destinations' lists, each containing
             connector name, type key, and install extras (if any).
         """
-        # Keep both lists in lockstep with drt/connectors/registry.py —
-        # scripts/check_drift.sh (mcp-inventory-dest / mcp-inventory-src)
-        # fails the weekly drift audit when a registered connector is
-        # missing here.
-        return {
-            "sources": [
-                {"name": "BigQuery", "type": "bigquery", "install": "drt-core[bigquery]"},
-                {"name": "DuckDB", "type": "duckdb", "install": "(core)"},
-                {"name": "SQLite", "type": "sqlite", "install": "(core)"},
-                {"name": "PostgreSQL", "type": "postgres", "install": "drt-core[postgres]"},
-                {"name": "Redshift", "type": "redshift", "install": "drt-core[redshift]"},
-                {"name": "ClickHouse", "type": "clickhouse", "install": "drt-core[clickhouse]"},
-                {"name": "Snowflake", "type": "snowflake", "install": "drt-core[snowflake]"},
-                {"name": "MySQL", "type": "mysql", "install": "drt-core[mysql]"},
-                {"name": "Databricks", "type": "databricks", "install": "drt-core[databricks]"},
-                {"name": "SQL Server", "type": "sqlserver", "install": "drt-core[sqlserver]"},
-                {"name": "REST API", "type": "rest_api", "install": "(core)"},
-                {"name": "Delta Lake", "type": "deltalake", "install": "drt-core[deltalake]"},
-                {"name": "Iceberg", "type": "iceberg", "install": "drt-core[iceberg]"},
-            ],
-            "destinations": [
-                {"name": "REST API", "type": "rest_api", "install": "(core)"},
-                {"name": "Slack", "type": "slack", "install": "(core)"},
-                {"name": "Discord", "type": "discord", "install": "(core)"},
-                {"name": "Microsoft Teams", "type": "teams", "install": "(core)"},
-                {"name": "GitHub Actions", "type": "github_actions", "install": "(core)"},
-                {"name": "HubSpot", "type": "hubspot", "install": "(core)"},
-                {"name": "Amplitude", "type": "amplitude", "install": "(core)"},
-                {"name": "Klaviyo", "type": "klaviyo", "install": "(core)"},
-                {"name": "Mixpanel", "type": "mixpanel", "install": "(core)"},
-                {"name": "Zendesk", "type": "zendesk", "install": "(core)"},
-                {
-                    "name": "Elasticsearch / OpenSearch",
-                    "type": "elasticsearch",
-                    "install": "(core)",
-                },
-                {"name": "Google Sheets", "type": "google_sheets", "install": "drt-core[sheets]"},
-                {"name": "PostgreSQL", "type": "postgres", "install": "drt-core[postgres]"},
-                {"name": "MySQL", "type": "mysql", "install": "drt-core[mysql]"},
-                {"name": "ClickHouse", "type": "clickhouse", "install": "drt-core[clickhouse]"},
-                {"name": "Snowflake", "type": "snowflake", "install": "drt-core[snowflake]"},
-                {
-                    "name": "Databricks Delta Lake",
-                    "type": "databricks",
-                    "install": "drt-core[databricks]",
-                },
-                {"name": "BigQuery", "type": "bigquery", "install": "drt-core[bigquery]"},
-                {"name": "Amazon S3", "type": "s3", "install": "drt-core[s3]"},
-                {"name": "Google Cloud Storage", "type": "gcs", "install": "drt-core[gcs]"},
-                {"name": "Azure Blob Storage", "type": "azure_blob", "install": "drt-core[azure]"},
-                {"name": "Parquet", "type": "parquet", "install": "drt-core[parquet]"},
-                {"name": "CSV/JSON/JSONL", "type": "file", "install": "(core)"},
-                {"name": "Jira", "type": "jira", "install": "(core)"},
-                {"name": "Linear", "type": "linear", "install": "(core)"},
-                {"name": "SendGrid", "type": "sendgrid", "install": "(core)"},
-                {"name": "Notion", "type": "notion", "install": "(core)"},
-                {"name": "Airtable", "type": "airtable", "install": "(core)"},
-                {"name": "Twilio SMS", "type": "twilio", "install": "(core)"},
-                {"name": "Intercom", "type": "intercom", "install": "(core)"},
-                {"name": "Email SMTP", "type": "email_smtp", "install": "(core)"},
-                {"name": "Google Ads", "type": "google_ads", "install": "(core)"},
-                {"name": "Salesforce Bulk", "type": "salesforce_bulk", "install": "(core)"},
-                {"name": "Staged Upload", "type": "staged_upload", "install": "(core)"},
-            ],
-        }
+        # Derived from the drt.config.connectors SSoT (kept in lockstep with
+        # drt/connectors/registry.py by test_cli_list_connectors), so this
+        # inventory can never fall out of sync with the registry.
+        from drt.config.connectors import connector_inventory
+
+        return connector_inventory()
 
     # -----------------------------------------------------------------------
     # drt_dlq
