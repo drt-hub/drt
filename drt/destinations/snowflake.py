@@ -353,23 +353,21 @@ class SnowflakeDestination:
         records: list[dict[str, Any]],
         sync_options: SyncOptions,
         result: SyncResult,
-        columns: list[str] | None = None,
-        json_cols: list[str] | None = None,
+        columns: list[str],
+        json_cols: list[str],
     ) -> None:
         """Execute a parameterised INSERT per row, honouring ``on_error``.
 
-        When ``columns`` is given, values are ordered to it and JSON columns
-        (``json_cols``) are ``json.dumps``'d to feed the ``PARSE_JSON`` bind
-        sites; otherwise the row's values are bound positionally (legacy path).
+        Values are ordered to ``columns`` and JSON columns (``json_cols``) are
+        ``json.dumps``'d to feed the ``PARSE_JSON`` bind sites. Ordering by
+        ``columns`` (via ``row.get`` in ``_bind_row``) keeps binds correct even
+        when a source yields rows with a varying key order/set — so
+        ``columns``/``json_cols`` are required, not an optional
+        ``list(row.values())`` fallback (#699).
         """
         for i, row in enumerate(records):
             try:
-                bound = (
-                    _bind_row(row, columns, json_cols or [])
-                    if columns is not None
-                    else list(row.values())
-                )
-                cur.execute(sql, bound)
+                cur.execute(sql, _bind_row(row, columns, json_cols))
                 result.success += 1
             except Exception as e:
                 result.failed += 1

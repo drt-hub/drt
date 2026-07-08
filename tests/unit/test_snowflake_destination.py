@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from drt.config.models import SnowflakeDestinationConfig, SyncOptions
-from drt.destinations.snowflake import SnowflakeDestination
+from drt.destinations.snowflake import SnowflakeDestination, _bind_row
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -568,3 +568,19 @@ class TestSnowflakeSchemaIntrospection:
         assert "VALUES (%s, %s)" in sql
         assert "PARSE_JSON" not in sql
         assert bound == [1, 0.5]
+
+
+def test_bind_row_orders_by_columns_regardless_of_row_key_order() -> None:
+    """The order-safe path (#699): ``_bind_row`` orders values by ``columns`` via
+    ``row.get``, so rows with a varying key order/set (REST especially) never
+    misalign. This is why the old ``list(row.values())`` fallback was unsafe and
+    is now removed — ``columns``/``json_cols`` are required."""
+    columns = ["id", "name", "email"]
+    same_order = {"id": 1, "name": "Alice", "email": "a@x.com"}
+    diff_order = {"email": "b@x.com", "id": 2, "name": "Bob"}  # keys reordered
+    missing_key = {"id": 3, "name": "Carol"}  # no "email"
+    assert _bind_row(same_order, columns, []) == [1, "Alice", "a@x.com"]
+    # ordered by columns, NOT by dict insertion order:
+    assert _bind_row(diff_order, columns, []) == [2, "Bob", "b@x.com"]
+    # a missing key becomes None in its column slot, never a shifted misalignment:
+    assert _bind_row(missing_key, columns, []) == [3, "Carol", None]

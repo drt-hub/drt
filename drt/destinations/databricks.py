@@ -437,23 +437,21 @@ class DatabricksDestination:
         records: list[dict[str, Any]],
         sync_options: SyncOptions,
         result: SyncResult,
-        columns: list[str] | None = None,
-        json_cols: list[str] | None = None,
+        columns: list[str],
+        json_cols: list[str],
     ) -> None:
         """Execute a parameterised INSERT per row, honouring ``on_error``.
 
-        When ``columns`` is given, values are ordered to it and json columns
-        (``json_cols``) are ``json.dumps``'d so the ``from_json`` / ``parse_json``
-        bind receives a JSON string (Layer 3, #317).
+        Values are ordered to ``columns`` and json columns (``json_cols``) are
+        ``json.dumps``'d so the ``from_json`` / ``parse_json`` bind receives a
+        JSON string (Layer 3, #317). Ordering by ``columns`` (via ``row.get`` in
+        ``_bind_row``) keeps binds correct even when a source yields rows with a
+        varying key order/set — so ``columns``/``json_cols`` are required, not an
+        optional ``list(row.values())`` fallback (#699).
         """
         for i, row in enumerate(records):
             try:
-                values = (
-                    _bind_row(row, columns, json_cols or [])
-                    if columns is not None
-                    else list(row.values())
-                )
-                cur.execute(sql, values)
+                cur.execute(sql, _bind_row(row, columns, json_cols))
                 result.success += 1
             except Exception as e:
                 result.failed += 1
