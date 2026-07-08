@@ -34,6 +34,7 @@ from drt.config.models import (
 from drt.destinations._serializer import serialize_complex_value
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
+from drt.destinations.sql_base import BaseSqlDestination
 
 try:
     from psycopg2.extras import Json as _Psycopg2Json
@@ -128,45 +129,12 @@ def _with_relation_suffix(table: str, suffix: str) -> str:
     return _join_qualified(schema, f"{relation}{suffix}")
 
 
-class PostgresDestination:
+class PostgresDestination(BaseSqlDestination):
     """Upsert or replace records into a PostgreSQL table.
 
-    Implements ConnectionTestable via test_connection().
+    Implements ConnectionTestable via test_connection(). Per-sync state, schema
+    resolution, and mirror bookkeeping come from ``BaseSqlDestination``.
     """
-
-    def __init__(self) -> None:
-        self._replace_truncated: bool = False
-        self._swap_shadow_created: bool = False
-        self._swap_table: str | None = None
-        # sync.mode: mirror (#340) — accumulates upsert_key tuples seen
-        # across batches so finalize_sync can DELETE missing rows.
-        # ``None`` means mirror mode hasn't engaged yet (no batch with
-        # records); finalize_sync treats that as "skip DELETE" — safety
-        # against deleting everything when the source produced no data.
-        self._mirror_keys: list[tuple[Any, ...]] | None = None
-        # mirror.scope (#687) — distinct scope-column value tuples observed
-        # across batches; the destination-strategy DELETE is restricted to
-        # rows whose scope values are in this set.
-        self._mirror_scopes: set[tuple[Any, ...]] | None = None
-        # Layer 3 (#317): INFORMATION_SCHEMA map, fetched once per table per
-        # sync. ``None`` value = introspection ran but is unavailable; the
-        # key being absent = not yet fetched.
-        self._schema_cache: dict[str, dict[str, str] | None] = {}
-
-    def _resolve_schema(self, config: PostgresDestinationConfig) -> dict[str, str] | None:
-        """Column → type-category map for the target table, cached per sync.
-
-        Returns ``None`` (Layer 3 inactive) when the user disabled
-        ``introspect_schema``, declared ``json_columns`` explicitly (Layer 2
-        wins), or introspection isn't available.
-        """
-        if not config.introspect_schema or config.json_columns is not None:
-            return None
-        if config.table not in self._schema_cache:
-            from drt.destinations.schema import describe_columns
-
-            self._schema_cache[config.table] = describe_columns(config)
-        return self._schema_cache[config.table]
 
     def load(
         self,
@@ -178,21 +146,7 @@ class PostgresDestination:
         if not records:
             return SyncResult()
 
-        # mirror.scope (#687) — a scope column absent from the model output
-        # is a config error; fail fast before any row is written.
-        if (
-            sync_options.mode == "mirror"
-            and sync_options.mirror is not None
-            and sync_options.mirror.scope
-        ):
-            missing = [
-                c for c in sync_options.mirror.scope if c not in records[0]
-            ]
-            if missing:
-                raise ValueError(
-                    "mirror.scope columns missing from the model output: "
-                    f"{missing} (available: {sorted(records[0].keys())})"
-                )
+        self._validate_mirror_scope(records, sync_options)
 
         conn = self._connect(config)
         result = SyncResult()
@@ -231,42 +185,10 @@ class PostgresDestination:
                     config,
                     sync_options,
                 )
-                # sync.mode: mirror (#340) — accumulate upsert_key tuples
-                # for the finalize_sync DELETE pass. Only keys from
-                # successfully-loaded records are tracked (failed records
-                # don't count as "source state").
+                # sync.mode: mirror (#340 / #687) — record the observed
+                # upsert_key (and scope) tuples for the finalize_sync DELETE.
                 if sync_options.mode == "mirror":
-                    if not config.upsert_key:
-                        from drt.destinations.sql_utils import MIRROR_UPSERT_KEY_MSG
-
-                        raise ValueError(MIRROR_UPSERT_KEY_MSG)
-                    if self._mirror_keys is None:
-                        self._mirror_keys = []
-                    # Re-extract from records minus the ones in row_errors.
-                    failed_indices = {
-                        re.batch_index for re in result.row_errors
-                    }
-                    # mirror.scope (#687) — also collect distinct scope
-                    # value tuples so the DELETE can be pruned to parents
-                    # observed in this run.
-                    scope_cols = (
-                        sync_options.mirror.scope
-                        if sync_options.mirror is not None
-                        else None
-                    )
-                    if scope_cols and self._mirror_scopes is None:
-                        self._mirror_scopes = set()
-                    for idx, record in enumerate(records):
-                        if idx in failed_indices:
-                            continue
-                        self._mirror_keys.append(
-                            tuple(record.get(k) for k in config.upsert_key)
-                        )
-                        if scope_cols:
-                            assert self._mirror_scopes is not None
-                            self._mirror_scopes.add(
-                                tuple(record.get(c) for c in scope_cols)
-                            )
+                    self._accumulate_mirror_state(records, result, config, sync_options)
         finally:
             conn.close()
 
