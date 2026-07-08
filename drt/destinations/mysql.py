@@ -179,10 +179,9 @@ class MySQLDestination:
                 # don't count as "source state").
                 if sync_options.mode == "mirror":
                     if not config.upsert_key:
-                        raise ValueError(
-                            "sync.mode: mirror requires destination.upsert_key "
-                            "(needed to identify which rows to DELETE)."
-                        )
+                        from drt.destinations.sql_utils import MIRROR_UPSERT_KEY_MSG
+
+                        raise ValueError(MIRROR_UPSERT_KEY_MSG)
                     if self._mirror_keys is None:
                         self._mirror_keys = []
                     failed_indices = {
@@ -250,12 +249,11 @@ class MySQLDestination:
     def _quote_ident(table: str) -> str:
         """Backtick-quote a (possibly schema-qualified) identifier.
 
-        ``mydb.scores`` -> ``\\`mydb\\`.\\`scores\\```
-        ``scores``      -> ``\\`scores\\```
+        ``mydb.scores`` -> ``\\`mydb\\`.\\`scores\\``` ; ``scores`` -> ``\\`scores\\```.
         """
-        if "." in table:
-            return "`" + "`.`".join(table.split(".")) + "`"
-        return f"`{table}`"
+        from drt.destinations.sql_utils import backtick_quote_ident
+
+        return backtick_quote_ident(table)
 
     def _load_replace(
         self,
