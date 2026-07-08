@@ -123,6 +123,15 @@ def _median(values: Sequence[float]) -> float:
     return float(statistics.median(values))
 
 
+# barycenter vs median: on real drt DAGs these tie on crossings, because each
+# sync is degree-1 on both sides (exactly one source, one destination), so a
+# sync's barycenter and median are the same single value — the two can only
+# diverge on source/destination ordering under heavy fan. An A/B over synthetic
+# heavy-fan graphs diverged ~16% of the time and was mixed (neither dominates),
+# so we default to median, keep both selectable, and don't run both-and-pick
+# (that adds a second pass + cross-strategy compare against the byte-identical
+# guarantee for zero gain on the graphs we actually render). Revisit only if a
+# real project surfaces the heavy-fan divergence.
 _STRATEGIES: dict[str, _Aggregator] = {
     "barycenter": _barycenter,
     "median": _median,
@@ -363,7 +372,7 @@ def _route_lookups(
 def compute_layout(
     manifest: Manifest,
     *,
-    strategy: str = "barycenter",
+    strategy: str = "median",
     config: LayoutConfig | None = None,
 ) -> Layout:
     """Lay out *manifest* as a static DAG. Deterministic for a given manifest +
