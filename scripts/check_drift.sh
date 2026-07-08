@@ -185,24 +185,18 @@ for tool in $mcp_tools; do
 done
 
 # ---------------------------------------------------------------------------
-# Check 8: registered connector → drt_list_connectors inventory
-# The sources and destinations blocks are matched separately so a type
-# key present in one list can't mask its absence from the other (e.g.
-# "snowflake" in sources must not satisfy the destinations check).
+# Check 8: drt_list_connectors must DERIVE its inventory from the
+# drt.config.connectors SSoT (not a hand-maintained literal). The SSoT is
+# kept aligned with the registry by test_cli_list_connectors, so a derived
+# inventory can't drift — whereas a re-hardcoded one silently can (that's how
+# salesforce_bulk once fell out of the MCP list). Flag any regression to a
+# literal. Actual name/type parity is asserted in tests/unit/test_mcp.py.
 # ---------------------------------------------------------------------------
 list_connectors_fn=$(awk '/def drt_list_connectors/,/^    # ----/' "$MCP_SERVER")
-inventory_src_block=$(echo "$list_connectors_fn" | awk '/"sources": \[/,/"destinations": \[/')
-inventory_dest_block=$(echo "$list_connectors_fn" | awk '/"destinations": \[/,0')
-for dest in $destinations; do
-    if ! echo "$inventory_dest_block" | grep -q "\"type\": \"$dest\""; then
-        report "mcp-inventory-dest" "$dest" "not in drt_list_connectors destinations inventory"
-    fi
-done
-for src in $sources; do
-    if ! echo "$inventory_src_block" | grep -q "\"type\": \"$src\""; then
-        report "mcp-inventory-src" "$src" "not in drt_list_connectors sources inventory"
-    fi
-done
+if ! echo "$list_connectors_fn" | grep -q "connector_inventory"; then
+    report "mcp-inventory" "drt_list_connectors" \
+        "no longer derives from the drt.config.connectors SSoT (re-hardcoded?)"
+fi
 
 # ---------------------------------------------------------------------------
 # Summary

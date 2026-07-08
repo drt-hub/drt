@@ -63,3 +63,49 @@ DESTINATIONS = [
     ("twilio", "Twilio"),
     ("zendesk", "Zendesk"),
 ]
+
+
+# pip extra required per connector type. Types not listed ship in drt-core
+# (DuckDB, SQLite, REST API, and every webhook / SaaS destination). The extra
+# name equals the type except where noted.
+_EXTRAS: dict[str, str] = {
+    "bigquery": "bigquery",
+    "postgres": "postgres",
+    "redshift": "redshift",
+    "clickhouse": "clickhouse",
+    "snowflake": "snowflake",
+    "mysql": "mysql",
+    "databricks": "databricks",
+    "sqlserver": "sqlserver",
+    "deltalake": "deltalake",
+    "iceberg": "iceberg",
+    "s3": "s3",
+    "gcs": "gcs",
+    "azure_blob": "azure",  # extra name differs from the type
+    "parquet": "parquet",
+    "google_sheets": "sheets",  # extra name differs from the type
+}
+
+
+def install_target(connector_type: str) -> str:
+    """pip install target for a connector type; ``"(core)"`` when no extra is needed."""
+    extra = _EXTRAS.get(connector_type)
+    return f"drt-core[{extra}]" if extra else "(core)"
+
+
+def connector_inventory() -> dict[str, list[dict[str, str]]]:
+    """Sources + destinations as ``{name, type, install}`` dicts, derived from
+    the ``SOURCES`` / ``DESTINATIONS`` SSoT above.
+
+    Consumed by the MCP ``drt_list_connectors`` tool so the inventory can't
+    drift out of lockstep with the registry (which ``test_cli_list_connectors``
+    already keeps aligned with these lists).
+    """
+    return {
+        "sources": [
+            {"name": name, "type": t, "install": install_target(t)} for t, name in SOURCES
+        ],
+        "destinations": [
+            {"name": name, "type": t, "install": install_target(t)} for t, name in DESTINATIONS
+        ],
+    }

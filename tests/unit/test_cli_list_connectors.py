@@ -234,3 +234,34 @@ def test_sample_yaml_caps_at_eight_lines_when_required_fields_overflow() -> None
     assert len(lines) == 8
     assert lines[0].endswith("type: synthetic")
     assert lines[-1].endswith("f6: <f6>")  # last required field that fit
+
+
+# ---------------------------------------------------------------------------
+# install_target / connector_inventory (SSoT for the MCP inventory)
+# ---------------------------------------------------------------------------
+
+
+def test_install_target_extras_and_core() -> None:
+    from drt.config.connectors import install_target
+
+    assert install_target("postgres") == "drt-core[postgres]"
+    assert install_target("azure_blob") == "drt-core[azure]"  # extra name != type
+    assert install_target("google_sheets") == "drt-core[sheets]"  # extra name != type
+    assert install_target("slack") == "(core)"
+    assert install_target("duckdb") == "(core)"  # bundled in core despite a [duckdb] extra
+
+
+def test_connector_inventory_covers_every_registered_type() -> None:
+    """The derived inventory lists exactly the SSoT types (which
+    test_DESTINATIONS_matches_registry keeps aligned with the registry) — the
+    structural guard against the drift that once dropped salesforce_bulk."""
+    from drt.config.connectors import connector_inventory
+
+    inv = connector_inventory()
+    assert {c["type"] for c in inv["sources"]} == {t for t, _ in SOURCES}
+    assert {c["type"] for c in inv["destinations"]} == {t for t, _ in DESTINATIONS}
+    # every entry carries name + type + install
+    for entry in inv["sources"] + inv["destinations"]:
+        assert entry.keys() == {"name", "type", "install"}
+    # the connector that fell out of the old hand-maintained list is present
+    assert any(c["type"] == "salesforce_bulk" for c in inv["destinations"])
