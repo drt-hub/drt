@@ -3,8 +3,7 @@
 Extracted from ``drt/cli/main.py`` in Phase 2b PR (a) of the #546 split
 (see #573 for the umbrella). Bundles:
 
-- ``LogFormat`` Enum + ``_JsonFormatter`` + ``_configure_json_logging``
-  (JSON Lines structured logging — only ``run`` uses this today)
+- ``LogFormat`` Enum (the ``--log-format`` option)
 - ``_RunContext`` dataclass (shared state for one sync invocation)
 - ``_exit_code_for_signal`` (POSIX 128 + signum convention)
 - ``_run_one`` (per-sync execution; observer composition; telemetry)
@@ -13,9 +12,9 @@ Extracted from ``drt/cli/main.py`` in Phase 2b PR (a) of the #546 split
 - ``run`` (the @app.command itself; signal handling; parallel/sequential
   dispatch; JSON-mode output)
 
-These pieces live together because ``run`` is the only caller of the
-helpers and the helpers were never reused elsewhere. Keeping them in one
-module avoids creating an ``_logging.py`` / ``_run_context.py`` graveyard.
+The JSON Lines logging itself (``_JsonFormatter`` / ``_configure_json_logging``)
+was factored out to ``drt.cli._logging`` (#723) and is re-imported here; the
+rest stays because ``run`` is their only caller.
 
 Back-compat: ``drt.cli.main`` re-exports each of the underscore-prefixed
 names + ``LogFormat`` so that ``from drt.cli.main import _RunContext``
@@ -31,7 +30,6 @@ import signal
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -75,33 +73,8 @@ class LogFormat(str, Enum):
 # JSON logging
 # ---------------------------------------------------------------------------
 
-_STANDARD_LOG_FIELDS = frozenset(vars(logging.LogRecord("", 0, "", 0, "", (), None)))
-
-
-class _JsonFormatter(logging.Formatter):
-    """Emit each log record as a single JSON object (JSON Lines format)."""
-
-    def format(self, record: logging.LogRecord) -> str:
-        ts = datetime.fromtimestamp(record.created, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        payload: dict[str, object] = {
-            "ts": ts,
-            "level": record.levelname,
-            "msg": record.getMessage(),
-        }
-        # Merge any extra fields passed via the `extra` kwarg
-        for key, value in record.__dict__.items():
-            if key not in _STANDARD_LOG_FIELDS and not key.startswith("_"):
-                payload[key] = value
-        return json.dumps(payload)
-
-
-def _configure_json_logging() -> None:
-    """Replace root logger handlers with a stderr JSON handler."""
-    handler = logging.StreamHandler()
-    handler.setFormatter(_JsonFormatter())
-    logging.root.handlers = [handler]
-    logging.root.setLevel(logging.INFO)
-
+# JSON-lines logging (``--log-format json``) lives in ``drt.cli._logging``.
+from drt.cli._logging import _configure_json_logging  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Run context + helpers
