@@ -204,23 +204,16 @@ class DatabricksDestination:
         # upsert_key here so the misconfiguration is surfaced before any
         # row touches Databricks.
         is_mirror = sync_options.mode == "mirror"
-        if is_mirror and not config.upsert_key:
-            from drt.destinations.sql_utils import MIRROR_UPSERT_KEY_MSG
+        # Reject an unserveable mirror config (missing upsert_key, or
+        # tracked/scope which are Postgres/MySQL-only) before writing; close the
+        # connection we just opened before surfacing the error.
+        from drt.destinations.sql_utils import check_mirror_supported
 
+        try:
+            check_mirror_supported(config, sync_options, "databricks")
+        except ValueError:
             conn.close()
-            raise ValueError(MIRROR_UPSERT_KEY_MSG)
-        # mirror.strategy: tracked (#686) is Postgres/MySQL-only for now —
-        # fail fast rather than silently falling back to the destination
-        # diff, which has different (co-writer-unsafe) delete semantics.
-        if (
-            is_mirror
-            and sync_options.mirror is not None
-            and (sync_options.mirror.strategy == "tracked" or sync_options.mirror.scope)
-        ):
-            from drt.destinations.sql_utils import unsupported_tracked_scope_msg
-
-            conn.close()
-            raise ValueError(unsupported_tracked_scope_msg("databricks"))
+            raise
         try:
             with conn.cursor() as cur:
                 columns = list(records[0].keys())

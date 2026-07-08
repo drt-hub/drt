@@ -74,3 +74,25 @@ def unsupported_tracked_scope_msg(dialect: str) -> str:
         f"mirror.strategy: tracked / mirror.scope are not yet supported on {dialect} "
         "(supported: postgres, mysql — see #686 follow-ups)."
     )
+
+
+def check_mirror_supported(config: Any, sync_options: Any, dialect: str) -> None:
+    """Fail fast on a ``sync.mode: mirror`` config a SQL destination can't serve.
+
+    - mirror requires an ``upsert_key`` (to know which rows to DELETE)
+    - ``mirror.strategy: tracked`` / ``mirror.scope`` are Postgres/MySQL-only, so
+      reject them on ``dialect`` rather than silently falling back to the
+      (co-writer-unsafe) destination diff.
+
+    No-op for non-mirror syncs. Callers holding an open connection should close
+    it before re-raising (``try: check_mirror_supported(...) except ValueError:
+    conn.close(); raise``).
+    """
+    if sync_options.mode != "mirror":
+        return
+    if not config.upsert_key:
+        raise ValueError(MIRROR_UPSERT_KEY_MSG)
+    if sync_options.mirror is not None and (
+        sync_options.mirror.strategy == "tracked" or sync_options.mirror.scope
+    ):
+        raise ValueError(unsupported_tracked_scope_msg(dialect))

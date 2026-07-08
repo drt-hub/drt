@@ -99,21 +99,11 @@ class ClickHouseDestination:
                 # sync.mode: mirror (#340 Step 3) — validate upsert_key
                 # before any INSERT so a misconfigured sync fails fast
                 # rather than after partially populating the table.
-                if sync_options.mode == "mirror" and not config.upsert_key:
-                    from drt.destinations.sql_utils import MIRROR_UPSERT_KEY_MSG
+                # Reject an unserveable mirror config (missing upsert_key, or
+                # tracked/scope which are Postgres/MySQL-only) before any INSERT.
+                from drt.destinations.sql_utils import check_mirror_supported
 
-                    raise ValueError(MIRROR_UPSERT_KEY_MSG)
-                # mirror.strategy: tracked (#686) is Postgres/MySQL-only for
-                # now — fail fast rather than silently falling back to the
-                # destination diff, whose delete semantics differ.
-                if (
-                    sync_options.mode == "mirror"
-                    and sync_options.mirror is not None
-                    and (sync_options.mirror.strategy == "tracked" or sync_options.mirror.scope)
-                ):
-                    from drt.destinations.sql_utils import unsupported_tracked_scope_msg
-
-                    raise ValueError(unsupported_tracked_scope_msg("clickhouse"))
+                check_mirror_supported(config, sync_options, "clickhouse")
 
                 # clickhouse-connect's client.insert(table=...) interpolates
                 # the table raw into "INSERT INTO {table} ..." with no quoting
