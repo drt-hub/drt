@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
+
 from drt.destinations.sql_utils import (
     MIRROR_UPSERT_KEY_MSG,
     RowCountable,
     backtick_quote_ident,
+    check_mirror_supported,
     get_row_count_for_destination,
     unsupported_tracked_scope_msg,
 )
@@ -76,3 +81,42 @@ def test_unsupported_tracked_scope_message_names_dialect() -> None:
         "mirror.strategy: tracked / mirror.scope are not yet supported on snowflake "
         "(supported: postgres, mysql — see #686 follow-ups)."
     )
+
+
+# ---------------------------------------------------------------------------
+# check_mirror_supported — shared mirror-capability guard
+# ---------------------------------------------------------------------------
+
+
+def _mirror_opts(strategy: str | None = None, scope: object = None) -> SimpleNamespace:
+    return SimpleNamespace(mode="mirror", mirror=SimpleNamespace(strategy=strategy, scope=scope))
+
+
+def test_check_mirror_supported_noop_for_non_mirror() -> None:
+    # Non-mirror sync: no upsert_key needed, no raise.
+    check_mirror_supported(
+        SimpleNamespace(upsert_key=[]),
+        SimpleNamespace(mode="upsert", mirror=None),
+        "snowflake",
+    )
+
+
+def test_check_mirror_supported_requires_upsert_key() -> None:
+    with pytest.raises(ValueError, match="requires destination.upsert_key"):
+        check_mirror_supported(
+            SimpleNamespace(upsert_key=[]),
+            SimpleNamespace(mode="mirror", mirror=None),
+            "snowflake",
+        )
+
+
+def test_check_mirror_supported_rejects_tracked_and_scope() -> None:
+    cfg = SimpleNamespace(upsert_key=["id"])
+    with pytest.raises(ValueError, match="not yet supported on databricks"):
+        check_mirror_supported(cfg, _mirror_opts(strategy="tracked"), "databricks")
+    with pytest.raises(ValueError, match="not yet supported on clickhouse"):
+        check_mirror_supported(cfg, _mirror_opts(scope=["parent_id"]), "clickhouse")
+
+
+def test_check_mirror_supported_ok_for_plain_mirror() -> None:
+    check_mirror_supported(SimpleNamespace(upsert_key=["id"]), _mirror_opts(), "snowflake")

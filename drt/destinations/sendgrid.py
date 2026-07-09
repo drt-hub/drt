@@ -28,7 +28,6 @@ SendGrid API reference:
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
@@ -40,15 +39,12 @@ from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
 from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import RowError
+from drt.destinations.row_errors import record_preview as _record_preview
 from drt.templates.renderer import render_template
 
 logger = logging.getLogger(__name__)
 
 _SENDGRID_API_URL = "https://api.sendgrid.com/v3/mail/send"
-
-
-def _record_preview(row: dict[str, Any]) -> str:
-    return json.dumps(row, default=str)[:200]
 
 
 class SendGridDestination:

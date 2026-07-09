@@ -8,7 +8,6 @@ For each record:
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from typing import Any
@@ -20,6 +19,7 @@ from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter
 from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import RowError
+from drt.destinations.row_errors import record_preview as _record_preview
 from drt.templates.renderer import render_template
 
 logger = logging.getLogger(__name__)
@@ -187,6 +187,3 @@ def _to_adf(text: str) -> dict[str, Any]:
     }
 
 
-def _record_preview(row: dict[str, Any]) -> str:
-    """Best-effort JSON preview that tolerates non-serializable values."""
-    return json.dumps(row, default=str)[:200]
