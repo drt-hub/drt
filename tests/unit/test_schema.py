@@ -280,7 +280,8 @@ def test_databricks_query_targets_catalog_information_schema(
     cur = conn.cursor.return_value.__enter__.return_value
     sql, params = cur.execute.call_args[0]
     assert "main.information_schema.columns" in sql
-    assert "lower(table_schema) = lower(%s)" in sql
+    # Native `?` paramstyle (#707) — Databricks binds server-side with `?`.
+    assert "lower(table_schema) = lower(?)" in sql
     assert params == ["analytics", "events"]
 
 

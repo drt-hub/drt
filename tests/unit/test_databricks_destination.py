@@ -165,11 +165,11 @@ class TestDatabricksDestinationLoad:
         assert conn_kwargs["server_hostname"] == "dbc-abc123.cloud.databricks.com"
         assert conn_kwargs["http_path"] == "/sql/1.0/warehouses/xyz789"
         assert conn_kwargs["access_token"] == "dapi-test-token"
-        # Connector >=3.0 defaults to native paramstyle (`?`) and forwards the
-        # destination's pyformat `%s` markers unexpanded -> server-side
-        # PARSE_SYNTAX_ERROR on every parameterised write. The inline opt-in
-        # is load-bearing; losing it breaks all writes on a live warehouse.
-        assert conn_kwargs["use_inline_params"] == "silent"
+        # #707: the destination now binds with native `?` placeholders (the
+        # connector's default paramstyle, server-side binding), so it must NOT
+        # opt into the deprecated client-side inline rendering — assert the
+        # `use_inline_params` flag added in #706 is gone.
+        assert "use_inline_params" not in conn_kwargs
 
     def test_insert_mode_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
@@ -426,11 +426,25 @@ class TestDatabricksMirrorMode:
             )
             dest.finalize_sync(config, _options(mode="mirror"))
 
-        # The DELETE was issued (in a separate connection cycle)
-        sqls = [(call.args[0] if call.args else "") for call in conn._cur.execute.call_args_list]
-        delete_sql = next(s for s in sqls if s.startswith("DELETE FROM"))
-        assert "DELETE FROM main.default.user_scores" in delete_sql
-        assert "WHERE id NOT IN" in delete_sql
+        # #707: keys are staged into a scratch Delta table and removed via
+        # anti-join, so the DELETE binds no key parameters (scales past the
+        # native paramstyle limit).
+        calls = conn._cur.execute.call_args_list
+        sqls = [(c.args[0] if c.args else "") for c in calls]
+        keys_tbl = "main.default.__drt_mirror_keys_user_scores"
+        assert any(s.startswith(f"CREATE OR REPLACE TABLE {keys_tbl}") for s in sqls)
+        key_inserts = [
+            c.args[1]
+            for c in calls
+            if c.args and c.args[0].startswith(f"INSERT INTO {keys_tbl}")
+        ]
+        assert sorted(key_inserts) == [[1], [2]]  # each observed key staged
+        delete_call = next(c for c in calls if c.args and c.args[0].startswith("DELETE FROM"))
+        assert delete_call.args[0] == (
+            f"DELETE FROM main.default.user_scores WHERE id NOT IN (SELECT id FROM {keys_tbl})"
+        )
+        assert len(delete_call.args) == 1  # no bound key params
+        assert any(s.startswith(f"DROP TABLE IF EXISTS {keys_tbl}") for s in sqls)
 
     def test_mirror_finalize_composite_key_uses_tuple_form(
         self, monkeypatch: pytest.MonkeyPatch
@@ -450,9 +464,20 @@ class TestDatabricksMirrorMode:
             )
             dest.finalize_sync(config, _options(mode="mirror"))
 
-        sqls = [(call.args[0] if call.args else "") for call in conn._cur.execute.call_args_list]
-        delete_sql = next(s for s in sqls if s.startswith("DELETE FROM"))
-        assert "WHERE (tenant_id, user_id) NOT IN" in delete_sql
+        calls = conn._cur.execute.call_args_list
+        keys_tbl = "main.default.__drt_mirror_keys_user_scores"
+        delete_call = next(c for c in calls if c.args and c.args[0].startswith("DELETE FROM"))
+        assert (
+            f"WHERE (tenant_id, user_id) NOT IN (SELECT tenant_id, user_id FROM {keys_tbl})"
+            in delete_call.args[0]
+        )
+        assert len(delete_call.args) == 1  # anti-join binds no key params
+        key_inserts = [
+            c.args[1]
+            for c in calls
+            if c.args and c.args[0].startswith(f"INSERT INTO {keys_tbl}")
+        ]
+        assert key_inserts == [["a", 1]]  # the composite key staged as a tuple
 
     def test_mirror_skips_failed_keys_from_delete_observed_set(
         self, monkeypatch: pytest.MonkeyPatch
@@ -488,19 +513,27 @@ class TestDatabricksMirrorMode:
             )
             dest.finalize_sync(config, _options(mode="mirror"))
 
-        # The DELETE was issued and includes only id=2 (the survivor),
-        # not id=1 (which failed staging).
-        sqls = [(call.args[0] if call.args else "") for call in cur.execute.call_args_list]
+        # #707: observed keys are staged (one INSERT each) into the mirror-keys
+        # table and removed via anti-join — so it's the mirror-keys INSERTs, not
+        # the DELETE params, that must reflect only id=2 (id=1 failed staging).
+        key_inserts = [
+            call.args[1]
+            for call in cur.execute.call_args_list
+            if call.args
+            and call.args[0].startswith("INSERT INTO main.default.__drt_mirror_keys_user_scores")
+        ]
+        assert key_inserts == [[2]]  # only the survivor's key was staged
+        # The anti-join DELETE was issued and binds no key parameters.
         delete_call = next(
             call
             for call in cur.execute.call_args_list
             if call.args and call.args[0].startswith("DELETE FROM")
         )
-        delete_params = delete_call.args[1] if len(delete_call.args) > 1 else []
-        assert delete_params == [2]
-        # And the DELETE was actually issued (not skipped — at least one
-        # record made it through).
-        assert any(s.startswith("DELETE FROM") for s in sqls)
+        assert len(delete_call.args) == 1  # SQL only — no inline key params
+        assert (
+            "NOT IN (SELECT id FROM main.default.__drt_mirror_keys_user_scores)"
+            in delete_call.args[0]
+        )
 
     def test_mirror_finalize_skipped_when_no_records_observed(
         self, monkeypatch: pytest.MonkeyPatch
