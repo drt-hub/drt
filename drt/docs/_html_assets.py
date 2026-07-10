@@ -208,10 +208,15 @@ td.right, th.right { text-align:right; }
 .group a .count { float:right; }
 
 @media (max-width:860px) {
-  .cards { grid-template-columns:1fr; }
-  .two-col { grid-template-columns:1fr; }
+  .cards, .two-col { grid-template-columns:1fr; }
   .sidebar { display:none; }
-  .topnav { display:none; }
+  .topbar { flex-wrap:wrap; row-gap:6px; padding:10px 12px; }
+  .project { display:none; }
+  .search { flex-basis:100%; margin-left:0; }
+  .search input { width:100%; }
+  .main { padding:20px 14px; }
+  table { display:block; overflow-x:auto; white-space:nowrap; }
+  .kv { grid-template-columns:120px 1fr; }
 }
 """
 
