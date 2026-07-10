@@ -15,8 +15,8 @@ Covers the #672 verification set (BigQuery #673 / PR #700 is the reference shape
   typed sub-fields back.
 - ``test_databricks_connection`` — fast credential check via ``test_connection``.
 - ``test_databricks_mirror_deletes_unobserved_keys`` — ``sync.mode: mirror``
-  end-of-sync DELETE via the #707 staging anti-join, with more observed keys than
-  the old inline ``NOT IN (?, …)`` parameter limit would have allowed.
+  end-of-sync DELETE via the #707 staging anti-join removes the unobserved rows
+  on a live warehouse (its parameter-limit immunity is covered by the unit suite).
 """
 
 from __future__ import annotations
@@ -342,10 +342,12 @@ def test_databricks_mirror_deletes_unobserved_keys(tmp_path: Path) -> None:
 
     Pre-seeds the Delta target with more keys than the source produces, then runs
     a mirror sync: the MERGE upserts the observed rows and ``finalize_sync``
-    removes the rows whose key was *not* observed. The observed set is sized to
-    exceed a typical native-paramstyle per-statement parameter limit — under the
-    pre-#707 inline ``DELETE … NOT IN (?, ?, …)`` that DELETE could have failed;
-    the anti-join stages the keys and binds none in the DELETE, so it scales.
+    removes the rows whose key was *not* observed, proving the staging anti-join
+    (``DELETE … WHERE key NOT IN (SELECT key FROM staging)``) deletes correctly on
+    a live warehouse. The anti-join's *parameter-limit immunity* (it binds no key
+    parameters in the DELETE) is asserted in the mock unit suite, so the key count
+    here is kept small — row-by-row Delta staging makes a large mirror slow (a
+    300-key run measured ~20 min), and the count doesn't change what's proven.
     """
     creds = require_env(
         HOST_ENV,
@@ -360,10 +362,12 @@ def test_databricks_mirror_deletes_unobserved_keys(tmp_path: Path) -> None:
     fqn = f"`{catalog}`.`{schema}`.`{table}`"
     keys_fqn = f"`{catalog}`.`{schema}`.`__drt_mirror_keys_{table}`"
 
-    # Observed keys deliberately exceed a typical per-statement parameter limit
-    # so the anti-join's "no key parameters bound in the DELETE" path is exercised
-    # for real. Tune down if the row-by-row staging makes the run too slow.
-    observed, stale = 300, 40
+    # Kept small on purpose: row-by-row Delta staging is slow (a 300-key run
+    # took ~20 min), and the anti-join deletes the same way for 20 keys or 20k.
+    # The "binds no key parameters / scales past the limit" property is covered
+    # by the mock unit suite; here we just prove the live DELETE removes the
+    # unobserved rows.
+    observed, stale = 20, 5
 
     duckdb = pytest.importorskip("duckdb")
     db_path = str(tmp_path / "mirror_source.duckdb")
