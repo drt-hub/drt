@@ -303,3 +303,16 @@ def test_render_guard_surfaces_as_clean_cli_error(
     # clean exit, not an unhandled ValueError traceback
     assert not isinstance(result.exception, ValueError)
     assert (target / "keep.txt").exists()  # guard protected the dir
+
+
+def test_regeneration_is_byte_identical(tmp_path: Path) -> None:
+    """#697's acceptance bar: same manifest -> same bytes, across the whole site."""
+    m = _manifest()
+    out1, out2 = tmp_path / "a", tmp_path / "b"
+    render_html(m, out1)
+    render_html(m, out2)
+    files1 = sorted(p.relative_to(out1) for p in out1.rglob("*") if p.is_file())
+    files2 = sorted(p.relative_to(out2) for p in out2.rglob("*") if p.is_file())
+    assert files1 == files2
+    for rel in files1:
+        assert (out1 / rel).read_bytes() == (out2 / rel).read_bytes(), str(rel)
