@@ -1293,3 +1293,33 @@ def test_non_incremental_source_unaffected(tmp_path: Path) -> None:
     )
 
     assert result.success == 1
+
+
+def test_incremental_source_receives_lag_adjusted_cursor(tmp_path: Path) -> None:
+    """IncrementalSource composes with watermark.lag (#759): the source sees
+    the same lag-adjusted cursor the SQL predicate would use."""
+
+    class _Storage:
+        def get(self, sync_name: str) -> str:
+            return "2026-07-10 12:00:00"
+
+        def save(self, sync_name: str, value: str) -> None: ...
+
+    source = FakeIncrementalSource([{"id": 1, "updated_at": "2026-07-10 12:30:00"}])
+    dest = FakeDestination()
+    sync = SyncConfig.model_validate(
+        {
+            "name": "inc_lag_sync",
+            "model": "users",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {
+                "mode": "incremental",
+                "cursor_field": "updated_at",
+                "watermark": {"lag": "1 hour"},
+            },
+        }
+    )
+
+    run_sync(sync, source, dest, _make_profile(), tmp_path, watermark_storage=_Storage())
+
+    assert source.incremental_calls == ["2026-07-10 11:00:00"]

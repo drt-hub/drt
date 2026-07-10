@@ -425,11 +425,13 @@ def _run_sync_body(
 
     # Source extraction wrapped via generator helper so exceptions raised
     # during iteration (not just the initial call) carry stage="source" (#544).
+    # IncrementalSource capability (#767) receives the same lag-adjusted
+    # cursor (#759) the SQL predicate uses — one effective read window.
     records_iter = _staged_source_iter(
         source,
         query,
         profile,
-        cursor_value=last_cursor_value,
+        cursor_value=effective_cursor_value,
         incremental=cursor_field is not None,
     )
     new_cursor_value: str | None = last_cursor_value
