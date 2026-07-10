@@ -12,15 +12,17 @@
 # lives in the accounts: Snowflake resource monitor, GCP budget,
 # Free Edition's structural $0.
 #
-# Runs daily at 04:00 UTC — one hour after dwh-smoke (03:00), so the
-# digest includes the night's smoke usage.
+# Runs daily at 03:20 UTC — right after dwh-smoke (03:00), so the digest
+# includes the night's smoke usage AND reuses the still-warm Snowflake
+# warehouse (AUTO_SUSPEND=60s bills a fresh ~2-minute resume cycle per
+# burst; piggybacking saves ~1 credit/month ≈ $3).
 
 name: cost-digest
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 4 * * *'
+    - cron: '20 3 * * *'
 
 permissions:
   contents: read
