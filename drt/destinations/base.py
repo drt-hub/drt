@@ -34,6 +34,9 @@ class SyncResult:
     # Overlap window (#759) — the watermark.lag that widened this run's read
     # window (e.g. "1 hour"), or None when no lag was applied.
     watermark_lag: str | None = None
+    # Sampling (#774) — the --limit N that capped this run's extraction,
+    # or None for a full run. Sampled runs never advance the watermark.
+    limit_applied: int | None = None
     # Graceful shutdown (#279) — True if the sync stopped early due to a
     # cooperative cancellation signal (SIGTERM/SIGINT) between batches.
     interrupted: bool = False

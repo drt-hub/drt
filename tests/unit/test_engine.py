@@ -1323,3 +1323,56 @@ def test_incremental_source_receives_lag_adjusted_cursor(tmp_path: Path) -> None
     run_sync(sync, source, dest, _make_profile(), tmp_path, watermark_storage=_Storage())
 
     assert source.incremental_calls == ["2026-07-10 11:00:00"]
+
+
+# extract_limit (#774) — sampled runs
+# ---------------------------------------------------------------------------
+
+
+def test_extract_limit_caps_rows(tmp_path: Path) -> None:
+    rows = [{"id": i} for i in range(10)]
+    source = FakeSource(rows)
+    dest = FakeDestination()
+    sync = _make_sync(batch_size=4)
+
+    result = run_sync(sync, source, dest, _make_profile(), tmp_path, extract_limit=3)
+
+    assert result.success == 3
+    assert result.rows_extracted == 3
+    assert result.limit_applied == 3
+
+
+def test_extract_limit_none_is_unchanged(tmp_path: Path) -> None:
+    rows = [{"id": i} for i in range(5)]
+    result = run_sync(_make_sync(), FakeSource(rows), FakeDestination(), _make_profile(), tmp_path)
+    assert result.success == 5
+    assert result.limit_applied is None
+
+
+def test_extract_limit_never_advances_watermark(tmp_path: Path) -> None:
+    from drt.state.manager import StateManager
+
+    rows = [
+        {"id": 1, "updated_at": "2024-01-01"},
+        {"id": 2, "updated_at": "2024-01-03"},
+    ]
+    source = FakeSource(rows)
+    dest = FakeDestination()
+    sync = _make_incremental_sync()
+    state_mgr = StateManager(tmp_path)
+
+    run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+        extract_limit=1,
+    )
+
+    state = state_mgr.get_last_sync("inc_sync")
+    assert state is not None
+    # The sampled run must not eat the skipped rows' cursor progress.
+    assert state.last_cursor_value is None

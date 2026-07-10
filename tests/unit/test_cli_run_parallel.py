@@ -105,6 +105,7 @@ class _FakeResult:
         self.watermark_source: str | None = None
         self.cursor_value_used: str | None = None
         self.watermark_lag: str | None = None
+        self.limit_applied: int | None = None
 
 
 @pytest.fixture
@@ -119,6 +120,7 @@ def patched_engine(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     from drt.engine import sync as sync_module
 
     calls: list[str] = []
+    limits: list[int | None] = []
     lock = threading.Lock()
     threads_seen: set[int] = set()
 
@@ -129,6 +131,7 @@ def patched_engine(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         time.sleep(0.05)
         with lock:
             calls.append(sync.name)
+            limits.append(_kwargs.get("extract_limit"))
             threads_seen.add(threading.get_ident())
         return _FakeResult(success=1, failed=0)
 
@@ -153,7 +156,7 @@ def patched_engine(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         lambda *_a, **_kw: object(),
         raising=False,
     )
-    return {"calls": calls, "threads_seen": threads_seen}
+    return {"calls": calls, "threads_seen": threads_seen, "limits": limits}
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +330,55 @@ def test_failed_with_clean_state_exits_zero_without_running(
     assert result.exit_code == 0
     assert patched_engine["calls"] == []
     assert "nothing_failed" in result.output
+
+
+# ---------------------------------------------------------------------------
+# --limit (#774): sampled runs
+# ---------------------------------------------------------------------------
+
+
+def test_limit_forwarded_to_engine(project: Path, patched_engine: dict[str, Any]) -> None:
+    result = runner.invoke(
+        app, ["run", "--select", "sync_a", "--limit", "10", "--output", "json"]
+    )
+    assert result.exit_code == 0
+    assert patched_engine["calls"] == ["sync_a"]
+    assert patched_engine["limits"] == [10]
+
+
+def test_limit_rejects_non_positive(project: Path, patched_engine: dict[str, Any]) -> None:
+    result = runner.invoke(app, ["run", "--limit", "0", "--output", "json"])
+    assert result.exit_code == 1
+    assert patched_engine["calls"] == []
+
+
+def test_limit_refused_for_mirror_and_replace(
+    project: Path, patched_engine: dict[str, Any]
+) -> None:
+    (project / "syncs" / "sync_mirror.yml").write_text(
+        yaml.dump(
+            {
+                "name": "sync_mirror",
+                "model": "SELECT 1",
+                "destination": {
+                    "type": "postgres",
+                    "host": "localhost",
+                    "dbname": "d",
+                    "user": "u",
+                    "password_env": "PGPASSWORD",
+                    "table": "t",
+                    "upsert_key": ["id"],
+                },
+                "sync": {"mode": "mirror"},
+            }
+        )
+    )
+
+    result = runner.invoke(app, ["run", "--limit", "5", "--output", "json"])
+
+    assert result.exit_code == 1
+    assert "sync_mirror" in result.output
+    assert patched_engine["calls"] == []
 
 
 # ---------------------------------------------------------------------------

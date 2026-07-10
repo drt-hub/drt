@@ -60,6 +60,7 @@ def test_run_dry_run_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
             self.watermark_source = None
             self.cursor_value_used = None
             self.watermark_lag = None
+            self.limit_applied = None
 
     def mock_run_sync(*args, **kwargs):
         return FakeResult()

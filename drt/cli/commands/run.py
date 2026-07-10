@@ -103,6 +103,8 @@ class _RunContext:
     # the engine populates result.diff for the renderer to display.
     compute_diff: bool = False
     diff_limit: int = 20
+    # Sampling (#774) — cap extraction at N rows per sync; watermarks frozen.
+    extract_limit: int | None = None
 
 
 def _exit_code_for_signal(signum: int) -> int:
@@ -175,6 +177,7 @@ def _run_one(
                 compute_diff=ctx.compute_diff,
                 diff_limit=ctx.diff_limit,
                 observer=observer,
+                extract_limit=ctx.extract_limit,
             )
         except Exception as e:
             from drt.cli.errors import format_error, render_to_console
@@ -233,6 +236,8 @@ def _run_one(
             entry["cursor_value_used"] = result.cursor_value_used
         if result.watermark_lag is not None:
             entry["watermark_lag"] = result.watermark_lag
+        if result.limit_applied is not None:
+            entry["limit"] = result.limit_applied
         if ctx.log_json:
             logging.info(
                 "sync_complete",
@@ -328,6 +333,14 @@ def run(
         help=(
             "Re-run only syncs whose last recorded status was not success "
             "(intersects with --select/--exclude). Never-run syncs are not included."
+        ),
+    ),
+    limit: int = typer.Option(
+        None,
+        "--limit",
+        help=(
+            "Extract at most N rows per sync — a sampled run for safe first sends. "
+            "Watermarks do not advance; refused for mirror/replace syncs."
         ),
     ),
     threads: int = typer.Option(1, "--threads", "-t", help="Parallel execution threads."),
@@ -466,6 +479,25 @@ def run(
                 f"{', '.join(s.name for s in syncs)}[/dim]"
             )
 
+    # --limit (#774): sampled run guards. A sampled mirror would DELETE the
+    # destination rows the sample skipped; a sampled replace would truncate
+    # a full table down to N rows. Refuse both outright.
+    if limit is not None:
+        if limit < 1:
+            print_error("--limit must be a positive integer.")
+            raise typer.Exit(1)
+        guarded = [s.name for s in syncs if s.sync.mode in ("mirror", "replace")]
+        if guarded:
+            print_error(
+                "--limit is not allowed for mode=mirror/replace syncs "
+                f"(a sample would delete or replace real rows): {', '.join(guarded)}"
+            )
+            raise typer.Exit(1)
+        if not json_mode and not quiet:
+            console.print(
+                f"[yellow]--limit {limit}: sampled run — watermarks will not advance.[/yellow]"
+            )
+
     if cursor_value is not None:
         incremental = [s for s in syncs if s.sync.mode == "incremental"]
         if not incremental:
@@ -540,6 +572,7 @@ def run(
         stop_event=stop_event,
         compute_diff=diff,
         diff_limit=diff_limit,
+        extract_limit=limit,
     )
 
     # Execute syncs — parallel if threads > 1, sequential otherwise
