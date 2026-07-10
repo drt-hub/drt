@@ -86,6 +86,10 @@ GH_TOKEN = "ghp_xxxx"
 
 [sources.snowflake]
 SNOWFLAKE_PASSWORD = "dev-password"
+# Key-pair auth (#737, preferred — new accounts enforce MFA on passwords):
+# point private_key_env at a var holding the PEM private key contents.
+SNOWFLAKE_PRIVATE_KEY = """-----BEGIN PRIVATE KEY-----
+..."""
 ```
 
 ---

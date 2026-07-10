@@ -118,9 +118,7 @@ def test_show_unknown_profile_errors(drt_home: Path) -> None:
 
 
 def test_remove_with_yes_flag(drt_home: Path) -> None:
-    _write_profiles(
-        drt_home, {"dev": {"type": "duckdb"}, "prod": {"type": "bigquery"}}
-    )
+    _write_profiles(drt_home, {"dev": {"type": "duckdb"}, "prod": {"type": "bigquery"}})
     result = runner.invoke(app, ["profile", "remove", "dev", "--yes"])
     assert result.exit_code == 0
     assert "Removed 'dev'" in result.output
@@ -181,9 +179,7 @@ def test_add_preserves_observability_and_existing(drt_home: Path) -> None:
 
 def test_add_duckdb(drt_home: Path) -> None:
     # Prompts: type, then database (has a default → blank accepts it).
-    result = runner.invoke(
-        app, ["profile", "add", "local"], input="duckdb\n./my.duckdb\n"
-    )
+    result = runner.invoke(app, ["profile", "add", "local"], input="duckdb\n./my.duckdb\n")
     assert result.exit_code == 0, result.output
     assert "Wrote profile 'local'" in result.output
 
@@ -245,9 +241,7 @@ def test_add_migrates_flat_layout_to_nested(drt_home: Path) -> None:
 
 def test_remove_migrates_flat_layout_to_nested(drt_home: Path) -> None:
     """`remove` on a legacy flat profiles.yml rewrites it under `profiles:`."""
-    _write_flat_profiles(
-        drt_home, {"dev": {"type": "duckdb"}, "prod": {"type": "bigquery"}}
-    )
+    _write_flat_profiles(drt_home, {"dev": {"type": "duckdb"}, "prod": {"type": "bigquery"}})
 
     result = runner.invoke(app, ["profile", "remove", "dev", "--yes"])
     assert result.exit_code == 0, result.output
@@ -270,9 +264,7 @@ def test_test_connection_ok(drt_home: Path, monkeypatch: pytest.MonkeyPatch) -> 
         def test_connection(self, profile: object) -> bool:
             return True
 
-    monkeypatch.setattr(
-        "drt.connectors.registry.get_source", lambda profile: _FakeSource()
-    )
+    monkeypatch.setattr("drt.connectors.registry.get_source", lambda profile: _FakeSource())
     result = runner.invoke(app, ["profile", "test", "dev"])
     assert result.exit_code == 0
     assert "connection OK" in result.output
@@ -285,17 +277,13 @@ def test_test_connection_failure(drt_home: Path, monkeypatch: pytest.MonkeyPatch
         def test_connection(self, profile: object) -> bool:
             raise RuntimeError("could not connect")
 
-    monkeypatch.setattr(
-        "drt.connectors.registry.get_source", lambda profile: _FakeSource()
-    )
+    monkeypatch.setattr("drt.connectors.registry.get_source", lambda profile: _FakeSource())
     result = runner.invoke(app, ["profile", "test", "dev"])
     assert result.exit_code == 1
     assert "could not connect" in result.output
 
 
-def test_test_connection_returns_false(
-    drt_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_test_connection_returns_false(drt_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A source whose test_connection returns False (no exception) → exit 1."""
     _write_profiles(drt_home, {"dev": {"type": "duckdb", "database": ":memory:"}})
 
@@ -303,9 +291,7 @@ def test_test_connection_returns_false(
         def test_connection(self, profile: object) -> bool:
             return False
 
-    monkeypatch.setattr(
-        "drt.connectors.registry.get_source", lambda profile: _FakeSource()
-    )
+    monkeypatch.setattr("drt.connectors.registry.get_source", lambda profile: _FakeSource())
     result = runner.invoke(app, ["profile", "test", "dev"])
     assert result.exit_code == 1
     assert "returned false" in result.output
@@ -316,3 +302,19 @@ def test_test_unknown_profile_errors(drt_home: Path) -> None:
     result = runner.invoke(app, ["profile", "test", "missing"])
     assert result.exit_code == 1
     assert "not found" in result.output
+
+
+def test_add_snowflake_prompts_keypair_and_password(drt_home: Path) -> None:
+    """#737 periphery: the snowflake add-spec offers key-pair auth first,
+    with password as the fallback prompt — both env-var names are written
+    (resolution prefers the key env var and falls back when it's unset)."""
+    # type, account, user, database, schema, warehouse, private_key_env, password_env
+    result = runner.invoke(
+        app,
+        ["profile", "add", "sf"],
+        input="snowflake\nacme-xy12345\nDRT_SERVICE\nANALYTICS\nPUBLIC\nCOMPUTE_WH\n\n\n",
+    )
+    assert result.exit_code == 0, result.output
+    entry = yaml.safe_load((drt_home / "profiles.yml").read_text())["profiles"]["sf"]
+    assert entry["private_key_env"] == "SNOWFLAKE_PRIVATE_KEY"
+    assert entry["password_env"] == "SNOWFLAKE_PASSWORD"

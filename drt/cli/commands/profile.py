@@ -77,7 +77,15 @@ _ADD_FIELD_SPECS: dict[str, list[tuple[str, str, str | None]]] = {
         ("database", "Database", None),
         ("schema", "Schema", "PUBLIC"),
         ("warehouse", "Warehouse", None),
-        ("password_env", "Env var holding the password", "SNOWFLAKE_PASSWORD"),
+        # Key-pair auth (#737) resolves first; when its env var is unset at
+        # connect time the connector falls back to the password env var, so
+        # writing both keys is safe for either auth style.
+        (
+            "private_key_env",
+            "Env var holding the private key PEM (key-pair auth)",
+            "SNOWFLAKE_PRIVATE_KEY",
+        ),
+        ("password_env", "Env var holding the password (fallback)", "SNOWFLAKE_PASSWORD"),
     ],
 }
 
@@ -108,9 +116,7 @@ def profile_list() -> None:
 
     profiles = load_raw_profiles()
     if not profiles:
-        console.print(
-            "[dim]No profiles found. Run `drt init` or `drt profile add <name>`.[/dim]"
-        )
+        console.print("[dim]No profiles found. Run `drt init` or `drt profile add <name>`.[/dim]")
         return
 
     table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
