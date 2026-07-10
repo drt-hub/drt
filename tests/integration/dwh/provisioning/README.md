@@ -39,7 +39,14 @@ Secrets: `SMOKE_SNOWFLAKE_{ACCOUNT,USER,PASSWORD,DATABASE,SCHEMA,WAREHOUSE}`.
 ## BigQuery — `bigquery.sh`
 
 Needs a **billing-enabled** project (a payment card — even the free tier
-requires billing enabled). Effectively $0/month for KB-scale smoke tables.
+requires billing enabled). ⚠️ A project created *after* billing signup is
+**not auto-linked** to the billing account — link it first or every write
+fails with `billingNotEnabled` / "not allowed in the free tier":
+
+```bash
+gcloud billing accounts list
+gcloud billing projects link <PROJECT> --billing-account=<ACCOUNT_ID>
+``` Effectively $0/month for KB-scale smoke tables.
 Run [`bigquery.sh`](./bigquery.sh) with `gcloud` authenticated; load the
 generated keyfile's contents into `SMOKE_BIGQUERY_KEYFILE_JSON`, then delete
 the local keyfile. Secrets: `SMOKE_BIGQUERY_{PROJECT,DATASET,KEYFILE_JSON}`.
