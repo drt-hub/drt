@@ -186,10 +186,13 @@ class TestDatabricksDestinationLoad:
         assert result.success == 2
         assert result.failed == 0
         cur = conn._cur
-        assert cur.execute.call_count == 2
+        # #734: scalar rows are batched into one multi-row VALUES INSERT.
+        assert cur.execute.call_count == 1
         first_sql = cur.execute.call_args_list[0][0][0]
         assert "INSERT INTO main.default.user_scores" in first_sql
         assert "id, score" in first_sql
+        assert first_sql.count("(?, ?)") == 2  # one marker group per row
+        assert cur.execute.call_args_list[0][0][1] == [1, 0.95, 2, 0.80]
         conn.close.assert_called_once()
 
     def test_merge_mode_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -231,7 +234,13 @@ class TestDatabricksDestinationLoad:
     def test_insert_row_error_on_error_skip(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
         conn = _fake_conn()
-        conn._cur.execute.side_effect = [Exception("type mismatch"), None]
+        # #734: the multi-row chunk fails first, then the row-by-row replay
+        # pins the failure on row 0 while row 1 goes through.
+        conn._cur.execute.side_effect = [
+            Exception("type mismatch"),  # chunked INSERT
+            Exception("type mismatch"),  # replay: row 0
+            None,  # replay: row 1
+        ]
         modules = _mocked_databricks_modules(conn)
 
         records = [
@@ -243,6 +252,7 @@ class TestDatabricksDestinationLoad:
         assert result.failed == 1
         assert result.success == 1
         assert len(result.row_errors) == 1
+        assert result.row_errors[0].batch_index == 0
         assert "type mismatch" in result.row_errors[0].error_message
 
     def test_insert_row_error_on_error_fail_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -284,15 +294,16 @@ class TestDatabricksDestinationLoad:
         conn = _fake_conn()
         cur = conn._cur
 
-        # Fail the FIRST staging INSERT (row 0), let everything else through.
-        # The CREATE OR REPLACE TABLE statement runs first, then per-row
-        # INSERT INTO __drt_staging_..., then MERGE INTO, then DROP TABLE.
+        # Fail the chunked staging INSERT, then row 0 of the row-by-row
+        # replay (#734) — so the failure is attributed to row 0 and row 1
+        # still lands. CREATE OR REPLACE TABLE runs first, then the staging
+        # INSERTs, then MERGE INTO, then DROP TABLE.
         insert_call_count = {"n": 0}
 
         def execute_side_effect(sql: str, *args: Any) -> None:
             if "INSERT INTO main.default.__drt_staging_user_scores" in sql:
                 insert_call_count["n"] += 1
-                if insert_call_count["n"] == 1:
+                if insert_call_count["n"] <= 2:  # chunk, then replay row 0
                     raise Exception("staging type mismatch")
             return None
 
@@ -305,13 +316,12 @@ class TestDatabricksDestinationLoad:
         ]
         config = _config(mode="merge", upsert_key=["id"])
         with patch.dict("sys.modules", modules):
-            result = DatabricksDestination().load(
-                records, config, _options(on_error="skip")
-            )
+            result = DatabricksDestination().load(records, config, _options(on_error="skip"))
 
         assert result.failed == 1
         assert result.success == 1
         assert len(result.row_errors) == 1
+        assert result.row_errors[0].batch_index == 0
         assert "staging type mismatch" in result.row_errors[0].error_message
         # The MERGE statement still ran (against the staging table that
         # ended up with one row).
@@ -433,12 +443,13 @@ class TestDatabricksMirrorMode:
         sqls = [(c.args[0] if c.args else "") for c in calls]
         keys_tbl = "main.default.__drt_mirror_keys_user_scores"
         assert any(s.startswith(f"CREATE OR REPLACE TABLE {keys_tbl}") for s in sqls)
-        key_inserts = [
-            c.args[1]
-            for c in calls
-            if c.args and c.args[0].startswith(f"INSERT INTO {keys_tbl}")
+        key_insert_calls = [
+            c for c in calls if c.args and c.args[0].startswith(f"INSERT INTO {keys_tbl}")
         ]
-        assert sorted(key_inserts) == [[1], [2]]  # each observed key staged
+        # #734: both observed keys staged in one chunked multi-row INSERT.
+        assert len(key_insert_calls) == 1
+        assert key_insert_calls[0].args[0].count("(?)") == 2
+        assert sorted(key_insert_calls[0].args[1]) == [1, 2]
         delete_call = next(c for c in calls if c.args and c.args[0].startswith("DELETE FROM"))
         assert delete_call.args[0] == (
             f"DELETE FROM main.default.user_scores WHERE id NOT IN (SELECT id FROM {keys_tbl})"
@@ -473,9 +484,7 @@ class TestDatabricksMirrorMode:
         )
         assert len(delete_call.args) == 1  # anti-join binds no key params
         key_inserts = [
-            c.args[1]
-            for c in calls
-            if c.args and c.args[0].startswith(f"INSERT INTO {keys_tbl}")
+            c.args[1] for c in calls if c.args and c.args[0].startswith(f"INSERT INTO {keys_tbl}")
         ]
         assert key_inserts == [["a", 1]]  # the composite key staged as a tuple
 
@@ -490,13 +499,14 @@ class TestDatabricksMirrorMode:
         conn = _fake_conn()
         cur = conn._cur
 
-        # First record's staging INSERT fails; second succeeds.
+        # #734: the chunked staging INSERT fails, then row 0 of the replay
+        # fails — so record id=1 is the failure and id=2 survives.
         insert_call_count = {"n": 0}
 
         def execute_side_effect(sql: str, *args: Any) -> None:
             if "INSERT INTO main.default.__drt_staging_user_scores" in sql:
                 insert_call_count["n"] += 1
-                if insert_call_count["n"] == 1:
+                if insert_call_count["n"] <= 2:  # chunk, then replay row 0
                     raise Exception("staging type mismatch")
             return None
 
@@ -513,9 +523,10 @@ class TestDatabricksMirrorMode:
             )
             dest.finalize_sync(config, _options(mode="mirror"))
 
-        # #707: observed keys are staged (one INSERT each) into the mirror-keys
-        # table and removed via anti-join — so it's the mirror-keys INSERTs, not
-        # the DELETE params, that must reflect only id=2 (id=1 failed staging).
+        # #707: observed keys are staged (chunked multi-row INSERTs, #734) into
+        # the mirror-keys table and removed via anti-join — so it's the
+        # mirror-keys INSERTs, not the DELETE params, that must reflect only
+        # id=2 (id=1 failed staging).
         key_inserts = [
             call.args[1]
             for call in cur.execute.call_args_list
@@ -600,21 +611,18 @@ class TestDatabricksReplaceMode:
     def _swap_opts(**kw: Any) -> SyncOptions:
         return _options(mode="replace", replace_strategy="swap", **kw)
 
-    def test_replace_truncate_truncates_then_inserts(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_replace_truncate_truncates_then_inserts(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
         conn = _fake_conn()
         modules = _mocked_databricks_modules(conn)
         records = [{"id": 1, "score": 0.95}, {"id": 2, "score": 0.80}]
         with patch.dict("sys.modules", modules):
-            result = DatabricksDestination().load(
-                records, _config(), _options(mode="replace")
-            )
+            result = DatabricksDestination().load(records, _config(), _options(mode="replace"))
         assert result.success == 2
         sqls = _sqls(conn._cur)
         assert any(s.startswith(f"TRUNCATE TABLE {_FQ}") for s in sqls)
-        assert sum(f"INSERT INTO {_FQ} (" in s for s in sqls) == 2
+        # #734: both rows land in one chunked multi-row INSERT.
+        assert sum(f"INSERT INTO {_FQ} (" in s for s in sqls) == 1
 
     def test_replace_truncate_only_once_across_batches(
         self, monkeypatch: pytest.MonkeyPatch
@@ -628,9 +636,7 @@ class TestDatabricksReplaceMode:
             dest.load([{"id": 2}], _config(), _options(mode="replace"))
         assert sum(s.startswith("TRUNCATE TABLE") for s in _sqls(conn._cur)) == 1
 
-    def test_replace_swap_creates_shadow_and_inserts(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_replace_swap_creates_shadow_and_inserts(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
         conn = _fake_conn()
         conn._cur.fetchall.return_value = [("user_scores",)]  # target exists
@@ -642,8 +648,7 @@ class TestDatabricksReplaceMode:
         assert result.success == 1
         sqls = _sqls(conn._cur)
         assert any(
-            f"CREATE OR REPLACE TABLE {_SHADOW} AS SELECT * FROM {_FQ} WHERE 1=0" in s
-            for s in sqls
+            f"CREATE OR REPLACE TABLE {_SHADOW} AS SELECT * FROM {_FQ} WHERE 1=0" in s for s in sqls
         )
         assert any(f"INSERT INTO {_SHADOW} (" in s for s in sqls)
 
@@ -682,9 +687,7 @@ class TestDatabricksReplaceMode:
         assert any(f"INSERT INTO {_FQ} (" in s for s in sqls)
         assert fin is None
 
-    def test_replace_swap_on_error_fail_drops_shadow(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_replace_swap_on_error_fail_drops_shadow(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
         conn = _fake_conn()
         cur = conn._cur
@@ -754,9 +757,7 @@ class TestDatabricksOrphanCleanup:
         conn._cur.execute.side_effect = Exception("permission denied")
         modules = _mocked_databricks_modules(conn)
         with patch.dict("sys.modules", modules):
-            dropped, failed = DatabricksDestination().drop_orphan_swap_tables(
-                _config(), [_SHADOW]
-            )
+            dropped, failed = DatabricksDestination().drop_orphan_swap_tables(_config(), [_SHADOW])
         assert dropped == []
         assert failed == [_SHADOW]
 
@@ -791,3 +792,124 @@ def test_scope_rejected_on_databricks(monkeypatch: pytest.MonkeyPatch) -> None:
     with patch.dict("sys.modules", _mocked_databricks_modules(conn)):
         with pytest.raises(ValueError, match="mirror.scope are not yet supported"):
             dest.load([{"id": 1, "parent_id": 10}], config, opts)
+
+
+class TestDatabricksChunkedInserts:
+    """#734 — scalar loads batch into multi-row ``VALUES`` chunks under the
+    native 255-marker limit; a failed chunk replays row-by-row to keep exact
+    ``RowError`` attribution; json ``SELECT``-form loads stay one per row."""
+
+    def test_rows_per_chunk_math(self) -> None:
+        from drt.destinations.databricks import _rows_per_chunk
+
+        assert _rows_per_chunk(1) == 255
+        assert _rows_per_chunk(2) == 127
+        assert _rows_per_chunk(255) == 1
+        assert _rows_per_chunk(300) == 1  # wider than the limit still progresses
+
+    def test_insert_chunks_at_native_param_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """200 two-column rows -> a 127-row chunk + a 73-row chunk."""
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        modules = _mocked_databricks_modules(conn)
+        records = [{"id": i, "score": float(i)} for i in range(200)]
+        with patch.dict("sys.modules", modules):
+            result = DatabricksDestination().load(records, _config(), _options())
+
+        assert result.success == 200
+        assert result.failed == 0
+        calls = conn._cur.execute.call_args_list
+        assert len(calls) == 2
+        assert calls[0].args[0].count("(?, ?)") == 127  # 254 markers <= 255
+        assert len(calls[0].args[1]) == 254
+        assert calls[1].args[0].count("(?, ?)") == 73
+        assert len(calls[1].args[1]) == 146
+
+    def test_chunk_failure_replays_and_attributes_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed chunk lands nothing (atomic); the replay pins the RowError
+        on the exact record (original batch index) and the rest still load."""
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.execute.side_effect = [
+            Exception("bad row"),  # chunked INSERT (3 rows)
+            None,  # replay: row 0
+            Exception("bad row"),  # replay: row 1
+            None,  # replay: row 2
+        ]
+        modules = _mocked_databricks_modules(conn)
+        records = [
+            {"id": 1, "score": 0.1},
+            {"id": 2, "score": 0.2},
+            {"id": 3, "score": 0.3},
+        ]
+        with patch.dict("sys.modules", modules):
+            result = DatabricksDestination().load(records, _config(), _options(on_error="skip"))
+
+        assert result.success == 2
+        assert result.failed == 1
+        assert [e.batch_index for e in result.row_errors] == [1]
+
+    def test_chunk_failure_on_error_fail_raises_from_replay(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.execute.side_effect = Exception("bad row")
+        modules = _mocked_databricks_modules(conn)
+        records = [{"id": 1, "score": 0.1}, {"id": 2, "score": 0.2}]
+        with patch.dict("sys.modules", modules):
+            with pytest.raises(Exception, match="bad row"):
+                DatabricksDestination().load(records, _config(), _options(on_error="fail"))
+        conn.close.assert_called_once()
+
+    def test_json_columns_stay_row_by_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``SELECT``-form (from_json) inserts don't compose into multi-row
+        ``VALUES`` — they stay one statement per row (#734)."""
+        _set_creds(monkeypatch)
+        monkeypatch.setattr(
+            DatabricksDestination,
+            "_resolve_schema",
+            lambda self, config: {"attrs": "json"},
+        )
+        monkeypatch.setattr(
+            DatabricksDestination,
+            "_resolve_ddls",
+            lambda self, config: {"attrs": "map<string,string>"},
+        )
+        conn = _fake_conn()
+        modules = _mocked_databricks_modules(conn)
+        records = [{"id": 1, "attrs": {"a": "1"}}, {"id": 2, "attrs": {"b": "2"}}]
+        with patch.dict("sys.modules", modules):
+            result = DatabricksDestination().load(records, _config(), _options())
+
+        assert result.success == 2
+        calls = conn._cur.execute.call_args_list
+        assert len(calls) == 2  # one SELECT-form INSERT per row
+        assert all("from_json" in c.args[0] for c in calls)
+
+    def test_mirror_key_staging_chunks_past_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """300 observed single-column keys stage in two INSERTs (255 + 45)."""
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        modules = _mocked_databricks_modules(conn)
+        config = _config(mode="merge", upsert_key=["id"])
+        dest = DatabricksDestination()
+        dest._mirror_keys = [(i,) for i in range(300)]
+        with patch.dict("sys.modules", modules):
+            dest.finalize_sync(config, _options(mode="mirror"))
+
+        keys_tbl = "main.default.__drt_mirror_keys_user_scores"
+        key_inserts = [
+            c
+            for c in conn._cur.execute.call_args_list
+            if c.args and c.args[0].startswith(f"INSERT INTO {keys_tbl}")
+        ]
+        assert len(key_inserts) == 2
+        assert sorted(len(c.args[1]) for c in key_inserts) == [45, 255]
+        # Marker groups match the bound values chunk for chunk…
+        assert all(c.args[0].count("(?)") == len(c.args[1]) for c in key_inserts)
+        # …and every key is staged exactly once.
+        staged = [v for c in key_inserts for v in c.args[1]]
+        assert sorted(staged) == list(range(300))
