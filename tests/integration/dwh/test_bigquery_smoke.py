@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from drt.config.credentials import DuckDBProfile
 from drt.config.models import BigQueryDestinationConfig, SyncConfig, SyncOptions
 from drt.destinations.bigquery import BigQueryDestination
 from drt.engine.sync import run_sync
+from drt.sources.duckdb import DuckDBSource
 
 from .conftest import require_env, seed_duckdb_users, unique_table
 
@@ -177,3 +180,91 @@ def test_bigquery_connection() -> None:
         }
     )
     BigQueryDestination().test_connection(dest)
+
+
+def test_bigquery_complex_type_roundtrip(tmp_path: Path) -> None:
+    """Nested / repeated fields roundtrip via ``insert_rows_json`` on a real project.
+
+    BigQuery handles ARRAY / STRUCT natively — unlike the Snowflake / Databricks
+    legs there's no ``PARSE_JSON`` / ``from_json`` wrapping — so this proves the
+    destination passes a Python ``list`` + ``dict`` straight through into a live
+    ``ARRAY<STRING>`` / ``STRUCT`` table, read back as typed sub-fields.
+    """
+    creds = require_env(
+        "DRT_SMOKE_BIGQUERY_PROJECT",
+        "DRT_SMOKE_BIGQUERY_DATASET",
+        "DRT_SMOKE_BIGQUERY_KEYFILE",
+    )
+    table = unique_table("drt_smoke")
+    project = creds["DRT_SMOKE_BIGQUERY_PROJECT"]
+    dataset = creds["DRT_SMOKE_BIGQUERY_DATASET"]
+    keyfile = creds["DRT_SMOKE_BIGQUERY_KEYFILE"]
+    fqn = f"`{project}`.`{dataset}`.`{table}`"
+
+    # Source: DuckDB LIST -> Python list (ARRAY), STRUCT -> Python dict (RECORD).
+    duckdb = pytest.importorskip("duckdb")
+    db_path = str(tmp_path / "complex_source.duckdb")
+    dconn = duckdb.connect(db_path)
+    try:
+        dconn.execute(
+            "CREATE TABLE events ("
+            "  id INTEGER,"
+            "  tags VARCHAR[],"
+            "  attrs STRUCT(theme VARCHAR, level INTEGER)"
+            ")"
+        )
+        dconn.execute("INSERT INTO events VALUES (1, ['a', 'b'], {'theme': 'dark', 'level': 3})")
+    finally:
+        dconn.close()
+    source = DuckDBSource()
+    profile = DuckDBProfile(type="duckdb", database=db_path)
+
+    dest_kwargs: dict[str, Any] = {
+        "type": "bigquery",
+        "project": project,
+        "dataset": dataset,
+        "table": table,
+        "mode": "insert",
+        "method": "keyfile",
+        "keyfile": keyfile,
+    }
+    dest = BigQueryDestinationConfig(**dest_kwargs)
+    sync = SyncConfig(
+        name="bigquery_complex_smoke",
+        model="ref('events')",
+        destination=dest,
+        sync=SyncOptions(batch_size=10),
+    )
+
+    client = bigquery.Client.from_service_account_json(keyfile, project=project)
+    try:
+        client.query(
+            f"CREATE TABLE {fqn} "
+            "(id INT64, tags ARRAY<STRING>, attrs STRUCT<theme STRING, level INT64>)"
+        ).result()
+
+        result = run_sync(sync, source, BigQueryDestination(), profile, tmp_path)
+        assert result.success == 1, f"expected 1 loaded row, got {result.success}"
+        assert result.failed == 0
+
+        # Streaming insert lands in a buffer; poll until the typed fields resolve.
+        row = None
+        for _ in range(12):
+            rows = list(
+                client.query(
+                    f"SELECT tags[OFFSET(0)] AS first_tag, attrs.theme AS theme, "
+                    f"attrs.level AS lvl FROM {fqn} WHERE id = 1"
+                ).result()
+            )
+            if rows:
+                row = rows[0]
+                break
+            time.sleep(5)
+        assert row is not None, "row did not land"
+        # Typed sub-fields resolve → the list/dict landed as real ARRAY/STRUCT,
+        # not an opaque JSON string.
+        assert row["first_tag"] == "a"
+        assert row["theme"] == "dark"
+        assert row["lvl"] == 3
+    finally:
+        client.query(f"DROP TABLE IF EXISTS {fqn}").result()
