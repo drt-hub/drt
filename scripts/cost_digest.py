@@ -17,7 +17,10 @@ the health signal, this is a bookkeeping note. The one exception: a failing
 *webhook delivery* raises and fails the run — if the delivery channel itself
 is broken, nobody would see the digest, so that must be loud):
 
-- ``DRT_COST_SNOWFLAKE_ACCOUNT`` / ``_USER`` / ``_PASSWORD`` / ``_WAREHOUSE``
+- ``DRT_COST_SNOWFLAKE_ACCOUNT`` / ``_USER`` / ``_WAREHOUSE``, plus
+  ``_PRIVATE_KEY`` (PEM, key-pair auth for a ``TYPE = SERVICE`` user —
+  preferred; new Snowflake accounts enforce MFA on password users) or
+  ``_PASSWORD`` (legacy fallback)
 - ``DRT_COST_BIGQUERY_PROJECT`` (+ ``GOOGLE_APPLICATION_CREDENTIALS``)
 - ``DRT_COST_DISCORD_WEBHOOK``
 - ``DRT_COST_SF_CREDIT_BUDGET`` (default 5, mirrors the resource monitor)
@@ -48,14 +51,31 @@ def snowflake_mtd_credits() -> float | None:
     """MTD credits across all warehouses (ACCOUNT_USAGE lags ~1-3h; fine daily)."""
     account = os.environ.get("DRT_COST_SNOWFLAKE_ACCOUNT")
     user = os.environ.get("DRT_COST_SNOWFLAKE_USER")
-    password = os.environ.get("DRT_COST_SNOWFLAKE_PASSWORD")
     warehouse = os.environ.get("DRT_COST_SNOWFLAKE_WAREHOUSE")
-    if not all([account, user, password, warehouse]):
+    private_key_pem = os.environ.get("DRT_COST_SNOWFLAKE_PRIVATE_KEY")
+    password = os.environ.get("DRT_COST_SNOWFLAKE_PASSWORD")
+    if not all([account, user, warehouse]) or not (private_key_pem or password):
         return None
     import snowflake.connector
 
+    auth: dict[str, object] = {}
+    if private_key_pem:
+        # Key-pair auth (TYPE = SERVICE user) — the connector wants DER bytes.
+        from cryptography.hazmat.primitives import serialization
+
+        key = serialization.load_pem_private_key(
+            private_key_pem.encode(), password=None
+        )
+        auth["private_key"] = key.private_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    else:
+        auth["password"] = password
+
     conn = snowflake.connector.connect(
-        account=account, user=user, password=password, warehouse=warehouse
+        account=account, user=user, warehouse=warehouse, **auth
     )
     try:
         cur = conn.cursor()
