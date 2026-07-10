@@ -59,7 +59,9 @@ gh run watch <run-id> --exit-status
 curl -s https://pypi.org/pypi/drt-core/json | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['info']['version'])"
 # should print X.Y.Z
 
-gh release create vX.Y.Z --latest --title "vX.Y.Z" --notes "..."
+# The publish workflow's SBOM step already auto-created a bare release
+# for the tag — `gh release create` fails 422. EDIT it instead:
+gh release edit vX.Y.Z --latest --title "vX.Y.Z" --notes "..."
 gh release list --limit 3   # confirm vX.Y.Z shows Latest
 ```
 - Release notes: copy the `[X.Y.Z]` CHANGELOG section, add install snippet and `Full Changelog` compare link
