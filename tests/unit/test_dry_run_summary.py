@@ -59,6 +59,7 @@ def test_run_dry_run_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
             self.rows_extracted = self.success
             self.watermark_source = None
             self.cursor_value_used = None
+            self.watermark_lag = None
 
     def mock_run_sync(*args, **kwargs):
         return FakeResult()

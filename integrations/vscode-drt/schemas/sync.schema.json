@@ -4188,6 +4188,21 @@
           ],
           "default": null,
           "title": "Default Value"
+        },
+        "lag": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lag"
         }
       },
       "title": "WatermarkConfig",

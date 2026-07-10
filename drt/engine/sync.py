@@ -7,6 +7,7 @@ CLI owns all console output; engine only returns SyncResult.
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from collections.abc import Iterator
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from drt.config.credentials import ProfileConfig
+from drt.config.duration import parse_duration
 from drt.config.models import LookupConfig, SyncConfig
 from drt.destinations.base import Destination, StagedDestination, SyncResult
 from drt.destinations.lookup import (
@@ -60,6 +62,43 @@ def _stringify_cursor_value(val: Any) -> str:
     if isinstance(val, datetime) and val.tzinfo is not None:
         val = val.astimezone(timezone.utc).replace(tzinfo=None)
     return str(val)
+
+
+_INT_CURSOR_PATTERN = re.compile(r"-?\d+")
+
+
+def _apply_watermark_lag(value: str, lag: str | int) -> str:
+    """Return ``value`` shifted back by ``lag`` for the extraction predicate (#759).
+
+    Integer cursors take an integer ``lag`` (units of the cursor); timestamp
+    cursors take a duration string like ``"1 hour"`` (grammar shared with
+    ``freshness.max_age``). The lagged timestamp is re-stringified with the
+    same normalization as persisted watermarks (#475) so the rendered
+    predicate stays format-compatible with stored/default values.
+    """
+    text = value.strip()
+    if _INT_CURSOR_PATTERN.fullmatch(text):
+        if not isinstance(lag, int):
+            raise ValueError(
+                f"watermark.lag {lag!r} cannot apply to numeric cursor {value!r}: "
+                "numeric cursors take an integer lag (e.g. lag: 1000)."
+            )
+        return str(int(text) - lag)
+    if isinstance(lag, int):
+        raise ValueError(
+            f"watermark.lag {lag!r} cannot apply to timestamp cursor {value!r}: "
+            "timestamp cursors take a duration string (e.g. lag: '1 hour')."
+        )
+    iso = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+    try:
+        parsed = datetime.fromisoformat(iso)
+    except ValueError as e:
+        raise ValueError(
+            "watermark.lag requires a numeric or ISO-format timestamp cursor; "
+            f"could not parse stored watermark {value!r}."
+        ) from e
+    lagged = parsed - parse_duration(lag, field_name="watermark.lag")
+    return _stringify_cursor_value(lagged)
 
 
 def batch(iterable: Iterator[Any], size: int) -> Iterator[list[Any]]:
@@ -348,7 +387,29 @@ def _run_sync_body(
             watermark_source = "default_value"
             observer.on_watermark_resolved(sync.name, "default_value", last_cursor_value)
 
-    query = resolve_model_ref(sync.model, project_dir, profile, cursor_field, last_cursor_value)
+    # Overlap window (#759): widen the *read* window by watermark.lag so
+    # late-arriving rows are re-synced. Storage-sourced watermarks only —
+    # CLI overrides are exact by contract and default_value already marks a
+    # user-chosen start. Only the extraction predicate sees the lagged value;
+    # new_cursor_value below seeds from the unlagged watermark, so the
+    # persisted watermark can never regress (e.g. on an empty run).
+    effective_cursor_value = last_cursor_value
+    watermark_lag_applied: str | None = None
+    wm_cfg = sync.sync.watermark
+    if (
+        last_cursor_value is not None
+        and watermark_source == "storage"
+        and wm_cfg is not None
+        and wm_cfg.lag is not None
+    ):
+        effective_cursor_value = _apply_watermark_lag(last_cursor_value, wm_cfg.lag)
+        if effective_cursor_value != last_cursor_value:
+            watermark_lag_applied = str(wm_cfg.lag)
+            observer.on_watermark_resolved(sync.name, "storage_lag", effective_cursor_value)
+
+    query = resolve_model_ref(
+        sync.model, project_dir, profile, cursor_field, effective_cursor_value
+    )
 
     # Source extraction wrapped via generator helper so exceptions raised
     # during iteration (not just the initial call) carry stage="source" (#544).
@@ -537,7 +598,10 @@ def _run_sync_body(
 
     total_result.duration_seconds = round(time.perf_counter() - t0, 3)
     total_result.watermark_source = watermark_source
-    total_result.cursor_value_used = last_cursor_value
+    # The value the extraction predicate actually used — lag-adjusted when
+    # watermark.lag applied (#759). The persisted watermark is new_cursor_value.
+    total_result.cursor_value_used = effective_cursor_value
+    total_result.watermark_lag = watermark_lag_applied
 
     # State + watermark persistence is the observer's responsibility (#548).
     # The CLI composes ``LoggingObserver`` + ``StatePersistingObserver`` so

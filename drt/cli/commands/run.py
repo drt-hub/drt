@@ -230,6 +230,8 @@ def _run_one(
             entry["watermark_source"] = result.watermark_source
         if result.cursor_value_used is not None:
             entry["cursor_value_used"] = result.cursor_value_used
+        if result.watermark_lag is not None:
+            entry["watermark_lag"] = result.watermark_lag
         if ctx.log_json:
             logging.info(
                 "sync_complete",
@@ -286,6 +288,13 @@ def _print_watermark_summary(results: list[dict[str, object]]) -> None:
         console.print(
             f"\n[cyan]Note: {len(override_syncs)} sync(s) used --cursor-value "
             f"override: {names}[/cyan]"
+        )
+    lag_syncs = [e for e in results if e.get("watermark_lag")]
+    if lag_syncs:
+        names = ", ".join(f"{e['name']} ({e['watermark_lag']})" for e in lag_syncs)
+        console.print(
+            f"\n[cyan]Note: {len(lag_syncs)} sync(s) widened the read window via "
+            f"watermark.lag (overlap rows re-sent): {names}[/cyan]"
         )
 
 

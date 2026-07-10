@@ -104,6 +104,7 @@ class _FakeResult:
         self.row_errors: list[Any] = []
         self.watermark_source: str | None = None
         self.cursor_value_used: str | None = None
+        self.watermark_lag: str | None = None
 
 
 @pytest.fixture

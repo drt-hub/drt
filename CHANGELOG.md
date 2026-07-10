@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`sync.watermark.lag` — overlap window for late-arriving rows** ([#759](https://github.com/drt-hub/drt/issues/759)): incremental syncs can widen the *read* window behind the stored watermark so rows that arrive late (upstream backfills, clock skew, rebuilt marts) are re-synced instead of stranded — `WHERE cursor > (watermark - lag)`. Timestamp cursors take a duration string (`lag: "1 hour"`, same grammar as `freshness.max_age`); numeric cursors take a positive int. Applies **only to storage-sourced watermarks** — `--cursor-value` overrides stay exact and `default_value` first runs already mark a user-chosen start — and the *persisted* watermark is never lagged (`new_cursor_value` seeds from the unlagged value), so the window can never regress on an empty run. The lag-adjusted cursor is what `SyncResult.cursor_value_used` reports, a new `watermark_lag` field lands in `--output json` entries, the post-run summary prints an overlap note, and the observer emits a `storage_lag` watermark-resolved event. Duration parsing moves to a shared `drt/config/duration.py` (mirrors the `freshness.max_age` grammar). Prior art: dlt's incremental `lag`/attribution window. Overlap rows are re-sent every run, so destinations must tolerate duplicates (e.g. `upsert_key`). Docs: `docs/llm/API_REFERENCE.md` + `CONTEXT.md`.
+
 ## [0.7.11] - 2026-07-10
 
 ### Added

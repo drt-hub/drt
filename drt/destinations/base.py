@@ -31,6 +31,9 @@ class SyncResult:
     # Watermark observability (#390 / #391)
     watermark_source: str | None = None  # "cli_override" | "storage" | "default_value"
     cursor_value_used: str | None = None
+    # Overlap window (#759) — the watermark.lag that widened this run's read
+    # window (e.g. "1 hour"), or None when no lag was applied.
+    watermark_lag: str | None = None
     # Graceful shutdown (#279) — True if the sync stopped early due to a
     # cooperative cancellation signal (SIGTERM/SIGINT) between batches.
     interrupted: bool = False

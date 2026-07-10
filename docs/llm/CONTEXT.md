@@ -218,6 +218,7 @@ Slash command versions also available in `.claude/commands/` for manual installa
 - Cursor comparison uses numeric ordering when possible (handles integer/float cursors correctly)
 - **Template variable**: Use `{{ cursor_value }}` (or `{{ watermark }}`) in model SQL for flexible WHERE placement. When present, auto-injection is skipped.
 - **Remote watermark storage**: For stateless environments (e.g., Cloud Run Jobs), set `sync.watermark.storage` to `gcs` or `bigquery` to persist cursor values externally instead of `.drt/state.json`.
+- **Overlap window** (#759): `sync.watermark.lag` re-reads a window behind the stored watermark (`"1 hour"` for timestamp cursors — same grammar as `freshness.max_age` — or a positive int for numeric cursors) so late-arriving rows are re-synced. Applies only to storage-sourced watermarks (never `--cursor-value` or `default_value`), and the persisted watermark itself is never lagged. Overlap rows are re-sent every run, so the destination must tolerate duplicates (e.g. `upsert_key`).
 
 **Upsert mode**: Semantic alias for `mode: full` when `upsert_key` is set. Makes YAML intent explicit.
 - Set `sync.mode: upsert` — behaves identically to `mode: full`
