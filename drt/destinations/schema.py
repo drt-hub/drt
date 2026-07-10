@@ -202,9 +202,13 @@ def _describe_databricks(config: DatabricksDestinationConfig) -> dict[str, str] 
     # both quoted and unquoted table definitions. ``data_type`` reports the
     # top-level type name (e.g. ``ARRAY`` / ``STRUCT``); ``full_data_type`` would
     # carry the parameterised form, which we don't need for categorisation.
+    # Native ``?`` paramstyle (#707): the Databricks connector binds server-side
+    # with ``?`` markers, unlike the Postgres / MySQL / Snowflake queries in this
+    # file which are pyformat (``%s``) — the two paramstyles coexist here on
+    # purpose, one per driver's native style.
     sql = (
         f"SELECT column_name, data_type FROM {config.catalog}.information_schema.columns "
-        "WHERE lower(table_schema) = lower(%s) AND lower(table_name) = lower(%s)"
+        "WHERE lower(table_schema) = lower(?) AND lower(table_name) = lower(?)"
     )
     params: list[Any] = [config.schema_, config.table]
 
@@ -250,9 +254,10 @@ def describe_databricks_ddls(
     """
     from drt.destinations.databricks import DatabricksDestination
 
+    # Native ``?`` paramstyle (#707) — see the note in ``_describe_databricks``.
     sql = (
         f"SELECT column_name, full_data_type FROM {config.catalog}.information_schema.columns "
-        "WHERE lower(table_schema) = lower(%s) AND lower(table_name) = lower(%s)"
+        "WHERE lower(table_schema) = lower(?) AND lower(table_name) = lower(?)"
     )
     params: list[Any] = [config.schema_, config.table]
     try:

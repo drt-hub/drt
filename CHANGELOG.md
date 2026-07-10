@@ -49,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Databricks destination migrated to native `?` paramstyle** ([#707](https://github.com/drt-hub/drt/issues/707)): removes the interim `use_inline_params="silent"` opt-in from #706 — all bind sites (`_value_clause` scalar / `from_json` / `parse_json`, and the two schema-introspection queries) now use the connector's default native `?` markers with server-side binding, dropping the per-connection deprecation warning and the escaping-based injection surface inline rendering carried. The `sync.mode: mirror` end-of-sync DELETE is reworked from an inline `NOT IN (?, ?, …)` (one parameter per observed key, which native mode's per-statement parameter limit would cap) to a **staging anti-join**: observed keys are staged into a scratch Delta table and removed via `DELETE … WHERE key NOT IN (SELECT key FROM staging)`, binding no key parameters so it scales to any number of keys. Postgres/MySQL/Snowflake stay pyformat (native to their drivers). **Needs a live Databricks smoke run (incl. a mirror large enough to cross the old parameter limit) before release** — the unit suite is mock-based like the rest of this destination.
+
 - **README modernised; Japanese i18n retired** ([#712](https://github.com/drt-hub/drt/pull/712)): README.ja.md and its translation upkeep are removed; the English README is the single maintained entry point.
 
 ### Fixed

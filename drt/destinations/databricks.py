@@ -70,19 +70,20 @@ def _value_clause(
     Layer 3 (#317): json-category columns are wrapped so Databricks reconstructs
     the complex value from a JSON string —
 
-    - STRUCT / ARRAY / MAP -> ``from_json(%s, '<ddl>')`` (DDL from ``information_schema``)
-    - VARIANT -> ``parse_json(%s)`` (no DDL form)
+    - STRUCT / ARRAY / MAP -> ``from_json(?, '<ddl>')`` (DDL from ``information_schema``)
+    - VARIANT -> ``parse_json(?)`` (no DDL form)
 
-    Scalars pass straight through (``%s``). Databricks — like Snowflake — won't
+    Scalars pass straight through (``?``). Databricks — like Snowflake — won't
     accept these functions in a ``VALUES`` clause, so any wrapping switches the
-    statement to the ``SELECT`` form (``INSERT INTO t (cols) SELECT %s,
-    from_json(%s, '<ddl>')``). With no json columns the clause is the unchanged
-    ``VALUES (%s, %s, ...)`` — byte-identical to pre-#317 behaviour.
+    statement to the ``SELECT`` form (``INSERT INTO t (cols) SELECT ?,
+    from_json(?, '<ddl>')``). With no json columns the clause is the unchanged
+    ``VALUES (?, ?, ...)``.
 
-    The DDL is interpolated as a literal (it comes verbatim from
-    ``information_schema``, so there is no injection surface); the value itself
-    stays a ``%s`` bind. Returns ``(clause, json_columns)`` where ``clause``
-    already includes the ``VALUES (...)`` / ``SELECT ...`` keyword.
+    Markers are native ``?`` placeholders (databricks-sql-connector's default,
+    server-side binding — #707). The DDL is interpolated as a literal (it comes
+    verbatim from ``information_schema``, so there is no injection surface); the
+    value itself stays a ``?`` bind. Returns ``(clause, json_columns)`` where
+    ``clause`` already includes the ``VALUES (...)`` / ``SELECT ...`` keyword.
     """
     exprs: list[str] = []
     json_columns: list[str] = []
@@ -107,12 +108,12 @@ def _value_clause(
                 # out of the string literal (defence-in-depth — the DDL already
                 # comes verbatim from information_schema).
                 safe_ddl = ddl.replace("'", "''")
-                exprs.append(f"from_json(%s, '{safe_ddl}')")
+                exprs.append(f"from_json(?, '{safe_ddl}')")
             else:
                 # VARIANT — no DDL form.
-                exprs.append("parse_json(%s)")
+                exprs.append("parse_json(?)")
         else:
-            exprs.append("%s")
+            exprs.append("?")
     if json_columns:
         return "SELECT " + ", ".join(exprs), json_columns
     return "VALUES (" + ", ".join(exprs) + ")", json_columns
@@ -172,7 +173,7 @@ class DatabricksDestination:
     def _resolve_ddls(self, config: DatabricksDestinationConfig) -> dict[str, str] | None:
         """STRUCT/ARRAY/MAP column -> full type DDL, cached per sync.
 
-        Used to build ``from_json(%s, '<ddl>')``. VARIANT columns are absent (they
+        Used to build ``from_json(?, '<ddl>')``. VARIANT columns are absent (they
         load via ``parse_json``). ``None`` when introspection is off/unavailable.
         """
         if not config.introspect_schema:
@@ -518,16 +519,19 @@ class DatabricksDestination:
     ) -> SyncResult | None:
         """``sync.mode: mirror`` end-of-sync DELETE pass.
 
-        Issues ``DELETE FROM <catalog>.<schema>.<table> WHERE key NOT IN
-        (<observed>)`` against Databricks Delta. The connector uses
-        ``pyformat`` placeholders, but Databricks SQL does not auto-expand
-        a tuple-of-tuples — so the placeholder list is built explicitly,
-        mirroring the Snowflake leg of #340.
+        Deletes rows whose ``upsert_key`` was not observed in the source. Under
+        native ``?`` binding (#707) the per-statement parameter limit rules out
+        inlining every observed key into a single ``NOT IN (?, ?, ...)``, so the
+        keys are staged into a scratch Delta table (one small INSERT each) and
+        removed via anti-join: ``DELETE ... WHERE key NOT IN (SELECT key FROM
+        staging)`` binds *no* key parameters in the DELETE, so it scales past the
+        limit regardless of how many keys were observed. Reuses the MERGE path's
+        staging approach (Delta has no session-local temp tables; the principal
+        needs ``CREATE`` on the schema plus ``MODIFY`` on the target).
 
-        Returns ``None`` when ``_mirror_keys`` is empty or ``None`` —
-        treats "no batch with records was ever observed" as a signal to
-        skip the DELETE entirely, so a transient empty source doesn't
-        wipe the destination.
+        Returns ``None`` when ``_mirror_keys`` is empty or ``None`` — treats "no
+        batch with records was ever observed" as a signal to skip the DELETE
+        entirely, so a transient empty source doesn't wipe the destination.
         """
         assert isinstance(config, DatabricksDestinationConfig)
         if not self._mirror_keys:
@@ -536,24 +540,29 @@ class DatabricksDestination:
         upsert_cols = config.upsert_key
         assert upsert_cols  # guarded in load()
 
-        # Dedupe to keep the IN list compact when batches overlap.
+        # Dedupe the observed keys.
         keys = list({tuple(k) for k in self._mirror_keys})
         table_fq = f"{config.catalog}.{config.schema_}.{config.table}"
+        key_cols = ", ".join(upsert_cols)
+        where_cols = upsert_cols[0] if len(upsert_cols) == 1 else f"({key_cols})"
+        keys_table = f"{config.catalog}.{config.schema_}.__drt_mirror_keys_{config.table}"
+        row_marker = "(" + ", ".join(["?"] * len(upsert_cols)) + ")"
 
         conn = self._connect(config)
         try:
             with conn.cursor() as cur:
-                if len(upsert_cols) == 1:
-                    placeholders = ", ".join(["%s"] * len(keys))
-                    stmt = f"DELETE FROM {table_fq} WHERE {upsert_cols[0]} NOT IN ({placeholders})"
-                    params: list[Any] = [k[0] for k in keys]
-                else:
-                    col_tuple = "(" + ", ".join(upsert_cols) + ")"
-                    row_placeholder = "(" + ", ".join(["%s"] * len(upsert_cols)) + ")"
-                    placeholders = ", ".join([row_placeholder] * len(keys))
-                    stmt = f"DELETE FROM {table_fq} WHERE {col_tuple} NOT IN ({placeholders})"
-                    params = [v for key in keys for v in key]
-                cur.execute(stmt, params)
+                cur.execute(
+                    f"CREATE OR REPLACE TABLE {keys_table} AS "
+                    f"SELECT {key_cols} FROM {table_fq} WHERE 1=0"
+                )
+                insert_key_sql = f"INSERT INTO {keys_table} ({key_cols}) VALUES {row_marker}"
+                for key in keys:
+                    cur.execute(insert_key_sql, list(key))
+                cur.execute(
+                    f"DELETE FROM {table_fq} WHERE {where_cols} "
+                    f"NOT IN (SELECT {key_cols} FROM {keys_table})"
+                )
+                cur.execute(f"DROP TABLE IF EXISTS {keys_table}")
         finally:
             conn.close()
 
@@ -643,19 +652,13 @@ class DatabricksDestination:
                 f"({config.host_env}, {config.http_path_env}, {config.token_env})."
             )
 
-        # databricks-sql-connector >=3.0 defaults to *native* paramstyle
-        # (`?` / `:name` markers, server-side binding) and forwards pyformat
-        # `%s` markers to the server unexpanded — every parameterised
-        # statement in this destination then dies server-side with
-        # PARSE_SYNTAX_ERROR. Opt back into client-side inline rendering,
-        # which this destination's `%s` binds were written against (the
-        # connector renders values into the SQL text, matching the
-        # snowflake-connector default this file's SQL was modelled on).
-        # "silent" suppresses the per-connection deprecation warning; the
-        # native-`?` migration is tracked as a follow-up.
+        # This destination binds with native `?` placeholders (#707) —
+        # databricks-sql-connector >=3.0's default paramstyle (server-side
+        # binding). No `use_inline_params` opt-in: its client-side inline
+        # rendering is deprecated upstream and carries an escaping-based
+        # injection surface that native binding removes.
         return sql.connect(
             server_hostname=host,
             http_path=http_path,
             access_token=token,
-            use_inline_params="silent",
         )

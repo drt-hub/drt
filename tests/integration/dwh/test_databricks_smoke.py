@@ -14,11 +14,15 @@ Covers the #672 verification set (BigQuery #673 / PR #700 is the reference shape
   ``from_json`` and a VARIANT column via ``parse_json``, proven by reading
   typed sub-fields back.
 - ``test_databricks_connection`` — fast credential check via ``test_connection``.
+- ``test_databricks_mirror_deletes_unobserved_keys`` — ``sync.mode: mirror``
+  end-of-sync DELETE via the #707 staging anti-join removes the unobserved rows
+  on a live warehouse (its parameter-limit immunity is covered by the unit suite).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -331,3 +335,104 @@ def test_databricks_connection() -> None:
         }
     )
     DatabricksDestination().test_connection(dest)
+
+
+def test_databricks_mirror_deletes_unobserved_keys(tmp_path: Path) -> None:
+    """``sync.mode: mirror`` end-of-sync DELETE via the #707 staging anti-join.
+
+    Pre-seeds the Delta target with more keys than the source produces, then runs
+    a mirror sync: the MERGE upserts the observed rows and ``finalize_sync``
+    removes the rows whose key was *not* observed, proving the staging anti-join
+    (``DELETE … WHERE key NOT IN (SELECT key FROM staging)``) deletes correctly on
+    a live warehouse. The anti-join's *parameter-limit immunity* (it binds no key
+    parameters in the DELETE) is asserted in the mock unit suite, so the key count
+    here is kept small — row-by-row Delta staging makes a large mirror slow (a
+    300-key run measured ~20 min), and the count doesn't change what's proven.
+    """
+    creds = require_env(
+        HOST_ENV,
+        HTTP_PATH_ENV,
+        TOKEN_ENV,
+        "DRT_SMOKE_DATABRICKS_CATALOG",
+        "DRT_SMOKE_DATABRICKS_SCHEMA",
+    )
+    catalog = creds["DRT_SMOKE_DATABRICKS_CATALOG"]
+    schema = creds["DRT_SMOKE_DATABRICKS_SCHEMA"]
+    table = unique_table("drt_smoke_mirror")
+    fqn = f"`{catalog}`.`{schema}`.`{table}`"
+    keys_fqn = f"`{catalog}`.`{schema}`.`__drt_mirror_keys_{table}`"
+
+    # Kept small on purpose: row-by-row Delta staging is slow (a 300-key run
+    # took ~20 min), and the anti-join deletes the same way for 20 keys or 20k.
+    # The "binds no key parameters / scales past the limit" property is covered
+    # by the mock unit suite; here we just prove the live DELETE removes the
+    # unobserved rows.
+    observed, stale = 20, 5
+
+    duckdb = pytest.importorskip("duckdb")
+    db_path = str(tmp_path / "mirror_source.duckdb")
+    dconn = duckdb.connect(db_path)
+    try:
+        dconn.execute("CREATE TABLE items (id INTEGER, val VARCHAR)")
+        dconn.executemany(
+            "INSERT INTO items VALUES (?, ?)",
+            [(i, f"v{i}") for i in range(1, observed + 1)],
+        )
+    finally:
+        dconn.close()
+    source, profile = DuckDBSource(), DuckDBProfile(type="duckdb", database=db_path)
+
+    dest_kwargs: dict[str, Any] = {
+        "type": "databricks",
+        "host_env": HOST_ENV,
+        "http_path_env": HTTP_PATH_ENV,
+        "token_env": TOKEN_ENV,
+        "catalog": catalog,
+        "schema": schema,
+        "table": table,
+        "mode": "merge",
+        "upsert_key": ["id"],
+    }
+    dest = DatabricksDestinationConfig(**dest_kwargs)
+    sync = SyncConfig(
+        name="databricks_mirror_smoke",
+        model="ref('items')",
+        destination=dest,
+        sync=SyncOptions(mode="mirror", batch_size=100),
+    )
+
+    # Pre-seed the target with observed + stale keys; the stale ones
+    # (ids observed+1 .. observed+stale) are absent from the source, so the
+    # mirror finalize must delete exactly those.
+    conn = _connect(creds)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"CREATE TABLE {fqn} (id INT, val STRING) USING DELTA")
+            values = ", ".join(f"({i}, 'stale{i}')" for i in range(1, observed + stale + 1))
+            cur.execute(f"INSERT INTO {fqn} (id, val) VALUES {values}")
+    finally:
+        conn.close()
+
+    try:
+        result = run_sync(sync, source, DatabricksDestination(), profile, tmp_path)
+        assert result.failed == 0, f"mirror sync had failures: {result.errors[:3]}"
+
+        conn = _connect(creds)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT count(*), min(id), max(id) FROM {fqn}")
+                count, lo, hi = cur.fetchone()
+        finally:
+            conn.close()
+        # Only the observed keys (1..observed) survive; the stale rows were
+        # removed by the anti-join DELETE.
+        assert count == observed, f"expected {observed} rows after mirror, got {count}"
+        assert (lo, hi) == (1, observed)
+    finally:
+        conn = _connect(creds)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"DROP TABLE IF EXISTS {fqn}")
+                cur.execute(f"DROP TABLE IF EXISTS {keys_fqn}")
+        finally:
+            conn.close()

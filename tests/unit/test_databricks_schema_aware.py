@@ -1,7 +1,7 @@
 """Schema-aware serialization for the Databricks destination (#317, Layer 3).
 
 Shape-asserting tests for the write-path wiring: json-category columns bind via
-``from_json(%s, '<ddl>')`` (STRUCT/ARRAY/MAP) or ``parse_json(%s)`` (VARIANT),
+``from_json(?, '<ddl>')`` (STRUCT/ARRAY/MAP) or ``parse_json(?)`` (VARIANT),
 scalars pass through, and the no-json path stays byte-identical. A live
 round-trip against a real warehouse is the DWH smoke harness's job (#674); here
 we assert the generated SQL + binds, plus the JSON encoding round-trips.
@@ -83,14 +83,14 @@ def _load(
 
 def test_value_clause_no_json_is_values_form() -> None:
     clause, json_cols = _value_clause(["id", "name"], {"id": "scalar", "name": "scalar"}, None)
-    assert clause == "VALUES (%s, %s)"
+    assert clause == "VALUES (?, ?)"
     assert json_cols == []
 
 
 def test_value_clause_no_map_is_values_form() -> None:
     # Introspection unavailable (None) → unchanged behaviour.
     clause, json_cols = _value_clause(["id", "name"], None, None)
-    assert clause == "VALUES (%s, %s)"
+    assert clause == "VALUES (?, ?)"
     assert json_cols == []
 
 
@@ -101,8 +101,8 @@ def test_value_clause_struct_array_use_from_json_with_ddl() -> None:
         {"profile": "struct<a: int>", "tags": "array<string>"},
     )
     assert clause.startswith("SELECT ")
-    assert "from_json(%s, 'struct<a: int>')" in clause
-    assert "from_json(%s, 'array<string>')" in clause
+    assert "from_json(?, 'struct<a: int>')" in clause
+    assert "from_json(?, 'array<string>')" in clause
     assert json_cols == ["profile", "tags"]
 
 
@@ -111,7 +111,7 @@ def test_value_clause_variant_uses_parse_json() -> None:
     clause, json_cols = _value_clause(
         ["id", "doc"], {"id": "scalar", "doc": "json"}, {}
     )
-    assert "parse_json(%s)" in clause
+    assert "parse_json(?)" in clause
     assert "from_json" not in clause
     assert json_cols == ["doc"]
 
@@ -119,7 +119,7 @@ def test_value_clause_variant_uses_parse_json() -> None:
 def test_value_clause_case_insensitive_column_match() -> None:
     # information_schema lower-cases; record key may differ in case.
     clause, json_cols = _value_clause(["Tags"], {"tags": "json"}, {"tags": "array<int>"})
-    assert "from_json(%s, 'array<int>')" in clause
+    assert "from_json(?, 'array<int>')" in clause
     assert json_cols == ["Tags"]
 
 
@@ -148,8 +148,8 @@ def test_insert_path_wraps_and_binds() -> None:
     )
     sql, params = calls[0]
     assert sql.startswith("INSERT INTO main.default.t (id, profile, blob) SELECT")
-    assert "from_json(%s, 'struct<city: string>')" in sql
-    assert "parse_json(%s)" in sql
+    assert "from_json(?, 'struct<city: string>')" in sql
+    assert "parse_json(?)" in sql
     assert params[1] == json.dumps({"city": "London"})
     assert params[2] == json.dumps({"k": 1})
 
@@ -157,7 +157,7 @@ def test_insert_path_wraps_and_binds() -> None:
 def test_insert_no_json_is_byte_identical_values() -> None:
     calls = _load([{"id": 1, "name": "Alice"}], {"id": "scalar", "name": "scalar"}, None)
     sql, params = calls[0]
-    assert sql == "INSERT INTO main.default.t (id, name) VALUES (%s, %s)"
+    assert sql == "INSERT INTO main.default.t (id, name) VALUES (?, ?)"
     assert params == [1, "Alice"]
 
 
@@ -178,7 +178,7 @@ def test_introspect_schema_off_skips_introspection() -> None:
     finally:
         schema_mod.describe_columns = orig  # type: ignore[assignment]
     sql, _ = cur.calls[0]
-    assert "VALUES (%s, %s)" in sql and "from_json" not in sql
+    assert "VALUES (?, ?)" in sql and "from_json" not in sql
     assert calls_made["n"] == 0  # gate short-circuits before any introspection
 
 
@@ -190,7 +190,7 @@ def test_replace_truncate_path_wraps() -> None:
         sync=SyncOptions(mode="replace", replace_strategy="truncate"),
     )
     insert = next(s for s, _ in calls if s.startswith("INSERT"))
-    assert "SELECT %s, from_json(%s, 'array<string>')" in insert
+    assert "SELECT ?, from_json(?, 'array<string>')" in insert
 
 
 def test_replace_swap_path_wraps() -> None:
@@ -201,7 +201,7 @@ def test_replace_swap_path_wraps() -> None:
         sync=SyncOptions(mode="replace", replace_strategy="swap"),
     )
     insert = next(s for s, _ in calls if s.startswith("INSERT"))
-    assert "from_json(%s, 'array<string>')" in insert
+    assert "from_json(?, 'array<string>')" in insert
 
 
 def test_merge_staging_path_wraps() -> None:
@@ -215,7 +215,7 @@ def test_merge_staging_path_wraps() -> None:
     staging = next(
         s for s, _ in calls if s.startswith("INSERT INTO main.default.__drt_staging")
     )
-    assert "from_json(%s, 'array<string>')" in staging
+    assert "from_json(?, 'array<string>')" in staging
 
 
 def test_from_json_ddl_single_quotes_are_escaped() -> None:
@@ -224,7 +224,7 @@ def test_from_json_ddl_single_quotes_are_escaped() -> None:
         ["c"], {"c": "json"}, {"c": "struct<n: string, it's: int>"}
     )
     assert "it''s" in clause
-    assert "from_json(%s, 'struct<n: string, it''s: int>')" in clause
+    assert "from_json(?, 'struct<n: string, it''s: int>')" in clause
 
 
 def test_bind_row_orders_by_columns_regardless_of_row_key_order() -> None:
