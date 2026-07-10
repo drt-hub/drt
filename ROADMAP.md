@@ -104,20 +104,18 @@ Two additive features accumulated since v0.7.5 — a new **Amplitude destination
 
 ## v0.8 — Cloud Destinations & Growth
 
-**Theme:** DWH/Lakehouse destinations + community growth push.
+**Theme:** DWH/Lakehouse destinations + community growth push. Most of the original connector scope shipped early on the v0.7.x line — v0.8.0 releases the `drt docs` site plus a DX pull-in wave.
+
+**Release gate:** the `drt docs` site epic (#499) — ADR (#500) · static pre-laid DAG (#701) · default-safe connection labels (#696) · byte-identical output (#697) · post-#677 design follow-ups (#702). The tag is cut when the docs experience is coherent end-to-end.
 
 **Scope:**
-- **Cloud destinations** — BigQuery (#165) · Databricks Delta Lake (#167) · S3 Parquet/CSV (#168) · GCS (#169) · Azure Blob (#170) — *Snowflake (#164) shipped early in v0.7 via PR #353*
-- **SaaS destinations** — *Zendesk (#421) shipped via PR #504 — pattern reference for future SaaS connectors*
-- **Sources** — REST API (#422) ✅ *shipped via PR #474 — first non-database source, pattern reference for future API sources* · Delta Lake (#172) · Apache Iceberg (#173)
-- **Reliability follow-on** — dead letter queue (#278) — *opt-in telemetry (#263) moved up to v0.7*
-- **Correctness epic** — schema-aware serialization via INFORMATION_SCHEMA (#317)
-- **Engine** — `sync.mode: mirror` differential delete (#340)
-- **Growth / README** — hero section redesign (#281) · Quickstart GIF/asciinema (#282) · "Why OSS Reverse ETL" blog (#284) · production use case blog (#285) · Discord (#378) · X account link (#379) · Awesome lists (#290) — *Codespaces devcontainer (#283) and PyPI keywords (#307) shipped early in v0.7; Reddit/HN launch (#289) deferred to opportunistic timing post-v0.8*
-- **Ecosystem** — GitHub Action (#292) · VS Code extension (#293)
-- **Dev tooling** — FakeSource (#364) · `drt_run_test` MCP tool (#368) · `/drt-troubleshoot` skill (#369) · `/drt-changelog` repo skill (#372) · connection test in `drt validate` (#367)
+- **Docs site (release gate)** — `drt docs` sync catalog & lineage UI (#499 / #500 / #701 / #696 / #697 / #702) — *`generate --format mermaid|json|html` shipped v0.7.5–v0.7.11*
+- **DX pull-ins** *(from the 2026-07-10 dbt/dlt/competitor gap batch, #755–#786)* — `watermark.lag` (#759) · REST API source incremental (#767) · selection v2: glob / union / `--exclude` / `destination:`/`source:` (#771) · `drt run --failed` (#773) · `drt run --limit` (#774) · `--fail-fast` (#775) · `drt build` (#777) · dbt exposures export (#781, starts after #752 lands) · `drt deploy github-actions` (#785)
+- **Docs / skills debt** — skills freshness sweep (#717) · `sync.mask` documentation (#716)
+- **Growth / README (non-blocking)** — hero section redesign (#281) · "Why OSS Reverse ETL" blog (#284) · production use case doc (#375) · Discord (#378) · X account link (#379) — these ride alongside the release and do **not** gate the tag; Reddit/HN launch (#289) stays opportunistic post-v0.8
+- **Shipped early on the v0.7.x line** — cloud destinations: BigQuery (#165) · Databricks Delta Lake (#167) · S3 (#168) · GCS (#169) · Azure Blob (#170) · Snowflake (#164) — sources: REST API (#422) · Delta Lake (#172) · Iceberg (#173) — reliability/correctness: DLQ (#278) · schema-aware serialization (#317) · `sync.mode: mirror` (#340) — ecosystem: GitHub Action (#292) · VS Code extension (#293) — dev tooling: FakeSource (#364) · `drt_run_test` (#368) · `/drt-troubleshoot` (#369) · `/drt-changelog` (#372) · validate connection test (#367)
 
-**Out of scope:** Enterprise boundary (RBAC / audit log / plugin system → v0.9), Rust engine work (→ v1.x).
+**Out of scope:** Enterprise boundary (→ v0.9), Rust engine work (→ v1.x), diff polish (→ v0.8.1), warehouse hardening follow-ups (→ v0.8.2).
 
 **Target:** 2026-07 · **Progress:** [milestone/5](https://github.com/drt-hub/drt/milestone/5)
 
@@ -147,6 +145,9 @@ Two additive features accumulated since v0.7.5 — a new **Amplitude destination
 - **Performance** — Databricks batched writes ([#734](https://github.com/drt-hub/drt/issues/734)) — row-per-statement is one HTTP round trip per row on a live warehouse (300-key mirror smoke ≈ 19 min)
 - **Mirror symmetry** — `strategy: tracked` / `scope` for ClickHouse / Snowflake / Databricks ([#692](https://github.com/drt-hub/drt/issues/692)) · tracked+scope composition & SQL-JOIN state diff ([#694](https://github.com/drt-hub/drt/issues/694)) · tracked-mirror destination privileges doc ([#695](https://github.com/drt-hub/drt/issues/695))
 - **Cleanups** — Snowflake/Databricks `_insert_rows` dead-branch removal ([#699](https://github.com/drt-hub/drt/issues/699)) · `drt docs generate` hardening — rmtree guard / ImportError hint / slug collision ([#703](https://github.com/drt-hub/drt/issues/703))
+- **Extract robustness** *(2026-07-10 gap batch)* — streaming extraction via server-side cursors / `fetchmany` ([#765](https://github.com/drt-hub/drt/issues/765)) · source-side retry for transient extract failures ([#766](https://github.com/drt-hub/drt/issues/766))
+- **Cost attribution** — query tagging: BigQuery job labels / Snowflake `QUERY_TAG` / SQL comment header ([#768](https://github.com/drt-hub/drt/issues/768))
+- **State ops** — `--full-refresh` + `drt state show/reset` ([#776](https://github.com/drt-hub/drt/issues/776))
 
 **Out of scope:** diff work (→ v0.8.1), enterprise boundary (→ v0.9), engine refactors (#719–#723 land opportunistically).
 
@@ -163,8 +164,16 @@ Two additive features accumulated since v0.7.5 — a new **Amplitude destination
 - **Protocol stability** — review and freeze preparation (#300) · config encryption for secrets at rest (#303) — *`drt cloud push` stub (#302) shipped early in v0.7 via PR #409*
 - **Observability** — OpenTelemetry traces + metrics for sync execution (epic #429) — *Phase 1 (config schema + `[otel]` extras) shipped early via PR #527; Phase 2 (NoOpTracer global provider, #531) and Phases 3–4 (engine instrumentation + counter metrics) continue in parallel with v0.8 work*
 - **Performance** — benchmark suite (#280) + I/O vs CPU profiling for Rust migration decision (#301)
+- **Engine foundation** *(2026-07-10 gap batch)* — diff-based incremental (#755) · remote state backend for run state / history / DLQ (#756) · windowed backfill (#758) · first-class `run_id` + metadata columns (#762)
+- **Schema management** — managed destination tables + `on_schema_change` (#760) · column contracts (#761)
+- **CI / artifacts** — `state:modified` selector (#772) · `run_results.json` run artifacts (#778)
+- **Testing depth** — custom SQL tests + `severity: warn` + store-failures (#779) · sync unit tests (#780)
+- **Security** — secret provider URIs: AWS/GCP Secret Manager, Vault (#782) — pairs with config encryption (#303)
+- **Research** — streaming / event-triggered syncs ADR (#786)
 
 **Out of scope:** Implementing RBAC/audit log in OSS, actual Cloud service backend, Rust migration itself.
+
+**Unscheduled backlog** *(no milestone — pull in when a release theme fits)*: `match_policy` update_only/create_only (#757) · `computed_fields` (#763) · pre/post-sync hooks (#764) · rate limiting v2 (#769) · REST batch mode (#770, good first issue) · project vars (#783) · alert conditions (#784, good first issue).
 
 **Target:** 2026-09 · **Progress:** [milestone/6](https://github.com/drt-hub/drt/milestone/6)
 
