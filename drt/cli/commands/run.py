@@ -322,6 +322,14 @@ def run(
         help="Subtract syncs from the selection (same grammar as --select). Repeatable.",
         autocompletion=complete_selector,
     ),
+    failed_only: bool = typer.Option(
+        False,
+        "--failed",
+        help=(
+            "Re-run only syncs whose last recorded status was not success "
+            "(intersects with --select/--exclude). Never-run syncs are not included."
+        ),
+    ),
     threads: int = typer.Option(1, "--threads", "-t", help="Parallel execution threads."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without writing data."),
     verbose: bool = typer.Option(False, "--verbose", help="Show row-level error details."),
@@ -377,6 +385,7 @@ def run(
       drt run --select 'users_*' --exclude users_backfill
       drt run --select tag:crm --select tag:ads --threads 4
       drt run --select destination:hubspot
+      drt run --failed
       drt run --dry-run --diff
     """
     if diff and not dry_run:
@@ -420,6 +429,42 @@ def run(
     if not syncs:
         print_error("Selection matched no syncs (after --exclude).")
         raise typer.Exit(1)
+
+    # --failed (#773): sync-level re-run of the previous invocation's
+    # failures. Applied after --select/--exclude (intersection semantics).
+    # A clean previous state exits 0 — recovery loops shouldn't page when
+    # there is nothing to recover. (Record-level replay is `drt retry`.)
+    if failed_only:
+        state_probe = StateManager(Path("."))
+
+        def _last_run_failed(sync_cfg: SyncConfig) -> bool:
+            prev = state_probe.get_last_sync(sync_cfg.name)
+            return prev is not None and prev.status != "success"
+
+        syncs = [s for s in syncs if _last_run_failed(s)]
+        if not syncs:
+            if json_mode:
+                print(
+                    json.dumps(
+                        {
+                            "syncs": [],
+                            "succeeded": 0,
+                            "failed": 0,
+                            "note": "nothing_failed",
+                        },
+                        indent=2,
+                    )
+                )
+            else:
+                console.print(
+                    "[green]Nothing failed in the previous run — nothing to re-run.[/green]"
+                )
+            raise typer.Exit(0)
+        if not json_mode and not quiet:
+            console.print(
+                f"[dim]--failed: re-running {len(syncs)} sync(s): "
+                f"{', '.join(s.name for s in syncs)}[/dim]"
+            )
 
     if cursor_value is not None:
         incremental = [s for s in syncs if s.sync.mode == "incremental"]

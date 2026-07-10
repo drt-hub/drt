@@ -150,6 +150,7 @@ sync:
 | `--select tag:<tag>` | Run syncs by tag (e.g., `tag:hourly`); repeat `--select` to union |
 | `--select destination:<type>` | Run syncs by destination type (e.g., `destination:hubspot`) |
 | `--exclude <selector>` | Subtract syncs from the selection (same grammar) |
+| `--failed` | Re-run only syncs that failed in the previous invocation (exit 0 when nothing failed) |
 | `--threads N` | Parallel execution for faster pipelines |
 | `--log-format json` | Structured logs for log aggregators |
 
