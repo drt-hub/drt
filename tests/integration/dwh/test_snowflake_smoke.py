@@ -390,7 +390,7 @@ def test_snowflake_mirror_deletes_unobserved_keys(tmp_path: Path) -> None:
         "type": "snowflake",
         "account_env": ACCOUNT_ENV,
         "user_env": USER_ENV,
-        "password_env": PASSWORD_ENV,
+        **_auth_config_kwargs(),
         "database": creds["DRT_SMOKE_SNOWFLAKE_DATABASE"],
         "schema": creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"],
         "table": table,
