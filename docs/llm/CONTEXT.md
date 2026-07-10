@@ -123,6 +123,7 @@ drt run --select destination:hubspot  # select by destination type (#771)
 drt run --exclude <name-or-selector>  # subtract from the selection (#771)
 drt run --failed                  # re-run only syncs whose last status != success (#773; record-level replay is `drt retry`)
 drt run --limit 10                # sampled run (#774): extract at most N rows; watermark does NOT advance; refused for mirror/replace
+drt run --fail-fast               # stop scheduling after first failure (#775); remaining syncs report status=skipped; also on drt test
 drt run --threads 4               # parallel sync execution
 drt run --cursor-value '2026-01-01 00:00:00'  # override watermark cursor for backfill
 drt test                          # run post-sync validation tests

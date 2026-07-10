@@ -151,6 +151,8 @@ sync:
 | `--select destination:<type>` | Run syncs by destination type (e.g., `destination:hubspot`) |
 | `--exclude <selector>` | Subtract syncs from the selection (same grammar) |
 | `--failed` | Re-run only syncs that failed in the previous invocation (exit 0 when nothing failed) |
+| `--fail-fast` | Stop scheduling after the first failure — one systemic error, one red build, minimal quota burn |
+| `--limit N` | Sampled run: send at most N rows per sync (watermarks frozen; refused for mirror/replace) |
 | `--threads N` | Parallel execution for faster pipelines |
 | `--log-format json` | Structured logs for log aggregators |
 

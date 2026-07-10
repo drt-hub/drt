@@ -343,6 +343,14 @@ def run(
             "Watermarks do not advance; refused for mirror/replace syncs."
         ),
     ),
+    fail_fast: bool = typer.Option(
+        False,
+        "--fail-fast",
+        help=(
+            "Stop scheduling syncs after the first failure; in-flight syncs finish, "
+            "remaining ones are reported as skipped."
+        ),
+    ),
     threads: int = typer.Option(1, "--threads", "-t", help="Parallel execution threads."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without writing data."),
     verbose: bool = typer.Option(False, "--verbose", help="Show row-level error details."),
@@ -527,6 +535,20 @@ def run(
     t_total = time.monotonic()
     succeeded = 0
     failed = 0
+    skipped = 0
+
+    def _skipped_entry(sync_cfg: SyncConfig) -> dict[str, object]:
+        # --fail-fast (#775): "didn't run" is distinct from "ran and failed".
+        return {
+            "name": sync_cfg.name,
+            "status": "skipped",
+            "reason": "fail_fast",
+            "rows_extracted": 0,
+            "rows_synced": 0,
+            "rows_failed": 0,
+            "duration_seconds": 0.0,
+            "dry_run": dry_run,
+        }
 
     # Cooperative graceful shutdown for SIGTERM/SIGINT (#279).
     # Signals are delivered to the main thread by Python; the engine checks
@@ -582,20 +604,41 @@ def run(
         with ThreadPoolExecutor(max_workers=threads) as pool:
             futures = {pool.submit(_run_one, s, ctx, profile): s for s in syncs}
             for future in as_completed(futures):
+                if future.cancelled():
+                    # --fail-fast cancelled it before a worker picked it up.
+                    json_results.append(_skipped_entry(futures[future]))
+                    skipped += 1
+                    continue
                 name, entry, had_err = future.result()
                 json_results.append(entry)
                 if had_err:
                     failed += 1
+                    if fail_fast:
+                        # Stop scheduling; in-flight syncs drain normally
+                        # (the with-block's shutdown(wait=True) still waits).
+                        pool.shutdown(wait=False, cancel_futures=True)
                 else:
                     succeeded += 1
     else:
+        stop_scheduling = False
         for sync in syncs:
+            if stop_scheduling:
+                json_results.append(_skipped_entry(sync))
+                skipped += 1
+                continue
             name, entry, had_err = _run_one(sync, ctx, profile)
             json_results.append(entry)
             if had_err:
                 failed += 1
+                if fail_fast:
+                    stop_scheduling = True
             else:
                 succeeded += 1
+
+    if skipped and not json_mode and not quiet:
+        console.print(
+            f"[yellow]--fail-fast: skipped {skipped} sync(s) after the first failure.[/yellow]"
+        )
 
     total_duration = round(time.monotonic() - t_total, 2)
 
@@ -616,6 +659,7 @@ def run(
                     "syncs": json_results,
                     "succeeded": succeeded,
                     "failed": failed,
+                    "skipped": skipped,
                     "total_duration_seconds": total_duration,
                 },
                 indent=2,

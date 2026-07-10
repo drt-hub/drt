@@ -9,6 +9,7 @@ calls — each test only asserts the CLI wiring behaves as documented.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
@@ -350,6 +351,73 @@ def test_limit_rejects_non_positive(project: Path, patched_engine: dict[str, Any
     result = runner.invoke(app, ["run", "--limit", "0", "--output", "json"])
     assert result.exit_code == 1
     assert patched_engine["calls"] == []
+
+
+def _patch_failing_engine(
+    monkeypatch: pytest.MonkeyPatch, patched_engine: dict[str, Any], fail_names: set[str]
+) -> None:
+    """Re-patch run_sync so the named syncs report failure."""
+    from drt.engine import sync as sync_module
+
+    calls = patched_engine["calls"]
+
+    def fake_run_sync(sync, *_args: Any, **_kwargs: Any) -> _FakeResult:
+        calls.append(sync.name)
+        if sync.name in fail_names:
+            return _FakeResult(success=0, failed=1)
+        return _FakeResult(success=1, failed=0)
+
+    monkeypatch.setattr(sync_module, "run_sync", fake_run_sync, raising=False)
+
+
+# ---------------------------------------------------------------------------
+# --fail-fast (#775)
+# ---------------------------------------------------------------------------
+
+
+def test_fail_fast_sequential_skips_remaining(
+    project: Path, patched_engine: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_failing_engine(monkeypatch, patched_engine, {"sync_a"})
+
+    result = runner.invoke(app, ["run", "--fail-fast", "--output", "json"])
+
+    assert result.exit_code == 1
+    assert patched_engine["calls"] == ["sync_a"]  # b and c never scheduled
+    payload = json.loads(result.output)
+    assert payload["failed"] == 1
+    assert payload["skipped"] == 2
+    skipped = [e for e in payload["syncs"] if e["status"] == "skipped"]
+    assert {e["name"] for e in skipped} == {"sync_b", "sync_c"}
+    assert all(e["reason"] == "fail_fast" for e in skipped)
+
+
+def test_without_fail_fast_all_syncs_still_run(
+    project: Path, patched_engine: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_failing_engine(monkeypatch, patched_engine, {"sync_a"})
+
+    result = runner.invoke(app, ["run", "--output", "json"])
+
+    assert result.exit_code == 1
+    assert set(patched_engine["calls"]) == {"sync_a", "sync_b", "sync_c"}
+    payload = json.loads(result.output)
+    assert payload["skipped"] == 0
+
+
+def test_fail_fast_with_threads_accounts_for_every_sync(
+    project: Path, patched_engine: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Threaded fail-fast: no sync is lost — every sync is either run or
+    reported skipped (exact split is timing-dependent by design)."""
+    _patch_failing_engine(monkeypatch, patched_engine, {"sync_a", "sync_b", "sync_c"})
+
+    result = runner.invoke(app, ["run", "--fail-fast", "--threads", "3", "--output", "json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["succeeded"] + payload["failed"] + payload["skipped"] == 3
+    assert len(payload["syncs"]) == 3
 
 
 def test_limit_refused_for_mirror_and_replace(
