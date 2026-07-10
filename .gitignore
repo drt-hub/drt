@@ -57,3 +57,7 @@ docs/plans/
 # DWH smoke provisioning — never commit generated keyfiles
 drt-smoke-bq-key.json
 tests/integration/dwh/provisioning/*.json
+
+# the docs-demo example ships a hand-authored state fixture
+!examples/docs-demo/.drt/
+!examples/docs-demo/.drt/state.json

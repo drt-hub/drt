@@ -1,0 +1,11 @@
+name: errors_to_slack
+description: "Stream pipeline errors to the on-call channel."
+tags: [ops]
+model: ref('pipeline_errors')
+destination:
+  type: slack
+  webhook_url_env: SLACK_WEBHOOK_URL
+  message_template: ":x: {{ row.pipeline }} failed: {{ row.message }}"
+sync:
+  mode: full
+  batch_size: 1

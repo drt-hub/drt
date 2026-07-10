@@ -1,0 +1,10 @@
+name: leads_to_hubspot
+description: "Sync qualified leads for the GTM team."
+tags: [gtm]
+model: ref('qualified_leads')
+destination:
+  type: hubspot
+  object_type: contacts
+sync:
+  mode: incremental
+  cursor_field: scored_at

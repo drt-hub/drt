@@ -1,0 +1,37 @@
+name: orders_to_pg
+description: "Sync orders, enriched via user + product lookups."
+tags: [core]
+model: |
+  SELECT
+    o.order_id,
+    o.customer_id,
+    o.product_id,
+    o.amount,
+    CASE
+      WHEN o.amount >= 1000 THEN 'enterprise'
+      WHEN o.amount >= 100  THEN 'pro'
+      ELSE 'starter'
+    END AS tier
+  FROM {{ ref('orders') }} o
+  WHERE o.updated_at > {{ watermark }}
+destination:
+  type: postgres
+  host_env: DEMO_PG_HOST
+  dbname: acme_app
+  table: public.orders
+  upsert_key: [order_id]
+  lookups:
+    user:
+      table: public.users
+      match: { customer_id: id }
+      select: email
+    product:
+      table: public.products
+      match: { product_id: id }
+      select: sku
+sync:
+  mode: upsert
+  field_mappings:
+    order_id: id
+    amount: amount_usd
+  on_error: skip
