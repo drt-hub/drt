@@ -90,13 +90,9 @@ def _value_clause(
     # information_schema reports column names lower-cased; source record keys may
     # differ in case — fold both sides so wrapping fires for the common pipeline.
     cats = (
-        {str(k).lower(): v for k, v in category_map.items()}
-        if category_map is not None
-        else None
+        {str(k).lower(): v for k, v in category_map.items()} if category_map is not None else None
     )
-    ddl_map = (
-        {str(k).lower(): v for k, v in ddls.items()} if ddls is not None else None
-    )
+    ddl_map = {str(k).lower(): v for k, v in ddls.items()} if ddls is not None else None
     for col in columns:
         key = str(col).lower()
         if cats is not None and cats.get(key) == "json":
@@ -123,9 +119,17 @@ def _bind_row(row: dict[str, Any], columns: list[str], json_columns: list[str]) 
     """Order a row's values to ``columns``; ``json.dumps`` the json columns so the
     ``from_json`` / ``parse_json`` bind receives a JSON string."""
     js = set(json_columns)
-    return [
-        json.dumps(row.get(c), default=str) if c in js else row.get(c) for c in columns
-    ]
+    return [json.dumps(row.get(c), default=str) if c in js else row.get(c) for c in columns]
+
+
+# databricks-sql-connector's native paramstyle allows at most 255 parameter
+# markers per statement — multi-row INSERT chunks must stay under it (#734).
+_NATIVE_PARAM_LIMIT = 255
+
+
+def _rows_per_chunk(n_cols: int) -> int:
+    """How many rows fit in one multi-row INSERT under the native marker limit."""
+    return max(1, _NATIVE_PARAM_LIMIT // max(1, n_cols))
 
 
 class DatabricksDestination:
@@ -229,13 +233,26 @@ class DatabricksDestination:
                 if sync_options.mode == "replace":
                     if sync_options.replace_strategy == "swap":
                         self._load_replace_swap(
-                            cur, records, columns, config, table_fq, sync_options,
-                            result, category_map, ddls,
+                            cur,
+                            records,
+                            columns,
+                            config,
+                            table_fq,
+                            sync_options,
+                            result,
+                            category_map,
+                            ddls,
                         )
                     else:
                         self._load_replace_truncate(
-                            cur, records, columns, table_fq, sync_options, result,
-                            category_map, ddls,
+                            cur,
+                            records,
+                            columns,
+                            table_fq,
+                            sync_options,
+                            result,
+                            category_map,
+                            ddls,
                         )
                     return result
 
@@ -245,23 +262,7 @@ class DatabricksDestination:
 
                 if effective_mode == "insert":
                     sql = f"INSERT INTO {table_fq} ({col_list}) {value_clause}"
-
-                    for i, row in enumerate(records):
-                        try:
-                            cur.execute(sql, _bind_row(row, columns, json_cols))
-                            result.success += 1
-                        except Exception as e:
-                            result.failed += 1
-                            result.row_errors.append(
-                                RowError(
-                                    batch_index=i,
-                                    record_preview=str(row)[:200],
-                                    http_status=None,
-                                    error_message=str(e),
-                                )
-                            )
-                            if sync_options.on_error == "fail":
-                                raise
+                    self._insert_rows(cur, sql, records, sync_options, result, columns, json_cols)
 
                 elif effective_mode == "merge":
                     if not config.upsert_key:
@@ -292,24 +293,19 @@ class DatabricksDestination:
                         f"AS SELECT * FROM {table_fq} WHERE 1=0"
                     )
 
-                    staging_sql = (
-                        f"INSERT INTO {staging_table} ({col_list}) {value_clause}"
+                    staging_sql = f"INSERT INTO {staging_table} ({col_list}) {value_clause}"
+                    # Staging success is accounted after the MERGE (success =
+                    # len(records) - failed), so skip per-row success counting.
+                    self._insert_rows(
+                        cur,
+                        staging_sql,
+                        records,
+                        sync_options,
+                        result,
+                        columns,
+                        json_cols,
+                        count_success=False,
                     )
-                    for i, row in enumerate(records):
-                        try:
-                            cur.execute(staging_sql, _bind_row(row, columns, json_cols))
-                        except Exception as e:
-                            result.failed += 1
-                            result.row_errors.append(
-                                RowError(
-                                    batch_index=i,
-                                    record_preview=str(row)[:200],
-                                    http_status=None,
-                                    error_message=str(e),
-                                )
-                            )
-                            if sync_options.on_error == "fail":
-                                raise
 
                     matched_clause = (
                         f"WHEN MATCHED THEN UPDATE SET {update_clause}" if update_cols else ""
@@ -399,8 +395,7 @@ class DatabricksDestination:
         if not self._swap_shadow_created and not self._swap_direct_write:
             if self._target_exists(cur, config):
                 cur.execute(
-                    f"CREATE OR REPLACE TABLE {shadow_fq} "
-                    f"AS SELECT * FROM {table_fq} WHERE 1=0"
+                    f"CREATE OR REPLACE TABLE {shadow_fq} AS SELECT * FROM {table_fq} WHERE 1=0"
                 )
                 self._swap_shadow_created = True
                 self._swap_table = table_fq
@@ -433,8 +428,10 @@ class DatabricksDestination:
         result: SyncResult,
         columns: list[str],
         json_cols: list[str],
+        *,
+        count_success: bool = True,
     ) -> None:
-        """Execute a parameterised INSERT per row, honouring ``on_error``.
+        """Execute a parameterised INSERT for ``records``, honouring ``on_error``.
 
         Values are ordered to ``columns`` and json columns (``json_cols``) are
         ``json.dumps``'d so the ``from_json`` / ``parse_json`` bind receives a
@@ -442,16 +439,96 @@ class DatabricksDestination:
         ``_bind_row``) keeps binds correct even when a source yields rows with a
         varying key order/set — so ``columns``/``json_cols`` are required, not an
         optional ``list(row.values())`` fallback (#699).
+
+        Scalar-only loads (no json columns) are batched into multi-row
+        ``VALUES (…), (…)`` statements sized to the native 255-marker limit —
+        one warehouse round trip per chunk instead of per row (#734). A failed
+        chunk lands nothing (a multi-row INSERT is atomic), so it is replayed
+        row by row to keep exact per-row ``RowError`` attribution and
+        ``on_error`` semantics. The ``SELECT``-form json inserts don't compose
+        into multi-row ``VALUES`` and stay one statement per row.
+
+        ``count_success=False`` skips ``result.success`` accounting — the MERGE
+        staging path computes success after the merge instead.
         """
+        if json_cols:
+            self._insert_rows_one_by_one(
+                cur,
+                sql,
+                records,
+                sync_options,
+                result,
+                columns,
+                json_cols,
+                base_index=0,
+                count_success=count_success,
+            )
+            return
+
+        row_marker = "(" + ", ".join(["?"] * len(columns)) + ")"
+        rows_per = _rows_per_chunk(len(columns))
+        for start in range(0, len(records), rows_per):
+            chunk = records[start : start + rows_per]
+            if len(chunk) == 1:
+                self._insert_rows_one_by_one(
+                    cur,
+                    sql,
+                    chunk,
+                    sync_options,
+                    result,
+                    columns,
+                    json_cols,
+                    base_index=start,
+                    count_success=count_success,
+                )
+                continue
+            # The single-row statement ends in ``VALUES {row_marker}`` — extend
+            # it with one marker group per additional row in the chunk.
+            chunk_sql = sql + ", " + ", ".join([row_marker] * (len(chunk) - 1))
+            params: list[Any] = []
+            for row in chunk:
+                params.extend(_bind_row(row, columns, json_cols))
+            try:
+                cur.execute(chunk_sql, params)
+                if count_success:
+                    result.success += len(chunk)
+            except Exception:
+                self._insert_rows_one_by_one(
+                    cur,
+                    sql,
+                    chunk,
+                    sync_options,
+                    result,
+                    columns,
+                    json_cols,
+                    base_index=start,
+                    count_success=count_success,
+                )
+
+    def _insert_rows_one_by_one(
+        self,
+        cur: Any,
+        sql: str,
+        records: list[dict[str, Any]],
+        sync_options: SyncOptions,
+        result: SyncResult,
+        columns: list[str],
+        json_cols: list[str],
+        *,
+        base_index: int,
+        count_success: bool,
+    ) -> None:
+        """One INSERT per row — json ``SELECT``-form loads and chunk replay (#734)."""
         for i, row in enumerate(records):
             try:
                 cur.execute(sql, _bind_row(row, columns, json_cols))
-                result.success += 1
+                if count_success:
+                    result.success += 1
             except Exception as e:
                 result.failed += 1
                 result.row_errors.append(
                     RowError(
-                        batch_index=i,
+                        batch_index=base_index + i,
                         record_preview=str(row)[:200],
                         http_status=None,
                         error_message=str(e),
@@ -462,10 +539,7 @@ class DatabricksDestination:
 
     def _target_exists(self, cur: Any, config: DatabricksDestinationConfig) -> bool:
         """Return True if the target table exists (``SHOW TABLES ... LIKE``)."""
-        cur.execute(
-            f"SHOW TABLES IN {config.catalog}.{config.schema_} "
-            f"LIKE '{config.table}'"
-        )
+        cur.execute(f"SHOW TABLES IN {config.catalog}.{config.schema_} LIKE '{config.table}'")
         return bool(cur.fetchall())
 
     def finalize_sync(
@@ -522,10 +596,11 @@ class DatabricksDestination:
         Deletes rows whose ``upsert_key`` was not observed in the source. Under
         native ``?`` binding (#707) the per-statement parameter limit rules out
         inlining every observed key into a single ``NOT IN (?, ?, ...)``, so the
-        keys are staged into a scratch Delta table (one small INSERT each) and
-        removed via anti-join: ``DELETE ... WHERE key NOT IN (SELECT key FROM
-        staging)`` binds *no* key parameters in the DELETE, so it scales past the
-        limit regardless of how many keys were observed. Reuses the MERGE path's
+        keys are staged into a scratch Delta table (chunked multi-row INSERTs
+        sized to the marker limit, #734) and removed via anti-join: ``DELETE ...
+        WHERE key NOT IN (SELECT key FROM staging)`` binds *no* key parameters
+        in the DELETE, so it scales past the limit regardless of how many keys
+        were observed. Reuses the MERGE path's
         staging approach (Delta has no session-local temp tables; the principal
         needs ``CREATE`` on the schema plus ``MODIFY`` on the target).
 
@@ -555,9 +630,14 @@ class DatabricksDestination:
                     f"CREATE OR REPLACE TABLE {keys_table} AS "
                     f"SELECT {key_cols} FROM {table_fq} WHERE 1=0"
                 )
-                insert_key_sql = f"INSERT INTO {keys_table} ({key_cols}) VALUES {row_marker}"
-                for key in keys:
-                    cur.execute(insert_key_sql, list(key))
+                insert_key_prefix = f"INSERT INTO {keys_table} ({key_cols}) VALUES "
+                rows_per = _rows_per_chunk(len(upsert_cols))
+                for start in range(0, len(keys), rows_per):
+                    chunk = keys[start : start + rows_per]
+                    cur.execute(
+                        insert_key_prefix + ", ".join([row_marker] * len(chunk)),
+                        [v for key in chunk for v in key],
+                    )
                 cur.execute(
                     f"DELETE FROM {table_fq} WHERE {where_cols} "
                     f"NOT IN (SELECT {key_cols} FROM {keys_table})"
@@ -596,8 +676,7 @@ class DatabricksDestination:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"SHOW TABLES IN {config.catalog}.{config.schema_} "
-                    f"LIKE '{shadow_name}'"
+                    f"SHOW TABLES IN {config.catalog}.{config.schema_} LIKE '{shadow_name}'"
                 )
                 rows = cur.fetchall()
         finally:
