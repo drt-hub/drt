@@ -129,6 +129,7 @@ drt status                        # show recent sync results
 drt status --output json          # JSON output for status
 drt mcp run                       # start MCP server (requires drt-core[mcp])
 drt serve --port 8080             # start HTTP webhook endpoint (POST /sync/<name>)
+drt deploy github-actions --schedule "40 3 * * *"  # scaffold .github/workflows/drt-sync.yml — drt-action wired, extras inferred, required secrets enumerated (#785)
 ```
 
 ## MCP Server

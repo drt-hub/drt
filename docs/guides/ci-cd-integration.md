@@ -4,6 +4,21 @@ Run drt in your CI/CD pipeline to automate data activation with proper testing a
 
 ## GitHub Actions
 
+### Fastest path: `drt deploy github-actions`
+
+Since #785, drt scaffolds the workflow for you — from your project root:
+
+```bash
+drt deploy github-actions --schedule "40 3 * * *"
+```
+
+This writes `.github/workflows/drt-sync.yml` wired to [`drt-hub/drt-action`](https://github.com/drt-hub/drt-action), with:
+
+- **connector extras inferred** from your `profiles.yml` + sync destinations (e.g. `extras: "snowflake"`)
+- **every required secret enumerated** in the step's `env:` block — each `*_env` reference and `${VAR}` placeholder in your project becomes `NAME: ${{ secrets.NAME }}`, and the command prints the matching `gh secret set NAME` checklist
+
+Use `--select` / `--profile` to scope it, `--dry-run` to preview, `--force` to overwrite. The sections below cover hand-rolled workflows for anything the scaffold doesn't fit.
+
 ### Basic: run syncs on push to main
 
 ```yaml
