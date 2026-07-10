@@ -135,6 +135,7 @@ sync:                       # optional: all fields have defaults
     project: my-project     # BigQuery only
     dataset: my_dataset     # BigQuery only
     default_value: "2026-01-01 00:00:00"  # optional: fallback cursor for first run (v0.6.2)
+    lag: "1 hour"           # optional (#759): overlap window — re-read this far behind the stored watermark to catch late-arriving rows. Duration string for timestamp cursors ("1 hour", same grammar as freshness.max_age) or positive int for numeric cursors. Storage-sourced watermarks only (never --cursor-value / default_value); the persisted watermark is never lagged. Overlap rows are RE-SENT each run — destination must tolerate duplicates (upsert_key)
   batch_size: 100           # default: 100 — rows per destination call
   on_error: fail            # "fail" (default) | "skip"
   field_mappings:           # optional (#415): declarative column rename {source_column: destination_field}

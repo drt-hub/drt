@@ -70,6 +70,7 @@ def test_diff_with_dry_run_runs(
         errors: list[str] = []
         watermark_source: str | None = None
         cursor_value_used: str | None = None
+        watermark_lag: str | None = None
         duration_seconds = 0.01
         interrupted = False
         diff: Any = diff_mod.DiffResult(
@@ -127,6 +128,7 @@ def test_diff_json_mode_embeds_diff(
         errors: list[str] = []
         watermark_source: str | None = None
         cursor_value_used: str | None = None
+        watermark_lag: str | None = None
         duration_seconds = 0.01
         interrupted = False
         diff: Any = sample_diff

@@ -70,3 +70,18 @@ def test_print_watermark_summary_ignores_unknown_sources(capsys) -> None:  # typ
             ]
         )
     assert cap.get() == ""
+
+
+def test_print_watermark_summary_lag_branch(capsys) -> None:  # type: ignore[no-untyped-def]
+    """``watermark_lag`` entries trigger the overlap-window cyan note (#759)."""
+    with console.capture() as cap:
+        _print_watermark_summary(
+            [
+                {"name": "post_users", "watermark_source": "storage", "watermark_lag": "1 hour"},
+                {"name": "post_orders", "watermark_source": "storage"},
+            ]
+        )
+    out = cap.get()
+    assert "1 sync(s) widened the read window via" in out
+    assert "post_users (1 hour)" in out
+    assert "post_orders" not in out  # storage-source without lag stays silent

@@ -6,6 +6,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
+from drt.config.duration import parse_duration
+
 # ---------------------------------------------------------------------------
 # Auth (shared across destination types)
 # ---------------------------------------------------------------------------
@@ -1095,6 +1097,31 @@ class WatermarkConfig(BaseModel):
     dataset: str | None = None
     # Fallback value used when no watermark exists yet (first run)
     default_value: str | None = None
+    # Overlap window (#759): widen the incremental *read* window by this much
+    # behind the stored watermark so late-arriving rows are re-synced.
+    # Timestamp cursors take a duration string ("1 hour" — grammar shared with
+    # freshness.max_age); numeric cursors take a positive int (cursor units).
+    # Applies only to storage-sourced watermarks — never to --cursor-value
+    # overrides or default_value first runs — and the persisted watermark is
+    # never lagged, so the window cannot regress. Rows inside the lag window
+    # are re-sent every run: the destination must tolerate duplicates
+    # (e.g. via upsert_key).
+    lag: str | int | None = None
+
+    @model_validator(mode="after")
+    def _check_lag(self) -> WatermarkConfig:
+        if isinstance(self.lag, bool):
+            raise ValueError("watermark.lag must be a duration string or a positive integer.")
+        if self.lag is None:
+            return self
+        if isinstance(self.lag, int):
+            if self.lag <= 0:
+                raise ValueError(
+                    "watermark.lag must be a positive integer (units of the numeric cursor)."
+                )
+        else:
+            parse_duration(self.lag, field_name="watermark.lag")
+        return self
 
     @model_validator(mode="after")
     def _check_backend_fields(self) -> WatermarkConfig:
@@ -1229,6 +1256,16 @@ class SyncOptions(BaseModel):
     def _check_incremental_cursor(self) -> SyncOptions:
         if self.mode == "incremental" and not self.cursor_field:
             raise ValueError("cursor_field is required when mode is 'incremental'.")
+        return self
+
+    @model_validator(mode="after")
+    def _check_watermark_lag_mode(self) -> SyncOptions:
+        if (
+            self.watermark is not None
+            and self.watermark.lag is not None
+            and self.mode != "incremental"
+        ):
+            raise ValueError("watermark.lag requires mode='incremental'.")
         return self
 
     @model_validator(mode="after")
