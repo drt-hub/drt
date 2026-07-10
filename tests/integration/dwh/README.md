@@ -48,13 +48,21 @@ the cloud accounts and the "verified ✓" sign-off are the maintainer's
 | --- | --- |
 | `SMOKE_SNOWFLAKE_ACCOUNT` | account identifier |
 | `SMOKE_SNOWFLAKE_USER` | |
-| `SMOKE_SNOWFLAKE_PASSWORD` | |
+| `SMOKE_SNOWFLAKE_PRIVATE_KEY` | PEM private-key contents (key-pair auth — preferred) |
+| `SMOKE_SNOWFLAKE_PASSWORD` | legacy fallback only — see the key-pair note below |
 | `SMOKE_SNOWFLAKE_DATABASE` | a throwaway DB the role can create/drop tables in |
 | `SMOKE_SNOWFLAKE_SCHEMA` | |
 | `SMOKE_SNOWFLAKE_WAREHOUSE` | |
 
 Snowflake prerequisites (#671):
 
+- A **`TYPE = SERVICE` user with an RSA key pair** (#737) — new Snowflake
+  accounts enforce MFA on password sign-ins, so programmatic password auth
+  fails there; `SERVICE` users forbid passwords entirely. The conversion +
+  key-registration steps are in
+  [`provisioning/snowflake.sql`](./provisioning/snowflake.sql). The
+  `SMOKE_SNOWFLAKE_PASSWORD` path remains only for pre-existing accounts
+  where password sign-in still works.
 - A **throwaway database + schema** the role can `CREATE`/`DROP` tables in, plus a
   running **virtual warehouse** for compute. Scope the grants to the throwaway
   schema, not the whole account — the swap leg builds and drops a

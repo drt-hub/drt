@@ -31,10 +31,15 @@ adding accounts one at a time never breaks CI.
 
 ## Snowflake — `snowflake.sql`
 
-Card-free 30-day trial. Run [`snowflake.sql`](./snowflake.sql) as
-`ACCOUNTADMIN` in a Worksheet, filling in a strong password. Account identifier
-is under the account menu (bottom-left) → *Copy account identifier*.
-Secrets: `SMOKE_SNOWFLAKE_{ACCOUNT,USER,PASSWORD,DATABASE,SCHEMA,WAREHOUSE}`.
+Card-free 30-day trial (converts to pay-as-you-go on a card afterwards — the
+resource monitor in the script is the hard cap either way). Run
+[`snowflake.sql`](./snowflake.sql) as `ACCOUNTADMIN` in a Worksheet (**Run All**,
+not "run current statement" — partial runs leave the user with no roles),
+filling in a strong password. Account identifier is under the account menu
+(bottom-left) → *Copy account identifier*. Then convert the user to
+`TYPE = SERVICE` + RSA key pair (the script's last section) — new accounts
+enforce MFA on password sign-ins, so key-pair is the programmatic path (#737).
+Secrets: `SMOKE_SNOWFLAKE_{ACCOUNT,USER,PRIVATE_KEY,DATABASE,SCHEMA,WAREHOUSE}`.
 
 ## BigQuery — `bigquery.sh`
 
@@ -46,28 +51,34 @@ fails with `billingNotEnabled` / "not allowed in the free tier":
 ```bash
 gcloud billing accounts list
 gcloud billing projects link <PROJECT> --billing-account=<ACCOUNT_ID>
-``` Effectively $0/month for KB-scale smoke tables.
+```
+
+Effectively $0/month for KB-scale smoke tables.
 Run [`bigquery.sh`](./bigquery.sh) with `gcloud` authenticated; load the
 generated keyfile's contents into `SMOKE_BIGQUERY_KEYFILE_JSON`, then delete
 the local keyfile. Secrets: `SMOKE_BIGQUERY_{PROJECT,DATASET,KEYFILE_JSON}`.
 
 ## Databricks — `databricks.sql` + manual steps
 
-The most expensive leg; consider deferring. [`databricks.sql`](./databricks.sql)
-covers the catalog/schema/grants. The rest is UI/API:
+**Free Edition** — structurally $0, no card, and includes a serverless SQL
+warehouse, PATs, and Unity Catalog (everything the smoke needs).
+[`databricks.sql`](./databricks.sql) covers the catalog/schema/grants. The
+rest is UI/API:
 
-- **Workspace**: a Databricks workspace on a cloud (trial or paid). Host =
+- **Workspace**: sign up for Databricks Free Edition. Host =
   `dbc-xxxx.cloud.databricks.com`.
-- **SQL warehouse**: create a (2X-)Small warehouse with the **minimum auto-stop**
-  (cost guardrail). Its *Connection details* give the HTTP path.
+- **SQL warehouse**: the built-in serverless starter warehouse works as-is.
+  Its *Connection details* give the HTTP path.
 - **PAT**: Settings → Developer → Access tokens → generate (`dapi…`).
+  ⚠️ PATs default to a **90-day lifetime** — calendar the rotation.
 
 Secrets: `SMOKE_DATABRICKS_{HOST,HTTP_PATH,TOKEN,CATALOG,SCHEMA}`.
 
 ## Cost & ownership
 
-Steady-state (correctly configured): Snowflake ~$1–3, BigQuery ~$0, Databricks
-~$8–15 per month. The dominant risk across all three is **leaving compute
-running** — always set auto-suspend/auto-stop + a budget/credit hard cap first.
-Account ownership, card strategy, and the CI-vs-contributor split are maintainer
-decisions kept in private strategy notes.
+Steady-state (correctly configured): Snowflake ~$1–3 (resource monitor hard-caps
+at 5 credits/month), BigQuery ~$0 (budget-alerted), Databricks $0 (Free Edition —
+no billing account exists to bill). On Snowflake/BigQuery the dominant risk is
+**leaving compute running** — always set auto-suspend + a budget/credit hard cap
+first. Account ownership, card strategy, and the CI-vs-contributor split are
+maintainer decisions kept in private strategy notes.
