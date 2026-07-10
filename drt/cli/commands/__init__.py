@@ -19,6 +19,7 @@ from drt.cli.commands import (
     cloud,  # noqa: F401
     config,  # noqa: F401
     connectors,  # noqa: F401 — registers `drt sources` + `drt destinations`
+    deploy,  # noqa: F401 — registers `drt deploy` sub-app (github-actions)
     docs,  # noqa: F401
     doctor,  # noqa: F401
     init,  # noqa: F401
