@@ -11,10 +11,11 @@ Identities: a dedicated read-only "cost watcher" per warehouse
 privileges stay least-possible. Databricks runs on Free Edition (no billing
 account exists), so its line is a constant $0.
 
-Env (all optional — a missing leg reports "n/a", a missing webhook prints
-to stdout only, and the script always exits 0 so the cron never "fails red"
-over a transient warehouse hiccup; the smoke workflow is the health signal,
-this is a bookkeeping note):
+Env (all optional — a missing leg reports "n/a" and a failing leg becomes an
+inline ⚠️ note, so a warehouse hiccup never "fails red"; the smoke workflow is
+the health signal, this is a bookkeeping note. The one exception: a failing
+*webhook delivery* raises and fails the run — if the delivery channel itself
+is broken, nobody would see the digest, so that must be loud):
 
 - ``DRT_COST_SNOWFLAKE_ACCOUNT`` / ``_USER`` / ``_PASSWORD`` / ``_WAREHOUSE``
 - ``DRT_COST_BIGQUERY_PROJECT`` (+ ``GOOGLE_APPLICATION_CREDENTIALS``)
@@ -97,6 +98,7 @@ def build_digest() -> str:
     try:
         credits = snowflake_mtd_credits()
     except Exception as e:  # noqa: BLE001 — a broken leg must not kill the digest
+        print(f"[debug] snowflake leg failed: {e}", file=sys.stderr)
         parts.append(f"Snowflake ⚠️ query failed ({type(e).__name__})")
         credits = None
     else:
@@ -112,6 +114,7 @@ def build_digest() -> str:
     try:
         tib = bigquery_mtd_tib()
     except Exception as e:  # noqa: BLE001
+        print(f"[debug] bigquery leg failed: {e}", file=sys.stderr)
         parts.append(f"BigQuery ⚠️ query failed ({type(e).__name__})")
         tib = None
     else:
@@ -136,7 +139,14 @@ def post_to_discord(message: str) -> bool:
         return False
     body = json.dumps({"content": message}).encode()
     req = urllib.request.Request(
-        webhook, data=body, headers={"Content-Type": "application/json"}
+        webhook,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            # Discord's edge (Cloudflare) rejects the default Python-urllib
+            # user agent with 403 — any explicit UA passes.
+            "User-Agent": "drt-cost-digest (github.com/drt-hub/drt)",
+        },
     )
     urllib.request.urlopen(req, timeout=30)  # noqa: S310 — webhook URL from secrets
     return True
