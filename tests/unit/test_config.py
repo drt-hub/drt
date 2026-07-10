@@ -768,3 +768,39 @@ class TestMirrorScope:
     def test_empty_scope_list_rejected(self) -> None:
         with pytest.raises(ValidationError):
             SyncOptions(mode="mirror", mirror={"scope": []})
+
+
+class TestSnowflakeKeyPairAuth:
+    """Snowflake key-pair auth config surface (#737)."""
+
+    def _base(self, **auth: str) -> dict:
+        return {
+            "type": "snowflake",
+            "account_env": "SF_ACCOUNT",
+            "user_env": "SF_USER",
+            "database": "DB",
+            "schema": "PUBLIC",
+            "table": "T",
+            "warehouse": "WH",
+            **auth,
+        }
+
+    def test_password_only_still_valid(self) -> None:
+        from drt.config.models import SnowflakeDestinationConfig
+
+        cfg = SnowflakeDestinationConfig(**self._base(password_env="SF_PASS"))
+        assert cfg.password_env == "SF_PASS"
+        assert cfg.private_key_env is None
+
+    def test_private_key_only_valid(self) -> None:
+        from drt.config.models import SnowflakeDestinationConfig
+
+        cfg = SnowflakeDestinationConfig(**self._base(private_key_env="SF_PK"))
+        assert cfg.private_key_env == "SF_PK"
+        assert cfg.password_env is None
+
+    def test_neither_auth_rejected(self) -> None:
+        from drt.config.models import SnowflakeDestinationConfig
+
+        with pytest.raises(ValueError, match="private_key_env.*or password_env"):
+            SnowflakeDestinationConfig(**self._base())

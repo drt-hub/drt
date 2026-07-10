@@ -175,6 +175,12 @@ class SnowflakeProfile:
     user: str = ""
     password_env: str | None = None
     password: str | None = None
+    # Key-pair auth (#737) for TYPE = SERVICE users — new Snowflake accounts
+    # enforce MFA on password sign-ins, so programmatic access should use a
+    # SERVICE user with an RSA key pair. The env var holds the PEM private
+    # key *contents* (PKCS#8). Takes precedence over password when set.
+    private_key_env: str | None = None
+    private_key_passphrase_env: str | None = None
     database: str = ""
     schema: str = "PUBLIC"
     warehouse: str = ""
@@ -337,6 +343,28 @@ def resolve_env(value: str | None, env_var: str | None) -> str | None:
             return env_val
         return _lookup_secrets_toml(env_var)
     return None
+
+
+def load_snowflake_private_key(
+    pem: str, passphrase: str | None = None
+) -> bytes:
+    """Decode a PEM private key to the DER bytes snowflake-connector expects.
+
+    Shared by the Snowflake source and destination for key-pair auth (#737).
+    ``cryptography`` is a snowflake-connector-python dependency, so it is
+    present whenever the connector itself is installed — imported lazily to
+    keep drt-core importable without the extra.
+    """
+    from cryptography.hazmat.primitives import serialization
+
+    key = serialization.load_pem_private_key(
+        pem.encode(), password=passphrase.encode() if passphrase else None
+    )
+    return key.private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
 
 
 def resolve_env_dict(options: dict[str, str]) -> dict[str, str]:

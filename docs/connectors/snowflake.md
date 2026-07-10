@@ -25,7 +25,9 @@ destination:
 | `type` | `"snowflake"` | — | Required |
 | `account_env` | string | — | Env var holding the Snowflake account identifier (e.g. `acct.us-east-1.aws`). **Required** |
 | `user_env` | string | — | Env var holding the username. **Required** |
-| `password_env` | string | — | Env var holding the password. **Required** |
+| `password_env` | string \| null | null | Env var holding the password. One of `password_env` / `private_key_env` is required. |
+| `private_key_env` | string \| null | null | Env var holding the **PEM (PKCS#8) private key contents** for key-pair auth (#737) — the path for `TYPE = SERVICE` users. Takes precedence over `password_env`. |
+| `private_key_passphrase_env` | string \| null | null | Env var holding the private key passphrase, if the key is encrypted. |
 | `database` | string | — | Database name. **Required** |
 | `schema` | string | — | Schema name (YAML key; model field is `schema_` to avoid colliding with `BaseModel.schema()` under mypy strict). **Required** |
 | `table` | string | — | Target table name. **Required** |
@@ -38,12 +40,17 @@ destination:
 
 ## Authentication
 
-Snowflake credentials are read at sync time from the three required env vars:
+**Key-pair (recommended):** new Snowflake accounts enforce MFA on password sign-ins, so programmatic access should use a `TYPE = SERVICE` user with an RSA key pair. Generate a key, register the public half on the user, and point `private_key_env` at an env var holding the **PEM private key contents**:
 
 ```bash
-export SF_ACCOUNT="myorg-myaccount.us-east-1"
-export SF_USER="drt_writer"
-export SF_PASSWORD="..."
+openssl genrsa 2048 | openssl pkcs8 -topk8 -inform PEM -out sf_key.p8 -nocrypt
+openssl rsa -in sf_key.p8 -pubout   # → RSA_PUBLIC_KEY value (strip the PEM headers)
+export SF_PRIVATE_KEY="$(cat sf_key.p8)"
+```
+
+```sql
+CREATE USER drt_writer TYPE = SERVICE DEFAULT_ROLE = ...;
+ALTER USER drt_writer SET RSA_PUBLIC_KEY = 'MII...';
 ```
 
 ```yaml
@@ -51,11 +58,13 @@ destination:
   type: snowflake
   account_env: SF_ACCOUNT
   user_env: SF_USER
-  password_env: SF_PASSWORD
+  private_key_env: SF_PRIVATE_KEY   # wins over password_env when both are set
   ...
 ```
 
-> drt does not yet support key-pair authentication or OAuth for Snowflake. Open an issue if this is blocking — password-based auth was sufficient for the v0.5 production-ready scope but is no longer the recommended Snowflake default for new deployments.
+**Password (legacy):** still supported via `password_env` for human-type users / older accounts, but Snowflake is deprecating password-only sign-ins — expect it to stop working for non-MFA users.
+
+Both paths apply to the **source profile** too (`private_key_env` on the `snowflake` profile in `~/.drt/profiles.yml`). OAuth is not yet supported.
 
 ## Common Patterns
 
