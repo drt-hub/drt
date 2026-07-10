@@ -63,15 +63,24 @@ class SnowflakeSource:
         except ImportError as e:
             raise ImportError("Snowflake support requires: pip install drt-core[snowflake]") from e
 
-        password = resolve_env(config.password, config.password_env) or ""
-
         connect_args: dict[str, Any] = {
             "account": config.account,
             "user": config.user,
-            "password": password,
             "database": config.database,
             "schema": config.schema,
         }
+        # Key-pair auth (#737) wins over password — the SERVICE-user path for
+        # accounts that enforce MFA on password sign-ins.
+        private_key_pem = resolve_env(None, config.private_key_env)
+        if private_key_pem:
+            from drt.config.credentials import load_snowflake_private_key
+
+            connect_args["private_key"] = load_snowflake_private_key(
+                private_key_pem,
+                resolve_env(None, config.private_key_passphrase_env),
+            )
+        else:
+            connect_args["password"] = resolve_env(config.password, config.password_env) or ""
         if config.warehouse:
             connect_args["warehouse"] = config.warehouse
         if config.role:

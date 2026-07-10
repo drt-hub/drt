@@ -52,10 +52,23 @@ CREATE USER IF NOT EXISTS DRT_SMOKE_USER
   MUST_CHANGE_PASSWORD = FALSE;
 GRANT ROLE DRT_SMOKE_ROLE TO USER DRT_SMOKE_USER;
 
+-- ── 5b. Key-pair auth (#737 — REQUIRED on new accounts) ────────────────────
+-- New Snowflake accounts enforce MFA on password sign-ins, which breaks
+-- programmatic password logins. Convert the user to a SERVICE user with an
+-- RSA key pair (generate locally: openssl genrsa 2048 | openssl pkcs8 -topk8
+-- -inform PEM -nocrypt) and register the private key PEM contents as the
+-- SMOKE_SNOWFLAKE_PRIVATE_KEY secret instead of a password:
+--
+--   ALTER USER DRT_SMOKE_USER SET
+--     TYPE = SERVICE,
+--     RSA_PUBLIC_KEY = '<public key, PEM headers stripped>';
+--   ALTER USER DRT_SMOKE_USER UNSET PASSWORD;
+
 -- ── Secret mapping (register these; values → SMOKE_SNOWFLAKE_* repo secrets)─
 --   SMOKE_SNOWFLAKE_ACCOUNT   = <account identifier, e.g. orgname-accountname>
 --   SMOKE_SNOWFLAKE_USER      = DRT_SMOKE_USER
---   SMOKE_SNOWFLAKE_PASSWORD  = <the password above>
+--   SMOKE_SNOWFLAKE_PRIVATE_KEY = <PEM private key contents — preferred>
+--   SMOKE_SNOWFLAKE_PASSWORD  = <the password above — legacy fallback>
 --   SMOKE_SNOWFLAKE_DATABASE  = DRT_SMOKE
 --   SMOKE_SNOWFLAKE_SCHEMA    = PUBLIC
 --   SMOKE_SNOWFLAKE_WAREHOUSE = DRT_SMOKE_WH

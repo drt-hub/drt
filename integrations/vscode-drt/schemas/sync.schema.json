@@ -3361,8 +3361,40 @@
           "type": "string"
         },
         "password_env": {
-          "title": "Password Env",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Password Env"
+        },
+        "private_key_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Private Key Env"
+        },
+        "private_key_passphrase_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Private Key Passphrase Env"
         },
         "database": {
           "title": "Database",
@@ -3429,7 +3461,6 @@
         "type",
         "account_env",
         "user_env",
-        "password_env",
         "database",
         "schema",
         "table",

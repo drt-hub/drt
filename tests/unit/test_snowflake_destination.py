@@ -584,3 +584,76 @@ def test_bind_row_orders_by_columns_regardless_of_row_key_order() -> None:
     assert _bind_row(diff_order, columns, []) == [2, "Bob", "b@x.com"]
     # a missing key becomes None in its column slot, never a shifted misalignment:
     assert _bind_row(missing_key, columns, []) == [3, "Carol", None]
+
+
+class TestSnowflakeKeyPairConnect:
+    """_connect passes DER private_key for key-pair auth (#737)."""
+
+    def _config(self, **auth: str):
+        return SnowflakeDestinationConfig(
+            **{
+                "type": "snowflake",
+                "account_env": "SF_ACCOUNT",
+                "user_env": "SF_USER",
+                "database": "DB",
+                "schema": "PUBLIC",
+                "table": "T",
+                "warehouse": "WH",
+                "introspect_schema": False,
+                **auth,
+            }
+        )
+
+    @staticmethod
+    def _pem() -> str:
+        cryptography = pytest.importorskip("cryptography")  # noqa: F841
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        return key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode()
+
+    def test_private_key_env_wins_and_passes_der(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SF_ACCOUNT", "acct")
+        monkeypatch.setenv("SF_USER", "svc_user")
+        monkeypatch.setenv("SF_PK", self._pem())
+        monkeypatch.setenv("SF_PASS", "should-not-be-used")
+
+        conn = MagicMock()
+        fake = MagicMock()
+        fake.connector.connect = MagicMock(return_value=conn)
+        with patch.dict(
+            "sys.modules", {"snowflake": fake, "snowflake.connector": fake.connector}
+        ):
+            dest = SnowflakeDestination()
+            got = dest._connect(
+                self._config(private_key_env="SF_PK", password_env="SF_PASS")
+            )
+
+        assert got is conn
+        kwargs = fake.connector.connect.call_args.kwargs
+        assert isinstance(kwargs["private_key"], bytes)  # DER bytes
+        assert "password" not in kwargs
+
+    def test_password_fallback_when_no_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SF_ACCOUNT", "acct")
+        monkeypatch.setenv("SF_USER", "user")
+        monkeypatch.setenv("SF_PASS", "pw")
+
+        fake = MagicMock()
+        with patch.dict(
+            "sys.modules", {"snowflake": fake, "snowflake.connector": fake.connector}
+        ):
+            SnowflakeDestination()._connect(self._config(password_env="SF_PASS"))
+
+        kwargs = fake.connector.connect.call_args.kwargs
+        assert kwargs["password"] == "pw"
+        assert "private_key" not in kwargs

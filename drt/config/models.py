@@ -437,7 +437,15 @@ class SnowflakeDestinationConfig(BaseModel):
 
     account_env: str
     user_env: str
-    password_env: str
+    # Auth: either a password or an RSA private key (#737). Key-pair is the
+    # path for ``TYPE = SERVICE`` users — new Snowflake accounts enforce MFA
+    # on password sign-ins, so programmatic identities should migrate to a
+    # SERVICE user + key pair. ``private_key_env`` names an env var holding
+    # the PEM (PKCS#8) private key *contents*; it takes precedence over
+    # ``password_env`` when both are set.
+    password_env: str | None = None
+    private_key_env: str | None = None
+    private_key_passphrase_env: str | None = None
 
     database: str
     # Use alias because BaseModel.schema() shadows a plain `schema` attribute
@@ -462,6 +470,15 @@ class SnowflakeDestinationConfig(BaseModel):
     # proper semi-structured data, not a stringified repr). On by default; set
     # false for roles without read access to information_schema.
     introspect_schema: bool = True
+
+    @model_validator(mode="after")
+    def _check_auth(self) -> SnowflakeDestinationConfig:
+        if not self.password_env and not self.private_key_env:
+            raise ValueError(
+                "snowflake destination needs private_key_env (key-pair auth, "
+                "preferred) or password_env."
+            )
+        return self
 
     def describe(self) -> str:
         return f"{self.type} ({self.database}.{self.schema_}.{self.table})"

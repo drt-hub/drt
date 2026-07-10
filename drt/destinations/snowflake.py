@@ -563,18 +563,32 @@ class SnowflakeDestination:
 
         account = resolve_env(None, config.account_env)
         user = resolve_env(None, config.user_env)
+        private_key_pem = resolve_env(None, config.private_key_env)
         password = resolve_env(None, config.password_env)
 
-        if not account or not user or not password:
+        if not account or not user or not (private_key_pem or password):
             raise ValueError(
                 "Missing Snowflake credentials. Check environment variables or secrets.toml."
             )
 
+        # Key-pair auth (#737) wins over password — the SERVICE-user path for
+        # accounts that enforce MFA on password sign-ins.
+        auth: dict[str, Any] = {}
+        if private_key_pem:
+            from drt.config.credentials import load_snowflake_private_key
+
+            auth["private_key"] = load_snowflake_private_key(
+                private_key_pem,
+                resolve_env(None, config.private_key_passphrase_env),
+            )
+        else:
+            auth["password"] = password
+
         return snowflake.connector.connect(
             account=account,
             user=user,
-            password=password,
             warehouse=config.warehouse,
             database=config.database,
             schema=config.schema_,
+            **auth,
         )
