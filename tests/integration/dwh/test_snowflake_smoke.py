@@ -18,6 +18,9 @@ Covers the #671 verification set (Priority 1 under epic #654):
   ``dict`` are reconstructed as real semi-structured values, proven by reading
   typed sub-fields (``tags[0]``, ``attrs:theme``, ``meta:source``) back.
 - ``test_snowflake_connection`` — fast credential check via ``test_connection``.
+- ``test_snowflake_mirror_deletes_unobserved_keys`` — ``sync.mode: mirror``
+  end-of-sync DELETE (#340 Snowflake leg): a pre-seeded row the source never
+  emits is removed because its key wasn't observed.
 
 Runs only when the ``DRT_SMOKE_SNOWFLAKE_*`` secrets are present (injected by the
 dwh-smoke workflow). Otherwise it skips — safe no-op for forks / local runs.
@@ -27,6 +30,7 @@ See tests/integration/dwh/README.md for the secret list.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -360,3 +364,67 @@ def test_snowflake_connection() -> None:
         }
     )
     SnowflakeDestination().test_connection(dest)
+
+
+def test_snowflake_mirror_deletes_unobserved_keys(tmp_path: Path) -> None:
+    """``sync.mode: mirror`` end-of-sync DELETE on a real account (#340 Snowflake leg).
+
+    Pre-seeds a stale row (``id=99``) the source never emits, runs a mirror sync,
+    and asserts the source rows land while the stale row is deleted — its key was
+    not in the observed set, so ``finalize_sync``'s ``DELETE … WHERE id NOT IN
+    (observed)`` removes it. This is the mirror leg the mock suite covers but no
+    live smoke did.
+    """
+    creds = require_env(
+        ACCOUNT_ENV,
+        USER_ENV,
+        PASSWORD_ENV,
+        "DRT_SMOKE_SNOWFLAKE_DATABASE",
+        "DRT_SMOKE_SNOWFLAKE_SCHEMA",
+        "DRT_SMOKE_SNOWFLAKE_WAREHOUSE",
+    )
+    source, profile = seed_duckdb_users(tmp_path)  # ids 1..3 (Alice/Bob/Carol)
+    table = unique_table("DRT_SMOKE_MIRROR")
+
+    dest_kwargs: dict[str, Any] = {
+        "type": "snowflake",
+        "account_env": ACCOUNT_ENV,
+        "user_env": USER_ENV,
+        "password_env": PASSWORD_ENV,
+        "database": creds["DRT_SMOKE_SNOWFLAKE_DATABASE"],
+        "schema": creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"],
+        "table": table,
+        "warehouse": creds["DRT_SMOKE_SNOWFLAKE_WAREHOUSE"],
+        "mode": "merge",
+        "upsert_key": ["id"],
+    }
+    dest = SnowflakeDestinationConfig(**dest_kwargs)
+    sync = SyncConfig(
+        name="snowflake_mirror_smoke",
+        model="ref('users')",
+        destination=dest,
+        sync=SyncOptions(mode="mirror", batch_size=10),
+    )
+
+    try:
+        _create_table(creds, table)
+        # Stale row the source never emits — mirror must delete it (id 99 ∉ {1,2,3}).
+        conn = _connect(creds)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"INSERT INTO {table} (id, name, email) "
+                    "VALUES (99, 'Stale', 'stale@example.com')"
+                )
+        finally:
+            conn.close()
+
+        result = run_sync(sync, source, SnowflakeDestination(), profile, tmp_path)
+        assert result.failed == 0, f"mirror sync had failures: {result.errors[:3]}"
+
+        count, names = _readback_count_and_names(creds, table)
+        # Source rows upserted; the unobserved stale row removed by the mirror DELETE.
+        assert names == {"Alice", "Bob", "Carol"}
+        assert count == 3, f"stale row not deleted — expected 3 rows, got {count}"
+    finally:
+        _drop_table(creds, table)
