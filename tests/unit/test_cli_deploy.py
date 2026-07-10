@@ -166,8 +166,12 @@ def test_extras_mapping_matches_registered_connectors() -> None:
 
 
 def test_extras_mapping_matches_pyproject_extras() -> None:
-    """Drift guard: every mapped extra must exist in pyproject optional-dependencies."""
-    import tomllib
+    """Drift guard: every mapped extra must exist in pyproject optional-dependencies.
+
+    tomllib is stdlib only from Python 3.11 — skipped on 3.10, where the CI
+    matrix still runs this guard on the three newer interpreters.
+    """
+    tomllib = pytest.importorskip("tomllib")
 
     pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
     with pyproject.open("rb") as f:
