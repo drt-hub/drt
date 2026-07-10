@@ -143,3 +143,56 @@ class TestSnowflakeSource:
             source._connect(config)
             call_kwargs = mock_connector.connect.call_args[1]
             assert call_kwargs["password"] == "env_secret"
+
+
+class TestSnowflakeSourceKeyPairConnect:
+    """Source _connect passes DER private_key for key-pair auth (#737)."""
+
+    @staticmethod
+    def _pem() -> str:
+        pytest.importorskip("cryptography")
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        return key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode()
+
+    def _profile(self, **auth: Any) -> SnowflakeProfile:
+        return SnowflakeProfile(
+            type="snowflake",
+            account="acct",
+            user="svc_user",
+            database="DB",
+            schema="PUBLIC",
+            warehouse="WH",
+            **auth,
+        )
+
+    def test_private_key_env_wins_and_passes_der(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SF_PK", self._pem())
+        fake = MagicMock()
+        with patch.dict(
+            "sys.modules", {"snowflake": fake, "snowflake.connector": fake.connector}
+        ):
+            SnowflakeSource()._connect(
+                self._profile(private_key_env="SF_PK", password="ignored")
+            )
+        kwargs = fake.connector.connect.call_args.kwargs
+        assert isinstance(kwargs["private_key"], bytes)  # DER bytes
+        assert "password" not in kwargs
+
+    def test_password_fallback_when_no_key(self) -> None:
+        fake = MagicMock()
+        with patch.dict(
+            "sys.modules", {"snowflake": fake, "snowflake.connector": fake.connector}
+        ):
+            SnowflakeSource()._connect(self._profile(password="pw"))
+        kwargs = fake.connector.connect.call_args.kwargs
+        assert kwargs["password"] == "pw"
+        assert "private_key" not in kwargs
