@@ -560,7 +560,13 @@ def render_html(
     # assets/
     write("assets/style.css", STYLE_CSS)
     write("assets/app.js", APP_JS)
-    write("assets/pygments-default.css", HtmlFormatter().get_style_defs(".highlight"))
+    write(
+        "assets/pygments-default.css",
+        HtmlFormatter().get_style_defs(".highlight")
+        + "\n@media (prefers-color-scheme: dark) {\n"
+        + HtmlFormatter(style="native").get_style_defs(".highlight")
+        + "\n}\n",
+    )
 
     # manifest.json — still emitted (P2 artifact for external tools).
     write("manifest.json", json.dumps(manifest.to_dict(), indent=2))
