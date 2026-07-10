@@ -130,6 +130,22 @@ Two additive features accumulated since v0.7.5 — a new **Amplitude destination
 
 ---
 
+## v0.8.2 — Warehouse hardening & security
+
+**Theme:** make the DWH legs secure, fast, and fully symmetrical — the follow-ups the v0.7.10 mirror work and the real-machine smoke program (#654, all three warehouses now live-validated nightly) surfaced.
+
+**Scope:**
+- **Security** — Snowflake key-pair authentication for destination + source ([#737](https://github.com/drt-hub/drt/issues/737)) — new Snowflake accounts already enforce MFA on password users, so `TYPE = SERVICE` + key-pair is the unblock; migrates the smoke/cost users off passwords
+- **Performance** — Databricks batched writes ([#734](https://github.com/drt-hub/drt/issues/734)) — row-per-statement is one HTTP round trip per row on a live warehouse (300-key mirror smoke ≈ 19 min)
+- **Mirror symmetry** — `strategy: tracked` / `scope` for ClickHouse / Snowflake / Databricks ([#692](https://github.com/drt-hub/drt/issues/692)) · tracked+scope composition & SQL-JOIN state diff ([#694](https://github.com/drt-hub/drt/issues/694)) · tracked-mirror destination privileges doc ([#695](https://github.com/drt-hub/drt/issues/695))
+- **Cleanups** — Snowflake/Databricks `_insert_rows` dead-branch removal ([#699](https://github.com/drt-hub/drt/issues/699)) · `drt docs generate` hardening — rmtree guard / ImportError hint / slug collision ([#703](https://github.com/drt-hub/drt/issues/703))
+
+**Out of scope:** diff work (→ v0.8.1), enterprise boundary (→ v0.9), engine refactors (#719–#723 land opportunistically).
+
+**Target:** rolling, after the v0.8 Growth push · **Progress:** [milestone/12](https://github.com/drt-hub/drt/milestone/12)
+
+---
+
 ## v0.9 — Enterprise Foundation
 
 **Theme:** Open Core boundary design — interfaces for Enterprise features without implementing them in OSS.
