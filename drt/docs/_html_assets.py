@@ -212,8 +212,7 @@ td.right, th.right { text-align:right; }
   .sidebar { display:none; }
   .topbar { flex-wrap:wrap; row-gap:6px; padding:10px 12px; }
   .project { display:none; }
-  .search { flex-basis:100%; margin-left:0; }
-  .search input { width:100%; }
+  .search { display:none; }  /* filters the sidebar, which is hidden here — restore with the real search UX */
   .main { padding:20px 14px; }
   table { display:block; overflow-x:auto; white-space:nowrap; }
   .kv { grid-template-columns:120px 1fr; }
