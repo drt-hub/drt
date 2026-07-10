@@ -4,14 +4,15 @@
 per view (overview, DAG, and each sync/source/destination) plus vendored
 ``assets/``. Per the ADR (#500): no runtime fetch, each page inlines its data
 subset in a ``<script type="application/json" id="drt-data">`` block, so the
-site works opened directly via ``file://`` with no CORS issues. Mermaid renders
-the DAG via CDN; YAML is syntax-highlighted at build time with Pygments.
+site works opened directly via ``file://`` with no CORS issues. The DAG page is
+a static SVG emitted from the layout engine (:mod:`drt.docs.dag`, #701) — no
+CDN, no runtime layout JS; YAML is syntax-highlighted at build time with
+Pygments.
 """
 
 from __future__ import annotations
 
 import json
-import re
 import shutil
 from collections import Counter
 from html import escape
@@ -24,132 +25,9 @@ from pygments.formatters import HtmlFormatter
 from pygments.lexers import YamlLexer
 
 from drt.docs._html_assets import APP_JS, STYLE_CSS
+from drt.docs._svg import _badge, _marker_defs, _node_card, _slug, _slug_map
+from drt.docs.dag import render_dag_svg
 from drt.docs.manifest import Manifest, Sync
-from drt.docs.mermaid import render_mermaid
-
-_SLUG_RE = re.compile(r"[^A-Za-z0-9]+")
-
-
-def _slug(value: str) -> str:
-    return _SLUG_RE.sub("-", value).strip("-").lower() or "x"
-
-
-def _slug_map(names: list[str], kind: str) -> dict[str, str]:
-    """Map each name to a stable slug, failing fast on a collision.
-
-    ``_slug`` collapses runs of non-alphanumerics, so punctuation-only-distinct
-    names (``a_b`` vs ``a__b``) can slugify to the same file — which would
-    silently overwrite a page and break cross-links. Detect that and raise.
-    """
-    out: dict[str, str] = {}
-    seen: dict[str, str] = {}
-    for name in names:
-        slug = _slug(name)
-        if slug in seen and seen[slug] != name:
-            raise ValueError(
-                f"Two {kind} names slugify to the same page {slug!r}: "
-                f"{seen[slug]!r} and {name!r}. Rename one so their pages don't collide."
-            )
-        seen[slug] = name
-        out[name] = slug
-    return out
-# Connector badges — brand-color initials (decision: docs design pass 1).
-# Curated map for known types; anything else falls back to a neutral brand
-# badge with the first two letters, so new plugins render without changes.
-_BADGES: dict[str, tuple[str, str, str]] = {
-    "bigquery": ("BQ", "#4285f4", "#ffffff"),
-    "postgres": ("PG", "#336791", "#ffffff"),
-    "duckdb": ("DK", "#fff100", "#3a3a00"),
-    "snowflake": ("SF", "#29b5e8", "#062d3d"),
-    "databricks": ("DX", "#ff3621", "#ffffff"),
-    "clickhouse": ("CH", "#faff69", "#3a3d00"),
-    "sqlite": ("SQ", "#0f80cc", "#ffffff"),
-    "mysql": ("MY", "#00758f", "#ffffff"),
-    "elasticsearch": ("ES", "#00bfb3", "#00312e"),
-    "s3": ("S3", "#ff9900", "#3e2500"),
-    "gcs": ("GC", "#4285f4", "#ffffff"),
-    "azure_blob": ("AZ", "#0078d4", "#ffffff"),
-    "slack": ("SL", "#4a154b", "#ffffff"),
-    "discord": ("DC", "#5865f2", "#ffffff"),
-    "hubspot": ("HS", "#ff7a59", "#3e1c00"),
-    "salesforce": ("SF", "#00a1e0", "#ffffff"),
-    "airtable": ("AT", "#fcb400", "#3d2c00"),
-    "klaviyo": ("KL", "#232426", "#ffffff"),
-    "rest_api": ("API", "#5a6068", "#ffffff"),
-    "webhook": ("WH", "#5a6068", "#ffffff"),
-}
-
-
-def _badge(conn_type: str) -> tuple[str, str, str]:
-    known = _BADGES.get(conn_type)
-    if known:
-        return known
-    initials = (conn_type[:2] or "??").upper()
-    return (initials, "#7c3aed", "#ffffff")
-
-
-def _badge_svg(conn_type: str, x: int, y: int) -> str:
-    """A 26x26 brand-initial badge at (x, y). All text escaped."""
-    initials, bg, fg = _badge(conn_type)
-    fs = 9 if len(initials) > 2 else 10
-    return (
-        f'<rect x="{x}" y="{y}" width="26" height="26" rx="7" fill="{bg}"/>'
-        f'<text x="{x + 13}" y="{y + 17}" font-size="{fs}" font-weight="700" '
-        f'class="mono" fill="{fg}" text-anchor="middle">{escape(initials)}</text>'
-    )
-
-
-def _clip(value: str, limit: int = 24) -> str:
-    return value if len(value) <= limit else value[: limit - 1] + "…"
-
-
-def _node_card(
-    x: int,
-    y: int,
-    w: int,
-    conn_type: str,
-    name: str,
-    sub: str,
-    href: str | None,
-    *,
-    code: bool = False,
-) -> str:
-    """One ego-graph node card. `code=True` renders the drt-managed sync style."""
-    accent = (
-        f'<rect x="{x}" y="{y}" width="3" height="54" rx="1.5" fill="var(--brand-600)"/>'
-        if code
-        else ""
-    )
-    stroke = "var(--zone-drt-line)" if code else "var(--line)"
-    if code:
-        icon = (
-            f'<g transform="translate({x + 13},{y + 14})">'
-            '<path d="M0,1.5 a1.5,1.5 0 0 1 1.5,-1.5 h6 l4,4 v11 a1.5,1.5 0 0 1 -1.5,1.5 '
-            'h-8.5 a1.5,1.5 0 0 1 -1.5,-1.5 z" fill="none" stroke="var(--brand-600)" '
-            'stroke-width="1.4" stroke-linejoin="round"/>'
-            '<path d="M7.5,0 v4 h4" fill="none" stroke="var(--brand-600)" '
-            'stroke-width="1.4" stroke-linejoin="round"/>'
-            '<path d="M3,9 h6 M3,12 h4" stroke="#a78bfa" stroke-width="1.2" '
-            'stroke-linecap="round"/></g>'
-        )
-        tx = x + 34
-    else:
-        icon = _badge_svg(conn_type, x + 12, y + 14)
-        tx = x + 48
-    name = _clip(name)
-    sub = _clip(sub, 30)
-    body = (
-        f'<rect x="{x}" y="{y}" width="{w}" height="54" rx="8" '
-        f'fill="var(--surface)" stroke="{stroke}"/>'
-        f"{accent}{icon}"
-        f'<text x="{tx}" y="{y + 23}" font-size="12.5" font-weight="600" '
-        f'class="mono" fill="var(--fg)">{escape(name)}</text>'
-        f'<text x="{tx}" y="{y + 40}" font-size="10" letter-spacing="0.6" '
-        f'fill="var(--muted)">{escape(sub.upper())}</text>'
-    )
-    if href:
-        return f'<a href="{escape(href, quote=True)}">{body}</a>'
-    return body
 
 
 def _ego_svg(
@@ -177,14 +55,7 @@ def _ego_svg(
     parts: list[str] = [
         f'<svg viewBox="0 0 890 {height}" width="890" height="{height}" role="img" '
         f'aria-label="Lineage for {escape(sync.name, quote=True)}">',
-        "<defs>"
-        '<marker id="ego-arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" '
-        'markerHeight="6" orient="auto-start-reverse">'
-        '<path d="M0,0.6 L7.4,4 L0,7.4 Z" fill="var(--edge)"/></marker>'
-        '<marker id="ego-arr-lk" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" '
-        'markerHeight="6" orient="auto-start-reverse">'
-        '<path d="M0,0.6 L7.4,4 L0,7.4 Z" fill="var(--edge-lookup)"/></marker>'
-        "</defs>",
+        _marker_defs("ego"),
     ]
 
     # main row: source → sync → destination
@@ -416,15 +287,14 @@ _DAG = """\
 {% block main %}
 <div class="eyebrow">Lineage</div>
 <h1>DAG</h1>
-<p class="lede">Source → sync → destination lineage. Dashed edges are destination lookups.</p>
-<pre class="mermaid">{{ mermaid }}</pre>
-{% endblock %}
-{% block scripts %}
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-<script>
-  var dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
-  mermaid.initialize({ startOnLoad: true, theme: dark ? "dark" : "default" });
-</script>
+<p class="lede">Ownership at a glance: what drt manages, what it reads, what it writes.
+Dashed edges are destination lookups.</p>
+{% if dag_svg %}
+<div class="dag">{{ dag_svg|safe }}</div>
+{% else %}
+<div class="empty">No syncs found &mdash; add <code>.yml</code> files to <code>syncs/</code>
+and re-run <code>drt docs generate</code>.</div>
+{% endif %}
 {% endblock %}
 """
 
@@ -722,7 +592,7 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
         ),
     )
 
-    # dag.html
+    # dag.html — static SVG from the layout engine (#701); no runtime layout JS.
     write(
         "dag.html",
         env.get_template("dag").render(
@@ -730,7 +600,7 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
             active="dag",
             root="",
             current_slug="",
-            mermaid=render_mermaid(manifest),
+            dag_svg=render_dag_svg(manifest) if manifest.syncs else None,
             data_json=dumps({"nav": nav}),
             **common,
         ),

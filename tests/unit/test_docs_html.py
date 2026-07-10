@@ -110,10 +110,12 @@ def test_sync_page_has_highlighted_yaml_and_state(site: Path) -> None:
     assert "../destination/dest-discord-x.html" in html
 
 
-def test_dag_uses_mermaid(site: Path) -> None:
+def test_dag_is_static_svg(site: Path) -> None:
+    """The DAG page inlines the layout-engine SVG (#701) — no Mermaid, no CDN."""
     html = (site / "dag.html").read_text(encoding="utf-8")
-    assert "mermaid" in html
-    assert "graph LR" in html
+    assert "<svg" in html
+    assert "mermaid" not in html
+    assert "cdn.jsdelivr.net" not in html
 
 
 def test_assets_referenced_with_correct_relative_paths(site: Path) -> None:
