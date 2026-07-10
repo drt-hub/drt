@@ -17,6 +17,7 @@ from drt.config.models import (
     LinkHeaderPaginationConfig,
     OffsetPaginationConfig,
     PaginationConfig,
+    RestIncrementalConfig,
 )
 from drt.destinations.auth import AuthHandler
 from drt.sources.base import Source
@@ -36,7 +37,39 @@ class RestApiSource(Source):
         ``RestApiProfile`` block in ``profiles.yml``).
         """
         assert isinstance(config, RestApiProfile)
+        yield from self._extract_impl(config, incremental=None, cursor_value=None)
 
+    def extract_incremental(
+        self, query: str, config: ProfileConfig, cursor_value: str | None
+    ) -> Iterator[dict[str, Any]]:
+        """Extract with the sync's watermark pushed to the API (#767).
+
+        Called by the engine instead of ``extract`` for ``mode: incremental``
+        syncs (``IncrementalSource`` capability). When the profile configures
+        ``incremental.start_param``, the watermark value is injected as a
+        request query parameter so the API filters server-side; without it,
+        extraction falls back to the full endpoint (and warns, since the
+        engine still cursors but every run re-pulls everything).
+        """
+        assert isinstance(config, RestApiProfile)
+        incremental: RestIncrementalConfig | None = None
+        if config.incremental:
+            incremental = TypeAdapter(RestIncrementalConfig).validate_python(config.incremental)
+        else:
+            logger.warning(
+                "rest_api source: sync runs with mode=incremental but the profile has no "
+                "incremental.start_param — the full endpoint is re-extracted every run. "
+                "Add `incremental: {start_param: <param>}` to the rest_api profile to "
+                "push the watermark to the API."
+            )
+        yield from self._extract_impl(config, incremental=incremental, cursor_value=cursor_value)
+
+    def _extract_impl(
+        self,
+        config: RestApiProfile,
+        incremental: RestIncrementalConfig | None,
+        cursor_value: str | None,
+    ) -> Iterator[dict[str, Any]]:
         auth_config: AuthConfig | None = None
         if config.auth:
             auth_config = TypeAdapter(AuthConfig).validate_python(config.auth)
@@ -82,6 +115,19 @@ class RestApiSource(Source):
                     url_with_params = config.url
                     if page > 0:
                         break  # No pagination, only 1 page
+
+                # Incremental (#767): push the watermark to the API. Injected
+                # on every request for offset/cursor/no-pagination styles
+                # (each page re-sends its params); for link_header only on
+                # the first request — the server's `next` links are
+                # authoritative full URLs that already carry request state.
+                if (
+                    incremental is not None
+                    and cursor_value is not None
+                    and (page == 0 or not isinstance(pagination_config, LinkHeaderPaginationConfig))
+                ):
+                    request_params = dict(request_params or {})
+                    request_params[incremental.start_param] = cursor_value
 
                 response = client.request(
                     method="GET",

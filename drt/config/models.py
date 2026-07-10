@@ -79,6 +79,19 @@ PaginationConfig = Annotated[
 ]
 
 
+class RestIncrementalConfig(BaseModel):
+    """Incremental extraction for the REST API source (#767).
+
+    ``start_param`` names the request query parameter that receives the last
+    watermark value (e.g. ``updated_since``). Cursor *tracking* stays
+    engine-side: ``sync.cursor_field`` names the record field whose max value
+    is persisted after each run — this config only tells the source where to
+    put that value on the request.
+    """
+
+    start_param: str
+
+
 # ---------------------------------------------------------------------------
 # Source config (inline — kept for backward compat; prefer profiles.yml)
 # ---------------------------------------------------------------------------

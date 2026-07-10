@@ -67,6 +67,20 @@ ch_prod:
   database: default
   user: default
   password_env: CLICKHOUSE_PASSWORD
+
+# REST API example (source):
+api_users:
+  type: rest_api
+  url: https://api.example.com/users
+  auth:                       # optional — bearer | api_key | basic | oauth2_client_credentials
+    type: bearer
+    token_env: USERS_API_TOKEN
+  pagination:                 # optional — offset | cursor | link_header
+    type: offset
+    limit: 100
+  result_path: data.items     # optional dot-path to the records array
+  incremental:                # optional (#767) — used by mode: incremental syncs
+    start_param: updated_since  # request param that receives the last watermark value
 ```
 
 ---

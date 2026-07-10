@@ -233,6 +233,11 @@ class RestApiProfile:
     auth: dict[str, Any] | None = None
     pagination: dict[str, Any] | None = None
     result_path: str | None = None
+    # Incremental extraction (#767): {"start_param": "updated_since"} — the
+    # request query parameter that receives the sync's last watermark value
+    # when mode=incremental. Validated as RestIncrementalConfig at extract
+    # time (same late-validation pattern as auth / pagination).
+    incremental: dict[str, Any] | None = None
 
     def describe(self) -> str:
         return f"{self.type} ({self.url})"
