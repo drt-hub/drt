@@ -1,0 +1,59 @@
+# Daily DWH cost digest → Discord (#710, Layer 2b — the visibility layer).
+#
+# Reads month-to-date usage from the smoke warehouses' own usage views
+# (Snowflake ACCOUNT_USAGE via the read-only DRT_COST_USER, BigQuery
+# INFORMATION_SCHEMA.JOBS_BY_PROJECT via the read-only drt-cost-sa;
+# Databricks runs on Free Edition = no billing to watch) and posts one
+# line to a private ops channel via DISCORD_COST_WEBHOOK.
+#
+# This is bookkeeping, not health: the script exits 0 even when a leg's
+# query fails (the failure is *in* the digest text), so this cron never
+# pages anyone — dwh-smoke is the health signal. Prevention (hard caps)
+# lives in the accounts: Snowflake resource monitor, GCP budget,
+# Free Edition's structural $0.
+#
+# Runs daily at 04:00 UTC — one hour after dwh-smoke (03:00), so the
+# digest includes the night's smoke usage.
+
+name: cost-digest
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    if: github.repository == 'drt-hub/drt'
+    env:
+      DRT_COST_SNOWFLAKE_ACCOUNT: ${{ secrets.COST_SNOWFLAKE_ACCOUNT }}
+      DRT_COST_SNOWFLAKE_USER: ${{ secrets.COST_SNOWFLAKE_USER }}
+      DRT_COST_SNOWFLAKE_PASSWORD: ${{ secrets.COST_SNOWFLAKE_PASSWORD }}
+      DRT_COST_SNOWFLAKE_WAREHOUSE: ${{ secrets.COST_SNOWFLAKE_WAREHOUSE }}
+      DRT_COST_BIGQUERY_PROJECT: ${{ secrets.COST_BIGQUERY_PROJECT }}
+      COST_BIGQUERY_KEYFILE_JSON: ${{ secrets.COST_BIGQUERY_KEYFILE_JSON }}
+      DRT_COST_DISCORD_WEBHOOK: ${{ secrets.DISCORD_COST_WEBHOOK }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install warehouse clients
+        run: pip install --quiet snowflake-connector-python google-cloud-bigquery
+
+      - name: Materialize BigQuery keyfile
+        if: env.COST_BIGQUERY_KEYFILE_JSON != ''
+        run: |
+          printf '%s' "$COST_BIGQUERY_KEYFILE_JSON" > "$RUNNER_TEMP/cost-sa.json"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/cost-sa.json" >> "$GITHUB_ENV"
+
+      - name: Build and post digest
+        run: python scripts/cost_digest.py
