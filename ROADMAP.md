@@ -54,6 +54,14 @@ Closes the **Tech Foundation Hardening epic** ([#538](https://github.com/drt-hub
 
 ---
 
+## v0.7.11 — Databricks write fix + native paramstyle, docs-site engine, real-warehouse validation ✅ Shipped 2026-07-10
+
+Released as **v0.7.11** on 2026-07-10. See [CHANGELOG.md](CHANGELOG.md#0711---2026-07-10) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.7.11) for the full feature list.
+
+**The urgency lever is Databricks**: v0.7.10 wheels break every parameterised Databricks write on databricks-sql-connector >=3.0 (native paramstyle forwards `%s` unexpanded, [#706](https://github.com/drt-hub/drt/issues/706)), and this release ships both the interim fix and the forward migration to native `?` markers with a staging anti-join for mirror deletes ([#707](https://github.com/drt-hub/drt/issues/707)). **Snowflake key-pair authentication** (`private_key_env`, [#737](https://github.com/drt-hub/drt/issues/737)) lands just in time — new Snowflake accounts enforce MFA on password sign-ins (hit live on the org smoke account), and a `TYPE = SERVICE` user with an RSA key pair is the sanctioned programmatic path. Databricks writes are also **batched into multi-row `VALUES` chunks** ([#734](https://github.com/drt-hub/drt/issues/734)) — a 127–255× round-trip reduction that the 300-key mirror probe motivated. It also finally puts `drt docs generate --format html` ([#510](https://github.com/drt-hub/drt/issues/510)) in a published wheel (it missed the v0.7.10 tag — [#715](https://github.com/drt-hub/drt/issues/715)), joined by the docs-site UI follow-ups ([#704](https://github.com/drt-hub/drt/pull/704)) and the deterministic DAG layout engine ([#713](https://github.com/drt-hub/drt/pull/713)). MCP reaches CLI parity — DLQ/retry, docs manifest, profile diagnostics ([#718](https://github.com/drt-hub/drt/issues/718)); schema-aware serialization gains its Databricks STRUCT/ARRAY/MAP/VARIANT leg ([#317](https://github.com/drt-hub/drt/issues/317) via [#680](https://github.com/drt-hub/drt/pull/680)); and the [#654](https://github.com/drt-hub/drt/issues/654) real-warehouse smoke epic closes with Snowflake / Databricks / BigQuery all live-validated (both mirror legs included), plus provisioning scripts, runbook, and a daily cost digest ([#738](https://github.com/drt-hub/drt/pull/738)). README modernised + Japanese i18n retired ([#712](https://github.com/drt-hub/drt/pull/712)); destination-layer dedup tranches ([#719](https://github.com/drt-hub/drt/issues/719)/[#722](https://github.com/drt-hub/drt/issues/722)). No breaking changes — drop-in upgrade from v0.7.10.
+
+---
+
 ## v0.7.10 — Co-writer-safe mirror + lakehouse sources + PII masking ✅ Shipped 2026-07-02
 
 Released as **v0.7.10** on 2026-07-02. See [CHANGELOG.md](CHANGELOG.md#0710---2026-07-02) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.7.10) for the full feature list.
