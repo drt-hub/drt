@@ -114,3 +114,65 @@ Anything else still raises `TypeError`, matching `json.dumps`. The default `tojs
 - Without `body_template`, each record is sent as-is as a JSON object
 - Rate limiting and retry are configured in the `sync` section, not the destination
 - The generic REST API destination covers any HTTP endpoint — use specific destinations (Slack, HubSpot, etc.) when available for better defaults
+
+---
+
+# REST API Source
+
+> Pull records from any HTTP endpoint (`profiles.yml` profile, since v0.7).
+
+```yaml
+# ~/.drt/profiles.yml
+api_users:
+  type: rest_api
+  url: https://api.example.com/users
+  auth:                       # optional — same four auth types as the destination
+    type: bearer
+    token_env: USERS_API_TOKEN
+  pagination:                 # optional — offset | cursor | link_header
+    type: offset
+    limit: 100
+  result_path: data.items     # optional dot-path to the records array in the response
+  incremental:                # optional — see below
+    start_param: updated_since
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `type` | `"rest_api"` | — | Required |
+| `url` | string | — | Endpoint to GET records from |
+| `auth` | AuthConfig \| null | null | Bearer / API key / Basic / OAuth2 client credentials |
+| `pagination` | PaginationConfig \| null | null | `offset` (offset/limit params), `cursor` (token from the response), or `link_header` (RFC 5988 `Link: rel="next"`); `max_pages` caps all styles (default 100) |
+| `result_path` | string \| null | null | Dot-notation path to the records array (defaults: top-level list, `records`, or `data`) |
+| `incremental.start_param` | string \| null | null | Incremental extraction — see below |
+
+## Incremental extraction
+
+For `mode: incremental` syncs, set `incremental.start_param` to the query
+parameter your API uses for "records changed since". drt injects the sync's
+last watermark value into that parameter, so the API filters server-side
+instead of re-sending the full endpoint every run:
+
+```yaml
+# syncs/users_from_api.yml
+name: users_from_api
+model: api_users            # decorative for REST sources — the profile defines the endpoint
+sync:
+  mode: incremental
+  cursor_field: updated_at  # record field whose max value becomes the new watermark
+  watermark:
+    default_value: "2026-01-01T00:00:00Z"   # first-run fallback sent to start_param
+```
+
+How the pieces compose:
+
+- **Engine-side cursor tracking is unchanged** — `cursor_field` names the
+  record field whose max value is persisted after each run (local
+  `.drt/watermarks.json`, or `gcs` / `bigquery` storage).
+- On the next run drt requests `GET <url>?updated_since=<last watermark>`.
+- The parameter is sent on every page for `offset` / `cursor` / no-pagination
+  styles; for `link_header` only on the first request (the server's `next`
+  links are authoritative full URLs).
+- `--cursor-value` works as usual for bounded backfills.
+- Without `incremental.start_param`, `mode: incremental` still tracks the
+  watermark but re-extracts the full endpoint every run (drt logs a warning).

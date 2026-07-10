@@ -1199,3 +1199,97 @@ def test_field_mappings_cursor_field_uses_source_name(tmp_path: Path) -> None:
     saved = state_mgr.get_last_sync(sync.name)
     assert saved is not None
     assert saved.last_cursor_value == "2026-01-02T00:00:00"
+
+
+# ---------------------------------------------------------------------------
+# IncrementalSource capability dispatch (#767)
+# ---------------------------------------------------------------------------
+
+
+class FakeIncrementalSource:
+    """Source implementing the optional IncrementalSource capability."""
+
+    def __init__(self, rows: list[dict]) -> None:
+        self._rows = rows
+        self.extract_calls: list[str] = []
+        self.incremental_calls: list[str | None] = []
+
+    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict]:
+        self.extract_calls.append(query)
+        yield from self._rows
+
+    def extract_incremental(
+        self, query: str, config: ProfileConfig, cursor_value: str | None
+    ) -> Iterator[dict]:
+        self.incremental_calls.append(cursor_value)
+        yield from self._rows
+
+    def test_connection(self, config: ProfileConfig) -> bool:
+        return True
+
+
+def _make_incremental_sync_config() -> SyncConfig:
+    return SyncConfig.model_validate(
+        {
+            "name": "inc_sync",
+            "model": "users",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {"mode": "incremental", "cursor_field": "updated_at"},
+        }
+    )
+
+
+def test_incremental_source_receives_cursor_value(tmp_path: Path) -> None:
+    source = FakeIncrementalSource([{"id": 1, "updated_at": "2026-01-02"}])
+    dest = FakeDestination()
+    sync = _make_incremental_sync_config()
+
+    result = run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        cursor_value_override="2026-01-01",
+    )
+
+    assert source.incremental_calls == ["2026-01-01"]
+    assert source.extract_calls == []
+    assert result.success == 1
+
+
+def test_incremental_source_called_with_none_on_first_run(tmp_path: Path) -> None:
+    source = FakeIncrementalSource([{"id": 1, "updated_at": "2026-01-02"}])
+    dest = FakeDestination()
+    sync = _make_incremental_sync_config()
+
+    run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+    # mode=incremental with no stored watermark / default: capability is
+    # still used, with cursor_value=None (source decides what that means).
+    assert source.incremental_calls == [None]
+    assert source.extract_calls == []
+
+
+def test_incremental_source_uses_plain_extract_for_full_mode(tmp_path: Path) -> None:
+    source = FakeIncrementalSource([{"id": 1}])
+    dest = FakeDestination()
+    sync = _make_sync()  # mode: full
+
+    run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+    assert source.incremental_calls == []
+    assert len(source.extract_calls) == 1
+
+
+def test_non_incremental_source_unaffected(tmp_path: Path) -> None:
+    """Plain sources keep the query-based path for incremental syncs."""
+    source = FakeSource([{"id": 1, "updated_at": "2026-01-02"}])
+    dest = FakeDestination()
+    sync = _make_incremental_sync_config()
+
+    result = run_sync(
+        sync, source, dest, _make_profile(), tmp_path, cursor_value_override="2026-01-01"
+    )
+
+    assert result.success == 1

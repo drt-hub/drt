@@ -29,7 +29,7 @@ from drt.engine.masking import apply_mask
 from drt.engine.observer import NullObserver, SyncObserver
 from drt.engine.resolver import resolve_model_ref
 from drt.observability import build_status, get_tracer
-from drt.sources.base import Source
+from drt.sources.base import IncrementalSource, Source
 from drt.state.dlq import DeadLetter
 from drt.state.history import HistoryEntry, HistoryManager
 from drt.state.manager import StateManager
@@ -155,7 +155,11 @@ class _stage_ctx:
 
 
 def _staged_source_iter(
-    source: Source, query: str, profile: ProfileConfig
+    source: Source,
+    query: str,
+    profile: ProfileConfig,
+    cursor_value: str | None = None,
+    incremental: bool = False,
 ) -> Iterator[dict[str, Any]]:
     """Wrap ``source.extract`` so iteration errors get tagged with stage="source".
 
@@ -163,9 +167,17 @@ def _staged_source_iter(
     initial call OR during subsequent ``__next__`` invocations both bubble
     through this generator's frame, which means ``_stage_ctx`` catches
     them whether the source materialises eagerly or lazily.
+
+    For ``mode: incremental`` syncs, sources implementing the optional
+    ``IncrementalSource`` capability (#767) receive the resolved watermark
+    directly via ``extract_incremental`` — API-shaped sources have no SQL
+    query to carry it. SQL sources keep consuming it through ``query``.
     """
     with _stage_ctx("source"):
-        yield from source.extract(query, profile)
+        if incremental and isinstance(source, IncrementalSource):
+            yield from source.extract_incremental(query, profile, cursor_value)
+        else:
+            yield from source.extract(query, profile)
 
 
 def run_sync(
@@ -413,7 +425,13 @@ def _run_sync_body(
 
     # Source extraction wrapped via generator helper so exceptions raised
     # during iteration (not just the initial call) carry stage="source" (#544).
-    records_iter = _staged_source_iter(source, query, profile)
+    records_iter = _staged_source_iter(
+        source,
+        query,
+        profile,
+        cursor_value=last_cursor_value,
+        incremental=cursor_field is not None,
+    )
     new_cursor_value: str | None = last_cursor_value
     is_staged = isinstance(destination, StagedDestination)
     staged_count = 0

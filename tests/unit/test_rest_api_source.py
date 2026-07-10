@@ -282,3 +282,165 @@ def test_rest_api_source_extract_link_header_pagination(monkeypatch: Any) -> Non
     assert len(records) == 3
     assert records[0]["id"] == 1
     assert records[2]["id"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Incremental extraction (#767) — watermark pushed as a request param
+# ---------------------------------------------------------------------------
+
+
+def _recording_client(monkeypatch: Any, responses: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Patch httpx.Client with a recorder; returns the list of captured calls.
+
+    ``responses[i]`` is ``{"json": ..., "headers": {...}}`` for the i-th
+    request; the last entry repeats for any further requests.
+    """
+    calls: list[dict[str, Any]] = []
+
+    class MockResponse:
+        def __init__(self, spec: dict[str, Any]) -> None:
+            self._spec = spec
+            self.headers: dict[str, str] = spec.get("headers", {})
+
+        def json(self) -> Any:
+            return self._spec["json"]
+
+        def raise_for_status(self) -> None:
+            pass
+
+    class MockClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def __enter__(self) -> "MockClient":
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            pass
+
+        def request(
+            self,
+            method: str,
+            url: str,
+            headers: dict[str, str],
+            params: dict[str, Any] | None,
+            **kwargs: Any,
+        ) -> MockResponse:
+            calls.append({"url": url, "params": params})
+            spec = responses[min(len(calls) - 1, len(responses) - 1)]
+            return MockResponse(spec)
+
+    monkeypatch.setattr(httpx, "Client", MockClient)
+    return calls
+
+
+def test_extract_incremental_injects_start_param(monkeypatch: Any) -> None:
+    source = RestApiSource()
+    profile = RestApiProfile(
+        type="rest_api",
+        url="https://api.example.com/users",
+        incremental={"start_param": "updated_since"},
+    )
+    calls = _recording_client(monkeypatch, [{"json": [{"id": 1}]}])
+
+    records = list(source.extract_incremental("", profile, "2026-01-01T00:00:00"))
+
+    assert len(records) == 1
+    assert calls[0]["params"] == {"updated_since": "2026-01-01T00:00:00"}
+
+
+def test_extract_incremental_none_cursor_skips_injection(monkeypatch: Any) -> None:
+    """First run with no stored watermark and no default: no param injected."""
+    source = RestApiSource()
+    profile = RestApiProfile(
+        type="rest_api",
+        url="https://api.example.com/users",
+        incremental={"start_param": "updated_since"},
+    )
+    calls = _recording_client(monkeypatch, [{"json": [{"id": 1}]}])
+
+    list(source.extract_incremental("", profile, None))
+
+    assert calls[0]["params"] is None
+
+
+def test_extract_incremental_offset_pagination_injects_every_page(monkeypatch: Any) -> None:
+    source = RestApiSource()
+    profile = RestApiProfile(
+        type="rest_api",
+        url="https://api.example.com/users",
+        pagination={"type": "offset", "limit": 2},
+        incremental={"start_param": "since"},
+    )
+    calls = _recording_client(
+        monkeypatch,
+        [
+            {"json": [{"id": 1}, {"id": 2}]},  # full page -> fetch next
+            {"json": [{"id": 3}]},  # short page -> stop
+        ],
+    )
+
+    records = list(source.extract_incremental("", profile, "42"))
+
+    assert len(records) == 3
+    assert len(calls) == 2
+    for call in calls:
+        assert call["params"]["since"] == "42"
+
+
+def test_extract_incremental_link_header_injects_first_request_only(monkeypatch: Any) -> None:
+    source = RestApiSource()
+    profile = RestApiProfile(
+        type="rest_api",
+        url="https://api.example.com/users",
+        pagination={"type": "link_header"},
+        incremental={"start_param": "since"},
+    )
+    calls = _recording_client(
+        monkeypatch,
+        [
+            {
+                "json": [{"id": 1}],
+                "headers": {"link": '<https://api.example.com/users?page=2>; rel="next"'},
+            },
+            {"json": [{"id": 2}], "headers": {}},
+        ],
+    )
+
+    records = list(source.extract_incremental("", profile, "2026-01-01"))
+
+    assert len(records) == 2
+    assert calls[0]["params"] == {"since": "2026-01-01"}
+    # The server's next link is authoritative — no re-injection.
+    assert calls[1]["params"] is None
+    assert calls[1]["url"] == "https://api.example.com/users?page=2"
+
+
+def test_extract_incremental_without_profile_config_warns_and_full_extracts(
+    monkeypatch: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    source = RestApiSource()
+    profile = RestApiProfile(type="rest_api", url="https://api.example.com/users")
+    calls = _recording_client(monkeypatch, [{"json": [{"id": 1}]}])
+
+    with caplog.at_level(logging.WARNING, logger="drt"):
+        records = list(source.extract_incremental("", profile, "2026-01-01"))
+
+    assert len(records) == 1
+    assert calls[0]["params"] is None
+    assert any("incremental.start_param" in r.message for r in caplog.records)
+
+
+def test_plain_extract_never_injects_even_with_config(monkeypatch: Any) -> None:
+    """Non-incremental syncs (mode: full) must not filter the endpoint."""
+    source = RestApiSource()
+    profile = RestApiProfile(
+        type="rest_api",
+        url="https://api.example.com/users",
+        incremental={"start_param": "updated_since"},
+    )
+    calls = _recording_client(monkeypatch, [{"json": [{"id": 1}]}])
+
+    list(source.extract("", profile))
+
+    assert calls[0]["params"] is None
