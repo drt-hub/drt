@@ -123,9 +123,10 @@ drt list                    # list sync definitions
 drt sources                 # list available source connectors
 drt destinations            # list available destination connectors
 drt run                     # run all syncs
-drt run --select <name>     # run a specific sync
-drt run --all               # discover and run all syncs
-drt run --select tag:<tag>  # run syncs matching a tag
+drt run --select <name>     # run a specific sync (globs work: 'users_*')
+drt run --select tag:<tag>  # run syncs matching a tag (repeat --select to union)
+drt run --select destination:<type>  # run syncs by destination type
+drt run --exclude <name>    # subtract syncs (same grammar as --select)
 drt run --threads 4         # parallel sync execution
 drt run --dry-run           # dry run
 drt run --verbose           # show row-level error details

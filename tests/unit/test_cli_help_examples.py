@@ -25,7 +25,8 @@ def test_run_help_shows_examples() -> None:
     assert result.exit_code == 0
     assert "Examples:" in output
     assert "drt run --select post_users" in output
-    assert "drt run --select tag:crm --threads 4" in output
+    assert "drt run --select 'users_*' --exclude users_backfill" in output
+    assert "drt run --select tag:crm --select tag:ads --threads 4" in output
     assert "drt run --dry-run --diff" in output
 
 

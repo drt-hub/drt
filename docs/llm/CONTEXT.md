@@ -117,8 +117,10 @@ drt run --verbose                 # show row-level error details on failure
 drt run --output json             # structured JSON output for CI/scripting
 drt run --log-format json         # structured JSON logging to stderr
 drt run --profile prd             # override profile (or DRT_PROFILE env var)
-drt run --all                     # discover and run all syncs
-drt run --select tag:<tag>        # run syncs matching a tag
+drt run --select 'users_*'        # glob selection (#771)
+drt run --select tag:<tag>        # run syncs matching a tag (repeat --select to union)
+drt run --select destination:hubspot  # select by destination type (#771)
+drt run --exclude <name-or-selector>  # subtract from the selection (#771)
 drt run --threads 4               # parallel sync execution
 drt run --cursor-value '2026-01-01 00:00:00'  # override watermark cursor for backfill
 drt test                          # run post-sync validation tests
