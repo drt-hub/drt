@@ -155,8 +155,8 @@ def build_manifest(project_dir: Path = Path("."), include_state: bool = False) -
     )
 
 
-def collect_sync_yaml_texts(project_dir: Path = Path(".")) -> dict[str, str]:
-    """Best-effort map of sync name -> raw YAML text, for the docs YAML tab.
+def collect_sync_yaml_texts(project_dir: Path = Path(".")) -> dict[str, tuple[str, str]]:
+    """Best-effort map of sync name -> (relative path, raw YAML text).
 
     Reads ``<project_dir>/syncs/*.yml`` off disk so the docs site can show the
     sync definition as written (including ``model`` SQL, which manifest schema
@@ -167,7 +167,7 @@ def collect_sync_yaml_texts(project_dir: Path = Path(".")) -> dict[str, str]:
     """
     import yaml
 
-    texts: dict[str, str] = {}
+    texts: dict[str, tuple[str, str]] = {}
     syncs_dir = project_dir / "syncs"
     if not syncs_dir.is_dir():
         return texts
@@ -178,5 +178,6 @@ def collect_sync_yaml_texts(project_dir: Path = Path(".")) -> dict[str, str]:
         except (OSError, UnicodeDecodeError, yaml.YAMLError):
             continue
         if isinstance(name, str) and name:
-            texts[name] = raw.rstrip("\n")
+            rel = path.relative_to(project_dir).as_posix()
+            texts[name] = (rel, raw.rstrip("\n"))
     return texts
