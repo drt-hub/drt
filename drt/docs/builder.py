@@ -153,3 +153,30 @@ def build_manifest(project_dir: Path = Path("."), include_state: bool = False) -
         destinations=list(destinations.values()),
         edges=edges,
     )
+
+
+def collect_sync_yaml_texts(project_dir: Path = Path(".")) -> dict[str, str]:
+    """Best-effort map of sync name -> raw YAML text, for the docs YAML tab.
+
+    Reads ``<project_dir>/syncs/*.yml`` off disk so the docs site can show the
+    sync definition as written (including ``model`` SQL, which manifest schema
+    v1 does not carry). Purely presentational: the texts are NOT part of the
+    manifest. Files that cannot be read or parsed, or that carry no ``name``,
+    are silently skipped — the renderer falls back to its manifest-derived
+    view for those syncs.
+    """
+    import yaml
+
+    texts: dict[str, str] = {}
+    syncs_dir = project_dir / "syncs"
+    if not syncs_dir.is_dir():
+        return texts
+    for path in sorted(syncs_dir.glob("*.yml")):
+        try:
+            raw = path.read_text(encoding="utf-8")
+            name = (yaml.safe_load(raw) or {}).get("name")
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            continue
+        if isinstance(name, str) and name:
+            texts[name] = raw.rstrip("\n")
+    return texts

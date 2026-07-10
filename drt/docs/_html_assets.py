@@ -154,6 +154,7 @@ td.right, th.right { text-align:right; }
 .empty--hero pre.code { display:inline-block; text-align:left; margin:14px auto 0; }
 .kpi__error { font-family:var(--mono); font-size:11.5px; color:var(--error); margin-top:4px;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.yaml-note { font-size:12px; color:var(--muted); font-style:italic; margin-top:8px; }
 
 /* Sync detail — KPI cards, tabs (progressive: stacked without JS), ego lineage */
 .kpi { border:1px solid var(--line); border-radius:var(--radius); padding:12px 16px; }

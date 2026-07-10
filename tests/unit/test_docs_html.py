@@ -316,3 +316,44 @@ def test_regeneration_is_byte_identical(tmp_path: Path) -> None:
     assert files1 == files2
     for rel in files1:
         assert (out1 / rel).read_bytes() == (out2 / rel).read_bytes(), str(rel)
+def test_yaml_tab_prefers_raw_text_and_notes_fallback(tmp_path: Path) -> None:
+    """With sync_yaml_texts, the YAML tab shows the file as written (incl.
+    model SQL); syncs without an entry keep the manifest view plus a note."""
+    raw = (
+        "name: customers_to_discord\n"
+        'description: "VIP customers to Discord"\n'
+        "model: ref('vip_customers')\n"
+        "destination:\n  type: discord\n"
+    )
+    out = tmp_path / "docs"
+    render_html(_manifest(), out, sync_yaml_texts={"customers_to_discord": raw})
+
+    with_raw = (out / "sync" / "customers-to-discord.html").read_text(encoding="utf-8")
+    assert "ref(&#39;vip_customers&#39;)" in with_raw or "vip_customers" in with_raw
+    assert "Rendered from the manifest" not in with_raw
+
+    without_raw = (out / "sync" / "users-to-pg.html").read_text(encoding="utf-8")
+    assert "Rendered from the manifest" in without_raw
+
+
+def test_raw_yaml_is_escaped(tmp_path: Path) -> None:
+    hostile = 'name: customers_to_discord\ndescription: "</script><script>alert(1)</script>"\n'
+    out = tmp_path / "docs"
+    render_html(_manifest(), out, sync_yaml_texts={"customers_to_discord": hostile})
+    page = (out / "sync" / "customers-to-discord.html").read_text(encoding="utf-8")
+    assert "<script>alert(1)</script>" not in page
+
+
+def test_collect_sync_yaml_texts_best_effort(tmp_path: Path) -> None:
+    from drt.docs.builder import collect_sync_yaml_texts
+
+    syncs = tmp_path / "syncs"
+    syncs.mkdir()
+    (syncs / "good.yml").write_text("name: good_sync\nmode: full\n", encoding="utf-8")
+    (syncs / "broken.yml").write_text("name: [unclosed\n", encoding="utf-8")
+    (syncs / "nameless.yml").write_text("description: no name here\n", encoding="utf-8")
+
+    texts = collect_sync_yaml_texts(tmp_path)
+    assert texts == {"good_sync": "name: good_sync\nmode: full"}
+    # no syncs dir at all -> empty map, no crash
+    assert collect_sync_yaml_texts(tmp_path / "nowhere") == {}
