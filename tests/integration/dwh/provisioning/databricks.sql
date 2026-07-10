@@ -5,10 +5,10 @@
 -- steps — see the "Databricks — manual (UI/API) steps" section in
 -- provisioning/README.md.
 --
--- Cost note: Databricks is the most expensive of the three (Serverless SQL
--- bills DBUs + cloud compute; a warehouse left running is a cost bomb like
--- Snowflake's). Keep AUTO-STOP at its minimum and consider deferring the
--- Databricks leg — see the maintainer strategy notes.
+-- Cost note: the smoke account runs on Databricks Free Edition — structurally
+-- $0 (no billing account exists). On a paid workspace, Serverless SQL bills
+-- DBUs + cloud compute and a warehouse left running is a cost bomb like
+-- Snowflake's — keep AUTO-STOP at its minimum there.
 --
 -- The smoke tests create/populate/drop their own throwaway tables (insert /
 -- replace INSERT OVERWRITE / STRUCT-ARRAY-MAP + VARIANT complex types), so no
