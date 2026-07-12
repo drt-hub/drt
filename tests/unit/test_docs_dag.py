@@ -198,3 +198,47 @@ def test_manifest_text_is_escaped() -> None:
     )
     svg = render_dag_svg(manifest)
     assert "<script>" not in svg
+
+
+def test_badge_keys_match_registered_connectors() -> None:
+    """Every curated badge key must be a registered connector ``type``.
+
+    Guards the drift that had ``salesforce`` (never registered — the type is
+    ``salesforce_bulk``) silently falling through to the neutral badge.
+    """
+    from drt.connectors import registry
+    from drt.docs._svg import _BADGES
+
+    registered = set(registry._source_registry) | set(registry._destination_registry)
+    stray = set(_BADGES) - registered
+    assert not stray, f"_BADGES keys not registered as connector types: {sorted(stray)}"
+
+
+def test_svg_is_responsive_not_fixed_width() -> None:
+    """The DAG SVG scales to its column (#701 follow-up): viewBox + a
+    max-width style, no fixed width/height px attributes that would overflow a
+    narrower content column and push the destination rank off-screen."""
+    svg = render_dag_svg(_manifest())
+    opening = svg[: svg.index(">") + 1]
+    assert "viewBox=" in opening
+    assert "width:100%" in opening and "max-width:" in opening
+    assert ' width="' not in opening and ' height="' not in opening
+
+
+def test_coordinate_formatter_never_scientific() -> None:
+    """``_f`` must stay fixed-point: ``format(v, "g")`` emits ``1e+06`` at
+    ``>= 1e6`` — invalid as an SVG coordinate — reachable on an absurdly large
+    DAG. It also stays byte-identical to the old ``"g"`` form for the normal
+    <= 2-decimal coordinates the layout engine produces."""
+    from drt.docs.dag import _f
+
+    # never scientific, even past the 1e6 threshold that broke "g"
+    for big in (1_000_000.0, 1_234_567.89, 9_999_999.5):
+        out = _f(big)
+        assert "e" not in out and "E" not in out, f"{big!r} -> {out!r} went scientific"
+    # exact + trailing-zero-stripped for the values that actually occur
+    assert _f(12.0) == "12"
+    assert _f(12.5) == "12.5"
+    assert _f(12.34) == "12.34"
+    assert _f(1_000_000.0) == "1000000"
+    assert _f(0.0) == "0"
