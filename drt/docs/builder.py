@@ -155,6 +155,49 @@ def build_manifest(project_dir: Path = Path("."), include_state: bool = False) -
     )
 
 
+# Inline value redaction for the raw-YAML docs tab (#696). The tab publishes the
+# sync file verbatim, so an inlined credential / endpoint / PII value would land
+# in a docs site that may be committed or hosted. We mask the value of any key
+# whose name matches one of these (case-insensitive substring), covering
+# secrets, connection endpoints, and PII. ``*_env`` keys are env-var *references*
+# (drt's recommended pattern), never secrets, so they are left intact.
+_SENSITIVE_KEY_RE = re.compile(
+    r"(?i)(password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|"
+    r"private[_-]?key|client[_-]?secret|credential|connection[_-]?string|dsn|"
+    r"auth|webhook|url|endpoint|host|hostname|email|phone)"
+)
+# key: value line, allowing an optional "- " list-item prefix; value must be a
+# scalar on the same line (block scalars / nested maps have no inline value).
+_YAML_KV_RE = re.compile(r"^(\s*(?:-\s+)?)([A-Za-z0-9_.\-]+)(\s*:\s+)(\S.*)$")
+_REDACTION = "'« redacted »'"
+_MAX_YAML_BYTES = 64 * 1024  # a sync definition beyond this is pathological
+
+
+def _redact_sensitive_yaml(raw: str) -> tuple[str, bool]:
+    """Mask inline secret / endpoint / PII values, preserving the file's layout.
+
+    Line-based so the "as written" formatting survives — only the scalar value
+    after a sensitive ``key:`` is replaced. Keys ending in ``_env`` (env-var
+    references) and block scalars / anchors / nested maps (no inline value) are
+    left untouched. Returns ``(text, redacted_any)``.
+    """
+    redacted = False
+    out: list[str] = []
+    for line in raw.split("\n"):
+        m = _YAML_KV_RE.match(line)
+        if m:
+            prefix, key, sep, value = m.groups()
+            block_or_anchor = value[:1] in {"|", ">", "&", "*", "#"}
+            if key.endswith("_env") or block_or_anchor or not _SENSITIVE_KEY_RE.search(key):
+                out.append(line)
+            else:
+                out.append(f"{prefix}{key}{sep}{_REDACTION}")
+                redacted = True
+        else:
+            out.append(line)
+    return "\n".join(out), redacted
+
+
 def collect_sync_yaml_texts(project_dir: Path = Path(".")) -> dict[str, tuple[str, str]]:
     """Best-effort map of sync name -> (relative path, raw YAML text).
 
@@ -164,6 +207,14 @@ def collect_sync_yaml_texts(project_dir: Path = Path(".")) -> dict[str, tuple[st
     manifest. Files that cannot be read or parsed, or that carry no ``name``,
     are silently skipped — the renderer falls back to its manifest-derived
     view for those syncs.
+
+    Hardened for a docs artifact that may be committed / hosted:
+    - **symlinks are not followed** — they could point outside ``syncs/`` while
+      the code header still shows the in-project path;
+    - **non-mapping YAML** (e.g. a top-level list) is skipped, not crashed on;
+    - text is **capped** at 64 KiB with a truncation note;
+    - inline **secrets / endpoints / PII are masked** (#696), with a leading
+      note when anything was redacted.
     """
     import yaml
 
@@ -172,12 +223,33 @@ def collect_sync_yaml_texts(project_dir: Path = Path(".")) -> dict[str, tuple[st
     if not syncs_dir.is_dir():
         return texts
     for path in sorted(syncs_dir.glob("*.yml")):
+        if path.is_symlink():
+            # A symlink could read outside syncs/ under a masked in-project path.
+            continue
         try:
             raw = path.read_text(encoding="utf-8")
-            name = (yaml.safe_load(raw) or {}).get("name")
+            parsed = yaml.safe_load(raw)
         except (OSError, UnicodeDecodeError, yaml.YAMLError):
             continue
-        if isinstance(name, str) and name:
-            rel = path.relative_to(project_dir).as_posix()
-            texts[name] = (rel, raw.rstrip("\n"))
+        if not isinstance(parsed, dict):
+            # Valid YAML but not a mapping (list / scalar) — has no sync name and
+            # would AttributeError on ``.get``; skip per the best-effort contract.
+            continue
+        name = parsed.get("name")
+        if not (isinstance(name, str) and name):
+            continue
+
+        display = raw.rstrip("\n")
+        encoded = display.encode("utf-8")
+        if len(encoded) > _MAX_YAML_BYTES:
+            display = encoded[:_MAX_YAML_BYTES].decode("utf-8", "ignore").rstrip()
+            display += f"\n# … truncated by drt docs (file exceeds {_MAX_YAML_BYTES // 1024} KiB)"
+        display, redacted = _redact_sensitive_yaml(display)
+        if redacted:
+            display = (
+                "# drt docs: inline secrets / PII masked — prefer *_env references\n" + display
+            )
+
+        rel = path.relative_to(project_dir).as_posix()
+        texts[name] = (rel, display)
     return texts
