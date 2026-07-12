@@ -11,6 +11,10 @@
 
 dlt loads data in, dbt transforms it, and **drt** activates it back out — reverse ETL from your warehouse to the tools your team works in. Declarative YAML, one `drt run`.
 
+<p align="center">
+  <code>dlt</code> <sub>load</sub> &nbsp;→&nbsp; <code>dbt</code> <sub>transform</sub> &nbsp;→&nbsp; <b><code>drt</code></b> <sub>activate</sub>
+</p>
+
 [![CI](https://img.shields.io/github/actions/workflow/status/drt-hub/drt/ci.yml?branch=main&style=flat-square&logo=githubactions&logoColor=white&label=CI)](https://github.com/drt-hub/drt/actions/workflows/ci.yml)
 [![Coverage](https://img.shields.io/codecov/c/github/drt-hub/drt?style=flat-square&logo=codecov&logoColor=white&label=coverage)](https://codecov.io/gh/drt-hub/drt)
 [![PyPI](https://img.shields.io/pypi/v/drt-core?style=flat-square&logo=pypi&logoColor=white&label=PyPI)](https://pypi.org/project/drt-core/)
@@ -46,10 +50,32 @@ drt init && drt run
 
 ## Why drt?
 
-- **Same DX as dbt.** If you know `dbt run`, you already know `drt run` — declarative YAML, versioned in Git, reviewed in PRs.
-- **CI-native.** Exit codes and `--output json` drop straight into GitHub Actions, cron, or Dagster / Airflow / Prefect — no GUI, no clickops.
-- **LLM-native.** A built-in MCP server and Claude Code skills let AI tools author and run your syncs.
-- **Free and open source.** Every connector, the CLI, the MCP server, and the sync engine — Apache 2.0, self-hosted, no lock-in.
+<table>
+<tr>
+<td width="50%">
+
+**Same DX as dbt.** If you know `dbt run`, you already know `drt run` — declarative YAML, versioned in Git, reviewed in PRs.
+
+</td>
+<td width="50%">
+
+**CI-native.** Exit codes and `--output json` drop straight into GitHub Actions, cron, or Dagster / Airflow / Prefect — no GUI, no clickops.
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+**LLM-native.** A built-in MCP server and Claude Code skills let AI tools author and run your syncs.
+
+</td>
+<td width="50%">
+
+**Free and open source.** Every connector, the CLI, the MCP server, and the sync engine — Apache 2.0, self-hosted, no lock-in.
+
+</td>
+</tr>
+</table>
 
 > **What's always free?** All connectors, CLI, MCP server, and sync engine. See [OPEN_CORE.md](./OPEN_CORE.md) for the open core boundary.
 
