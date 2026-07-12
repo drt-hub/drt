@@ -117,8 +117,9 @@ def test_destinations_detailed_json_includes_field_metadata() -> None:
     assert set(pg.keys()) == expected_keys
     assert "table" in pg["required_fields"]
     assert "type: postgres" in pg["sample_yaml"]
-    # Postgres config class lives in drt.config.models
-    assert pg["config_class"].startswith("drt.config.models.PostgresDestinationConfig")
+    # Postgres config class lives in drt.config.destinations_sql after the #721
+    # split (re-exported from drt.config.models — both import paths work).
+    assert pg["config_class"].startswith("drt.config.destinations_sql.PostgresDestinationConfig")
 
 
 # ---------------------------------------------------------------------------
