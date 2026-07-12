@@ -1,0 +1,7 @@
+name: acme-analytics
+version: "0.1"
+profile: bq_prod
+source:
+  type: bigquery
+  project: acme-demo
+  dataset: analytics

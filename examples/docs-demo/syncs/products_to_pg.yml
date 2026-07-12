@@ -1,0 +1,11 @@
+name: products_to_pg
+description: "Product catalog snapshot."
+model: ref('products')
+destination:
+  type: postgres
+  host_env: DEMO_PG_HOST
+  dbname: acme_app
+  table: public.products
+  upsert_key: [id]
+sync:
+  mode: full

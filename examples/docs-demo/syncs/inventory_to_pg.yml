@@ -1,0 +1,13 @@
+name: inventory_to_pg
+description: "Warehouse inventory deltas."
+tags: [ops]
+model: ref('inventory_deltas')
+destination:
+  type: postgres
+  host_env: DEMO_PG_HOST
+  dbname: acme_app
+  table: public.inventory
+  upsert_key: [sku]
+sync:
+  mode: incremental
+  cursor_field: changed_at
