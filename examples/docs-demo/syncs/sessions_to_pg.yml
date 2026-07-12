@@ -1,0 +1,18 @@
+name: sessions_to_pg
+description: "Session rollups keyed by user."
+tags: [analytics]
+model: ref('session_rollups')
+destination:
+  type: postgres
+  host_env: DEMO_PG_HOST
+  dbname: acme_app
+  table: public.sessions
+  upsert_key: [session_id]
+  lookups:
+    user:
+      table: public.users
+      match: { user_id: id }
+      check_only: true
+sync:
+  mode: incremental
+  cursor_field: started_at

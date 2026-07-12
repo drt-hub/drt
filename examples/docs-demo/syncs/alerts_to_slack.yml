@@ -1,0 +1,12 @@
+name: alerts_to_slack
+description: "Post anomaly alerts to #alerts."
+tags: [ops]
+model: ref('anomaly_alerts')
+destination:
+  type: slack
+  webhook_url_env: SLACK_WEBHOOK_URL
+  message_template: ":rotating_light: {{ row.title }} — {{ row.detail }}"
+sync:
+  mode: full
+  batch_size: 1
+  on_error: skip

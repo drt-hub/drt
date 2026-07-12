@@ -1,0 +1,12 @@
+name: accounts_to_pg
+description: "Full refresh of the account dimension."
+tags: [core]
+model: ref('accounts')
+destination:
+  type: postgres
+  host_env: DEMO_PG_HOST
+  dbname: acme_app
+  table: public.accounts
+  upsert_key: [account_id]
+sync:
+  mode: full

@@ -42,27 +42,58 @@ def _slug_map(names: list[str], kind: str) -> dict[str, str]:
 # Connector badges — brand-color initials (decision: docs design pass 1).
 # Curated map for known types; anything else falls back to a neutral brand
 # badge with the first two letters, so new plugins render without changes.
+# Keys must match the registered connector ``type`` (see
+# ``drt/connectors/registry.py``) — a guard test pins this so a typo'd key
+# (e.g. the old ``salesforce`` vs the registered ``salesforce_bulk``) can't
+# silently fall through to the neutral badge.
 _BADGES: dict[str, tuple[str, str, str]] = {
+    # Warehouses / databases
     "bigquery": ("BQ", "#4285f4", "#ffffff"),
     "postgres": ("PG", "#336791", "#ffffff"),
+    "redshift": ("RS", "#8c4fff", "#ffffff"),
     "duckdb": ("DK", "#fff100", "#3a3a00"),
-    "snowflake": ("SF", "#29b5e8", "#062d3d"),
+    # NB: snowflake moved SF -> SN so the now-active salesforce_bulk keeps the
+    # canonical "SF". Revert if design prefers SF for Snowflake instead.
+    "snowflake": ("SN", "#29b5e8", "#062d3d"),
     "databricks": ("DX", "#ff3621", "#ffffff"),
     "clickhouse": ("CH", "#faff69", "#3a3d00"),
     "sqlite": ("SQ", "#0f80cc", "#ffffff"),
     "mysql": ("MY", "#00758f", "#ffffff"),
-    "elasticsearch": ("ES", "#00bfb3", "#00312e"),
+    "sqlserver": ("MS", "#a91d22", "#ffffff"),
+    # Lakehouse / files / object stores
+    "deltalake": ("DL", "#00add4", "#00303d"),
+    "iceberg": ("IB", "#2c88d9", "#ffffff"),
+    "parquet": ("PQ", "#50abf1", "#0a2740"),
+    "file": ("FL", "#5a6068", "#ffffff"),
     "s3": ("S3", "#ff9900", "#3e2500"),
     "gcs": ("GC", "#4285f4", "#ffffff"),
     "azure_blob": ("AZ", "#0078d4", "#ffffff"),
+    "elasticsearch": ("ES", "#00bfb3", "#00312e"),
+    # Messaging / collaboration
     "slack": ("SL", "#4a154b", "#ffffff"),
     "discord": ("DC", "#5865f2", "#ffffff"),
+    "teams": ("TM", "#6264a7", "#ffffff"),
+    "email_smtp": ("EM", "#5a6068", "#ffffff"),
+    "twilio": ("TW", "#f22f46", "#ffffff"),
+    "sendgrid": ("SG", "#1a82e2", "#ffffff"),
+    # CRM / marketing / product analytics
     "hubspot": ("HS", "#ff7a59", "#3e1c00"),
-    "salesforce": ("SF", "#00a1e0", "#ffffff"),
-    "airtable": ("AT", "#fcb400", "#3d2c00"),
+    "salesforce_bulk": ("SF", "#00a1e0", "#ffffff"),
+    "intercom": ("IC", "#1f8ded", "#ffffff"),
     "klaviyo": ("KL", "#232426", "#ffffff"),
+    "airtable": ("AT", "#fcb400", "#3d2c00"),
+    "notion": ("NO", "#191919", "#ffffff"),
+    "amplitude": ("AM", "#1f6fff", "#ffffff"),
+    "mixpanel": ("MX", "#7856ff", "#ffffff"),
+    "google_ads": ("GA", "#4285f4", "#ffffff"),
+    "google_sheets": ("GS", "#0f9d58", "#ffffff"),
+    # Issue trackers / other
+    "jira": ("JR", "#0052cc", "#ffffff"),
+    "linear": ("LN", "#5e6ad2", "#ffffff"),
+    "github_actions": ("GH", "#2088ff", "#ffffff"),
+    "zendesk": ("ZD", "#03363d", "#ffffff"),
+    "staged_upload": ("SU", "#5a6068", "#ffffff"),
     "rest_api": ("API", "#5a6068", "#ffffff"),
-    "webhook": ("WH", "#5a6068", "#ffffff"),
 }
 
 # Status dot/word pairs (never color-alone) — token names from STYLE_CSS.

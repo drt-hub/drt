@@ -1,0 +1,82 @@
+{
+  "users_to_pg": {
+    "sync_name": "users_to_pg",
+    "last_run_at": "2026-07-09T23:55:12Z",
+    "records_synced": 1248,
+    "status": "success",
+    "error": null,
+    "last_cursor_value": "2026-07-09T23:50:00Z"
+  },
+  "orders_to_pg": {
+    "sync_name": "orders_to_pg",
+    "last_run_at": "2026-07-09T23:00:48Z",
+    "records_synced": 502,
+    "status": "partial",
+    "error": "3 rows skipped: null customer_id",
+    "last_cursor_value": null
+  },
+  "products_to_pg": {
+    "sync_name": "products_to_pg",
+    "last_run_at": "2026-07-09T20:30:00Z",
+    "records_synced": 312,
+    "status": "success",
+    "error": null,
+    "last_cursor_value": null
+  },
+  "sessions_to_pg": {
+    "sync_name": "sessions_to_pg",
+    "last_run_at": "2026-07-09T22:10:30Z",
+    "records_synced": 940,
+    "status": "success",
+    "error": null,
+    "last_cursor_value": "2026-07-09T22:00:00Z"
+  },
+  "accounts_to_pg": {
+    "sync_name": "accounts_to_pg",
+    "last_run_at": "2026-07-09T21:05:00Z",
+    "records_synced": 0,
+    "status": "failed",
+    "error": "psycopg2.OperationalError: connection timed out after 30s",
+    "last_cursor_value": null
+  },
+  "inventory_to_pg": {
+    "sync_name": "inventory_to_pg",
+    "last_run_at": "2026-07-09T19:15:00Z",
+    "records_synced": 77,
+    "status": "success",
+    "error": null,
+    "last_cursor_value": "2026-07-09T19:00:00Z"
+  },
+  "alerts_to_slack": {
+    "sync_name": "alerts_to_slack",
+    "last_run_at": "2026-07-09T22:55:33Z",
+    "records_synced": 0,
+    "status": "failed",
+    "error": "slack_sdk.errors.SlackApiError: channel_not_found",
+    "last_cursor_value": null
+  },
+  "errors_to_slack": {
+    "sync_name": "errors_to_slack",
+    "last_run_at": "2026-07-09T18:00:00Z",
+    "records_synced": 14,
+    "status": "partial",
+    "error": "rate limited, 2 retries",
+    "last_cursor_value": null
+  },
+  "users_to_hubspot": {
+    "sync_name": "users_to_hubspot",
+    "last_run_at": "2026-07-09T22:00:11Z",
+    "records_synced": 1248,
+    "status": "success",
+    "error": null,
+    "last_cursor_value": "2026-07-09T21:45:00Z"
+  },
+  "leads_to_hubspot": {
+    "sync_name": "leads_to_hubspot",
+    "last_run_at": "2026-07-09T16:00:00Z",
+    "records_synced": 430,
+    "status": "success",
+    "error": null,
+    "last_cursor_value": "2026-07-09T15:30:00Z"
+  }
+}

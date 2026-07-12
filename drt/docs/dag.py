@@ -69,11 +69,17 @@ def _zone_bands(cfg: LayoutConfig, total_h: float) -> str:
             f'fill="{title_fill}" font-weight="600">{title}</text>'
         )
         if is_sync:
+            # "managed by drt" pill on the title row, then the mock's second
+            # descriptor as a muted line beneath it (the band is too narrow to
+            # carry both on one row — see the sources/destinations secondary,
+            # which is right-aligned on the title row instead).
             parts.append(
                 f'<rect x="{_f(left + 66)}" y="19" width="92" height="18" rx="9" '
                 'fill="var(--brand-600)"/>'
                 f'<text x="{_f(left + 112)}" y="32" font-size="10.5" fill="#fff" '
                 'text-anchor="middle" font-weight="600">managed by drt</text>'
+                f'<text x="{_f(left + 14)}" y="44" font-size="9.5" letter-spacing="0.3" '
+                'fill="var(--muted)">version-controlled YAML</text>'
             )
         elif secondary:
             parts.append(
@@ -133,8 +139,14 @@ def render_dag_svg(manifest: Manifest, *, strategy: str = "median") -> str:
     card_w = round(cfg.node_w)
 
     parts: list[str] = [
-        f'<svg viewBox="0 0 {_f(width)} {_f(height)}" width="{_f(width)}" '
-        f'height="{_f(height)}" role="img" aria-label="Lineage graph: sources feed '
+        # Responsive: viewBox carries the intrinsic geometry; the style scales
+        # the SVG down to its column and never upscales past natural size, so
+        # the destination rank stays on-screen instead of overflowing a
+        # narrower content column (the `.dag` overflow-x:auto only engages on
+        # genuinely tiny viewports). No fixed width/height px attributes.
+        f'<svg viewBox="0 0 {_f(width)} {_f(height)}" '
+        f'style="width:100%;height:auto;max-width:{_f(width)}px" '
+        'role="img" aria-label="Lineage graph: sources feed '
         'drt-managed syncs which write to destinations">',
         _marker_defs("dag", size=7),
         # back to front: zones, then edges, then node cards

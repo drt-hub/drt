@@ -198,3 +198,28 @@ def test_manifest_text_is_escaped() -> None:
     )
     svg = render_dag_svg(manifest)
     assert "<script>" not in svg
+
+
+def test_badge_keys_match_registered_connectors() -> None:
+    """Every curated badge key must be a registered connector ``type``.
+
+    Guards the drift that had ``salesforce`` (never registered — the type is
+    ``salesforce_bulk``) silently falling through to the neutral badge.
+    """
+    from drt.connectors import registry
+    from drt.docs._svg import _BADGES
+
+    registered = set(registry._source_registry) | set(registry._destination_registry)
+    stray = set(_BADGES) - registered
+    assert not stray, f"_BADGES keys not registered as connector types: {sorted(stray)}"
+
+
+def test_svg_is_responsive_not_fixed_width() -> None:
+    """The DAG SVG scales to its column (#701 follow-up): viewBox + a
+    max-width style, no fixed width/height px attributes that would overflow a
+    narrower content column and push the destination rank off-screen."""
+    svg = render_dag_svg(_manifest())
+    opening = svg[: svg.index(">") + 1]
+    assert "viewBox=" in opening
+    assert "width:100%" in opening and "max-width:" in opening
+    assert ' width="' not in opening and ' height="' not in opening

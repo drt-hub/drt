@@ -1,0 +1,17 @@
+name: users_to_pg
+description: "Mirror warehouse users into the app database."
+tags: [core, pii]
+model: |
+  SELECT id, name, email, created_at
+  FROM {{ ref('users') }}
+destination:
+  type: postgres
+  host_env: DEMO_PG_HOST
+  dbname: acme_app
+  table: public.users
+  upsert_key: [id]
+sync:
+  mode: incremental
+  cursor_field: created_at
+  mask:
+    email: hash

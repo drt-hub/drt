@@ -1,0 +1,12 @@
+name: users_to_hubspot
+description: "Upsert users as HubSpot contacts."
+tags: [gtm, pii]
+model: ref('crm_contacts')
+destination:
+  type: hubspot
+  object_type: contacts
+sync:
+  mode: incremental
+  cursor_field: updated_at
+  mask:
+    email: hash
