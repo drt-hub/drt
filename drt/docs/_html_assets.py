@@ -27,6 +27,7 @@ STYLE_CSS = """\
   --success:#15803d; --warning:#b45309; --error:#b91c1c;
   /* lineage */
   --edge:#9aa0a8; --edge-lookup:var(--brand-500); --zone-drt-line:var(--brand-200);
+  --zone-drt-bg:var(--brand-50);
   /* shape & type */
   --radius:8px;
   --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,monospace;
@@ -38,6 +39,7 @@ STYLE_CSS = """\
     --line:var(--ink-700); --surface:var(--ink-800); --chip:var(--ink-700);
     --success:#4ade80; --warning:#fbbf24; --error:#f87171;
     --edge:#6a707a; --zone-drt-line:rgba(139,92,246,0.35);
+    --zone-drt-bg:rgba(124,58,237,0.10);
   }
 }
 * { box-sizing:border-box; }
@@ -151,6 +153,12 @@ td.right, th.right { text-align:right; }
   padding:10px; overflow-x:auto; }
 .ego svg text { font-family:var(--sans); }
 .ego svg .mono { font-family:var(--mono); }
+
+/* Project DAG — static SVG from the layout engine (#701) */
+.dag { border:1px solid var(--line); border-radius:var(--radius); background:var(--surface);
+  padding:10px; overflow-x:auto; }
+.dag svg text { font-family:var(--sans); }
+.dag svg .mono { font-family:var(--mono); }
 .group a .count { float:right; }
 
 @media (max-width:860px) {
