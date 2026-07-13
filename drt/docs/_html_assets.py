@@ -134,6 +134,11 @@ td.right, th.right { text-align:right; }
 .status-partial { color:var(--warning); font-weight:500; }
 .status-failed { color:var(--error); font-weight:500; }
 .empty { border:1px dashed var(--line); padding:32px; text-align:center; border-radius:var(--radius); color:var(--muted); }
+.empty--hero { padding:56px 32px; }
+.empty__title { font-size:17px; font-weight:600; color:var(--fg); margin-bottom:6px; }
+.empty--hero pre.code { display:inline-block; text-align:left; margin:14px auto 0; }
+.kpi__error { font-family:var(--mono); font-size:11.5px; color:var(--error); margin-top:4px;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
 /* Sync detail — KPI cards, tabs (progressive: stacked without JS), ego lineage */
 .kpi { border:1px solid var(--line); border-radius:var(--radius); padding:12px 16px; }

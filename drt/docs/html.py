@@ -231,6 +231,15 @@ _INDEX = """\
 <div class="eyebrow">Overview</div>
 <h1>{{ project_name }}</h1>
 <p class="lede">drt {{ drt_version }} &middot; profile <code>{{ profile }}</code> &middot; manifest schema v{{ schema_version }}</p>
+{% if not nav.syncs %}
+<div class="empty empty--hero">
+  <div class="empty__title">No syncs yet</div>
+  <p>This project has no sync definitions. Create one and regenerate:</p>
+  <pre class="code">drt init          # scaffold a sync YAML
+drt run           # execute it
+drt docs generate # rebuild this site</pre>
+</div>
+{% else %}
 <div class="cards">
   <div class="card"><div class="num">{{ nav.syncs|length }}</div><div class="lbl">Syncs</div></div>
   <div class="card"><div class="num">{{ nav.sources|length }}</div><div class="lbl">Sources</div></div>
@@ -279,6 +288,7 @@ _INDEX = """\
 {% else %}
 <div class="empty">No run history yet &mdash; run <code>drt run</code> to populate state.</div>
 {% endif %}
+{% endif %}
 {% endblock %}
 """
 
@@ -292,8 +302,10 @@ Dashed edges are destination lookups.</p>
 {% if dag_svg %}
 <div class="dag">{{ dag_svg|safe }}</div>
 {% else %}
-<div class="empty">No syncs found &mdash; add <code>.yml</code> files to <code>syncs/</code>
-and re-run <code>drt docs generate</code>.</div>
+<div class="empty empty--hero">
+  <div class="empty__title">No syncs found</div>
+  <p>The lineage graph appears once the project has at least one sync.</p>
+</div>
 {% endif %}
 {% endblock %}
 """
@@ -311,6 +323,7 @@ _SYNC = """\
     {% if state %}
     <div>{{ state.last_sync_at }} &middot; <span class="status-{{ state.last_status }}">{{ state.last_status }}</span></div>
     <div class="font-mono">{{ state.rows_synced }} rows</div>
+    {% if state.last_error %}<div class="kpi__error" title="{{ state.last_error }}">{{ state.last_error|truncate(80) }}</div>{% endif %}
     {% else %}<div class="empty" style="padding:8px">No runs yet</div>{% endif %}
   </div>
   <div class="kpi">
@@ -503,9 +516,7 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
     if output_dir.exists():
         if output_dir.is_file():
             raise ValueError(f"--output must be a directory, but {output_dir} is a file.")
-        looks_like_docs = (output_dir / "index.html").exists() and (
-            output_dir / "assets"
-        ).is_dir()
+        looks_like_docs = (output_dir / "index.html").exists() and (output_dir / "assets").is_dir()
         is_empty = not any(output_dir.iterdir())
         if not (looks_like_docs or is_empty):
             raise ValueError(
