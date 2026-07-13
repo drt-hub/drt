@@ -46,6 +46,11 @@ STYLE_CSS = """\
 html,body { margin:0; padding:0; }
 body { background:var(--bg); color:var(--fg); font-family:var(--sans); font-size:14px; line-height:1.55; }
 a { color:var(--brand-700); text-decoration:none; }
+a:focus-visible, button:focus-visible, input:focus-visible, summary:focus-visible {
+  outline:2px solid var(--brand-500); outline-offset:2px; border-radius:4px; }
+.skip { position:absolute; left:-9999px; top:0; z-index:100; background:var(--brand-600);
+  color:#fff; padding:8px 14px; border-radius:0 0 8px 0; }
+.skip:focus { left:0; }
 a:hover { text-decoration:underline; }
 code,pre,.mono { font-family:var(--mono); }
 
@@ -118,6 +123,16 @@ pre.code { background:var(--surface); border:1px solid var(--line); border-radiu
 .mermaid { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:16px; }
 
 .footer { color:var(--muted); font-size:12px; margin-top:36px; padding-top:14px; border-top:1px solid var(--line); }
+.search-empty { color:var(--muted); font-size:12.5px; font-style:italic; padding:2px 4px; }
+
+@media print {
+  .topbar, .sidebar, .skip, .copy-btn, .expand-btn, .tabs { display:none !important; }
+  .js .tab-panel:not(.active) { display:block !important; }
+  .js .collapsible:not(.open) .codebody { max-height:none !important; }
+  .js .collapsible:not(.open) .codebody::after { display:none !important; }
+  .shell { display:block; }
+  .main { max-width:none; padding:0; }
+}
 
 /* Overview — type-distribution bars */
 .two-col { display:grid; grid-template-columns:1fr 1fr; gap:32px; margin-bottom:8px; }
@@ -202,13 +217,25 @@ APP_JS = """\
   function wireSearch() {
     var input = document.getElementById("drt-search");
     if (!input) return;
+    var sidebar = document.querySelector(".sidebar");
+    var emptyMsg = null;
+    if (sidebar) {
+      emptyMsg = document.createElement("div");
+      emptyMsg.className = "search-empty";
+      emptyMsg.textContent = "No matches";
+      emptyMsg.hidden = true;
+      sidebar.appendChild(emptyMsg);
+    }
     input.addEventListener("input", function () {
       var q = input.value.trim().toLowerCase();
+      var visible = 0;
       document.querySelectorAll(".sidebar li").forEach(function (li) {
         var a = li.querySelector("a");
         var hit = !q || (a && a.textContent.toLowerCase().indexOf(q) !== -1);
         li.style.display = hit ? "" : "none";
+        if (hit) visible += 1;
       });
+      if (emptyMsg) emptyMsg.hidden = !q || visible > 0;
     });
   }
 
@@ -220,7 +247,10 @@ APP_JS = """\
       buttons.forEach(function (btn) {
         btn.addEventListener("click", function () {
           var target = btn.getAttribute("data-tab");
-          buttons.forEach(function (b) { b.classList.toggle("active", b === btn); });
+          buttons.forEach(function (b) {
+            b.classList.toggle("active", b === btn);
+            b.setAttribute("aria-selected", b === btn ? "true" : "false");
+          });
           group.parentElement.querySelectorAll(".tab-panel").forEach(function (p) {
             p.classList.toggle("active", p.getAttribute("data-tab") === target);
           });
