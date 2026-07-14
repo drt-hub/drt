@@ -45,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`drt deploy github-actions` — scaffold a scheduled sync workflow with required secrets enumerated** ([#785](https://github.com/drt-hub/drt/issues/785)): generates `.github/workflows/drt-sync.yml` wired to `drt-hub/drt-action@v1` from the project root. The error-prone part is automated: connector **extras are inferred** from `profiles.yml` + sync destination types, and **every required secret** — each `*_env` reference and `${VAR}` placeholder across syncs/profiles — lands in the step's `env:` block as `NAME: ${{ secrets.NAME }}`, with a printed `gh secret set NAME` checklist. `--schedule "40 3 * * *"` adds the cron trigger (omit for manual dispatch with a commented example); `--select` / `--profile` / `--extras` override inference; `--dry-run` previews; `--force` overwrites. The scanner reads YAML raw (no `${VAR}` expansion), so it works in a fresh checkout with no runtime env vars set. Two drift-guard tests pin the type→extra mapping to the connector registry and pyproject extras. Prior art: `dlt deploy github-action`. Docs: CI/CD guide + README/llm CLI references.
 
+### Changed
+
+- **`drt sources --detailed` now reports `config_class` as `drt.config.profiles.<X>Profile`** ([#721](https://github.com/drt-hub/drt/issues/721)): the 13 source profile dataclasses moved from `drt/config/credentials.py` into a new `drt/config/profiles.py` (re-exported from `credentials.py`, so every `from drt.config.credentials import <X>Profile` is unchanged). The `config_class` string in `drt sources --detailed` / `--output json` is built from the class's real module, so it now reads `drt.config.profiles.<X>Profile` instead of `drt.config.credentials.<X>Profile`. The connectors themselves are unchanged — this mirrors the destination-side shift from the earlier `models.py` split ([#721](https://github.com/drt-hub/drt/issues/721) phase 1).
+
 ## [0.7.11] - 2026-07-10
 
 ### Added
