@@ -60,6 +60,7 @@ class _FakeResult:
     watermark_source: str | None = None
     cursor_value_used: str | None = None
     watermark_lag: str | None = None
+    limit_applied: int | None = None
     duration_seconds: float | None = 0.01
     interrupted = False
 

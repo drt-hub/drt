@@ -12,6 +12,7 @@ import threading
 import time
 from collections.abc import Iterator
 from datetime import datetime, timezone
+from itertools import islice
 from pathlib import Path
 from typing import Any, Literal
 
@@ -196,6 +197,7 @@ def run_sync(
     compute_diff: bool = False,
     diff_limit: int = 20,
     observer: SyncObserver | None = None,
+    extract_limit: int | None = None,
 ) -> SyncResult:
     """Run a single sync: extract from source, load to destination.
 
@@ -281,6 +283,7 @@ def run_sync(
                     total_result=total_result,
                     observer=observer,
                     tracer=tracer,
+                    extract_limit=extract_limit,
                 )
             except BaseException as exc:
                 raised = exc
@@ -363,6 +366,7 @@ def _run_sync_body(
     total_result: SyncResult,
     observer: SyncObserver,
     tracer: Any,
+    extract_limit: int | None = None,
 ) -> SyncResult:
     """Inner body of run_sync. Mutates `total_result` in place so the outer
     finally-block can read partial results when an exception propagates.
@@ -434,6 +438,10 @@ def _run_sync_body(
         cursor_value=effective_cursor_value,
         incremental=cursor_field is not None,
     )
+    # Sampling (#774): cap extraction engine-side — dialect-agnostic (works
+    # for REST/file sources and avoids per-dialect LIMIT/TOP SQL rendering).
+    if extract_limit is not None:
+        records_iter = islice(records_iter, extract_limit)
     new_cursor_value: str | None = last_cursor_value
     is_staged = isinstance(destination, StagedDestination)
     staged_count = 0
@@ -487,7 +495,9 @@ def _run_sync_body(
             # Track max cursor value seen across all batches.
             # Stringify with tz-naive UTC normalization for tz-aware datetimes
             # to avoid #475 (re-emit-at-boundary when user SQL is tz-naive).
-            if cursor_field:
+            # Sampled runs (#774) never advance the watermark — the rows a
+            # --limit run skipped would otherwise fall behind the cursor.
+            if cursor_field and extract_limit is None:
                 for row in record_batch:
                     val = row.get(cursor_field)
                     if val is not None:
@@ -622,6 +632,7 @@ def _run_sync_body(
     # watermark.lag applied (#759). The persisted watermark is new_cursor_value.
     total_result.cursor_value_used = effective_cursor_value
     total_result.watermark_lag = watermark_lag_applied
+    total_result.limit_applied = extract_limit
 
     # State + watermark persistence is the observer's responsibility (#548).
     # The CLI composes ``LoggingObserver`` + ``StatePersistingObserver`` so
