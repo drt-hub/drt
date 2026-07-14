@@ -52,6 +52,7 @@ from drt.cli._helpers import (
     get_watermark_storage,
     resolve_profile_name,
 )
+from drt.cli._selection import SelectionError, complete_selector, select_syncs
 from drt.cli.output import (
     console,
     print_dry_run_summary,
@@ -305,11 +306,21 @@ def _print_watermark_summary(results: list[dict[str, object]]) -> None:
 
 @app.command()
 def run(
-    select: str = typer.Option(
+    select: list[str] = typer.Option(
         None,
         "--select",
         "-s",
-        help='Run sync by name, tag (tag:crm), or "*" / "all" for every sync.',
+        help=(
+            "Select syncs: name or glob (users_*), tag:<pattern>, "
+            'destination:<type>, or "*" / "all". Repeat to union.'
+        ),
+        autocompletion=complete_selector,
+    ),
+    exclude: list[str] = typer.Option(
+        None,
+        "--exclude",
+        help="Subtract syncs from the selection (same grammar as --select). Repeatable.",
+        autocompletion=complete_selector,
     ),
     threads: int = typer.Option(1, "--threads", "-t", help="Parallel execution threads."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without writing data."),
@@ -355,15 +366,17 @@ def run(
     """Run sync(s) defined in the project.
 
     Without --select, runs all syncs sequentially (existing behaviour).
-    Use --select to filter by name or tag (e.g. --select tag:crm).
-    Use --select "*" or --select all to be explicit about running every sync.
+    --select accepts a sync name or glob, tag:<pattern>, destination:<type>,
+    or "*" / "all"; repeat --select to union, --exclude to subtract (#771).
     Use --threads N for parallel execution.
     Use --dry-run --diff to preview record-level changes (#413).
 
     Examples:
       drt run
       drt run --select post_users
-      drt run --select tag:crm --threads 4
+      drt run --select 'users_*' --exclude users_backfill
+      drt run --select tag:crm --select tag:ads --threads 4
+      drt run --select destination:hubspot
       drt run --dry-run --diff
     """
     if diff and not dry_run:
@@ -399,21 +412,14 @@ def run(
             console.print("[dim]No syncs found in syncs/. Add .yml files to get started.[/dim]")
         raise typer.Exit()
 
-    if select:
-        if select in ("*", "all"):
-            # Explicit "run every sync" sentinel — no filtering.
-            pass
-        elif select.startswith("tag:"):
-            tag = select[4:]
-            syncs = [s for s in syncs if tag in getattr(s, "tags", [])]
-            if not syncs:
-                print_error(f"No syncs with tag '{tag}' found.")
-                raise typer.Exit(1)
-        else:
-            syncs = [s for s in syncs if s.name == select]
-            if not syncs:
-                print_error(f"No sync named '{select}' found.")
-                raise typer.Exit(1)
+    try:
+        syncs = select_syncs(syncs, select, exclude)
+    except SelectionError as e:
+        print_error(str(e))
+        raise typer.Exit(1)
+    if not syncs:
+        print_error("Selection matched no syncs (after --exclude).")
+        raise typer.Exit(1)
 
     if cursor_value is not None:
         incremental = [s for s in syncs if s.sync.mode == "incremental"]

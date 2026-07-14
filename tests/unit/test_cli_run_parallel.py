@@ -215,6 +215,57 @@ def test_all_flag_was_removed(project: Path, patched_engine: dict[str, Any]) -> 
 
 
 # ---------------------------------------------------------------------------
+# selection v2 (#771): glob / repeated --select / --exclude / destination:
+# ---------------------------------------------------------------------------
+
+
+def test_select_glob_pattern(project: Path, patched_engine: dict[str, Any]) -> None:
+    result = runner.invoke(app, ["run", "--select", "sync_*", "--output", "json"])
+    assert result.exit_code == 0
+    assert set(patched_engine["calls"]) == {"sync_a", "sync_b", "sync_c"}
+
+
+def test_repeated_select_unions(project: Path, patched_engine: dict[str, Any]) -> None:
+    result = runner.invoke(
+        app, ["run", "--select", "sync_a", "--select", "sync_c", "--output", "json"]
+    )
+    assert result.exit_code == 0
+    assert set(patched_engine["calls"]) == {"sync_a", "sync_c"}
+
+
+def test_exclude_subtracts_from_selection(
+    project: Path, patched_engine: dict[str, Any]
+) -> None:
+    result = runner.invoke(
+        app, ["run", "--select", "tag:crm", "--exclude", "sync_b", "--output", "json"]
+    )
+    assert result.exit_code == 0
+    assert patched_engine["calls"] == ["sync_a"]
+
+
+def test_exclude_without_select(project: Path, patched_engine: dict[str, Any]) -> None:
+    result = runner.invoke(app, ["run", "--exclude", "sync_b", "--output", "json"])
+    assert result.exit_code == 0
+    assert set(patched_engine["calls"]) == {"sync_a", "sync_c"}
+
+
+def test_exclude_everything_exits_nonzero(
+    project: Path, patched_engine: dict[str, Any]
+) -> None:
+    result = runner.invoke(app, ["run", "--exclude", "*", "--output", "json"])
+    assert result.exit_code == 1
+    assert patched_engine["calls"] == []
+
+
+def test_unknown_selector_method_exits_nonzero(
+    project: Path, patched_engine: dict[str, Any]
+) -> None:
+    result = runner.invoke(app, ["run", "--select", "source:bigquery", "--output", "json"])
+    assert result.exit_code == 1
+    assert patched_engine["calls"] == []
+
+
+# ---------------------------------------------------------------------------
 # --threads — real parallel dispatch
 # ---------------------------------------------------------------------------
 
