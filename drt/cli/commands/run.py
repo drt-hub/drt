@@ -52,6 +52,7 @@ from drt.cli._helpers import (
     get_watermark_storage,
     resolve_profile_name,
 )
+from drt.cli._selection import SelectionError, complete_selector, select_syncs
 from drt.cli.output import (
     console,
     print_dry_run_summary,
@@ -102,6 +103,8 @@ class _RunContext:
     # the engine populates result.diff for the renderer to display.
     compute_diff: bool = False
     diff_limit: int = 20
+    # Sampling (#774) — cap extraction at N rows per sync; watermarks frozen.
+    extract_limit: int | None = None
 
 
 def _exit_code_for_signal(signum: int) -> int:
@@ -174,6 +177,7 @@ def _run_one(
                 compute_diff=ctx.compute_diff,
                 diff_limit=ctx.diff_limit,
                 observer=observer,
+                extract_limit=ctx.extract_limit,
             )
         except Exception as e:
             from drt.cli.errors import format_error, render_to_console
@@ -232,6 +236,8 @@ def _run_one(
             entry["cursor_value_used"] = result.cursor_value_used
         if result.watermark_lag is not None:
             entry["watermark_lag"] = result.watermark_lag
+        if result.limit_applied is not None:
+            entry["limit"] = result.limit_applied
         if ctx.log_json:
             logging.info(
                 "sync_complete",
@@ -305,11 +311,45 @@ def _print_watermark_summary(results: list[dict[str, object]]) -> None:
 
 @app.command()
 def run(
-    select: str = typer.Option(
+    select: list[str] = typer.Option(
         None,
         "--select",
         "-s",
-        help='Run sync by name, tag (tag:crm), or "*" / "all" for every sync.',
+        help=(
+            "Select syncs: name or glob (users_*), tag:<pattern>, "
+            'destination:<type>, or "*" / "all". Repeat to union.'
+        ),
+        autocompletion=complete_selector,
+    ),
+    exclude: list[str] = typer.Option(
+        None,
+        "--exclude",
+        help="Subtract syncs from the selection (same grammar as --select). Repeatable.",
+        autocompletion=complete_selector,
+    ),
+    failed_only: bool = typer.Option(
+        False,
+        "--failed",
+        help=(
+            "Re-run only syncs whose last recorded status was not success "
+            "(intersects with --select/--exclude). Never-run syncs are not included."
+        ),
+    ),
+    limit: int = typer.Option(
+        None,
+        "--limit",
+        help=(
+            "Extract at most N rows per sync — a sampled run for safe first sends. "
+            "Watermarks do not advance; refused for mirror/replace syncs."
+        ),
+    ),
+    fail_fast: bool = typer.Option(
+        False,
+        "--fail-fast",
+        help=(
+            "Stop scheduling syncs after the first failure; in-flight syncs finish, "
+            "remaining ones are reported as skipped."
+        ),
     ),
     threads: int = typer.Option(1, "--threads", "-t", help="Parallel execution threads."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without writing data."),
@@ -355,15 +395,18 @@ def run(
     """Run sync(s) defined in the project.
 
     Without --select, runs all syncs sequentially (existing behaviour).
-    Use --select to filter by name or tag (e.g. --select tag:crm).
-    Use --select "*" or --select all to be explicit about running every sync.
+    --select accepts a sync name or glob, tag:<pattern>, destination:<type>,
+    or "*" / "all"; repeat --select to union, --exclude to subtract (#771).
     Use --threads N for parallel execution.
     Use --dry-run --diff to preview record-level changes (#413).
 
     Examples:
       drt run
       drt run --select post_users
-      drt run --select tag:crm --threads 4
+      drt run --select 'users_*' --exclude users_backfill
+      drt run --select tag:crm --select tag:ads --threads 4
+      drt run --select destination:hubspot
+      drt run --failed
       drt run --dry-run --diff
     """
     if diff and not dry_run:
@@ -399,21 +442,69 @@ def run(
             console.print("[dim]No syncs found in syncs/. Add .yml files to get started.[/dim]")
         raise typer.Exit()
 
-    if select:
-        if select in ("*", "all"):
-            # Explicit "run every sync" sentinel — no filtering.
-            pass
-        elif select.startswith("tag:"):
-            tag = select[4:]
-            syncs = [s for s in syncs if tag in getattr(s, "tags", [])]
-            if not syncs:
-                print_error(f"No syncs with tag '{tag}' found.")
-                raise typer.Exit(1)
-        else:
-            syncs = [s for s in syncs if s.name == select]
-            if not syncs:
-                print_error(f"No sync named '{select}' found.")
-                raise typer.Exit(1)
+    try:
+        syncs = select_syncs(syncs, select, exclude)
+    except SelectionError as e:
+        print_error(str(e))
+        raise typer.Exit(1)
+    if not syncs:
+        print_error("Selection matched no syncs (after --exclude).")
+        raise typer.Exit(1)
+
+    # --failed (#773): sync-level re-run of the previous invocation's
+    # failures. Applied after --select/--exclude (intersection semantics).
+    # A clean previous state exits 0 — recovery loops shouldn't page when
+    # there is nothing to recover. (Record-level replay is `drt retry`.)
+    if failed_only:
+        state_probe = StateManager(Path("."))
+
+        def _last_run_failed(sync_cfg: SyncConfig) -> bool:
+            prev = state_probe.get_last_sync(sync_cfg.name)
+            return prev is not None and prev.status != "success"
+
+        syncs = [s for s in syncs if _last_run_failed(s)]
+        if not syncs:
+            if json_mode:
+                print(
+                    json.dumps(
+                        {
+                            "syncs": [],
+                            "succeeded": 0,
+                            "failed": 0,
+                            "note": "nothing_failed",
+                        },
+                        indent=2,
+                    )
+                )
+            else:
+                console.print(
+                    "[green]Nothing failed in the previous run — nothing to re-run.[/green]"
+                )
+            raise typer.Exit(0)
+        if not json_mode and not quiet:
+            console.print(
+                f"[dim]--failed: re-running {len(syncs)} sync(s): "
+                f"{', '.join(s.name for s in syncs)}[/dim]"
+            )
+
+    # --limit (#774): sampled run guards. A sampled mirror would DELETE the
+    # destination rows the sample skipped; a sampled replace would truncate
+    # a full table down to N rows. Refuse both outright.
+    if limit is not None:
+        if limit < 1:
+            print_error("--limit must be a positive integer.")
+            raise typer.Exit(1)
+        guarded = [s.name for s in syncs if s.sync.mode in ("mirror", "replace")]
+        if guarded:
+            print_error(
+                "--limit is not allowed for mode=mirror/replace syncs "
+                f"(a sample would delete or replace real rows): {', '.join(guarded)}"
+            )
+            raise typer.Exit(1)
+        if not json_mode and not quiet:
+            console.print(
+                f"[yellow]--limit {limit}: sampled run — watermarks will not advance.[/yellow]"
+            )
 
     if cursor_value is not None:
         incremental = [s for s in syncs if s.sync.mode == "incremental"]
@@ -444,6 +535,20 @@ def run(
     t_total = time.monotonic()
     succeeded = 0
     failed = 0
+    skipped = 0
+
+    def _skipped_entry(sync_cfg: SyncConfig) -> dict[str, object]:
+        # --fail-fast (#775): "didn't run" is distinct from "ran and failed".
+        return {
+            "name": sync_cfg.name,
+            "status": "skipped",
+            "reason": "fail_fast",
+            "rows_extracted": 0,
+            "rows_synced": 0,
+            "rows_failed": 0,
+            "duration_seconds": 0.0,
+            "dry_run": dry_run,
+        }
 
     # Cooperative graceful shutdown for SIGTERM/SIGINT (#279).
     # Signals are delivered to the main thread by Python; the engine checks
@@ -489,6 +594,7 @@ def run(
         stop_event=stop_event,
         compute_diff=diff,
         diff_limit=diff_limit,
+        extract_limit=limit,
     )
 
     # Execute syncs — parallel if threads > 1, sequential otherwise
@@ -498,20 +604,41 @@ def run(
         with ThreadPoolExecutor(max_workers=threads) as pool:
             futures = {pool.submit(_run_one, s, ctx, profile): s for s in syncs}
             for future in as_completed(futures):
+                if future.cancelled():
+                    # --fail-fast cancelled it before a worker picked it up.
+                    json_results.append(_skipped_entry(futures[future]))
+                    skipped += 1
+                    continue
                 name, entry, had_err = future.result()
                 json_results.append(entry)
                 if had_err:
                     failed += 1
+                    if fail_fast:
+                        # Stop scheduling; in-flight syncs drain normally
+                        # (the with-block's shutdown(wait=True) still waits).
+                        pool.shutdown(wait=False, cancel_futures=True)
                 else:
                     succeeded += 1
     else:
+        stop_scheduling = False
         for sync in syncs:
+            if stop_scheduling:
+                json_results.append(_skipped_entry(sync))
+                skipped += 1
+                continue
             name, entry, had_err = _run_one(sync, ctx, profile)
             json_results.append(entry)
             if had_err:
                 failed += 1
+                if fail_fast:
+                    stop_scheduling = True
             else:
                 succeeded += 1
+
+    if skipped and not json_mode and not quiet:
+        console.print(
+            f"[yellow]--fail-fast: skipped {skipped} sync(s) after the first failure.[/yellow]"
+        )
 
     total_duration = round(time.monotonic() - t_total, 2)
 
@@ -532,6 +659,7 @@ def run(
                     "syncs": json_results,
                     "succeeded": succeeded,
                     "failed": failed,
+                    "skipped": skipped,
                     "total_duration_seconds": total_duration,
                 },
                 indent=2,

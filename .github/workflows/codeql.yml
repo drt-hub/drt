@@ -3,8 +3,9 @@ name: CodeQL
 on:
   push:
     branches: [main]
+  # No `branches:` filter — see #801: it matches the PR's base, so gating on
+  # `main` silently exempts every stacked PR.
   pull_request:
-    branches: [main]
   schedule:
     # Weekly scan (Mon 03:00 UTC) — offset from ci.yml nightly (00:00 UTC)
     # so the two scheduled runs don't compete for runner capacity.

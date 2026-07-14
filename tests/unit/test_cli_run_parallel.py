@@ -9,6 +9,7 @@ calls — each test only asserts the CLI wiring behaves as documented.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
@@ -105,6 +106,7 @@ class _FakeResult:
         self.watermark_source: str | None = None
         self.cursor_value_used: str | None = None
         self.watermark_lag: str | None = None
+        self.limit_applied: int | None = None
 
 
 @pytest.fixture
@@ -119,6 +121,7 @@ def patched_engine(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     from drt.engine import sync as sync_module
 
     calls: list[str] = []
+    limits: list[int | None] = []
     lock = threading.Lock()
     threads_seen: set[int] = set()
 
@@ -129,6 +132,7 @@ def patched_engine(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         time.sleep(0.05)
         with lock:
             calls.append(sync.name)
+            limits.append(_kwargs.get("extract_limit"))
             threads_seen.add(threading.get_ident())
         return _FakeResult(success=1, failed=0)
 
@@ -153,7 +157,7 @@ def patched_engine(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         lambda *_a, **_kw: object(),
         raising=False,
     )
-    return {"calls": calls, "threads_seen": threads_seen}
+    return {"calls": calls, "threads_seen": threads_seen, "limits": limits}
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +215,237 @@ def test_all_flag_was_removed(project: Path, patched_engine: dict[str, Any]) -> 
     """The legacy ``--all`` boolean was replaced by --select * / --select all."""
     result = runner.invoke(app, ["run", "--all", "--output", "json"])
     assert result.exit_code != 0
+    assert patched_engine["calls"] == []
+
+
+# ---------------------------------------------------------------------------
+# selection v2 (#771): glob / repeated --select / --exclude / destination:
+# ---------------------------------------------------------------------------
+
+
+def test_select_glob_pattern(project: Path, patched_engine: dict[str, Any]) -> None:
+    result = runner.invoke(app, ["run", "--select", "sync_*", "--output", "json"])
+    assert result.exit_code == 0
+    assert set(patched_engine["calls"]) == {"sync_a", "sync_b", "sync_c"}
+
+
+def test_repeated_select_unions(project: Path, patched_engine: dict[str, Any]) -> None:
+    result = runner.invoke(
+        app, ["run", "--select", "sync_a", "--select", "sync_c", "--output", "json"]
+    )
+    assert result.exit_code == 0
+    assert set(patched_engine["calls"]) == {"sync_a", "sync_c"}
+
+
+def test_exclude_subtracts_from_selection(
+    project: Path, patched_engine: dict[str, Any]
+) -> None:
+    result = runner.invoke(
+        app, ["run", "--select", "tag:crm", "--exclude", "sync_b", "--output", "json"]
+    )
+    assert result.exit_code == 0
+    assert patched_engine["calls"] == ["sync_a"]
+
+
+def test_exclude_without_select(project: Path, patched_engine: dict[str, Any]) -> None:
+    result = runner.invoke(app, ["run", "--exclude", "sync_b", "--output", "json"])
+    assert result.exit_code == 0
+    assert set(patched_engine["calls"]) == {"sync_a", "sync_c"}
+
+
+def test_exclude_everything_exits_nonzero(
+    project: Path, patched_engine: dict[str, Any]
+) -> None:
+    result = runner.invoke(app, ["run", "--exclude", "*", "--output", "json"])
+    assert result.exit_code == 1
+    assert patched_engine["calls"] == []
+
+
+def test_unknown_selector_method_exits_nonzero(
+    project: Path, patched_engine: dict[str, Any]
+) -> None:
+    result = runner.invoke(app, ["run", "--select", "source:bigquery", "--output", "json"])
+    assert result.exit_code == 1
+    assert patched_engine["calls"] == []
+
+
+# ---------------------------------------------------------------------------
+# --failed (#773): sync-level re-run of previous failures
+# ---------------------------------------------------------------------------
+
+
+def _seed_state(statuses: dict[str, str]) -> None:
+    """Write .drt/state.json entries for the given sync statuses."""
+    from drt.state.manager import StateManager, SyncState
+
+    mgr = StateManager(Path("."))
+    for name, status in statuses.items():
+        mgr.save_sync(
+            SyncState(
+                sync_name=name,
+                last_run_at="2026-07-10T00:00:00",
+                records_synced=0,
+                status=status,
+                error="boom" if status != "success" else None,
+                last_cursor_value=None,
+            )
+        )
+
+
+def test_failed_reruns_only_failed_syncs(project: Path, patched_engine: dict[str, Any]) -> None:
+    _seed_state({"sync_a": "failed", "sync_b": "success", "sync_c": "partial"})
+
+    result = runner.invoke(app, ["run", "--failed", "--output", "json"])
+
+    assert result.exit_code == 0
+    assert set(patched_engine["calls"]) == {"sync_a", "sync_c"}  # partial counts as not-success
+
+
+def test_failed_excludes_never_run_syncs(project: Path, patched_engine: dict[str, Any]) -> None:
+    _seed_state({"sync_a": "failed"})  # sync_b / sync_c never ran
+
+    result = runner.invoke(app, ["run", "--failed", "--output", "json"])
+
+    assert result.exit_code == 0
+    assert patched_engine["calls"] == ["sync_a"]
+
+
+def test_failed_intersects_with_select(project: Path, patched_engine: dict[str, Any]) -> None:
+    _seed_state({"sync_a": "failed", "sync_c": "failed"})
+
+    result = runner.invoke(
+        app, ["run", "--failed", "--select", "tag:crm", "--output", "json"]
+    )
+
+    assert result.exit_code == 0
+    assert patched_engine["calls"] == ["sync_a"]  # sync_c failed but isn't tag:crm
+
+
+def test_failed_with_clean_state_exits_zero_without_running(
+    project: Path, patched_engine: dict[str, Any]
+) -> None:
+    _seed_state({"sync_a": "success", "sync_b": "success"})
+
+    result = runner.invoke(app, ["run", "--failed", "--output", "json"])
+
+    assert result.exit_code == 0
+    assert patched_engine["calls"] == []
+    assert "nothing_failed" in result.output
+
+
+# ---------------------------------------------------------------------------
+# --limit (#774): sampled runs
+# ---------------------------------------------------------------------------
+
+
+def test_limit_forwarded_to_engine(project: Path, patched_engine: dict[str, Any]) -> None:
+    result = runner.invoke(
+        app, ["run", "--select", "sync_a", "--limit", "10", "--output", "json"]
+    )
+    assert result.exit_code == 0
+    assert patched_engine["calls"] == ["sync_a"]
+    assert patched_engine["limits"] == [10]
+
+
+def test_limit_rejects_non_positive(project: Path, patched_engine: dict[str, Any]) -> None:
+    result = runner.invoke(app, ["run", "--limit", "0", "--output", "json"])
+    assert result.exit_code == 1
+    assert patched_engine["calls"] == []
+
+
+def _patch_failing_engine(
+    monkeypatch: pytest.MonkeyPatch, patched_engine: dict[str, Any], fail_names: set[str]
+) -> None:
+    """Re-patch run_sync so the named syncs report failure."""
+    from drt.engine import sync as sync_module
+
+    calls = patched_engine["calls"]
+
+    def fake_run_sync(sync, *_args: Any, **_kwargs: Any) -> _FakeResult:
+        calls.append(sync.name)
+        if sync.name in fail_names:
+            return _FakeResult(success=0, failed=1)
+        return _FakeResult(success=1, failed=0)
+
+    monkeypatch.setattr(sync_module, "run_sync", fake_run_sync, raising=False)
+
+
+# ---------------------------------------------------------------------------
+# --fail-fast (#775)
+# ---------------------------------------------------------------------------
+
+
+def test_fail_fast_sequential_skips_remaining(
+    project: Path, patched_engine: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_failing_engine(monkeypatch, patched_engine, {"sync_a"})
+
+    result = runner.invoke(app, ["run", "--fail-fast", "--output", "json"])
+
+    assert result.exit_code == 1
+    assert patched_engine["calls"] == ["sync_a"]  # b and c never scheduled
+    payload = json.loads(result.output)
+    assert payload["failed"] == 1
+    assert payload["skipped"] == 2
+    skipped = [e for e in payload["syncs"] if e["status"] == "skipped"]
+    assert {e["name"] for e in skipped} == {"sync_b", "sync_c"}
+    assert all(e["reason"] == "fail_fast" for e in skipped)
+
+
+def test_without_fail_fast_all_syncs_still_run(
+    project: Path, patched_engine: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_failing_engine(monkeypatch, patched_engine, {"sync_a"})
+
+    result = runner.invoke(app, ["run", "--output", "json"])
+
+    assert result.exit_code == 1
+    assert set(patched_engine["calls"]) == {"sync_a", "sync_b", "sync_c"}
+    payload = json.loads(result.output)
+    assert payload["skipped"] == 0
+
+
+def test_fail_fast_with_threads_accounts_for_every_sync(
+    project: Path, patched_engine: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Threaded fail-fast: no sync is lost — every sync is either run or
+    reported skipped (exact split is timing-dependent by design)."""
+    _patch_failing_engine(monkeypatch, patched_engine, {"sync_a", "sync_b", "sync_c"})
+
+    result = runner.invoke(app, ["run", "--fail-fast", "--threads", "3", "--output", "json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["succeeded"] + payload["failed"] + payload["skipped"] == 3
+    assert len(payload["syncs"]) == 3
+
+
+def test_limit_refused_for_mirror_and_replace(
+    project: Path, patched_engine: dict[str, Any]
+) -> None:
+    (project / "syncs" / "sync_mirror.yml").write_text(
+        yaml.dump(
+            {
+                "name": "sync_mirror",
+                "model": "SELECT 1",
+                "destination": {
+                    "type": "postgres",
+                    "host": "localhost",
+                    "dbname": "d",
+                    "user": "u",
+                    "password_env": "PGPASSWORD",
+                    "table": "t",
+                    "upsert_key": ["id"],
+                },
+                "sync": {"mode": "mirror"},
+            }
+        )
+    )
+
+    result = runner.invoke(app, ["run", "--limit", "5", "--output", "json"])
+
+    assert result.exit_code == 1
+    assert "sync_mirror" in result.output
     assert patched_engine["calls"] == []
 
 

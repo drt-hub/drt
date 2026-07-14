@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 
 from drt.cli._app import app
+from drt.cli._selection import SelectionError, complete_selector, select_syncs
 from drt.cli.output import (
     console,
     print_error,
@@ -32,9 +33,40 @@ from drt.cli.output import (
 )
 
 
+def _fnmatch_token(name: str, token: str) -> bool:
+    """Bare-name/glob select tokens only — method tokens (tag:, destination:)
+    cannot match unparseable syncs, which exist solely as error-dict keys."""
+    if token in ("*", "all"):
+        return True
+    if ":" in token:
+        return False
+    from fnmatch import fnmatchcase
+
+    return fnmatchcase(name, token)
+
+
+def _match_error_keys(errors: dict[str, Any], select: list[str]) -> set[str]:
+    return {k for k in errors if any(_fnmatch_token(k, t) for t in select)}
+
+
 @app.command()
 def validate(
-    select: str = typer.Option(None, "--select", "-s", help="Validate a specific sync by name."),
+    select: list[str] = typer.Option(
+        None,
+        "--select",
+        "-s",
+        help=(
+            "Select syncs: name or glob, tag:<pattern>, destination:<type>, "
+            'or "*" / "all". Repeat to union.'
+        ),
+        autocompletion=complete_selector,
+    ),
+    exclude: list[str] = typer.Option(
+        None,
+        "--exclude",
+        help="Subtract syncs from the selection (same grammar as --select). Repeatable.",
+        autocompletion=complete_selector,
+    ),
     emit_schema: bool = typer.Option(  # noqa: E501
         False, "--emit-schema", help="Write JSON Schemas to .drt/schemas/."
     ),
@@ -60,13 +92,33 @@ def validate(
     result = load_syncs_safe(Path("."))
     secret_findings = find_hardcoded_secrets(Path("."))
 
-    if select:
-        result.syncs = [s for s in result.syncs if s.name == select]
-        result.errors = {k: v for k, v in result.errors.items() if k == select}
-        result.deprecations = {k: v for k, v in result.deprecations.items() if k == select}
-        secret_findings = [finding for finding in secret_findings if finding.sync_name == select]
+    if select or exclude:
+        # Resolve method/glob selectors against the parseable syncs. Broken
+        # syncs never parse, so bare-name/glob select tokens additionally
+        # match error keys directly — `drt validate --select broken_sync`
+        # must still surface that sync's errors.
+        try:
+            selected = select_syncs(result.syncs, select, exclude)
+        except SelectionError as e:
+            error_keys: set[str] = set()
+            if select:
+                error_keys = _match_error_keys(result.errors, select)
+            if not error_keys:
+                print_error(str(e))
+                raise typer.Exit(1)
+            selected = []
+        selected_names = {s.name for s in selected}
+        error_names = _match_error_keys(result.errors, select) if select else set(result.errors)
+        for token in exclude or ():
+            error_names = {k for k in error_names if not _fnmatch_token(k, token)}
+        result.syncs = selected
+        result.errors = {k: v for k, v in result.errors.items() if k in error_names}
+        result.deprecations = {
+            k: v for k, v in result.deprecations.items() if k in selected_names
+        }
+        secret_findings = [f for f in secret_findings if f.sync_name in selected_names]
         if not result.syncs and not result.errors:
-            print_error(f"No sync named '{select}' found.")
+            print_error("Selection matched no syncs (after --exclude).")
             raise typer.Exit(1)
 
     secret_warnings_by_sync = _group_secret_findings(secret_findings)

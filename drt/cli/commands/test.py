@@ -22,6 +22,7 @@ from typing import TypedDict
 import typer
 
 from drt.cli._app import app
+from drt.cli._selection import SelectionError, complete_selector, select_syncs
 from drt.cli.output import (
     console,
     print_error,
@@ -43,8 +44,28 @@ class _SyncTestResult(TypedDict, total=False):
 @app.command(name="test")
 def test_syncs(
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
-    select: str = typer.Option(None, "--select", "-s", help="Test a specific sync by name."),
+    select: list[str] = typer.Option(
+        None,
+        "--select",
+        "-s",
+        help=(
+            "Select syncs: name or glob, tag:<pattern>, destination:<type>, "
+            'or "*" / "all". Repeat to union.'
+        ),
+        autocompletion=complete_selector,
+    ),
+    exclude: list[str] = typer.Option(
+        None,
+        "--exclude",
+        help="Subtract syncs from the selection (same grammar as --select). Repeatable.",
+        autocompletion=complete_selector,
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without running tests."),
+    fail_fast: bool = typer.Option(
+        False,
+        "--fail-fast",
+        help="Stop after the first sync with a failing test; remaining syncs are skipped.",
+    ),
 ) -> None:
     """Run post-sync validation tests.
 
@@ -70,11 +91,14 @@ def test_syncs(
             print(json.dumps({"status": "no_syncs", "results": []}))
         return
 
-    if select:
-        syncs = [s for s in syncs if s.name == select]
-        if not syncs:
-            print_error(f"No sync named '{select}' found.")
-            raise typer.Exit(1)
+    try:
+        syncs = select_syncs(syncs, select, exclude)
+    except SelectionError as e:
+        print_error(str(e))
+        raise typer.Exit(1)
+    if not syncs:
+        print_error("Selection matched no syncs (after --exclude).")
+        raise typer.Exit(1)
 
     syncs_with_tests = [s for s in syncs if s.tests]
     if not syncs_with_tests:
@@ -86,7 +110,7 @@ def test_syncs(
 
     had_failures = False
 
-    for sync in syncs_with_tests:
+    for i, sync in enumerate(syncs_with_tests):
         if not json_mode:
             print_test_header(sync.name)
         sync_results: _SyncTestResult = {"sync": sync.name, "tests": []}
@@ -137,6 +161,25 @@ def test_syncs(
                     had_failures = True
 
         results.append(sync_results)
+
+        # --fail-fast (#775): stop after the first sync with a failing test.
+        if fail_fast and had_failures:
+            remaining = syncs_with_tests[i + 1 :]
+            for skipped_sync in remaining:
+                results.append(
+                    {
+                        "sync": skipped_sync.name,
+                        "tests": [],
+                        "skipped": True,
+                        "reason": "fail_fast",
+                    }
+                )
+            if remaining and not json_mode:
+                console.print(
+                    f"[yellow]--fail-fast: skipped {len(remaining)} sync(s) "
+                    "after the first failure.[/yellow]"
+                )
+            break
 
     if json_mode:
         print(

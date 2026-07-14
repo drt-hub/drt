@@ -316,3 +316,128 @@ def test_regeneration_is_byte_identical(tmp_path: Path) -> None:
     assert files1 == files2
     for rel in files1:
         assert (out1 / rel).read_bytes() == (out2 / rel).read_bytes(), str(rel)
+def test_yaml_tab_prefers_raw_text_and_notes_fallback(tmp_path: Path) -> None:
+    """With sync_yaml_texts, the YAML tab shows the file as written (incl.
+    model SQL); syncs without an entry keep the manifest view plus a note."""
+    raw = (
+        "name: customers_to_discord\n"
+        'description: "VIP customers to Discord"\n'
+        "model: ref('vip_customers')\n"
+        "destination:\n  type: discord\n"
+    )
+    out = tmp_path / "docs"
+    render_html(
+        _manifest(), out, sync_yaml_texts={"customers_to_discord": ("syncs/customers.yml", raw)}
+    )
+
+    with_raw = (out / "sync" / "customers-to-discord.html").read_text(encoding="utf-8")
+    assert "ref(&#39;vip_customers&#39;)" in with_raw or "vip_customers" in with_raw
+    assert "Rendered from the manifest" not in with_raw
+    assert "syncs/customers.yml" in with_raw  # code header shows the file path
+    assert 'class="linenos"' in with_raw  # line numbers
+
+    without_raw = (out / "sync" / "users-to-pg.html").read_text(encoding="utf-8")
+    assert "Rendered from the manifest" in without_raw
+
+
+def test_raw_yaml_is_escaped(tmp_path: Path) -> None:
+    hostile = 'name: customers_to_discord\ndescription: "</script><script>alert(1)</script>"\n'
+    out = tmp_path / "docs"
+    render_html(
+        _manifest(), out, sync_yaml_texts={"customers_to_discord": ("syncs/customers.yml", hostile)}
+    )
+    page = (out / "sync" / "customers-to-discord.html").read_text(encoding="utf-8")
+    assert "<script>alert(1)</script>" not in page
+
+
+def test_collect_sync_yaml_texts_best_effort(tmp_path: Path) -> None:
+    from drt.docs.builder import collect_sync_yaml_texts
+
+    syncs = tmp_path / "syncs"
+    syncs.mkdir()
+    (syncs / "good.yml").write_text("name: good_sync\nmode: full\n", encoding="utf-8")
+    (syncs / "broken.yml").write_text("name: [unclosed\n", encoding="utf-8")
+    (syncs / "nameless.yml").write_text("description: no name here\n", encoding="utf-8")
+
+    texts = collect_sync_yaml_texts(tmp_path)
+    assert texts == {"good_sync": ("syncs/good.yml", "name: good_sync\nmode: full")}
+    # no syncs dir at all -> empty map, no crash
+    assert collect_sync_yaml_texts(tmp_path / "nowhere") == {}
+
+
+def test_collect_sync_yaml_texts_non_dict_yaml_is_skipped(tmp_path: Path) -> None:
+    """#752①: valid-but-non-mapping YAML (e.g. a list) must be skipped, not crash
+    the whole docs build on an uncaught AttributeError."""
+    from drt.docs.builder import collect_sync_yaml_texts
+
+    syncs = tmp_path / "syncs"
+    syncs.mkdir()
+    (syncs / "list.yml").write_text("- one\n- two\n", encoding="utf-8")  # a list, not a dict
+    (syncs / "scalar.yml").write_text("just a string\n", encoding="utf-8")
+    (syncs / "good.yml").write_text("name: ok\nmode: full\n", encoding="utf-8")
+
+    texts = collect_sync_yaml_texts(tmp_path)  # must not raise
+    assert set(texts) == {"ok"}
+
+
+def test_collect_sync_yaml_texts_skips_symlinks(tmp_path: Path) -> None:
+    """#752②: symlinks are not followed — a link could read outside syncs/ while
+    the code header shows the in-project path."""
+    from drt.docs.builder import collect_sync_yaml_texts
+
+    outside = tmp_path / "OUTSIDE.yml"
+    outside.write_text("name: leaked\npassword: hunter2\n", encoding="utf-8")
+    syncs = tmp_path / "syncs"
+    syncs.mkdir()
+    (syncs / "real.yml").write_text("name: real\nmode: full\n", encoding="utf-8")
+    try:
+        (syncs / "innocent.yml").symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+
+    texts = collect_sync_yaml_texts(tmp_path)
+    assert set(texts) == {"real"}  # the symlinked external file is not read
+
+
+def test_collect_sync_yaml_texts_caps_size(tmp_path: Path) -> None:
+    """#752③: an oversized file is truncated with a note, not embedded whole."""
+    from drt.docs.builder import collect_sync_yaml_texts
+
+    syncs = tmp_path / "syncs"
+    syncs.mkdir()
+    big = "name: big\nmodel: |\n" + "  select 1\n" * 20000  # well over 64 KiB
+    (syncs / "big.yml").write_text(big, encoding="utf-8")
+
+    _, text = collect_sync_yaml_texts(tmp_path)["big"]
+    assert len(text.encode("utf-8")) < 70 * 1024
+    assert "truncated by drt docs" in text
+
+
+def test_collect_sync_yaml_texts_redacts_secrets(tmp_path: Path) -> None:
+    """#752④ / #696: inline secrets, endpoints, and PII are masked in the raw
+    tab; *_env references are preserved."""
+    from drt.docs.builder import collect_sync_yaml_texts
+
+    syncs = tmp_path / "syncs"
+    syncs.mkdir()
+    (syncs / "leaky.yml").write_text(
+        "name: leaky\n"
+        "destination:\n"
+        "  type: postgres\n"
+        "  password: hunter2-SUPERSECRET\n"
+        "  password_env: PG_PASSWORD\n"
+        "  token: xoxb-REALSLACKTOKEN\n"
+        "  host: prod-db.internal.acme.com\n"
+        "  admin_email: oncall@acme.com\n"
+        "  phone: +1-555-123-4567\n"
+        "  batch_size: 100\n",
+        encoding="utf-8",
+    )
+
+    _, text = collect_sync_yaml_texts(tmp_path)["leaky"]
+    for leaked in ("hunter2-SUPERSECRET", "xoxb-REALSLACKTOKEN", "prod-db.internal.acme.com",
+                   "oncall@acme.com", "+1-555-123-4567"):
+        assert leaked not in text, f"{leaked!r} leaked into the raw-YAML tab"
+    assert "PG_PASSWORD" in text  # *_env reference preserved
+    assert "batch_size: 100" in text  # non-sensitive value preserved
+    assert "inline secrets / PII masked" in text  # redaction note shown

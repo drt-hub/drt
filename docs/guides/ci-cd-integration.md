@@ -146,8 +146,13 @@ sync:
 |------|---------|
 | `--output json` | Machine-readable output for parsing in scripts |
 | `--dry-run` | Preview without writing data (safe for PR checks) |
-| `--select <name>` | Run a specific sync |
-| `--select tag:<tag>` | Run syncs by tag (e.g., `tag:hourly`) |
+| `--select <name>` | Run a specific sync (globs work: `--select 'users_*'`) |
+| `--select tag:<tag>` | Run syncs by tag (e.g., `tag:hourly`); repeat `--select` to union |
+| `--select destination:<type>` | Run syncs by destination type (e.g., `destination:hubspot`) |
+| `--exclude <selector>` | Subtract syncs from the selection (same grammar) |
+| `--failed` | Re-run only syncs that failed in the previous invocation (exit 0 when nothing failed) |
+| `--fail-fast` | Stop scheduling after the first failure — one systemic error, one red build, minimal quota burn |
+| `--limit N` | Sampled run: send at most N rows per sync (watermarks frozen; refused for mirror/replace) |
 | `--threads N` | Parallel execution for faster pipelines |
 | `--log-format json` | Structured logs for log aggregators |
 

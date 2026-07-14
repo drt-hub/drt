@@ -154,6 +154,32 @@ td.right, th.right { text-align:right; }
 .empty--hero pre.code { display:inline-block; text-align:left; margin:14px auto 0; }
 .kpi__error { font-family:var(--mono); font-size:11.5px; color:var(--error); margin-top:4px;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.yaml-note { font-size:12px; color:var(--muted); font-style:italic; margin-top:8px; }
+
+/* code block chrome — header bar + line numbers + collapse */
+.codeblock { border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; position:relative; }
+.codehdr { display:flex; align-items:center; gap:10px; padding:7px 12px;
+  border-bottom:1px solid var(--line); background:var(--chip); font-size:12px; }
+.codehdr__path { font-family:var(--mono); font-weight:600; color:var(--fg); }
+.codehdr__meta { color:var(--muted); }
+.copy-btn, .expand-btn { display:none; }
+.js .copy-btn { display:inline-block; margin-left:auto; border:1px solid var(--line);
+  background:var(--surface); color:var(--fg); border-radius:6px; padding:2px 10px;
+  font:500 11.5px var(--sans); cursor:pointer; }
+.js .copy-btn:hover { border-color:var(--brand-500); color:var(--brand-700); }
+.codebody .highlight { margin:0; }
+.codebody .highlight pre { margin:0; padding:12px 14px; overflow-x:auto; font-size:12.5px; line-height:1.6; }
+.codebody .highlight table { border-collapse:collapse; width:100%; }
+.codebody .highlight table td { padding:0; border:none; }
+.codebody .highlight .linenos { width:1%; user-select:none; -webkit-user-select:none; }
+.codebody .highlight .linenos pre { color:var(--muted); opacity:.55; text-align:right; padding-right:4px; }
+.js .collapsible:not(.open) .codebody { max-height:520px; overflow:hidden; }
+.js .collapsible:not(.open) .codebody::after { content:""; position:absolute; left:0; right:0; bottom:34px;
+  height:56px; background:linear-gradient(transparent, var(--surface)); pointer-events:none; }
+.js .collapsible:not(.open) .expand-btn { display:block; width:100%; border:none;
+  border-top:1px solid var(--line); background:var(--chip); color:var(--brand-700);
+  padding:7px; font:500 12px var(--sans); cursor:pointer; }
+.js .collapsible.open .expand-btn { display:none; }
 
 /* Sync detail — KPI cards, tabs (progressive: stacked without JS), ego lineage */
 .kpi { border:1px solid var(--line); border-radius:var(--radius); padding:12px 16px; }
@@ -182,10 +208,14 @@ td.right, th.right { text-align:right; }
 .group a .count { float:right; }
 
 @media (max-width:860px) {
-  .cards { grid-template-columns:1fr; }
-  .two-col { grid-template-columns:1fr; }
+  .cards, .two-col { grid-template-columns:1fr; }
   .sidebar { display:none; }
-  .topnav { display:none; }
+  .topbar { flex-wrap:wrap; row-gap:6px; padding:10px 12px; }
+  .project { display:none; }
+  .search { display:none; }  /* filters the sidebar, which is hidden here — restore with the real search UX */
+  .main { padding:20px 14px; }
+  table { display:block; overflow-x:auto; white-space:nowrap; }
+  .kv { grid-template-columns:120px 1fr; }
 }
 """
 
@@ -259,11 +289,37 @@ APP_JS = """\
     });
   }
 
+  // Code blocks — copy button + long-file collapse (JS-only affordances;
+  // without JS the full text renders and the buttons stay hidden).
+  function wireCode() {
+    document.querySelectorAll(".codeblock").forEach(function (block) {
+      var copy = block.querySelector(".copy-btn");
+      if (copy) {
+        copy.addEventListener("click", function () {
+          var code = block.querySelector("td.code pre") || block.querySelector(".codebody pre");
+          var text = code ? code.textContent : "";
+          function done() {
+            copy.textContent = "Copied!";
+            setTimeout(function () { copy.textContent = "Copy"; }, 1500);
+          }
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done, function () {});
+          }
+        });
+      }
+      var expand = block.querySelector(".expand-btn");
+      if (expand) {
+        expand.addEventListener("click", function () { block.classList.add("open"); });
+      }
+    });
+  }
+
   document.documentElement.classList.add("js");
   document.addEventListener("DOMContentLoaded", function () {
     restoreGroups();
     wireSearch();
     wireTabs();
+    wireCode();
   });
 })();
 """

@@ -282,3 +282,48 @@ def test_drt_test_dry_run_summary(
     result = runner.invoke(app, ["test", "--dry-run"])
     assert result.exit_code == 0
     assert "Preview of tests" in result.output
+
+
+def test_drt_test_fail_fast_skips_remaining(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--fail-fast (#775): first failing sync stops the loop; the rest are
+    reported skipped with reason=fail_fast."""
+    import json as json_mod
+
+    monkeypatch.chdir(tmp_path)
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    for name in ("a_first", "b_second"):
+        (syncs_dir / f"{name}.yml").write_text(
+            yaml.dump(
+                {
+                    "name": name,
+                    "model": "SELECT 1",
+                    "destination": {
+                        "type": "postgres",
+                        "connection_string_env": "DB_CONN",
+                        "table": "test_table",
+                        "upsert_key": ["id"],
+                    },
+                    "tests": [{"not_null": {"columns": ["id"]}}],
+                }
+            )
+        )
+
+    from drt.destinations import query as query_module
+
+    monkeypatch.setattr(query_module, "is_queryable", lambda d: True)
+    monkeypatch.setattr(query_module, "get_table_name", lambda d: "test_table")
+    # not_null check passes when the NULL-count is 0 — return 5 so it fails.
+    monkeypatch.setattr(query_module, "execute_test_query", lambda d, q: 5)
+
+    result = runner.invoke(app, ["test", "--fail-fast", "--output", "json"])
+
+    assert result.exit_code == 1
+    payload = json_mod.loads(result.output)
+    assert payload["status"] == "failed"
+    by_sync = {r["sync"]: r for r in payload["results"]}
+    assert by_sync["a_first"]["tests"], "first sync's tests ran"
+    assert by_sync["b_second"].get("skipped") is True
+    assert by_sync["b_second"].get("reason") == "fail_fast"
