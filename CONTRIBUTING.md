@@ -86,6 +86,16 @@ drt uses **GitHub Flow** — all development happens on feature branches that me
 - No `develop` or `release` branches
 - Releases are marked with tags (`v0.2.0`, `v0.3.0`, …)
 
+### Stacked PRs — retarget the children *before* merging the parent
+
+A stacked PR (base = another feature branch, not `main`) is fine to open, but the merge order matters:
+
+1. **Retarget every child PR to `main` first** (`gh pr edit <child> --base main`).
+2. Then merge the parent, deleting its branch.
+3. Rebase each child onto `main` and merge in turn.
+
+Merging the parent *first* deletes a branch that an open PR still points at, and **GitHub silently closes that PR**. Worse, a force-push after the auto-close makes it permanently un-reopenable (`state cannot be changed. The <branch> branch was force-pushed or recreated`) — the PR, its review history, and its approvals are gone, and the work has to be re-filed. This is exactly how #792 was lost and had to come back as #800.
+
 ## Commit Signing (Required)
 
 The `main` branch requires **signed commits** to protect against supply chain attacks. All PRs are merged with **Squash & merge**, and GitHub automatically signs the squash commit — so **you don't need to set up signing just to contribute**.

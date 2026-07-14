@@ -28,8 +28,9 @@ on:
       - 'integrations/vscode-drt/schemas/**'
       - 'integrations/vscode-drt/scripts/regenerate-schemas.sh'
       - '.github/workflows/vscode-schema-drift.yml'
+  # No `branches:` filter — see #801: it matches the PR's base, so gating on
+  # `main` silently exempts every stacked PR. The `paths:` filter stays.
   pull_request:
-    branches: [main]
     paths:
       - 'drt/config/**'
       - 'integrations/vscode-drt/schemas/**'
