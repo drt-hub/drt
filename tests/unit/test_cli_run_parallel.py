@@ -266,6 +266,70 @@ def test_unknown_selector_method_exits_nonzero(
 
 
 # ---------------------------------------------------------------------------
+# --failed (#773): sync-level re-run of previous failures
+# ---------------------------------------------------------------------------
+
+
+def _seed_state(statuses: dict[str, str]) -> None:
+    """Write .drt/state.json entries for the given sync statuses."""
+    from drt.state.manager import StateManager, SyncState
+
+    mgr = StateManager(Path("."))
+    for name, status in statuses.items():
+        mgr.save_sync(
+            SyncState(
+                sync_name=name,
+                last_run_at="2026-07-10T00:00:00",
+                records_synced=0,
+                status=status,
+                error="boom" if status != "success" else None,
+                last_cursor_value=None,
+            )
+        )
+
+
+def test_failed_reruns_only_failed_syncs(project: Path, patched_engine: dict[str, Any]) -> None:
+    _seed_state({"sync_a": "failed", "sync_b": "success", "sync_c": "partial"})
+
+    result = runner.invoke(app, ["run", "--failed", "--output", "json"])
+
+    assert result.exit_code == 0
+    assert set(patched_engine["calls"]) == {"sync_a", "sync_c"}  # partial counts as not-success
+
+
+def test_failed_excludes_never_run_syncs(project: Path, patched_engine: dict[str, Any]) -> None:
+    _seed_state({"sync_a": "failed"})  # sync_b / sync_c never ran
+
+    result = runner.invoke(app, ["run", "--failed", "--output", "json"])
+
+    assert result.exit_code == 0
+    assert patched_engine["calls"] == ["sync_a"]
+
+
+def test_failed_intersects_with_select(project: Path, patched_engine: dict[str, Any]) -> None:
+    _seed_state({"sync_a": "failed", "sync_c": "failed"})
+
+    result = runner.invoke(
+        app, ["run", "--failed", "--select", "tag:crm", "--output", "json"]
+    )
+
+    assert result.exit_code == 0
+    assert patched_engine["calls"] == ["sync_a"]  # sync_c failed but isn't tag:crm
+
+
+def test_failed_with_clean_state_exits_zero_without_running(
+    project: Path, patched_engine: dict[str, Any]
+) -> None:
+    _seed_state({"sync_a": "success", "sync_b": "success"})
+
+    result = runner.invoke(app, ["run", "--failed", "--output", "json"])
+
+    assert result.exit_code == 0
+    assert patched_engine["calls"] == []
+    assert "nothing_failed" in result.output
+
+
+# ---------------------------------------------------------------------------
 # --threads — real parallel dispatch
 # ---------------------------------------------------------------------------
 
