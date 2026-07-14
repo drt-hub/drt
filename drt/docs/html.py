@@ -344,7 +344,16 @@ _SYNC = """\
 
 <div class="tab-panel active" data-tab="yaml">
   <h2>Definition</h2>
-  {{ yaml_html|safe }}
+  <div class="codeblock{{ ' collapsible' if yaml_lines > 32 }}">
+    <div class="codehdr">
+      <span class="codehdr__path">{% if yaml_is_raw %}{{ yaml_path }}{% else %}manifest view{% endif %}</span>
+      <span class="codehdr__meta">YAML &middot; {{ yaml_lines }} lines</span>
+      <button class="copy-btn" type="button">Copy</button>
+    </div>
+    <div class="codebody">{{ yaml_html|safe }}</div>
+    <button class="expand-btn" type="button">Show all {{ yaml_lines }} lines</button>
+  </div>
+  {% if not yaml_is_raw %}<p class="yaml-note">Rendered from the manifest &mdash; the original YAML file was not available at generation time.</p>{% endif %}
 </div>
 
 <div class="tab-panel" data-tab="lineage">
@@ -445,12 +454,23 @@ _TAG = (
 )
 
 
-def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
+def render_html(
+    manifest: Manifest,
+    output_dir: Path,
+    sync_yaml_texts: dict[str, tuple[str, str]] | None = None,
+) -> list[Path]:
     """Render *manifest* into a multi-file static site under *output_dir*.
 
     Returns the list of files written. The output is self-contained and
     portable: open ``index.html`` directly (``file://``) or host the directory
     on any static server.
+
+    ``sync_yaml_texts`` (sync name -> (relative path, raw YAML), from
+    :func:`drt.docs.builder.collect_sync_yaml_texts`) upgrades each sync's
+    YAML tab to the definition **as written on disk** — including ``model``
+    SQL, which manifest schema v1 does not carry. Syncs without an entry fall
+    back to the manifest-derived view with a note. Display-only: the texts
+    never enter ``manifest.json``.
     """
     env = Environment(
         loader=DictLoader(
@@ -540,7 +560,13 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
     # assets/
     write("assets/style.css", STYLE_CSS)
     write("assets/app.js", APP_JS)
-    write("assets/pygments-default.css", HtmlFormatter().get_style_defs(".highlight"))
+    write(
+        "assets/pygments-default.css",
+        HtmlFormatter().get_style_defs(".highlight")
+        + "\n@media (prefers-color-scheme: dark) {\n"
+        + HtmlFormatter(style="native").get_style_defs(".highlight")
+        + "\n}\n",
+    )
 
     # manifest.json — still emitted (P2 artifact for external tools).
     write("manifest.json", json.dumps(manifest.to_dict(), indent=2))
@@ -621,11 +647,15 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
     )
 
     # per-sync pages
-    formatter = HtmlFormatter(cssclass="highlight")
     sync_by_name = {s.name: s for s in manifest.syncs}
+    yaml_texts = sync_yaml_texts or {}
+    yaml_formatter = HtmlFormatter(cssclass="highlight", linenos="table")
     for s in manifest.syncs:
-        yaml_text = _sync_yaml(s)
-        yaml_html = highlight(yaml_text, YamlLexer(), formatter)
+        entry = yaml_texts.get(s.name)
+        yaml_path, raw_yaml = entry if entry is not None else (None, None)
+        yaml_text = raw_yaml if raw_yaml is not None else _sync_yaml(s)
+        yaml_lines = yaml_text.count("\n") + 1
+        yaml_html = highlight(yaml_text, YamlLexer(), yaml_formatter)
         dest = dest_by_id.get(s.destination)
         state = None
         if s.state is not None:
@@ -666,6 +696,9 @@ def render_html(manifest: Manifest, output_dir: Path) -> list[Path]:
                 destination_slug=dest_slugs.get(s.destination, _slug(s.destination)),
                 destination_label=dest.label if dest else s.destination,
                 yaml_html=yaml_html,
+                yaml_is_raw=raw_yaml is not None,
+                yaml_path=yaml_path,
+                yaml_lines=yaml_lines,
                 state=state,
                 ego_svg=_ego_svg(s, manifest, sync_slugs, source_slugs, dest_slugs),
                 upstream=upstream,

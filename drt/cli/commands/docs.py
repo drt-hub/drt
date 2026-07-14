@@ -61,9 +61,12 @@ def docs_generate(
             print_error("HTML docs generation requires: pip install drt-core[docs]")
             raise typer.Exit(1)
 
+        from drt.docs.builder import collect_sync_yaml_texts
+
         manifest = build_manifest(Path("."), include_state=include_state)
+        sync_yaml_texts = collect_sync_yaml_texts(Path("."))
         try:
-            written = render_html(manifest, output)
+            written = render_html(manifest, output, sync_yaml_texts=sync_yaml_texts)
         except ValueError as e:
             print_error(str(e))
             raise typer.Exit(1) from e
