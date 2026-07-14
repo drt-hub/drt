@@ -60,6 +60,7 @@ class _FakeResult:
         self.errors: list[str] = ["boom"] if failed else []
         self.watermark_source: str | None = None
         self.cursor_value_used: str | None = None
+        self.watermark_lag: str | None = None
         self.limit_applied: int | None = None
         self.duration_seconds = 0.01
         self.interrupted = False
@@ -109,9 +110,7 @@ def patched_runtime(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     }
 
 
-def test_build_runs_syncs_and_their_tests(
-    project: Path, patched_runtime: dict[str, Any]
-) -> None:
+def test_build_runs_syncs_and_their_tests(project: Path, patched_runtime: dict[str, Any]) -> None:
     result = runner.invoke(app, ["build", "--output", "json"])
 
     assert result.exit_code == 0, result.output
@@ -120,7 +119,7 @@ def test_build_runs_syncs_and_their_tests(
     payload = json.loads(result.output)
     by_name = {e["name"]: e for e in payload["syncs"]}
     assert by_name["a_with_tests"]["tests"][0]["passed"] is True
-    assert "tests" not in by_name["b_plain"]
+    assert by_name["b_plain"]["tests"] == []  # no tests: defined — stable empty shape
     assert payload["succeeded"] == 2
 
 
@@ -139,9 +138,7 @@ def test_build_failing_test_marks_sync_failed(
     assert payload["succeeded"] == 1  # b_plain unaffected (no --fail-fast)
 
 
-def test_build_failed_run_skips_its_tests(
-    project: Path, patched_runtime: dict[str, Any]
-) -> None:
+def test_build_failed_run_skips_its_tests(project: Path, patched_runtime: dict[str, Any]) -> None:
     patched_runtime["fail_runs"].add("a_with_tests")
 
     result = runner.invoke(app, ["build", "--output", "json"])
@@ -150,12 +147,10 @@ def test_build_failed_run_skips_its_tests(
     assert patched_runtime["test_queries"] == []  # tests never ran for the failed sync
     payload = json.loads(result.output)
     by_name = {e["name"]: e for e in payload["syncs"]}
-    assert "tests" not in by_name["a_with_tests"]
+    assert by_name["a_with_tests"]["tests"] == []  # run failed — tests skipped, key still present
 
 
-def test_build_fail_fast_skips_remaining(
-    project: Path, patched_runtime: dict[str, Any]
-) -> None:
+def test_build_fail_fast_skips_remaining(project: Path, patched_runtime: dict[str, Any]) -> None:
     patched_runtime["null_count"]["value"] = 7  # first sync's test fails
 
     result = runner.invoke(app, ["build", "--fail-fast", "--output", "json"])
@@ -179,6 +174,23 @@ def test_build_dry_run_previews_tests_without_executing(
     payload = json.loads(result.output)
     by_name = {e["name"]: e for e in payload["syncs"]}
     assert by_name["a_with_tests"]["tests"][0]["dry_run"] is True
+
+
+def test_build_quiet_suppresses_test_output_in_text_mode(
+    project: Path, patched_runtime: dict[str, Any]
+) -> None:
+    loud = runner.invoke(app, ["build"])
+    quiet = runner.invoke(app, ["build", "--quiet"])
+
+    assert loud.exit_code == 0, loud.output
+    assert quiet.exit_code == 0, quiet.output
+    # The loud run announces the test it ran and the summary; --quiet does neither,
+    # while still executing them (exit code + test_queries prove the work happened).
+    assert "not_null" in loud.output
+    assert "Build summary" in loud.output
+    assert "not_null" not in quiet.output
+    assert "Build summary" not in quiet.output
+    assert len(patched_runtime["test_queries"]) == 2  # one per invocation
 
 
 def test_build_selection_applies(project: Path, patched_runtime: dict[str, Any]) -> None:

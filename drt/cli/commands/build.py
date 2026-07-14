@@ -142,6 +142,7 @@ def build(
                     "rows_failed": 0,
                     "duration_seconds": 0.0,
                     "dry_run": dry_run,
+                    "tests": [],
                 }
             )
             skipped += 1
@@ -150,10 +151,13 @@ def build(
         name, entry, had_err = _run_one(sync, ctx, profile)
 
         # Tests run only after a successful (or dry-run) run of that sync —
-        # a failed load makes its post-sync assertions meaningless.
+        # a failed load makes its post-sync assertions meaningless. Every
+        # entry still carries `tests` so JSON consumers see one stable shape
+        # (an empty list = no tests ran, whatever the reason).
+        entry["tests"] = []
         if not had_err and sync.tests:
             test_result, tests_failed = execute_tests_for_sync(
-                sync, dry_run=dry_run, json_mode=json_mode
+                sync, dry_run=dry_run, json_mode=json_mode, quiet=quiet
             )
             entry["tests"] = test_result.get("tests", [])
             if test_result.get("skipped"):
