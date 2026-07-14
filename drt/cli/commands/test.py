@@ -61,6 +61,11 @@ def test_syncs(
         autocompletion=complete_selector,
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without running tests."),
+    fail_fast: bool = typer.Option(
+        False,
+        "--fail-fast",
+        help="Stop after the first sync with a failing test; remaining syncs are skipped.",
+    ),
 ) -> None:
     """Run post-sync validation tests.
 
@@ -105,7 +110,7 @@ def test_syncs(
 
     had_failures = False
 
-    for sync in syncs_with_tests:
+    for i, sync in enumerate(syncs_with_tests):
         if not json_mode:
             print_test_header(sync.name)
         sync_results: _SyncTestResult = {"sync": sync.name, "tests": []}
@@ -156,6 +161,25 @@ def test_syncs(
                     had_failures = True
 
         results.append(sync_results)
+
+        # --fail-fast (#775): stop after the first sync with a failing test.
+        if fail_fast and had_failures:
+            remaining = syncs_with_tests[i + 1 :]
+            for skipped_sync in remaining:
+                results.append(
+                    {
+                        "sync": skipped_sync.name,
+                        "tests": [],
+                        "skipped": True,
+                        "reason": "fail_fast",
+                    }
+                )
+            if remaining and not json_mode:
+                console.print(
+                    f"[yellow]--fail-fast: skipped {len(remaining)} sync(s) "
+                    "after the first failure.[/yellow]"
+                )
+            break
 
     if json_mode:
         print(
