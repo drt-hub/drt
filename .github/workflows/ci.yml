@@ -3,8 +3,11 @@ name: CI
 on:
   push:
     branches: [main]
+  # No `branches:` filter here on purpose (#801). That filter matches the PR's
+  # *base*, so gating it on `main` exempted every stacked PR — a PR based on a
+  # feature branch ran only `cla` and still showed a green tick. It hid a real
+  # bug through five PRs. Every PR gets the matrix, whatever it targets.
   pull_request:
-    branches: [main]
   schedule:
     # Weekly nightly run (Mon 00:00 UTC) to catch env-drift / flaky tests
     # against fresh upstream dependencies, independent of PR/push activity.
