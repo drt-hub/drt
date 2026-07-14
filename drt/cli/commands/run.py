@@ -143,9 +143,7 @@ def _run_one(
     if not ctx.dry_run and sync.sync.dlq is not None and sync.sync.dlq.enabled:
         from drt.state.dlq import DlqStore
 
-        observers.append(
-            DlqObserver(DlqStore(Path(".")), max_records=sync.sync.dlq.max_records)
-        )
+        observers.append(DlqObserver(DlqStore(Path(".")), max_records=sync.sync.dlq.max_records))
     observer = CompositeObserver(observers)
     if not ctx.json_mode and not ctx.dry_run and not ctx.quiet:
         print_sync_start(sync.name, ctx.dry_run)
@@ -412,7 +410,7 @@ def run(
     if diff and not dry_run:
         print_error("--diff requires --dry-run")
         raise typer.Exit(1)
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 
     from drt.config.credentials import load_profile
     from drt.config.parser import load_project, load_syncs
@@ -603,20 +601,42 @@ def run(
             console.print(f"[dim]Running {len(syncs)} syncs with {threads} threads[/dim]\n")
         with ThreadPoolExecutor(max_workers=threads) as pool:
             futures = {pool.submit(_run_one, s, ctx, profile): s for s in syncs}
+            reaped: set[Future[Any]] = set()
             for future in as_completed(futures):
+                reaped.add(future)
+                name, entry, had_err = future.result()
+                json_results.append(entry)
+                if had_err:
+                    failed += 1
+                    if fail_fast:
+                        # Stop scheduling, then STOP ITERATING as_completed().
+                        #
+                        # shutdown(cancel_futures=True) calls Future.cancel() on
+                        # everything still queued, but a future cancelled that way
+                        # never reaches as_completed()'s waiter — the waiter is only
+                        # notified from set_running_or_notify_cancel(), which a worker
+                        # calls when it *picks up* the item, and these items were pulled
+                        # off the queue instead. Staying in the loop would block forever
+                        # waiting for futures that can never be delivered.
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        break
+                else:
+                    succeeded += 1
+
+            # Reap what the loop above didn't: cancelled futures (never started —
+            # report them as skipped) and in-flight ones (let them drain; the
+            # with-block would wait for them regardless).
+            for future, sync in futures.items():
+                if future in reaped:
+                    continue
                 if future.cancelled():
-                    # --fail-fast cancelled it before a worker picked it up.
-                    json_results.append(_skipped_entry(futures[future]))
+                    json_results.append(_skipped_entry(sync))
                     skipped += 1
                     continue
                 name, entry, had_err = future.result()
                 json_results.append(entry)
                 if had_err:
                     failed += 1
-                    if fail_fast:
-                        # Stop scheduling; in-flight syncs drain normally
-                        # (the with-block's shutdown(wait=True) still waits).
-                        pool.shutdown(wait=False, cancel_futures=True)
                 else:
                     succeeded += 1
     else:
