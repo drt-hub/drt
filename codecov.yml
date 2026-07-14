@@ -1,8 +1,15 @@
 coverage:
   status:
+    # Whole-repo coverage stays advisory — existing low-coverage areas
+    # shouldn't fail a PR that merely touches a file near them.
     project:
       default:
         informational: true
+    # New/changed lines DO gate (#803): untested new code fails its PR.
+    # This is what would have caught the --fail-fast deadlock at review time —
+    # the cancellation branch was unhit and nothing acted on it.
     patch:
       default:
-        informational: true
+        target: 80%
+        threshold: 5%
+        informational: false
