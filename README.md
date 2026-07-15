@@ -153,6 +153,7 @@ drt run --exclude <name>    # subtract syncs (same grammar as --select)
 drt run --failed            # re-run only syncs that failed last time
 drt run --limit 10          # sampled run: send only N rows (watermark frozen)
 drt run --fail-fast         # stop scheduling after the first failure
+drt run --vars 'lookback_days: 1'   # override project vars: for this run
 drt run --threads 4         # parallel sync execution
 drt run --dry-run           # dry run
 drt run --verbose           # show row-level error details

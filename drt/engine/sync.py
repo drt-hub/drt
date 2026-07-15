@@ -198,6 +198,7 @@ def run_sync(
     diff_limit: int = 20,
     observer: SyncObserver | None = None,
     extract_limit: int | None = None,
+    vars: dict[str, Any] | None = None,
 ) -> SyncResult:
     """Run a single sync: extract from source, load to destination.
 
@@ -284,6 +285,7 @@ def run_sync(
                     observer=observer,
                     tracer=tracer,
                     extract_limit=extract_limit,
+                    vars=vars,
                 )
             except BaseException as exc:
                 raised = exc
@@ -367,6 +369,7 @@ def _run_sync_body(
     observer: SyncObserver,
     tracer: Any,
     extract_limit: int | None = None,
+    vars: dict[str, Any] | None = None,
 ) -> SyncResult:
     """Inner body of run_sync. Mutates `total_result` in place so the outer
     finally-block can read partial results when an exception propagates.
@@ -424,7 +427,7 @@ def _run_sync_body(
             observer.on_watermark_resolved(sync.name, "storage_lag", effective_cursor_value)
 
     query = resolve_model_ref(
-        sync.model, project_dir, profile, cursor_field, effective_cursor_value
+        sync.model, project_dir, profile, cursor_field, effective_cursor_value, vars=vars
     )
 
     # Source extraction wrapped via generator helper so exceptions raised

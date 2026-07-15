@@ -13,8 +13,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-
-from jinja2 import BaseLoader, Environment
+from typing import Any
 
 from drt.config.credentials import (
     BigQueryProfile,
@@ -26,6 +25,7 @@ from drt.config.credentials import (
     SnowflakeProfile,
     SQLServerProfile,
 )
+from drt.config.vars import has_var_template, var_environment
 
 # Matches: ref('table') or ref("table")
 _REF_PATTERN = re.compile(r"""^ref\(\s*['"]([^'"]+)['"]\s*\)$""", re.IGNORECASE)
@@ -55,6 +55,7 @@ def resolve_model_ref(
     profile: ProfileConfig,
     cursor_field: str | None = None,
     last_cursor_value: str | None = None,
+    vars: dict[str, Any] | None = None,
 ) -> str:
     """Resolve a model reference to a runnable SQL query.
 
@@ -65,6 +66,7 @@ def resolve_model_ref(
         profile: Resolved profile (supplies dataset for ref() expansion).
         cursor_field: Column name used for incremental filtering (e.g. updated_at).
         last_cursor_value: Previous watermark; rows with cursor > this are fetched.
+        vars: Resolved project vars for ``{{ var('name') }}`` (#783).
 
     Returns:
         A SQL query string ready to send to the source.
@@ -109,14 +111,20 @@ def resolve_model_ref(
     # Expand environment variables: ${VAR} syntax
     base_sql = _expand_env_vars(base_sql)
 
-    # Render {{ cursor_value }} / {{ watermark }} template if present
-    if has_cursor_template(base_sql):
-        if last_cursor_value is None:
+    # Render the template surface — {{ cursor_value }} / {{ watermark }} and
+    # {{ var('name') }} (#783) — in one pass, so SQL can use both.
+    cursor_templated = has_cursor_template(base_sql)
+    if cursor_templated or has_var_template(base_sql):
+        if cursor_templated and last_cursor_value is None:
             raise ValueError(
                 "Cannot render cursor template: no cursor value provided. "
                 "Set watermark.default_value in your sync config or use --cursor-value."
             )
-        return _render_cursor_template(base_sql, last_cursor_value)
+        base_sql = _render_template(base_sql, last_cursor_value, vars)
+        if cursor_templated:
+            # A cursor template means the user placed the predicate themselves;
+            # never also inject a WHERE clause (pre-#783 behaviour).
+            return base_sql
 
     # Inject incremental WHERE clause when cursor info is available
     if cursor_field and last_cursor_value:
@@ -139,9 +147,12 @@ def has_cursor_template(sql: str) -> bool:
     return bool(_CURSOR_TEMPLATE_PATTERN.search(sql))
 
 
-def _render_cursor_template(sql: str, cursor_value: str) -> str:
-    """Render {{ cursor_value }} and {{ watermark }} in SQL."""
-    env = Environment(loader=BaseLoader())
+def _render_template(
+    sql: str, cursor_value: str | None, vars: dict[str, Any] | None = None
+) -> str:
+    """Render the SQL template surface: ``cursor_value`` / ``watermark`` plus
+    ``var()`` (#783). Deliberately tiny — no control flow or macros."""
+    env = var_environment(vars)
     tmpl = env.from_string(sql)
     return tmpl.render(cursor_value=cursor_value, watermark=cursor_value)
 

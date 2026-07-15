@@ -14,10 +14,43 @@ profile: default          # optional, default: "default" — maps to ~/.drt/prof
 history:                  # optional: sync execution history (#276)
   enabled: true           # default: true — set to false to disable history altogether
   retention_days: 30      # default: 30 — entries older than this are pruned on each append
+vars:                     # optional: project vars (#783) — reviewed, in-repo defaults
+  lookback_days: 7        # referenced as {{ var('lookback_days') }}
+  hubspot_pipeline: default
 ```
 
 History is stored under `.drt/history/<sync_name>.jsonl` (one file per sync, JSONL format).
 Inspect via `drt status --history` or the `drt_get_history` MCP tool.
+
+### Project vars (#783)
+
+Anything project-shaped — a default lookback window, a campaign tag, the pipeline id that
+differs between sandbox and prod — belongs in `vars:` rather than an environment variable.
+Reference them with `{{ var('name') }}` or `{{ var('name', default) }}` in **model SQL** and
+**YAML string fields** (alongside `${ENV}`):
+
+```yaml
+# syncs/users.yml
+model: |
+  SELECT * FROM mart_users
+  WHERE updated_at > CURRENT_DATE - {{ var('lookback_days') }}
+destination:
+  type: hubspot
+  pipeline: "{{ var('hubspot_pipeline') }}"
+```
+
+```bash
+drt run --vars 'lookback_days: 1, hubspot_pipeline: sandbox'
+```
+
+**Precedence** (highest first): `--vars` > `DRT_VAR_<NAME>` env var > project `vars:`.
+An undefined var with no default is a **validate-time** error — `drt validate` reports it per
+file (including vars used inside `model:` SQL) instead of failing halfway through a run.
+
+`var()` joins the deliberately tiny SQL template surface (`cursor_value` / `watermark`) and
+composes with it in a single render. Full Jinja control flow and macros are an explicit
+non-goal — the surface stays predictable. Var values interpolate into SQL text exactly like
+`${ENV}` does: they are reviewed project config, not user input.
 
 ---
 

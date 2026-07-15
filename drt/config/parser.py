@@ -12,6 +12,7 @@ import yaml
 from pydantic import ValidationError
 
 from drt.config.models import ProjectConfig, SyncConfig
+from drt.config.vars import expand_vars, has_var_template, render_vars, resolve_vars
 
 _ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
@@ -101,37 +102,91 @@ def load_project(project_dir: Path = Path(".")) -> ProjectConfig:
     return ProjectConfig.model_validate(data)
 
 
-def load_syncs(project_dir: Path = Path(".")) -> list[SyncConfig]:
+def _expand_sync_vars(data: Any, variables: dict[str, Any]) -> Any:
+    """Render ``var()`` in a sync's YAML string fields, leaving ``model:`` alone.
+
+    Model SQL shares its template surface with ``{{ cursor_value }}`` /
+    ``{{ watermark }}``, which only :func:`drt.engine.resolver.resolve_model_ref`
+    can supply. Rendering the model here would resolve ``var()`` but blank the
+    cursor template (undefined at load time), silently breaking an incremental
+    predicate — so the resolver owns the whole SQL template surface, and this
+    owns the rest of the YAML.
+    """
+    if not isinstance(data, dict):
+        return expand_vars(data, variables)
+    return {
+        key: value if key == "model" else expand_vars(value, variables)
+        for key, value in data.items()
+    }
+
+
+def project_vars(
+    project_dir: Path = Path("."), cli_vars: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Resolve the project's vars (#783): ``vars:`` block < ``DRT_VAR_*`` < *cli_vars*.
+
+    Best-effort on the project file: a directory with syncs but no (or an
+    invalid) ``drt_project.yml`` still resolves vars from the environment and
+    ``cli_vars``, so loading syncs never starts requiring a project file.
+    """
+    declared: dict[str, Any] = {}
+    try:
+        declared = load_project(project_dir).vars
+    except (FileNotFoundError, ValidationError, ValueError, yaml.YAMLError):
+        pass  # no/invalid project file — env + CLI vars still apply
+    return resolve_vars(declared, cli_vars)
+
+
+def load_syncs(
+    project_dir: Path = Path("."), vars: dict[str, Any] | None = None
+) -> list[SyncConfig]:
     """Load and validate all sync YAML files from syncs/.
 
     Raises ``ValidationError`` on the first invalid file (original behaviour).
+    ``vars`` overrides the resolved project vars (#783) — pass the ``--vars``
+    result; omit it to resolve from ``drt_project.yml`` + ``DRT_VAR_*``.
     """
     syncs_dir = project_dir / "syncs"
     if not syncs_dir.exists():
         return []
+    resolved = vars if vars is not None else project_vars(project_dir)
     syncs = []
     for path in sorted(syncs_dir.glob("*.yml")):
         with path.open() as f:
             data = yaml.safe_load(f)
         data = expand_env_vars(data)
+        data = _expand_sync_vars(data, resolved)
         syncs.append(SyncConfig.model_validate(data))
     return syncs
 
 
-def load_syncs_safe(project_dir: Path = Path(".")) -> SyncLoadResult:
-    """Load sync YAML files, collecting errors instead of raising."""
+def load_syncs_safe(
+    project_dir: Path = Path("."), vars: dict[str, Any] | None = None
+) -> SyncLoadResult:
+    """Load sync YAML files, collecting errors instead of raising.
+
+    An undefined ``var()`` without a default lands in ``errors`` for that file
+    (``VarError`` subclasses ``ValueError``), so ``drt validate`` reports it.
+    """
     syncs_dir = project_dir / "syncs"
     if not syncs_dir.exists():
         return SyncLoadResult()
+    resolved = vars if vars is not None else project_vars(project_dir)
     result = SyncLoadResult()
     for path in sorted(syncs_dir.glob("*.yml")):
         with path.open() as f:
             data = yaml.safe_load(f)
         try:
             data = expand_env_vars(data)
+            data = _expand_sync_vars(data, resolved)
             # Check for deprecated keys before validation
             deprecations = _check_deprecated_keys(data)
             sync = SyncConfig.model_validate(data)
+            # `model:` is rendered by the resolver at run time (it owns
+            # cursor_value too), so trial-render it here purely to surface an
+            # undefined var now rather than mid-run — the output is discarded.
+            if has_var_template(sync.model):
+                render_vars(sync.model, resolved)
             if deprecations:
                 # Store deprecations using the actual sync name, not the file name
                 result.deprecations[sync.name] = deprecations
