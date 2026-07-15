@@ -270,7 +270,18 @@ def test_suspicious_vars_flags_sql_metacharacters() -> None:
 
 
 def _cli_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A project on disk with the profile lookup stubbed.
+
+    ``drt run`` resolves the profile before it touches vars, so without this
+    stub these tests would depend on the developer having a real
+    ``~/.drt/profiles.yml`` — green locally, red on a clean runner.
+    """
+    from drt.config import credentials as creds
+
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        creds, "load_profile", lambda *_a, **_kw: DuckDBProfile(type="duckdb"), raising=False
+    )
     (tmp_path / "syncs").mkdir()
     (tmp_path / "drt_project.yml").write_text(
         "name: demo\nprofile: default\nvars:\n  pipeline: prod\n"
