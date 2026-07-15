@@ -232,6 +232,33 @@ def test_sql_without_vars_is_unchanged(tmp_path: Path) -> None:
     assert resolve_model_ref("SELECT * FROM t", tmp_path, _DUCKDB) == "SELECT * FROM t"
 
 
+def test_resolver_resolves_project_vars_when_caller_passes_none(tmp_path: Path) -> None:
+    """``vars=None`` means "resolve from the project" — the same contract
+    load_syncs has.
+
+    Guards the `drt build` shape (#777): a command that reuses `_run_one` /
+    `run_sync` without threading vars would otherwise raise "Undefined var" on
+    model SQL that `drt run` renders fine. Only `--vars` needs threading.
+    """
+    (tmp_path / "drt_project.yml").write_text(
+        "name: d\nprofile: default\nvars: {pipeline: from_project}\n"
+    )
+    out = resolve_model_ref("SELECT {{ var('pipeline') }}", tmp_path, _DUCKDB)
+    assert out == "SELECT from_project"
+
+
+def test_resolver_explicit_vars_still_win_over_project(tmp_path: Path) -> None:
+    """An explicit vars= (what `drt run --vars` threads) is not overridden by
+    the project block."""
+    (tmp_path / "drt_project.yml").write_text(
+        "name: d\nprofile: default\nvars: {pipeline: from_project}\n"
+    )
+    out = resolve_model_ref(
+        "SELECT {{ var('pipeline') }}", tmp_path, _DUCKDB, vars={"pipeline": "from_cli"}
+    )
+    assert out == "SELECT from_cli"
+
+
 def test_resolver_undefined_var_raises(tmp_path: Path) -> None:
     with pytest.raises(VarError, match="Undefined var 'nope'"):
         resolve_model_ref("SELECT {{ var('nope') }}", tmp_path, _DUCKDB, vars={})

@@ -114,12 +114,23 @@ def resolve_model_ref(
     # Render the template surface — {{ cursor_value }} / {{ watermark }} and
     # {{ var('name') }} (#783) — in one pass, so SQL can use both.
     cursor_templated = has_cursor_template(base_sql)
-    if cursor_templated or has_var_template(base_sql):
+    var_templated = has_var_template(base_sql)
+    if cursor_templated or var_templated:
         if cursor_templated and last_cursor_value is None:
             raise ValueError(
                 "Cannot render cursor template: no cursor value provided. "
                 "Set watermark.default_value in your sync config or use --cursor-value."
             )
+        if var_templated and vars is None:
+            # ``vars=None`` means "resolve from the project" — the same contract
+            # ``load_syncs`` has. Callers that don't thread vars (``drt build``,
+            # library callers) still get the ``vars:`` block + ``DRT_VAR_*``;
+            # only ``--vars`` needs explicit threading. Read lazily and only
+            # when the SQL actually uses ``var()``, so var-less projects pay
+            # nothing.
+            from drt.config.parser import project_vars
+
+            vars = project_vars(project_dir)
         base_sql = _render_template(base_sql, last_cursor_value, vars)
         if cursor_templated:
             # A cursor template means the user placed the predicate themselves;
