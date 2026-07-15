@@ -53,6 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Selection v2 — globs, repeated `--select`, `--exclude`, `destination:` selectors** ([#771](https://github.com/drt-hub/drt/issues/771)): the dbt-familiar selection vocabulary lands across `drt run` / `drt test` / `drt validate`, which now share one resolver (`drt/cli/_selection.py`) instead of three divergent inline filters (`test`/`validate` were name-only). Grammar per token: bare name with fnmatch globs (`--select 'users_*'`), `tag:<pattern>` (patterns work on tags too), `destination:<type>` (e.g. `destination:hubspot`), and the existing `*`/`all` sentinels. Repeat `--select` to union; `--exclude` subtracts with the same grammar (a select token matching nothing is an error — a typo never silently runs nothing; exclude tokens may match nothing). Definition order is preserved and deduplicated. `--select`/`--exclude` values get best-effort shell completion (sync names, `tag:`s, `destination:`s from the current project). `drt validate` keeps surfacing errors for unparseable syncs selected by name/glob. `source:` from the issue was deliberately dropped: syncs share the project profile, so there is nothing per-sync to select on — revisit if per-sync sources land. Groundwork for `state:modified` (#772) and `drt run --failed` (#773).
 
+### Changed
+
+- **`drt sources --detailed` now reports `config_class` as `drt.config.profiles.<X>Profile`** ([#721](https://github.com/drt-hub/drt/issues/721)): the 13 source profile dataclasses moved from `drt/config/credentials.py` into a new `drt/config/profiles.py` (re-exported from `credentials.py`, so every `from drt.config.credentials import <X>Profile` is unchanged). The `config_class` string in `drt sources --detailed` / `--output json` is built from the class's real module, so it now reads `drt.config.profiles.<X>Profile` instead of `drt.config.credentials.<X>Profile`. The connectors themselves are unchanged — this mirrors the destination-side shift from the earlier `models.py` split ([#721](https://github.com/drt-hub/drt/issues/721) phase 1).
+
 ## [0.7.11] - 2026-07-10
 
 ### Added

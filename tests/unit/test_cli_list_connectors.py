@@ -122,6 +122,24 @@ def test_destinations_detailed_json_includes_field_metadata() -> None:
     assert pg["config_class"].startswith("drt.config.destinations_sql.PostgresDestinationConfig")
 
 
+def test_sources_detailed_json_config_class_tracks_real_module() -> None:
+    """``config_class`` in ``drt sources --detailed --format json`` reports the
+    profile dataclass's real module. The 13 source profiles moved
+    ``credentials.py`` -> ``profiles.py`` in #721 phase 2 (re-exported from
+    ``credentials.py`` — both import paths work), so this now reads
+    ``drt.config.profiles.…``. Pins the source side (nothing did before), mirroring
+    the destination assertion above, so the next module move is a deliberate
+    decision instead of a silent shift in user-visible JSON metadata.
+    """
+    import json as _json
+
+    result = runner.invoke(app, ["sources", "--detailed", "--format", "json"])
+    assert result.exit_code == 0
+    payload = _json.loads(result.output)
+    pg = next(c for c in payload["connectors"] if c["type"] == "postgres")
+    assert pg["config_class"].startswith("drt.config.profiles.PostgresProfile")
+
+
 # ---------------------------------------------------------------------------
 # Registry parity — guard against new connectors landing without metadata
 # ---------------------------------------------------------------------------
