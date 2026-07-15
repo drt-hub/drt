@@ -183,17 +183,13 @@ def test_select_star_runs_every_sync(project: Path, patched_engine: dict[str, An
     assert set(patched_engine["calls"]) == {"sync_a", "sync_b", "sync_c"}
 
 
-def test_select_all_sentinel_runs_every_sync(
-    project: Path, patched_engine: dict[str, Any]
-) -> None:
+def test_select_all_sentinel_runs_every_sync(project: Path, patched_engine: dict[str, Any]) -> None:
     result = runner.invoke(app, ["run", "--select", "all", "--output", "json"])
     assert result.exit_code == 0
     assert set(patched_engine["calls"]) == {"sync_a", "sync_b", "sync_c"}
 
 
-def test_no_select_defaults_to_every_sync(
-    project: Path, patched_engine: dict[str, Any]
-) -> None:
+def test_no_select_defaults_to_every_sync(project: Path, patched_engine: dict[str, Any]) -> None:
     result = runner.invoke(app, ["run", "--output", "json"])
     assert result.exit_code == 0
     assert set(patched_engine["calls"]) == {"sync_a", "sync_b", "sync_c"}
@@ -237,9 +233,7 @@ def test_repeated_select_unions(project: Path, patched_engine: dict[str, Any]) -
     assert set(patched_engine["calls"]) == {"sync_a", "sync_c"}
 
 
-def test_exclude_subtracts_from_selection(
-    project: Path, patched_engine: dict[str, Any]
-) -> None:
+def test_exclude_subtracts_from_selection(project: Path, patched_engine: dict[str, Any]) -> None:
     result = runner.invoke(
         app, ["run", "--select", "tag:crm", "--exclude", "sync_b", "--output", "json"]
     )
@@ -253,9 +247,7 @@ def test_exclude_without_select(project: Path, patched_engine: dict[str, Any]) -
     assert set(patched_engine["calls"]) == {"sync_a", "sync_c"}
 
 
-def test_exclude_everything_exits_nonzero(
-    project: Path, patched_engine: dict[str, Any]
-) -> None:
+def test_exclude_everything_exits_nonzero(project: Path, patched_engine: dict[str, Any]) -> None:
     result = runner.invoke(app, ["run", "--exclude", "*", "--output", "json"])
     assert result.exit_code == 1
     assert patched_engine["calls"] == []
@@ -313,9 +305,7 @@ def test_failed_excludes_never_run_syncs(project: Path, patched_engine: dict[str
 def test_failed_intersects_with_select(project: Path, patched_engine: dict[str, Any]) -> None:
     _seed_state({"sync_a": "failed", "sync_c": "failed"})
 
-    result = runner.invoke(
-        app, ["run", "--failed", "--select", "tag:crm", "--output", "json"]
-    )
+    result = runner.invoke(app, ["run", "--failed", "--select", "tag:crm", "--output", "json"])
 
     assert result.exit_code == 0
     assert patched_engine["calls"] == ["sync_a"]  # sync_c failed but isn't tag:crm
@@ -339,9 +329,7 @@ def test_failed_with_clean_state_exits_zero_without_running(
 
 
 def test_limit_forwarded_to_engine(project: Path, patched_engine: dict[str, Any]) -> None:
-    result = runner.invoke(
-        app, ["run", "--select", "sync_a", "--limit", "10", "--output", "json"]
-    )
+    result = runner.invoke(app, ["run", "--select", "sync_a", "--limit", "10", "--output", "json"])
     assert result.exit_code == 0
     assert patched_engine["calls"] == ["sync_a"]
     assert patched_engine["limits"] == [10]
@@ -420,6 +408,79 @@ def test_fail_fast_with_threads_accounts_for_every_sync(
     assert len(payload["syncs"]) == 3
 
 
+def test_fail_fast_with_threads_cancels_queued_syncs(
+    project: Path, patched_engine: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """More syncs than workers, so some are still *queued* when the first one
+    fails — those get cancelled and must surface as ``skipped``.
+
+    The sibling test above runs 3 syncs on 3 threads, so every future starts
+    immediately and the ``future.cancelled()`` branch never executes. Without
+    this case, a regression that drops cancelled futures on the floor (losing
+    syncs from the report entirely) would go unnoticed.
+    """
+    # Named to sort *after* sync_a, so the failing sync is submitted first and
+    # the rest are still queued when it trips --fail-fast.
+    syncs_dir = project / "syncs"
+    for i in range(8):
+        name = f"zz_queued_{i}"
+        (syncs_dir / f"{name}.yml").write_text(
+            yaml.dump({**SYNC_B, "name": name, "tags": ["queued"]})
+        )
+
+    calls: list[str] = []
+    lock = threading.Lock()
+
+    def fake_run_sync(sync, *_a: Any, **_kw: Any) -> _FakeResult:
+        with lock:
+            calls.append(sync.name)
+        if sync.name == "sync_a":
+            return _FakeResult(success=0, failed=1)  # fails immediately
+        time.sleep(0.3)  # occupies its worker long enough for the queue to be cancelled
+        return _FakeResult(success=1, failed=0)
+
+    from drt.engine import sync as sync_module
+
+    monkeypatch.setattr(sync_module, "run_sync", fake_run_sync, raising=False)
+
+    result = runner.invoke(app, ["run", "--fail-fast", "--threads", "2", "--output", "json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    total = len(payload["syncs"])
+    assert total == 11  # sync_a/b/c + 8 queued
+    assert payload["succeeded"] + payload["failed"] + payload["skipped"] == total
+    # Cancellation actually happened: with 2 workers, most syncs never started.
+    assert payload["skipped"] > 0
+    assert len(calls) < total
+    skipped = [e for e in payload["syncs"] if e["status"] == "skipped"]
+    assert len(skipped) == payload["skipped"]
+    assert all(e["reason"] == "fail_fast" for e in skipped)
+    # A cancelled sync is reported, not silently dropped.
+    assert {e["name"] for e in payload["syncs"]} >= {f"zz_queued_{i}" for i in range(8)}
+
+
+def test_limit_applied_surfaces_in_json(
+    project: Path, patched_engine: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--limit`` must be echoed back per sync in JSON output, so a sampled
+    run is distinguishable from a full one after the fact."""
+    from drt.engine import sync as sync_module
+
+    def fake_run_sync(sync, *_a: Any, **kw: Any) -> _FakeResult:
+        res = _FakeResult(success=1, failed=0)
+        res.limit_applied = kw.get("extract_limit")
+        return res
+
+    monkeypatch.setattr(sync_module, "run_sync", fake_run_sync, raising=False)
+
+    result = runner.invoke(app, ["run", "--select", "sync_a", "--limit", "10", "--output", "json"])
+
+    assert result.exit_code == 0
+    entry = json.loads(result.output)["syncs"][0]
+    assert entry["limit"] == 10
+
+
 def test_limit_refused_for_mirror_and_replace(
     project: Path, patched_engine: dict[str, Any]
 ) -> None:
@@ -454,9 +515,7 @@ def test_limit_refused_for_mirror_and_replace(
 # ---------------------------------------------------------------------------
 
 
-def test_threads_flag_actually_parallelises(
-    project: Path, patched_engine: dict[str, Any]
-) -> None:
+def test_threads_flag_actually_parallelises(project: Path, patched_engine: dict[str, Any]) -> None:
     result = runner.invoke(
         app,
         ["run", "--select", "*", "--threads", "3", "--output", "json"],
@@ -468,9 +527,7 @@ def test_threads_flag_actually_parallelises(
     assert len(patched_engine["threads_seen"]) > 1
 
 
-def test_threads_one_runs_sequentially(
-    project: Path, patched_engine: dict[str, Any]
-) -> None:
+def test_threads_one_runs_sequentially(project: Path, patched_engine: dict[str, Any]) -> None:
     result = runner.invoke(
         app,
         ["run", "--select", "*", "--threads", "1", "--output", "json"],
