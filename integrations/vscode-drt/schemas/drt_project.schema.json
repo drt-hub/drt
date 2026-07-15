@@ -102,6 +102,11 @@
     },
     "history": {
       "$ref": "#/$defs/HistoryConfig"
+    },
+    "vars": {
+      "additionalProperties": true,
+      "title": "Vars",
+      "type": "object"
     }
   },
   "required": [

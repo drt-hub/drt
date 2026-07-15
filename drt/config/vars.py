@@ -142,7 +142,16 @@ def var_environment(variables: dict[str, Any] | None = None) -> Environment:
     ``var()`` itself (an unknown var raises), so adding this layer can't change
     how an existing stray ``{{ token }}`` renders.
     """
-    env = Environment(loader=BaseLoader())
+    # autoescape stays off: this renders SQL and YAML, never HTML. Escaping
+    # would corrupt values (``O'Brien`` -> ``O&#39;Brien``) and break queries.
+    # Var values are reviewed project config interpolated into SQL text — the
+    # same trust posture as ``${ENV}`` substitution, documented alongside it.
+    # (This is the environment that previously lived in engine/resolver.py for
+    # the cursor template; it moved here rather than being newly introduced.)
+    env = Environment(  # lgtm[py/jinja2/autoescape-false]  # noqa: S701
+        loader=BaseLoader(),
+        autoescape=False,
+    )
     env.globals["var"] = make_var(variables or {})
     return env
 
