@@ -189,13 +189,25 @@ def expand_vars(data: Any, variables: dict[str, Any] | None = None) -> Any:
 
     Mirrors :func:`drt.config.parser.expand_env_vars`. Strings without a
     ``var()`` call are returned untouched, so this is a no-op for projects that
-    don't use vars. Rendering yields a string; pydantic coerces it back to the
-    field's declared type (``{{ var('lookback_days') }}`` -> ``"7"`` -> ``7``).
+    don't use vars.
+
+    Rendering yields a **string**, which pydantic then coerces to the field's
+    declared type (``{{ var('lookback_days') }}`` -> ``"7"`` -> ``7``). Vars are
+    therefore scalar-shaped: a list/dict var interpolated into a YAML field
+    renders as its Python repr and will fail that field's validation. Use one
+    var per scalar (the shape ``${ENV}`` substitution already has).
     """
+    # One environment for the whole tree: var_environment() compiles a fresh
+    # Jinja Environment, so building it per string would create one per field.
+    env = var_environment(variables)
+    return _expand(data, env)
+
+
+def _expand(data: Any, env: Environment) -> Any:
     if isinstance(data, str):
-        return render_vars(data, variables) if has_var_template(data) else data
+        return env.from_string(data).render() if has_var_template(data) else data
     if isinstance(data, dict):
-        return {k: expand_vars(v, variables) for k, v in data.items()}
+        return {k: _expand(v, env) for k, v in data.items()}
     if isinstance(data, list):
-        return [expand_vars(item, variables) for item in data]
+        return [_expand(item, env) for item in data]
     return data

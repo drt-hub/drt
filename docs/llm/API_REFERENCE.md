@@ -47,6 +47,11 @@ drt run --vars 'lookback_days: 1, hubspot_pipeline: sandbox'
 An undefined var with no default is a **validate-time** error — `drt validate` reports it per
 file (including vars used inside `model:` SQL) instead of failing halfway through a run.
 
+Vars are **scalar-shaped**: a rendered var becomes a string that pydantic coerces to the
+field's type (`{{ var('lookback_days') }}` → `"7"` → `7`). A list/dict var interpolated into a
+YAML field renders as its Python repr and will fail that field's validation — use one var per
+scalar, the same shape `${ENV}` substitution already has.
+
 `var()` joins the deliberately tiny SQL template surface (`cursor_value` / `watermark`) and
 composes with it in a single render. Full Jinja control flow and macros are an explicit
 non-goal — the surface stays predictable. Var values interpolate into SQL text exactly like
