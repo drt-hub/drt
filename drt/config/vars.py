@@ -29,7 +29,7 @@ from collections.abc import Callable
 from typing import Any
 
 import yaml
-from jinja2 import BaseLoader, Environment
+from jinja2 import BaseLoader, Environment, select_autoescape
 
 # Only ``var(`` calls count as a var template — a bare ``{{ foo }}`` is left to
 # whatever else renders it, so adding vars never changes existing SQL.
@@ -110,6 +110,27 @@ def has_var_template(text: str) -> bool:
     return bool(_VAR_TEMPLATE_PATTERN.search(text))
 
 
+# Var values interpolate into SQL text (same posture as ${ENV}), so a value
+# carrying SQL metacharacters is worth surfacing even though it is project
+# config rather than user input — it usually means a quoting mistake, and it is
+# the shape an injection would take if a var were ever fed from outside.
+_SQL_METACHARACTERS = re.compile(r"(--|/\*|\*/|;|'|\")")
+
+
+def suspicious_vars(variables: dict[str, Any]) -> list[str]:
+    """Names whose value isn't identifier/literal-shaped (#783).
+
+    Warning-only by design: legitimate values (a WHERE fragment, a label with an
+    apostrophe) can trip it, so this never blocks a run — it just makes an
+    injection-shaped value visible before it reaches SQL.
+    """
+    flagged: list[str] = []
+    for name, value in sorted(variables.items()):
+        if isinstance(value, str) and _SQL_METACHARACTERS.search(value):
+            flagged.append(name)
+    return flagged
+
+
 class _Missing:
     """Sentinel — distinguishes "no default given" from ``default=None``."""
 
@@ -142,15 +163,17 @@ def var_environment(variables: dict[str, Any] | None = None) -> Environment:
     ``var()`` itself (an unknown var raises), so adding this layer can't change
     how an existing stray ``{{ token }}`` renders.
     """
-    # autoescape stays off: this renders SQL and YAML, never HTML. Escaping
-    # would corrupt values (``O'Brien`` -> ``O&#39;Brien``) and break queries.
-    # Var values are reviewed project config interpolated into SQL text — the
-    # same trust posture as ``${ENV}`` substitution, documented alongside it.
-    # (This is the environment that previously lived in engine/resolver.py for
+    # Escaping is selected by template kind rather than hard-disabled: drt only
+    # ever renders strings (SQL / YAML values), which resolve to *no* escaping —
+    # HTML-escaping them would corrupt values (``O'Brien`` -> ``O&#39;Brien``)
+    # and break queries. Any future file-backed HTML/XML template would escape
+    # by extension. Var values are reviewed project config interpolated into SQL
+    # text: the same trust posture as ``${ENV}`` substitution, documented
+    # alongside it. (This environment previously lived in engine/resolver.py for
     # the cursor template; it moved here rather than being newly introduced.)
-    env = Environment(  # lgtm[py/jinja2/autoescape-false]  # noqa: S701
+    env = Environment(
         loader=BaseLoader(),
-        autoescape=False,
+        autoescape=select_autoescape(default_for_string=False, default=False),
     )
     env.globals["var"] = make_var(variables or {})
     return env

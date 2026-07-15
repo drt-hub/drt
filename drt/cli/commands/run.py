@@ -448,7 +448,7 @@ def run(
 
     # Project vars (#783): `vars:` block < DRT_VAR_* < --vars. Resolved once and
     # used for both the YAML side (load_syncs) and model SQL (via _RunContext).
-    from drt.config.vars import VarError, parse_cli_vars, resolve_vars
+    from drt.config.vars import VarError, parse_cli_vars, resolve_vars, suspicious_vars
 
     try:
         cli_vars = parse_cli_vars(vars_raw) if vars_raw else None
@@ -456,6 +456,15 @@ def run(
     except VarError as e:
         print_error(str(e))
         raise typer.Exit(1)
+
+    # Var values interpolate into SQL text (#783) — surface injection-shaped
+    # ones rather than blocking: they're project config, and a WHERE fragment or
+    # an apostrophe in a label is legitimate.
+    if (odd := suspicious_vars(project_vars)) and not json_mode and not quiet:
+        console.print(
+            f"[yellow]Warning: var(s) {', '.join(odd)} contain SQL metacharacters "
+            "(quote/semicolon/comment) and interpolate into SQL text — check quoting.[/yellow]"
+        )
 
     try:
         syncs = load_syncs(Path("."), vars=project_vars)

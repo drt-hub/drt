@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
+from typer.testing import CliRunner
 
 from drt.config.credentials import DuckDBProfile
 from drt.config.parser import load_syncs, load_syncs_safe, project_vars
@@ -17,6 +19,7 @@ from drt.config.vars import (
     parse_cli_vars,
     render_vars,
     resolve_vars,
+    suspicious_vars,
 )
 from drt.engine.resolver import resolve_model_ref
 
@@ -243,6 +246,73 @@ def test_cursor_template_without_value_still_raises(tmp_path: Path) -> None:
     """Pre-#783 behaviour: a cursor template with no cursor value is an error."""
     with pytest.raises(ValueError, match="no cursor value provided"):
         resolve_model_ref("SELECT '{{ cursor_value }}'", tmp_path, _DUCKDB)
+
+
+def test_suspicious_vars_flags_sql_metacharacters() -> None:
+    """#783's injection posture: values carrying SQL metacharacters are
+    surfaced (warning-only — they're project config, not user input)."""
+    flagged = suspicious_vars(
+        {
+            "clean": "sandbox",
+            "numeric": 7,
+            "injected": "1; DROP TABLE users--",
+            "quoted": "O'Brien",
+            "commented": "x /* hidden */",
+        }
+    )
+    assert flagged == ["commented", "injected", "quoted"]
+    assert suspicious_vars({"a": "plain_value", "b": 1}) == []
+
+
+# ---------------------------------------------------------------------------
+# CLI — `drt run --vars` end-to-end
+# ---------------------------------------------------------------------------
+
+
+def _cli_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "syncs").mkdir()
+    (tmp_path / "drt_project.yml").write_text(
+        "name: demo\nprofile: default\nvars:\n  pipeline: prod\n"
+    )
+    (tmp_path / "syncs" / "s.yml").write_text(
+        "name: s\nmodel: 'SELECT 1'\n"
+        "destination: {type: rest_api, url: \"https://x/{{ var('pipeline') }}\"}\n"
+    )
+    return tmp_path
+
+
+def test_cli_run_vars_is_parsed_and_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The --vars value must reach load_syncs — guards the CLI plumbing that
+    unit-testing the resolver alone would miss."""
+    from drt.cli.main import app
+    from drt.config import parser as parser_mod
+
+    _cli_project(tmp_path, monkeypatch)
+    seen: dict[str, Any] = {}
+
+    def spy(project_dir: Path, vars: dict[str, Any] | None = None) -> list[Any]:
+        seen["vars"] = vars
+        return []
+
+    monkeypatch.setattr(parser_mod, "load_syncs", spy)
+    CliRunner().invoke(app, ["run", "--vars", "pipeline: sandbox"])
+    assert seen["vars"]["pipeline"] == "sandbox", "--vars must override drt_project.yml vars:"
+
+
+def test_cli_run_rejects_malformed_vars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed --vars is a clean CLI error, not a traceback."""
+    from drt.cli.main import app
+
+    _cli_project(tmp_path, monkeypatch)
+    result = CliRunner().invoke(app, ["run", "--vars", "bare_word"])
+    assert result.exit_code == 1
+    assert "must be a mapping" in result.output
+    assert not isinstance(result.exception, VarError)
 
 
 def test_var_in_sql_file_via_ref(tmp_path: Path) -> None:
