@@ -232,9 +232,7 @@ async def test_get_schema_project(server: FastMCP) -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_sync_returns_error_for_unknown_sync(
-    project_dir: Path, monkeypatch: Any
-) -> None:
+async def test_run_sync_returns_error_for_unknown_sync(project_dir: Path, monkeypatch: Any) -> None:
     """Unknown ``sync_name`` returns a structured error (no engine call).
 
     Bypasses ``load_profile`` (which would otherwise try to read the
@@ -298,9 +296,7 @@ async def test_run_sync_compute_diff_threads_diff_into_response(
     monkeypatch.setattr("drt.cli.output.diff_to_dict", fake_diff_to_dict)
 
     srv = create_server(project_dir)
-    result = await call(
-        srv, "drt_run_sync", sync_name="notify", dry_run=True, compute_diff=True
-    )
+    result = await call(srv, "drt_run_sync", sync_name="notify", dry_run=True, compute_diff=True)
 
     assert "diff" in result
     assert result["diff"] == {
@@ -346,9 +342,7 @@ async def test_run_sync_dry_run_without_compute_diff_omits_diff_field(
 
 
 @pytest.mark.asyncio
-async def test_doctor_returns_structured_report(
-    project_dir: Path, monkeypatch: Any
-) -> None:
+async def test_doctor_returns_structured_report(project_dir: Path, monkeypatch: Any) -> None:
     """``drt_doctor`` returns ``{passed, checks}`` with at minimum
     Python version + drt version + project file rows.
     """
@@ -373,9 +367,7 @@ async def test_doctor_returns_structured_report(
 
 
 @pytest.mark.asyncio
-async def test_doctor_passes_on_well_formed_project(
-    project_dir: Path, monkeypatch: Any
-) -> None:
+async def test_doctor_passes_on_well_formed_project(project_dir: Path, monkeypatch: Any) -> None:
     """On a well-formed project (project file + profile file + syncs/),
     ``passed`` is True. The fixture creates exactly this shape, so any
     regression that breaks the happy path surfaces here."""
@@ -542,6 +534,24 @@ async def test_get_manifest_returns_catalog(server: FastMCP) -> None:
     assert [s["name"] for s in result["syncs"]] == ["notify"]
 
 
+@pytest.mark.asyncio
+async def test_get_manifest_labels_are_docs_safe_by_default(server: FastMCP) -> None:
+    """The manifest is the same artifact `drt docs generate` ships (#696), so
+    the MCP tool defaults to the same safe labels as the CLI."""
+    import json
+
+    result = await call(server, "drt_get_manifest")
+    assert result["destinations"][0]["label"] == "rest_api"
+    assert "example.com" not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_get_manifest_full_labels_opts_in(server: FastMCP) -> None:
+    """`full_labels=True` mirrors `drt docs generate --full-labels`."""
+    result = await call(server, "drt_get_manifest", full_labels=True)
+    assert result["destinations"][0]["label"] == "rest_api (https://example.com/hook)"
+
+
 # ---------------------------------------------------------------------------
 # drt_list_profiles / drt_test_profile — credential diagnostics (#718)
 # ---------------------------------------------------------------------------
@@ -642,9 +652,7 @@ async def test_run_sync_threads_profile_override_and_full_mode_cursor_guard(
     monkeypatch.setattr("drt.config.credentials.load_profile", lambda _name: object())
 
     srv = create_server(project_dir)
-    await call(
-        srv, "drt_run_sync", sync_name="notify", cursor_value="100", profile_name="prod"
-    )
+    await call(srv, "drt_run_sync", sync_name="notify", cursor_value="100", profile_name="prod")
 
     assert resolve_args["value"] == ("prod", "default")
     assert captured["cursor_value_override"] is None  # full-mode sync → guarded off
