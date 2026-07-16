@@ -198,3 +198,82 @@ def test_build_selection_applies(project: Path, patched_runtime: dict[str, Any])
 
     assert result.exit_code == 0, result.output
     assert patched_runtime["run_calls"] == ["b_plain"]
+
+
+def test_build_tests_skipped_for_nonqueryable_destination(
+    project: Path, patched_runtime: dict[str, Any]
+) -> None:
+    """A sync with ``tests:`` but a non-queryable destination reports the tests
+    as skipped-with-reason, not run — mirrors ``drt test`` semantics."""
+    (project / "syncs" / "c_rest_with_tests.yml").write_text(
+        yaml.dump(
+            {
+                "name": "c_rest_with_tests",
+                "model": "SELECT 3",
+                "destination": {"type": "rest_api", "url": "https://example.com/c"},
+                "tests": [{"not_null": {"columns": ["id"]}}],
+            }
+        )
+    )
+
+    result = runner.invoke(app, ["build", "--select", "c_rest_with_tests", "--output", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert patched_runtime["test_queries"] == []  # non-queryable — no test query ran
+    entry = json.loads(result.output)["syncs"][0]
+    assert entry["tests"] == []
+    assert "not supported" in entry["tests_skipped_reason"]
+
+
+def test_build_fail_fast_prints_skip_summary_in_text_mode(
+    project: Path, patched_runtime: dict[str, Any]
+) -> None:
+    """Text-mode ``--fail-fast`` prints the '"skipped N after the first failure"'
+    line (the JSON-mode tests never exercise that console path)."""
+    patched_runtime["null_count"]["value"] = 7  # first sync's test fails
+
+    result = runner.invoke(app, ["build", "--fail-fast"])
+
+    assert result.exit_code == 1
+    assert "skipped 1 sync(s) after the first failure" in result.output
+
+
+def test_build_no_syncs_found_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_runtime: dict[str, Any]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "drt_project.yml").write_text("name: demo\nprofile: default\n")
+    (tmp_path / "syncs").mkdir()
+
+    result = runner.invoke(app, ["build"])
+
+    assert result.exit_code == 0
+    assert "No syncs found" in result.output
+
+
+def test_build_selection_matching_nothing_exits_nonzero(
+    project: Path, patched_runtime: dict[str, Any]
+) -> None:
+    result = runner.invoke(app, ["build", "--select", "a_with_tests", "--exclude", "*"])
+
+    assert result.exit_code == 1
+    assert patched_runtime["run_calls"] == []
+
+
+def test_build_unknown_selector_exits_nonzero(
+    project: Path, patched_runtime: dict[str, Any]
+) -> None:
+    result = runner.invoke(app, ["build", "--select", "no_such_sync"])
+
+    assert result.exit_code == 1
+    assert patched_runtime["run_calls"] == []
+
+
+def test_build_missing_project_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)  # no drt_project.yml
+
+    result = runner.invoke(app, ["build"])
+
+    assert result.exit_code == 1
