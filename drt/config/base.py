@@ -8,7 +8,7 @@ union). ``models.py`` re-exports everything here — import sites are unchanged.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -121,6 +121,11 @@ class ProjectConfig(BaseModel):
     profile: str = "default"
     source: SourceConfig | None = None  # optional; profile is authoritative
     history: HistoryConfig = Field(default_factory=HistoryConfig)
+    # Project vars (#783): reviewed, in-repo defaults for anything
+    # project-shaped, referenced as {{ var('name') }} in model SQL and YAML
+    # string fields. Overridden by DRT_VAR_* env and `--vars` at run time —
+    # see drt.config.vars for the precedence chain.
+    vars: dict[str, Any] = Field(default_factory=dict)
 
 
 class LookupConfig(BaseModel):

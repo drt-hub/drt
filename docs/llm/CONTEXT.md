@@ -26,7 +26,7 @@ dlt (load into DWH) → dbt (transform) → drt (activate out of DWH)
 ## Architecture
 
 ```
-drt_project.yml          # project config (source profile)
+drt_project.yml          # project config (source profile, vars:)
 syncs/*.yml              # one file per sync definition
 
 CLI (drt run)
@@ -41,7 +41,7 @@ CLI (drt run)
 
 ```
 my-project/
-├── drt_project.yml       # required: project name + source profile
+├── drt_project.yml       # required: project name + source profile (+ optional vars:)
 ├── syncs/
 │   ├── notify_slack.yml  # one sync per file
 │   └── update_hubspot.yml

@@ -105,6 +105,9 @@ class _RunContext:
     diff_limit: int = 20
     # Sampling (#774) — cap extraction at N rows per sync; watermarks frozen.
     extract_limit: int | None = None
+    # Project vars (#783) — resolved `vars:` + DRT_VAR_* + --vars, for var()
+    # in model SQL. The YAML side is applied at load_syncs time.
+    vars: dict[str, Any] | None = None
 
 
 def _exit_code_for_signal(signum: int) -> int:
@@ -176,6 +179,7 @@ def _run_one(
                 diff_limit=ctx.diff_limit,
                 observer=observer,
                 extract_limit=ctx.extract_limit,
+                vars=ctx.vars,
             )
         except Exception as e:
             from drt.cli.errors import format_error, render_to_console
@@ -341,6 +345,14 @@ def run(
             "Watermarks do not advance; refused for mirror/replace syncs."
         ),
     ),
+    vars_raw: str = typer.Option(
+        None,
+        "--vars",
+        help=(
+            "Override project vars for this run, e.g. --vars 'lookback_days: 1, "
+            "tag: crm'. Takes precedence over DRT_VAR_* and drt_project.yml vars:."
+        ),
+    ),
     fail_fast: bool = typer.Option(
         False,
         "--fail-fast",
@@ -434,7 +446,31 @@ def run(
         print_error(str(e))
         raise typer.Exit(1)
 
-    syncs = load_syncs(Path("."))
+    # Project vars (#783): `vars:` block < DRT_VAR_* < --vars. Resolved once and
+    # used for both the YAML side (load_syncs) and model SQL (via _RunContext).
+    from drt.config.vars import VarError, parse_cli_vars, resolve_vars, suspicious_vars
+
+    try:
+        cli_vars = parse_cli_vars(vars_raw) if vars_raw else None
+        project_vars = resolve_vars(project.vars, cli_vars)
+    except VarError as e:
+        print_error(str(e))
+        raise typer.Exit(1)
+
+    # Var values interpolate into SQL text (#783) — surface injection-shaped
+    # ones rather than blocking: they're project config, and a WHERE fragment or
+    # an apostrophe in a label is legitimate.
+    if (odd := suspicious_vars(project_vars)) and not json_mode and not quiet:
+        console.print(
+            f"[yellow]Warning: var(s) {', '.join(odd)} contain SQL metacharacters "
+            "(quote/semicolon/comment) and interpolate into SQL text — check quoting.[/yellow]"
+        )
+
+    try:
+        syncs = load_syncs(Path("."), vars=project_vars)
+    except VarError as e:
+        print_error(str(e))
+        raise typer.Exit(1)
     if not syncs:
         if not json_mode:
             console.print("[dim]No syncs found in syncs/. Add .yml files to get started.[/dim]")
@@ -593,6 +629,7 @@ def run(
         compute_diff=diff,
         diff_limit=diff_limit,
         extract_limit=limit,
+        vars=project_vars,
     )
 
     # Execute syncs — parallel if threads > 1, sequential otherwise
