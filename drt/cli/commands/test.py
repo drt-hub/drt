@@ -17,9 +17,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
 import typer
+
+if TYPE_CHECKING:
+    from drt.config.models import SyncConfig
 
 from drt.cli._app import app
 from drt.cli._selection import SelectionError, complete_selector, select_syncs
@@ -39,6 +42,76 @@ class _SyncTestResult(TypedDict, total=False):
     tests: list[dict[str, object]]
     skipped: bool
     reason: str
+
+
+def execute_tests_for_sync(
+    sync: SyncConfig, *, dry_run: bool, json_mode: bool, quiet: bool = False
+) -> tuple[_SyncTestResult, bool]:
+    """Run one sync's ``tests:`` and return ``(result_dict, had_failures)``.
+
+    Shared by ``drt test`` and ``drt build`` (#777). Non-queryable
+    destinations are reported as skipped (never a failure); ``dry_run``
+    lists the test plan without connecting. ``quiet`` silences text-mode
+    output the same way ``drt run --quiet`` does — the result dict is
+    unaffected, so JSON output and exit codes still carry every failure.
+    """
+    from drt.destinations.query import (
+        execute_test_query,
+        get_table_name,
+        is_queryable,
+    )
+    from drt.engine.test_runner import build_test_query
+
+    show = not json_mode and not quiet
+
+    if show:
+        print_test_header(sync.name)
+    sync_results: _SyncTestResult = {"sync": sync.name, "tests": []}
+    had_failures = False
+
+    if not is_queryable(sync.destination):
+        if show:
+            if dry_run:
+                console.print(
+                    f"  [dim]⏭ {sync.name}: would be skipped"
+                    f" (tests not supported for"
+                    f" {sync.destination.type} destinations)[/dim]"
+                )
+            else:
+                print_test_skip(
+                    sync.name,
+                    f"tests not supported for {sync.destination.type} destinations",
+                )
+        sync_results["skipped"] = True
+        sync_results["reason"] = f"tests not supported for {sync.destination.type}"
+        return sync_results, False
+
+    table = get_table_name(sync.destination)
+    for test_def in sync.tests:
+        test_name = _test_display_name(test_def)
+        if dry_run:
+            if show:
+                console.print(f"  [dim](dry-run)[/dim] {test_name}")
+            sync_results["tests"].append({"name": test_name, "dry_run": True})
+        else:
+            try:
+                query, check = build_test_query(test_def, table)
+                result_val = execute_test_query(sync.destination, query)
+                passed = check(result_val)
+                if show:
+                    print_test_result(test_name, passed, str(result_val))
+                sync_results["tests"].append(
+                    {"name": test_name, "passed": passed, "value": str(result_val)}
+                )
+                if not passed:
+                    had_failures = True
+            except Exception as e:
+                if show:
+                    print_test_result(test_name, False, str(e))
+                sync_results["tests"].append({"name": test_name, "passed": False, "error": str(e)})
+                had_failures = True
+
+    return sync_results, had_failures
 
 
 @app.command(name="test")
@@ -73,12 +146,6 @@ def test_syncs(
     connecting to the destination or running queries.
     """
     from drt.config.parser import load_syncs
-    from drt.destinations.query import (
-        execute_test_query,
-        get_table_name,
-        is_queryable,
-    )
-    from drt.engine.test_runner import build_test_query
 
     json_mode = output == "json"
     results: list[_SyncTestResult] = []
@@ -111,56 +178,12 @@ def test_syncs(
     had_failures = False
 
     for i, sync in enumerate(syncs_with_tests):
-        if not json_mode:
-            print_test_header(sync.name)
-        sync_results: _SyncTestResult = {"sync": sync.name, "tests": []}
-
-        if not is_queryable(sync.destination):
-            if not json_mode:
-                if dry_run:
-                    console.print(
-                        f"  [dim]⏭ {sync.name}: would be skipped"
-                        f" (tests not supported for"
-                        f" {sync.destination.type} destinations)[/dim]"
-                    )
-                else:
-                    print_test_skip(
-                        sync.name,
-                        f"tests not supported for {sync.destination.type} destinations",
-                    )
-            sync_results["skipped"] = True
-            sync_results["reason"] = f"tests not supported for {sync.destination.type}"
-            results.append(sync_results)
-            continue
-
-        table = get_table_name(sync.destination)
-        for test_def in sync.tests:
-            test_name = _test_display_name(test_def)
-            if dry_run:
-                if not json_mode:
-                    console.print(f"  [dim](dry-run)[/dim] {test_name}")
-                sync_results["tests"].append({"name": test_name, "dry_run": True})
-            else:
-                try:
-                    query, check = build_test_query(test_def, table)
-                    result_val = execute_test_query(sync.destination, query)
-                    passed = check(result_val)
-                    if not json_mode:
-                        print_test_result(test_name, passed, str(result_val))
-                    sync_results["tests"].append(
-                        {"name": test_name, "passed": passed, "value": str(result_val)}
-                    )
-                    if not passed:
-                        had_failures = True
-                except Exception as e:
-                    if not json_mode:
-                        print_test_result(test_name, False, str(e))
-                    sync_results["tests"].append(
-                        {"name": test_name, "passed": False, "error": str(e)}
-                    )
-                    had_failures = True
-
+        sync_results, sync_failed = execute_tests_for_sync(
+            sync, dry_run=dry_run, json_mode=json_mode
+        )
         results.append(sync_results)
+        if sync_failed:
+            had_failures = True
 
         # --fail-fast (#775): stop after the first sync with a failing test.
         if fail_fast and had_failures:
