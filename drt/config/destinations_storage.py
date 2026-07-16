@@ -6,13 +6,13 @@ members of the :data:`~drt.config.sync_options.DestinationConfig` union.
 
 from __future__ import annotations
 
+from pathlib import PurePath
 from typing import Literal
 
 from drt.config.base import DescribableConfig
 
 
 class ParquetDestinationConfig(DescribableConfig):
-    _detail_is_public = True  # object identity only (#696) — safe for hosted docs
     type: Literal["parquet"]
     path: str  # output file or directory path, e.g. "output/data.parquet"
     partition_by: list[str] | None = None  # optional partition columns
@@ -21,9 +21,13 @@ class ParquetDestinationConfig(DescribableConfig):
     def _describe_detail(self) -> str:
         return f"{self.path}"
 
+    def describe_safe(self) -> str:
+        # File name only — the directory part of a local path can carry a home
+        # dir / username into a hosted docs site (#696 review, @Pawansingh3889).
+        return f"{self.type} ({PurePath(self.path).name})"
+
 
 class FileDestinationConfig(DescribableConfig):
-    _detail_is_public = True  # object identity only (#696) — safe for hosted docs
     type: Literal["file"]
     path: str  # output file path, e.g. "output/data.csv"
     format: Literal["csv", "json", "jsonl"] = "csv"
@@ -31,11 +35,13 @@ class FileDestinationConfig(DescribableConfig):
     def _describe_detail(self) -> str:
         return f"{self.path}"
 
+    def describe_safe(self) -> str:
+        # File name only — see ParquetDestinationConfig.describe_safe.
+        return f"{self.type} ({PurePath(self.path).name})"
+
 
 class S3DestinationConfig(DescribableConfig):
     """S3 destination — upload records as CSV / JSON / JSONL / Parquet to S3."""
-
-    _detail_is_public = True  # object identity only (#696) — safe for hosted docs
 
     type: Literal["s3"]
     bucket: str
@@ -69,11 +75,15 @@ class S3DestinationConfig(DescribableConfig):
     def _describe_detail(self) -> str:
         return f"s3://{self.bucket}/{self.prefix}"
 
+    def describe_safe(self) -> str:
+        # Prefix is the per-sync routing identity and stays; the bucket name is
+        # dropped — public bucket names invite probing (#696 review,
+        # @Pawansingh3889). Empty prefix renders type-only.
+        return f"{self.type} ({self.prefix})" if self.prefix else str(self.type)
+
 
 class GCSDestinationConfig(DescribableConfig):
     """GCS destination — upload records as CSV / JSON / JSONL / Parquet to Google Cloud Storage."""
-
-    _detail_is_public = True  # object identity only (#696) — safe for hosted docs
 
     type: Literal["gcs"]
     bucket: str
@@ -105,11 +115,15 @@ class GCSDestinationConfig(DescribableConfig):
     def _describe_detail(self) -> str:
         return f"gs://{self.bucket}/{self.prefix}"
 
+    def describe_safe(self) -> str:
+        # Prefix is the per-sync routing identity and stays; the bucket name is
+        # dropped — public bucket names invite probing (#696 review,
+        # @Pawansingh3889). Empty prefix renders type-only.
+        return f"{self.type} ({self.prefix})" if self.prefix else str(self.type)
+
 
 class AzureBlobDestinationConfig(DescribableConfig):
     """Azure Blob destination — upload records as CSV / JSON / JSONL / Parquet."""
-
-    _detail_is_public = True  # object identity only (#696) — safe for hosted docs
 
     type: Literal["azure_blob"]
     container: str
@@ -140,3 +154,9 @@ class AzureBlobDestinationConfig(DescribableConfig):
 
     def _describe_detail(self) -> str:
         return f"{self.container}/{self.prefix}"
+
+    def describe_safe(self) -> str:
+        # Prefix is the per-sync routing identity and stays; the bucket name is
+        # dropped — public bucket names invite probing (#696 review,
+        # @Pawansingh3889). Empty prefix renders type-only.
+        return f"{self.type} ({self.prefix})" if self.prefix else str(self.type)

@@ -73,7 +73,7 @@ SAMPLES: dict[str, object] = {
     "amplitude": AmplitudeDestinationConfig(
         type="amplitude", api_key_env="K", endpoint="identify", region="eu"
     ),
-    "azure_blob": AzureBlobDestinationConfig(type="azure_blob", container="exports"),
+    "azure_blob": AzureBlobDestinationConfig(type="azure_blob", container=f"{S}-container"),
     "bigquery": BigQueryDestinationConfig(
         type="bigquery", project="proj", dataset="mart", table="users"
     ),
@@ -103,8 +103,8 @@ SAMPLES: dict[str, object] = {
         subject_template="s",
         body_template="b",
     ),
-    "file": FileDestinationConfig(type="file", path="out/users.csv"),
-    "gcs": GCSDestinationConfig(type="gcs", bucket="exports", prefix="crm/"),
+    "file": FileDestinationConfig(type="file", path=f"/home/{S}/exports/users.csv"),
+    "gcs": GCSDestinationConfig(type="gcs", bucket=f"{S}-datalake", prefix="crm/"),
     "github_actions": GitHubActionsDestinationConfig(
         type="github_actions", owner=S, repo=S, workflow_id="sync.yml"
     ),
@@ -136,12 +136,12 @@ SAMPLES: dict[str, object] = {
         type="mysql", host=f"{S}.corp", dbname="app", table="scores", upsert_key=["id"]
     ),
     "notion": NotionDestinationConfig(type="notion", database_id=f"uuid-{S}", token_env="T"),
-    "parquet": ParquetDestinationConfig(type="parquet", path="out/users.parquet"),
+    "parquet": ParquetDestinationConfig(type="parquet", path=f"/home/{S}/out/users.parquet"),
     "postgres": PostgresDestinationConfig(
         type="postgres", host=f"{S}.corp", dbname="app", table="public.users", upsert_key=["id"]
     ),
     "rest_api": RestApiDestinationConfig(type="rest_api", url=f"https://{S}.corp/api"),
-    "s3": S3DestinationConfig(type="s3", bucket="exports", prefix="crm/"),
+    "s3": S3DestinationConfig(type="s3", bucket=f"{S}-datalake", prefix="crm/"),
     "salesforce_bulk": SalesforceBulkDestinationConfig(
         type="salesforce_bulk",
         object_name="Contact",
@@ -191,15 +191,15 @@ SAMPLES: dict[str, object] = {
 EXPECTED_SAFE: dict[str, str] = {
     "airtable": "airtable (Leads)",  # base id dropped
     "amplitude": "amplitude",  # endpoint/region dropped
-    "azure_blob": "azure_blob (exports/)",
+    "azure_blob": "azure_blob",  # container dropped (probeable); no prefix -> type-only
     "bigquery": "bigquery (proj.mart.users)",
     "clickhouse": "clickhouse (events)",
     "databricks": "databricks (cat.silver.users)",
     "discord": "discord (webhook)",
     "elasticsearch": "elasticsearch (events)",  # url dropped by describe() already
     "email_smtp": "email_smtp",  # host dropped
-    "file": "file (out/users.csv)",
-    "gcs": "gcs (gs://exports/crm/)",
+    "file": "file (users.csv)",  # directory dropped (can carry a home dir)
+    "gcs": "gcs (crm/)",  # bucket dropped, per-sync routing prefix kept
     "github_actions": "github_actions",  # owner/repo dropped (private repo names)
     "google_ads": "google_ads",  # customer id dropped
     "google_sheets": "google_sheets (Leads)",
@@ -211,10 +211,10 @@ EXPECTED_SAFE: dict[str, str] = {
     "mixpanel": "mixpanel",  # endpoint/region dropped
     "mysql": "mysql (scores)",
     "notion": "notion (database)",  # database uuid dropped
-    "parquet": "parquet (out/users.parquet)",
+    "parquet": "parquet (users.parquet)",  # directory dropped
     "postgres": "postgres (public.users)",
     "rest_api": "rest_api",  # full endpoint URL dropped
-    "s3": "s3 (s3://exports/crm/)",
+    "s3": "s3 (crm/)",  # bucket dropped, per-sync routing prefix kept
     "salesforce_bulk": "salesforce_bulk (Contact)",
     "sendgrid": "sendgrid (…@corp.example)",  # local part masked, org domain kept
     "slack": "slack (webhook)",
@@ -327,6 +327,30 @@ def test_destination_ids_are_deterministic(tmp_path: Path) -> None:
     first = {d.name for d in build_manifest(tmp_path).destinations}
     second = {d.name for d in build_manifest(tmp_path).destinations}
     assert first == second
+
+
+def test_destination_ids_survive_sync_file_renames(tmp_path: Path) -> None:
+    """Renaming a sync FILE must not swap which destination owns which id —
+    a bookmarked destination page would silently show the other endpoint's
+    syncs (#805 review, @Pawansingh3889). Suffix rank follows the referencing
+    sync *name* (manifest-public, file-independent), not file order."""
+    from drt.docs.builder import build_manifest
+
+    _write_project(tmp_path)
+    _write_rest_sync(tmp_path, "alerts", "https://a.corp/api")
+    _write_rest_sync(tmp_path, "digests", "https://b.corp/api")
+
+    def id_of(sync_name: str, manifest) -> str:
+        (sync,) = [s for s in manifest.syncs if s.name == sync_name]
+        return sync.destination
+
+    before = build_manifest(tmp_path)
+    # ファイル名だけ変える(sync 名はそのまま)
+    (tmp_path / "syncs" / "alerts.yml").rename(tmp_path / "syncs" / "zz_renamed.yml")
+    after = build_manifest(tmp_path)
+
+    assert id_of("alerts", before) == id_of("alerts", after)
+    assert id_of("digests", before) == id_of("digests", after)
 
 
 def test_destination_ids_do_not_depend_on_label_mode(tmp_path: Path) -> None:
