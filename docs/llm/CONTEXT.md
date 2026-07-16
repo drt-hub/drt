@@ -136,6 +136,8 @@ drt status                        # show recent sync results
 drt status --output json          # JSON output for status
 drt mcp run                       # start MCP server (requires drt-core[mcp])
 drt serve --port 8080             # start HTTP webhook endpoint (POST /sync/<name>)
+drt docs generate                 # static docs site to target/docs/ (html; also --format mermaid|json). Destination labels are docs-safe by default (#696): object identity (table/channel/sheet/bucket) stays, endpoints/hosts/phones/emails do not
+drt docs generate --full-labels   # verbatim describe() labels — trusted/internal hosting only (#696)
 drt deploy github-actions --schedule "40 3 * * *"  # scaffold .github/workflows/drt-sync.yml — drt-action wired, extras inferred, required secrets enumerated (#785)
 ```
 

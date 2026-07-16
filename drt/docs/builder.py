@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,9 +31,34 @@ def _slug(value: str) -> str:
 
 
 def _destination_id(sync: SyncConfig) -> str:
-    """Synthesize a stable destination node id; shared across syncs that target the same one."""
+    """Synthesize a stable destination node id; shared across syncs that target the same one.
+
+    The id is ``dest_<type>_<hash8>`` where the hash covers the full
+    ``describe()`` string. Hashing (rather than slugging the label, as before
+    #696) keeps two properties at once: distinct destinations stay distinct
+    even when their *safe* labels collide (two ``rest_api`` endpoints both
+    label as just ``rest_api``), and the id — which becomes page filenames and
+    manifest node names — no longer embeds the endpoint/host the way a slugged
+    URL did. Deterministic, so regeneration stays byte-identical (#697).
+    """
     dest = sync.destination
-    return f"dest_{_slug(dest.type)}_{_slug(dest.describe())}"
+    digest = hashlib.sha1(dest.describe().encode("utf-8")).hexdigest()[:8]
+    return f"dest_{_slug(dest.type)}_{digest}"
+
+
+def _destination_label(sync: SyncConfig, full_labels: bool) -> str:
+    """Docs label for a destination (#696): safe by default, verbatim on opt-in.
+
+    ``describe_safe`` is duck-typed so configs that don't inherit
+    :class:`DescribableConfig` still participate; anything without the method
+    (e.g. a future connector added without thinking about docs exposure)
+    falls back to its bare ``type`` — safe by default.
+    """
+    dest = sync.destination
+    if full_labels:
+        return dest.describe()
+    safe = getattr(dest, "describe_safe", None)
+    return safe() if callable(safe) else str(dest.type)
 
 
 def _destination_table(sync: SyncConfig) -> str | None:
@@ -67,8 +93,18 @@ def _state_snapshot(state: SyncState) -> SyncStateSnapshot:
     )
 
 
-def build_manifest(project_dir: Path = Path("."), include_state: bool = False) -> Manifest:
+def build_manifest(
+    project_dir: Path = Path("."),
+    include_state: bool = False,
+    full_labels: bool = False,
+) -> Manifest:
     """Build a `Manifest` from sync YAMLs + project config under *project_dir*.
+
+    Destination labels are **docs-safe by default** (#696): object identity
+    (table, channel, sheet, bucket) stays, network locations and personal
+    identifiers (URLs, hosts, phone numbers, emails) do not. Pass
+    *full_labels=True* (CLI: ``--full-labels``) to restore verbatim
+    ``describe()`` output for trusted/internal hosting.
 
     When *include_state* is true, each sync's latest persisted state from
     ``.drt/state.json`` is attached as :class:`SyncStateSnapshot` under the
@@ -97,7 +133,7 @@ def build_manifest(project_dir: Path = Path("."), include_state: bool = False) -
             destinations[dest_id] = Destination(
                 name=dest_id,
                 type=sync_cfg.destination.type,
-                label=sync_cfg.destination.describe(),
+                label=_destination_label(sync_cfg, full_labels),
             )
 
         sync_state = states.get(sync_cfg.name)
@@ -164,7 +200,7 @@ def build_manifest(project_dir: Path = Path("."), include_state: bool = False) -
 _SENSITIVE_KEY_RE = re.compile(
     r"(?i)(password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|"
     r"private[_-]?key|client[_-]?secret|credential|connection[_-]?string|dsn|"
-    r"auth|webhook|url|endpoint|host|hostname|email|phone)"
+    r"auth|webhook|url|endpoint|host|hostname|email|phone|number|sender|recipient)"
 )
 # key: value line, allowing an optional "- " list-item prefix; value must be a
 # scalar on the same line (block scalars / nested maps have no inline value).

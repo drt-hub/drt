@@ -12,6 +12,7 @@ from drt.config.base import DescribableConfig
 
 
 class ParquetDestinationConfig(DescribableConfig):
+    _detail_is_public = True  # object identity only (#696) — safe for hosted docs
     type: Literal["parquet"]
     path: str  # output file or directory path, e.g. "output/data.parquet"
     partition_by: list[str] | None = None  # optional partition columns
@@ -22,6 +23,7 @@ class ParquetDestinationConfig(DescribableConfig):
 
 
 class FileDestinationConfig(DescribableConfig):
+    _detail_is_public = True  # object identity only (#696) — safe for hosted docs
     type: Literal["file"]
     path: str  # output file path, e.g. "output/data.csv"
     format: Literal["csv", "json", "jsonl"] = "csv"
@@ -32,6 +34,8 @@ class FileDestinationConfig(DescribableConfig):
 
 class S3DestinationConfig(DescribableConfig):
     """S3 destination — upload records as CSV / JSON / JSONL / Parquet to S3."""
+
+    _detail_is_public = True  # object identity only (#696) — safe for hosted docs
 
     type: Literal["s3"]
     bucket: str
@@ -69,6 +73,8 @@ class S3DestinationConfig(DescribableConfig):
 class GCSDestinationConfig(DescribableConfig):
     """GCS destination — upload records as CSV / JSON / JSONL / Parquet to Google Cloud Storage."""
 
+    _detail_is_public = True  # object identity only (#696) — safe for hosted docs
+
     type: Literal["gcs"]
     bucket: str
     # Optional object-name prefix. The generated file name is appended:
@@ -102,6 +108,8 @@ class GCSDestinationConfig(DescribableConfig):
 
 class AzureBlobDestinationConfig(DescribableConfig):
     """Azure Blob destination — upload records as CSV / JSON / JSONL / Parquet."""
+
+    _detail_is_public = True  # object identity only (#696) — safe for hosted docs
 
     type: Literal["azure_blob"]
     container: str

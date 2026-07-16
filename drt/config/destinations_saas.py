@@ -29,6 +29,7 @@ class RestApiDestinationConfig(DescribableConfig):
 
 
 class SlackDestinationConfig(DescribableConfig):
+    _detail_is_public = True  # object identity only (#696) — safe for hosted docs
     type: Literal["slack"]
     webhook_url: str | None = None
     webhook_url_env: str | None = None
@@ -65,6 +66,11 @@ class TwilioDestinationConfig(DescribableConfig):
     def _describe_detail(self) -> str:
         return f"{self.from_number}"
 
+    def describe_safe(self) -> str:
+        # Country-code prefix only — enough to tell regions apart, not a number.
+        prefix = self.from_number[:3] if self.from_number.startswith("+") else ""
+        return f"{self.type} ({prefix}\u2026)" if prefix else str(self.type)
+
     @model_validator(mode="after")
     def _check_auth(self) -> TwilioDestinationConfig:
         if not (self.account_sid or self.account_sid_env):
@@ -75,6 +81,7 @@ class TwilioDestinationConfig(DescribableConfig):
 
 
 class DiscordDestinationConfig(DescribableConfig):
+    _detail_is_public = True  # object identity only (#696) — safe for hosted docs
     type: Literal["discord"]
     webhook_url: str | None = None
     webhook_url_env: str | None = None
@@ -107,6 +114,7 @@ class GitHubActionsDestinationConfig(DescribableConfig):
 
 
 class GoogleSheetsDestinationConfig(DescribableConfig):
+    _detail_is_public = True  # object identity only (#696) — safe for hosted docs
     type: Literal["google_sheets"]
     spreadsheet_id: str
     sheet: str = "Sheet1"
@@ -119,6 +127,7 @@ class GoogleSheetsDestinationConfig(DescribableConfig):
 
 
 class HubSpotDestinationConfig(DescribableConfig):
+    _detail_is_public = True  # object identity only (#696) — safe for hosted docs
     type: Literal["hubspot"]
     object_type: Literal["contacts", "deals", "companies"] = "contacts"
     # Property used as upsert key (contacts → email, deals → dealname, etc.)
@@ -134,6 +143,7 @@ class HubSpotDestinationConfig(DescribableConfig):
 
 
 class ZendeskDestinationConfig(DescribableConfig):
+    _detail_is_public = True  # object identity only (#696) — safe for hosted docs
     type: Literal["zendesk"]
     subdomain: str | None = None
     subdomain_env: str | None = None
@@ -202,6 +212,9 @@ class AirtableDestinationConfig(BaseModel):
     def describe(self) -> str:
         return f"airtable ({self.base_id}/{self.table_name})"
 
+    def describe_safe(self) -> str:
+        return f"airtable ({self.table_name})"
+
     @model_validator(mode="after")
     def _check_token(self) -> AirtableDestinationConfig:
         if not self.access_token and not self.access_token_env:
@@ -227,6 +240,9 @@ class KlaviyoDestinationConfig(BaseModel):
 
     def describe(self) -> str:
         return "klaviyo (profiles)"
+
+    def describe_safe(self) -> str:
+        return self.describe()  # detail is object identity only (#696)
 
     @model_validator(mode="after")
     def _check_api_key(self) -> KlaviyoDestinationConfig:
@@ -303,6 +319,7 @@ class MixpanelDestinationConfig(DescribableConfig):
 
 
 class IntercomDestinationConfig(DescribableConfig):
+    _detail_is_public = True  # object identity only (#696) — safe for hosted docs
     type: Literal["intercom"]
 
     auth: AuthConfig
@@ -330,6 +347,10 @@ class SendGridDestinationConfig(BaseModel):
     def describe(self) -> str:
         return f"sendgrid ({self.from_email})"
 
+    def describe_safe(self) -> str:
+        domain = self.from_email.rsplit("@", 1)[-1] if "@" in self.from_email else ""
+        return f"sendgrid (\u2026@{domain})" if domain else "sendgrid"
+
 
 class LinearDestinationConfig(BaseModel):
     type: Literal["linear"]
@@ -345,8 +366,12 @@ class LinearDestinationConfig(BaseModel):
     def describe(self) -> str:
         return "linear (issue)"
 
+    def describe_safe(self) -> str:
+        return self.describe()  # detail is object identity only (#696)
+
 
 class TeamsDestinationConfig(DescribableConfig):
+    _detail_is_public = True  # object identity only (#696) — safe for hosted docs
     type: Literal["teams"]
     webhook_url: str | None = None
     webhook_url_env: str | None = None
@@ -374,6 +399,9 @@ class JiraDestinationConfig(BaseModel):
 
     def describe(self) -> str:
         return f"jira ({self.project_key})"
+
+    def describe_safe(self) -> str:
+        return self.describe()  # detail is object identity only (#696)
 
 
 class EmailSmtpDestinationConfig(DescribableConfig):
@@ -406,6 +434,9 @@ class NotionDestinationConfig(DescribableConfig):
     def _describe_detail(self) -> str:
         return f"database {self.database_id}"
 
+    def describe_safe(self) -> str:
+        return f"{self.type} (database)"
+
 
 class GoogleAdsDestinationConfig(BaseModel):
     type: Literal["google_ads"]
@@ -421,6 +452,9 @@ class GoogleAdsDestinationConfig(BaseModel):
 
     def describe(self) -> str:
         return f"google_ads ({self.customer_id})"
+
+    def describe_safe(self) -> str:
+        return "google_ads"
 
 
 class StagedUploadPhaseConfig(BaseModel):
@@ -454,6 +488,9 @@ class StagedUploadDestinationConfig(BaseModel):
     def describe(self) -> str:
         return "staged_upload"
 
+    def describe_safe(self) -> str:
+        return self.describe()  # detail is object identity only (#696)
+
 
 class SalesforceBulkDestinationConfig(BaseModel):
     type: Literal["salesforce_bulk"]
@@ -471,6 +508,9 @@ class SalesforceBulkDestinationConfig(BaseModel):
 
     def describe(self) -> str:
         return f"salesforce_bulk ({self.object_name})"
+
+    def describe_safe(self) -> str:
+        return self.describe()  # detail is object identity only (#696)
 
     @model_validator(mode="after")
     def _check_instance_url(self) -> SalesforceBulkDestinationConfig:

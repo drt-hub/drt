@@ -8,7 +8,7 @@ union). ``models.py`` re-exports everything here — import sites are unchanged.
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -20,8 +20,25 @@ class DescribableConfig(BaseModel):
     or no parens) override ``describe()`` and inherit :class:`BaseModel` directly.
     """
 
+    # Docs-safe labelling (#696): ``describe()`` output ships verbatim in the
+    # generated docs site (manifest.json + every page), so details that carry
+    # network locations or personal identifiers (URLs, hosts, phone numbers,
+    # email addresses) must not flow through by default. Subclasses whose
+    # detail is pure *object identity* (a table, channel, sheet, bucket…) opt
+    # in with ``_detail_is_public = True``; everything else — including any
+    # future connector added without thinking about this — renders type-only.
+    _detail_is_public: ClassVar[bool] = False
+
     def describe(self) -> str:
         return f"{self.type} ({self._describe_detail()})"  # type: ignore[attr-defined]
+
+    def describe_safe(self) -> str:
+        """Label safe for a hosted docs site (#696) — never a network location
+        or personal identifier. Connectors with a partially-safe detail
+        (e.g. twilio keeps the country code) override this instead."""
+        if self._detail_is_public:
+            return self.describe()
+        return str(self.type)  # type: ignore[attr-defined]
 
     def _describe_detail(self) -> str:  # pragma: no cover - always overridden
         raise NotImplementedError
