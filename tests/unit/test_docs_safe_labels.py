@@ -308,10 +308,12 @@ def test_destination_ids_stay_distinct_when_safe_labels_collide(tmp_path: Path) 
     manifest = build_manifest(tmp_path)
 
     assert len(manifest.destinations) == 2
-    names = {d.name for d in manifest.destinations}
-    assert len(names) == 2
-    # ...and the ids themselves carry no endpoint fragment (they become page
-    # filenames), unlike the pre-#696 slug-of-describe() scheme.
+    names = sorted(d.name for d in manifest.destinations)
+    # Ids derive from the SAFE label + a deterministic counter — never from
+    # the endpoint. (The first cut hashed the unredacted describe(); review
+    # showed a truncated hash of a low-entropy value is brute-forceable, so
+    # no function of the sensitive string may ship at all.)
+    assert names == ["dest_rest_api", "dest_rest_api_2"]
     for n in names:
         assert "corp" not in n and "http" not in n
 
@@ -325,3 +327,17 @@ def test_destination_ids_are_deterministic(tmp_path: Path) -> None:
     first = {d.name for d in build_manifest(tmp_path).destinations}
     second = {d.name for d in build_manifest(tmp_path).destinations}
     assert first == second
+
+
+def test_destination_ids_do_not_depend_on_label_mode(tmp_path: Path) -> None:
+    """--full-labels changes labels only — ids (page filenames, graph nodes)
+    must not be rewired, and must stay non-identifying in both modes."""
+    from drt.docs.builder import build_manifest
+
+    _write_project(tmp_path)
+    _write_rest_sync(tmp_path, "push", "https://internal-host.corp/api")
+
+    safe_ids = {d.name for d in build_manifest(tmp_path).destinations}
+    full_ids = {d.name for d in build_manifest(tmp_path, full_labels=True).destinations}
+
+    assert safe_ids == full_ids == {"dest_rest_api"}

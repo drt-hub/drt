@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,20 +29,48 @@ def _slug(value: str) -> str:
     return _SLUG_RE.sub("_", value).strip("_") or "node"
 
 
-def _destination_id(sync: SyncConfig) -> str:
-    """Synthesize a stable destination node id; shared across syncs that target the same one.
+class _DestinationIds:
+    """Allocate destination node ids that never touch a sensitive value (#696).
 
-    The id is ``dest_<type>_<hash8>`` where the hash covers the full
-    ``describe()`` string. Hashing (rather than slugging the label, as before
-    #696) keeps two properties at once: distinct destinations stay distinct
-    even when their *safe* labels collide (two ``rest_api`` endpoints both
-    label as just ``rest_api``), and the id — which becomes page filenames and
-    manifest node names — no longer embeds the endpoint/host the way a slugged
-    URL did. Deterministic, so regeneration stays byte-identical (#697).
+    The id becomes page filenames and manifest node names — it ships. The
+    first #696 cut hashed the *unredacted* ``describe()`` string here, which
+    review showed is brute-forceable for low-entropy inputs (a phone number
+    was recovered from the truncated hash in under a minute; the partial
+    redactions — kept country code, kept domain — shrink the preimage space
+    further). Hashing is not redaction. So ids are now derived **only from
+    the safe label**: ``dest_<slug(describe_safe())>``, with a deterministic
+    ``_2``/``_3`` suffix when two distinct destinations share a safe label
+    (two ``rest_api`` endpoints). Distinctness is tracked by the full
+    ``describe()`` string **in memory only** — it never reaches the output.
+
+    Deterministic because sync files are iterated in sorted order (#697), and
+    independent of ``--full-labels`` so switching label modes never rewires
+    the graph or renames pages.
     """
+
+    def __init__(self) -> None:
+        self._by_identity: dict[str, str] = {}  # full describe() -> id (never shipped)
+        self._used: dict[str, int] = {}  # base slug -> allocation count
+
+    def get(self, sync: SyncConfig) -> str:
+        dest = sync.destination
+        identity = f"{dest.type}|{dest.describe()}"
+        existing = self._by_identity.get(identity)
+        if existing is not None:
+            return existing
+        base = f"dest_{_slug(_safe_label(sync))}"
+        n = self._used.get(base, 0) + 1
+        self._used[base] = n
+        allocated = base if n == 1 else f"{base}_{n}"
+        self._by_identity[identity] = allocated
+        return allocated
+
+
+def _safe_label(sync: SyncConfig) -> str:
+    """The docs-safe label — the only destination string allowed to ship."""
     dest = sync.destination
-    digest = hashlib.sha1(dest.describe().encode("utf-8")).hexdigest()[:8]
-    return f"dest_{_slug(dest.type)}_{digest}"
+    safe = getattr(dest, "describe_safe", None)
+    return safe() if callable(safe) else str(dest.type)
 
 
 def _destination_label(sync: SyncConfig, full_labels: bool) -> str:
@@ -54,11 +81,9 @@ def _destination_label(sync: SyncConfig, full_labels: bool) -> str:
     (e.g. a future connector added without thinking about docs exposure)
     falls back to its bare ``type`` — safe by default.
     """
-    dest = sync.destination
     if full_labels:
-        return dest.describe()
-    safe = getattr(dest, "describe_safe", None)
-    return safe() if callable(safe) else str(dest.type)
+        return sync.destination.describe()
+    return _safe_label(sync)
 
 
 def _destination_table(sync: SyncConfig) -> str | None:
@@ -126,9 +151,10 @@ def build_manifest(
     destinations: dict[str, Destination] = {}
     syncs: list[Sync] = []
     edges: list[Edge] = []
+    dest_ids = _DestinationIds()
 
     for sync_cfg in syncs_result.syncs:
-        dest_id = _destination_id(sync_cfg)
+        dest_id = dest_ids.get(sync_cfg)
         if dest_id not in destinations:
             destinations[dest_id] = Destination(
                 name=dest_id,
