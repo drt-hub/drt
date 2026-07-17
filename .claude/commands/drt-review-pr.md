@@ -17,7 +17,7 @@ The user will provide a PR number or URL.
    - `ruff` and `mypy` compliance
    - Missing trailing newlines
    - Import ordering (ruff I001)
-   - Type signature updates when adding new connectors (e.g. `_get_source` in `cli/main.py`, `ProfileConfig` union)
+   - New connectors are wired via `register_source(...)` / `register_destination(...)` in `drt/connectors/registry.py` (`_register_all_connectors`) — not by editing `cli/main.py` (`_get_source` / `_get_destination` are back-compat shims only). Check the `ProfileConfig` / `DestinationConfig` unions are extended too.
    - Lazy imports for optional dependencies (psycopg2, pymysql, etc.) — no top-level imports of extras
 
 4. **Documentation check** — if user-facing changes:
@@ -131,7 +131,7 @@ After merging a PR, always:
 1. `git pull origin main`
 2. Fix trailing newlines, import ordering, trailing whitespace
 3. Run `ruff check --fix && ruff format` on changed files
-4. Run `mypy drt` — check for type signature gaps (e.g. new profiles not added to `_get_source`)
+4. Run `mypy drt` — check for type signature gaps (e.g. new profiles not added to the `ProfileConfig` union or not registered in `drt/connectors/registry.py`)
 5. Run `pytest` on affected test files
 6. Commit with `chore: clean up [feature] (#PR follow-up)`
 7. Push and verify CI passes

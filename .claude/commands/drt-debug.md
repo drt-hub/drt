@@ -20,6 +20,9 @@ Debug a failing drt sync.
    - `drt run --select <name> --dry-run --diff` — record-level preview (added/updated/deleted) for queryable destinations (v0.7.1+)
    - `drt run --output json` / `drt status --output json` — structured output for CI / scripting (v0.7+)
    - `drt run --log-format json` — JSON Lines logs to stderr (separate from `--output`)
+   - `drt run --select <name> --limit 10` — really load ≤10 rows (#774) to reproduce with a small, inspectable send; watermark won't advance (refused for `mode: mirror` / `replace`)
+   - `drt run --failed` — re-run only the syncs whose last status wasn't `success` (#773) — the tight loop while fixing one red sync in a larger project
+   - `drt run --fail-fast` — stop after the first failure (#775) instead of running the whole set when the cause is systemic
 
 4. Diagnose the root cause using the patterns below.
 
@@ -36,6 +39,7 @@ Debug a failing drt sync.
 - **Cause**: Sending too fast for the destination's limits.
 - **Fix**: Lower `sync.rate_limit.requests_per_second`. HubSpot max: 9 req/s. GitHub Actions: 5 req/s.
 - **Also**: Add retry config — 429 is retryable by default; in v0.7+ you can also set a per-destination retry override.
+- **Recover the rows that still failed**: enable the dead letter queue (`sync.dlq.enabled: true` + `on_error: skip`, v0.7.9+) so per-record failures persist to `.drt/dlq/<sync>.jsonl` instead of being dropped, then `drt retry <sync>` re-sends just those once the limit clears. `drt status` shows the queue depth.
 
 ### Connection errors / timeouts
 - **Cause**: Wrong URL, network issue, or destination is down.
@@ -56,6 +60,7 @@ Debug a failing drt sync.
 ### `on_error: fail` stopping early
 - **Cause**: Default behavior for some destinations — first failure stops the sync.
 - **Fix**: Change to `on_error: skip` to continue past failures and see the full error count via `drt run --verbose` or `drt status`.
+- **Recover the failures**: pair `on_error: skip` with `sync.dlq.enabled: true` (v0.7.9+) so the skipped records land in `.drt/dlq/<sync>.jsonl`; `drt retry <sync>` replays just them after you fix the root cause. To re-run whole syncs that failed (not individual records), use `drt run --failed` (#773). See `docs/guides/dead-letter-queue.md`.
 
 ### Profile not found
 - **Cause**: `~/.drt/profiles.yml` missing or profile name mismatch.
@@ -77,7 +82,7 @@ Debug a failing drt sync.
 
 - `drt test --select <name>` — runs the post-sync validation tests (freshness / unique / accepted_values) declared in the sync YAML; use this when "the sync says success but the data looks wrong".
 - `drt_run_test` MCP tool (v0.7.5+) — same as `drt test` but callable from Claude/Cursor without leaving the chat.
-- OTel traces (v0.7+, Phase 1+2 shipped) — set `observability.otel.endpoint` in `drt_project.yml` and `pip install drt-core[otel]` to capture spans. Phase 3 engine spans (`drt.sync.run` / `drt.sync.extract` / `drt.sync.load`) land in v0.8.
+- OTel traces (v0.7+, Phase 1+2 shipped) — set `observability.otel.endpoint` in `drt_project.yml` and `pip install drt-core[otel]` to capture spans. Phase 3 engine spans (`drt.sync.run` / `drt.sync.extract` / `drt.sync.load`) shipped v0.7.10 (`pip install drt-core[otel]`).
 
 ## Telemetry
 
