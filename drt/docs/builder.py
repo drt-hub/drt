@@ -29,10 +29,72 @@ def _slug(value: str) -> str:
     return _SLUG_RE.sub("_", value).strip("_") or "node"
 
 
-def _destination_id(sync: SyncConfig) -> str:
-    """Synthesize a stable destination node id; shared across syncs that target the same one."""
+def _allocate_destination_ids(syncs: list[SyncConfig]) -> dict[str, str]:
+    """Map each destination identity to a node id that never touches a
+    sensitive value (#696): ``dest_<slug(describe_safe())>``, plus a
+    deterministic ``_2``/``_3`` suffix when two *distinct* destinations share
+    a safe label (two ``rest_api`` endpoints).
+
+    Two review findings shaped this shape:
+
+    - The first cut hashed the unredacted ``describe()``; a truncated hash of
+      a low-entropy value (phone number, email with a known domain) is
+      brute-forceable, so no function of the sensitive string may ship at all.
+      Distinctness is therefore tracked by the full ``describe()`` **in
+      memory only** — the returned dict is keyed by it, but only the values
+      reach the output.
+    - Suffixes were then allocated in sync-file encounter order, so renaming
+      ``a.yml`` → ``z.yml`` silently swapped which endpoint owned
+      ``dest_rest_api`` vs ``_2`` — a bookmarked page started showing the
+      other destination's syncs (@Pawansingh3889). Suffixes now follow the
+      lexicographically smallest *referencing sync name*: sync names are
+      manifest-public (no ordering leak, unlike sorting by the secret string)
+      and survive file renames — ids move only when the set of same-label
+      destinations actually changes.
+
+    Independent of ``--full-labels``, so switching label modes never rewires
+    the graph or renames pages.
+    """
+    # identity -> (base slug, smallest referencing sync name)
+    info: dict[str, tuple[str, str]] = {}
+    for sync in syncs:
+        dest = sync.destination
+        identity = f"{dest.type}|{dest.describe()}"
+        base = f"dest_{_slug(_safe_label(sync))}"
+        prev = info.get(identity)
+        if prev is None or sync.name < prev[1]:
+            info[identity] = (base, sync.name)
+
+    groups: dict[str, list[tuple[str, str]]] = {}  # base -> [(anchor sync, identity)]
+    for identity, (base, anchor) in info.items():
+        groups.setdefault(base, []).append((anchor, identity))
+
+    ids: dict[str, str] = {}
+    for base, members in groups.items():
+        members.sort()  # by anchor sync name — public, rename-stable
+        for i, (_anchor, identity) in enumerate(members):
+            ids[identity] = base if i == 0 else f"{base}_{i + 1}"
+    return ids
+
+
+def _safe_label(sync: SyncConfig) -> str:
+    """The docs-safe label — the only destination string allowed to ship."""
     dest = sync.destination
-    return f"dest_{_slug(dest.type)}_{_slug(dest.describe())}"
+    safe = getattr(dest, "describe_safe", None)
+    return safe() if callable(safe) else str(dest.type)
+
+
+def _destination_label(sync: SyncConfig, full_labels: bool) -> str:
+    """Docs label for a destination (#696): safe by default, verbatim on opt-in.
+
+    ``describe_safe`` is duck-typed so configs that don't inherit
+    :class:`DescribableConfig` still participate; anything without the method
+    (e.g. a future connector added without thinking about docs exposure)
+    falls back to its bare ``type`` — safe by default.
+    """
+    if full_labels:
+        return sync.destination.describe()
+    return _safe_label(sync)
 
 
 def _destination_table(sync: SyncConfig) -> str | None:
@@ -67,8 +129,18 @@ def _state_snapshot(state: SyncState) -> SyncStateSnapshot:
     )
 
 
-def build_manifest(project_dir: Path = Path("."), include_state: bool = False) -> Manifest:
+def build_manifest(
+    project_dir: Path = Path("."),
+    include_state: bool = False,
+    full_labels: bool = False,
+) -> Manifest:
     """Build a `Manifest` from sync YAMLs + project config under *project_dir*.
+
+    Destination labels are **docs-safe by default** (#696): object identity
+    (table, channel, sheet, bucket) stays, network locations and personal
+    identifiers (URLs, hosts, phone numbers, emails) do not. Pass
+    *full_labels=True* (CLI: ``--full-labels``) to restore verbatim
+    ``describe()`` output for trusted/internal hosting.
 
     When *include_state* is true, each sync's latest persisted state from
     ``.drt/state.json`` is attached as :class:`SyncStateSnapshot` under the
@@ -90,14 +162,16 @@ def build_manifest(project_dir: Path = Path("."), include_state: bool = False) -
     destinations: dict[str, Destination] = {}
     syncs: list[Sync] = []
     edges: list[Edge] = []
+    dest_ids = _allocate_destination_ids(syncs_result.syncs)
 
     for sync_cfg in syncs_result.syncs:
-        dest_id = _destination_id(sync_cfg)
+        dest = sync_cfg.destination
+        dest_id = dest_ids[f"{dest.type}|{dest.describe()}"]
         if dest_id not in destinations:
             destinations[dest_id] = Destination(
                 name=dest_id,
                 type=sync_cfg.destination.type,
-                label=sync_cfg.destination.describe(),
+                label=_destination_label(sync_cfg, full_labels),
             )
 
         sync_state = states.get(sync_cfg.name)
@@ -164,7 +238,8 @@ def build_manifest(project_dir: Path = Path("."), include_state: bool = False) -
 _SENSITIVE_KEY_RE = re.compile(
     r"(?i)(password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|"
     r"private[_-]?key|client[_-]?secret|credential|connection[_-]?string|dsn|"
-    r"auth|webhook|url|endpoint|host|hostname|email|phone)"
+    r"auth|webhook|url|endpoint|host|hostname|email|phone|number|sender|recipient|"
+    r"bucket|container|path)"
 )
 # key: value line, allowing an optional "- " list-item prefix; value must be a
 # scalar on the same line (block scalars / nested maps have no inline value).

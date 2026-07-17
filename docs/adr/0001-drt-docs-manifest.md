@@ -83,12 +83,17 @@ clocks (beyond that one stamp), randomness, or unordered sets.
 
 Syncs that target the same destination share one node. v1 as shipped derived
 the node id from a slug of `describe()` and carried `describe()` verbatim as
-`label`. **Amended by #696:** ids are now `dest_<type>_<sha1(describe())[:8]>`
-and labels are docs-safe by default (`describe_safe()`; `--full-labels`
-restores verbatim output) — the slugged form baked endpoints into page
-filenames, and verbatim labels published internal endpoints and contact
-identities the moment `target/docs/` was hosted. Both changes are
-`schema_version`-neutral: the field shapes are unchanged, only the values.
+`label`. **Amended by #696:** labels are docs-safe by default (`describe_safe()`;
+`--full-labels` restores verbatim output), and ids derive **only from the
+safe label** — `dest_<slug(describe_safe())>` plus a deterministic `_2`/`_3`
+suffix when distinct destinations share a safe label. The intermediate design
+(`dest_<type>_<sha1(describe())[:8]>`) was rejected in review: a truncated
+hash of a low-entropy value (phone number, email with a known domain) is
+brute-forceable, so no function of the sensitive string may ship at all.
+Distinctness is tracked by the full `describe()` in memory only; ids are
+independent of the label mode, so `--full-labels` never rewires the graph.
+Both changes are `schema_version`-neutral: field shapes unchanged, only
+values.
 
 ## Consequences
 

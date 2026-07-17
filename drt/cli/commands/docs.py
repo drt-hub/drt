@@ -20,14 +20,21 @@ app.add_typer(docs_app)
 
 @docs_app.command(name="generate")
 def docs_generate(
-    output: Path = typer.Option(
-        Path("target/docs"), "--output", "-o", help="Output directory."
-    ),
+    output: Path = typer.Option(Path("target/docs"), "--output", "-o", help="Output directory."),
     format: str = typer.Option(
         "html", "--format", "-f", help="Output format: html | mermaid | json."
     ),
     no_state: bool = typer.Option(
         False, "--no-state", help="Exclude per-sync run state from the manifest."
+    ),
+    full_labels: bool = typer.Option(
+        False,
+        "--full-labels",
+        help=(
+            "Show verbatim connection labels (endpoints, hosts, phone/email) "
+            "instead of the default docs-safe ones (#696). For trusted/internal "
+            "hosting only."
+        ),
     ),
 ) -> None:
     """Generate the project's sync catalog (P1 mermaid + P2 json)."""
@@ -38,12 +45,12 @@ def docs_generate(
     include_state = not no_state
 
     if fmt == "mermaid":
-        manifest = build_manifest(Path("."), include_state=include_state)
+        manifest = build_manifest(Path("."), include_state=include_state, full_labels=full_labels)
         print(render_mermaid(manifest))
         return
 
     if fmt == "json":
-        manifest = build_manifest(Path("."), include_state=include_state)
+        manifest = build_manifest(Path("."), include_state=include_state, full_labels=full_labels)
         output.mkdir(parents=True, exist_ok=True)
         manifest_path = output / "manifest.json"
         with manifest_path.open("w") as f:
@@ -63,7 +70,7 @@ def docs_generate(
 
         from drt.docs.builder import collect_sync_yaml_texts
 
-        manifest = build_manifest(Path("."), include_state=include_state)
+        manifest = build_manifest(Path("."), include_state=include_state, full_labels=full_labels)
         sync_yaml_texts = collect_sync_yaml_texts(Path("."))
         try:
             written = render_html(manifest, output, sync_yaml_texts=sync_yaml_texts)

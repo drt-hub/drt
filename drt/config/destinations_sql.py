@@ -15,6 +15,7 @@ from drt.config.base import DescribableConfig, LookupConfig, RetryConfig, SslCon
 
 
 class SnowflakeDestinationConfig(DescribableConfig):
+    _detail_is_public = True  # object identity only (#696) — safe for hosted docs
     type: Literal["snowflake"]
 
     account_env: str
@@ -75,6 +76,8 @@ class BigQueryDestinationConfig(DescribableConfig):
     / ``bigquery.jobs.create`` for the merge-path temp table).
     """
 
+    _detail_is_public = True  # object identity only (#696) — safe for hosted docs
+
     type: Literal["bigquery"]
 
     project: str
@@ -101,6 +104,8 @@ class DatabricksDestinationConfig(DescribableConfig):
     USAGE on the catalog + schema and INSERT/MODIFY on the target
     table.
     """
+
+    _detail_is_public = True  # object identity only (#696) — safe for hosted docs
 
     type: Literal["databricks"]
 
@@ -139,6 +144,8 @@ class DatabricksDestinationConfig(DescribableConfig):
 
 class ElasticsearchDestinationConfig(DescribableConfig):
     """Elasticsearch / OpenSearch destination — bulk-index records via the ``_bulk`` API."""
+
+    _detail_is_public = True  # object identity only (#696) — safe for hosted docs
 
     type: Literal["elasticsearch"]
     url: str  # cluster base URL, e.g. https://localhost:9200
@@ -185,6 +192,8 @@ class BaseSqlDestinationConfig(DescribableConfig):
     wire port; see ``MySQLDestinationConfig`` / ``ClickHouseDestinationConfig``
     for examples.
     """
+
+    _detail_is_public = True  # object identity only (#696) — safe for hosted docs
 
     connection_string_env: str | None = None
     host: str | None = None
