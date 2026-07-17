@@ -463,7 +463,7 @@ def create_server(project_dir: Path | None = None) -> Any:
     # -----------------------------------------------------------------------
 
     @mcp.tool()
-    def drt_get_manifest(include_state: bool = False) -> dict[str, Any]:
+    def drt_get_manifest(include_state: bool = False, full_labels: bool = False) -> dict[str, Any]:
         """Return the drt docs manifest — the machine-readable sync catalog and
         lineage graph (the ``--format json`` artifact of ``drt docs generate``).
 
@@ -473,13 +473,19 @@ def create_server(project_dir: Path | None = None) -> Any:
         Args:
             include_state: Also embed each sync's last-run state (status, records
                 synced, timestamps) when available.
+            full_labels: Keep verbatim connection details (endpoints, senders,
+                buckets) in destination labels. Defaults to the same docs-safe
+                labels as the CLI (#696); enable only when the manifest stays
+                in a trusted context, mirroring ``drt docs generate --full-labels``.
 
         Returns:
             The manifest as a JSON-serializable dict (schema-versioned).
         """
         from drt.docs.builder import build_manifest
 
-        return build_manifest(_project_dir, include_state=include_state).to_dict()
+        return build_manifest(
+            _project_dir, include_state=include_state, full_labels=full_labels
+        ).to_dict()
 
     # -----------------------------------------------------------------------
     # drt_list_profiles
