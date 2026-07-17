@@ -381,16 +381,17 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 > **Issue-level tracking → [GitHub Milestones](https://github.com/drt-hub/drt/milestones)**
 > **Looking to contribute? → [Good First Issues](https://github.com/drt-hub/drt/issues?q=is%3Aopen+label%3A%22good+first+issue%22)**
 
-**Shipped:** now on **v0.7.10** — co-writer-safe mirror · Delta Lake + Iceberg sources · PII masking · Klaviyo + Airtable · VS Code extension. Grouped milestones below; the full per-release changelog lives in [CHANGELOG.md](CHANGELOG.md) and [GitHub Releases](https://github.com/drt-hub/drt/releases).
+**Shipped:** now on **v0.8.0** — the `drt docs` lineage site (safe-by-default labels · static SVG DAG) · project `vars:` · `drt build` · `--fail-fast` / `--limit` / `--failed` · dbt-style selection v2 · incremental REST API. Grouped milestones below; the full per-release changelog lives in [CHANGELOG.md](CHANGELOG.md) and [GitHub Releases](https://github.com/drt-hub/drt/releases).
 
 | Milestone            | Highlights                                                                                                                                                             |
 | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **v0.1–0.3**         | Core CLI · BigQuery / DuckDB / Postgres sources · REST / Slack / HubSpot destinations · incremental sync · MCP server + AI Skills for Claude Code                       |
 | **v0.4–0.6**         | 20+ destinations (Sheets, SQL upserts, Notion, Twilio, Salesforce…) · dagster-drt / Airflow / Prefect · `drt test` · parallel `--threads` · JSON Schema validation     |
 | **v0.7** ✅          | **Production Ready** — graceful shutdown · sync history · atomic table swaps · `drt doctor` · opt-in telemetry · `sync.mode: mirror` · DLQ + `drt profile`              |
-| **v0.7.9–0.7.10** ✅ | Cloud destinations (S3 / GCS / Azure / Databricks / BigQuery / Elasticsearch) · Delta Lake + Iceberg sources · tracked & scoped mirror · PII masking · VS Code extension |
+| **v0.7.9–0.7.11** ✅ | Cloud destinations (S3 / GCS / Azure / Databricks / BigQuery / Elasticsearch) · Delta Lake + Iceberg sources · tracked & scoped mirror · PII masking · VS Code extension |
+| **v0.8.0** ✅        | **`drt docs` lineage site** (safe-by-default labels, static SVG DAG, byte-identical) · project `vars:` · `drt build` · `--fail-fast` / `--limit` / `--failed` · selection v2 · incremental REST API · `watermark.lag` · `drt deploy github-actions` |
 
-**Next:** [v0.8 Cloud Destinations & Growth](ROADMAP.md#v08--cloud-destinations--growth) → [v0.9 Enterprise Foundation](ROADMAP.md#v09--enterprise-foundation) → [v1.0 Stable Release](ROADMAP.md#v10--stable-release) → [v1.x Rust Engine](ROADMAP.md#v1x--rust-engine)
+**Next:** [v0.8.1 Diff Polish](ROADMAP.md#v081--diff-polish) → [v0.9 Enterprise Foundation](ROADMAP.md#v09--enterprise-foundation) → [v1.0 Stable Release](ROADMAP.md#v10--stable-release) → [v1.x Rust Engine](ROADMAP.md#v1x--rust-engine)
 
 ---
 
