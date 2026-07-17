@@ -28,9 +28,11 @@ Help the user migrate from an existing Reverse ETL tool (Census, Hightouch, Poly
 | Destination connection | `destination.type` + auth config |
 | Sync behavior: Full | `sync.mode: full` (every run, no dedup) |
 | Sync behavior: Append (incremental) | `sync.mode: incremental` + `cursor_field` |
-| Sync behavior: Mirror (upsert + delete-removed) | `sync.mode: mirror` (v0.7.7+) + `upsert_key` — supported on postgres / mysql / clickhouse / snowflake |
+| Sync behavior: Mirror (upsert + delete-removed) | `sync.mode: mirror` (v0.7.7+) + `upsert_key` — supported on postgres / mysql / clickhouse / snowflake / databricks (v0.7.9). Tune deletes via `sync.mirror` (v0.7.10, postgres / mysql only): `strategy: tracked` (#686, delete only rows drt itself synced — safe when the app also writes the table) and `scope: [col]` (#687, restrict deletes to observed parents) |
 | Sync behavior: Replace (overwrite table) | `sync.mode: replace` (TRUNCATE + INSERT, zero-downtime via `replace_strategy: swap` on supported DWHs) |
-| Field mappings (UI column picker) | `body_template` / `properties_template` (Jinja2) |
+| Field mappings (rename columns) | `sync.field_mappings: {source_column: destination_field}` (v0.7.9, #415) — first-class column rename applied just before the destination; use instead of aliasing in SQL |
+| Field mappings (compute / reshape a value) | `body_template` / `properties_template` (Jinja2) |
+| PII masking on a synced column | `sync.mask: {field: hash \| redact}` or `{field: {strategy: truncate, length: N}}` (v0.7.10, #427/#660) — obscures a field just before the destination without touching the source SQL |
 | Run schedule | `drt run` via cron, CI, Dagster, Airflow, or Prefect |
 | Error notifications | `failure_alerts` (Slack / webhook, v0.7.0+) — fires on sync-level failures |
 | Per-row error policy | `on_error: skip` (continue past failures) vs `on_error: fail` (stop at first) |
@@ -42,8 +44,8 @@ Help the user migrate from an existing Reverse ETL tool (Census, Hightouch, Poly
 | "Re-send everything every run" | `full` | Default. Idempotent destinations only — REST API / Slack / file outputs. |
 | "Append new rows since last run" | `incremental` + `cursor_field` | Watermark-based. `--cursor-value` overrides for backfill. |
 | "Upsert by key" | `upsert` + `upsert_key` | Census's most common "Update" shape. |
-| "Upsert by key AND delete rows removed from source" | `mirror` + `upsert_key` | Census's "Full Sync with Deletion" / Hightouch's "Mirror" semantic. v0.7.7+, SQL destinations. Source key cardinality fits in memory. |
-| "Overwrite the destination table each run" | `replace` | TRUNCATE + INSERT. Set `replace_strategy: swap` (Postgres / Snowflake) for zero-downtime via staging-table swap. |
+| "Upsert by key AND delete rows removed from source" | `mirror` + `upsert_key` | Census's "Full Sync with Deletion" / Hightouch's "Mirror" semantic. v0.7.7+, postgres / mysql / clickhouse / snowflake / databricks. Source key cardinality fits in memory. On a table the app also writes, use `sync.mirror.strategy: tracked` (postgres / mysql). |
+| "Overwrite the destination table each run" | `replace` | TRUNCATE + INSERT. Set `replace_strategy: swap` (Postgres / MySQL / ClickHouse / Snowflake / Databricks) for zero-downtime via staging-table swap. |
 
 ### Auth migration
 

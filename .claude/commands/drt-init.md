@@ -69,7 +69,9 @@ Guide the user through initializing a new drt project.
 - `drt_project.yml` selects which profile from `~/.drt/profiles.yml` to use; override per-run with `--profile <name>` or `DRT_PROFILE`.
 - Put each sync in a separate `syncs/<name>.yml` file (sync discovery is glob-based).
 - `drt sources --detailed` and `drt destinations --detailed` print every connector's required env vars and a sample YAML stanza — useful when hand-authoring beyond the templates.
-- `drt run --dry-run` runs through the engine without writing data; `--dry-run --diff` previews record-level changes for queryable destinations.
+- `drt run --dry-run` runs through the engine without writing data; `--dry-run --diff` previews record-level changes for queryable destinations. `drt run --limit 10` (#774) really loads at most 10 rows for a safe first send (watermark won't advance; refused for `mode: mirror` / `replace`).
+- `drt build` (#777) runs each sync and then its `tests:` in one pass — the `dbt build` shape; `drt build --select tag:crm --fail-fast` stops at the first failure.
 - `drt status` shows recent run results; `drt status --output json` is the CI-friendly form.
+- `drt docs generate` (v0.7.11+) renders a static HTML catalog of your project — every sync, its model, destination, and a lineage DAG — to `target/docs/`. Labels are docs-safe by default (endpoints/emails/phones stripped, #696); add `--format mermaid` or `--format json` for other outputs.
 - For non-US BigQuery datasets, set `location` in `profiles.yml` (e.g. `"EU"`, `"asia-northeast1"`).
 - Want to try drt without installing locally? Open the repo in GitHub Codespaces — the devcontainer ships drt + a seeded DuckDB warehouse + the `duckdb_to_rest` template pre-scaffolded.

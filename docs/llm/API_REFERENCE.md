@@ -193,6 +193,10 @@ sync:                       # optional: all fields have defaults
   field_mappings:           # optional (#415): declarative column rename {source_column: destination_field}
     user_id: id             # applied after extraction + cursor tracking + lookups, just before the destination
     full_name: name         # cursor_field / lookups use SOURCE names; upsert_key / destination columns use MAPPED names
+  mask:                     # optional (#427/#660): PII masking — obscure fields before they reach the destination
+    email: hash             # "hash" (SHA-256 hex) | "redact" ("[REDACTED]"); keys reference the DESTINATION-facing name (post field_mappings)
+    name: { strategy: truncate, length: 2 }  # object form for parameterised strategies (truncate keeps the first N chars)
+    # runs as the LAST transform (after field_mappings); nulls pass through; works on every destination; source SQL untouched
   dlq:                      # optional (#278): Dead Letter Queue — persist per-record load failures for replay
     enabled: false          # default: false (opt-in) — writes FULL records to .drt/dlq/<sync>.jsonl (a PII decision)
     max_records: 10000      # default: 10000 — cap queue size; oldest entries dropped past this (0 = unbounded)

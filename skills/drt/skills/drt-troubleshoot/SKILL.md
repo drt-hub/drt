@@ -108,10 +108,19 @@ destination.
 ### 6. First real run
 
 ```bash
+drt run --select <name> --limit 10           # sampled real send (#774) — load ≤10 rows, eyeball the destination
 drt run --select <name> --verbose            # row-level error detail
 drt status                                   # what actually happened
 drt status --output json                     # machine-readable, for CI
 ```
+
+`--limit N` really loads at most N rows (Census/Hightouch "test with sample
+records"), so you can inspect them in the destination UI before opening the
+tap. The watermark never advances on a sampled run, and it's refused for
+`mode: mirror` / `replace` (a sampled mirror would delete the rows it skipped).
+When verifying a whole project, add `--fail-fast` (#775) so a systemic failure
+(expired credential, warehouse down) stops after the first sync instead of
+burning quota — skipped syncs report `status: "skipped"` in `--output json`.
 
 - **✅ green when:** `result.success` equals the dry-run row count and
   `result.failed` is 0.
@@ -120,10 +129,14 @@ drt status --output json                     # machine-readable, for CI
   (`on_error: skip` to see the full failure count instead of stopping at the
   first); partial success where some rows fail validation downstream.
 - **Recovering partial failures:** enable the dead letter queue
-  (`sync.dlq.enabled: true` + `on_error: skip`, v0.8+) so failed records
+  (`sync.dlq.enabled: true` + `on_error: skip`, v0.7.9+) so failed records
   persist to `.drt/dlq/<sync>.jsonl` instead of being dropped. `drt status`
   shows the queue depth; `drt retry <sync>` re-sends just the failures once
   you've fixed the root cause. See `docs/guides/dead-letter-queue.md`.
+- **Re-running whole syncs that failed:** `drt retry` replays *records* from
+  the DLQ; `drt run --failed` (#773) re-runs the *syncs* whose last status
+  wasn't `success` — the sync-level recovery loop after you've fixed config.
+  It exits 0 (with a note) when nothing failed, so it's safe in CI.
 
 ### 7. Post-sync correctness
 
