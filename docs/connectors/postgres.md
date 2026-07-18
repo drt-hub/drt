@@ -88,6 +88,27 @@ Caveats:
 
 Same `replace_strategy: swap` is supported on MySQL (atomic `RENAME TABLE`) and ClickHouse (atomic `EXCHANGE TABLES`, requires CH 21.8+).
 
+**Match policy (`match_policy`, [#757](https://github.com/drt-hub/drt/issues/757)) — only-update / only-create:**
+
+```yaml
+sync:
+  mode: upsert
+  match_policy: update_only   # upsert (default) | update_only | create_only
+destination:
+  type: postgres
+  table: public.contacts
+  upsert_key: [id]
+```
+
+By default `mode: upsert` (and `full` / `incremental`) both *update* rows that already exist and *insert* rows that don't. `match_policy` narrows that to one side — the reverse-ETL activation cases where creating or overwriting is exactly wrong:
+
+- **`update_only`** — only touch rows that already exist in the destination; rows with no match are **skipped, not inserted**. The enrichment case: push warehouse-computed scores into CRM contacts sales already created, without spraying a new junk contact for every warehouse row. Emitted as `UPDATE <table> SET <non-key cols> WHERE <upsert_key>`; requires at least one non-key column to update.
+- **`create_only`** — only insert rows that don't yet exist; existing rows are **left untouched**. Seed an audience once and never overwrite fields a rep has since hand-edited. Emitted as `INSERT ... ON CONFLICT (<upsert_key>) DO NOTHING`.
+
+Skipped rows are counted in the run's **`skipped`** total (`drt run` prints `… N skipped`), not as errors. `match_policy` composes with `field_mappings`, `mask`, and `lookups`. It is **rejected for `mode: replace`** (the TRUNCATE makes only-update / only-create meaningless) and **`mode: mirror`** (its delete pass is a separate design) at validate time, and a destination that doesn't implement it **fails fast** rather than silently upserting. Prior art: Census / Hightouch "Update Only" / "Create Only" sync behaviours.
+
+> **Availability:** shipped on the **Postgres** destination first (clean `rowcount` semantics for the skip count). MySQL and the SaaS/CRM destinations (HubSpot, Salesforce, Intercom, …) — where `update_only` is most valuable — follow as per-destination PRs on the same engine seam ([#757](https://github.com/drt-hub/drt/issues/757)).
+
 **Mirror mode (differential delete, [#340](https://github.com/drt-hub/drt/issues/340) — v0.7.7+):**
 
 ```yaml
