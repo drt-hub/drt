@@ -470,6 +470,48 @@ def test_tracked_baseline_logs_warning(caplog: pytest.LogCaptureFixture) -> None
     assert any("baselin" in r.message.lower() for r in caplog.records)
 
 
+def test_tracked_creates_state_table_when_absent() -> None:
+    """to_regclass -> NULL: the state table is created (lazy-create default)."""
+    dest = PostgresDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    cur = finalize_conn.cursor.return_value
+    cur.fetchone.return_value = (None,)  # existence probe: table absent
+    cur.fetchall.return_value = []
+
+    with patch.object(PostgresDestination, "_connect", return_value=load_conn):
+        dest.load([{"id": 1}], _config(), _tracked_options())
+    with patch.object(PostgresDestination, "_connect", return_value=finalize_conn):
+        dest.finalize_sync(_config(), _tracked_options())
+
+    assert any(
+        "CREATE TABLE" in str(c.args[0]) for c in cur.execute.call_args_list
+    )
+
+
+def test_tracked_skips_create_when_state_table_preprovisioned() -> None:
+    """to_regclass -> non-NULL: no CREATE, so a no-DDL user can run (#695)."""
+    dest = PostgresDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    cur = finalize_conn.cursor.return_value
+    cur.fetchone.return_value = ("public._drt_synced_keys",)  # already exists
+    cur.fetchall.return_value = []
+
+    with patch.object(PostgresDestination, "_connect", return_value=load_conn):
+        dest.load([{"id": 1}], _config(), _tracked_options())
+    with patch.object(PostgresDestination, "_connect", return_value=finalize_conn):
+        dest.finalize_sync(_config(), _tracked_options())
+
+    assert not any(
+        "CREATE TABLE" in str(c.args[0]) for c in cur.execute.call_args_list
+    )
+    # the sync still functions: state is read and rewritten
+    assert any(
+        "_drt_synced_keys" in str(c.args[0]) for c in cur.execute.call_args_list
+    )
+
+
 # ---------------------------------------------------------------------------
 # mirror.scope (#687)
 # ---------------------------------------------------------------------------

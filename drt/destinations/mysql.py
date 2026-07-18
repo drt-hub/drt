@@ -472,18 +472,38 @@ class MySQLDestination(BaseSqlDestination):
             database = config.table.rsplit(".", 1)[0]
             state_q = self._quote_ident(f"{database}.{STATE_TABLE}")
         else:
+            database = None
             state_q = self._quote_ident(STATE_TABLE)
 
         conn = self._connect(config)
         try:
             cur = conn.cursor()
-            cur.execute(
-                f"CREATE TABLE IF NOT EXISTS {state_q} ("
-                "sync_name VARCHAR(255) NOT NULL, "
-                "key_hash CHAR(64) NOT NULL, "
-                "key_json TEXT NOT NULL, "
-                "PRIMARY KEY (sync_name, key_hash))"
-            )
+            # Pre-provisioning (#695): check existence before issuing DDL so a
+            # locked-down destination user (no CREATE privilege) can run against
+            # a state table an admin created ahead of time. MySQL checks the
+            # CREATE privilege *before* the IF NOT EXISTS existence check, so a
+            # pre-created table alone is not enough — we must avoid emitting the
+            # statement at all. Only CREATE when the table is genuinely absent.
+            if database is not None:
+                cur.execute(
+                    "SELECT COUNT(*) FROM information_schema.tables "
+                    "WHERE table_schema = %s AND table_name = %s",
+                    (database, STATE_TABLE),
+                )
+            else:
+                cur.execute(
+                    "SELECT COUNT(*) FROM information_schema.tables "
+                    "WHERE table_schema = DATABASE() AND table_name = %s",
+                    (STATE_TABLE,),
+                )
+            if cur.fetchone()[0] == 0:
+                cur.execute(
+                    f"CREATE TABLE IF NOT EXISTS {state_q} ("
+                    "sync_name VARCHAR(255) NOT NULL, "
+                    "key_hash CHAR(64) NOT NULL, "
+                    "key_json TEXT NOT NULL, "
+                    "PRIMARY KEY (sync_name, key_hash))"
+                )
             cur.execute(
                 f"SELECT key_hash, key_json FROM {state_q} WHERE sync_name = %s",
                 (sync_name,),

@@ -146,6 +146,27 @@ sync:
 
 Instead of diffing against the whole destination table (only correct when drt exclusively owns it), `tracked` persists the set of `upsert_key` tuples drt has itself synced in a drt-managed `_drt_synced_keys` table (created lazily in the target's database) and deletes only `previously-synced − current-source` keys — so rows the application wrote are never deletion candidates. First run baselines without deleting; lost state re-baselines with a WARN; target delete + state rewrite share one transaction. See the [Postgres tracked-mirror section](postgres.md) for the full semantics — the MySQL implementation is identical apart from placeholder building (explicit `%s` lists).
 
+**Required destination privileges ([#695](https://github.com/drt-hub/drt/issues/695)):** tracked mirror needs `DELETE` on the target plus grants on the state table, beyond the `mode: full` set (`SELECT, INSERT, UPDATE`). This bit a real least-privilege MySQL rollout (`(1142, "CREATE command denied to user … for table '_drt_synced_keys'")`):
+
+```sql
+-- target table: DELETE is the tracked-mirror addition
+GRANT SELECT, INSERT, UPDATE, DELETE ON `analytics`.`scores` TO 'retl_user'@'%';
+-- state table: pre-provision it once as an admin to skip the CREATE grant
+CREATE TABLE IF NOT EXISTS `analytics`.`_drt_synced_keys` (
+  sync_name VARCHAR(255) NOT NULL,
+  key_hash  CHAR(64)     NOT NULL,
+  key_json  TEXT         NOT NULL,
+  PRIMARY KEY (sync_name, key_hash)
+);
+GRANT SELECT, INSERT, DELETE ON `analytics`.`_drt_synced_keys` TO 'retl_user'@'%';
+-- table-level grants can be issued before the table exists
+```
+
+Two MySQL-specific traps:
+
+1. **The DELETE grant fails late, not on the first run.** The first run baselines and issues no deletes, so a missing `DELETE` privilege only detonates on the *first real generation change* — potentially weeks after rollout. Grant it up front.
+2. **`CREATE TABLE IF NOT EXISTS` still needs `CREATE` — MySQL checks the privilege *before* the existence check**, so pre-creating `_drt_synced_keys` alone did not historically avoid the grant. Since v0.8.x drt first probes `information_schema.tables` and **skips the CREATE entirely when the table already exists**, so an admin can pre-provision the state table (SQL above) and run the sync user with **no DDL privilege** — the sanctioned pattern for "no CREATE for app users" hardening.
+
 **Scoped mirror (`mirror.scope`, [#687](https://github.com/drt-hub/drt/issues/687)):** `scope: [parent_id]` restricts the mirror DELETE to rows whose scope values appeared in this run's source — the stateless fit for 1:N regeneration (delete stale children under regenerated parents, never touch rows under unobserved parents). See the [Postgres scoped-mirror section](postgres.md) for the full semantics.
 
 Same `sync.mode: mirror` is supported on **Postgres** (Step 1 — psycopg2's tuple-of-tuples auto-expansion), **ClickHouse** (Step 3 — `ALTER TABLE ... DELETE WHERE` mutation with `mutations_sync=1`), and **Snowflake** (Step 4 — forces the MERGE write path regardless of `config.mode`). BigQuery follows once contributor PR [#584](https://github.com/drt-hub/drt/pull/584) lands. `mirror.strategy: tracked` is currently **Postgres + MySQL only**.
