@@ -105,3 +105,4 @@ values.
   exposure for column-level lineage (L2, #702), run/DLQ history for the DLQ
   badge (#698), and model-SQL source-table extraction (needs SQL parsing).
   Each is additive in spirit but reshapes `Sync`, so they land together as v2.
+  **Landed** (all but SQL parsing) — see ADR 0003.
