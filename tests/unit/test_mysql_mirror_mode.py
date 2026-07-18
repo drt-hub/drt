@@ -470,6 +470,56 @@ def test_tracked_state_table_in_target_database_mysql() -> None:
     assert "`mydb`.`_drt_synced_keys`" in executed
 
 
+def test_tracked_creates_state_table_when_absent_mysql() -> None:
+    """information_schema COUNT -> 0: the state table is created (lazy default)."""
+    dest = MySQLDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    cur = finalize_conn.cursor.return_value
+    cur.fetchone.return_value = (0,)  # existence probe: table absent
+    cur.fetchall.return_value = []
+
+    with patch.object(MySQLDestination, "_connect", return_value=load_conn):
+        dest.load([{"id": 1}], _config(), _tracked_options())
+    with patch.object(MySQLDestination, "_connect", return_value=finalize_conn):
+        dest.finalize_sync(_config(), _tracked_options())
+
+    assert any(
+        "CREATE TABLE" in str(c.args[0]) for c in cur.execute.call_args_list
+    )
+    # existence is probed via information_schema, not blind DDL
+    assert any(
+        "information_schema.tables" in str(c.args[0])
+        for c in cur.execute.call_args_list
+    )
+
+
+def test_tracked_skips_create_when_state_table_preprovisioned_mysql() -> None:
+    """information_schema COUNT -> 1: no CREATE, so a no-DDL user can run (#695).
+
+    MySQL checks the CREATE privilege before the ``IF NOT EXISTS`` existence
+    check, so the statement must not be emitted at all when the table exists.
+    """
+    dest = MySQLDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    cur = finalize_conn.cursor.return_value
+    cur.fetchone.return_value = (1,)  # existence probe: already exists
+    cur.fetchall.return_value = []
+
+    with patch.object(MySQLDestination, "_connect", return_value=load_conn):
+        dest.load([{"id": 1}], _config(), _tracked_options())
+    with patch.object(MySQLDestination, "_connect", return_value=finalize_conn):
+        dest.finalize_sync(_config(), _tracked_options())
+
+    assert not any(
+        "CREATE TABLE" in str(c.args[0]) for c in cur.execute.call_args_list
+    )
+    assert any(
+        "_drt_synced_keys" in str(c.args[0]) for c in cur.execute.call_args_list
+    )
+
+
 # ---------------------------------------------------------------------------
 # mirror.scope (#687)
 # ---------------------------------------------------------------------------

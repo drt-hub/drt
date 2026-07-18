@@ -549,15 +549,25 @@ class PostgresDestination(BaseSqlDestination):
         conn = self._connect(config)
         try:
             cur = conn.cursor()
+            # Pre-provisioning (#695): check existence before issuing DDL so a
+            # locked-down destination user (no CREATE privilege) can run against
+            # a state table an admin created ahead of time. Only CREATE when the
+            # table is genuinely absent — the IF NOT EXISTS guard stays for the
+            # concurrent-first-run race.
             cur.execute(
-                _pgsql.SQL(
-                    "CREATE TABLE IF NOT EXISTS {} ("
-                    "sync_name VARCHAR(255) NOT NULL, "
-                    "key_hash CHAR(64) NOT NULL, "
-                    "key_json TEXT NOT NULL, "
-                    "PRIMARY KEY (sync_name, key_hash))"
-                ).format(state_ident)
+                "SELECT to_regclass(%s)",
+                (_join_qualified(schema, STATE_TABLE),),
             )
+            if cur.fetchone()[0] is None:
+                cur.execute(
+                    _pgsql.SQL(
+                        "CREATE TABLE IF NOT EXISTS {} ("
+                        "sync_name VARCHAR(255) NOT NULL, "
+                        "key_hash CHAR(64) NOT NULL, "
+                        "key_json TEXT NOT NULL, "
+                        "PRIMARY KEY (sync_name, key_hash))"
+                    ).format(state_ident)
+                )
             cur.execute(
                 _pgsql.SQL(
                     "SELECT key_hash, key_json FROM {} WHERE sync_name = %s"

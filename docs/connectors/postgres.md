@@ -140,6 +140,26 @@ Tracked-specific behaviour:
 
 Choose `destination` when drt owns the table (slightly cheaper: no state I/O). Choose `tracked` when anything else writes to the table. Currently supported on **Postgres and MySQL**; ClickHouse / Snowflake / Databricks reject `strategy: tracked` with a clear error until their follow-ups land.
 
+**Required destination privileges ([#695](https://github.com/drt-hub/drt/issues/695)):** tracked mirror needs two grants beyond the `mode: full` set (`SELECT, INSERT, UPDATE` on the target). A least-privilege user hardened for `full` writes will otherwise fail — and, because of trap #1 below, often not until weeks later:
+
+```sql
+-- target table: DELETE is the tracked-mirror addition
+GRANT SELECT, INSERT, UPDATE, DELETE ON marketing.scores TO retl_user;
+-- state table: pre-provision it once as an admin to skip the CREATE grant entirely
+CREATE TABLE IF NOT EXISTS marketing._drt_synced_keys (
+  sync_name VARCHAR(255) NOT NULL,
+  key_hash  CHAR(64)     NOT NULL,
+  key_json  TEXT         NOT NULL,
+  PRIMARY KEY (sync_name, key_hash)
+);
+GRANT SELECT, INSERT, DELETE ON marketing._drt_synced_keys TO retl_user;
+```
+
+Two traps worth calling out:
+
+1. **The DELETE grant fails late, not on the first run.** The first run baselines and issues no deletes, so a missing `DELETE` privilege stays invisible until the *first real generation change* — potentially weeks after rollout. Grant it up front.
+2. **The state table is lazily created — but drt checks existence first.** drt runs `CREATE TABLE IF NOT EXISTS _drt_synced_keys` on the target schema when the table is absent, so by default the sync user needs `CREATE`. Since v0.8.x drt first probes `to_regclass('<schema>._drt_synced_keys')` and **skips the CREATE entirely when the table already exists** — so an admin can pre-provision `_drt_synced_keys` (SQL above) and run the sync user with **no DDL privilege at all**, the sanctioned pattern for "no CREATE for app users" environments.
+
 **Scoped mirror (`mirror.scope`, [#687](https://github.com/drt-hub/drt/issues/687)) — for 1:N regeneration:**
 
 ```yaml
