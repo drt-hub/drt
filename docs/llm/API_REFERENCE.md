@@ -208,6 +208,11 @@ sync:                       # optional: all fields have defaults
     backoff_multiplier: 2.0 # default: 2.0 — set to 1.0 for linear/constant backoff
     max_backoff: 60.0       # default: 60.0 seconds
     retryable_status_codes: [429, 500, 502, 503, 504]  # default as shown
+    # Retry-After (#769): when a retryable HTTP response (429/503 from Slack,
+    # HubSpot, Intercom, Zendesk, …) sends a `Retry-After` header (delay-seconds
+    # or HTTP-date), drt waits max(retry_after, computed_backoff), capped by
+    # max_backoff — honouring the server instead of retrying too early/late.
+    # Header-less responses and network errors keep pure exponential backoff.
 
 # Per-destination retry override (#277): set `retry:` inside any HTTP
 # destination block to override `sync.retry` for that destination only.
