@@ -463,20 +463,27 @@ def create_server(project_dir: Path | None = None) -> Any:
     # -----------------------------------------------------------------------
 
     @mcp.tool()
-    def drt_get_manifest(include_state: bool = False, full_labels: bool = False) -> dict[str, Any]:
+    def drt_get_manifest(
+        include_state: bool = False, full_labels: bool = False, history_depth: int = 10
+    ) -> dict[str, Any]:
         """Return the drt docs manifest — the machine-readable sync catalog and
         lineage graph (the ``--format json`` artifact of ``drt docs generate``).
 
         This is the structured view of the whole project: every sync, its source
-        model and destination, and the source→sync→destination edges.
+        model and destination, the source→sync→destination edges, and each
+        sync's declared column facts (``fields`` — renames + masks, schema v2).
 
         Args:
-            include_state: Also embed each sync's last-run state (status, records
-                synced, timestamps) when available.
+            include_state: Also embed what is machine-local: each sync's
+                last-run state (status, records synced, timestamps), recent
+                run history (``runs``), and DLQ depth.
             full_labels: Keep verbatim connection details (endpoints, senders,
-                buckets) in destination labels. Defaults to the same docs-safe
-                labels as the CLI (#696); enable only when the manifest stays
-                in a trusted context, mirroring ``drt docs generate --full-labels``.
+                buckets) in destination labels and embedded error text.
+                Defaults to the same docs-safe output as the CLI (#696/#698);
+                enable only when the manifest stays in a trusted context,
+                mirroring ``drt docs generate --full-labels``.
+            history_depth: Recent runs per sync to embed when *include_state*
+                (newest first; 0 disables). Mirrors ``--history-depth``.
 
         Returns:
             The manifest as a JSON-serializable dict (schema-versioned).
@@ -484,7 +491,10 @@ def create_server(project_dir: Path | None = None) -> Any:
         from drt.docs.builder import build_manifest
 
         return build_manifest(
-            _project_dir, include_state=include_state, full_labels=full_labels
+            _project_dir,
+            include_state=include_state,
+            full_labels=full_labels,
+            history_depth=history_depth,
         ).to_dict()
 
     # -----------------------------------------------------------------------

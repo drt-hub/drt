@@ -11,6 +11,8 @@ from drt.docs.manifest import (
     Project,
     Source,
     Sync,
+    SyncField,
+    SyncRun,
     SyncStateSnapshot,
 )
 from drt.docs.mermaid import render_mermaid
@@ -23,6 +25,8 @@ __all__ = [
     "Project",
     "Source",
     "Sync",
+    "SyncField",
+    "SyncRun",
     "SyncStateSnapshot",
     "build_manifest",
     "render_dag_svg",

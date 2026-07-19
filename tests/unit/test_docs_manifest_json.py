@@ -18,6 +18,8 @@ from drt.docs import (
     Project,
     Source,
     Sync,
+    SyncField,
+    SyncRun,
     SyncStateSnapshot,
     build_manifest,
 )
@@ -65,6 +67,38 @@ def _write_state(project_dir: Path, payload: dict[str, dict[str, object]]) -> No
     (state_dir / "state.json").write_text(json.dumps(payload))
 
 
+def _history_entry(sync_name: str, started_at: str, **overrides: object) -> dict[str, object]:
+    """One on-disk HistoryEntry line (the .drt/history JSONL shape)."""
+    entry: dict[str, object] = {
+        "sync_name": sync_name,
+        "started_at": started_at,
+        "completed_at": "2026-05-14T00:00:05+00:00",
+        "duration_seconds": 5.0,
+        "status": "success",
+        "records_synced": 10,
+        "records_failed": 0,
+        "errors": [],
+        "cursor_value_used": None,
+        "dry_run": False,
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _write_history(project_dir: Path, sync_name: str, entries: list[dict[str, object]]) -> None:
+    hist_dir = project_dir / ".drt" / "history"
+    hist_dir.mkdir(parents=True, exist_ok=True)
+    (hist_dir / f"{sync_name}.jsonl").write_text("".join(json.dumps(e) + "\n" for e in entries))
+
+
+def _write_dlq(project_dir: Path, sync_name: str, n: int) -> None:
+    dlq_dir = project_dir / ".drt" / "dlq"
+    dlq_dir.mkdir(parents=True, exist_ok=True)
+    (dlq_dir / f"{sync_name}.jsonl").write_text(
+        "".join(json.dumps({"record": {"id": i}, "error": "boom"}) + "\n" for i in range(n))
+    )
+
+
 class TestManifestRoundTrip:
     def test_round_trip_preserves_all_fields(self) -> None:
         original = Manifest(
@@ -87,6 +121,23 @@ class TestManifestRoundTrip:
                         last_status="success",
                         last_error=None,
                     ),
+                    runs=(
+                        SyncRun(
+                            started_at="2026-05-14T00:00:00Z",
+                            completed_at="2026-05-14T00:00:07Z",
+                            duration_seconds=7.2,
+                            status="partial",
+                            records_synced=1200,
+                            records_failed=48,
+                            errors=("row 12: boom",),
+                            cursor_value_used="2026-05-13T23:55:00Z",
+                        ),
+                    ),
+                    fields=(
+                        SyncField(name="email_address", source_name="email", mask="hash"),
+                        SyncField(name="phone", source_name="phone", mask="truncate"),
+                    ),
+                    dlq_depth=3,
                 ),
             ],
             sources=[Source(name="bq_prod", type="bigquery")],
@@ -117,6 +168,19 @@ class TestManifestRoundTrip:
         )
         sync_dict = m.to_dict()["syncs"][0]
         assert "state" not in sync_dict
+
+    def test_v2_blocks_omitted_when_absent(self) -> None:
+        """A sync with no machine-local data and no declared columns serializes
+        exactly like a v1 sync — v2 is a pure superset (#698)."""
+        m = Manifest(
+            schema_version=SCHEMA_VERSION,
+            drt_version="0.9.0",
+            syncs=[Sync(name="s", source="src", destination="dst", mode="full")],
+        )
+        sync_dict = m.to_dict()["syncs"][0]
+        assert "runs" not in sync_dict
+        assert "fields" not in sync_dict
+        assert "dlq_depth" not in sync_dict
 
 
 class TestBuildManifestWithState:
@@ -192,32 +256,240 @@ class TestBuildManifestWithState:
         assert manifest.project.profile == "my_profile"
 
 
+class TestBuildManifestRuns:
+    """Schema v2 (#698): recent run history from .drt/history embedded per sync."""
+
+    def _project_with_history(self, tmp_path: Path, entries: list[dict[str, object]]) -> None:
+        _write_project(tmp_path)
+        _write_sync(tmp_path, "users.yml", _pg_sync("users", "public.users"))
+        _write_history(tmp_path, "users", entries)
+
+    def test_runs_embedded_newest_first(self, tmp_path: Path) -> None:
+        self._project_with_history(
+            tmp_path,
+            [
+                _history_entry("users", "2026-05-14T00:00:00+00:00", records_synced=100),
+                _history_entry(
+                    "users",
+                    "2026-05-14T01:00:00+00:00",
+                    status="failed",
+                    records_synced=0,
+                    records_failed=100,
+                    duration_seconds=1.5,
+                    cursor_value_used="2026-05-13T23:00:00Z",
+                ),
+            ],
+        )
+
+        manifest = build_manifest(tmp_path, include_state=True)
+        runs = manifest.syncs[0].runs
+
+        assert [r.started_at for r in runs] == [
+            "2026-05-14T01:00:00+00:00",
+            "2026-05-14T00:00:00+00:00",
+        ]
+        newest = runs[0]
+        assert newest.status == "failed"
+        assert newest.duration_seconds == 1.5
+        assert newest.records_failed == 100
+        assert newest.cursor_value_used == "2026-05-13T23:00:00Z"
+
+    def test_history_depth_limits_runs(self, tmp_path: Path) -> None:
+        self._project_with_history(
+            tmp_path,
+            [_history_entry("users", f"2026-05-14T0{i}:00:00+00:00") for i in range(3)],
+        )
+        manifest = build_manifest(tmp_path, include_state=True, history_depth=2)
+        assert len(manifest.syncs[0].runs) == 2
+
+    def test_history_depth_zero_disables_runs(self, tmp_path: Path) -> None:
+        self._project_with_history(tmp_path, [_history_entry("users", "2026-05-14T00:00:00+00:00")])
+        manifest = build_manifest(tmp_path, include_state=True, history_depth=0)
+        assert manifest.syncs[0].runs == ()
+
+    def test_no_state_omits_runs(self, tmp_path: Path) -> None:
+        self._project_with_history(tmp_path, [_history_entry("users", "2026-05-14T00:00:00+00:00")])
+        manifest = build_manifest(tmp_path, include_state=False)
+        assert manifest.syncs[0].runs == ()
+        assert "runs" not in manifest.to_dict()["syncs"][0]
+
+    def test_run_errors_redacted_by_default(self, tmp_path: Path) -> None:
+        """The #698 interlock: error strings carry connection details, so the
+        #696 safe-by-default policy covers them too."""
+        self._project_with_history(
+            tmp_path,
+            [
+                _history_entry(
+                    "users",
+                    "2026-05-14T00:00:00+00:00",
+                    status="failed",
+                    errors=[
+                        "connection to postgres://drt:hunter2@db.internal:5432/wh failed",
+                        "notify admin@corp.example about host=db.internal",
+                    ],
+                )
+            ],
+        )
+        manifest = build_manifest(tmp_path, include_state=True)
+        blob = json.dumps(manifest.to_dict())
+        assert "hunter2" not in blob
+        assert "db.internal" not in blob
+        assert "admin@corp.example" not in blob
+        errors = manifest.syncs[0].runs[0].errors
+        assert all("« redacted »" in e for e in errors)
+
+    def test_full_labels_keeps_error_text(self, tmp_path: Path) -> None:
+        self._project_with_history(
+            tmp_path,
+            [
+                _history_entry(
+                    "users",
+                    "2026-05-14T00:00:00+00:00",
+                    status="failed",
+                    errors=["connection to postgres://db.internal:5432/wh failed"],
+                )
+            ],
+        )
+        manifest = build_manifest(tmp_path, include_state=True, full_labels=True)
+        assert manifest.syncs[0].runs[0].errors == (
+            "connection to postgres://db.internal:5432/wh failed",
+        )
+
+
+class TestBuildManifestFields:
+    """Schema v2 (#808): declared write-side column facts from field_mappings + mask."""
+
+    def _sync_with_options(self, **options: object) -> dict[str, object]:
+        sync = _pg_sync("users", "public.users")
+        sync["sync"] = {"mode": "upsert", **options}
+        return sync
+
+    def test_mappings_and_mask_merge_on_post_rename_name(self, tmp_path: Path) -> None:
+        _write_project(tmp_path)
+        _write_sync(
+            tmp_path,
+            "users.yml",
+            self._sync_with_options(
+                field_mappings={"email": "email_address", "created": "created_at"},
+                mask={
+                    "email_address": "hash",
+                    "ssn": {"strategy": "truncate", "length": 4},
+                },
+            ),
+        )
+
+        manifest = build_manifest(tmp_path)
+        fields = manifest.syncs[0].fields
+
+        # Sorted by destination-side name; mask keys reference post-rename names.
+        assert [(f.name, f.source_name, f.mask) for f in fields] == [
+            ("created_at", "created", None),
+            ("email_address", "email", "hash"),
+            ("ssn", "ssn", "truncate"),
+        ]
+
+    def test_fields_emitted_without_state(self, tmp_path: Path) -> None:
+        """Declared columns are a function of the repo, not the machine —
+        they survive --no-state like the rest of the catalog."""
+        _write_project(tmp_path)
+        _write_sync(tmp_path, "users.yml", self._sync_with_options(mask={"email": "redact"}))
+        manifest = build_manifest(tmp_path, include_state=False)
+        assert manifest.syncs[0].fields == (
+            SyncField(name="email", source_name="email", mask="redact"),
+        )
+
+    def test_no_declarations_omit_fields_key(self, tmp_path: Path) -> None:
+        _write_project(tmp_path)
+        _write_sync(tmp_path, "users.yml", _pg_sync("users", "public.users"))
+        manifest = build_manifest(tmp_path)
+        assert manifest.syncs[0].fields == ()
+        assert "fields" not in manifest.to_dict()["syncs"][0]
+
+
+class TestBuildManifestDlq:
+    """Schema v2 (#698/#808): current DLQ depth per sync, for the DLQ badge."""
+
+    def test_dlq_depth_counts_entries(self, tmp_path: Path) -> None:
+        _write_project(tmp_path)
+        _write_sync(tmp_path, "users.yml", _pg_sync("users", "public.users"))
+        _write_dlq(tmp_path, "users", 3)
+        manifest = build_manifest(tmp_path, include_state=True)
+        assert manifest.syncs[0].dlq_depth == 3
+
+    def test_dlq_depth_zero_when_no_queue(self, tmp_path: Path) -> None:
+        _write_project(tmp_path)
+        _write_sync(tmp_path, "users.yml", _pg_sync("users", "public.users"))
+        manifest = build_manifest(tmp_path, include_state=True)
+        assert manifest.syncs[0].dlq_depth == 0
+
+    def test_dlq_depth_absent_without_state(self, tmp_path: Path) -> None:
+        _write_project(tmp_path)
+        _write_sync(tmp_path, "users.yml", _pg_sync("users", "public.users"))
+        _write_dlq(tmp_path, "users", 3)
+        manifest = build_manifest(tmp_path, include_state=False)
+        assert manifest.syncs[0].dlq_depth is None
+        assert "dlq_depth" not in manifest.to_dict()["syncs"][0]
+
+
+class TestStateErrorRedaction:
+    """The pre-existing state.last_error leak, closed by the #698 interlock."""
+
+    def _project_with_error(self, tmp_path: Path, error: str) -> None:
+        _write_project(tmp_path)
+        _write_sync(tmp_path, "users.yml", _pg_sync("users", "public.users"))
+        _write_state(
+            tmp_path,
+            {
+                "users": {
+                    "sync_name": "users",
+                    "last_run_at": "2026-05-14T00:00:00Z",
+                    "records_synced": 0,
+                    "status": "failed",
+                    "error": error,
+                    "last_cursor_value": None,
+                }
+            },
+        )
+
+    def test_last_error_redacted_by_default(self, tmp_path: Path) -> None:
+        self._project_with_error(
+            tmp_path, "could not reach https://api.corp.example/hook (token=abc123)"
+        )
+        manifest = build_manifest(tmp_path, include_state=True)
+        state = manifest.syncs[0].state
+        assert state is not None and state.last_error is not None
+        assert "api.corp.example" not in state.last_error
+        assert "abc123" not in state.last_error
+        assert "« redacted »" in state.last_error
+
+    def test_last_error_verbatim_with_full_labels(self, tmp_path: Path) -> None:
+        self._project_with_error(tmp_path, "could not reach https://api.corp.example/hook")
+        manifest = build_manifest(tmp_path, include_state=True, full_labels=True)
+        state = manifest.syncs[0].state
+        assert state is not None
+        assert state.last_error == "could not reach https://api.corp.example/hook"
+
+
 class TestDocsGenerateJsonCLI:
-    def test_writes_manifest_json_to_output_dir(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_writes_manifest_json_to_output_dir(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.chdir(tmp_path)
         _write_project(tmp_path)
         _write_sync(tmp_path, "users.yml", _pg_sync("users", "public.users"))
 
-        result = runner.invoke(
-            app, ["docs", "generate", "--format", "json", "--output", "out"]
-        )
+        result = runner.invoke(app, ["docs", "generate", "--format", "json", "--output", "out"])
 
         assert result.exit_code == 0
         manifest_path = tmp_path / "out" / "manifest.json"
         assert manifest_path.exists()
 
         data = json.loads(manifest_path.read_text())
-        assert data["schema_version"] == 1
+        assert data["schema_version"] == SCHEMA_VERSION
         assert "drt_version" in data
         assert data["project"]["name"] == "demo"
         assert len(data["syncs"]) == 1
         assert data["syncs"][0]["name"] == "users"
 
-    def test_default_output_is_target_docs(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_default_output_is_target_docs(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.chdir(tmp_path)
         _write_project(tmp_path)
         result = runner.invoke(app, ["docs", "generate", "--format", "json"])
@@ -249,10 +521,39 @@ class TestDocsGenerateJsonCLI:
         assert result.exit_code == 0
         data = json.loads((tmp_path / "out" / "manifest.json").read_text())
         assert "state" not in data["syncs"][0]
+        assert "runs" not in data["syncs"][0]
+        assert "dlq_depth" not in data["syncs"][0]
 
-    def test_html_writes_static_site(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_history_depth_flag_limits_runs(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        _write_project(tmp_path)
+        _write_sync(tmp_path, "users.yml", _pg_sync("users", "public.users"))
+        _write_history(
+            tmp_path,
+            "users",
+            [_history_entry("users", f"2026-05-14T0{i}:00:00+00:00") for i in range(3)],
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "docs",
+                "generate",
+                "--format",
+                "json",
+                "--output",
+                "out",
+                "--history-depth",
+                "1",
+            ],
+        )
+        assert result.exit_code == 0
+        data = json.loads((tmp_path / "out" / "manifest.json").read_text())
+        runs = data["syncs"][0]["runs"]
+        assert len(runs) == 1
+        assert runs[0]["started_at"] == "2026-05-14T02:00:00+00:00"
+
+    def test_html_writes_static_site(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.chdir(tmp_path)
         _write_project(tmp_path)
         result = runner.invoke(app, ["docs", "generate", "--format", "html"])

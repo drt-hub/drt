@@ -552,6 +552,50 @@ async def test_get_manifest_full_labels_opts_in(server: FastMCP) -> None:
     assert result["destinations"][0]["label"] == "rest_api (https://example.com/hook)"
 
 
+def _seed_history(project_dir: Path, n: int) -> None:
+    import json
+
+    hist_dir = project_dir / ".drt" / "history"
+    hist_dir.mkdir(parents=True, exist_ok=True)
+    (hist_dir / "notify.jsonl").write_text(
+        "".join(
+            json.dumps(
+                {
+                    "sync_name": "notify",
+                    "started_at": f"2026-05-14T0{i}:00:00+00:00",
+                    "completed_at": f"2026-05-14T0{i}:00:05+00:00",
+                    "duration_seconds": 5.0,
+                    "status": "success",
+                    "records_synced": 10,
+                    "records_failed": 0,
+                    "errors": [],
+                    "cursor_value_used": None,
+                    "dry_run": False,
+                }
+            )
+            + "\n"
+            for i in range(n)
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_manifest_history_depth_mirrors_cli(server: FastMCP, project_dir: Path) -> None:
+    """`history_depth` mirrors `drt docs generate --history-depth` (schema v2, #698):
+    runs ride along with `include_state`, newest first, capped at the depth."""
+    _seed_history(project_dir, 3)
+
+    result = await call(server, "drt_get_manifest", include_state=True, history_depth=2)
+    runs = result["syncs"][0]["runs"]
+    assert len(runs) == 2
+    assert runs[0]["started_at"] == "2026-05-14T02:00:00+00:00"
+    assert result["syncs"][0]["dlq_depth"] == 0
+
+    # Without include_state the manifest stays catalog-only, like the CLI.
+    result = await call(server, "drt_get_manifest", history_depth=2)
+    assert "runs" not in result["syncs"][0]
+
+
 # ---------------------------------------------------------------------------
 # drt_list_profiles / drt_test_profile — credential diagnostics (#718)
 # ---------------------------------------------------------------------------

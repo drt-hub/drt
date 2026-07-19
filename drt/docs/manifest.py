@@ -1,14 +1,23 @@
 """Manifest dataclasses for `drt docs generate`.
 
 These describe the catalog of a drt project — syncs, sources, destinations,
-edges, and (optionally) per-sync run state. Schema is versioned
-(`SCHEMA_VERSION`) and considered a public surface; see ADR #500 and
-sub-issue #507.
+edges, and (optionally) per-sync run state and history. Schema is versioned
+(`SCHEMA_VERSION`) and considered a public surface; see ADR 0001 (#500,
+sub-issue #507) for v1 and ADR 0003 (#698) for v2.
 
 Public field names are stable across drt versions per VERSIONING.md.
 Breaking the JSON shape requires bumping ``SCHEMA_VERSION`` and a migration
 note. Internal :class:`drt.state.manager.SyncState` field names are
 intentionally renamed in the public ``state`` block; see ``SyncStateSnapshot``.
+
+Schema v2 (#698) is a pure superset of v1 — three optional additions on each
+sync, nothing renamed or removed, so v1 consumers keep working unchanged:
+
+- ``runs``: recent execution history (public shape of
+  :class:`drt.state.history.HistoryEntry`), newest first.
+- ``fields``: declared write-side column facts from ``sync.field_mappings``
+  and ``sync.mask`` — the column-level lineage source (#808).
+- ``dlq_depth``: current Dead Letter Queue depth for the sync.
 """
 
 from __future__ import annotations
@@ -16,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 EdgeKind = Literal["source_to_sync", "sync_to_destination", "lookup"]
 
@@ -57,6 +66,41 @@ class SyncStateSnapshot:
 
 
 @dataclass(frozen=True)
+class SyncRun:
+    """One historical execution of a sync (schema v2, #698).
+
+    Public shape of :class:`drt.state.history.HistoryEntry`. ``sync_name`` is
+    dropped (runs nest under their sync) and ``dry_run`` is dropped (always
+    False on disk — reserved). ``errors`` text is redacted by the builder
+    unless ``--full-labels`` (#696 policy, see ADR 0003).
+    """
+
+    started_at: str  # ISO-8601 UTC
+    completed_at: str  # ISO-8601 UTC
+    duration_seconds: float
+    status: str  # "success" | "partial" | "failed"
+    records_synced: int
+    records_failed: int
+    errors: tuple[str, ...] = ()
+    cursor_value_used: str | None = None
+
+
+@dataclass(frozen=True)
+class SyncField:
+    """A declared write-side column fact (schema v2, #808 column lineage).
+
+    Built from ``sync.field_mappings`` (source column → destination field)
+    and ``sync.mask`` (whose keys reference the post-rename name). Only
+    *declared* columns appear — drt does not parse model SQL, so this is
+    never the full column set.
+    """
+
+    name: str  # destination-side field name (post-rename)
+    source_name: str  # pre-rename column; equals ``name`` when not renamed
+    mask: str | None = None  # mask strategy ("hash" | "redact" | "truncate")
+
+
+@dataclass(frozen=True)
 class Sync:
     name: str
     source: str  # Source.name
@@ -65,6 +109,9 @@ class Sync:
     description: str = ""
     tags: tuple[str, ...] = ()
     state: SyncStateSnapshot | None = None
+    runs: tuple[SyncRun, ...] = ()  # newest first; empty when state excluded
+    fields: tuple[SyncField, ...] = ()  # declared columns only (v2)
+    dlq_depth: int | None = None  # None when state excluded
 
 
 @dataclass(frozen=True)
@@ -140,6 +187,26 @@ def _sync_to_dict(s: Sync) -> dict[str, Any]:
             "last_status": s.state.last_status,
             "last_error": s.state.last_error,
         }
+    if s.runs:
+        d["runs"] = [
+            {
+                "started_at": r.started_at,
+                "completed_at": r.completed_at,
+                "duration_seconds": r.duration_seconds,
+                "status": r.status,
+                "records_synced": r.records_synced,
+                "records_failed": r.records_failed,
+                "errors": list(r.errors),
+                "cursor_value_used": r.cursor_value_used,
+            }
+            for r in s.runs
+        ]
+    if s.fields:
+        d["fields"] = [
+            {"name": f.name, "source_name": f.source_name, "mask": f.mask} for f in s.fields
+        ]
+    if s.dlq_depth is not None:
+        d["dlq_depth"] = s.dlq_depth
     return d
 
 
@@ -154,4 +221,9 @@ def _sync_from_dict(d: dict[str, Any]) -> Sync:
         description=d.get("description", ""),
         tags=tuple(d.get("tags", [])),
         state=state,
+        runs=tuple(
+            SyncRun(**{**r, "errors": tuple(r.get("errors", []))}) for r in d.get("runs", [])
+        ),
+        fields=tuple(SyncField(**f) for f in d.get("fields", [])),
+        dlq_depth=d.get("dlq_depth"),
     )

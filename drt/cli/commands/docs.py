@@ -25,15 +25,26 @@ def docs_generate(
         "html", "--format", "-f", help="Output format: html | mermaid | json."
     ),
     no_state: bool = typer.Option(
-        False, "--no-state", help="Exclude per-sync run state from the manifest."
+        False,
+        "--no-state",
+        help="Exclude per-sync run state, run history, and DLQ depth from the manifest.",
     ),
     full_labels: bool = typer.Option(
         False,
         "--full-labels",
         help=(
             "Show verbatim connection labels (endpoints, hosts, phone/email) "
-            "instead of the default docs-safe ones (#696). For trusted/internal "
-            "hosting only."
+            "and unredacted error text instead of the default docs-safe output "
+            "(#696/#698). For trusted/internal hosting only."
+        ),
+    ),
+    history_depth: int = typer.Option(
+        10,
+        "--history-depth",
+        min=0,
+        help=(
+            "Recent runs per sync to embed in the manifest from .drt/history "
+            "(schema v2, #698). 0 disables; ignored with --no-state."
         ),
     ),
 ) -> None:
@@ -45,12 +56,22 @@ def docs_generate(
     include_state = not no_state
 
     if fmt == "mermaid":
-        manifest = build_manifest(Path("."), include_state=include_state, full_labels=full_labels)
+        manifest = build_manifest(
+            Path("."),
+            include_state=include_state,
+            full_labels=full_labels,
+            history_depth=history_depth,
+        )
         print(render_mermaid(manifest))
         return
 
     if fmt == "json":
-        manifest = build_manifest(Path("."), include_state=include_state, full_labels=full_labels)
+        manifest = build_manifest(
+            Path("."),
+            include_state=include_state,
+            full_labels=full_labels,
+            history_depth=history_depth,
+        )
         output.mkdir(parents=True, exist_ok=True)
         manifest_path = output / "manifest.json"
         with manifest_path.open("w") as f:
@@ -70,7 +91,12 @@ def docs_generate(
 
         from drt.docs.builder import collect_sync_yaml_texts
 
-        manifest = build_manifest(Path("."), include_state=include_state, full_labels=full_labels)
+        manifest = build_manifest(
+            Path("."),
+            include_state=include_state,
+            full_labels=full_labels,
+            history_depth=history_depth,
+        )
         sync_yaml_texts = collect_sync_yaml_texts(Path("."))
         try:
             written = render_html(manifest, output, sync_yaml_texts=sync_yaml_texts)
