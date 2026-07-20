@@ -332,8 +332,90 @@ AlertItem = Annotated[
 ]
 
 
+class ConditionThreshold(BaseModel):
+    """One comparison for a degraded-sync condition (#784).
+
+    Exactly one operator is set — ``{gt: 1}``, ``{eq: 0}``, etc. The metric it
+    applies to is the key it sits under in ``on_degraded.conditions``.
+    """
+
+    gt: float | None = None
+    lt: float | None = None
+    gte: float | None = None
+    lte: float | None = None
+    eq: float | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_operator(self) -> ConditionThreshold:
+        set_ops = [op for op in (self.gt, self.lt, self.gte, self.lte, self.eq) if op is not None]
+        if len(set_ops) != 1:
+            raise ValueError(
+                "each alert condition must set exactly one of gt/lt/gte/lte/eq "
+                f"(got {len(set_ops)})."
+            )
+        return self
+
+    @property
+    def operator(self) -> str:
+        for name in ("gt", "lt", "gte", "lte", "eq"):
+            if getattr(self, name) is not None:
+                return name
+        raise AssertionError("unreachable: validated to have exactly one operator")
+
+    @property
+    def value(self) -> float:
+        return float(getattr(self, self.operator))
+
+    def compares(self, actual: float) -> bool:
+        """True when *actual* satisfies this threshold (i.e. the condition trips)."""
+        if self.gt is not None:
+            return actual > self.gt
+        if self.lt is not None:
+            return actual < self.lt
+        if self.gte is not None:
+            return actual >= self.gte
+        if self.lte is not None:
+            return actual <= self.lte
+        return actual == self.eq
+
+
+class DegradedConditions(BaseModel):
+    """Post-sync degradation thresholds (#784) — a mapping metric -> threshold.
+
+    A mapping (not a list) forbids duplicate metrics for free. Every field is
+    optional; an unset metric is simply not evaluated. Evaluated at the CLI seam
+    from data already in ``SyncResult`` + the DLQ store — no new collection.
+    """
+
+    # failed / rows_extracted, as a percentage (0 when rows_extracted == 0, so an
+    # empty source is the rows_extracted condition's job, never a false 100%).
+    row_errors_pct: ConditionThreshold | None = None
+    # whole-sync wall time; skipped when SyncResult.duration_seconds is unset.
+    duration_seconds: ConditionThreshold | None = None
+    # extracted source row count — ``{eq: 0}`` is the empty-source guard.
+    rows_extracted: ConditionThreshold | None = None
+    # cumulative DLQ backlog for this sync (accumulates across runs until retry).
+    dlq_depth: ConditionThreshold | None = None
+
+
+class OnDegradedConfig(BaseModel):
+    """``alerts.on_degraded`` (#784) — thresholds + the channels they notify.
+
+    Separate from ``on_failure`` (hard failure): degradation is partial — a
+    creeping error rate, a duration SLA breach, an empty source, an accumulating
+    DLQ. ``channels`` defaults to empty, so conditions can be JSON-only (surfaced
+    in ``--output json`` for CI) without wiring a Slack/webhook target.
+    """
+
+    channels: list[AlertItem] = Field(default_factory=list)
+    conditions: DegradedConditions = Field(default_factory=DegradedConditions)
+
+
 class AlertsConfig(BaseModel):
     on_failure: list[AlertItem] = Field(default_factory=list)
+    # Partial-degradation thresholds (#784) — see OnDegradedConfig. on_failure
+    # (hard failure) is untouched.
+    on_degraded: OnDegradedConfig | None = None
 
 
 # Discriminated union — add new destination types here.

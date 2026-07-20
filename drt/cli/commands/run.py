@@ -30,6 +30,7 @@ import signal
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -151,6 +152,7 @@ def _run_one(
     if not ctx.json_mode and not ctx.dry_run and not ctx.quiet:
         print_sync_start(sync.name, ctx.dry_run)
     t0 = time.monotonic()
+    started_at = datetime.now(timezone.utc).isoformat()  # for #784 degraded-alert context
     if ctx.log_json:
         logging.info("sync_started", extra={"sync": sync.name})
 
@@ -267,6 +269,45 @@ def _run_one(
                 from drt.cli.output import print_diff_table
 
                 print_diff_table(diff_value, sync.name)
+
+        # Degraded-sync conditions (#784): evaluated here at the CLI seam — the
+        # one place with both the finished SyncResult and the DLQ store — so the
+        # engine (Rust boundary) stays untouched and `drt build` inherits this
+        # for free. Skipped on dry runs (nothing really ran). on_failure is
+        # unaffected; conditions are orthogonal degradation signals.
+        if not ctx.dry_run and sync.alerts is not None and sync.alerts.on_degraded is not None:
+            from drt.alerts import (
+                build_degraded_context,
+                dispatch_targets,
+                evaluate_conditions,
+            )
+            from drt.state.dlq import DlqStore
+
+            dlq_depth = DlqStore(Path(".")).depth(sync.name)
+            tripped = evaluate_conditions(
+                result, dlq_depth, sync.alerts.on_degraded.conditions
+            )
+            if tripped:
+                entry["conditions_tripped"] = [
+                    {
+                        "metric": t.metric,
+                        "operator": t.operator,
+                        "threshold": t.threshold,
+                        "actual": t.actual,
+                    }
+                    for t in tripped
+                ]
+                dispatch_targets(
+                    sync.alerts.on_degraded.channels,
+                    build_degraded_context(
+                        sync_name=sync.name,
+                        result=result,
+                        duration_s=elapsed,
+                        started_at=started_at,
+                        tripped=tripped,
+                    ),
+                )
+
         return_value = (sync.name, entry, result.failed > 0)
         return return_value
     finally:
