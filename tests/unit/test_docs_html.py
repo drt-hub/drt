@@ -305,6 +305,89 @@ def test_render_guard_surfaces_as_clean_cli_error(
     assert (target / "keep.txt").exists()  # guard protected the dir
 
 
+# ---------------------------------------------------------------------------
+# --inline / self-contained output (#818)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def inline_site(tmp_path: Path) -> Path:
+    out = tmp_path / "docs"
+    render_html(_manifest(), out, inline_assets=True)
+    return out
+
+
+def test_inline_writes_no_assets_dir(inline_site: Path) -> None:
+    assert not (inline_site / "assets").exists()
+    # index + pages + manifest.json are still there.
+    assert (inline_site / "index.html").exists()
+    assert (inline_site / "sync/customers-to-discord.html").exists()
+    assert (inline_site / "manifest.json").exists()
+
+
+def test_inline_pages_have_no_external_css_js_references(inline_site: Path) -> None:
+    """Acceptance #1: no external CSS/JS sub-resource references on any page —
+    the property that lets an authenticated object store serve it (#818)."""
+    for f in inline_site.rglob("*.html"):
+        text = f.read_text(encoding="utf-8")
+        assert 'href="assets/' not in text and 'href="../assets/' not in text
+        assert 'src="assets/' not in text and 'src="../assets/' not in text
+        assert "assets/style.css" not in text
+        assert "assets/app.js" not in text
+
+
+def test_inline_pages_embed_style_and_script(inline_site: Path) -> None:
+    index = (inline_site / "index.html").read_text(encoding="utf-8")
+    assert "<style>" in index  # style.css inlined
+    assert "<script>" in index  # app.js inlined
+    # A recognisable rule from the bundled CSS survived inlining.
+    assert "--brand" in index
+
+
+def test_inline_favicon_stays_data_uri(inline_site: Path) -> None:
+    index = (inline_site / "index.html").read_text(encoding="utf-8")
+    assert 'rel="icon" href="data:image/svg+xml' in index
+
+
+def test_inline_interpage_links_still_work(inline_site: Path) -> None:
+    """Acceptance #3: index ↔ sub-page navigation is intact (self-contained,
+    not single-file)."""
+    index = (inline_site / "index.html").read_text(encoding="utf-8")
+    assert 'href="sync/customers-to-discord.html"' in index
+    sub = (inline_site / "sync/customers-to-discord.html").read_text(encoding="utf-8")
+    assert 'href="../index.html"' in sub  # back to overview
+
+
+def test_inline_regeneration_is_byte_identical(tmp_path: Path) -> None:
+    """#697's bar holds for --inline too — deterministic assets, deterministic bytes."""
+    m = _manifest()
+    a, b = tmp_path / "a", tmp_path / "b"
+    render_html(m, a, inline_assets=True)
+    render_html(m, b, inline_assets=True)
+    files_a = sorted(p.relative_to(a) for p in a.rglob("*") if p.is_file())
+    files_b = sorted(p.relative_to(b) for p in b.rglob("*") if p.is_file())
+    assert files_a == files_b
+    for rel in files_a:
+        assert (a / rel).read_bytes() == (b / rel).read_bytes(), str(rel)
+
+
+def test_inline_default_output_unchanged(tmp_path: Path) -> None:
+    """Default (multi-file) output still links assets/ — --inline is opt-in."""
+    out = tmp_path / "docs"
+    render_html(_manifest(), out)  # default
+    assert (out / "assets/style.css").exists()
+    assert 'href="assets/style.css"' in (out / "index.html").read_text(encoding="utf-8")
+
+
+def test_inline_regenerates_over_prior_inline_build(tmp_path: Path) -> None:
+    """The rmtree guard recognises a prior --inline build (no assets/ dir)."""
+    out = tmp_path / "docs"
+    render_html(_manifest(), out, inline_assets=True)
+    # Second run must not raise the "Refusing to delete" guard.
+    render_html(_manifest(), out, inline_assets=True)
+    assert (out / "index.html").exists()
+
+
 def test_regeneration_is_byte_identical(tmp_path: Path) -> None:
     """#697's acceptance bar: same manifest -> same bytes, across the whole site."""
     m = _manifest()
