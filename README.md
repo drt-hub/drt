@@ -381,7 +381,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 > **Issue-level tracking → [GitHub Milestones](https://github.com/drt-hub/drt/milestones)**
 > **Looking to contribute? → [Good First Issues](https://github.com/drt-hub/drt/issues?q=is%3Aopen+label%3A%22good+first+issue%22)**
 
-**Shipped:** now on **v0.8.1** — `sync.match_policy` (`update_only` / `create_only` on Postgres + HubSpot) · self-contained `drt docs --inline` for object-store hosting · manifest schema v2, on top of the v0.8.0 `drt docs` lineage site · project `vars:` · `drt build` · dbt-style selection v2. Grouped milestones below; the full per-release changelog lives in [CHANGELOG.md](CHANGELOG.md) and [GitHub Releases](https://github.com/drt-hub/drt/releases).
+**Shipped:** now on **v0.8.2** — single-object `drt docs --inline` (navigable hosted catalog on GCS/S3), on top of v0.8.1's `sync.match_policy` (`update_only` / `create_only` on Postgres + HubSpot) · self-contained `drt docs --inline` for object-store hosting · manifest schema v2, on top of the v0.8.0 `drt docs` lineage site · project `vars:` · `drt build` · dbt-style selection v2. Grouped milestones below; the full per-release changelog lives in [CHANGELOG.md](CHANGELOG.md) and [GitHub Releases](https://github.com/drt-hub/drt/releases).
 
 | Milestone            | Highlights                                                                                                                                                             |
 | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -391,8 +391,9 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | **v0.7.9–0.7.11** ✅ | Cloud destinations (S3 / GCS / Azure / Databricks / BigQuery / Elasticsearch) · Delta Lake + Iceberg sources · tracked & scoped mirror · PII masking · VS Code extension |
 | **v0.8.0** ✅        | **`drt docs` lineage site** (safe-by-default labels, static SVG DAG, byte-identical) · project `vars:` · `drt build` · `--fail-fast` / `--limit` / `--failed` · selection v2 · incremental REST API · `watermark.lag` · `drt deploy github-actions` |
 | **v0.8.1** ✅        | **`sync.match_policy`** `update_only` / `create_only` (Postgres + HubSpot) · `drt docs generate --inline` (self-contained HTML for object-store hosting) · manifest schema v2 (run history · column facts · DLQ depth) · tracked-mirror no-`CREATE`-grant · `Retry-After` |
+| **v0.8.2** ✅        | **`drt docs --inline` → single navigable HTML object** — the whole catalog in one file with in-page nav, so it renders *and* navigates on an authenticated GCS / S3 object URL (completes v0.8.1's `--inline`) |
 
-**Next:** [v0.8.2 Diff Polish](ROADMAP.md#v082--diff-polish) → [v0.9 Enterprise Foundation](ROADMAP.md#v09--enterprise-foundation) → [v1.0 Stable Release](ROADMAP.md#v10--stable-release) → [v1.x Rust Engine](ROADMAP.md#v1x--rust-engine)
+**Next:** [v0.8.3 Diff Polish](ROADMAP.md#v083--diff-polish) → [v0.9 Enterprise Foundation](ROADMAP.md#v09--enterprise-foundation) → [v1.0 Stable Release](ROADMAP.md#v10--stable-release) → [v1.x Rust Engine](ROADMAP.md#v1x--rust-engine)
 
 ---
 
