@@ -276,36 +276,46 @@ def _run_one(
         # for free. Skipped on dry runs (nothing really ran). on_failure is
         # unaffected; conditions are orthogonal degradation signals.
         if not ctx.dry_run and sync.alerts is not None and sync.alerts.on_degraded is not None:
-            from drt.alerts import (
-                build_degraded_context,
-                dispatch_targets,
-                evaluate_conditions,
-            )
-            from drt.state.dlq import DlqStore
+            # Best-effort: a monitoring feature must never fail the run it
+            # monitors. The DLQ read (a filesystem op on .drt/dlq/) and dispatch
+            # are wrapped so a permission/OS error degrades to a logged warning
+            # rather than sinking an otherwise-successful sync — same posture as
+            # dispatch_targets, which already swallows per-channel send errors.
+            try:
+                from drt.alerts import (
+                    build_degraded_context,
+                    dispatch_targets,
+                    evaluate_conditions,
+                )
+                from drt.state.dlq import DlqStore
 
-            dlq_depth = DlqStore(Path(".")).depth(sync.name)
-            tripped = evaluate_conditions(
-                result, dlq_depth, sync.alerts.on_degraded.conditions
-            )
-            if tripped:
-                entry["conditions_tripped"] = [
-                    {
-                        "metric": t.metric,
-                        "operator": t.operator,
-                        "threshold": t.threshold,
-                        "actual": t.actual,
-                    }
-                    for t in tripped
-                ]
-                dispatch_targets(
-                    sync.alerts.on_degraded.channels,
-                    build_degraded_context(
-                        sync_name=sync.name,
-                        result=result,
-                        duration_s=elapsed,
-                        started_at=started_at,
-                        tripped=tripped,
-                    ),
+                dlq_depth = DlqStore(Path(".")).depth(sync.name)
+                tripped = evaluate_conditions(
+                    result, dlq_depth, sync.alerts.on_degraded.conditions
+                )
+                if tripped:
+                    entry["conditions_tripped"] = [
+                        {
+                            "metric": t.metric,
+                            "operator": t.operator,
+                            "threshold": t.threshold,
+                            "actual": t.actual,
+                        }
+                        for t in tripped
+                    ]
+                    dispatch_targets(
+                        sync.alerts.on_degraded.channels,
+                        build_degraded_context(
+                            sync_name=sync.name,
+                            result=result,
+                            duration_s=elapsed,
+                            started_at=started_at,
+                            tripped=tripped,
+                        ),
+                    )
+            except Exception as exc:  # noqa: BLE001 — degraded eval must never fail the run
+                logging.getLogger(__name__).warning(
+                    "Degraded-condition evaluation failed for %r: %s", sync.name, exc
                 )
 
         return_value = (sync.name, entry, result.failed > 0)

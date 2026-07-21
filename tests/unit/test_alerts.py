@@ -307,3 +307,30 @@ class TestOnDegradedCliSeam:
         entry = _json.loads(result.output)["syncs"][0]
         assert "conditions_tripped" not in entry
         mock_slack.assert_not_called()
+
+    def test_degraded_eval_failure_does_not_sink_the_run(self, tmp_path, monkeypatch):
+        """A monitoring feature must never fail the run it monitors: if the DLQ
+        read raises (permission / OS error), the successful sync still succeeds
+        (masukai's robustness ask on #784)."""
+        import json as _json
+
+        from typer.testing import CliRunner
+
+        from drt.cli.main import app
+        from drt.state import dlq as dlq_module
+
+        self._project(
+            tmp_path,
+            monkeypatch,
+            "  on_degraded:\n    conditions:\n      dlq_depth: { gt: 0 }\n",
+        )
+        self._patch_engine(monkeypatch, extracted=100, failed=0, duration=1.0)
+
+        def boom(self, sync_name):  # noqa: ANN001, ANN202
+            raise PermissionError(".drt/dlq not readable")
+
+        monkeypatch.setattr(dlq_module.DlqStore, "depth", boom)
+        result = CliRunner().invoke(app, ["run", "--output", "json"])
+        payload = _json.loads(result.output)
+        assert result.exit_code == 0  # run not sunk by the monitoring read
+        assert "conditions_tripped" not in payload["syncs"][0]
