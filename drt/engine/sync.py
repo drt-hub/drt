@@ -19,7 +19,12 @@ from typing import Any, Literal
 from drt.config.credentials import ProfileConfig
 from drt.config.duration import parse_duration
 from drt.config.models import LookupConfig, SyncConfig
-from drt.destinations.base import Destination, StagedDestination, SyncResult
+from drt.destinations.base import (
+    Destination,
+    MatchPolicyCapable,
+    StagedDestination,
+    SyncResult,
+)
 from drt.destinations.lookup import (
     apply_lookups,
     build_lookup_map,
@@ -100,6 +105,34 @@ def _apply_watermark_lag(value: str, lag: str | int) -> str:
         ) from e
     lagged = parsed - parse_duration(lag, field_name="watermark.lag")
     return _stringify_cursor_value(lagged)
+
+
+def _check_match_policy_supported(
+    match_policy: str, destination: Destination | StagedDestination
+) -> None:
+    """Fail fast on a ``sync.match_policy`` a destination can't serve (#757).
+
+    No-op for the default ``upsert`` policy. For ``update_only`` / ``create_only``
+    the destination must declare support via :class:`MatchPolicyCapable` and
+    list the specific policy in ``supported_match_policies()`` — otherwise we
+    raise rather than silently upsert (which would create the junk CRM rows
+    ``update_only`` exists to prevent). Same fail-fast stance as unsupported
+    ``mirror`` configs; pure (no I/O), so it is safe inside ``engine/sync.py``.
+    """
+    if match_policy == "upsert":
+        return
+    supported: frozenset[str] = frozenset()
+    if isinstance(destination, MatchPolicyCapable):
+        supported = destination.supported_match_policies()
+    if match_policy not in supported:
+        dest_name = type(destination).__name__
+        raise ValueError(
+            f"sync.match_policy: {match_policy} is not supported by "
+            f"{dest_name}. Supported here: "
+            f"{', '.join(sorted(supported)) or 'upsert only'}. "
+            "match_policy currently ships on the Postgres destination "
+            "(update_only / create_only); other destinations follow (#757)."
+        )
 
 
 def batch(iterable: Iterator[Any], size: int) -> Iterator[list[Any]]:
@@ -374,6 +407,11 @@ def _run_sync_body(
     """Inner body of run_sync. Mutates `total_result` in place so the outer
     finally-block can read partial results when an exception propagates.
     """
+    # match_policy fail-fast (#757): a non-default policy on a destination that
+    # doesn't implement it must error loudly, never be silently ignored. Pure
+    # capability check — no I/O — so it stays inside the engine boundary.
+    _check_match_policy_supported(sync.sync.match_policy, destination)
+
     # Load last cursor value for incremental syncs (fallback chain)
     cursor_field = sync.sync.cursor_field if sync.sync.mode == "incremental" else None
     last_cursor_value: str | None = None
