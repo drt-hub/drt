@@ -24,6 +24,12 @@ class SyncResult:
     success: int = 0
     failed: int = 0
     skipped: int = 0
+    # Subset of ``skipped``: rows a destination declined because ``match_policy``
+    # (#757) had no create/update target — ``update_only`` with no matching row,
+    # ``create_only`` on an existing row. Always ``<= skipped`` (these rows are
+    # counted in ``skipped`` too, so ``total`` is unaffected); it just names
+    # *why* they were skipped, distinct from lookup / mask / ``--limit`` skips.
+    skipped_no_match: int = 0
     errors: list[str] = field(default_factory=list)
     row_errors: list[RowError] = field(default_factory=list)
     # Populated by run_sync(); covers full sync, not individual batches.
@@ -69,6 +75,27 @@ class ConnectionTestable(Protocol):
 
     def test_connection(self, config: DestinationConfig) -> None:
         """Raise an exception if the destination cannot be reached."""
+        ...
+
+
+@runtime_checkable
+class MatchPolicyCapable(Protocol):
+    """Destination that honours ``sync.match_policy`` (#757).
+
+    ``match_policy: update_only | create_only`` narrows the per-row upsert to
+    only-existing / only-new rows. Not every destination can express that
+    (a bare append-only API, say), so support is an opt-in capability the
+    engine checks structurally — ``isinstance(dest, MatchPolicyCapable)`` —
+    before running a non-default policy. Destinations that don't implement it
+    fail fast with a clear error instead of silently ignoring the policy
+    (the same fail-fast philosophy as unsupported ``mirror`` configs).
+
+    Implementations return the set of policies they honour so the engine can
+    reject an unsupported *value* on an otherwise-capable destination.
+    """
+
+    def supported_match_policies(self) -> frozenset[str]:
+        """Return the ``match_policy`` values this destination honours."""
         ...
 
 

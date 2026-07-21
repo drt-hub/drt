@@ -47,6 +47,18 @@ def docs_generate(
             "(schema v2, #698). 0 disables; ignored with --no-state."
         ),
     ),
+    inline: bool = typer.Option(
+        False,
+        "--inline",
+        help=(
+            "HTML only: emit the whole catalog as ONE self-contained, navigable "
+            "HTML object — inlined CSS/JS + in-page (#hash) navigation — so it "
+            "renders AND navigates on an authenticated object store (GCS / S3), "
+            "where per-object auth breaks the multi-file output's sub-resources "
+            "and cross-links (#818/#821). Display is byte-identical to the "
+            "default multi-file output."
+        ),
+    ),
 ) -> None:
     """Generate the project's sync catalog (P1 mermaid + P2 json)."""
     from drt.docs.builder import build_manifest
@@ -99,7 +111,9 @@ def docs_generate(
         )
         sync_yaml_texts = collect_sync_yaml_texts(Path("."))
         try:
-            written = render_html(manifest, output, sync_yaml_texts=sync_yaml_texts)
+            written = render_html(
+                manifest, output, sync_yaml_texts=sync_yaml_texts, inline_assets=inline
+            )
         except ValueError as e:
             print_error(str(e))
             raise typer.Exit(1) from e

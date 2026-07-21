@@ -13,6 +13,9 @@ drt-core version its bundled schemas were generated from.
 
 - Bundled JSON Schemas regenerated from drt-core: `drt_project.yml` now validates
   the `vars:` block (project vars, drt-hub/drt#783).
+- Bundled JSON Schemas regenerated from drt-core: `syncs/*.yml` now validates the
+  `sync.match_policy` field (`upsert` | `update_only` | `create_only`,
+  drt-hub/drt#757).
 
 ## [0.1.0] - Unreleased
 

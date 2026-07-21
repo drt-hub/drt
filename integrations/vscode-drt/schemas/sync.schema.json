@@ -3941,6 +3941,16 @@
           "title": "Replace Strategy",
           "type": "string"
         },
+        "match_policy": {
+          "default": "upsert",
+          "enum": [
+            "upsert",
+            "update_only",
+            "create_only"
+          ],
+          "title": "Match Policy",
+          "type": "string"
+        },
         "cursor_field": {
           "anyOf": [
             {

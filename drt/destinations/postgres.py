@@ -765,23 +765,54 @@ class PostgresDestination(BaseSqlDestination):
         sync_options: SyncOptions,
     ) -> SyncResult:
         result = SyncResult()
+        policy = sync_options.match_policy
         update_cols = [c for c in columns if c not in config.upsert_key]
-        query = PostgresDestination._build_upsert_sql(
-            config.table,
-            columns,
-            config.upsert_key,
-            update_cols,
-        )
         schema_map = self._resolve_schema(config)
+
+        # match_policy (#757) picks the write shape and, for the narrowed
+        # policies, the parameter order. Postgres has clean rowcount semantics:
+        # ON CONFLICT DO NOTHING reports rows *inserted* (0 == already existed),
+        # and UPDATE reports rows *matched* (0 == no such row) regardless of
+        # whether any value actually changed — so cur.rowcount == 0 is an exact
+        # "skipped, no match" signal for both narrowed policies.
+        if policy == "create_only":
+            query = PostgresDestination._build_create_only_sql(
+                config.table, columns, config.upsert_key
+            )
+            value_cols = columns
+        elif policy == "update_only":
+            if not update_cols:
+                raise ValueError(
+                    "sync.match_policy: update_only needs at least one non-key "
+                    "column to update, but every column is in upsert_key."
+                )
+            query = PostgresDestination._build_update_only_sql(
+                config.table, update_cols, config.upsert_key
+            )
+            # UPDATE ... SET <update_cols> WHERE <upsert_key>: SET params first,
+            # then the WHERE key params.
+            value_cols = update_cols + config.upsert_key
+        else:
+            query = PostgresDestination._build_upsert_sql(
+                config.table,
+                columns,
+                config.upsert_key,
+                update_cols,
+            )
+            value_cols = columns
 
         for i, record in enumerate(records):
             try:
                 values = [
                     _serialize_value(record.get(c), c, config.json_columns, schema_map)
-                    for c in columns
+                    for c in value_cols
                 ]
                 cur.execute(query, values)
-                result.success += 1
+                if policy in ("create_only", "update_only") and cur.rowcount == 0:
+                    result.skipped += 1
+                    result.skipped_no_match += 1  # #757 — no create/update target
+                else:
+                    result.success += 1
             except Exception as e:
                 result.failed += 1
                 result.row_errors.append(
@@ -839,6 +870,56 @@ class PostgresDestination(BaseSqlDestination):
             _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in upsert_key),
             conflict_action,
         )
+
+    @staticmethod
+    def _build_create_only_sql(
+        table: str, columns: list[str], upsert_key: list[str]
+    ) -> Any:
+        """``match_policy: create_only`` (#757) — insert only rows not yet present.
+
+        ``ON CONFLICT (key) DO NOTHING`` so existing rows are left untouched;
+        ``cur.rowcount`` is then the inserted count (0 == the row already
+        existed → skipped).
+        """
+        from psycopg2 import sql as _pgsql
+
+        return _pgsql.SQL(
+            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO NOTHING"
+        ).format(
+            _qualified_ident(table),
+            _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in columns),
+            _pgsql.SQL(", ").join(_pgsql.Placeholder() for _ in columns),
+            _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in upsert_key),
+        )
+
+    @staticmethod
+    def _build_update_only_sql(
+        table: str, update_cols: list[str], upsert_key: list[str]
+    ) -> Any:
+        """``match_policy: update_only`` (#757) — update only rows that exist.
+
+        A plain ``UPDATE ... SET <cols> WHERE <key>`` never inserts, so rows
+        with no destination match are left alone; ``cur.rowcount`` is the
+        matched-row count (0 == no such row → skipped). Params bind SET columns
+        first, then the WHERE key columns.
+        """
+        from psycopg2 import sql as _pgsql
+
+        set_clause = _pgsql.SQL(", ").join(
+            _pgsql.SQL("{} = {}").format(_pgsql.Identifier(c), _pgsql.Placeholder())
+            for c in update_cols
+        )
+        where_clause = _pgsql.SQL(" AND ").join(
+            _pgsql.SQL("{} = {}").format(_pgsql.Identifier(c), _pgsql.Placeholder())
+            for c in upsert_key
+        )
+        return _pgsql.SQL("UPDATE {} SET {} WHERE {}").format(
+            _qualified_ident(table), set_clause, where_clause
+        )
+
+    def supported_match_policies(self) -> frozenset[str]:
+        """Postgres honours all three ``match_policy`` values (#757)."""
+        return frozenset({"upsert", "update_only", "create_only"})
 
     @staticmethod
     def _connect(config: PostgresDestinationConfig) -> Any:

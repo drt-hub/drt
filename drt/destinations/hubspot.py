@@ -80,6 +80,7 @@ class HubSpotDestination:
             "Content-Type": "application/json",
         }
         upsert_url = f"{_HUBSPOT_API}/{config.object_type}"
+        policy = sync_options.match_policy  # #757 — upsert | update_only | create_only
         result = SyncResult()
         # HubSpot rate limit: 100 req/10s for private apps
         rate_limiter = RateLimiter(min(sync_options.rate_limit.requests_per_second, 9))
@@ -112,17 +113,43 @@ class HubSpotDestination:
                     "idProperty": config.id_property,
                 }
 
-                def do_upsert(
+                def do_write(
                     _url: str = upsert_url,
                     _headers: dict[str, Any] = headers,
                     _payload: dict[str, Any] = payload,
-                ) -> httpx.Response:
-                    # HubSpot upsert: POST with idProperty deduplicates
+                ) -> httpx.Response | None:
+                    """Write one record, honouring ``match_policy`` (#757).
+
+                    HubSpot's create-vs-update outcome is the status code, which
+                    gives exact skip detection without a separate lookup:
+
+                    - ``update_only``: PATCH by ``idProperty`` directly. A 404
+                      means no such record — skip, never create.
+                    - ``create_only``: POST only. A 409 means it already exists
+                      — skip, never overwrite.
+                    - ``upsert`` (default): POST, then PATCH on 409 (unchanged).
+
+                    Returns ``None`` when the record was skipped by the policy.
+                    """
+                    id_value = _payload["properties"].get(config.id_property)
+                    patch_url = f"{_url}/{id_value}?idProperty={config.id_property}"
+
+                    if policy == "update_only":
+                        response = client.patch(
+                            patch_url,
+                            json={"properties": _payload["properties"]},
+                            headers=_headers,
+                        )
+                        if response.status_code == 404:
+                            return None  # no matching record — skip
+                        response.raise_for_status()
+                        return response
+
+                    # create_only + upsert both POST first (idProperty dedupes).
                     response = client.post(_url, json=_payload, headers=_headers)
-                    # 409 Conflict = already exists, update instead
-                    if response.status_code == 409:
-                        id_value = _payload["properties"].get(config.id_property)
-                        patch_url = f"{_url}/{id_value}?idProperty={config.id_property}"
+                    if response.status_code == 409:  # already exists
+                        if policy == "create_only":
+                            return None  # exists — skip, don't overwrite
                         response = client.patch(
                             patch_url,
                             json={"properties": _payload["properties"]},
@@ -133,8 +160,12 @@ class HubSpotDestination:
 
                 try:
                     retry_config = resolve_retry(config.retry, sync_options)
-                    with_retry(do_upsert, retry_config)
-                    result.success += 1
+                    written = with_retry(do_write, retry_config)
+                    if written is None:
+                        result.skipped += 1
+                        result.skipped_no_match += 1  # #757 — policy declined
+                    else:
+                        result.success += 1
                 except httpx.HTTPStatusError as e:
                     result.failed += 1
                     result.row_errors.append(
@@ -161,3 +192,13 @@ class HubSpotDestination:
                         break
 
         return result
+
+    def supported_match_policies(self) -> frozenset[str]:
+        """HubSpot honours all three ``match_policy`` values (#757).
+
+        The v3 Objects API's POST-409 / PATCH-404 responses map exactly onto
+        create-only / update-only, so skips are detected without a separate
+        existence lookup. Declaring this makes the engine's
+        ``MatchPolicyCapable`` guard accept a non-default policy here.
+        """
+        return frozenset({"upsert", "update_only", "create_only"})

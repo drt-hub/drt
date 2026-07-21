@@ -305,6 +305,135 @@ def test_render_guard_surfaces_as_clean_cli_error(
     assert (target / "keep.txt").exists()  # guard protected the dir
 
 
+# ---------------------------------------------------------------------------
+# --inline / self-contained single-object bundle (#818 + #821)
+# ---------------------------------------------------------------------------
+
+import re as _re  # noqa: E402
+
+from drt.docs.html import _rewrite_bundle_links  # noqa: E402
+
+
+@pytest.fixture
+def inline_site(tmp_path: Path) -> Path:
+    out = tmp_path / "docs"
+    render_html(_manifest(), out, inline_assets=True)
+    return out
+
+
+def _sections(index_html: str) -> list[str]:
+    return _re.findall(r'<section class="page[^"]*" id="([^"]+)">', index_html)
+
+
+def test_inline_is_a_single_html_object(inline_site: Path) -> None:
+    """#821: the whole catalog is ONE .html object — no per-page files, no
+    assets/ dir. manifest.json (a data artifact) rides alongside."""
+    files = {p.relative_to(inline_site).as_posix() for p in inline_site.rglob("*") if p.is_file()}
+    assert files == {"index.html", "manifest.json"}
+    assert not (inline_site / "assets").exists()
+    assert not (inline_site / "sync").exists()
+
+
+def test_inline_bundle_contains_every_page_as_a_section(inline_site: Path) -> None:
+    """Overview + DAG + every sync / source / destination / tag is a <section>
+    in the one document (the Elementary single-object model)."""
+    ids = _sections((inline_site / "index.html").read_text(encoding="utf-8"))
+    assert "overview" in ids and "dag" in ids
+    # _manifest(): 2 syncs, 1 source, 2 destinations, 1 tag.
+    assert sum(i.startswith("sync-") for i in ids) == 2
+    assert sum(i.startswith("source-") for i in ids) == 1
+    assert sum(i.startswith("destination-") for i in ids) == 2
+    assert sum(i.startswith("tag-") for i in ids) == 1
+    # Exactly one section is active by default (overview).
+    index = (inline_site / "index.html").read_text(encoding="utf-8")
+    assert index.count('class="page active"') == 1
+    assert 'class="page active" id="overview"' in index
+
+
+def test_inline_no_external_or_interpage_requests(inline_site: Path) -> None:
+    """Acceptance: zero sub-resource requests AND zero inter-object navigation —
+    the two failures (#818 styling, #821 dead-end links) that break hosting on
+    an authenticated object store, both closed."""
+    index = (inline_site / "index.html").read_text(encoding="utf-8")
+    # No external CSS/JS (#818).
+    assert "assets/style.css" not in index and "assets/app.js" not in index
+    assert 'href="assets/' not in index and 'src="assets/' not in index
+    # No inter-page .html links (#821) — every nav/cross link is an in-page hash.
+    interpage = r'href="(?:\.\./)*(index|dag|sync/|source/|destination/|tag/)[^"]*\.html"'
+    assert not _re.search(interpage, index)
+    # The nav targets are hashes matching real sections.
+    assert 'href="#overview"' in index and 'href="#dag"' in index
+
+
+def test_inline_embeds_style_script_and_router(inline_site: Path) -> None:
+    index = (inline_site / "index.html").read_text(encoding="utf-8")
+    assert "<style>" in index and "<script>" in index and "--brand" in index
+    assert 'rel="icon" href="data:image/svg+xml' in index  # favicon stays data:
+    # The router + progressive-enhancement CSS are present (#821).
+    assert "wireRouter" in index
+    assert ".main > .page:not(.active)" in index
+
+
+def test_inline_bundle_content_matches_multifile(tmp_path: Path) -> None:
+    """Acceptance: display byte-identical to the default. Each multi-file page's
+    main content equals its bundle <section> — only link *delivery* differs."""
+    m = _manifest()
+    d, i = tmp_path / "d", tmp_path / "i"
+    render_html(m, d)
+    render_html(m, i, inline_assets=True)
+    index = (i / "index.html").read_text(encoding="utf-8")
+
+    def inner_main(html: str) -> str:
+        body = _re.search(r'<main class="main" id="main">(.*?)</main>', html, _re.S).group(1)
+        body = _re.sub(r'<div class="footer">.*?</div>', "", body, flags=_re.S)
+        return _re.sub(r"\s+", " ", body).strip()
+
+    def section(pid: str) -> str:
+        pat = rf'<section class="page[^"]*" id="{_re.escape(pid)}">(.*?)</section>'
+        body = _re.search(pat, index, _re.S).group(1)
+        return _re.sub(r"\s+", " ", body).strip()
+
+    for rel, pid in [
+        ("index.html", "overview"),
+        ("dag.html", "dag"),
+        ("sync/customers-to-discord.html", "sync-customers-to-discord"),
+        ("source/default.html", "source-default"),
+    ]:
+        mf = _rewrite_bundle_links(inner_main((d / rel).read_text(encoding="utf-8")))
+        assert mf == section(pid), pid
+
+
+def test_inline_regeneration_is_byte_identical(tmp_path: Path) -> None:
+    """#697's bar holds for the single-object bundle too — deterministic bytes."""
+    m = _manifest()
+    a, b = tmp_path / "a", tmp_path / "b"
+    render_html(m, a, inline_assets=True)
+    render_html(m, b, inline_assets=True)
+    assert (a / "index.html").read_bytes() == (b / "index.html").read_bytes()
+
+
+def test_inline_default_output_unchanged(tmp_path: Path) -> None:
+    """Default (multi-file) output still links assets/ + emits per-page files —
+    single-object bundling is opt-in via --inline."""
+    out = tmp_path / "docs"
+    render_html(_manifest(), out)  # default
+    assert (out / "assets/style.css").exists()
+    assert (out / "sync/customers-to-discord.html").exists()
+    idx = (out / "index.html").read_text(encoding="utf-8")
+    assert 'href="assets/style.css"' in idx
+    assert 'href="sync/customers-to-discord.html"' in idx  # real inter-page link
+    assert "<section class=\"page" not in idx  # no bundle sections in multi-file
+
+
+def test_inline_regenerates_over_prior_inline_build(tmp_path: Path) -> None:
+    """The rmtree guard (index.html + manifest.json) recognises a prior
+    single-object --inline build (which has no dag.html/assets/) — regen clean."""
+    out = tmp_path / "docs"
+    render_html(_manifest(), out, inline_assets=True)
+    render_html(_manifest(), out, inline_assets=True)
+    assert (out / "index.html").exists()
+
+
 def test_regeneration_is_byte_identical(tmp_path: Path) -> None:
     """#697's acceptance bar: same manifest -> same bytes, across the whole site."""
     m = _manifest()

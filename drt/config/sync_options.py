@@ -193,6 +193,19 @@ class MirrorConfig(BaseModel):
 class SyncOptions(BaseModel):
     mode: Literal["full", "incremental", "upsert", "replace", "mirror"] = "full"
     replace_strategy: Literal["truncate", "swap"] = "truncate"
+    # Upsert match policy (#757). Applies to the per-row upsert write path
+    # (modes full / upsert / incremental):
+    #   - "upsert" (default): insert new rows, update existing — today's behaviour.
+    #   - "update_only": only touch rows that already exist in the destination;
+    #     rows with no match are skipped (counted in SyncResult.skipped, not
+    #     errors). The reverse-ETL enrichment case — push warehouse-computed
+    #     fields into CRM records reps already created, never create junk rows.
+    #   - "create_only": only insert rows that do not yet exist; existing rows
+    #     are left untouched (seed an audience once, never overwrite hand edits).
+    # Rejected for mode: replace / mirror (see _check_match_policy_mode) and
+    # fails fast on destinations that don't implement it (see the engine's
+    # MatchPolicyCapable guard). Prior art: Census / Hightouch sync behaviours.
+    match_policy: Literal["upsert", "update_only", "create_only"] = "upsert"
     cursor_field: str | None = None  # required when mode=incremental
     watermark: WatermarkConfig | None = None
     batch_size: int = 100
@@ -250,6 +263,22 @@ class SyncOptions(BaseModel):
     def _check_replace_strategy(self) -> SyncOptions:
         if self.replace_strategy == "swap" and self.mode != "replace":
             raise ValueError("replace_strategy='swap' requires mode='replace'.")
+        return self
+
+    @model_validator(mode="after")
+    def _check_match_policy_mode(self) -> SyncOptions:
+        # match_policy governs the per-row upsert write path, which only runs
+        # for the upsert-family modes. replace TRUNCATEs first (update_only /
+        # create_only would be meaningless against an empty table) and mirror
+        # layers a delete pass on top of the upsert (combining it with
+        # create/update-only is a separate design) — reject both rather than
+        # silently ignore the policy.
+        if self.match_policy != "upsert" and self.mode in ("replace", "mirror"):
+            raise ValueError(
+                f"sync.match_policy: {self.match_policy} is not compatible with "
+                f"mode: {self.mode} — match_policy applies to the upsert write "
+                "path (mode: full / upsert / incremental)."
+            )
         return self
 
 
