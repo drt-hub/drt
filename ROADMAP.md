@@ -54,6 +54,14 @@ Closes the **Tech Foundation Hardening epic** ([#538](https://github.com/drt-hub
 
 ---
 
+## v0.8.1 — Reverse-ETL activation (`match_policy`) + docs hosting + hardening ✅ Shipped 2026-07-21
+
+Released as **v0.8.1** on 2026-07-21. See [CHANGELOG.md](CHANGELOG.md#081---2026-07-21) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.8.1) for the full feature list.
+
+**A follow-up release on the v0.8.0 line, themed around reverse-ETL activation semantics.** **`sync.match_policy`** ([#757](https://github.com/drt-hub/drt/issues/757)) brings Census/Hightouch-style `update_only` / `create_only` to the upsert write path — touch only rows a CRM already has (enrichment, no junk contacts) or only insert new ones (seed once, never overwrite) — shipping on **Postgres** (clean `rowcount` skip detection) and **HubSpot** (POST-409 / PATCH-404), with match-policy skips named via a new `SyncResult.skipped_no_match` counter surfaced in `drt run` and `--output json`. **`drt docs generate --inline`** ([#818](https://github.com/drt-hub/drt/issues/818)) emits self-contained HTML (CSS/JS inlined, no `assets/`) so the catalog renders on an authenticated object store (GCS `storage.cloud.google.com` / S3 presigned URLs) where per-object auth 401s relative asset fetches — display byte-identical to the default multi-file output. **Manifest schema v2** ([#698](https://github.com/drt-hub/drt/issues/698)) carries per-sync run history, declared column facts (`field_mappings` + `mask`), and DLQ depth, with embedded error text redacted by default. Plus hardening: tracked mirror pre-provisions its `_drt_synced_keys` state table without a `CREATE` grant ([#695](https://github.com/drt-hub/drt/issues/695)), and HTTP retries honour the server's `Retry-After` header ([#769](https://github.com/drt-hub/drt/issues/769)). No breaking changes — drop-in upgrade from v0.8.0.
+
+---
+
 ## v0.8.0 — `drt docs` site + developer-experience pull-in wave ✅ Shipped 2026-07-17
 
 Released as **v0.8.0** on 2026-07-17. See [CHANGELOG.md](CHANGELOG.md#080---2026-07-17) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.8.0) for the full feature list.
@@ -123,13 +131,13 @@ Two additive features accumulated since v0.7.5 — a new **Amplitude destination
 - **Growth / README (non-blocking)** — hero section redesign (#281) · "Why OSS Reverse ETL" blog (#284) · production use case doc (#375) · Discord (#378) · X account link (#379) — these ride alongside the release and do **not** gate the tag; Reddit/HN launch (#289) stays opportunistic post-v0.8
 - **Shipped early on the v0.7.x line** — cloud destinations: BigQuery (#165) · Databricks Delta Lake (#167) · S3 (#168) · GCS (#169) · Azure Blob (#170) · Snowflake (#164) — sources: REST API (#422) · Delta Lake (#172) · Iceberg (#173) — reliability/correctness: DLQ (#278) · schema-aware serialization (#317) · `sync.mode: mirror` (#340) — ecosystem: GitHub Action (#292) · VS Code extension (#293) — dev tooling: FakeSource (#364) · `drt_run_test` (#368) · `/drt-troubleshoot` (#369) · `/drt-changelog` (#372) · validate connection test (#367)
 
-**Out of scope:** Enterprise boundary (→ v0.9), Rust engine work (→ v1.x), diff polish (→ v0.8.1), warehouse hardening follow-ups (→ v0.8.2).
+**Out of scope:** Enterprise boundary (→ v0.9), Rust engine work (→ v1.x), diff polish (→ v0.8.2), warehouse hardening follow-ups (→ v0.8.3).
 
 **Target:** 2026-07 · **Progress:** [milestone/5](https://github.com/drt-hub/drt/milestone/5)
 
 ---
 
-## v0.8.1 — Diff Polish
+## v0.8.2 — Diff Polish
 
 **Theme:** Polish and follow-ups for the `--diff` feature shipped in v0.7.1.
 
@@ -144,7 +152,7 @@ Two additive features accumulated since v0.7.5 — a new **Amplitude destination
 
 ---
 
-## v0.8.2 — Warehouse hardening & security
+## v0.8.3 — Warehouse hardening & security
 
 **Theme:** make the DWH legs secure, fast, and fully symmetrical — the follow-ups the v0.7.10 mirror work and the real-machine smoke program (#654, all three warehouses now live-validated nightly) surfaced.
 
@@ -157,7 +165,7 @@ Two additive features accumulated since v0.7.5 — a new **Amplitude destination
 - **Cost attribution** — query tagging: BigQuery job labels / Snowflake `QUERY_TAG` / SQL comment header ([#768](https://github.com/drt-hub/drt/issues/768))
 - **State ops** — `--full-refresh` + `drt state show/reset` ([#776](https://github.com/drt-hub/drt/issues/776))
 
-**Out of scope:** diff work (→ v0.8.1), enterprise boundary (→ v0.9), engine refactors (#719–#723 land opportunistically).
+**Out of scope:** diff work (→ v0.8.2), enterprise boundary (→ v0.9), engine refactors (#719–#723 land opportunistically).
 
 **Target:** rolling, after the v0.8 Growth push · **Progress:** [milestone/12](https://github.com/drt-hub/drt/milestone/12)
 
