@@ -117,6 +117,7 @@ def test_create_only_skips_existing_and_never_patches() -> None:
         )
 
     assert (result.success, result.skipped, result.failed) == (0, 1, 0)
+    assert result.skipped_no_match == 1  # #757 — named subset of skipped
     post.assert_called_once()
     patch_call.assert_not_called()  # existing rows are left untouched
 
@@ -167,6 +168,7 @@ def test_update_only_skips_when_no_match() -> None:
         )
 
     assert (result.success, result.skipped, result.failed) == (0, 1, 0)
+    assert result.skipped_no_match == 1
     post.assert_not_called()
     patch_call.assert_called_once()
 
@@ -187,5 +189,6 @@ def test_mixed_batch_update_only_counts_hits_and_skips() -> None:
         )
 
     assert (result.success, result.skipped, result.failed) == (1, 1, 0)
+    assert result.skipped_no_match == 1
     assert patch_call.call_count == 2
     post.assert_not_called()

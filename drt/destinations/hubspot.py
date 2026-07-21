@@ -163,6 +163,7 @@ class HubSpotDestination:
                     written = with_retry(do_write, retry_config)
                     if written is None:
                         result.skipped += 1
+                        result.skipped_no_match += 1  # #757 — policy declined
                     else:
                         result.success += 1
                 except httpx.HTTPStatusError as e:
