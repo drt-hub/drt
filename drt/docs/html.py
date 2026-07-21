@@ -13,6 +13,7 @@ Pygments.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from collections import Counter
 from html import escape
@@ -216,7 +217,7 @@ _BASE = """\
     {% endif %}
   </aside>
   <main class="main" id="main">
-    {% block main %}{% endblock %}
+    {% if bundle_sections %}{{ bundle_sections|safe }}{% else %}{% block main %}{% endblock %}{% endif %}
     {# no timestamp here — pages stay byte-identical across regens (#697); generated_at lives in manifest.json #}
     <div class="footer">drt docs · static · drt {{ drt_version }} · manifest schema v{{ schema_version }}</div>
   </main>
@@ -229,8 +230,32 @@ _BASE = """\
 </html>
 """
 
+# Single-object bundle (#821): with layout="fragment" a page renders only its
+# main content (no chrome), which the builder wraps in a <section> and drops
+# into one document's <main>. Used by --inline so the whole navigable site is a
+# single HTML object — the only shape that navigates on an authenticated object
+# store (GCS / S3), where per-object auth breaks the inter-object links of the
+# multi-file output. The default layout ("base") is the full per-page document.
+_FRAGMENT = """\
+{% block main %}{% endblock %}
+"""
+
+
+# Inter-page hrefs (`sync/foo.html`, `../index.html`, `dag.html`, …) become
+# in-page hashes (`#sync-foo`, `#overview`, `#dag`) in the single-object bundle,
+# matching the section ids the builder assigns. Applied once over the assembled
+# document — SVG node-card links use plain `href=` too, so they're covered.
+_BUNDLE_LINK_RE = re.compile(r'href="(?:\.\./)*(sync|source|destination|tag)/([^"#]+)\.html"')
+
+
+def _rewrite_bundle_links(html: str) -> str:
+    html = re.sub(r'href="(?:\.\./)*index\.html"', 'href="#overview"', html)
+    html = re.sub(r'href="(?:\.\./)*dag\.html"', 'href="#dag"', html)
+    return _BUNDLE_LINK_RE.sub(r'href="#\1-\2"', html)
+
+
 _INDEX = """\
-{% extends "base" %}
+{% extends layout %}
 {% block main %}
 <div class="eyebrow">Overview</div>
 <h1>{{ project_name }}</h1>
@@ -297,7 +322,7 @@ drt docs generate # rebuild this site</pre>
 """
 
 _DAG = """\
-{% extends "base" %}
+{% extends layout %}
 {% block main %}
 <div class="eyebrow">Lineage</div>
 <h1>DAG</h1>
@@ -315,7 +340,7 @@ Dashed edges are destination lookups.</p>
 """
 
 _SYNC = """\
-{% extends "base" %}
+{% extends layout %}
 {% block main %}
 <div class="crumb"><a href="../index.html">Syncs</a> / {{ sync.name }}</div>
 <h1>{{ sync.name }}</h1>
@@ -394,7 +419,7 @@ _STATUS_TD = (
 
 _SOURCE = (
     """\
-{% extends "base" %}
+{% extends layout %}
 {% block main %}
 <div class="crumb"><a href="../index.html">Sources</a> / {{ source.name }}</div>
 <h1><span class="badge" style="background:{{ badge.bg }};color:{{ badge.fg }}">{{ badge.initials }}</span> {{ source.name }}</h1>
@@ -415,7 +440,7 @@ _SOURCE = (
 
 _DESTINATION = (
     """\
-{% extends "base" %}
+{% extends layout %}
 {% block main %}
 <div class="crumb"><a href="../index.html">Destinations</a> / {{ destination.label }}</div>
 <h1><span class="badge" style="background:{{ badge.bg }};color:{{ badge.fg }}">{{ badge.initials }}</span> {{ destination.label }}</h1>
@@ -436,7 +461,7 @@ _DESTINATION = (
 
 _TAG = (
     """\
-{% extends "base" %}
+{% extends layout %}
 {% block main %}
 <div class="crumb"><a href="../index.html">Tags</a> / #{{ tag }}</div>
 <h1><span class="chip">#{{ tag }}</span></h1>
@@ -488,6 +513,7 @@ def render_html(
         loader=DictLoader(
             {
                 "base": _BASE,
+                "fragment": _FRAGMENT,
                 "index": _INDEX,
                 "dag": _DAG,
                 "sync": _SYNC,
@@ -551,6 +577,10 @@ def render_html(
         "schema_version": manifest.schema_version,
         "profile": manifest.project.profile if manifest.project else "",
         "nav": nav,
+        # Single-object bundle (#821): pages render as fragments (main only) so
+        # the builder can assemble them into one document; default is the full
+        # per-page "base" layout.
+        "layout": "fragment" if inline_assets else "base",
         # --inline (#818): pages embed CSS/JS instead of linking assets/.
         "inline_assets": inline_assets,
         "inline_style": STYLE_CSS if inline_assets else "",
@@ -566,17 +596,18 @@ def render_html(
     if output_dir.exists():
         if output_dir.is_file():
             raise ValueError(f"--output must be a directory, but {output_dir} is a file.")
-        # Recognise a prior build by two pages every build emits regardless of
-        # mode — assets/ is absent in --inline output (#818), so keying on it
-        # would refuse to regenerate an inline site.
+        # Recognise a prior build by two artifacts every build emits in every
+        # mode: index.html + manifest.json. (assets/ is absent under --inline
+        # (#818), and dag.html is a section rather than a file in the single-
+        # object bundle (#821), so neither is a mode-independent signal.)
         looks_like_docs = (output_dir / "index.html").exists() and (
-            output_dir / "dag.html"
+            output_dir / "manifest.json"
         ).exists()
         is_empty = not any(output_dir.iterdir())
         if not (looks_like_docs or is_empty):
             raise ValueError(
                 f"Refusing to delete {output_dir}: it isn't empty and doesn't look like "
-                f"a previous drt docs build (expected index.html + dag.html). Point "
+                f"a previous drt docs build (expected index.html + manifest.json). Point "
                 f"--output at an empty or regenerable directory."
             )
         shutil.rmtree(output_dir)
@@ -586,6 +617,24 @@ def render_html(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(html, encoding="utf-8")
         written.append(path)
+
+    # Single-object bundle accumulator (#821). In the default multi-file mode
+    # ``emit`` writes each page; in --inline single-object mode it wraps the
+    # page's fragment (main content) in a <section> keyed by the same id the
+    # inter-page links are rewritten to, for assembly into one document.
+    sections: list[str] = []
+
+    def _page_id(rel: str) -> str:
+        stem = rel[:-5] if rel.endswith(".html") else rel  # drop .html
+        return "overview" if stem == "index" else stem.replace("/", "-")
+
+    def emit(rel: str, html: str) -> None:
+        if not inline_assets:
+            write(rel, html)
+            return
+        pid = _page_id(rel)
+        active = " active" if pid == "overview" else ""
+        sections.append(f'<section class="page{active}" id="{pid}">\n{html}\n</section>')
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -635,7 +684,7 @@ def render_html(
         }
         for s in runs_with_state[:10]
     ]
-    write(
+    emit(
         "index.html",
         env.get_template("index").render(
             page_title="Overview",
@@ -661,7 +710,7 @@ def render_html(
     )
 
     # dag.html — static SVG from the layout engine (#701); no runtime layout JS.
-    write(
+    emit(
         "dag.html",
         env.get_template("dag").render(
             page_title="DAG",
@@ -712,7 +761,7 @@ def render_html(
             for e in manifest.edges
             if e.kind == "lookup" and e.from_ == s.name
         ]
-        write(
+        emit(
             f"sync/{sync_slugs[s.name]}.html",
             env.get_template("sync").render(
                 page_title=s.name,
@@ -751,7 +800,7 @@ def render_html(
             for s in manifest.syncs
             if s.source == src.name
         ]
-        write(
+        emit(
             f"source/{source_slugs[src.name]}.html",
             env.get_template("source").render(
                 page_title=src.name,
@@ -779,7 +828,7 @@ def render_html(
             for s in manifest.syncs
             if s.destination == d.name
         ]
-        write(
+        emit(
             f"destination/{dest_slugs[d.name]}.html",
             env.get_template("destination").render(
                 page_title=d.label,
@@ -808,7 +857,7 @@ def render_html(
             }
             for s in tag_syncs[t]
         ]
-        write(
+        emit(
             f"tag/{tag_slugs[t]}.html",
             env.get_template("tag").render(
                 page_title=f"#{t}",
@@ -821,5 +870,22 @@ def render_html(
                 **common,
             ),
         )
+
+    # Single-object bundle (#821): assemble the collected page fragments into one
+    # navigable HTML object, then rewrite inter-page links to in-page hashes.
+    # This is what --inline emits — the only shape that navigates on an
+    # authenticated object store, where per-object auth breaks the multi-file
+    # output's relative cross-links.
+    if inline_assets:
+        bundle = env.get_template("base").render(
+            page_title="Overview",
+            active="overview",
+            root="",
+            current_slug="",
+            bundle_sections="\n".join(sections),
+            data_json=dumps({"nav": nav}),
+            **common,
+        )
+        write("index.html", _rewrite_bundle_links(bundle))
 
     return written
