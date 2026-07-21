@@ -54,6 +54,14 @@ Closes the **Tech Foundation Hardening epic** ([#538](https://github.com/drt-hub
 
 ---
 
+## v0.8.2 — Navigable docs hosting (single-object `--inline`) ✅ Shipped 2026-07-21
+
+Released as **v0.8.2** on 2026-07-21. See [CHANGELOG.md](CHANGELOG.md#082---2026-07-21) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.8.2) for the full feature list.
+
+**A focused follow-up completing v0.8.1's `--inline` ([#818](https://github.com/drt-hub/drt/issues/818)).** v0.8.1 made each `drt docs` page self-contained (fixing *styling* on an authenticated GCS / S3 object URL) but left the site multi-object, so navigation still dead-ended — a per-object authenticated viewer isn't a web server and the relative inter-object links break. `drt docs generate --inline` now emits the **entire catalog as one navigable HTML object** ([#821](https://github.com/drt-hub/drt/issues/821), the Elementary single-file model): overview, DAG, and every sync / source / destination / tag become `<section>`s with in-page `#hash` navigation, so it both renders *and* navigates from a single authenticated object URL — zero sub-resource and zero inter-object requests. Per-page display byte-identical to the default multi-file output (unchanged). No breaking changes — drop-in upgrade from v0.8.1.
+
+---
+
 ## v0.8.1 — Reverse-ETL activation (`match_policy`) + docs hosting + hardening ✅ Shipped 2026-07-21
 
 Released as **v0.8.1** on 2026-07-21. See [CHANGELOG.md](CHANGELOG.md#081---2026-07-21) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.8.1) for the full feature list.
@@ -131,13 +139,13 @@ Two additive features accumulated since v0.7.5 — a new **Amplitude destination
 - **Growth / README (non-blocking)** — hero section redesign (#281) · "Why OSS Reverse ETL" blog (#284) · production use case doc (#375) · Discord (#378) · X account link (#379) — these ride alongside the release and do **not** gate the tag; Reddit/HN launch (#289) stays opportunistic post-v0.8
 - **Shipped early on the v0.7.x line** — cloud destinations: BigQuery (#165) · Databricks Delta Lake (#167) · S3 (#168) · GCS (#169) · Azure Blob (#170) · Snowflake (#164) — sources: REST API (#422) · Delta Lake (#172) · Iceberg (#173) — reliability/correctness: DLQ (#278) · schema-aware serialization (#317) · `sync.mode: mirror` (#340) — ecosystem: GitHub Action (#292) · VS Code extension (#293) — dev tooling: FakeSource (#364) · `drt_run_test` (#368) · `/drt-troubleshoot` (#369) · `/drt-changelog` (#372) · validate connection test (#367)
 
-**Out of scope:** Enterprise boundary (→ v0.9), Rust engine work (→ v1.x), diff polish (→ v0.8.2), warehouse hardening follow-ups (→ v0.8.3).
+**Out of scope:** Enterprise boundary (→ v0.9), Rust engine work (→ v1.x), diff polish (→ v0.8.3), warehouse hardening follow-ups (→ v0.8.4).
 
 **Target:** 2026-07 · **Progress:** [milestone/5](https://github.com/drt-hub/drt/milestone/5)
 
 ---
 
-## v0.8.2 — Diff Polish
+## v0.8.3 — Diff Polish
 
 **Theme:** Polish and follow-ups for the `--diff` feature shipped in v0.7.1.
 
@@ -152,7 +160,7 @@ Two additive features accumulated since v0.7.5 — a new **Amplitude destination
 
 ---
 
-## v0.8.3 — Warehouse hardening & security
+## v0.8.4 — Warehouse hardening & security
 
 **Theme:** make the DWH legs secure, fast, and fully symmetrical — the follow-ups the v0.7.10 mirror work and the real-machine smoke program (#654, all three warehouses now live-validated nightly) surfaced.
 
@@ -165,7 +173,7 @@ Two additive features accumulated since v0.7.5 — a new **Amplitude destination
 - **Cost attribution** — query tagging: BigQuery job labels / Snowflake `QUERY_TAG` / SQL comment header ([#768](https://github.com/drt-hub/drt/issues/768))
 - **State ops** — `--full-refresh` + `drt state show/reset` ([#776](https://github.com/drt-hub/drt/issues/776))
 
-**Out of scope:** diff work (→ v0.8.2), enterprise boundary (→ v0.9), engine refactors (#719–#723 land opportunistically).
+**Out of scope:** diff work (→ v0.8.3), enterprise boundary (→ v0.9), engine refactors (#719–#723 land opportunistically).
 
 **Target:** rolling, after the v0.8 Growth push · **Progress:** [milestone/12](https://github.com/drt-hub/drt/milestone/12)
 
