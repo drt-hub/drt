@@ -51,10 +51,12 @@ def docs_generate(
         False,
         "--inline",
         help=(
-            "HTML only: inline CSS/JS into every page (no assets/ dir) so each "
-            "page renders with zero sub-resource requests (#818). Needed to host "
-            "on an authenticated object store (GCS/S3) where relative asset "
-            "fetches 401. Default output is multi-file."
+            "HTML only: emit the whole catalog as ONE self-contained, navigable "
+            "HTML object — inlined CSS/JS + in-page (#hash) navigation — so it "
+            "renders AND navigates on an authenticated object store (GCS / S3), "
+            "where per-object auth breaks the multi-file output's sub-resources "
+            "and cross-links (#818/#821). Display is byte-identical to the "
+            "default multi-file output."
         ),
     ),
 ) -> None:

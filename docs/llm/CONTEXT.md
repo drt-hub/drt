@@ -139,7 +139,7 @@ drt serve --port 8080             # start HTTP webhook endpoint (POST /sync/<nam
 drt docs generate                 # static docs site to target/docs/ (html; also --format mermaid|json). Destination labels are docs-safe by default (#696): object identity (table/channel/sheet/bucket) stays, endpoints/hosts/phones/emails do not
 drt docs generate --full-labels   # verbatim describe() labels + unredacted error text — trusted/internal hosting only (#696/#698)
 drt docs generate --history-depth 20  # recent runs per sync embedded in the manifest from .drt/history (schema v2, #698; default 10, 0 disables, --no-state omits)
-drt docs generate --inline        # html only: inline CSS/JS into every page (no assets/ dir) so each page renders with zero sub-resource requests (#818) — required to host on an authenticated object store (GCS storage.cloud.google.com / S3 presigned URLs) where relative asset fetches 401. Multi-page (inter-page links intact), byte-identical; default output stays multi-file
+drt docs generate --inline        # html only: emit the whole catalog as ONE self-contained navigable HTML object — inlined CSS/JS + in-page (#hash) navigation (Elementary single-file model), zero sub-resource AND zero inter-object requests — so it renders and navigates on an authenticated object store (GCS storage.cloud.google.com / S3 presigned URLs) where per-object auth breaks the multi-file output's assets and cross-links (#818/#821). Display byte-identical to the default; default output stays multi-file
 drt deploy github-actions --schedule "40 3 * * *"  # scaffold .github/workflows/drt-sync.yml — drt-action wired, extras inferred, required secrets enumerated (#785)
 ```
 

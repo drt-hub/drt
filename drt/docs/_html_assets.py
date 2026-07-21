@@ -195,6 +195,10 @@ td.right, th.right { text-align:right; }
 .tab-panel > h2:first-child { margin-top:26px; }
 .js .tab-panel > h2:first-child { display:none; }
 .js .tab-panel:not(.active) { display:none; }
+/* Single-object bundle (#821): the whole site is one document of .page
+   sections. With JS the router shows one at a time (SPA-like); without JS all
+   render stacked and the in-page #hash links jump natively. */
+.js .main > .page:not(.active) { display:none; }
 .ego { border:1px solid var(--line); border-radius:var(--radius); background:var(--surface);
   padding:10px; overflow-x:auto; }
 .ego svg text { font-family:var(--sans); }
@@ -314,12 +318,37 @@ APP_JS = """\
     });
   }
 
+  // Single-object bundle router (#821). The whole site is one document of
+  // <section class="page" id="..."> blocks; show the one matching location.hash
+  // (default overview), hide the rest, and highlight its nav link. No-op in the
+  // default multi-file output (no .page sections), so this is safe in both modes.
+  function wireRouter() {
+    var pages = document.querySelectorAll(".main > .page");
+    if (!pages.length) return;
+    function show() {
+      var id = (location.hash || "").replace(/^#/, "") || "overview";
+      var target = document.getElementById(id);
+      if (!target || !target.classList.contains("page")) {
+        id = "overview";
+        target = document.getElementById("overview");
+      }
+      pages.forEach(function (p) { p.classList.toggle("active", p === target); });
+      document.querySelectorAll(".sidebar a, .topnav a").forEach(function (a) {
+        a.classList.toggle("current", a.getAttribute("href") === "#" + id);
+      });
+      window.scrollTo(0, 0);
+    }
+    window.addEventListener("hashchange", show);
+    show();
+  }
+
   document.documentElement.classList.add("js");
   document.addEventListener("DOMContentLoaded", function () {
     restoreGroups();
     wireSearch();
     wireTabs();
     wireCode();
+    wireRouter();
   });
 })();
 """
