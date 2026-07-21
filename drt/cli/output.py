@@ -138,7 +138,16 @@ def print_sync_result(sync_name: str, result: SyncResult, elapsed: float) -> Non
     console.print(
         f"  {status} {result.success} synced"
         + (f", {result.failed} failed" if result.failed else "")
-        + (f", {result.skipped} skipped" if result.skipped else "")
+        + (
+            f", {result.skipped} skipped"
+            + (
+                f" ({result.skipped_no_match} no match)"
+                if result.skipped_no_match
+                else ""
+            )
+            if result.skipped
+            else ""
+        )
         + f"  [dim]({elapsed:.1f}s)[/dim]"
     )
     for err in result.errors[:5]:

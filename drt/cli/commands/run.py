@@ -229,9 +229,14 @@ def _run_one(
             "rows_extracted": result.rows_extracted,
             "rows_synced": result.success,
             "rows_failed": result.failed,
+            "rows_skipped": result.skipped,
             "duration_seconds": elapsed,
             "dry_run": ctx.dry_run,
         }
+        # match_policy no-match skips (#757) — a breakdown of rows_skipped, only
+        # emitted when present so healthy runs keep a lean entry.
+        if result.skipped_no_match:
+            entry["rows_skipped_no_match"] = result.skipped_no_match
         if result.watermark_source:
             entry["watermark_source"] = result.watermark_source
         if result.cursor_value_used is not None:

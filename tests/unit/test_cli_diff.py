@@ -65,6 +65,7 @@ def test_diff_with_dry_run_runs(
         success = 1
         failed = 0
         skipped = 0
+        skipped_no_match = 0
         rows_extracted = 1
         row_errors: list[Any] = []
         errors: list[str] = []
@@ -124,6 +125,7 @@ def test_diff_json_mode_embeds_diff(
         success = 5
         failed = 0
         skipped = 0
+        skipped_no_match = 0
         rows_extracted = 5
         row_errors: list[Any] = []
         errors: list[str] = []

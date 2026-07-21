@@ -594,10 +594,14 @@ def _run_sync_body(
                     load_span.set_attribute("load.success", result.success)
                     load_span.set_attribute("load.failed", result.failed)
                     load_span.set_attribute("load.skipped", result.skipped)
+                    load_span.set_attribute(
+                        "load.skipped_no_match", result.skipped_no_match
+                    )
                 load_batch_index += 1
                 total_result.success += result.success
                 total_result.failed += result.failed
                 total_result.skipped += result.skipped
+                total_result.skipped_no_match += result.skipped_no_match
                 total_result.errors.extend(result.errors)
                 total_result.row_errors.extend(getattr(result, "row_errors", []))
 

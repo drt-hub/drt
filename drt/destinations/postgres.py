@@ -810,6 +810,7 @@ class PostgresDestination(BaseSqlDestination):
                 cur.execute(query, values)
                 if policy in ("create_only", "update_only") and cur.rowcount == 0:
                     result.skipped += 1
+                    result.skipped_no_match += 1  # #757 — no create/update target
                 else:
                     result.success += 1
             except Exception as e:
