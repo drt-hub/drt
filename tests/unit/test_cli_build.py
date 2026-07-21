@@ -55,6 +55,7 @@ class _FakeResult:
         self.success = success
         self.failed = failed
         self.skipped = 0
+        self.skipped_no_match = 0  # #757 — subset of skipped
         self.rows_extracted = success
         self.row_errors: list[Any] = []
         self.errors: list[str] = ["boom"] if failed else []

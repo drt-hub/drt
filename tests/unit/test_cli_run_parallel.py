@@ -101,6 +101,8 @@ class _FakeResult:
     ) -> None:
         self.success = success
         self.failed = failed
+        self.skipped = 0
+        self.skipped_no_match = 0
         self.rows_extracted = success if rows_extracted is None else rows_extracted
         self.row_errors: list[Any] = []
         self.watermark_source: str | None = None

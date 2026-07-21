@@ -24,6 +24,12 @@ class SyncResult:
     success: int = 0
     failed: int = 0
     skipped: int = 0
+    # Subset of ``skipped``: rows a destination declined because ``match_policy``
+    # (#757) had no create/update target — ``update_only`` with no matching row,
+    # ``create_only`` on an existing row. Always ``<= skipped`` (these rows are
+    # counted in ``skipped`` too, so ``total`` is unaffected); it just names
+    # *why* they were skipped, distinct from lookup / mask / ``--limit`` skips.
+    skipped_no_match: int = 0
     errors: list[str] = field(default_factory=list)
     row_errors: list[RowError] = field(default_factory=list)
     # Populated by run_sync(); covers full sync, not individual batches.

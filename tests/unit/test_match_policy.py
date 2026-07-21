@@ -148,6 +148,7 @@ def test_create_only_emits_do_nothing_and_counts_existing_as_skipped() -> None:
     query = str(conn.cursor.return_value.execute.call_args.args[0])
     assert "ON CONFLICT" in query and "DO NOTHING" in query
     assert result.skipped == 2
+    assert result.skipped_no_match == 2  # #757 — named subset of skipped
     assert result.success == 0
 
 
@@ -193,6 +194,7 @@ def test_update_only_no_match_is_counted_as_skipped() -> None:
         result = dest.load([{"id": 99, "score": 5}], _pg_config(), opts)
 
     assert result.skipped == 1
+    assert result.skipped_no_match == 1
     assert result.success == 0
 
 
@@ -205,6 +207,31 @@ def test_update_only_requires_a_non_key_column() -> None:
     with patch.object(PostgresDestination, "_connect", return_value=conn):
         with pytest.raises(ValueError, match="at least one non-key column"):
             dest.load([{"id": 1}], _pg_config(), opts)
+
+
+def test_skipped_no_match_defaults_to_zero_and_is_subset_of_skipped() -> None:
+    from drt.destinations.base import SyncResult
+
+    r = SyncResult()
+    assert r.skipped_no_match == 0
+    # It names a reason *within* skipped, so total ignores it (no double count).
+    r = SyncResult(success=8, failed=0, skipped=2, skipped_no_match=2)
+    assert r.total == 10  # success + failed + skipped only
+
+
+def test_cli_output_shows_no_match_breakdown() -> None:
+    """`drt run` prints '… N skipped (M no match)' when match_policy skipped rows."""
+    from drt.cli.output import print_sync_result
+    from drt.destinations.base import SyncResult
+
+    with patch("drt.cli.output.console") as console:
+        print_sync_result(
+            "enrich_contacts",
+            SyncResult(rows_extracted=10, success=8, skipped=2, skipped_no_match=2),
+            elapsed=1.0,
+        )
+    printed = " ".join(str(c.args[0]) for c in console.print.call_args_list)
+    assert "2 skipped (2 no match)" in printed
 
 
 def test_default_upsert_policy_still_upserts() -> None:

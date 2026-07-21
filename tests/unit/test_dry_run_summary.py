@@ -51,6 +51,7 @@ def test_run_dry_run_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
             self.success = 42
             self.failed = 0
             self.skipped = 0
+            self.skipped_no_match = 0  # #757 — subset of skipped
             self.errors = []
             self.row_errors = []
             # Added by PR #345/#347 to SyncResult — keeping the fake in

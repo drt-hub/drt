@@ -54,6 +54,7 @@ class _FakeResult:
     success = 1
     failed = 0
     skipped = 0
+    skipped_no_match = 0
     rows_extracted = 1
     row_errors: list[Any] = []
     errors: list[str] = []
