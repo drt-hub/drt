@@ -88,3 +88,14 @@ def test_accumulate_collects_distinct_scopes() -> None:
     )
     assert d._mirror_keys == [(1,), (2,)]
     assert d._mirror_scopes == {("a",)}
+
+
+# ---------------------------------------------------------------------------
+# dialect hooks (#719)
+# ---------------------------------------------------------------------------
+
+
+def test_dialect_hooks_are_declared() -> None:
+    # The base defines the hook names the template methods depend on.
+    for hook in ("_dialect_connect", "_qualify_ident"):
+        assert hasattr(BaseSqlDestination, hook), hook

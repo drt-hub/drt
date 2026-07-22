@@ -110,3 +110,13 @@ class BaseSqlDestination:
             if scope_cols:
                 assert self._mirror_scopes is not None
                 self._mirror_scopes.add(tuple(record.get(c) for c in scope_cols))
+
+    # --- dialect hooks (subclasses implement) -----------------------------
+    def _dialect_connect(self, config: Any) -> Any:
+        """Return a live DB connection (psycopg2 / pymysql) for this config."""
+        raise NotImplementedError
+
+    def _qualify_ident(self, name: str) -> Any:
+        """Quote/qualify an identifier. Returns a psycopg2 Composable (PG)
+        or a backtick-quoted str (MySQL) — both accepted by cursor.execute."""
+        raise NotImplementedError
