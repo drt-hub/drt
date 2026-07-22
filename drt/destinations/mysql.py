@@ -181,6 +181,13 @@ class MySQLDestination(BaseSqlDestination):
 
         return backtick_quote_ident(table)
 
+    # --- dialect hooks (#719) ---------------------------------------------
+    def _dialect_connect(self, config: Any) -> Any:
+        return self._connect(config)  # _connect is @staticmethod(config)
+
+    def _qualify_ident(self, name: str) -> Any:
+        return self._quote_ident(name)  # _quote_ident is @staticmethod
+
     def _load_replace(
         self,
         conn: Any,

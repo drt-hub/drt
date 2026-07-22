@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from drt.config.models import MySQLDestinationConfig, SyncOptions
+from drt.destinations.base import MatchPolicyCapable
 from drt.destinations.mysql import MySQLDestination
 
 # ---------------------------------------------------------------------------
@@ -637,3 +638,34 @@ class TestMySQLConnection:
         # Verify SELECT 1 was called
         cur = conn.cursor()
         assert any("SELECT 1" in str(call.args[0]) for call in cur.execute.call_args_list)
+
+
+# ---------------------------------------------------------------------------
+# Dialect hooks (#719)
+# ---------------------------------------------------------------------------
+
+
+SOME_MYSQL_CONFIG = _config()
+
+
+def test_mysql_dialect_connect_delegates_to_connect(monkeypatch: Any) -> None:
+    calls: dict[str, Any] = {}
+
+    def _fake_connect(cfg: Any) -> str:
+        calls["cfg"] = cfg
+        return "CONN"
+
+    monkeypatch.setattr(MySQLDestination, "_connect", staticmethod(_fake_connect))
+    d = MySQLDestination()
+    assert d._dialect_connect(SOME_MYSQL_CONFIG) == "CONN"
+    assert calls["cfg"] is SOME_MYSQL_CONFIG
+
+
+def test_mysql_qualify_ident_delegates_to_quote_ident() -> None:
+    d = MySQLDestination()
+    assert d._qualify_ident("mydb.scores") == MySQLDestination._quote_ident("mydb.scores")
+
+
+def test_mysql_is_not_match_policy_capable() -> None:
+    # unchanged by this refactor: MySQL must NOT become MatchPolicyCapable
+    assert not isinstance(MySQLDestination(), MatchPolicyCapable)

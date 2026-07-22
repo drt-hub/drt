@@ -921,6 +921,13 @@ class PostgresDestination(BaseSqlDestination):
         """Postgres honours all three ``match_policy`` values (#757)."""
         return frozenset({"upsert", "update_only", "create_only"})
 
+    # --- dialect hooks (#719) ---------------------------------------------
+    def _dialect_connect(self, config: Any) -> Any:
+        return self._connect(config)  # _connect is @staticmethod(config)
+
+    def _qualify_ident(self, name: str) -> Any:
+        return _qualified_ident(name)  # module-level fn
+
     @staticmethod
     def _connect(config: PostgresDestinationConfig) -> Any:
         try:

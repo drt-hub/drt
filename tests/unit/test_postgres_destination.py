@@ -847,3 +847,29 @@ class TestPostgresSchemaIntrospection:
 
         bound = [c.args[1] for c in cur.execute.call_args_list if len(c.args) == 2][-1]
         assert bound[1] == [1, 2, 3]  # untouched
+
+
+# ---------------------------------------------------------------------------
+# Dialect hooks (#719)
+# ---------------------------------------------------------------------------
+
+
+SOME_PG_CONFIG = _config()
+
+
+def test_pg_dialect_connect_delegates_to_connect(monkeypatch: Any) -> None:
+    calls: dict[str, Any] = {}
+
+    def _fake_connect(cfg: Any) -> str:
+        calls["cfg"] = cfg
+        return "CONN"
+
+    monkeypatch.setattr(PostgresDestination, "_connect", staticmethod(_fake_connect))
+    d = PostgresDestination()
+    assert d._dialect_connect(SOME_PG_CONFIG) == "CONN"
+    assert calls["cfg"] is SOME_PG_CONFIG
+
+
+def test_pg_qualify_ident_delegates_to_module_fn() -> None:
+    d = PostgresDestination()
+    assert d._qualify_ident("public.scores") == _qualified_ident("public.scores")
