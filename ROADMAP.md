@@ -150,11 +150,13 @@ Two additive features accumulated since v0.7.5 — a new **Amplitude destination
 **Theme:** Polish and follow-ups for the `--diff` feature shipped in v0.7.1.
 
 **Scope:**
-- **Diff UX** — `--diff-fields` column filter (#471) · API-based diff for upsert-keyed SaaS destinations (#472)
 - **Diff perf** — batch lookup queries for large diff sets (#470)
-- **Lookup correctness** — first-miss-wins YAML order semantics (#453)
+- **Mirror preview** — `--dry-run --diff` previews mirror deletions for destination / tracked / scoped strategies (#693); tracked is read-only and the highest-value preview
+- **Diff UX** *(feedback-gated, pull in on demand)* — `--diff-fields` column filter (#471, parking spot until wide-table readability is reported) · opt-in API-based diff for upsert-keyed SaaS destinations (#472)
 
-**Out of scope:** New destinations, engine features unrelated to `--diff`.
+**Out of scope:** New destinations, engine features unrelated to `--diff`. Delta/Iceberg predicate pushdown (#679) is a source-side perf item, not `--diff` — tracked separately.
+
+*Already shipped:* lookup first-miss-wins ambiguity warning (#453) landed in **v0.7.5** (PR #521); the stale milestone tag is being cleared.
 
 **Target:** Cut from v0.8 once Cloud Destinations land · **Progress:** [milestone/10](https://github.com/drt-hub/drt/milestone/10)
 
