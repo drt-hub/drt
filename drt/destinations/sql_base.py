@@ -99,7 +99,7 @@ class BaseSqlDestination:
             raise ValueError(MIRROR_UPSERT_KEY_MSG)
         if self._mirror_keys is None:
             self._mirror_keys = []
-        failed_indices = {re.batch_index for re in result.row_errors}
+        failed_indices = {err.batch_index for err in result.row_errors}
         scope_cols = sync_options.mirror.scope if sync_options.mirror is not None else None
         if scope_cols and self._mirror_scopes is None:
             self._mirror_scopes = set()
