@@ -37,6 +37,28 @@ Alerts do **not** fire on:
 - Successful syncs (`failed == 0` and no exception).
 - `--dry-run` invocations (the sync did not actually run).
 
+## Degraded-sync conditions (`on_degraded`)
+
+`on_failure` fires only on **hard failure**. Real reverse-ETL degradation is often *partial* — a creeping error rate, a duration SLA breach, an empty source that "succeeds", or a DLQ backlog growing across runs. `alerts.on_degraded` ([#784](https://github.com/drt-hub/drt/issues/784)) adds **thresholds on four post-sync metrics**, evaluated after each sync from data already in `SyncResult` + the DLQ store (no new collection):
+
+```yaml
+alerts:
+  on_degraded:
+    channels:                       # same target types as on_failure; empty ⇒ JSON-only (CI)
+      - { type: slack, webhook_url_env: SLACK_WEBHOOK_URL }
+    conditions:                     # mapping metric → threshold; exactly one of gt/lt/gte/lte/eq
+      row_errors_pct: { gt: 1 }     # failed / rows_extracted, as % (0 when nothing extracted)
+      duration_seconds: { gt: 300 } # whole-sync wall time SLA
+      rows_extracted: { eq: 0 }     # empty-source guard ("succeeds" with no rows)
+      dlq_depth: { gt: 500 }        # DLQ backlog for this sync, cumulative across runs
+```
+
+- **`row_errors_pct` is `failed / rows_extracted`** — `skipped` is excluded (a skipped row is a *normal* outcome via `match_policy` / `--limit` / `lookups.check_only`); when `rows_extracted == 0` the rate is `0%` (empty source is the `rows_extracted` condition's job, never a false `100%`).
+- **Conditions are a mapping**, not a list — duplicate metrics are impossible, and each threshold takes exactly one operator (`gt` / `lt` / `gte` / `lte` / `eq`).
+- **Multiple tripped conditions coalesce into one alert** per sync per run. `--output json` gains `conditions_tripped: [{metric, operator, threshold, actual}, …]` so CI can react without parsing Slack.
+- **`channels` defaults to empty** — conditions can be JSON-only (surfaced in `--output json`) with no paging target, handy for CI gates.
+- Evaluated at the CLI seam, so `drt build` inherits it, and — like `on_failure` — it's **best-effort**: a failure while reading the DLQ or dispatching degrades to a logged warning and never sinks the run it monitors. `on_failure` is unchanged and orthogonal.
+
 ## Targets
 
 ### `type: slack`
