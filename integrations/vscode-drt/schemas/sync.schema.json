@@ -115,6 +115,17 @@
           },
           "title": "On Failure",
           "type": "array"
+        },
+        "on_degraded": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OnDegradedConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "title": "AlertsConfig",
@@ -737,6 +748,73 @@
       "title": "ClickHouseDestinationConfig",
       "type": "object"
     },
+    "ConditionThreshold": {
+      "description": "One comparison for a degraded-sync condition (#784).\n\nExactly one operator is set \u2014 ``{gt: 1}``, ``{eq: 0}``, etc. The metric it\napplies to is the key it sits under in ``on_degraded.conditions``.",
+      "properties": {
+        "gt": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gt"
+        },
+        "lt": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lt"
+        },
+        "gte": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gte"
+        },
+        "lte": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lte"
+        },
+        "eq": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Eq"
+        }
+      },
+      "title": "ConditionThreshold",
+      "type": "object"
+    },
     "CursorPaginationConfig": {
       "properties": {
         "type": {
@@ -865,6 +943,57 @@
         "table"
       ],
       "title": "DatabricksDestinationConfig",
+      "type": "object"
+    },
+    "DegradedConditions": {
+      "description": "Post-sync degradation thresholds (#784) \u2014 a mapping metric -> threshold.\n\nA mapping (not a list) forbids duplicate metrics for free. Every field is\noptional; an unset metric is simply not evaluated. Evaluated at the CLI seam\nfrom data already in ``SyncResult`` + the DLQ store \u2014 no new collection.",
+      "properties": {
+        "row_errors_pct": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConditionThreshold"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "duration_seconds": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConditionThreshold"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rows_extracted": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConditionThreshold"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "dlq_depth": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConditionThreshold"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "DegradedConditions",
       "type": "object"
     },
     "DiscordDestinationConfig": {
@@ -2500,6 +2629,37 @@
         "type"
       ],
       "title": "OffsetPaginationConfig",
+      "type": "object"
+    },
+    "OnDegradedConfig": {
+      "description": "``alerts.on_degraded`` (#784) \u2014 thresholds + the channels they notify.\n\nSeparate from ``on_failure`` (hard failure): degradation is partial \u2014 a\ncreeping error rate, a duration SLA breach, an empty source, an accumulating\nDLQ. ``channels`` defaults to empty, so conditions can be JSON-only (surfaced\nin ``--output json`` for CI) without wiring a Slack/webhook target.",
+      "properties": {
+        "channels": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "slack": "#/$defs/SlackAlertConfig",
+                "webhook": "#/$defs/WebhookAlertConfig"
+              },
+              "propertyName": "type"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/SlackAlertConfig"
+              },
+              {
+                "$ref": "#/$defs/WebhookAlertConfig"
+              }
+            ]
+          },
+          "title": "Channels",
+          "type": "array"
+        },
+        "conditions": {
+          "$ref": "#/$defs/DegradedConditions"
+        }
+      },
+      "title": "OnDegradedConfig",
       "type": "object"
     },
     "ParquetDestinationConfig": {

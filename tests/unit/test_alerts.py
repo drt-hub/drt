@@ -166,3 +166,171 @@ class TestDispatcher:
         ])
         dispatch_alerts(cfg, "on_failure", context={"sync_name": "s", "error": "e"})
         mock_webhook.assert_called_once()  # second sender still ran
+
+
+class TestDispatchTargets:
+    """Degraded conditions (#784) reuse the same per-channel dispatch."""
+
+    @patch("drt.alerts.dispatcher.send_slack_alert")
+    @patch("drt.alerts.dispatcher.send_webhook_alert")
+    def test_dispatch_targets_routes_a_channel_list(
+        self, mock_webhook: MagicMock, mock_slack: MagicMock
+    ) -> None:
+        from drt.alerts.dispatcher import dispatch_targets
+        from drt.config.models import SlackAlertConfig, WebhookAlertConfig
+
+        dispatch_targets(
+            [
+                SlackAlertConfig(type="slack", webhook_url="https://x"),
+                WebhookAlertConfig(type="webhook", url="https://y"),
+            ],
+            context={"sync_name": "s", "error": "degraded — dlq_depth 5 (gt 0)"},
+        )
+        mock_slack.assert_called_once()
+        mock_webhook.assert_called_once()
+
+    def test_build_degraded_context_summarizes_trips(self) -> None:
+        from drt.alerts.conditions import TrippedCondition
+        from drt.alerts.dispatcher import build_degraded_context
+        from drt.destinations.base import SyncResult
+
+        tripped = [
+            TrippedCondition("row_errors_pct", "gt", 1.0, 4.2),
+            TrippedCondition("dlq_depth", "gt", 500.0, 530.0),
+        ]
+        ctx = build_degraded_context(
+            sync_name="orders_to_pg",
+            result=SyncResult(rows_extracted=1000, success=958, failed=42),
+            duration_s=12.0,
+            started_at="2026-07-19T00:00:00Z",
+            tripped=tripped,
+        )
+        assert ctx["status"] == "degraded"
+        # Both trips named in the one-line summary (coalesced into one message).
+        assert "row_errors_pct 4.2 (gt 1.0)" in ctx["error"]
+        assert "dlq_depth 530.0 (gt 500.0)" in ctx["error"]
+        assert [c["metric"] for c in ctx["conditions_tripped"]] == [
+            "row_errors_pct",
+            "dlq_depth",
+        ]
+
+
+class TestOnDegradedCliSeam:
+    """End-to-end at the CLI seam: _run_one evaluates conditions, coalesces one
+    message per sync, and surfaces tripped conditions in --output json."""
+
+    def _project(self, tmp_path, monkeypatch, conditions_yaml, *, dlq_lines=0):
+        import yaml as _yaml
+
+        from drt.config import credentials as creds
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            creds, "load_profile", lambda *_a, **_k: creds.DuckDBProfile(type="duckdb"),
+            raising=False,
+        )
+        (tmp_path / "drt_project.yml").write_text("name: demo\nprofile: default\n")
+        (tmp_path / "syncs").mkdir()
+        (tmp_path / "syncs" / "s.yml").write_text(
+            "name: s\nmodel: 'SELECT 1'\n"
+            "destination: {type: rest_api, url: 'https://x'}\n"
+            "alerts:\n" + conditions_yaml
+        )
+        if dlq_lines:
+            dlq = tmp_path / ".drt" / "dlq"
+            dlq.mkdir(parents=True)
+            (dlq / "s.jsonl").write_text(
+                "\n".join(_yaml.dump({"record": i}) for i in range(dlq_lines)) + "\n"
+            )
+        return tmp_path
+
+    def _patch_engine(self, monkeypatch, *, extracted, failed, duration):
+        from drt.destinations.base import SyncResult
+        from drt.engine import sync as sync_module
+
+        fake = SyncResult(
+            rows_extracted=extracted,
+            success=extracted - failed,
+            failed=failed,
+            skipped=0,
+            duration_seconds=duration,
+        )
+        monkeypatch.setattr(sync_module, "run_sync", lambda *a, **k: fake, raising=False)
+
+    @patch("drt.alerts.dispatcher.send_slack_alert")
+    def test_tripped_condition_dispatches_and_lands_in_json(
+        self, mock_slack, tmp_path, monkeypatch
+    ):
+        import json as _json
+
+        from typer.testing import CliRunner
+
+        from drt.cli.main import app
+
+        self._project(
+            tmp_path,
+            monkeypatch,
+            "  on_degraded:\n"
+            "    channels: [{type: slack, webhook_url: 'https://hooks/x'}]\n"
+            "    conditions:\n"
+            "      row_errors_pct: { gt: 1 }\n"
+            "      dlq_depth: { gt: 0 }\n",
+            dlq_lines=3,
+        )
+        self._patch_engine(monkeypatch, extracted=1000, failed=40, duration=5.0)
+        result = CliRunner().invoke(app, ["run", "--output", "json"])
+        payload = _json.loads(result.output)
+        entry = payload["syncs"][0]
+        metrics = {c["metric"] for c in entry["conditions_tripped"]}
+        assert metrics == {"row_errors_pct", "dlq_depth"}  # dlq_depth from the 3 DLQ lines
+        mock_slack.assert_called_once()  # coalesced: ONE message despite two trips
+
+    @patch("drt.alerts.dispatcher.send_slack_alert")
+    def test_healthy_sync_neither_dispatches_nor_annotates_json(
+        self, mock_slack, tmp_path, monkeypatch
+    ):
+        import json as _json
+
+        from typer.testing import CliRunner
+
+        from drt.cli.main import app
+
+        self._project(
+            tmp_path,
+            monkeypatch,
+            "  on_degraded:\n"
+            "    channels: [{type: slack, webhook_url: 'https://hooks/x'}]\n"
+            "    conditions:\n      row_errors_pct: { gt: 1 }\n",
+        )
+        self._patch_engine(monkeypatch, extracted=1000, failed=0, duration=5.0)
+        result = CliRunner().invoke(app, ["run", "--output", "json"])
+        entry = _json.loads(result.output)["syncs"][0]
+        assert "conditions_tripped" not in entry
+        mock_slack.assert_not_called()
+
+    def test_degraded_eval_failure_does_not_sink_the_run(self, tmp_path, monkeypatch):
+        """A monitoring feature must never fail the run it monitors: if the DLQ
+        read raises (permission / OS error), the successful sync still succeeds
+        (masukai's robustness ask on #784)."""
+        import json as _json
+
+        from typer.testing import CliRunner
+
+        from drt.cli.main import app
+        from drt.state import dlq as dlq_module
+
+        self._project(
+            tmp_path,
+            monkeypatch,
+            "  on_degraded:\n    conditions:\n      dlq_depth: { gt: 0 }\n",
+        )
+        self._patch_engine(monkeypatch, extracted=100, failed=0, duration=1.0)
+
+        def boom(self, sync_name):  # noqa: ANN001, ANN202
+            raise PermissionError(".drt/dlq not readable")
+
+        monkeypatch.setattr(dlq_module.DlqStore, "depth", boom)
+        result = CliRunner().invoke(app, ["run", "--output", "json"])
+        payload = _json.loads(result.output)
+        assert result.exit_code == 0  # run not sunk by the monitoring read
+        assert "conditions_tripped" not in payload["syncs"][0]

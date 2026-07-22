@@ -241,6 +241,33 @@ tests:                      # optional: post-sync validation (DB destinations on
 
 ---
 
+## Alerts (`alerts:` on a sync)
+
+```yaml
+alerts:
+  on_failure:                      # hard failure (#414) — fires when the sync errors out
+    - { type: slack, webhook_url_env: SLACK_WEBHOOK_URL }
+    - { type: webhook, url_env: PAGERDUTY_URL }   # webhook covers PagerDuty etc.
+  on_degraded:                     # partial degradation (#784) — thresholds on post-sync metrics
+    channels:                      # same channel types as on_failure; empty => JSON-only (CI)
+      - { type: slack, webhook_url_env: SLACK_WEBHOOK_URL }
+    conditions:                    # mapping metric -> threshold; exactly one of gt/lt/gte/lte/eq
+      row_errors_pct: { gt: 1 }    # failed / rows_extracted, as % (0 when nothing extracted)
+      duration_seconds: { gt: 300 }# whole-sync wall time SLA (skipped if unmeasured)
+      rows_extracted: { eq: 0 }    # empty-source guard ("succeeds" with no rows)
+      dlq_depth: { gt: 500 }       # DLQ backlog for this sync, cumulative across runs
+```
+
+- **`row_errors_pct` is `failed / rows_extracted`** — `skipped` is deliberately excluded (a skipped
+  row is a normal outcome via `match_policy` / `--limit` / `lookups.check_only`); a "too many skipped"
+  signal would be a separate future condition. When `rows_extracted == 0` the rate is `0%`, so an
+  empty source is caught only by the `rows_extracted` condition, never a false `100%`.
+- Multiple tripped conditions **coalesce into one alert per sync per run**. `--output json` adds
+  `conditions_tripped: [{metric, operator, threshold, actual}, …]` so CI can react without parsing Slack.
+- Evaluated post-sync at the CLI seam, so `drt build` inherits it. `on_failure` is unchanged.
+
+---
+
 ## Destination Configs
 
 ### `type: rest_api`
