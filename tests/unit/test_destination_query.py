@@ -301,6 +301,68 @@ def test_fetch_rows_by_keys_snowflake_parameterized() -> None:
     assert rows == [{"ID": 1, "NAME": "alice"}]
 
 
+def test_fetch_rows_by_keys_mysql_composite_key_placeholders() -> None:
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [[(1, 5, "alice")]]
+    conn = _plain_conn(cursor)
+
+    with patch(
+        "drt.destinations.mysql.MySQLDestination._connect", return_value=conn
+    ):
+        rows = fetch_rows_by_keys(
+            _mysql_config(),
+            key_cols=["user_id", "company_id"],
+            key_tuples=[(1, 5)],
+            columns=["user_id", "company_id", "name"],
+        )
+
+    sql, params = cursor.execute.call_args_list[0][0]
+    assert "(`user_id`, `company_id`) IN ((%s, %s))" in sql
+    assert params == [1, 5]
+    assert rows == [{"user_id": 1, "company_id": 5, "name": "alice"}]
+
+
+def test_fetch_rows_by_keys_mysql_dict_cursor_rows() -> None:
+    # pymysql with a DictCursor yields dict rows — the helper must project by
+    # the requested columns rather than zip a positional tuple.
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [[{"id": 1, "name": "alice", "extra": "x"}]]
+    conn = _plain_conn(cursor)
+
+    with patch(
+        "drt.destinations.mysql.MySQLDestination._connect", return_value=conn
+    ):
+        rows = fetch_rows_by_keys(
+            _mysql_config(),
+            key_cols=["id"],
+            key_tuples=[(1,)],
+            columns=["id", "name"],
+        )
+
+    assert rows == [{"id": 1, "name": "alice"}]
+
+
+def test_fetch_rows_by_keys_snowflake_composite_key_placeholders() -> None:
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [[(1, 5, "alice")]]
+    conn = _fake_conn(cursor)
+
+    with patch(
+        "drt.destinations.snowflake.SnowflakeDestination._connect", return_value=conn
+    ):
+        rows = fetch_rows_by_keys(
+            _snowflake_config(),
+            key_cols=["USER_ID", "COMPANY_ID"],
+            key_tuples=[(1, 5)],
+            columns=["USER_ID", "COMPANY_ID", "NAME"],
+        )
+
+    sql, params = cursor.execute.call_args_list[0][0]
+    assert "IN ((%s, %s))" in sql
+    assert params == [1, 5]
+    assert rows == [{"USER_ID": 1, "COMPANY_ID": 5, "NAME": "alice"}]
+
+
 def test_fetch_rows_by_keys_empty_returns_empty_without_query() -> None:
     cursor = MagicMock()
     conn = _plain_conn(cursor)
