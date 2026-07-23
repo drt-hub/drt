@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from drt.config.models import SyncOptions
+from drt.config.models import DestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 
@@ -48,6 +48,123 @@ class BaseSqlDestination:
         # sync. ``None`` value = introspection ran but is unavailable; the key
         # being absent = not yet fetched.
         self._schema_cache: dict[str, dict[str, str] | None] = {}
+
+    def load(
+        self,
+        records: list[dict[str, Any]],
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        """Dialect-agnostic write template (#719 phase 2a).
+
+        Validates mirror.scope, opens a dialect connection, dispatches to the
+        replace-swap / replace / upsert write path, and — for ``mode: mirror``
+        — accumulates the observed ``upsert_key`` (and scope) tuples for the
+        ``finalize_sync`` DELETE. The concrete SQL construction lives in the
+        subclass ``_load_replace_swap`` / ``_load_replace`` / ``_load_upsert``
+        hooks, which each narrow the config type internally.
+        """
+        if not records:
+            return SyncResult()
+
+        # ``config`` is the ``DestinationConfig`` union (the Protocol signature);
+        # the fields read below (``table``) live on the concrete SQL subclass
+        # configs, so narrow via ``Any`` — the same convention the other base
+        # helpers use. The ``_dialect_connect`` / ``_load_*`` hooks each assert
+        # the concrete config type internally.
+        cfg: Any = config
+        self._validate_mirror_scope(records, sync_options)
+
+        conn = self._dialect_connect(config)
+        result = SyncResult()
+
+        try:
+            cur = conn.cursor()
+            columns = list(records[0].keys())
+
+            if sync_options.mode == "replace":
+                if sync_options.replace_strategy == "swap":
+                    result = self._load_replace_swap(
+                        conn,
+                        cur,
+                        records,
+                        columns,
+                        cfg.table,
+                        sync_options,
+                        config,
+                    )
+                else:
+                    result = self._load_replace(
+                        conn,
+                        cur,
+                        records,
+                        columns,
+                        cfg.table,
+                        sync_options,
+                        config,
+                    )
+            else:
+                result = self._load_upsert(
+                    conn,
+                    cur,
+                    records,
+                    columns,
+                    config,
+                    sync_options,
+                )
+                # sync.mode: mirror (#340 / #687) — record the observed
+                # upsert_key (and scope) tuples for the finalize_sync DELETE.
+                if sync_options.mode == "mirror":
+                    self._accumulate_mirror_state(records, result, config, sync_options)
+        finally:
+            conn.close()
+
+        return result
+
+    def finalize_sync(
+        self,
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult | None:
+        """End-of-sync hook: swap-finalize for replace, DELETE-missing for mirror.
+
+        - ``mode=mirror`` (#340): delegate to ``_finalize_mirror`` (still
+          dialect-specific — pulled up in phase 2b) and reset mirror state so a
+          re-run starts fresh.
+        - ``mode=replace, replace_strategy=swap``: atomically rename the shadow
+          table over the original via the ``_rename_swap`` hook (PG: two ALTERs
+          with an intermediate commit; MySQL: one atomic RENAME), then clear the
+          swap state.
+
+        The swap guard, shadow/old name computation (via ``_shadow_name`` /
+        ``_old_name``), connection, and state reset are dialect-agnostic and
+        live here; only the rename DDL and the naming convention differ, and
+        those are the hooks.
+        """
+        if sync_options.mode == "mirror":
+            result = self._finalize_mirror(config, sync_options)
+            # Reset mirror state regardless of result so a re-run starts fresh.
+            self._mirror_keys = None
+            self._mirror_scopes = None
+            return result
+
+        if not self._swap_shadow_created or self._swap_table is None:
+            return None
+
+        table = self._swap_table
+        shadow = self._shadow_name(table)
+        old = self._old_name(table)
+
+        conn = self._dialect_connect(config)
+        try:
+            cur = conn.cursor()
+            self._rename_swap(conn, cur, table, shadow, old)
+        finally:
+            conn.close()
+            self._swap_shadow_created = False
+            self._swap_table = None
+
+        return SyncResult()
 
     def _resolve_schema(self, config: Any) -> dict[str, str] | None:
         """Column → type-category map for the target table, cached per sync.
@@ -152,4 +269,72 @@ class BaseSqlDestination:
     def _qualify_ident(self, name: str) -> Any:
         """Quote/qualify an identifier. Returns a psycopg2 Composable (PG)
         or a backtick-quoted str (MySQL) — both accepted by cursor.execute."""
+        raise NotImplementedError
+
+    def _load_replace_swap(
+        self,
+        conn: Any,
+        cur: Any,
+        records: list[dict[str, Any]],
+        columns: list[str],
+        table: str,
+        sync_options: SyncOptions,
+        config: Any,
+    ) -> SyncResult:
+        """Zero-downtime replace: build a shadow table this batch; the atomic
+        rename happens in ``finalize_sync``. Dialect-specific SQL."""
+        raise NotImplementedError
+
+    def _load_replace(
+        self,
+        conn: Any,
+        cur: Any,
+        records: list[dict[str, Any]],
+        columns: list[str],
+        table: str,
+        sync_options: SyncOptions,
+        config: Any,
+    ) -> SyncResult:
+        """TRUNCATE-then-INSERT replace within a single transaction.
+        Dialect-specific SQL."""
+        raise NotImplementedError
+
+    def _load_upsert(
+        self,
+        conn: Any,
+        cur: Any,
+        records: list[dict[str, Any]],
+        columns: list[str],
+        config: Any,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        """Idempotent upsert (INSERT ... ON CONFLICT / ON DUPLICATE KEY).
+        Dialect-specific SQL."""
+        raise NotImplementedError
+
+    def _shadow_name(self, table: str) -> str:
+        """Name of the per-sync swap shadow table (schema-preserving on PG,
+        f-string suffix on MySQL). Dialect-specific."""
+        raise NotImplementedError
+
+    def _old_name(self, table: str) -> str:
+        """Name of the transient ``__drt_old`` table used during the swap.
+        Dialect-specific."""
+        raise NotImplementedError
+
+    def _rename_swap(
+        self, conn: Any, cur: Any, table: str, shadow: str, old: str
+    ) -> None:
+        """Rename ``shadow`` over ``table`` (moving the original to ``old``) and
+        DROP ``old``, committing as today's dialect does: PG issues two
+        ``ALTER TABLE ... RENAME TO`` under one commit then a separate DROP+commit;
+        MySQL issues one atomic ``RENAME TABLE`` + commit then DROP+commit. The
+        whole rename/DROP + transaction boundary is dialect-specific."""
+        raise NotImplementedError
+
+    def _finalize_mirror(
+        self, config: Any, sync_options: SyncOptions
+    ) -> SyncResult | None:
+        """DELETE destination rows whose observed keys weren't seen this run
+        (#340 / #687). Still dialect-specific — pulled up in phase 2b."""
         raise NotImplementedError

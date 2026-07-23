@@ -135,64 +135,6 @@ class PostgresDestination(BaseSqlDestination):
     resolution, and mirror bookkeeping come from ``BaseSqlDestination``.
     """
 
-    def load(
-        self,
-        records: list[dict[str, Any]],
-        config: DestinationConfig,
-        sync_options: SyncOptions,
-    ) -> SyncResult:
-        assert isinstance(config, PostgresDestinationConfig)
-        if not records:
-            return SyncResult()
-
-        self._validate_mirror_scope(records, sync_options)
-
-        conn = self._connect(config)
-        result = SyncResult()
-
-        try:
-            cur = conn.cursor()
-            columns = list(records[0].keys())
-
-            if sync_options.mode == "replace":
-                if sync_options.replace_strategy == "swap":
-                    result = self._load_replace_swap(
-                        conn,
-                        cur,
-                        records,
-                        columns,
-                        config.table,
-                        sync_options,
-                        config,
-                    )
-                else:
-                    result = self._load_replace(
-                        conn,
-                        cur,
-                        records,
-                        columns,
-                        config.table,
-                        sync_options,
-                        config,
-                    )
-            else:
-                result = self._load_upsert(
-                    conn,
-                    cur,
-                    records,
-                    columns,
-                    config,
-                    sync_options,
-                )
-                # sync.mode: mirror (#340 / #687) — record the observed
-                # upsert_key (and scope) tuples for the finalize_sync DELETE.
-                if sync_options.mode == "mirror":
-                    self._accumulate_mirror_state(records, result, config, sync_options)
-        finally:
-            conn.close()
-
-        return result
-
     def get_row_count(self, config: DestinationConfig) -> int:
         """Get the current row count from the destination table.
 
@@ -327,65 +269,38 @@ class PostgresDestination(BaseSqlDestination):
         conn.commit()
         return result
 
-    def finalize_sync(
-        self,
-        config: DestinationConfig,
-        sync_options: SyncOptions,
-    ) -> SyncResult | None:
-        """End-of-sync hook: swap-finalize for replace, DELETE-missing for mirror.
+    def _shadow_name(self, table: str) -> str:
+        return _with_relation_suffix(table, "__drt_swap")
 
-        - ``mode=replace, replace_strategy=swap``: atomic rename of the
-          shadow table over the original (existing behaviour).
-        - ``mode=mirror`` (#340): DELETE rows from the destination whose
-          ``upsert_key`` tuple is not in the set seen across all batches.
-          Skipped if the source produced no batches with records —
-          treats "no observation" as "don't delete anything" for safety.
-        """
+    def _old_name(self, table: str) -> str:
+        return _with_relation_suffix(table, "__drt_old")
+
+    def _rename_swap(
+        self, conn: Any, cur: Any, table: str, shadow: str, old: str
+    ) -> None:
+        """PG swap rename: two ``ALTER TABLE ... RENAME TO`` under one commit,
+        then a separate DROP+commit for the old table."""
         from psycopg2 import sql as _pgsql
 
-        if sync_options.mode == "mirror":
-            result = self._finalize_mirror(config, sync_options)
-            # Reset mirror state regardless of result so a re-run starts fresh.
-            self._mirror_keys = None
-            self._mirror_scopes = None
-            return result
-
-        if not self._swap_shadow_created or self._swap_table is None:
-            return None
-
-        assert isinstance(config, PostgresDestinationConfig)
-        table = self._swap_table
-        shadow = _with_relation_suffix(table, "__drt_swap")
-        old = _with_relation_suffix(table, "__drt_old")
-
-        conn = self._connect(config)
-        try:
-            cur = conn.cursor()
-            # Single transaction: original->old, shadow->original.
-            # ALTER TABLE ... RENAME TO takes a bare relation name on the RHS;
-            # the schema is preserved automatically.
-            cur.execute(
-                _pgsql.SQL("ALTER TABLE {} RENAME TO {}").format(
-                    _qualified_ident(table),
-                    _pgsql.Identifier(_relation_name(old)),
-                )
+        # Single transaction: original->old, shadow->original.
+        # ALTER TABLE ... RENAME TO takes a bare relation name on the RHS;
+        # the schema is preserved automatically.
+        cur.execute(
+            _pgsql.SQL("ALTER TABLE {} RENAME TO {}").format(
+                _qualified_ident(table),
+                _pgsql.Identifier(_relation_name(old)),
             )
-            cur.execute(
-                _pgsql.SQL("ALTER TABLE {} RENAME TO {}").format(
-                    _qualified_ident(shadow),
-                    _pgsql.Identifier(_relation_name(table)),
-                )
+        )
+        cur.execute(
+            _pgsql.SQL("ALTER TABLE {} RENAME TO {}").format(
+                _qualified_ident(shadow),
+                _pgsql.Identifier(_relation_name(table)),
             )
-            conn.commit()
-            # DROP old in separate tx (failure here doesn't break the swap).
-            cur.execute(_pgsql.SQL("DROP TABLE {}").format(_qualified_ident(old)))
-            conn.commit()
-        finally:
-            conn.close()
-            self._swap_shadow_created = False
-            self._swap_table = None
-
-        return SyncResult()
+        )
+        conn.commit()
+        # DROP old in separate tx (failure here doesn't break the swap).
+        cur.execute(_pgsql.SQL("DROP TABLE {}").format(_qualified_ident(old)))
+        conn.commit()
 
     def _finalize_mirror(
         self,

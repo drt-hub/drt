@@ -98,7 +98,13 @@ def test_accumulate_collects_distinct_scopes() -> None:
 
 def test_dialect_hooks_are_declared() -> None:
     # The base defines the hook names the template methods depend on.
-    for hook in ("_dialect_connect", "_qualify_ident"):
+    for hook in (
+        "_dialect_connect",
+        "_qualify_ident",
+        "_load_replace_swap",
+        "_load_replace",
+        "_load_upsert",
+    ):
         assert hasattr(BaseSqlDestination, hook), hook
 
 
@@ -111,6 +117,154 @@ def test_base_dialect_hooks_raise_not_implemented() -> None:
         base._dialect_connect(object())
     with pytest.raises(NotImplementedError):
         base._qualify_ident("x")
+
+
+def test_base_load_hooks_raise_not_implemented() -> None:
+    # The three write-path hooks the pulled-up ``load`` dispatches to are
+    # abstract by contract — each SQL dialect implements its own.
+    base = BaseSqlDestination()
+    with pytest.raises(NotImplementedError):
+        base._load_replace_swap(None, None, [], [], "t", object(), object())
+    with pytest.raises(NotImplementedError):
+        base._load_replace(None, None, [], [], "t", object(), object())
+    with pytest.raises(NotImplementedError):
+        base._load_upsert(None, None, [], [], object(), object())
+
+
+def test_base_finalize_hooks_raise_not_implemented() -> None:
+    # The swap-rename + shadow/old naming hooks and the mirror-delete hook
+    # (pulled up in phase 2b) are abstract by contract.
+    base = BaseSqlDestination()
+    with pytest.raises(NotImplementedError):
+        base._rename_swap(None, None, "t", "s", "o")
+    with pytest.raises(NotImplementedError):
+        base._shadow_name("t")
+    with pytest.raises(NotImplementedError):
+        base._old_name("t")
+    with pytest.raises(NotImplementedError):
+        base._finalize_mirror(object(), SimpleNamespace(mode="mirror"))
+
+
+# ---------------------------------------------------------------------------
+# load template (#719 phase 2a)
+# ---------------------------------------------------------------------------
+
+
+def _load_dest(events: list[str], mode: str, replace_strategy: str = "delete") -> Any:
+    """A BaseSqlDestination subclass whose write hooks record which path ran."""
+
+    class _Cur:
+        pass
+
+    class _Conn:
+        def cursor(self) -> _Cur:
+            return _Cur()
+
+        def close(self) -> None:
+            events.append("close")
+
+    class _Dest(BaseSqlDestination):
+        def _dialect_connect(self, config: Any) -> Any:
+            events.append("connect")
+            return _Conn()
+
+        def _load_replace_swap(self, *a: Any, **k: Any) -> SyncResult:
+            events.append("replace_swap")
+            return SyncResult()
+
+        def _load_replace(self, *a: Any, **k: Any) -> SyncResult:
+            events.append("replace")
+            return SyncResult()
+
+        def _load_upsert(self, *a: Any, **k: Any) -> SyncResult:
+            events.append("upsert")
+            return SyncResult()
+
+    return _Dest()
+
+
+def _load_options(mode: str, replace_strategy: str = "delete") -> SimpleNamespace:
+    return SimpleNamespace(
+        mode=mode, replace_strategy=replace_strategy, mirror=None
+    )
+
+
+def test_load_empty_records_returns_early() -> None:
+    events: list[str] = []
+    d = _load_dest(events, "upsert")
+    result = d.load([], SimpleNamespace(upsert_key=["id"]), _load_options("upsert"))
+    assert isinstance(result, SyncResult)
+    assert events == []  # never connected
+
+
+def test_load_dispatches_replace_swap() -> None:
+    events: list[str] = []
+    d = _load_dest(events, "replace")
+    d.load(
+        [{"id": 1}],
+        SimpleNamespace(upsert_key=["id"], table="t"),
+        _load_options("replace", replace_strategy="swap"),
+    )
+    assert events == ["connect", "replace_swap", "close"]
+
+
+def test_load_dispatches_replace_delete() -> None:
+    events: list[str] = []
+    d = _load_dest(events, "replace")
+    d.load(
+        [{"id": 1}],
+        SimpleNamespace(upsert_key=["id"], table="t"),
+        _load_options("replace", replace_strategy="delete"),
+    )
+    assert events == ["connect", "replace", "close"]
+
+
+def test_load_dispatches_upsert_no_mirror_accumulate() -> None:
+    events: list[str] = []
+    d = _load_dest(events, "upsert")
+    d.load(
+        [{"id": 1}],
+        SimpleNamespace(upsert_key=["id"], table="t"),
+        _load_options("upsert"),
+    )
+    assert events == ["connect", "upsert", "close"]
+    assert d._mirror_keys is None  # not accumulated when mode != mirror
+
+
+def test_load_mirror_accumulates_state() -> None:
+    events: list[str] = []
+    d = _load_dest(events, "mirror")
+    d.load(
+        [{"id": 1}, {"id": 2}],
+        SimpleNamespace(upsert_key=["id"], table="t"),
+        _load_options("mirror"),
+    )
+    assert events == ["connect", "upsert", "close"]
+    assert d._mirror_keys == [(1,), (2,)]  # accumulated for mirror
+
+
+def test_load_closes_connection_on_error() -> None:
+    events: list[str] = []
+
+    class _Conn:
+        def cursor(self) -> Any:
+            raise RuntimeError("boom")
+
+        def close(self) -> None:
+            events.append("close")
+
+    class _Dest(BaseSqlDestination):
+        def _dialect_connect(self, config: Any) -> Any:
+            return _Conn()
+
+    d = _Dest()
+    with pytest.raises(RuntimeError, match="boom"):
+        d.load(
+            [{"id": 1}],
+            SimpleNamespace(upsert_key=["id"], table="t"),
+            _load_options("upsert"),
+        )
+    assert events == ["close"]  # finally ran
 
 
 # ---------------------------------------------------------------------------
@@ -183,3 +337,81 @@ def test_record_row_error_appends_truncated_preview() -> None:
     assert err.error_message == "boom"
     assert len(err.record_preview) <= 200
     assert err.http_status is None
+
+
+# ---------------------------------------------------------------------------
+# finalize_sync template (#719 phase 2a)
+# ---------------------------------------------------------------------------
+
+
+def _finalize_dest(events: list[str]) -> Any:
+    """A BaseSqlDestination subclass recording the swap-finalize hook calls."""
+
+    class _Cur:
+        pass
+
+    class _Conn:
+        def cursor(self) -> _Cur:
+            return _Cur()
+
+        def close(self) -> None:
+            events.append("close")
+
+    class _Dest(BaseSqlDestination):
+        def _dialect_connect(self, config: Any) -> Any:
+            events.append("connect")
+            return _Conn()
+
+        def _shadow_name(self, table: str) -> str:
+            return f"{table}__shadow"
+
+        def _old_name(self, table: str) -> str:
+            return f"{table}__old"
+
+        def _rename_swap(
+            self, conn: Any, cur: Any, table: str, shadow: str, old: str
+        ) -> None:
+            events.append(f"rename:{table}:{shadow}:{old}")
+
+        def _finalize_mirror(self, config: Any, sync_options: Any) -> SyncResult:
+            events.append("finalize_mirror")
+            return SyncResult()
+
+    return _Dest()
+
+
+def test_finalize_sync_mirror_dispatches_and_resets_state() -> None:
+    events: list[str] = []
+    d = _finalize_dest(events)
+    d._mirror_keys = [(1,)]
+    d._mirror_scopes = {("a",)}
+    result = d.finalize_sync(object(), SimpleNamespace(mode="mirror"))
+    assert isinstance(result, SyncResult)
+    assert events == ["finalize_mirror"]
+    # mirror state reset regardless of result
+    assert d._mirror_keys is None
+    assert d._mirror_scopes is None
+
+
+def test_finalize_sync_returns_none_when_no_swap() -> None:
+    events: list[str] = []
+    d = _finalize_dest(events)
+    # not mirror, and no swap shadow created
+    assert d.finalize_sync(object(), SimpleNamespace(mode="replace")) is None
+    assert events == []
+
+
+def test_finalize_sync_swap_delegates_rename_and_resets() -> None:
+    events: list[str] = []
+    d = _finalize_dest(events)
+    d._swap_shadow_created = True
+    d._swap_table = "public.scores"
+    result = d.finalize_sync(object(), SimpleNamespace(mode="replace"))
+    assert isinstance(result, SyncResult)
+    assert events == [
+        "connect",
+        "rename:public.scores:public.scores__shadow:public.scores__old",
+        "close",
+    ]
+    assert d._swap_shadow_created is False
+    assert d._swap_table is None
