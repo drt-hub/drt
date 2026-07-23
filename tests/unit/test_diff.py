@@ -142,12 +142,16 @@ class TestComputeDiffQueryable:
         assert result.deleted[0]["id"] == 3
         assert len(result.updated) == 1  # id=1 score changed
 
-    @patch("drt.engine.diff.fetch_rows")
-    def test_deleted_hidden_when_mode_is_full(self, mock_fetch: Any) -> None:
-        """In full (upsert) mode, 'deleted' has no semantic — must be empty."""
-        mock_fetch.return_value = [
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_deleted_hidden_when_mode_is_full(self, mock_fetch_keys: Any) -> None:
+        """In full (upsert) mode, 'deleted' has no semantic — must be empty.
+
+        Full mode (#470) uses the keyed fetch, which by design only returns
+        dest rows whose key is in the source set — so the id=99 dest-only row
+        is never seen. ``deleted`` stays empty regardless.
+        """
+        mock_fetch_keys.return_value = [
             {"id": 1, "score": 0.5},
-            {"id": 99, "score": 0.7},  # not in source
         ]
         records = [{"id": 1, "score": 0.95}]
 
@@ -200,6 +204,120 @@ class TestComputeDiffQueryable:
         assert result.deleted == []
         assert result.total_source_rows == 1
         assert result.total_destination_rows == 1
+
+
+# ---------------------------------------------------------------------------
+# Keyed fetch (#470): compute_diff batches destination lookup by source PKs
+# ---------------------------------------------------------------------------
+
+
+class TestComputeDiffKeyedFetch:
+    @patch("drt.engine.diff.fetch_rows")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_compute_diff_uses_keyed_fetch_for_upsert_mode(
+        self, mock_fetch_keys: Any, mock_fetch: Any
+    ) -> None:
+        """Upsert (non-replace) mode + upsert_key -> keyed fetch, not SELECT *.
+
+        added/updated must match the full-scan behaviour for the same rows.
+        """
+        mock_fetch_keys.return_value = [
+            {"id": 1, "score": 0.5},
+            {"id": 2, "score": 0.9},
+        ]
+        records = [
+            {"id": 1, "score": 0.95},  # update
+            {"id": 2, "score": 0.9},  # unchanged
+            {"id": 3, "score": 0.7},  # add
+        ]
+
+        result = compute_diff(records, _pg_config(), _options("full"), limit=20)
+
+        # keyed fetch used; full-table SELECT * never issued
+        assert mock_fetch_keys.called
+        assert not mock_fetch.called
+
+        # fetch bounded to the source key set (order-insensitive)
+        call = mock_fetch_keys.call_args
+        assert call.args[1] == ["id"]  # key_cols
+        assert set(call.args[2]) == {(1,), (2,), (3,)}  # source key tuples
+        assert call.kwargs["columns"] == ["id", "score"]
+
+        assert len(result.added) == 1
+        assert result.added[0]["id"] == 3
+        assert len(result.updated) == 1
+        old, new = result.updated[0]
+        assert old["score"] == 0.5 and new["score"] == 0.95
+        assert result.deleted == []
+
+    @patch("drt.engine.diff.fetch_rows")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_compute_diff_replace_mode_still_full_scans(
+        self, mock_fetch_keys: Any, mock_fetch: Any
+    ) -> None:
+        """Replace mode must NOT use keyed fetch — deleted set must survive."""
+        mock_fetch.return_value = [
+            {"id": 1, "score": 0.5},
+            {"id": 2, "score": 0.9},
+            {"id": 3, "score": 0.7},  # not in source -> deleted
+        ]
+        records = [{"id": 1, "score": 0.95}, {"id": 2, "score": 0.9}]
+
+        result = compute_diff(records, _pg_config(), _options("replace"), limit=20)
+
+        # full scan used; keyed fetch never issued in replace mode
+        assert mock_fetch.called
+        assert not mock_fetch_keys.called
+
+        assert len(result.deleted) == 1
+        assert result.deleted[0]["id"] == 3
+        assert len(result.updated) == 1
+
+    @patch("drt.engine.diff.fetch_rows")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_compute_diff_clickhouse_falls_back_to_full_scan(
+        self, mock_fetch_keys: Any, mock_fetch: Any
+    ) -> None:
+        """NotImplementedError (ClickHouse) -> fall back to full SELECT * scan."""
+        mock_fetch_keys.side_effect = NotImplementedError("ClickHouse unsupported")
+        mock_fetch.return_value = [
+            {"id": 1, "score": 0.5},
+            {"id": 2, "score": 0.9},
+        ]
+        records = [
+            {"id": 1, "score": 0.95},  # update
+            {"id": 3, "score": 0.7},  # add
+        ]
+
+        result = compute_diff(records, _pg_config(), _options("full"), limit=20)
+
+        # keyed fetch attempted, then full scan used as the fallback
+        assert mock_fetch_keys.called
+        assert mock_fetch.called
+
+        assert len(result.added) == 1
+        assert result.added[0]["id"] == 3
+        assert len(result.updated) == 1
+        assert result.deleted == []
+
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_compute_diff_keyed_fetch_query_failure_falls_back_to_sample(
+        self, mock_fetch_keys: Any
+    ) -> None:
+        """A non-NotImplementedError from the keyed fetch → sample fallback.
+
+        The query-failure fallback (shared with the full-scan path) must still
+        fire when the keyed fetch itself errors.
+        """
+        mock_fetch_keys.side_effect = RuntimeError("connection refused")
+        records = [{"id": 1, "score": 0.95}]
+
+        result = compute_diff(records, _pg_config(), _options("full"), limit=20)
+
+        assert not result.supported
+        assert result.fallback_reason is not None
+        assert "Could not query destination" in result.fallback_reason
+        assert result.sample == records
 
 
 # ---------------------------------------------------------------------------
