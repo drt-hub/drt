@@ -306,6 +306,34 @@ class TestMySQLReplaceMode:
         conn.commit.assert_called_once()
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
+    def test_replace_row_error_on_error_skip(self, mock_connect: MagicMock) -> None:
+        # replace path: TRUNCATE ok, first INSERT raises, second succeeds on a
+        # fresh cursor. Exercises _load_replace's error branch (rollback →
+        # new cursor → continue) and the shared _record_row_error.
+        conn = _fake_connection()
+        cur = conn.cursor()
+        # execute #1 = TRUNCATE (ok), #2 = INSERT row 0 (raises)
+        cur.execute.side_effect = [None, Exception("duplicate key"), None]
+        new_cur = MagicMock()
+        conn.cursor.side_effect = [cur, new_cur]
+        mock_connect.return_value = conn
+
+        records = [
+            {"user_id": 1, "company_id": 5, "score": 0.5},
+            {"user_id": 2, "company_id": 5, "score": 0.9},
+        ]
+        result = MySQLDestination().load(
+            records, _config(), _options(mode="replace", on_error="skip")
+        )
+
+        assert result.failed == 1
+        assert result.success == 1
+        assert len(result.row_errors) == 1
+        assert result.row_errors[0].batch_index == 0
+        assert "duplicate key" in result.row_errors[0].error_message
+        conn.rollback.assert_called_once()
+
+    @patch("drt.destinations.mysql.MySQLDestination._connect")
     def test_replace_truncates_only_once_across_batches(self, mock_connect: MagicMock) -> None:
         conn = _fake_connection()
         mock_connect.return_value = conn
