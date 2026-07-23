@@ -102,6 +102,17 @@ def test_dialect_hooks_are_declared() -> None:
         assert hasattr(BaseSqlDestination, hook), hook
 
 
+def test_base_dialect_hooks_raise_not_implemented() -> None:
+    # The base stubs are abstract by contract: a subclass MUST override them.
+    # This locks that contract (and catches a future warehouse base that
+    # forgets to implement a hook — the #720 direction).
+    base = BaseSqlDestination()
+    with pytest.raises(NotImplementedError):
+        base._dialect_connect(object())
+    with pytest.raises(NotImplementedError):
+        base._qualify_ident("x")
+
+
 # ---------------------------------------------------------------------------
 # test_connection (#719)
 # ---------------------------------------------------------------------------
