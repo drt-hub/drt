@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -88,3 +89,97 @@ def test_accumulate_collects_distinct_scopes() -> None:
     )
     assert d._mirror_keys == [(1,), (2,)]
     assert d._mirror_scopes == {("a",)}
+
+
+# ---------------------------------------------------------------------------
+# dialect hooks (#719)
+# ---------------------------------------------------------------------------
+
+
+def test_dialect_hooks_are_declared() -> None:
+    # The base defines the hook names the template methods depend on.
+    for hook in ("_dialect_connect", "_qualify_ident"):
+        assert hasattr(BaseSqlDestination, hook), hook
+
+
+def test_base_dialect_hooks_raise_not_implemented() -> None:
+    # The base stubs are abstract by contract: a subclass MUST override them.
+    # This locks that contract (and catches a future warehouse base that
+    # forgets to implement a hook — the #720 direction).
+    base = BaseSqlDestination()
+    with pytest.raises(NotImplementedError):
+        base._dialect_connect(object())
+    with pytest.raises(NotImplementedError):
+        base._qualify_ident("x")
+
+
+# ---------------------------------------------------------------------------
+# test_connection (#719)
+# ---------------------------------------------------------------------------
+
+
+def test_connection_runs_select_1_and_closes() -> None:
+    events: list[str] = []
+
+    class _Cur:
+        def execute(self, sql: str) -> None:
+            events.append(f"execute:{sql}")
+
+    class _Conn:
+        def cursor(self) -> _Cur:
+            events.append("cursor")
+            return _Cur()
+
+        def close(self) -> None:
+            events.append("close")
+
+    class _Dest(BaseSqlDestination):
+        def _dialect_connect(self, config: Any) -> Any:
+            events.append("connect")
+            return _Conn()
+
+    d = _Dest()
+    assert d.test_connection(object()) is None
+    assert events == ["connect", "cursor", "execute:SELECT 1", "close"]
+
+
+def test_connection_closes_even_when_execute_raises() -> None:
+    events: list[str] = []
+
+    class _Cur:
+        def execute(self, sql: str) -> None:
+            raise RuntimeError("boom")
+
+    class _Conn:
+        def cursor(self) -> _Cur:
+            return _Cur()
+
+        def close(self) -> None:
+            events.append("close")
+
+    class _Dest(BaseSqlDestination):
+        def _dialect_connect(self, config: Any) -> Any:
+            return _Conn()
+
+    d = _Dest()
+    with pytest.raises(RuntimeError, match="boom"):
+        d.test_connection(object())
+    assert events == ["close"]  # finally ran despite the error
+
+
+# ---------------------------------------------------------------------------
+# _record_row_error (#722 seam / #719)
+# ---------------------------------------------------------------------------
+
+
+def test_record_row_error_appends_truncated_preview() -> None:
+    d = BaseSqlDestination()
+    result = SyncResult()
+    big = {"x": "y" * 500}
+    d._record_row_error(result, 3, big, ValueError("boom"))
+    assert result.failed == 1
+    err = result.row_errors[0]
+    assert err.batch_index == 3
+    assert err.error_message == "boom"
+    assert len(err.record_preview) <= 200
+    assert err.http_status is None

@@ -33,7 +33,6 @@ from drt.config.models import (
 )
 from drt.destinations._serializer import serialize_complex_value
 from drt.destinations.base import SyncResult
-from drt.destinations.row_errors import RowError
 from drt.destinations.sql_base import BaseSqlDestination
 
 try:
@@ -221,16 +220,6 @@ class PostgresDestination(BaseSqlDestination):
         finally:
             conn.close()
 
-    def test_connection(self, config: DestinationConfig) -> None:
-        """Test connectivity by establishing a connection and running SELECT 1."""
-        assert isinstance(config, PostgresDestinationConfig)
-        conn = self._connect(config)
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT 1")
-        finally:
-            conn.close()
-
     def _load_replace(
         self,
         conn: Any,
@@ -261,15 +250,7 @@ class PostgresDestination(BaseSqlDestination):
                 cur.execute(query, values)
                 result.success += 1
             except Exception as e:
-                result.failed += 1
-                result.row_errors.append(
-                    RowError(
-                        batch_index=i,
-                        record_preview=json.dumps(record, default=str)[:200],
-                        http_status=None,
-                        error_message=str(e),
-                    )
-                )
+                self._record_row_error(result, i, record, e)
                 if sync_options.on_error == "fail":
                     conn.rollback()
                     return result
@@ -327,15 +308,7 @@ class PostgresDestination(BaseSqlDestination):
                 cur.execute(sql, values)
                 result.success += 1
             except Exception as e:
-                result.failed += 1
-                result.row_errors.append(
-                    RowError(
-                        batch_index=i,
-                        record_preview=json.dumps(record, default=str)[:200],
-                        http_status=None,
-                        error_message=str(e),
-                    )
-                )
+                self._record_row_error(result, i, record, e)
                 if sync_options.on_error == "fail":
                     conn.rollback()
                     # Cleanup shadow on hard fail
@@ -814,15 +787,7 @@ class PostgresDestination(BaseSqlDestination):
                 else:
                     result.success += 1
             except Exception as e:
-                result.failed += 1
-                result.row_errors.append(
-                    RowError(
-                        batch_index=i,
-                        record_preview=json.dumps(record, default=str)[:200],
-                        http_status=None,
-                        error_message=str(e),
-                    )
-                )
+                self._record_row_error(result, i, record, e)
                 if sync_options.on_error == "fail":
                     conn.rollback()
                     return result
@@ -920,6 +885,13 @@ class PostgresDestination(BaseSqlDestination):
     def supported_match_policies(self) -> frozenset[str]:
         """Postgres honours all three ``match_policy`` values (#757)."""
         return frozenset({"upsert", "update_only", "create_only"})
+
+    # --- dialect hooks (#719) ---------------------------------------------
+    def _dialect_connect(self, config: Any) -> Any:
+        return self._connect(config)  # _connect is @staticmethod(config)
+
+    def _qualify_ident(self, name: str) -> Any:
+        return _qualified_ident(name)  # module-level fn
 
     @staticmethod
     def _connect(config: PostgresDestinationConfig) -> Any:

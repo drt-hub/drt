@@ -19,10 +19,12 @@ entry.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from drt.config.models import SyncOptions
 from drt.destinations.base import SyncResult
+from drt.destinations.row_errors import RowError
 
 
 class BaseSqlDestination:
@@ -99,7 +101,7 @@ class BaseSqlDestination:
             raise ValueError(MIRROR_UPSERT_KEY_MSG)
         if self._mirror_keys is None:
             self._mirror_keys = []
-        failed_indices = {re.batch_index for re in result.row_errors}
+        failed_indices = {err.batch_index for err in result.row_errors}
         scope_cols = sync_options.mirror.scope if sync_options.mirror is not None else None
         if scope_cols and self._mirror_scopes is None:
             self._mirror_scopes = set()
@@ -110,3 +112,44 @@ class BaseSqlDestination:
             if scope_cols:
                 assert self._mirror_scopes is not None
                 self._mirror_scopes.add(tuple(record.get(c) for c in scope_cols))
+
+    def _record_row_error(
+        self, result: SyncResult, i: int, record: dict[str, Any], exc: Exception
+    ) -> None:
+        """Append the standard per-row ``RowError``. This is the failure-recording
+        block that was byte-identical across every SQL ``_load_*`` path (#722 seam).
+        Callers keep their own success-count and error-recovery logic — only the
+        ``result.failed += 1`` + ``row_errors.append(RowError(...))`` pair moved here.
+        """
+        result.failed += 1
+        result.row_errors.append(
+            RowError(
+                batch_index=i,
+                record_preview=json.dumps(record, default=str)[:200],
+                http_status=None,
+                error_message=str(exc),
+            )
+        )
+
+    def test_connection(self, config: Any) -> None:
+        """Connectivity check: open a connection and run ``SELECT 1``.
+
+        Dialect-agnostic — the connection comes from the ``_dialect_connect``
+        hook, which each subclass narrows the config type inside.
+        """
+        conn = self._dialect_connect(config)
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+        finally:
+            conn.close()
+
+    # --- dialect hooks (subclasses implement) -----------------------------
+    def _dialect_connect(self, config: Any) -> Any:
+        """Return a live DB connection (psycopg2 / pymysql) for this config."""
+        raise NotImplementedError
+
+    def _qualify_ident(self, name: str) -> Any:
+        """Quote/qualify an identifier. Returns a psycopg2 Composable (PG)
+        or a backtick-quoted str (MySQL) — both accepted by cursor.execute."""
+        raise NotImplementedError

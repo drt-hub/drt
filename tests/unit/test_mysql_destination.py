@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from drt.config.models import MySQLDestinationConfig, SyncOptions
+from drt.destinations.base import MatchPolicyCapable
 from drt.destinations.mysql import MySQLDestination
 
 # ---------------------------------------------------------------------------
@@ -303,6 +304,34 @@ class TestMySQLReplaceMode:
         first_call_sql = cur.execute.call_args_list[0][0][0]
         assert "TRUNCATE TABLE" in first_call_sql
         conn.commit.assert_called_once()
+
+    @patch("drt.destinations.mysql.MySQLDestination._connect")
+    def test_replace_row_error_on_error_skip(self, mock_connect: MagicMock) -> None:
+        # replace path: TRUNCATE ok, first INSERT raises, second succeeds on a
+        # fresh cursor. Exercises _load_replace's error branch (rollback →
+        # new cursor → continue) and the shared _record_row_error.
+        conn = _fake_connection()
+        cur = conn.cursor()
+        # execute #1 = TRUNCATE (ok), #2 = INSERT row 0 (raises)
+        cur.execute.side_effect = [None, Exception("duplicate key"), None]
+        new_cur = MagicMock()
+        conn.cursor.side_effect = [cur, new_cur]
+        mock_connect.return_value = conn
+
+        records = [
+            {"user_id": 1, "company_id": 5, "score": 0.5},
+            {"user_id": 2, "company_id": 5, "score": 0.9},
+        ]
+        result = MySQLDestination().load(
+            records, _config(), _options(mode="replace", on_error="skip")
+        )
+
+        assert result.failed == 1
+        assert result.success == 1
+        assert len(result.row_errors) == 1
+        assert result.row_errors[0].batch_index == 0
+        assert "duplicate key" in result.row_errors[0].error_message
+        conn.rollback.assert_called_once()
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
     def test_replace_truncates_only_once_across_batches(self, mock_connect: MagicMock) -> None:
@@ -637,3 +666,34 @@ class TestMySQLConnection:
         # Verify SELECT 1 was called
         cur = conn.cursor()
         assert any("SELECT 1" in str(call.args[0]) for call in cur.execute.call_args_list)
+
+
+# ---------------------------------------------------------------------------
+# Dialect hooks (#719)
+# ---------------------------------------------------------------------------
+
+
+SOME_MYSQL_CONFIG = _config()
+
+
+def test_mysql_dialect_connect_delegates_to_connect(monkeypatch: Any) -> None:
+    calls: dict[str, Any] = {}
+
+    def _fake_connect(cfg: Any) -> str:
+        calls["cfg"] = cfg
+        return "CONN"
+
+    monkeypatch.setattr(MySQLDestination, "_connect", staticmethod(_fake_connect))
+    d = MySQLDestination()
+    assert d._dialect_connect(SOME_MYSQL_CONFIG) == "CONN"
+    assert calls["cfg"] is SOME_MYSQL_CONFIG
+
+
+def test_mysql_qualify_ident_delegates_to_quote_ident() -> None:
+    d = MySQLDestination()
+    assert d._qualify_ident("mydb.scores") == MySQLDestination._quote_ident("mydb.scores")
+
+
+def test_mysql_is_not_match_policy_capable() -> None:
+    # unchanged by this refactor: MySQL must NOT become MatchPolicyCapable
+    assert not isinstance(MySQLDestination(), MatchPolicyCapable)
