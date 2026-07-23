@@ -33,7 +33,6 @@ from drt.config.models import (
 )
 from drt.destinations._serializer import serialize_complex_value
 from drt.destinations.base import SyncResult
-from drt.destinations.row_errors import RowError
 from drt.destinations.sql_base import BaseSqlDestination
 
 try:
@@ -251,15 +250,7 @@ class PostgresDestination(BaseSqlDestination):
                 cur.execute(query, values)
                 result.success += 1
             except Exception as e:
-                result.failed += 1
-                result.row_errors.append(
-                    RowError(
-                        batch_index=i,
-                        record_preview=json.dumps(record, default=str)[:200],
-                        http_status=None,
-                        error_message=str(e),
-                    )
-                )
+                self._record_row_error(result, i, record, e)
                 if sync_options.on_error == "fail":
                     conn.rollback()
                     return result
@@ -317,15 +308,7 @@ class PostgresDestination(BaseSqlDestination):
                 cur.execute(sql, values)
                 result.success += 1
             except Exception as e:
-                result.failed += 1
-                result.row_errors.append(
-                    RowError(
-                        batch_index=i,
-                        record_preview=json.dumps(record, default=str)[:200],
-                        http_status=None,
-                        error_message=str(e),
-                    )
-                )
+                self._record_row_error(result, i, record, e)
                 if sync_options.on_error == "fail":
                     conn.rollback()
                     # Cleanup shadow on hard fail
@@ -804,15 +787,7 @@ class PostgresDestination(BaseSqlDestination):
                 else:
                     result.success += 1
             except Exception as e:
-                result.failed += 1
-                result.row_errors.append(
-                    RowError(
-                        batch_index=i,
-                        record_preview=json.dumps(record, default=str)[:200],
-                        http_status=None,
-                        error_message=str(e),
-                    )
-                )
+                self._record_row_error(result, i, record, e)
                 if sync_options.on_error == "fail":
                     conn.rollback()
                     return result
