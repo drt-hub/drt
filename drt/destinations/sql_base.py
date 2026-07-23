@@ -111,6 +111,19 @@ class BaseSqlDestination:
                 assert self._mirror_scopes is not None
                 self._mirror_scopes.add(tuple(record.get(c) for c in scope_cols))
 
+    def test_connection(self, config: Any) -> None:
+        """Connectivity check: open a connection and run ``SELECT 1``.
+
+        Dialect-agnostic — the connection comes from the ``_dialect_connect``
+        hook, which each subclass narrows the config type inside.
+        """
+        conn = self._dialect_connect(config)
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+        finally:
+            conn.close()
+
     # --- dialect hooks (subclasses implement) -----------------------------
     def _dialect_connect(self, config: Any) -> Any:
         """Return a live DB connection (psycopg2 / pymysql) for this config."""

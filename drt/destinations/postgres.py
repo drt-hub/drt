@@ -221,16 +221,6 @@ class PostgresDestination(BaseSqlDestination):
         finally:
             conn.close()
 
-    def test_connection(self, config: DestinationConfig) -> None:
-        """Test connectivity by establishing a connection and running SELECT 1."""
-        assert isinstance(config, PostgresDestinationConfig)
-        conn = self._connect(config)
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT 1")
-        finally:
-            conn.close()
-
     def _load_replace(
         self,
         conn: Any,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -99,3 +100,57 @@ def test_dialect_hooks_are_declared() -> None:
     # The base defines the hook names the template methods depend on.
     for hook in ("_dialect_connect", "_qualify_ident"):
         assert hasattr(BaseSqlDestination, hook), hook
+
+
+# ---------------------------------------------------------------------------
+# test_connection (#719)
+# ---------------------------------------------------------------------------
+
+
+def test_connection_runs_select_1_and_closes() -> None:
+    events: list[str] = []
+
+    class _Cur:
+        def execute(self, sql: str) -> None:
+            events.append(f"execute:{sql}")
+
+    class _Conn:
+        def cursor(self) -> _Cur:
+            events.append("cursor")
+            return _Cur()
+
+        def close(self) -> None:
+            events.append("close")
+
+    class _Dest(BaseSqlDestination):
+        def _dialect_connect(self, config: Any) -> Any:
+            events.append("connect")
+            return _Conn()
+
+    d = _Dest()
+    assert d.test_connection(object()) is None
+    assert events == ["connect", "cursor", "execute:SELECT 1", "close"]
+
+
+def test_connection_closes_even_when_execute_raises() -> None:
+    events: list[str] = []
+
+    class _Cur:
+        def execute(self, sql: str) -> None:
+            raise RuntimeError("boom")
+
+    class _Conn:
+        def cursor(self) -> _Cur:
+            return _Cur()
+
+        def close(self) -> None:
+            events.append("close")
+
+    class _Dest(BaseSqlDestination):
+        def _dialect_connect(self, config: Any) -> Any:
+            return _Conn()
+
+    d = _Dest()
+    with pytest.raises(RuntimeError, match="boom"):
+        d.test_connection(object())
+    assert events == ["close"]  # finally ran despite the error
