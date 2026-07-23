@@ -154,3 +154,21 @@ def test_connection_closes_even_when_execute_raises() -> None:
     with pytest.raises(RuntimeError, match="boom"):
         d.test_connection(object())
     assert events == ["close"]  # finally ran despite the error
+
+
+# ---------------------------------------------------------------------------
+# _record_row_error (#722 seam / #719)
+# ---------------------------------------------------------------------------
+
+
+def test_record_row_error_appends_truncated_preview() -> None:
+    d = BaseSqlDestination()
+    result = SyncResult()
+    big = {"x": "y" * 500}
+    d._record_row_error(result, 3, big, ValueError("boom"))
+    assert result.failed == 1
+    err = result.row_errors[0]
+    assert err.batch_index == 3
+    assert err.error_message == "boom"
+    assert len(err.record_preview) <= 200
+    assert err.http_status is None
