@@ -22,7 +22,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from drt.config.models import DestinationConfig, SyncOptions
-from drt.destinations.query import fetch_rows, get_table_name, is_queryable
+from drt.destinations.query import (
+    fetch_rows,
+    fetch_rows_by_keys,
+    get_table_name,
+    is_queryable,
+)
 
 
 @dataclass
@@ -120,10 +125,40 @@ def compute_diff(
         )
 
     table = get_table_name(config)
-    # Fetch the entire destination state (#470 may optimise this later).
-    select_query = f"SELECT * FROM {table}"  # noqa: S608 — table from trusted config
+
+    # Pre-compute the source key set. In non-replace modes this lets us fetch
+    # only the destination rows whose key is in the source (#470), avoiding a
+    # full-table scan on large destinations. In replace mode we still need the
+    # whole table (deleted = dest rows whose key is NOT in the source), which a
+    # keyed fetch can never see — so that path keeps the full ``SELECT *`` scan.
+    source_keys: set[tuple[Any, ...]] = set()
+    for record in records:
+        source_keys.add(tuple(record.get(c) for c in upsert_key))
+
+    # keyed fetch is sound only when ``deleted`` is not the source-key
+    # complement (mode != "replace") and there are records to key on (we read
+    # the column set from records[0]).
+    use_keyed_fetch = sync_options.mode != "replace" and bool(records)
     try:
-        dest_rows = fetch_rows(config, select_query, columns=[])
+        if use_keyed_fetch:
+            # Explicit columns (never []) so returned dicts are keyed — this
+            # also sidesteps the fetch_rows(columns=[]) empty-dict trap.
+            columns = list(records[0].keys())
+            try:
+                dest_rows = fetch_rows_by_keys(
+                    config,
+                    upsert_key,
+                    list(source_keys),
+                    columns=columns,
+                )
+            except NotImplementedError:
+                # ClickHouse (different paramstyle) — fall back to full scan.
+                # keyed fetch is an optimisation, never a correctness need.
+                select_query = f"SELECT * FROM {table}"  # noqa: S608 — table from trusted config
+                dest_rows = fetch_rows(config, select_query, columns=[])
+        else:
+            select_query = f"SELECT * FROM {table}"  # noqa: S608 — table from trusted config
+            dest_rows = fetch_rows(config, select_query, columns=[])
     except Exception as e:
         return DiffResult(
             sample=list(records[:limit]),
@@ -139,13 +174,11 @@ def compute_diff(
         key = tuple(row.get(c) for c in upsert_key)
         dest_by_key[key] = row
 
-    source_keys: set[tuple[Any, ...]] = set()
     added: list[dict[str, Any]] = []
     updated: list[tuple[dict[str, Any], dict[str, Any]]] = []
 
     for record in records:
         key = tuple(record.get(c) for c in upsert_key)
-        source_keys.add(key)
         existing = dest_by_key.get(key)
         if existing is None:
             added.append(record)
