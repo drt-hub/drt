@@ -4,6 +4,12 @@ All notable changes to the **drt — Reverse ETL** VS Code extension are documen
 here. This extension versions independently of `drt-core`; each release notes the
 drt-core version its bundled schemas were generated from.
 
+## [0.1.8] - Unreleased
+
+- Bundled JSON Schemas regenerated from drt-core: `syncs/*.yml` tests now
+  validate `name`, `query`, and `severity` (custom SQL query tests + warn
+  severity, drt-hub/drt#779).
+
 ## [0.1.7] - Unreleased
 
 - Bundled JSON Schemas regenerated from drt-core: `syncs/*.yml` now validates the

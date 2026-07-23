@@ -145,5 +145,5 @@ The pre-v0.7.8 `get_row_count` path used `".`".join(...)` and rendered `` `db.`s
 - Requires `pip install drt-core[clickhouse]` (uses `clickhouse-connect`)
 - Each record is inserted individually to enable row-level error tracking (consistent with PostgreSQL and MySQL destination patterns)
 - For deduplication on the INSERT path, **create the destination table with `ReplacingMergeTree`** — `upsert_key` on the config is informational only for non-mirror modes
-- `drt test` validators (row_count, not_null, freshness, unique, accepted_values) work with ClickHouse
+- `drt test` validators (row_count, not_null, freshness, unique, accepted_values, query) work with ClickHouse
 - `--dry-run` shows row count diff for `mode: replace`

@@ -163,6 +163,7 @@ drt run --profile prd       # override profile (or DRT_PROFILE env var)
 drt run --cursor-value '…'  # override watermark cursor for backfill
 drt test                    # run post-sync validation tests
 drt test --select <name>    # test a specific sync
+drt test --store-failures   # sample up to N failing rows per failed test (masked)
 drt build                   # run each sync and its tests in one pass
 drt validate                # validate sync YAML configs
 drt status                  # show recent sync status

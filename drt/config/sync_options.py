@@ -306,11 +306,23 @@ class AcceptedValuesTest(BaseModel):
 
 
 class SyncTest(BaseModel):
+    # Optional identifier (#779) — recommended for `query` tests (which have no
+    # other natural label); also used to name the --store-failures sample file.
+    # Falls back to a slugified test_display_name() when omitted.
+    name: str | None = None
     row_count: RowCountTest | None = None
     not_null: NotNullTest | None = None
     freshness: FreshnessTest | None = None
     unique: UniqueTest | None = None
     accepted_values: AcceptedValuesTest | None = None
+    # Custom SQL test (#779): arbitrary SQL that returns the FAILING rows —
+    # 0 rows = pass. `{{ table }}` renders to the qualified destination table.
+    # Same trust model as `model:` SQL: this is project config the operator
+    # writes and reviews, not runtime user input.
+    query: str | None = Field(default=None, min_length=1)
+    # warn: runs, failures are reported + counted, exit code unaffected.
+    # error (default): a failure exits non-zero, same as today.
+    severity: Literal["warn", "error"] = "error"
 
     @model_validator(mode="after")
     def _check_exactly_one_test(self) -> SyncTest:
@@ -320,6 +332,7 @@ class SyncTest(BaseModel):
             self.freshness,
             self.unique,
             self.accepted_values,
+            self.query,
         ]
         configured_count = sum(test is not None for test in configured_tests)
         if configured_count != 1:

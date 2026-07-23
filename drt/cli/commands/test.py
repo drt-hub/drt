@@ -16,13 +16,14 @@ via ``@app.command(name="test")`` (Python function called
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
 import typer
 
 if TYPE_CHECKING:
-    from drt.config.models import SyncConfig
+    from drt.config.models import SyncConfig, SyncTest
 
 from drt.cli._app import app
 from drt.cli._selection import SelectionError, complete_selector, select_syncs
@@ -34,6 +35,8 @@ from drt.cli.output import (
     print_test_skip,
 )
 
+_TEST_ID_RE = re.compile(r"[^A-Za-z0-9_]+")
+
 
 class _SyncTestResult(TypedDict, total=False):
     """Type hint for test result dict in JSON output."""
@@ -44,8 +47,69 @@ class _SyncTestResult(TypedDict, total=False):
     reason: str
 
 
+def _test_id(test_def: SyncTest, index: int) -> str:
+    """Filesystem-safe identifier for one test, for --store-failures paths (#779).
+
+    An explicit ``name:`` is trusted as unique (the operator chose it — same
+    convention as dbt's singular-test-by-filename). Without one, falls back to
+    a slugified display name prefixed with the test's position in ``tests:``,
+    so two same-shaped tests (e.g. two ``not_null`` tests) never collide.
+    """
+    from drt.engine.test_runner import test_display_name
+
+    if test_def.name:
+        return _TEST_ID_RE.sub("-", test_def.name).strip("-").lower() or f"{index}-test"
+    base = test_display_name(test_def)
+    slug = _TEST_ID_RE.sub("-", base).strip("-").lower() or "test"
+    return f"{index}-{slug}"
+
+
+def _store_or_clear_failure_sample(
+    *,
+    sync: SyncConfig,
+    test_def: SyncTest,
+    test_id: str,
+    table: str,
+    passed: bool,
+    project_dir: Path,
+    store_failures_limit: int,
+) -> tuple[Path, int] | None:
+    """``--store-failures`` (#779): on failure, fetch + mask + write up to N
+    failing rows; on pass, clear any stale sample from a previous failing run.
+
+    Returns ``(path, count)`` when a sample was written, else ``None`` (test
+    passed, or the type has no per-row failure concept — ``row_count``).
+    """
+    from drt.destinations.query import fetch_failing_rows
+    from drt.engine.masking import apply_mask
+    from drt.engine.test_runner import build_failing_rows_query
+    from drt.state.test_failures import clear_test_failures, write_test_failures
+
+    if passed:
+        clear_test_failures(project_dir, sync.name, test_id)
+        return None
+
+    failing_rows_query = build_failing_rows_query(test_def, table)
+    if failing_rows_query is None:
+        return None  # row_count: aggregate check, nothing to sample
+
+    raw_rows = fetch_failing_rows(sync.destination, failing_rows_query, store_failures_limit)
+    # Mask BEFORE anything else touches these rows (#427 reuse) — `raw_rows`
+    # is never referenced again after this line, only `masked_rows` is.
+    masked_rows = apply_mask(raw_rows, sync.sync.mask)
+    path = write_test_failures(project_dir, sync.name, test_id, masked_rows)
+    return path, len(masked_rows)
+
+
 def execute_tests_for_sync(
-    sync: SyncConfig, *, dry_run: bool, json_mode: bool, quiet: bool = False
+    sync: SyncConfig,
+    *,
+    dry_run: bool,
+    json_mode: bool,
+    quiet: bool = False,
+    store_failures: bool = False,
+    store_failures_limit: int = 10,
+    project_dir: Path = Path("."),
 ) -> tuple[_SyncTestResult, bool]:
     """Run one sync's ``tests:`` and return ``(result_dict, had_failures)``.
 
@@ -54,13 +118,19 @@ def execute_tests_for_sync(
     lists the test plan without connecting. ``quiet`` silences text-mode
     output the same way ``drt run --quiet`` does — the result dict is
     unaffected, so JSON output and exit codes still carry every failure.
+
+    ``had_failures`` (#779) reflects only ``severity: error`` failures — a
+    ``severity: warn`` failure is still reported (and counted in each test's
+    entry / a top-level ``warnings`` section by the caller) but never flips
+    this to True, so it never fails ``drt test``'s exit code or ``drt
+    build``'s per-sync status either (both share this function).
     """
     from drt.destinations.query import (
         execute_test_query,
         get_table_name,
         is_queryable,
     )
-    from drt.engine.test_runner import build_test_query
+    from drt.engine.test_runner import build_test_query, test_display_name
 
     show = not json_mode and not quiet
 
@@ -87,31 +157,84 @@ def execute_tests_for_sync(
         return sync_results, False
 
     table = get_table_name(sync.destination)
-    for test_def in sync.tests:
-        test_name = _test_display_name(test_def)
+    for index, test_def in enumerate(sync.tests):
+        test_name = test_display_name(test_def)
         if dry_run:
             if show:
                 console.print(f"  [dim](dry-run)[/dim] {test_name}")
-            sync_results["tests"].append({"name": test_name, "dry_run": True})
+            sync_results["tests"].append(
+                {"name": test_name, "dry_run": True, "severity": test_def.severity}
+            )
         else:
             try:
                 query, check = build_test_query(test_def, table)
                 result_val = execute_test_query(sync.destination, query)
                 passed = check(result_val)
+                entry: dict[str, object] = {
+                    "name": test_name,
+                    "passed": passed,
+                    "value": str(result_val),
+                    "severity": test_def.severity,
+                }
+                if store_failures:
+                    stored = _store_or_clear_failure_sample(
+                        sync=sync,
+                        test_def=test_def,
+                        test_id=_test_id(test_def, index),
+                        table=table,
+                        passed=passed,
+                        project_dir=project_dir,
+                        store_failures_limit=store_failures_limit,
+                    )
+                    if stored is not None:
+                        path, count = stored
+                        entry["failures_stored"] = {"path": str(path), "count": count}
                 if show:
-                    print_test_result(test_name, passed, str(result_val))
-                sync_results["tests"].append(
-                    {"name": test_name, "passed": passed, "value": str(result_val)}
-                )
-                if not passed:
+                    print_test_result(
+                        test_name, passed, str(result_val), severity=test_def.severity
+                    )
+                    stored_info = entry.get("failures_stored")
+                    if isinstance(stored_info, dict):
+                        console.print(
+                            f"    [dim]→ {stored_info['count']} failing row(s)"
+                            f" written to {stored_info['path']}[/dim]"
+                        )
+                sync_results["tests"].append(entry)
+                if not passed and test_def.severity != "warn":
                     had_failures = True
             except Exception as e:
                 if show:
-                    print_test_result(test_name, False, str(e))
-                sync_results["tests"].append({"name": test_name, "passed": False, "error": str(e)})
-                had_failures = True
+                    print_test_result(test_name, False, str(e), severity=test_def.severity)
+                sync_results["tests"].append(
+                    {
+                        "name": test_name,
+                        "passed": False,
+                        "error": str(e),
+                        "severity": test_def.severity,
+                    }
+                )
+                if test_def.severity != "warn":
+                    had_failures = True
 
     return sync_results, had_failures
+
+
+def _collect_warnings(results: list[_SyncTestResult]) -> list[dict[str, object]]:
+    """Flatten every ``severity: warn`` failure across *results* into a
+    top-level list (#779) — so CI tooling can react without walking the
+    nested per-sync/per-test structure."""
+    warnings: list[dict[str, object]] = []
+    for r in results:
+        for t in r.get("tests", []):
+            if t.get("severity") == "warn" and t.get("passed") is False:
+                warnings.append(
+                    {
+                        "sync": r["sync"],
+                        "test": t.get("name"),
+                        "value": t.get("value", t.get("error")),
+                    }
+                )
+    return warnings
 
 
 @app.command(name="test")
@@ -138,6 +261,20 @@ def test_syncs(
         False,
         "--fail-fast",
         help="Stop after the first sync with a failing test; remaining syncs are skipped.",
+    ),
+    store_failures: bool = typer.Option(
+        False,
+        "--store-failures",
+        help=(
+            "Write up to N failing rows per failed test to "
+            ".drt/test_failures/<sync>/<test>.jsonl (sync.mask applied before write; "
+            "N set by --store-failures-limit)."
+        ),
+    ),
+    store_failures_limit: int = typer.Option(
+        10,
+        "--store-failures-limit",
+        help="Max rows written per failed test when --store-failures is set.",
     ),
 ) -> None:
     """Run post-sync validation tests.
@@ -179,7 +316,11 @@ def test_syncs(
 
     for i, sync in enumerate(syncs_with_tests):
         sync_results, sync_failed = execute_tests_for_sync(
-            sync, dry_run=dry_run, json_mode=json_mode
+            sync,
+            dry_run=dry_run,
+            json_mode=json_mode,
+            store_failures=store_failures,
+            store_failures_limit=store_failures_limit,
         )
         results.append(sync_results)
         if sync_failed:
@@ -204,18 +345,25 @@ def test_syncs(
                 )
             break
 
+    warnings = _collect_warnings(results)
+
     if json_mode:
         print(
             json.dumps(
                 {
                     "status": "failed" if had_failures else "passed",
                     "results": results,
+                    "warnings": warnings,
                     "dry_run": dry_run,
                 }
             )
         )
     elif dry_run:
         console.print("\n[dry-run] Preview of tests that would be executed")
+    elif warnings:
+        console.print(
+            f"\n[yellow]{len(warnings)} warning(s) — reported but did not fail the run.[/yellow]"
+        )
     if had_failures:
         raise typer.Exit(1)
 

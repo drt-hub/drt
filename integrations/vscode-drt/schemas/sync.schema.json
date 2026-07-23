@@ -4063,6 +4063,18 @@
     },
     "SyncTest": {
       "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
         "row_count": {
           "anyOf": [
             {
@@ -4117,6 +4129,28 @@
             }
           ],
           "default": null
+        },
+        "query": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Query"
+        },
+        "severity": {
+          "default": "error",
+          "enum": [
+            "warn",
+            "error"
+          ],
+          "title": "Severity",
+          "type": "string"
         }
       },
       "title": "SyncTest",
