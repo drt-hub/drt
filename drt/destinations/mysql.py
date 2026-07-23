@@ -80,64 +80,6 @@ class MySQLDestination(BaseSqlDestination):
     resolution, and mirror bookkeeping come from ``BaseSqlDestination``.
     """
 
-    def load(
-        self,
-        records: list[dict[str, Any]],
-        config: DestinationConfig,
-        sync_options: SyncOptions,
-    ) -> SyncResult:
-        assert isinstance(config, MySQLDestinationConfig)
-        if not records:
-            return SyncResult()
-
-        self._validate_mirror_scope(records, sync_options)
-
-        conn = self._connect(config)
-        result = SyncResult()
-
-        try:
-            cur = conn.cursor()
-            columns = list(records[0].keys())
-
-            if sync_options.mode == "replace":
-                if sync_options.replace_strategy == "swap":
-                    result = self._load_replace_swap(
-                        conn,
-                        cur,
-                        records,
-                        columns,
-                        config.table,
-                        sync_options,
-                        config,
-                    )
-                else:
-                    result = self._load_replace(
-                        conn,
-                        cur,
-                        records,
-                        columns,
-                        config.table,
-                        sync_options,
-                        config,
-                    )
-            else:
-                result = self._load_upsert(
-                    conn,
-                    cur,
-                    records,
-                    columns,
-                    config,
-                    sync_options,
-                )
-                # sync.mode: mirror (#340 / #687) — record the observed
-                # upsert_key (and scope) tuples for the finalize_sync DELETE.
-                if sync_options.mode == "mirror":
-                    self._accumulate_mirror_state(records, result, config, sync_options)
-        finally:
-            conn.close()
-
-        return result
-
     def get_row_count(self, config: DestinationConfig) -> int:
         """Get the current row count from the destination table.
 

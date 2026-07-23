@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from drt.config.models import SyncOptions
+from drt.config.models import DestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 
@@ -48,6 +48,78 @@ class BaseSqlDestination:
         # sync. ``None`` value = introspection ran but is unavailable; the key
         # being absent = not yet fetched.
         self._schema_cache: dict[str, dict[str, str] | None] = {}
+
+    def load(
+        self,
+        records: list[dict[str, Any]],
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        """Dialect-agnostic write template (#719 phase 2a).
+
+        Validates mirror.scope, opens a dialect connection, dispatches to the
+        replace-swap / replace / upsert write path, and — for ``mode: mirror``
+        — accumulates the observed ``upsert_key`` (and scope) tuples for the
+        ``finalize_sync`` DELETE. The concrete SQL construction lives in the
+        subclass ``_load_replace_swap`` / ``_load_replace`` / ``_load_upsert``
+        hooks, which each narrow the config type internally.
+        """
+        if not records:
+            return SyncResult()
+
+        # ``config`` is the ``DestinationConfig`` union (the Protocol signature);
+        # the fields read below (``table``) live on the concrete SQL subclass
+        # configs, so narrow via ``Any`` — the same convention the other base
+        # helpers use. The ``_dialect_connect`` / ``_load_*`` hooks each assert
+        # the concrete config type internally.
+        cfg: Any = config
+        self._validate_mirror_scope(records, sync_options)
+
+        conn = self._dialect_connect(config)
+        result = SyncResult()
+
+        try:
+            cur = conn.cursor()
+            columns = list(records[0].keys())
+
+            if sync_options.mode == "replace":
+                if sync_options.replace_strategy == "swap":
+                    result = self._load_replace_swap(
+                        conn,
+                        cur,
+                        records,
+                        columns,
+                        cfg.table,
+                        sync_options,
+                        config,
+                    )
+                else:
+                    result = self._load_replace(
+                        conn,
+                        cur,
+                        records,
+                        columns,
+                        cfg.table,
+                        sync_options,
+                        config,
+                    )
+            else:
+                result = self._load_upsert(
+                    conn,
+                    cur,
+                    records,
+                    columns,
+                    config,
+                    sync_options,
+                )
+                # sync.mode: mirror (#340 / #687) — record the observed
+                # upsert_key (and scope) tuples for the finalize_sync DELETE.
+                if sync_options.mode == "mirror":
+                    self._accumulate_mirror_state(records, result, config, sync_options)
+        finally:
+            conn.close()
+
+        return result
 
     def _resolve_schema(self, config: Any) -> dict[str, str] | None:
         """Column → type-category map for the target table, cached per sync.
@@ -152,4 +224,45 @@ class BaseSqlDestination:
     def _qualify_ident(self, name: str) -> Any:
         """Quote/qualify an identifier. Returns a psycopg2 Composable (PG)
         or a backtick-quoted str (MySQL) — both accepted by cursor.execute."""
+        raise NotImplementedError
+
+    def _load_replace_swap(
+        self,
+        conn: Any,
+        cur: Any,
+        records: list[dict[str, Any]],
+        columns: list[str],
+        table: str,
+        sync_options: SyncOptions,
+        config: Any,
+    ) -> SyncResult:
+        """Zero-downtime replace: build a shadow table this batch; the atomic
+        rename happens in ``finalize_sync``. Dialect-specific SQL."""
+        raise NotImplementedError
+
+    def _load_replace(
+        self,
+        conn: Any,
+        cur: Any,
+        records: list[dict[str, Any]],
+        columns: list[str],
+        table: str,
+        sync_options: SyncOptions,
+        config: Any,
+    ) -> SyncResult:
+        """TRUNCATE-then-INSERT replace within a single transaction.
+        Dialect-specific SQL."""
+        raise NotImplementedError
+
+    def _load_upsert(
+        self,
+        conn: Any,
+        cur: Any,
+        records: list[dict[str, Any]],
+        columns: list[str],
+        config: Any,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        """Idempotent upsert (INSERT ... ON CONFLICT / ON DUPLICATE KEY).
+        Dialect-specific SQL."""
         raise NotImplementedError
