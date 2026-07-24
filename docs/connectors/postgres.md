@@ -226,5 +226,5 @@ json_columns: [profile, preferences]
 
 - Requires `pip install drt-core[postgres]` (uses `psycopg2`)
 - `upsert_key` columns must have a UNIQUE constraint on the target table
-- `drt test` validators (row_count, not_null, freshness, unique, accepted_values) work with PostgreSQL
+- `drt test` validators (row_count, not_null, freshness, unique, accepted_values, query) work with PostgreSQL
 - `--dry-run` shows row count diff for `mode: replace`

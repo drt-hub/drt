@@ -128,6 +128,7 @@ drt run --threads 4               # parallel sync execution
 drt run --cursor-value '2026-01-01 00:00:00'  # override watermark cursor for backfill
 drt test                          # run post-sync validation tests
 drt test --select <sync-name>     # test a specific sync
+drt test --store-failures         # sample up to N failing rows/failed test (#779); sync.mask applied
 drt build                         # run + test per sync in one pass (#777); test failure = sync failed (no rollback); sequential
 drt build --select tag:crm --fail-fast
 drt sources                       # list available source connectors

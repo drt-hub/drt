@@ -178,7 +178,10 @@ def create_server(project_dir: Path | None = None) -> Any:
             Dict with `status` ("passed" | "failed" | "no_tests" | "no_syncs"),
             and `results` — a list of per-sync result objects, each with:
                 - `sync`: sync name
-                - `tests`: list of {name, passed, value} or {name, passed: false, error}
+                - `tests`: list of {name, passed, value, severity} or
+                  {name, passed: false, error, severity} — severity is
+                  "warn" | "error" (#779); a "warn" failure is reported here
+                  but never flips the top-level `status` to "failed"
                 - `skipped` (optional): true when destination type isn't queryable
                 - `reason` (optional): why the sync was skipped
         """
@@ -225,15 +228,29 @@ def create_server(project_dir: Path | None = None) -> Any:
                     result_val = execute_test_query(sync.destination, query)
                     passed = check(result_val)
                     sync_result["tests"].append(
-                        {"name": test_name, "passed": passed, "value": str(result_val)}
+                        {
+                            "name": test_name,
+                            "passed": passed,
+                            "value": str(result_val),
+                            "severity": test_def.severity,
+                        }
                     )
-                    if not passed:
+                    # severity: warn (#779) is reported but must not flip
+                    # `status` to "failed" — same rule drt test / drt build
+                    # apply, so this tool doesn't drift from the CLI (#400).
+                    if not passed and test_def.severity != "warn":
                         had_failures = True
                 except Exception as e:
                     sync_result["tests"].append(
-                        {"name": test_name, "passed": False, "error": str(e)}
+                        {
+                            "name": test_name,
+                            "passed": False,
+                            "error": str(e),
+                            "severity": test_def.severity,
+                        }
                     )
-                    had_failures = True
+                    if test_def.severity != "warn":
+                        had_failures = True
 
             results.append(sync_result)
 

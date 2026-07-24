@@ -237,7 +237,38 @@ tests:                      # optional: post-sync validation (DB destinations on
   - accepted_values:
       column: status        # required: column to check
       values: [active, inactive, pending]  # required: allowed values
+  - name: no_negative_totals          # optional on every type; required label for query (#779)
+    query: "SELECT * FROM {{ table }} WHERE total < 0"  # arbitrary SQL: returns FAILING rows, 0 = pass
+    severity: warn                    # optional on every type: "warn" | "error" (default)
 ```
+
+### `query` — custom SQL tests (#779)
+
+Escape hatch for anything the five fixed types can't express. `{{ table }}` renders to the
+qualified destination table; the contract is **failing-rows**, not a count — the query returns
+the rows that violate the assertion, and zero rows means pass. Runs only on queryable
+destinations, same gate as every other type. Same trust model as `model:` SQL: this is project
+config the operator writes and reviews, not runtime user input.
+
+### `severity` — `warn` | `error` (default), on every test type (#779)
+
+`severity: warn` runs the test and reports + counts a failure, but never fails `drt test`'s (or
+`drt build`'s) exit code — `--output json` lists every warn-severity failure under a top-level
+`warnings` array so CI can still see it without treating it as fatal. `severity: error` (the
+default, and the only behavior before #779) fails the run exactly as today.
+
+### `drt test --store-failures` (#779)
+
+```bash
+drt test --store-failures                        # up to 10 failing rows per failed test
+drt test --store-failures --store-failures-limit 50
+```
+
+Writes up to N failing rows per failed test to `.drt/test_failures/<sync>/<test>.jsonl` (a
+debugging **snapshot of the current run** — each run overwrites the file, and a test that now
+passes has its stale sample removed). **`sync.mask` (#427) is applied before anything is
+written** — masked columns are masked in the failure file, never the raw value. `row_count` has
+no per-row failure concept, so nothing is written for it. Off by default.
 
 ---
 

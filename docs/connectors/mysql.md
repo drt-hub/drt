@@ -184,6 +184,6 @@ This means you can write `table: mydb.scores` without worrying about reserved wo
 
 - Requires `pip install drt-core[mysql]` (uses `pymysql`)
 - `upsert_key` columns must have a UNIQUE or PRIMARY KEY constraint on the target table
-- `drt test` validators (row_count, not_null, freshness, unique, accepted_values) work with MySQL
+- `drt test` validators (row_count, not_null, freshness, unique, accepted_values, query) work with MySQL
 - `--dry-run` shows row count diff for `mode: replace`
 - The connection uses `charset: utf8mb4` and `autocommit: false` by default so multi-statement work runs in a single transaction

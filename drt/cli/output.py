@@ -230,8 +230,19 @@ def print_test_header(sync_name: str) -> None:
     console.print(f"\n[bold]{sync_name}[/bold]")
 
 
-def print_test_result(test_name: str, passed: bool, message: str) -> None:
-    mark = "[green]✓[/green]" if passed else "[red]✗[/red]"
+def print_test_result(
+    test_name: str, passed: bool, message: str, *, severity: str = "error"
+) -> None:
+    """``severity`` (#779) distinguishes a warn-severity failure (yellow ⚠,
+    reported but doesn't fail the run) from an error-severity one (red ✗).
+    Defaults to "error" so any existing caller keeps today's marks unchanged.
+    """
+    if passed:
+        mark = "[green]✓[/green]"
+    elif severity == "warn":
+        mark = "[yellow]⚠[/yellow]"
+    else:
+        mark = "[red]✗[/red]"
     console.print(f"  {mark} {test_name}: {message}")
 
 
