@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import datetime
+
 import pytest
 from pydantic import ValidationError
 
@@ -131,9 +133,30 @@ def test_failing_rows_row_count_is_none() -> None:
         lambda: SyncTest(query="SELECT * FROM {{ table }} WHERE total < 0"),
     ],
 )
-def test_failing_rows_predicate_matches_count_predicate(make_test) -> None:
+def test_failing_rows_predicate_matches_count_predicate(
+    make_test, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The COUNT(*) check and the failing-rows sample must query the exact
-    same WHERE predicate — single source of truth, no drift risk."""
+    same WHERE predicate — single source of truth, no drift risk.
+
+    freshness's predicate embeds ``datetime.now()``, read fresh on every call
+    to ``_freshness_condition`` — so two separate calls (one from
+    ``build_test_query``, one from ``build_failing_rows_query``) can observe
+    a different instant and produce a microseconds-apart timestamp. That
+    flaked this exact assertion in CI. Freeze the clock so the two calls
+    share an instant, the same way they would if joined in a single
+    transaction — the OTHER 4 types have no time dependency, so freezing is a
+    no-op for them.
+    """
+    import drt.engine.test_runner as test_runner_module
+
+    class _FrozenDatetime(datetime.datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ANN001 — matches datetime.now's signature
+            return cls(2026, 1, 1, tzinfo=tz)
+
+    monkeypatch.setattr(test_runner_module, "datetime", _FrozenDatetime)
+
     test = make_test()
     table = "users"
     count_query, _ = build_test_query(test, table)

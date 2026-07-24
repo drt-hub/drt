@@ -211,6 +211,13 @@ def build_failing_rows_query(test: SyncTest, table: str) -> str | None:
     type (including ``query``) returns the same predicate text
     ``build_test_query`` wraps in ``COUNT(*)`` — this is the row-level view of
     that same check, used for ``--store-failures`` (#779).
+
+    Caveat for ``freshness``: its predicate embeds ``datetime.now()``, read
+    fresh on every call. ``--store-failures`` only calls this function
+    *after* ``build_test_query``'s count check has already run and failed —
+    two separate wall-clock reads, one query apart. In practice the drift is
+    negligible against a ``max_age`` measured in hours/days, but a row right
+    at the threshold could in principle appear in one and not the other.
     """
     safe_table = _safe_table(table)
 
