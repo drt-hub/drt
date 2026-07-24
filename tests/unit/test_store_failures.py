@@ -149,6 +149,51 @@ def _patch_destination_query(
         monkeypatch.setattr(query_module, "fetch_failing_rows", lambda d, q, limit: rows[:limit])
 
 
+def test_store_failures_freshness_count_and_sample_share_one_predicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#779 CI catch: freshness's condition embeds datetime.now(), read fresh
+    on every call. With --store-failures, drt/cli/commands/test.py now
+    computes build_failing_rows_query ONCE and threads it into both the count
+    query and the stored sample fetch, so this asserts the count query
+    literally wraps the exact string handed to fetch_failing_rows — not just
+    a same-shaped string, the same object — proving they can never observe a
+    different instant.
+    """
+    monkeypatch.chdir(tmp_path)
+    _write_sync(
+        tmp_path,
+        {
+            "name": "s",
+            "model": "SELECT 1",
+            "destination": _DEST,
+            "tests": [{"freshness": {"column": "updated_at", "max_age": "1 hour"}}],
+        },
+    )
+    from drt.destinations import query as query_module
+
+    captured: dict[str, str] = {}
+
+    def _fake_execute_test_query(dest: object, q: str) -> int:
+        captured["count_query"] = q
+        return 1  # one stale row -> fails
+
+    def _fake_fetch_failing_rows(dest: object, q: str, limit: int) -> list[dict]:
+        captured["rows_query"] = q
+        return [{"id": 1, "updated_at": "2020-01-01"}]
+
+    monkeypatch.setattr(query_module, "is_queryable", lambda d: True)
+    monkeypatch.setattr(query_module, "get_table_name", lambda d: "test_table")
+    monkeypatch.setattr(query_module, "execute_test_query", _fake_execute_test_query)
+    monkeypatch.setattr(query_module, "fetch_failing_rows", _fake_fetch_failing_rows)
+
+    result = runner.invoke(app, ["test", "--store-failures"])
+    assert result.exit_code == 1
+    assert captured["count_query"] == (
+        f"SELECT COUNT(*) FROM ({captured['rows_query']}) AS _drt_row_test"
+    )
+
+
 def test_store_failures_off_by_default_writes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

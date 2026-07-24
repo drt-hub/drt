@@ -238,11 +238,28 @@ def build_failing_rows_query(test: SyncTest, table: str) -> str | None:
     return None  # row_count — aggregate check, no per-row failure query
 
 
-def build_test_query(test: SyncTest, table: str) -> tuple[str, Callable[[int], bool]]:
+def build_test_query(
+    test: SyncTest, table: str, *, failing_rows_query: str | None = None
+) -> tuple[str, Callable[[int], bool]]:
     """Return (SQL query, check_function) for a test.
 
     The query returns a single integer.
     The check function returns True if the test passes.
+
+    ``row_count`` is a whole-table aggregate with no per-row view — it builds
+    its own ``COUNT(*)`` directly. Every other type is row-shaped: its COUNT
+    check is a ``COUNT(*)`` wrapped around the SAME rows query
+    ``build_failing_rows_query`` returns, so the predicate is computed exactly
+    once. This matters for ``freshness`` in particular, whose condition embeds
+    ``datetime.now()`` — building it twice (once here, once in a later
+    ``build_failing_rows_query`` call for ``--store-failures``) let the two
+    observe different instants and drift apart (caught in CI, #779).
+
+    Pass ``failing_rows_query`` when the caller already computed it (e.g.
+    ``--store-failures``, which needs the rows query regardless of whether the
+    test fails) — this reuses that exact text instead of computing it again,
+    so both the pass/fail check and the stored failure sample always agree
+    with the same instant, not just the same predicate shape.
     """
     safe_table = _safe_table(table)
 
@@ -259,61 +276,21 @@ def build_test_query(test: SyncTest, table: str) -> tuple[str, Callable[[int], b
 
         return query, check_row_count
 
-    if test.not_null is not None:
-        query = f"SELECT COUNT(*) FROM {safe_table} WHERE {_not_null_condition(test.not_null)}"
+    rows_query = (
+        failing_rows_query
+        if failing_rows_query is not None
+        else build_failing_rows_query(test, safe_table)
+    )
+    if rows_query is not None:
+        alias = "_drt_query_test" if test.query is not None else "_drt_row_test"
+        # Subquery-wrapped COUNT(*), same convention as engine/resolver.py's
+        # `_drt_base` — also defangs a stray `;` in `query:` SQL into a syntax
+        # error inside the parens rather than a second statement.
+        query = f"SELECT COUNT(*) FROM ({rows_query}) AS {alias}"
 
-        def check_not_null(val: int) -> bool:
+        def check_zero(val: int) -> bool:
             return val == 0
 
-        return query, check_not_null
-
-    if test.freshness is not None:
-        query = f"SELECT COUNT(*) FROM {safe_table} WHERE {_freshness_condition(test.freshness)}"
-
-        def check_freshness(val: int) -> bool:
-            # Test passes if there are no stale rows
-            return val == 0
-
-        return query, check_freshness
-
-    if test.unique is not None:
-        query = (
-            f"SELECT COUNT(*) FROM {safe_table} "
-            f"WHERE {_unique_duplicate_condition(test.unique, safe_table)}"
-        )
-
-        def check_unique(val: int) -> bool:
-            # Test passes if no duplicate rows exist
-            return val == 0
-
-        return query, check_unique
-
-    if test.accepted_values is not None:
-        query = (
-            f"SELECT COUNT(*) FROM {safe_table} "
-            f"WHERE {_accepted_values_condition(test.accepted_values)}"
-        )
-
-        def check_accepted_values(val: int) -> bool:
-            # Test passes if there are no invalid values
-            return val == 0
-
-        return query, check_accepted_values
-
-    if test.query is not None:
-        # Contract (#779): the user's query returns the FAILING rows; 0 rows =
-        # pass. Wrap in COUNT(*) to preserve the existing single-int execution
-        # path (execute_test_query) unchanged — mirrors exactly how the
-        # incremental cursor predicate is subquery-wrapped in
-        # engine/resolver.py's `_drt_base`, right down to the `_drt_` alias
-        # convention. A stray `;` in the user's SQL becomes a syntax error
-        # inside this parenthesized subquery, rather than a second statement.
-        rendered = render_query_test(test.query, safe_table)
-        query = f"SELECT COUNT(*) FROM ({rendered}) AS _drt_query_test"
-
-        def check_query(val: int) -> bool:
-            return val == 0
-
-        return query, check_query
+        return query, check_zero
 
     raise ValueError("No test type defined in SyncTest.")

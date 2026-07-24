@@ -69,7 +69,7 @@ def _store_or_clear_failure_sample(
     sync: SyncConfig,
     test_def: SyncTest,
     test_id: str,
-    table: str,
+    failing_rows_query: str | None,
     passed: bool,
     project_dir: Path,
     store_failures_limit: int,
@@ -77,19 +77,23 @@ def _store_or_clear_failure_sample(
     """``--store-failures`` (#779): on failure, fetch + mask + write up to N
     failing rows; on pass, clear any stale sample from a previous failing run.
 
+    ``failing_rows_query`` must be the SAME string already used to build the
+    test's count query (computed once by the caller) — not recomputed here.
+    For time-relative predicates (``freshness``'s ``datetime.now()``),
+    recomputing independently let the count check and the stored sample
+    observe different instants and drift apart (caught in CI, #779).
+
     Returns ``(path, count)`` when a sample was written, else ``None`` (test
     passed, or the type has no per-row failure concept — ``row_count``).
     """
     from drt.destinations.query import fetch_failing_rows
     from drt.engine.masking import apply_mask
-    from drt.engine.test_runner import build_failing_rows_query
     from drt.state.test_failures import clear_test_failures, write_test_failures
 
     if passed:
         clear_test_failures(project_dir, sync.name, test_id)
         return None
 
-    failing_rows_query = build_failing_rows_query(test_def, table)
     if failing_rows_query is None:
         return None  # row_count: aggregate check, nothing to sample
 
@@ -130,7 +134,11 @@ def execute_tests_for_sync(
         get_table_name,
         is_queryable,
     )
-    from drt.engine.test_runner import build_test_query, test_display_name
+    from drt.engine.test_runner import (
+        build_failing_rows_query,
+        build_test_query,
+        test_display_name,
+    )
 
     show = not json_mode and not quiet
 
@@ -167,7 +175,16 @@ def execute_tests_for_sync(
             )
         else:
             try:
-                query, check = build_test_query(test_def, table)
+                # Computed once (#779) and reused for both the count check and
+                # --store-failures's sample — never rebuilt independently, so
+                # a time-relative predicate (freshness's `now()`) can't drift
+                # between the two.
+                failing_rows_query = (
+                    build_failing_rows_query(test_def, table) if store_failures else None
+                )
+                query, check = build_test_query(
+                    test_def, table, failing_rows_query=failing_rows_query
+                )
                 result_val = execute_test_query(sync.destination, query)
                 passed = check(result_val)
                 entry: dict[str, object] = {
@@ -181,7 +198,7 @@ def execute_tests_for_sync(
                         sync=sync,
                         test_def=test_def,
                         test_id=_test_id(test_def, index),
-                        table=table,
+                        failing_rows_query=failing_rows_query,
                         passed=passed,
                         project_dir=project_dir,
                         store_failures_limit=store_failures_limit,

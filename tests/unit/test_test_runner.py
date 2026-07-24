@@ -136,17 +136,23 @@ def test_failing_rows_row_count_is_none() -> None:
 def test_failing_rows_predicate_matches_count_predicate(
     make_test, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The COUNT(*) check and the failing-rows sample must query the exact
-    same WHERE predicate — single source of truth, no drift risk.
+    """The COUNT(*) check must be exactly a COUNT(*) wrap of the failing-rows
+    sample query — single source of truth, no drift risk (#779).
 
-    freshness's predicate embeds ``datetime.now()``, read fresh on every call
-    to ``_freshness_condition`` — so two separate calls (one from
-    ``build_test_query``, one from ``build_failing_rows_query``) can observe
-    a different instant and produce a microseconds-apart timestamp. That
-    flaked this exact assertion in CI. Freeze the clock so the two calls
-    share an instant, the same way they would if joined in a single
-    transaction — the OTHER 4 types have no time dependency, so freezing is a
-    no-op for them.
+    build_test_query(), called WITHOUT a precomputed ``failing_rows_query``,
+    computes the rows query internally by calling build_failing_rows_query()
+    itself — so a standalone build_failing_rows_query() call here (mimicking
+    a caller who, unlike --store-failures, never threads the precomputed
+    query through) still independently recomputes the predicate.
+    freshness's predicate embeds ``datetime.now()``, read fresh on every
+    call — so these two independent computations can observe a different
+    instant and produce a microseconds-apart timestamp (this exact drift
+    flaked in CI before the fix). Freeze the clock so both computations share
+    an instant — the OTHER 4 types have no time dependency, so freezing is a
+    no-op for them. Production code (drt/cli/commands/test.py) never takes
+    this two-independent-calls path; see
+    test_build_test_query_freshness_shares_single_clock_read for the actual
+    shared-computation contract it relies on.
     """
     import drt.engine.test_runner as test_runner_module
 
@@ -162,14 +168,8 @@ def test_failing_rows_predicate_matches_count_predicate(
     count_query, _ = build_test_query(test, table)
     rows_query = build_failing_rows_query(test, table)
     assert rows_query is not None
-    # count_query is "SELECT COUNT(*) FROM <table_or_subquery> WHERE <cond>"
-    # or, for `query`, "SELECT COUNT(*) FROM (<rows_query>) AS _drt_query_test".
-    if test.query is not None:
-        assert count_query == f"SELECT COUNT(*) FROM ({rows_query}) AS _drt_query_test"
-    else:
-        where = count_query.split("WHERE", 1)[1].strip()
-        rows_where = rows_query.split("WHERE", 1)[1].strip()
-        assert where == rows_where
+    alias = "_drt_query_test" if test.query is not None else "_drt_row_test"
+    assert count_query == f"SELECT COUNT(*) FROM ({rows_query}) AS {alias}"
 
 
 def test_failing_rows_query_selects_star() -> None:
@@ -177,6 +177,63 @@ def test_failing_rows_query_selects_star() -> None:
     rows_query = build_failing_rows_query(t, "users")
     assert rows_query is not None
     assert rows_query.startswith("SELECT * FROM users WHERE")
+
+
+# ---------------------------------------------------------------------------
+# Shared predicate computation (#779, masukai's CI review) — build_test_query
+# derives its COUNT(*) by wrapping build_failing_rows_query's OWN output,
+# rather than rebuilding the WHERE condition a second time. This makes the
+# freshness now()-drift structurally impossible instead of merely unlikely:
+# there is only ever one place the predicate gets computed per call.
+# ---------------------------------------------------------------------------
+
+
+def test_build_test_query_computes_freshness_condition_only_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard: a single build_test_query() call must invoke the
+    time-relative condition builder exactly once, never twice internally."""
+    import drt.engine.test_runner as test_runner_module
+
+    calls: list[None] = []
+    original = test_runner_module._freshness_condition
+
+    def _counting(fresh):
+        calls.append(None)
+        return original(fresh)
+
+    monkeypatch.setattr(test_runner_module, "_freshness_condition", _counting)
+
+    t = SyncTest(freshness=FreshnessTest(column="updated_at", max_age="1 hour"))
+    build_test_query(t, "users")
+    assert len(calls) == 1
+
+
+def test_build_test_query_reuses_provided_failing_rows_query() -> None:
+    """When the caller already computed the rows query (--store-failures),
+    build_test_query must wrap that exact string verbatim rather than
+    recomputing the predicate — proven here with a string that deliberately
+    does NOT match what build_failing_rows_query would generate, so a silent
+    recomputation would make this assertion fail."""
+    t = SyncTest(not_null=NotNullTest(columns=["email"]))
+    precomputed = "SELECT * FROM users WHERE some_other_column IS NULL"
+    query, check = build_test_query(t, "users", failing_rows_query=precomputed)
+    assert query == f"SELECT COUNT(*) FROM ({precomputed}) AS _drt_row_test"
+    assert check(0) is True
+    assert check(2) is False
+
+
+def test_build_test_query_freshness_shares_single_clock_read() -> None:
+    """Compute build_failing_rows_query for freshness ONCE (as --store-failures
+    now does in drt/cli/commands/test.py), then confirm build_test_query
+    wraps that exact string — no second datetime.now() read, so the count
+    check and the stored failure sample can never disagree (#779)."""
+    t = SyncTest(freshness=FreshnessTest(column="updated_at", max_age="1 hour"))
+    rows_query = build_failing_rows_query(t, "users")
+    assert rows_query is not None
+    query, check = build_test_query(t, "users", failing_rows_query=rows_query)
+    assert query == f"SELECT COUNT(*) FROM ({rows_query}) AS _drt_row_test"
+    assert check(0) is True
 
 
 # ---------------------------------------------------------------------------
