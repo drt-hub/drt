@@ -18,6 +18,7 @@ from drt.destinations.query import (
     execute_test_query,
     fetch_rows,
     fetch_rows_by_keys,
+    fetch_tracked_state,
     get_table_name,
     is_queryable,
 )
@@ -390,3 +391,153 @@ def test_fetch_rows_by_keys_clickhouse_raises_not_implemented() -> None:
             key_tuples=[(1,)],
             columns=["id", "name"],
         )
+
+
+# ---------------------------------------------------------------------------
+# fetch_tracked_state — read-only tracked-mirror state read (#693)
+# ---------------------------------------------------------------------------
+
+
+_WRITE_KEYWORDS = ("INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "TRUNCATE", "ALTER")
+
+
+def _assert_read_only(cursor: MagicMock) -> None:
+    """Every statement the cursor saw must be a bare SELECT."""
+    for call in cursor.execute.call_args_list:
+        stmt = call[0][0]
+        text = _render_pg(stmt) if hasattr(stmt, "seq") else str(stmt)
+        upper = text.upper()
+        assert upper.lstrip().startswith("SELECT"), text
+        for kw in _WRITE_KEYWORDS:
+            assert kw not in upper, f"write keyword {kw} in {text}"
+
+
+def test_fetch_tracked_state_postgres_selects_only() -> None:
+    cursor = MagicMock()
+    # to_regclass probe -> exists; then the state rows.
+    cursor.fetchone.return_value = ("public._drt_synced_keys",)
+    cursor.fetchall.return_value = [("h1", '["a"]'), ("h2", '["b"]')]
+    conn = _plain_conn(cursor)
+
+    with patch(
+        "drt.destinations.postgres.PostgresDestination._connect", return_value=conn
+    ):
+        state = fetch_tracked_state(_pg_config(table="public.users"), "users_sync")
+
+    assert state == {"h1": '["a"]', "h2": '["b"]'}
+    _assert_read_only(cursor)
+    # State table is resolved in the target table's schema.
+    probe_params = cursor.execute.call_args_list[0][0][1]
+    assert probe_params == ("public._drt_synced_keys",)
+    select_stmt, select_params = cursor.execute.call_args_list[1][0]
+    rendered = _render_pg(select_stmt)
+    assert "SELECT key_hash, key_json" in rendered
+    assert '"public"."_drt_synced_keys"' in rendered
+    assert select_params == ("users_sync",)
+    conn.close.assert_called_once()
+
+
+def test_fetch_tracked_state_postgres_unqualified_table() -> None:
+    cursor = MagicMock()
+    cursor.fetchone.return_value = ("_drt_synced_keys",)
+    cursor.fetchall.return_value = []
+    conn = _plain_conn(cursor)
+
+    with patch(
+        "drt.destinations.postgres.PostgresDestination._connect", return_value=conn
+    ):
+        state = fetch_tracked_state(_pg_config(table="users"), "s")
+
+    assert state == {}
+    _assert_read_only(cursor)
+    assert cursor.execute.call_args_list[0][0][1] == ("_drt_synced_keys",)
+    assert '"_drt_synced_keys"' in _render_pg(cursor.execute.call_args_list[1][0][0])
+
+
+def test_fetch_tracked_state_postgres_missing_table_returns_empty() -> None:
+    cursor = MagicMock()
+    cursor.fetchone.return_value = (None,)  # to_regclass -> NULL
+    conn = _plain_conn(cursor)
+
+    with patch(
+        "drt.destinations.postgres.PostgresDestination._connect", return_value=conn
+    ):
+        state = fetch_tracked_state(_pg_config(table="public.users"), "s")
+
+    assert state == {}
+    # Probe only — no SELECT against a table that doesn't exist, and no DDL.
+    assert cursor.execute.call_count == 1
+    _assert_read_only(cursor)
+
+
+def test_fetch_tracked_state_mysql_selects_only() -> None:
+    cursor = MagicMock()
+    cursor.fetchone.return_value = (1,)  # information_schema count
+    cursor.fetchall.return_value = [("h1", '["a"]')]
+    conn = _plain_conn(cursor)
+
+    with patch(
+        "drt.destinations.mysql.MySQLDestination._connect", return_value=conn
+    ):
+        state = fetch_tracked_state(_mysql_config(table="mydb.users"), "users_sync")
+
+    assert state == {"h1": '["a"]'}
+    _assert_read_only(cursor)
+    probe_sql, probe_params = cursor.execute.call_args_list[0][0]
+    assert "information_schema.tables" in probe_sql
+    assert probe_params == ("mydb", "_drt_synced_keys")
+    select_sql, select_params = cursor.execute.call_args_list[1][0]
+    assert "SELECT key_hash, key_json" in select_sql
+    assert "`mydb`.`_drt_synced_keys`" in select_sql
+    assert select_params == ("users_sync",)
+    conn.close.assert_called_once()
+
+
+def test_fetch_tracked_state_mysql_unqualified_uses_current_database() -> None:
+    cursor = MagicMock()
+    # DictCursor shapes for both the probe and the state rows.
+    cursor.fetchone.return_value = {"COUNT(*)": 1}
+    cursor.fetchall.return_value = [{"key_hash": "h1", "key_json": '["a"]'}]
+    conn = _plain_conn(cursor)
+
+    with patch(
+        "drt.destinations.mysql.MySQLDestination._connect", return_value=conn
+    ):
+        state = fetch_tracked_state(_mysql_config(table="users"), "s")
+
+    # Dict cursors (pymysql DictCursor) are handled too.
+    assert state == {"h1": '["a"]'}
+    _assert_read_only(cursor)
+    probe_sql, probe_params = cursor.execute.call_args_list[0][0]
+    assert "DATABASE()" in probe_sql
+    assert probe_params == ("_drt_synced_keys",)
+    assert "`_drt_synced_keys`" in cursor.execute.call_args_list[1][0][0]
+
+
+def test_fetch_tracked_state_mysql_missing_table_returns_empty() -> None:
+    cursor = MagicMock()
+    cursor.fetchone.return_value = (0,)
+    conn = _plain_conn(cursor)
+
+    with patch(
+        "drt.destinations.mysql.MySQLDestination._connect", return_value=conn
+    ):
+        state = fetch_tracked_state(_mysql_config(table="mydb.users"), "s")
+
+    assert state == {}
+    assert cursor.execute.call_count == 1
+    _assert_read_only(cursor)
+
+
+def test_fetch_tracked_state_unsupported_dialect_returns_empty() -> None:
+    # Tracked mirror is Postgres/MySQL-only; other dialects have no state
+    # table to read, so the preview degrades to "no deletions known".
+    assert fetch_tracked_state(_clickhouse_config(), "s") == {}
+    assert fetch_tracked_state(_snowflake_config(), "s") == {}
+    assert (
+        fetch_tracked_state(
+            RestApiDestinationConfig(type="rest_api", url="http://x", method="POST"),
+            "s",
+        )
+        == {}
+    )

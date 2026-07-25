@@ -381,3 +381,127 @@ def _fetch_rows_by_keys_snowflake(
         return result
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# fetch_tracked_state — read-only tracked-mirror state read (#693)
+# ---------------------------------------------------------------------------
+
+_STATE_SELECT = "SELECT key_hash, key_json FROM {} WHERE sync_name = %s"
+
+
+def fetch_tracked_state(
+    config: DestinationConfig, sync_name: str
+) -> dict[str, str]:
+    """Read the tracked-mirror key state for *sync_name*, **read-only**.
+
+    Returns ``{key_hash: key_json}`` — the same mapping
+    ``BaseSqlDestination._finalize_mirror_tracked`` builds — so the pure
+    ``_mirror_state.diff_keys`` can compute the would-be mirror DELETE set for
+    ``drt run --dry-run --diff`` (#693) without touching the destination.
+
+    Strictly a reader: it issues the dialect's existence probe and, only if the
+    ``_drt_synced_keys`` table is already there, one parameterized ``SELECT``.
+    It **never** emits DDL, DML, or a ``COMMIT`` — a dry run must not create the
+    state table that a real run would lazily create.
+
+    An absent state table yields ``{}``, matching the first-run baseline
+    semantics of ``_finalize_mirror_tracked`` (no prior state → no deletes).
+
+    Postgres / MySQL only — the tracked strategy itself is PG/MySQL-only today
+    (other destinations fail fast at load time), so any other config type also
+    yields ``{}`` rather than raising. Returning ``{}`` (not
+    ``NotImplementedError``) keeps the caller a preview-only best-effort path:
+    "no tracked state known" and "no deletions to preview" are the same answer.
+    """
+    if isinstance(config, PostgresDestinationConfig):
+        return _fetch_tracked_state_postgres(config, sync_name)
+    if isinstance(config, MySQLDestinationConfig):
+        return _fetch_tracked_state_mysql(config, sync_name)
+    return {}
+
+
+def _fetch_tracked_state_postgres(
+    config: PostgresDestinationConfig, sync_name: str
+) -> dict[str, str]:
+    """Postgres leg — mirrors ``PostgresDestination._state_table_ident`` /
+    ``_state_table_exists`` (the state table lives in the target table's
+    schema; ``to_regclass`` takes the unquoted qualified name)."""
+    from psycopg2 import sql as _pgsql
+
+    from drt.destinations._mirror_state import STATE_TABLE
+    from drt.destinations.postgres import (
+        PostgresDestination,
+        _join_qualified,
+        _qualified_ident,
+        _split_qualified,
+    )
+
+    schema, _relation = _split_qualified(config.table)
+    qualified = _join_qualified(schema, STATE_TABLE)
+
+    conn = PostgresDestination._connect(config)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT to_regclass(%s)", (qualified,))
+        row = cur.fetchone()
+        if row is None or row[0] is None:
+            return {}
+        cur.execute(
+            _pgsql.SQL(_STATE_SELECT).format(_qualified_ident(qualified)),
+            (sync_name,),
+        )
+        return {r[0]: r[1] for r in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def _fetch_tracked_state_mysql(
+    config: MySQLDestinationConfig, sync_name: str
+) -> dict[str, str]:
+    """MySQL leg — mirrors ``MySQLDestination._state_table_ident`` /
+    ``_state_table_exists`` (state table lives in the target's database; the
+    probe binds the database name, or falls back to ``DATABASE()``)."""
+    from drt.destinations._mirror_state import STATE_TABLE
+    from drt.destinations.mysql import MySQLDestination
+
+    if "." in config.table:
+        database: str | None = config.table.rsplit(".", 1)[0]
+        ident = MySQLDestination._quote_ident(f"{database}.{STATE_TABLE}")
+    else:
+        database = None
+        ident = MySQLDestination._quote_ident(STATE_TABLE)
+
+    conn = MySQLDestination._connect(config)
+    try:
+        cur = conn.cursor()
+        if database is not None:
+            cur.execute(
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_schema = %s AND table_name = %s",
+                (database, STATE_TABLE),
+            )
+        else:
+            cur.execute(
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = %s",
+                (STATE_TABLE,),
+            )
+        probe = cur.fetchone()
+        # Same shape tolerance as ``_fetch_rows_mysql``: a DictCursor yields a
+        # mapping rather than a tuple.
+        count = (
+            next(iter(probe.values()), 0) if isinstance(probe, dict) else probe[0]
+        )
+        if not count:
+            return {}
+        cur.execute(_STATE_SELECT.format(ident), (sync_name,))
+        state: dict[str, str] = {}
+        for r in cur.fetchall():
+            if isinstance(r, dict):
+                state[r["key_hash"]] = r["key_json"]
+            else:
+                state[r[0]] = r[1]
+        return state
+    finally:
+        conn.close()
