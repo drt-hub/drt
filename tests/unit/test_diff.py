@@ -11,7 +11,7 @@ Covers compute_diff() across:
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from drt.config.models import (
     PostgresDestinationConfig,
@@ -19,6 +19,7 @@ from drt.config.models import (
     SlackDestinationConfig,
     SyncOptions,
 )
+from drt.destinations._mirror_state import key_hash, key_json
 from drt.engine.diff import DiffResult, compute_diff
 
 
@@ -318,6 +319,201 @@ class TestComputeDiffKeyedFetch:
         assert result.fallback_reason is not None
         assert "Could not query destination" in result.fallback_reason
         assert result.sample == records
+
+
+# ---------------------------------------------------------------------------
+# Mirror tracked-strategy delete preview (#693, Task B1)
+# ---------------------------------------------------------------------------
+
+
+def _mirror_tracked_options(sync_name: str | None = "users_sync") -> SyncOptions:
+    options = SyncOptions(mode="mirror", mirror={"strategy": "tracked"})  # type: ignore[arg-type]
+    if sync_name is not None:
+        options._sync_name = sync_name
+    return options
+
+
+class TestComputeDiffMirrorTracked:
+    @patch("drt.engine.diff.fetch_tracked_state")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_previews_tracked_mirror_deletes(
+        self, mock_fetch_keys: Any, mock_state: Any
+    ) -> None:
+        """previous={a,b,c}, source={a,b} → deleted previews {c}, read-only.
+
+        Mirror mode takes the keyed-fetch path (#470), which structurally can
+        never see dest-only rows — so the delete preview must come from the
+        tracked state table, not from ``dest_rows``.
+        """
+        mock_fetch_keys.return_value = [{"id": "a", "score": 0.5}]
+        mock_state.return_value = {
+            key_hash(("a",)): key_json(("a",)),
+            key_hash(("b",)): key_json(("b",)),
+            key_hash(("c",)): key_json(("c",)),
+        }
+        records = [{"id": "a", "score": 0.9}, {"id": "b", "score": 0.8}]
+
+        result = compute_diff(
+            records, _pg_config(), _mirror_tracked_options(), limit=20
+        )
+
+        assert result.supported
+        assert result.deleted == [{"id": "c"}]
+        # sync_name derivation: SyncOptions._sync_name, falling back to table
+        assert mock_state.call_args.args[1] == "users_sync"
+
+    @patch("drt.engine.diff.fetch_tracked_state")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_tracked_preview_is_read_only(
+        self, mock_fetch_keys: Any, mock_state: Any
+    ) -> None:
+        """The preview must never write: only SELECTs reach the cursor.
+
+        ``fetch_tracked_state`` is exercised for real against a fake cursor so
+        the read-only guarantee is proved end-to-end, not just at the seam.
+        """
+        from drt.destinations.query import fetch_tracked_state as real_fetch
+
+        cursor = MagicMock()
+        cursor.fetchone.return_value = ("public._drt_synced_keys",)
+        cursor.fetchall.return_value = [(key_hash(("c",)), key_json(("c",)))]
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+
+        mock_fetch_keys.return_value = []
+        mock_state.side_effect = real_fetch
+        records = [{"id": "a"}]
+
+        with patch(
+            "drt.destinations.postgres.PostgresDestination._connect",
+            return_value=conn,
+        ):
+            result = compute_diff(
+                records,
+                _pg_config(table="public.users"),
+                _mirror_tracked_options(),
+                limit=20,
+            )
+
+        assert result.deleted == [{"id": "c"}]
+        assert cursor.execute.call_count == 2  # existence probe + state SELECT
+        for call in cursor.execute.call_args_list:
+            stmt = call[0][0]
+            text = str(stmt.seq) if hasattr(stmt, "seq") else str(stmt)
+            upper = text.upper()
+            for kw in ("INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "TRUNCATE"):
+                assert kw not in upper, f"write keyword {kw} in {text}"
+        cursor.executemany.assert_not_called()
+        conn.commit.assert_not_called()
+
+    @patch("drt.engine.diff.fetch_tracked_state")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_tracked_preview_empty_when_state_absent(
+        self, mock_fetch_keys: Any, mock_state: Any
+    ) -> None:
+        """No state table (first run) → baseline semantics, nothing deleted."""
+        mock_fetch_keys.return_value = []
+        mock_state.return_value = {}
+        records = [{"id": "a"}]
+
+        result = compute_diff(
+            records, _pg_config(), _mirror_tracked_options(), limit=20
+        )
+
+        assert result.deleted == []
+        assert result.supported
+
+    @patch("drt.engine.diff.fetch_tracked_state")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_tracked_preview_swallows_state_read_failure(
+        self, mock_fetch_keys: Any, mock_state: Any
+    ) -> None:
+        """A failing state read must not break the whole diff — deleted = []."""
+        mock_fetch_keys.return_value = [{"id": "a", "score": 0.5}]
+        mock_state.side_effect = RuntimeError("permission denied for _drt_synced_keys")
+        records = [{"id": "a", "score": 0.9}]
+
+        result = compute_diff(
+            records, _pg_config(), _mirror_tracked_options(), limit=20
+        )
+
+        assert result.supported  # diff itself still usable
+        assert result.deleted == []
+        assert len(result.updated) == 1
+
+    @patch("drt.engine.diff.fetch_tracked_state")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_tracked_preview_sync_name_falls_back_to_table(
+        self, mock_fetch_keys: Any, mock_state: Any
+    ) -> None:
+        """Same derivation as ``_finalize_mirror_tracked``: ``_sync_name or table``."""
+        mock_fetch_keys.return_value = []
+        mock_state.return_value = {}
+
+        compute_diff(
+            [{"id": "a"}],
+            _pg_config(table="public.users"),
+            _mirror_tracked_options(sync_name=None),
+            limit=20,
+        )
+
+        assert mock_state.call_args.args[1] == "public.users"
+
+    @patch("drt.engine.diff.fetch_tracked_state")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_destination_strategy_mirror_not_previewed(
+        self, mock_fetch_keys: Any, mock_state: Any
+    ) -> None:
+        """Only the tracked strategy is previewed in B1 (destination = B4)."""
+        mock_fetch_keys.return_value = []
+        options = SyncOptions(mode="mirror")  # type: ignore[arg-type]
+
+        result = compute_diff([{"id": "a"}], _pg_config(), options, limit=20)
+
+        assert result.deleted == []
+        mock_state.assert_not_called()
+
+    @patch("drt.engine.diff.fetch_tracked_state")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_tracked_preview_composite_key_and_truncation(
+        self, mock_fetch_keys: Any, mock_state: Any
+    ) -> None:
+        """Composite keys map back to columns; over-limit sets ``truncated``."""
+        mock_fetch_keys.return_value = []
+        previous = {}
+        for i in range(3):
+            key = ("c1", f"u{i}")
+            previous[key_hash(key)] = key_json(key)
+        mock_state.return_value = previous
+
+        result = compute_diff(
+            [{"company_id": "c1", "user_id": "u0"}],
+            _pg_config(upsert_key=["company_id", "user_id"]),
+            _mirror_tracked_options(),
+            limit=1,
+        )
+
+        assert result.truncated is True
+        assert len(result.deleted) == 1
+        assert set(result.deleted[0]) == {"company_id", "user_id"}
+        assert result.deleted[0]["company_id"] == "c1"
+
+    @patch("drt.engine.diff.fetch_tracked_state")
+    @patch("drt.engine.diff.fetch_rows")
+    def test_tracked_preview_previews_full_wipe_on_empty_source(
+        self, mock_fetch: Any, mock_state: Any
+    ) -> None:
+        """Empty source → every tracked key is a delete candidate.
+
+        With no records the engine takes the full-scan path (``use_keyed_fetch``
+        needs ``records``), but the tracked preview is independent of that read.
+        """
+        mock_fetch.return_value = []
+        mock_state.return_value = {key_hash(("a",)): key_json(("a",))}
+
+        result = compute_diff([], _pg_config(), _mirror_tracked_options(), limit=20)
+
+        assert result.deleted == [{"id": "a"}]
 
 
 # ---------------------------------------------------------------------------

@@ -22,9 +22,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from drt.config.models import DestinationConfig, SyncOptions
+from drt.destinations._mirror_state import diff_keys
 from drt.destinations.query import (
     fetch_rows,
     fetch_rows_by_keys,
+    fetch_tracked_state,
     get_table_name,
     is_queryable,
 )
@@ -37,6 +39,10 @@ class DiffResult:
     For queryable destinations, ``added`` / ``updated`` / ``deleted`` reflect
     the real comparison. For non-queryable destinations, only ``sample`` is
     populated (with ``supported=False`` and ``fallback_reason`` set).
+
+    ``deleted`` rows carry full destination columns in ``replace`` mode; for the
+    tracked-mirror preview (#693) they carry the ``upsert_key`` columns only,
+    since the state table records keys rather than rows.
 
     Lists are bounded by the ``limit`` parameter passed to :func:`compute_diff`;
     ``truncated`` is set when at least one list was capped.
@@ -72,6 +78,52 @@ class DiffResult:
             for col in set(old) | set(new)
             if old.get(col) != new.get(col)
         }
+
+
+def _is_tracked_mirror(sync_options: SyncOptions) -> bool:
+    """True for ``mode: mirror`` with ``mirror.strategy: tracked`` (#686).
+
+    The ``destination`` strategy needs a full destination read to preview
+    (tracked separately); only the tracked strategy is previewable read-only.
+    """
+    return (
+        sync_options.mode == "mirror"
+        and sync_options.mirror is not None
+        and sync_options.mirror.strategy == "tracked"
+    )
+
+
+def _preview_tracked_mirror_deletes(
+    config: DestinationConfig,
+    sync_options: SyncOptions,
+    upsert_key: list[str],
+    source_keys: set[tuple[Any, ...]],
+) -> list[dict[str, Any]]:
+    """Read-only preview of the rows tracked mirror would DELETE (#693).
+
+    Reads the drt-managed ``_drt_synced_keys`` state for this sync and returns
+    ``previous - current`` as key-column dicts. Rows are key-only: the state
+    table stores keys, not full rows, and re-reading the destination for the
+    other columns would cost a second scan for a preview.
+
+    No prior state (first run / absent table) means no deletes, matching the
+    baseline semantics of ``BaseSqlDestination._finalize_mirror_tracked``. A
+    failed state read degrades to "nothing to preview" rather than failing the
+    diff — the same tone as the query-failure fallback above, but narrower: only
+    the delete preview is lost, the add/update diff stands.
+    """
+    # Same derivation as ``_finalize_mirror_tracked``: the injected sync name,
+    # falling back to the target table when the options were built standalone.
+    sync_name = str(sync_options._sync_name or getattr(config, "table", "") or "")
+    try:
+        previous = fetch_tracked_state(config, sync_name)
+    except Exception:
+        return []
+    if not previous:
+        return []
+    return [
+        dict(zip(upsert_key, key)) for key in diff_keys(previous, list(source_keys))
+    ]
 
 
 def compute_diff(
@@ -191,11 +243,20 @@ def compute_diff(
     # in the source effectively disappear. In full / incremental upsert
     # modes, dest-only rows are preserved, so reporting "deleted" would
     # be misleading.
+    #
+    # Mirror mode is the exception (#693): the engine *does* drop rows, but the
+    # keyed fetch above structurally cannot see them (it only returns dest rows
+    # whose key IS in the source), so the delete set comes from a separate
+    # read — for the ``tracked`` strategy, the drt-managed state table.
     deleted: list[dict[str, Any]] = []
     if sync_options.mode == "replace":
         deleted = [
             row for key, row in dest_by_key.items() if key not in source_keys
         ]
+    elif _is_tracked_mirror(sync_options):
+        deleted = _preview_tracked_mirror_deletes(
+            config, sync_options, upsert_key, source_keys
+        )
 
     truncated = (
         len(added) > limit or len(updated) > limit or len(deleted) > limit
