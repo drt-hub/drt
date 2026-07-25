@@ -363,123 +363,37 @@ class PostgresDestination(BaseSqlDestination):
             params = (*scope_params, tuple(keys))
         return stmt, params
 
-    def _finalize_mirror_tracked(
-        self,
-        config: PostgresDestinationConfig,
-        sync_options: SyncOptions,
-    ) -> SyncResult | None:
-        """``mirror.strategy: tracked`` (#686) — delete only rows drt synced.
+    # --- tracked-mirror state hooks (#686 / #695, #719 phase 2b) -----------
+    def _state_table_ident(self, config: Any) -> tuple[Any, Any, Any]:
+        """State table lives in the target table's schema; ``to_regclass``
+        takes the *unquoted* qualified name as a bound parameter."""
+        from drt.destinations._mirror_state import STATE_TABLE
 
-        Reads the previously-synced key set for this sync from the
-        drt-managed ``_drt_synced_keys`` table (created lazily in the target
-        table's schema), deletes ``previous - current`` from the target, and
-        rewrites the state to the current key set. Target delete and state
-        rewrite share one transaction, so they commit or roll back together.
+        schema, _relation = _split_qualified(config.table)
+        qualified = _join_qualified(schema, STATE_TABLE)
+        return _qualified_ident(qualified), schema, qualified
 
-        First run (or lost state) baselines: record keys, delete nothing,
-        WARN — matching Census semantics ("the first sync will be an upsert
-        for all records; the second and following account for deletions").
-        Rows the application wrote are never candidates for deletion because
-        they were never in the tracked set.
-        """
+    def _state_table_exists(self, cur: Any, scope: Any, raw: str) -> bool:
+        cur.execute("SELECT to_regclass(%s)", (raw,))
+        return cur.fetchone()[0] is not None
+
+    def _create_state_table(self, cur: Any, ident: Any) -> None:
         from psycopg2 import sql as _pgsql
 
-        from drt.destinations._mirror_state import (
-            STATE_TABLE,
-            diff_keys,
-            key_hash,
-            key_json,
+        cur.execute(
+            _pgsql.SQL(
+                "CREATE TABLE IF NOT EXISTS {} ("
+                "sync_name VARCHAR(255) NOT NULL, "
+                "key_hash CHAR(64) NOT NULL, "
+                "key_json TEXT NOT NULL, "
+                "PRIMARY KEY (sync_name, key_hash))"
+            ).format(ident)
         )
 
-        sync_name = sync_options._sync_name or config.table
-        current = list({tuple(k) for k in self._mirror_keys or []})
-        schema, _relation = _split_qualified(config.table)
-        state_ident = _qualified_ident(_join_qualified(schema, STATE_TABLE))
-        upsert_cols = config.upsert_key
+    def _state_sql(self, template: str, ident: Any) -> Any:
+        from psycopg2 import sql as _pgsql
 
-        conn = self._connect(config)
-        try:
-            cur = conn.cursor()
-            # Pre-provisioning (#695): check existence before issuing DDL so a
-            # locked-down destination user (no CREATE privilege) can run against
-            # a state table an admin created ahead of time. Only CREATE when the
-            # table is genuinely absent — the IF NOT EXISTS guard stays for the
-            # concurrent-first-run race.
-            cur.execute(
-                "SELECT to_regclass(%s)",
-                (_join_qualified(schema, STATE_TABLE),),
-            )
-            if cur.fetchone()[0] is None:
-                cur.execute(
-                    _pgsql.SQL(
-                        "CREATE TABLE IF NOT EXISTS {} ("
-                        "sync_name VARCHAR(255) NOT NULL, "
-                        "key_hash CHAR(64) NOT NULL, "
-                        "key_json TEXT NOT NULL, "
-                        "PRIMARY KEY (sync_name, key_hash))"
-                    ).format(state_ident)
-                )
-            cur.execute(
-                _pgsql.SQL(
-                    "SELECT key_hash, key_json FROM {} WHERE sync_name = %s"
-                ).format(state_ident),
-                (sync_name,),
-            )
-            previous = {row[0]: row[1] for row in cur.fetchall()}
-
-            if previous:
-                to_delete = diff_keys(previous, current)
-                if to_delete:
-                    if len(upsert_cols) == 1:
-                        # Single-column form: DELETE WHERE col IN %s
-                        stmt = _pgsql.SQL("DELETE FROM {} WHERE {} IN %s").format(
-                            _qualified_ident(config.table),
-                            _pgsql.Identifier(upsert_cols[0]),
-                        )
-                        params: tuple[Any, ...] = (
-                            tuple(k[0] for k in to_delete),
-                        )
-                    else:
-                        # Composite form: DELETE WHERE (c1, c2) IN %s
-                        col_tuple = _pgsql.SQL("({})").format(
-                            _pgsql.SQL(", ").join(
-                                _pgsql.Identifier(c) for c in upsert_cols
-                            )
-                        )
-                        stmt = _pgsql.SQL("DELETE FROM {} WHERE {} IN %s").format(
-                            _qualified_ident(config.table),
-                            col_tuple,
-                        )
-                        params = (tuple(tuple(k) for k in to_delete),)
-                    cur.execute(stmt, params)
-            else:
-                logging.getLogger(__name__).warning(
-                    "tracked mirror: no prior state for sync %r in %s — "
-                    "baselining this run's %d key(s); no deletes this run.",
-                    sync_name,
-                    STATE_TABLE,
-                    len(current),
-                )
-
-            # Rewrite this sync's state to the current key set.
-            cur.execute(
-                _pgsql.SQL("DELETE FROM {} WHERE sync_name = %s").format(
-                    state_ident
-                ),
-                (sync_name,),
-            )
-            cur.executemany(
-                _pgsql.SQL(
-                    "INSERT INTO {} (sync_name, key_hash, key_json) "
-                    "VALUES (%s, %s, %s)"
-                ).format(state_ident),
-                [(sync_name, key_hash(k), key_json(k)) for k in current],
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-        return SyncResult()
+        return _pgsql.SQL(template).format(ident)
 
     def list_orphan_swap_tables(
         self,

@@ -426,10 +426,140 @@ class BaseSqlDestination:
         """
         raise NotImplementedError
 
+    def _state_table_ident(self, config: Any) -> tuple[Any, Any, Any]:
+        """Locate the drt-managed ``_drt_synced_keys`` state table for ``config``.
+
+        Returns ``(ident, scope, raw)`` where ``ident`` is the identifier ready
+        to embed in SQL (psycopg2 ``Composed`` on PG, backtick-quoted ``str`` on
+        MySQL), ``scope`` is the namespace the existence probe filters on
+        (PG schema / MySQL database, ``None`` when the target is unqualified),
+        and ``raw`` is the unquoted qualified name the probe binds as a
+        parameter. Dialect-specific.
+        """
+        raise NotImplementedError
+
+    def _state_table_exists(self, cur: Any, scope: Any, raw: str) -> bool:
+        """Pre-provisioning probe (#695): does the state table already exist?
+
+        Postgres asks ``to_regclass``; MySQL counts ``information_schema.tables``
+        (falling back to ``DATABASE()`` when ``scope`` is ``None``). Kept as a
+        hook rather than inlined because a locked-down destination user with no
+        CREATE privilege must never see the DDL at all.
+        """
+        raise NotImplementedError
+
+    def _create_state_table(self, cur: Any, ident: Any) -> None:
+        """Issue the ``CREATE TABLE IF NOT EXISTS`` for the state table.
+        Body is identical across dialects; only the identifier type differs
+        (``Composable`` vs ``str``), which is why this is a hook."""
+        raise NotImplementedError
+
+    def _state_sql(self, template: str, ident: Any) -> Any:
+        """Bind ``ident`` into a single-``{}`` SQL ``template``, returning
+        something ``cursor.execute`` accepts.
+
+        This is the ``Composed``-vs-``str`` translation seam. The state-table
+        SELECT / DELETE / INSERT statements are byte-identical across dialects
+        *as text*, but Postgres must compose them through ``psycopg2.sql.SQL(
+        ...).format(Composed)`` while MySQL can use plain ``str.format``. Only
+        the binding step differs, so only the binding step is dialect code —
+        the templates themselves live in ``_finalize_mirror_tracked``.
+        """
+        raise NotImplementedError
+
     def _finalize_mirror_tracked(
         self, config: Any, sync_options: SyncOptions
     ) -> SyncResult | None:
-        """``mirror.strategy: tracked`` (#686) — diff against the drt-managed
-        ``_drt_synced_keys`` state table instead of the destination table.
-        Still dialect-specific (state-table DDL / existence check)."""
-        raise NotImplementedError
+        """``mirror.strategy: tracked`` (#686) — delete only rows drt synced.
+
+        Reads the previously-synced key set for this sync from the drt-managed
+        ``_drt_synced_keys`` table (created lazily next to the target table),
+        deletes ``previous - current`` from the target, and rewrites the state
+        to the current key set. Target delete and state rewrite share one
+        transaction, so they commit or roll back together.
+
+        First run (or lost state) baselines: record keys, delete nothing, WARN
+        — matching Census semantics ("the first sync will be an upsert for all
+        records; the second and following account for deletions"). Rows the
+        application wrote are never candidates for deletion because they were
+        never in the tracked set.
+
+        Dialect-agnostic (#719 phase 2b). The four dialect seams are the state
+        identifier (``_state_table_ident``), the pre-provisioning probe
+        (``_state_table_exists``), the DDL (``_create_state_table``), and the
+        ``Composed``/``str`` binding of the state statements (``_state_sql``).
+        The target DELETE reuses ``_build_mirror_delete`` in its
+        ``negate=False`` ("delete exactly these keys") form.
+        """
+        import logging
+
+        from drt.destinations._mirror_state import (
+            STATE_TABLE,
+            diff_keys,
+            key_hash,
+            key_json,
+        )
+
+        sync_name = sync_options._sync_name or config.table
+        current = list({tuple(k) for k in self._mirror_keys or []})
+        upsert_cols = config.upsert_key
+        state_ident, state_scope, state_raw = self._state_table_ident(config)
+
+        conn = self._dialect_connect(config)
+        try:
+            cur = conn.cursor()
+            # Pre-provisioning (#695): check existence before issuing DDL so a
+            # locked-down destination user (no CREATE privilege) can run against
+            # a state table an admin created ahead of time. Only CREATE when the
+            # table is genuinely absent — the IF NOT EXISTS guard stays for the
+            # concurrent-first-run race.
+            if not self._state_table_exists(cur, state_scope, state_raw):
+                self._create_state_table(cur, state_ident)
+            cur.execute(
+                self._state_sql(
+                    "SELECT key_hash, key_json FROM {} WHERE sync_name = %s",
+                    state_ident,
+                ),
+                (sync_name,),
+            )
+            previous = {row[0]: row[1] for row in cur.fetchall()}
+
+            if previous:
+                to_delete = diff_keys(previous, current)
+                if to_delete:
+                    stmt, params = self._build_mirror_delete(
+                        config.table,
+                        upsert_cols,
+                        to_delete,
+                        None,
+                        None,
+                        negate=False,
+                    )
+                    cur.execute(stmt, params)
+            else:
+                logging.getLogger(__name__).warning(
+                    "tracked mirror: no prior state for sync %r in %s — "
+                    "baselining this run's %d key(s); no deletes this run.",
+                    sync_name,
+                    STATE_TABLE,
+                    len(current),
+                )
+
+            # Rewrite this sync's state to the current key set.
+            cur.execute(
+                self._state_sql("DELETE FROM {} WHERE sync_name = %s", state_ident),
+                (sync_name,),
+            )
+            cur.executemany(
+                self._state_sql(
+                    "INSERT INTO {} (sync_name, key_hash, key_json) "
+                    "VALUES (%s, %s, %s)",
+                    state_ident,
+                ),
+                [(sync_name, key_hash(k), key_json(k)) for k in current],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        return SyncResult()

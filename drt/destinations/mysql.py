@@ -291,128 +291,52 @@ class MySQLDestination(BaseSqlDestination):
             params = scope_params + [v for key in keys for v in key]
         return stmt, params
 
-    def _finalize_mirror_tracked(
-        self,
-        config: MySQLDestinationConfig,
-        sync_options: SyncOptions,
-    ) -> SyncResult | None:
-        """``mirror.strategy: tracked`` (#686) — delete only rows drt synced.
+    # --- tracked-mirror state hooks (#686 / #695, #719 phase 2b) -----------
+    def _state_table_ident(self, config: Any) -> tuple[Any, Any, Any]:
+        """State table lives in the target's database; the existence probe
+        binds the database name (or falls back to ``DATABASE()``)."""
+        from drt.destinations._mirror_state import STATE_TABLE
 
-        MySQL counterpart of the Postgres implementation: reads the
-        previously-synced key set for this sync from the drt-managed
-        ``_drt_synced_keys`` table (created lazily in the target's database),
-        deletes ``previous - current`` from the target, and rewrites the
-        state — one transaction. First run / lost state baselines with a
-        WARN and no deletes. pymysql does not auto-expand tuple-of-tuples,
-        so IN placeholder lists are built explicitly like the destination
-        strategy above.
-        """
-        import logging
-
-        from drt.destinations._mirror_state import (
-            STATE_TABLE,
-            diff_keys,
-            key_hash,
-            key_json,
-        )
-
-        sync_name = sync_options._sync_name or config.table
-        current = list({tuple(k) for k in self._mirror_keys or []})
-        upsert_cols = config.upsert_key
-        table_q = self._quote_ident(config.table)
         if "." in config.table:
             database = config.table.rsplit(".", 1)[0]
-            state_q = self._quote_ident(f"{database}.{STATE_TABLE}")
+            return (
+                self._quote_ident(f"{database}.{STATE_TABLE}"),
+                database,
+                f"{database}.{STATE_TABLE}",
+            )
+        return self._quote_ident(STATE_TABLE), None, STATE_TABLE
+
+    def _state_table_exists(self, cur: Any, scope: Any, raw: str) -> bool:
+        """MySQL checks the CREATE privilege *before* the ``IF NOT EXISTS``
+        existence check, so a pre-created table alone is not enough (#695) —
+        the statement must not be emitted at all when the table exists."""
+        from drt.destinations._mirror_state import STATE_TABLE
+
+        if scope is not None:
+            cur.execute(
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_schema = %s AND table_name = %s",
+                (scope, STATE_TABLE),
+            )
         else:
-            database = None
-            state_q = self._quote_ident(STATE_TABLE)
-
-        conn = self._connect(config)
-        try:
-            cur = conn.cursor()
-            # Pre-provisioning (#695): check existence before issuing DDL so a
-            # locked-down destination user (no CREATE privilege) can run against
-            # a state table an admin created ahead of time. MySQL checks the
-            # CREATE privilege *before* the IF NOT EXISTS existence check, so a
-            # pre-created table alone is not enough — we must avoid emitting the
-            # statement at all. Only CREATE when the table is genuinely absent.
-            if database is not None:
-                cur.execute(
-                    "SELECT COUNT(*) FROM information_schema.tables "
-                    "WHERE table_schema = %s AND table_name = %s",
-                    (database, STATE_TABLE),
-                )
-            else:
-                cur.execute(
-                    "SELECT COUNT(*) FROM information_schema.tables "
-                    "WHERE table_schema = DATABASE() AND table_name = %s",
-                    (STATE_TABLE,),
-                )
-            if cur.fetchone()[0] == 0:
-                cur.execute(
-                    f"CREATE TABLE IF NOT EXISTS {state_q} ("
-                    "sync_name VARCHAR(255) NOT NULL, "
-                    "key_hash CHAR(64) NOT NULL, "
-                    "key_json TEXT NOT NULL, "
-                    "PRIMARY KEY (sync_name, key_hash))"
-                )
             cur.execute(
-                f"SELECT key_hash, key_json FROM {state_q} WHERE sync_name = %s",
-                (sync_name,),
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = %s",
+                (STATE_TABLE,),
             )
-            previous = {row[0]: row[1] for row in cur.fetchall()}
+        return bool(cur.fetchone()[0] != 0)
 
-            if previous:
-                to_delete = diff_keys(previous, current)
-                if to_delete:
-                    if len(upsert_cols) == 1:
-                        placeholders = ", ".join(["%s"] * len(to_delete))
-                        col_q = f"`{upsert_cols[0]}`"
-                        stmt = (
-                            f"DELETE FROM {table_q} WHERE {col_q} "
-                            f"IN ({placeholders})"
-                        )
-                        params: list[Any] = [k[0] for k in to_delete]
-                    else:
-                        col_tuple = (
-                            "(" + ", ".join(f"`{c}`" for c in upsert_cols) + ")"
-                        )
-                        row_placeholder = (
-                            "(" + ", ".join(["%s"] * len(upsert_cols)) + ")"
-                        )
-                        placeholders = ", ".join(
-                            [row_placeholder] * len(to_delete)
-                        )
-                        stmt = (
-                            f"DELETE FROM {table_q} WHERE {col_tuple} "
-                            f"IN ({placeholders})"
-                        )
-                        params = [v for key in to_delete for v in key]
-                    cur.execute(stmt, params)
-            else:
-                logging.getLogger(__name__).warning(
-                    "tracked mirror: no prior state for sync %r in %s — "
-                    "baselining this run's %d key(s); no deletes this run.",
-                    sync_name,
-                    STATE_TABLE,
-                    len(current),
-                )
+    def _create_state_table(self, cur: Any, ident: Any) -> None:
+        cur.execute(
+            f"CREATE TABLE IF NOT EXISTS {ident} ("
+            "sync_name VARCHAR(255) NOT NULL, "
+            "key_hash CHAR(64) NOT NULL, "
+            "key_json TEXT NOT NULL, "
+            "PRIMARY KEY (sync_name, key_hash))"
+        )
 
-            # Rewrite this sync's state to the current key set.
-            cur.execute(
-                f"DELETE FROM {state_q} WHERE sync_name = %s",
-                (sync_name,),
-            )
-            cur.executemany(
-                f"INSERT INTO {state_q} (sync_name, key_hash, key_json) "
-                "VALUES (%s, %s, %s)",
-                [(sync_name, key_hash(k), key_json(k)) for k in current],
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-        return SyncResult()
+    def _state_sql(self, template: str, ident: Any) -> Any:
+        return template.format(ident)
 
     def _load_upsert(
         self,
