@@ -104,6 +104,7 @@ def test_dialect_hooks_are_declared() -> None:
         "_load_replace_swap",
         "_load_replace",
         "_load_upsert",
+        "_build_mirror_delete",
     ):
         assert hasattr(BaseSqlDestination, hook), hook
 
@@ -132,8 +133,8 @@ def test_base_load_hooks_raise_not_implemented() -> None:
 
 
 def test_base_finalize_hooks_raise_not_implemented() -> None:
-    # The swap-rename + shadow/old naming hooks and the mirror-delete hook
-    # (pulled up in phase 2b) are abstract by contract.
+    # The swap-rename + shadow/old naming hooks and the mirror-DELETE builder
+    # (the phase-2b placeholder-expansion seam) are abstract by contract.
     base = BaseSqlDestination()
     with pytest.raises(NotImplementedError):
         base._rename_swap(None, None, "t", "s", "o")
@@ -142,7 +143,9 @@ def test_base_finalize_hooks_raise_not_implemented() -> None:
     with pytest.raises(NotImplementedError):
         base._old_name("t")
     with pytest.raises(NotImplementedError):
-        base._finalize_mirror(object(), SimpleNamespace(mode="mirror"))
+        base._build_mirror_delete("t", ["id"], [(1,)])
+    with pytest.raises(NotImplementedError):
+        base._finalize_mirror_tracked(object(), SimpleNamespace(mode="mirror"))
 
 
 # ---------------------------------------------------------------------------
@@ -415,3 +418,169 @@ def test_finalize_sync_swap_delegates_rename_and_resets() -> None:
     ]
     assert d._swap_shadow_created is False
     assert d._swap_table is None
+
+
+# ---------------------------------------------------------------------------
+# _finalize_mirror template (#719 phase 2b)
+# ---------------------------------------------------------------------------
+
+
+def _mirror_dest(events: list[str], tracked_result: Any = None) -> Any:
+    """A BaseSqlDestination subclass recording the mirror-DELETE hook calls.
+
+    ``_build_mirror_delete`` is the dialect seam (PG returns
+    ``(Composed, tuple)``, MySQL ``(str, list)``); here it just echoes its
+    arguments so the base control flow can be asserted dialect-free.
+    """
+
+    class _Cur:
+        def execute(self, stmt: Any, params: Any = None) -> None:
+            events.append(f"execute:{stmt}:{params}")
+
+    class _Conn:
+        def cursor(self) -> _Cur:
+            return _Cur()
+
+        def commit(self) -> None:
+            events.append("commit")
+
+        def close(self) -> None:
+            events.append("close")
+
+    class _Dest(BaseSqlDestination):
+        def _dialect_connect(self, config: Any) -> Any:
+            events.append("connect")
+            return _Conn()
+
+        def _build_mirror_delete(
+            self,
+            table: str,
+            upsert_cols: list[str],
+            keys: list[tuple[Any, ...]],
+            scope_cols: list[str] | None = None,
+            scopes: list[tuple[Any, ...]] | None = None,
+            negate: bool = True,
+        ) -> tuple[Any, Any]:
+            return (
+                f"DELETE {table} {upsert_cols} scope={scope_cols} negate={negate}",
+                (sorted(keys), scopes),
+            )
+
+        def _finalize_mirror_tracked(
+            self, config: Any, sync_options: Any
+        ) -> SyncResult | None:
+            events.append("tracked")
+            return tracked_result
+
+    return _Dest()
+
+
+def test_finalize_mirror_returns_none_without_keys() -> None:
+    events: list[str] = []
+    d = _mirror_dest(events)
+    cfg = SimpleNamespace(table="t", upsert_key=["id"])
+    # never engaged (None) and engaged-but-empty both skip the DELETE
+    assert d._finalize_mirror(cfg, _mirror()) is None
+    d._mirror_keys = []
+    assert d._finalize_mirror(cfg, _mirror()) is None
+    assert events == []
+
+
+def test_finalize_mirror_dispatches_tracked_strategy() -> None:
+    events: list[str] = []
+    sentinel = SyncResult()
+    d = _mirror_dest(events, tracked_result=sentinel)
+    d._mirror_keys = [(1,)]
+    opts = SimpleNamespace(
+        mode="mirror", mirror=SimpleNamespace(scope=None, strategy="tracked")
+    )
+    assert d._finalize_mirror(SimpleNamespace(table="t", upsert_key=["id"]), opts) is (
+        sentinel
+    )
+    assert events == ["tracked"]
+
+
+def test_finalize_mirror_dedupes_keys_and_executes_delete() -> None:
+    events: list[str] = []
+    d = _mirror_dest(events)
+    d._mirror_keys = [(1,), (2,), (1,)]
+    opts = SimpleNamespace(
+        mode="mirror", mirror=SimpleNamespace(scope=None, strategy="destination")
+    )
+    result = d._finalize_mirror(SimpleNamespace(table="t", upsert_key=["id"]), opts)
+    assert isinstance(result, SyncResult)
+    assert events == [
+        "connect",
+        "execute:DELETE t ['id'] scope=None negate=True:([(1,), (2,)], None)",
+        "commit",
+        "close",
+    ]
+
+
+def test_finalize_mirror_passes_scope_cols_and_scopes() -> None:
+    events: list[str] = []
+    d = _mirror_dest(events)
+    d._mirror_keys = [(1,)]
+    d._mirror_scopes = {("a",)}
+    opts = SimpleNamespace(
+        mode="mirror",
+        mirror=SimpleNamespace(scope=["tenant_id"], strategy="destination"),
+    )
+    d._finalize_mirror(SimpleNamespace(table="t", upsert_key=["id"]), opts)
+    assert events == [
+        "connect",
+        "execute:DELETE t ['id'] scope=['tenant_id'] negate=True:([(1,)], [('a',)])",
+        "commit",
+        "close",
+    ]
+
+
+def test_finalize_mirror_no_mirror_options_means_no_scope() -> None:
+    events: list[str] = []
+    d = _mirror_dest(events)
+    d._mirror_keys = [(1,)]
+    opts = SimpleNamespace(mode="mirror", mirror=None)
+    d._finalize_mirror(SimpleNamespace(table="t", upsert_key=["id"]), opts)
+    assert "scope=None" in events[1]
+
+
+def test_finalize_mirror_closes_connection_when_execute_raises() -> None:
+    events: list[str] = []
+
+    class _Cur:
+        def execute(self, stmt: Any, params: Any = None) -> None:
+            raise RuntimeError("boom")
+
+    class _Conn:
+        def cursor(self) -> _Cur:
+            return _Cur()
+
+        def commit(self) -> None:
+            events.append("commit")
+
+        def close(self) -> None:
+            events.append("close")
+
+    class _Dest(BaseSqlDestination):
+        def _dialect_connect(self, config: Any) -> Any:
+            return _Conn()
+
+        def _build_mirror_delete(
+            self,
+            table: str,
+            upsert_cols: list[str],
+            keys: list[tuple[Any, ...]],
+            scope_cols: list[str] | None = None,
+            scopes: list[tuple[Any, ...]] | None = None,
+            negate: bool = True,
+        ) -> tuple[Any, Any]:
+            return ("DELETE", ())
+
+    d = _Dest()
+    d._mirror_keys = [(1,)]
+    with pytest.raises(RuntimeError):
+        d._finalize_mirror(
+            SimpleNamespace(table="t", upsert_key=["id"]),
+            SimpleNamespace(mode="mirror", mirror=None),
+        )
+    assert events == ["close"]

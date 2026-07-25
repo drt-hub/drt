@@ -234,106 +234,62 @@ class MySQLDestination(BaseSqlDestination):
         cur.execute(f"DROP TABLE {old_q}")
         conn.commit()
 
-    def _finalize_mirror(
+    def _build_mirror_delete(
         self,
-        config: DestinationConfig,
-        sync_options: SyncOptions,
-    ) -> SyncResult | None:
-        """``sync.mode: mirror`` end-of-sync DELETE pass (#340 Step 2).
+        table: str,
+        upsert_cols: list[str],
+        keys: list[tuple[Any, ...]],
+        scope_cols: list[str] | None = None,
+        scopes: list[tuple[Any, ...]] | None = None,
+        negate: bool = True,
+    ) -> tuple[Any, Any]:
+        """MySQL mirror ``DELETE`` builder (#719 phase 2b) — returns a
+        ``(str, list)`` pair.
 
-        Deletes destination rows whose ``upsert_key`` tuple is not in the
-        set of keys observed across all batches.
-
-        pymysql does not auto-expand tuple-of-tuples like psycopg2 does,
-        so we build the ``NOT IN`` placeholder list explicitly:
+        pymysql does not auto-expand tuple-of-tuples like psycopg2 does, so
+        the ``IN`` placeholder list is built explicitly and the params are
+        flattened:
 
         - single-column form: ``DELETE FROM `t` WHERE `c` NOT IN (%s, %s, ...)``
         - composite form:     ``DELETE FROM `t` WHERE (`c1`,`c2`) NOT IN ((%s,%s),(%s,%s),...)``
 
-        Memory-bound to the source key cardinality; for tables larger than
-        a few million keys, a temp-table strategy (#340 follow-up) will be
-        more appropriate.
-
-        Returns ``None`` when ``_mirror_keys`` is empty or ``None`` —
-        treats "no batch with records was ever observed" as a signal to
-        skip the DELETE entirely, so a transient empty source doesn't
-        wipe the destination.
+        ``negate=True`` gives the destination-strategy ``NOT IN`` form,
+        ``negate=False`` the tracked-strategy ``IN`` form (#686).
+        ``scope_cols``/``scopes`` prepend the mirror.scope restriction (#687).
         """
-        assert isinstance(config, MySQLDestinationConfig)
-        if not self._mirror_keys:
-            return None
-
-        # mirror.strategy: tracked (#686) — state-based diff instead of the
-        # destination-table diff below. Shares the empty-source guard above,
-        # so a transient empty source also keeps the tracked baseline intact.
-        if (
-            sync_options.mirror is not None
-            and sync_options.mirror.strategy == "tracked"
-        ):
-            return self._finalize_mirror_tracked(config, sync_options)
-
-        # Dedupe to keep the IN list compact when batches overlap.
-        keys = list({tuple(k) for k in self._mirror_keys})
-        upsert_cols = config.upsert_key
-        table_q = self._quote_ident(config.table)
-
-        # mirror.scope (#687) — prepend "scope IN (observed)" so the diff
-        # only touches rows under parents this run actually saw. Rows under
-        # unobserved parents (other pipelines / the application) stay put.
-        scope_cols = (
-            sync_options.mirror.scope if sync_options.mirror is not None else None
-        )
-        # list(), not sorted() — scope values may include None (unorderable).
-        scopes = list(self._mirror_scopes or set()) if scope_cols else None
-
-        conn = self._connect(config)
-        try:
-            cur = conn.cursor()
-            scope_clause = ""
-            scope_params: list[Any] = []
-            if scope_cols and scopes:
-                if len(scope_cols) == 1:
-                    s_placeholders = ", ".join(["%s"] * len(scopes))
-                    scope_clause = (
-                        f"`{scope_cols[0]}` IN ({s_placeholders}) AND "
-                    )
-                    scope_params = [sc[0] for sc in scopes]
-                else:
-                    s_col_tuple = (
-                        "(" + ", ".join(f"`{c}`" for c in scope_cols) + ")"
-                    )
-                    s_row = "(" + ", ".join(["%s"] * len(scope_cols)) + ")"
-                    s_placeholders = ", ".join([s_row] * len(scopes))
-                    scope_clause = (
-                        f"{s_col_tuple} IN ({s_placeholders}) AND "
-                    )
-                    scope_params = [v for sc in scopes for v in sc]
-            if len(upsert_cols) == 1:
-                placeholders = ", ".join(["%s"] * len(keys))
-                col_q = f"`{upsert_cols[0]}`"
-                stmt = (
-                    f"DELETE FROM {table_q} WHERE {scope_clause}{col_q} "
-                    f"NOT IN ({placeholders})"
-                )
-                params: list[Any] = scope_params + [k[0] for k in keys]
+        op = "NOT IN" if negate else "IN"
+        table_q = self._quote_ident(table)
+        scope_clause = ""
+        scope_params: list[Any] = []
+        if scope_cols and scopes:
+            if len(scope_cols) == 1:
+                s_placeholders = ", ".join(["%s"] * len(scopes))
+                scope_clause = f"`{scope_cols[0]}` IN ({s_placeholders}) AND "
+                scope_params = [sc[0] for sc in scopes]
             else:
-                col_tuple = "(" + ", ".join(f"`{c}`" for c in upsert_cols) + ")"
-                row_placeholder = "(" + ", ".join(["%s"] * len(upsert_cols)) + ")"
-                placeholders = ", ".join([row_placeholder] * len(keys))
-                stmt = (
-                    f"DELETE FROM {table_q} WHERE {scope_clause}{col_tuple} "
-                    f"NOT IN ({placeholders})"
-                )
-                params = scope_params + [v for key in keys for v in key]
-            cur.execute(stmt, params)
-            conn.commit()
-        finally:
-            conn.close()
-
-        # SyncResult has no dedicated `deleted` field; future work tracks
-        # this separately. Returning a bare SyncResult signals "finalize
-        # ran successfully" to the engine without inflating success/failed.
-        return SyncResult()
+                s_col_tuple = "(" + ", ".join(f"`{c}`" for c in scope_cols) + ")"
+                s_row = "(" + ", ".join(["%s"] * len(scope_cols)) + ")"
+                s_placeholders = ", ".join([s_row] * len(scopes))
+                scope_clause = f"{s_col_tuple} IN ({s_placeholders}) AND "
+                scope_params = [v for sc in scopes for v in sc]
+        if len(upsert_cols) == 1:
+            placeholders = ", ".join(["%s"] * len(keys))
+            col_q = f"`{upsert_cols[0]}`"
+            stmt = (
+                f"DELETE FROM {table_q} WHERE {scope_clause}{col_q} "
+                f"{op} ({placeholders})"
+            )
+            params: list[Any] = scope_params + [k[0] for k in keys]
+        else:
+            col_tuple = "(" + ", ".join(f"`{c}`" for c in upsert_cols) + ")"
+            row_placeholder = "(" + ", ".join(["%s"] * len(upsert_cols)) + ")"
+            placeholders = ", ".join([row_placeholder] * len(keys))
+            stmt = (
+                f"DELETE FROM {table_q} WHERE {scope_clause}{col_tuple} "
+                f"{op} ({placeholders})"
+            )
+            params = scope_params + [v for key in keys for v in key]
+        return stmt, params
 
     def _finalize_mirror_tracked(
         self,

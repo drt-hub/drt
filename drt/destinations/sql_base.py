@@ -128,9 +128,8 @@ class BaseSqlDestination:
     ) -> SyncResult | None:
         """End-of-sync hook: swap-finalize for replace, DELETE-missing for mirror.
 
-        - ``mode=mirror`` (#340): delegate to ``_finalize_mirror`` (still
-          dialect-specific — pulled up in phase 2b) and reset mirror state so a
-          re-run starts fresh.
+        - ``mode=mirror`` (#340): delegate to ``_finalize_mirror`` and reset
+          mirror state so a re-run starts fresh.
         - ``mode=replace, replace_strategy=swap``: atomically rename the shadow
           table over the original via the ``_rename_swap`` hook (PG: two ALTERs
           with an intermediate commit; MySQL: one atomic RENAME), then clear the
@@ -164,6 +163,75 @@ class BaseSqlDestination:
             self._swap_shadow_created = False
             self._swap_table = None
 
+        return SyncResult()
+
+    def _finalize_mirror(
+        self,
+        config: Any,
+        sync_options: SyncOptions,
+    ) -> SyncResult | None:
+        """``sync.mode: mirror`` end-of-sync DELETE pass (#340 / #687).
+
+        Deletes destination rows whose ``upsert_key`` tuple is not in the set
+        of keys observed across all batches. Memory-bound to the source key
+        cardinality; for tables larger than a few million keys, the temp-table
+        strategy (#340 follow-up) will be more appropriate.
+
+        Returns ``None`` when ``_mirror_keys`` is empty or ``None`` — treats
+        "no batch with records was ever observed" as a signal to skip the
+        DELETE entirely, so a transient empty source doesn't wipe the
+        destination.
+
+        Dialect-agnostic (#719 phase 2b): the whole DELETE statement — and
+        with it the placeholder-expansion strategy, which is irreducibly
+        dialect-specific (psycopg2 auto-expands a tuple against one ``%s``;
+        pymysql needs an explicit ``%s`` list) — comes from the
+        ``_build_mirror_delete`` hook.
+        """
+        if not self._mirror_keys:
+            return None
+
+        # mirror.strategy: tracked (#686) — state-based diff instead of the
+        # destination-table diff below. Shares the empty-source guard above,
+        # so a transient empty source also keeps the tracked baseline intact.
+        if (
+            sync_options.mirror is not None
+            and sync_options.mirror.strategy == "tracked"
+        ):
+            return self._finalize_mirror_tracked(config, sync_options)
+
+        # Dedupe to keep the IN list compact when batches overlap.
+        keys = list({tuple(k) for k in self._mirror_keys})
+        upsert_cols = config.upsert_key
+
+        # mirror.scope (#687) — prepend "scope IN (observed)" so the diff
+        # only touches rows under parents this run actually saw. Rows under
+        # unobserved parents (other pipelines / the application) stay put.
+        scope_cols = (
+            sync_options.mirror.scope if sync_options.mirror is not None else None
+        )
+        # list(), not sorted() — scope values may include None (unorderable).
+        scopes = list(self._mirror_scopes or set()) if scope_cols else None
+
+        conn = self._dialect_connect(config)
+        try:
+            cur = conn.cursor()
+            stmt, params = self._build_mirror_delete(
+                config.table,
+                upsert_cols,
+                keys,
+                scope_cols,
+                scopes,
+                negate=True,
+            )
+            cur.execute(stmt, params)
+            conn.commit()
+        finally:
+            conn.close()
+
+        # SyncResult has no dedicated `deleted` field; future work tracks
+        # this separately. Returning a bare SyncResult signals "finalize
+        # ran successfully" to the engine without inflating success/failed.
         return SyncResult()
 
     def _resolve_schema(self, config: Any) -> dict[str, str] | None:
@@ -332,9 +400,36 @@ class BaseSqlDestination:
         whole rename/DROP + transaction boundary is dialect-specific."""
         raise NotImplementedError
 
-    def _finalize_mirror(
+    def _build_mirror_delete(
+        self,
+        table: str,
+        upsert_cols: list[str],
+        keys: list[tuple[Any, ...]],
+        scope_cols: list[str] | None = None,
+        scopes: list[tuple[Any, ...]] | None = None,
+        negate: bool = True,
+    ) -> tuple[Any, Any]:
+        """Build the mirror ``DELETE`` for ``keys`` as an ``(stmt, params)``
+        pair ready to hand straight to ``cursor.execute``.
+
+        ``negate=True`` produces the destination-strategy "delete what the
+        source no longer has" form (``NOT IN``); ``negate=False`` the
+        tracked-strategy "delete exactly these keys" form (``IN``).
+        ``scope_cols``/``scopes`` prepend a ``scope IN (...) AND`` restriction
+        (#687).
+
+        This is the placeholder-expansion seam and cannot be lifted: Postgres
+        returns ``(psycopg2.sql.Composed, tuple)`` and leans on psycopg2
+        expanding a tuple (or tuple-of-tuples) against a single ``%s``, while
+        MySQL returns ``(str, list)`` with an explicitly built ``%s`` list and
+        flattened params. Both shapes are accepted by ``cursor.execute``.
+        """
+        raise NotImplementedError
+
+    def _finalize_mirror_tracked(
         self, config: Any, sync_options: SyncOptions
     ) -> SyncResult | None:
-        """DELETE destination rows whose observed keys weren't seen this run
-        (#340 / #687). Still dialect-specific — pulled up in phase 2b."""
+        """``mirror.strategy: tracked`` (#686) — diff against the drt-managed
+        ``_drt_synced_keys`` state table instead of the destination table.
+        Still dialect-specific (state-table DDL / existence check)."""
         raise NotImplementedError

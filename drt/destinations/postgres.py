@@ -302,103 +302,66 @@ class PostgresDestination(BaseSqlDestination):
         cur.execute(_pgsql.SQL("DROP TABLE {}").format(_qualified_ident(old)))
         conn.commit()
 
-    def _finalize_mirror(
+    def _build_mirror_delete(
         self,
-        config: DestinationConfig,
-        sync_options: SyncOptions,
-    ) -> SyncResult | None:
-        """``sync.mode: mirror`` end-of-sync DELETE pass (#340).
+        table: str,
+        upsert_cols: list[str],
+        keys: list[tuple[Any, ...]],
+        scope_cols: list[str] | None = None,
+        scopes: list[tuple[Any, ...]] | None = None,
+        negate: bool = True,
+    ) -> tuple[Any, Any]:
+        """Postgres mirror ``DELETE`` builder (#719 phase 2b) — returns a
+        ``(psycopg2.sql.Composed, tuple)`` pair.
 
-        Deletes destination rows whose ``upsert_key`` tuple is not in the
-        set of keys observed across all batches. Strategy: composite NOT
-        IN with a server-side parameter (psycopg2 expands ``tuple of
-        tuples`` to the right SQL). Memory-bound to the source key
-        cardinality; for tables larger than a few million keys, the
-        temp-table strategy (#340 follow-up) will be more appropriate.
-
-        Returns ``None`` when ``_mirror_keys`` is empty or ``None`` —
-        treats "no batch with records was ever observed" as a signal to
-        skip the DELETE entirely, so a transient empty source doesn't
-        wipe the destination.
+        Strategy: composite ``[NOT] IN`` with a *single* server-side
+        parameter per clause — psycopg2 expands a ``tuple`` (single-column
+        key) or a ``tuple of tuples`` (composite key) into the right SQL, so
+        no placeholder list is built here. ``negate=True`` gives the
+        destination-strategy ``NOT IN`` form, ``negate=False`` the
+        tracked-strategy ``IN`` form (#686). ``scope_cols``/``scopes``
+        prepend the mirror.scope restriction (#687).
         """
         from psycopg2 import sql as _pgsql
 
-        assert isinstance(config, PostgresDestinationConfig)
-        if not self._mirror_keys:
-            return None
-
-        # mirror.strategy: tracked (#686) — state-based diff instead of the
-        # destination-table diff below. Shares the empty-source guard above,
-        # so a transient empty source also keeps the tracked baseline intact.
-        if (
-            sync_options.mirror is not None
-            and sync_options.mirror.strategy == "tracked"
-        ):
-            return self._finalize_mirror_tracked(config, sync_options)
-
-        # Dedupe to keep the IN list compact when batches overlap.
-        keys = list({tuple(k) for k in self._mirror_keys})
-        upsert_cols = config.upsert_key
-
-        # mirror.scope (#687) — prepend "scope IN (observed)" so the diff
-        # only touches rows under parents this run actually saw. Rows under
-        # unobserved parents (other pipelines / the application) stay put.
-        scope_cols = (
-            sync_options.mirror.scope if sync_options.mirror is not None else None
-        )
-        # list(), not sorted() — scope values may include None (unorderable).
-        scopes = list(self._mirror_scopes or set()) if scope_cols else None
-
-        conn = self._connect(config)
-        try:
-            cur = conn.cursor()
-            scope_clause = _pgsql.SQL("")
-            scope_params: tuple[Any, ...] = ()
-            if scope_cols and scopes:
-                if len(scope_cols) == 1:
-                    scope_clause = _pgsql.SQL("{} IN %s AND ").format(
-                        _pgsql.Identifier(scope_cols[0])
-                    )
-                    scope_params = (tuple(s[0] for s in scopes),)
-                else:
-                    scope_tuple = _pgsql.SQL("({})").format(
-                        _pgsql.SQL(", ").join(
-                            _pgsql.Identifier(c) for c in scope_cols
-                        )
-                    )
-                    scope_clause = _pgsql.SQL("{} IN %s AND ").format(scope_tuple)
-                    scope_params = (tuple(tuple(s) for s in scopes),)
-            if len(upsert_cols) == 1:
-                # Single-column form: DELETE WHERE [scope IN %s AND] col NOT IN %s
-                stmt = _pgsql.SQL("DELETE FROM {} WHERE {}{} NOT IN %s").format(
-                    _qualified_ident(config.table),
-                    scope_clause,
-                    _pgsql.Identifier(upsert_cols[0]),
+        op = "NOT IN" if negate else "IN"
+        scope_clause = _pgsql.SQL("")
+        scope_params: tuple[Any, ...] = ()
+        if scope_cols and scopes:
+            if len(scope_cols) == 1:
+                scope_clause = _pgsql.SQL("{} IN %s AND ").format(
+                    _pgsql.Identifier(scope_cols[0])
                 )
-                params: tuple[Any, ...] = (
-                    *scope_params,
-                    tuple(k[0] for k in keys),
-                )
+                scope_params = (tuple(s[0] for s in scopes),)
             else:
-                # Composite form: DELETE WHERE [scope IN %s AND] (c1, c2) NOT IN %s
-                col_tuple = _pgsql.SQL("({})").format(
-                    _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in upsert_cols)
+                scope_tuple = _pgsql.SQL("({})").format(
+                    _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in scope_cols)
                 )
-                stmt = _pgsql.SQL("DELETE FROM {} WHERE {}{} NOT IN %s").format(
-                    _qualified_ident(config.table),
-                    scope_clause,
-                    col_tuple,
-                )
-                params = (*scope_params, tuple(keys))
-            cur.execute(stmt, params)
-            conn.commit()
-        finally:
-            conn.close()
-
-        # SyncResult has no dedicated `deleted` field; future work tracks
-        # this separately. Returning a bare SyncResult signals "finalize
-        # ran successfully" to the engine without inflating success/failed.
-        return SyncResult()
+                scope_clause = _pgsql.SQL("{} IN %s AND ").format(scope_tuple)
+                scope_params = (tuple(tuple(s) for s in scopes),)
+        if len(upsert_cols) == 1:
+            # Single-column form: DELETE WHERE [scope IN %s AND] col [NOT] IN %s
+            stmt = _pgsql.SQL("DELETE FROM {} WHERE {}{} " + op + " %s").format(
+                _qualified_ident(table),
+                scope_clause,
+                _pgsql.Identifier(upsert_cols[0]),
+            )
+            params: tuple[Any, ...] = (
+                *scope_params,
+                tuple(k[0] for k in keys),
+            )
+        else:
+            # Composite form: DELETE WHERE [scope IN %s AND] (c1, c2) [NOT] IN %s
+            col_tuple = _pgsql.SQL("({})").format(
+                _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in upsert_cols)
+            )
+            stmt = _pgsql.SQL("DELETE FROM {} WHERE {}{} " + op + " %s").format(
+                _qualified_ident(table),
+                scope_clause,
+                col_tuple,
+            )
+            params = (*scope_params, tuple(keys))
+        return stmt, params
 
     def _finalize_mirror_tracked(
         self,
