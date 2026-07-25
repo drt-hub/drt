@@ -160,3 +160,117 @@ def test_diff_json_mode_embeds_diff(
     assert sync_entry["diff"]["supported"] is False
     assert sync_entry["diff"]["fallback_reason"]
     assert sync_entry["diff"]["sample"] == [{"id": 1, "msg": "ping"}]
+
+
+# ---------------------------------------------------------------------------
+# Delete-provenance rendering (#693, Task B2)
+#
+# ``replace`` drops rows because the table is rebuilt; tracked ``mirror`` issues
+# real DELETE statements against rows the destination keeps otherwise. Same
+# ``deleted`` list, very different blast radius — the renderers must say which.
+# The replace-mode output is the pre-existing contract and stays byte-identical.
+# ---------------------------------------------------------------------------
+
+
+def _rendered(diff: Any) -> str:
+    """Render *diff* through ``print_diff_table`` and return the plain text."""
+    from drt.cli.output import console, print_diff_table
+
+    with console.capture() as cap:
+        print_diff_table(diff, "sync_a")
+    return cap.get()
+
+
+def _deleting_diff(delete_reason: str | None) -> Any:
+    from drt.engine import diff as diff_mod
+
+    return diff_mod.DiffResult(
+        added=[{"id": 1, "name": "Alice"}],
+        deleted=[{"id": 9}],
+        total_source_rows=1,
+        total_destination_rows=2,
+        supported=True,
+        delete_reason=delete_reason,
+    )
+
+
+def test_print_diff_table_replace_delete_label_unchanged() -> None:
+    """Replace-mode deletes keep the original ``- Deleted (N):`` label.
+
+    This is the byte-level regression guard: the pre-#693 renderer emitted
+    exactly this line, and existing users' output must not shift.
+    """
+    out = _rendered(_deleting_diff("replace"))
+
+    assert "- Deleted (1):" in out
+    assert "- id=9" in out
+    assert "mirror" not in out.lower()
+
+
+def test_print_diff_table_mirror_delete_is_labelled() -> None:
+    """Mirror deletes are labelled as DELETE statements, not a rebuild."""
+    out = _rendered(_deleting_diff("mirror"))
+
+    assert "- Deleted (1, mirror DELETE):" in out
+    assert "- id=9" in out
+    # The state table stores keys only, so the preview rows are key-only —
+    # say so, or the missing columns read as data loss.
+    assert "key columns only" in out
+
+
+def test_print_diff_table_unlabelled_delete_falls_back_to_plain() -> None:
+    """A DiffResult with deletes but no reason renders the legacy label.
+
+    Guards the dataclass default: any caller constructing a ``DiffResult``
+    without the new field keeps the pre-#693 rendering.
+    """
+    out = _rendered(_deleting_diff(None))
+
+    assert "- Deleted (1):" in out
+    assert "mirror" not in out.lower()
+
+
+def test_diff_to_dict_exposes_delete_reason() -> None:
+    """``delete_reason`` rides alongside ``deleted`` without reshaping it."""
+    from drt.cli.output import diff_to_dict
+
+    replace_payload = diff_to_dict(_deleting_diff("replace"))
+    mirror_payload = diff_to_dict(_deleting_diff("mirror"))
+
+    # The existing public keys keep their exact shape...
+    assert replace_payload["deleted"] == [{"id": 9}]
+    assert mirror_payload["deleted"] == [{"id": 9}]
+    # ...and provenance is a new sibling key.
+    assert replace_payload["delete_reason"] == "replace"
+    assert mirror_payload["delete_reason"] == "mirror"
+
+
+def test_diff_to_dict_delete_reason_none_when_nothing_deleted() -> None:
+    """No deletes → ``delete_reason`` is null rather than absent."""
+    from drt.cli.output import diff_to_dict
+    from drt.engine import diff as diff_mod
+
+    payload = diff_to_dict(
+        diff_mod.DiffResult(added=[{"id": 1}], total_source_rows=1, supported=True)
+    )
+
+    assert payload["deleted"] == []
+    assert payload["delete_reason"] is None
+
+
+def test_diff_to_dict_unsupported_shape_has_no_delete_reason() -> None:
+    """The fallback (sample-mode) payload is untouched — no diff, no deletes."""
+    from drt.cli.output import diff_to_dict
+    from drt.engine import diff as diff_mod
+
+    payload = diff_to_dict(
+        diff_mod.DiffResult(
+            sample=[{"id": 1}],
+            total_source_rows=1,
+            supported=False,
+            fallback_reason="rest_api: no comparison available",
+        )
+    )
+
+    assert payload["supported"] is False
+    assert "delete_reason" not in payload

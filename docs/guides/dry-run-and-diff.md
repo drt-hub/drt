@@ -32,7 +32,7 @@ For SQL destinations with an `upsert_key`, drt fetches the current destination s
 
 - **Added** — rows in the source that are not in the destination
 - **Updated** — rows where the upsert key matches but at least one other column changed (with field-level `old → new` rendering)
-- **Deleted** — rows in the destination that are not in the source (only shown for `mode: replace`, since other modes never delete)
+- **Deleted** — rows that would be removed. Shown for `mode: replace` and for `mode: mirror` with `mirror.strategy: tracked`; other modes never delete, so the section is suppressed.
 
 ```
 Diff preview — customer_health
@@ -54,6 +54,18 @@ Diff preview — customer_health
 ```
 
 For `mode: replace`, "Deleted" lists rows that would disappear after the swap. For `mode: full` / `mode: incremental` (upsert), "Deleted" is suppressed because no rows are removed.
+
+### Mirror deletes are labelled separately
+
+`mode: mirror` with `mirror.strategy: tracked` also deletes rows — but by issuing explicit `DELETE` statements against a table that otherwise survives, not by rebuilding it. Because that is a different kind of change than a replace-mode swap, the preview says so:
+
+```
+  - Deleted (2, mirror DELETE): (key columns only)
+    - id=9
+    - id=10
+```
+
+The rows show **only the `upsert_key` columns**. drt derives the mirror delete set from its own `_drt_synced_keys` state table, which records keys rather than full rows; re-reading the destination just to fill in the other columns would cost a second scan for a preview. This is a read-only preview — no state is written and no `DELETE` is executed during `--dry-run`.
 
 ### Non-queryable destinations (REST API, Slack, HubSpot, Notion, file destinations, …)
 
@@ -102,12 +114,15 @@ When `--diff` is combined with `--output json`, the diff is embedded in each syn
           }
         ],
         "deleted": [],
+        "delete_reason": null,
         "truncated": false
       }
     }
   ]
 }
 ```
+
+`delete_reason` tells a CI script *why* `deleted` is non-empty: `"replace"` (rows lost to the table rebuild), `"mirror"` (rows removed by explicit `DELETE` statements), or `null` when nothing would be deleted. The `deleted` list itself is unchanged, so existing consumers keep working.
 
 This makes `--diff` useful in CI scripts that gate deployments on previewed change counts.
 

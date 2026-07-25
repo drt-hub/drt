@@ -142,6 +142,8 @@ class TestComputeDiffQueryable:
         assert len(result.deleted) == 1
         assert result.deleted[0]["id"] == 3
         assert len(result.updated) == 1  # id=1 score changed
+        # The rows disappear because the table is rebuilt (#693, Task B2)
+        assert result.delete_reason == "replace"
 
     @patch("drt.engine.diff.fetch_rows_by_keys")
     def test_deleted_hidden_when_mode_is_full(self, mock_fetch_keys: Any) -> None:
@@ -160,6 +162,8 @@ class TestComputeDiffQueryable:
 
         # Deleted is suppressed for non-replace mode
         assert result.deleted == []
+        # Nothing is dropped, so there is no delete story to tell (#693 B2)
+        assert result.delete_reason is None
 
     @patch("drt.engine.diff.fetch_rows")
     def test_composite_key(self, mock_fetch: Any) -> None:
@@ -359,6 +363,8 @@ class TestComputeDiffMirrorTracked:
 
         assert result.supported
         assert result.deleted == [{"id": "c"}]
+        # These rows are DELETEd by statement, not lost to a rebuild (#693 B2)
+        assert result.delete_reason == "mirror"
         # sync_name derivation: SyncOptions._sync_name, falling back to table
         assert mock_state.call_args.args[1] == "users_sync"
 

@@ -44,6 +44,12 @@ class DiffResult:
     tracked-mirror preview (#693) they carry the ``upsert_key`` columns only,
     since the state table records keys rather than rows.
 
+    ``delete_reason`` names *why* those rows go away, because the two cases are
+    not equally alarming: ``"replace"`` rows vanish as a side effect of
+    rebuilding the table, while ``"mirror"`` rows are removed by explicit
+    DELETE statements from a table the destination otherwise keeps. It stays
+    ``None`` when nothing would be deleted.
+
     Lists are bounded by the ``limit`` parameter passed to :func:`compute_diff`;
     ``truncated`` is set when at least one list was capped.
     """
@@ -62,6 +68,9 @@ class DiffResult:
     truncated: bool = False
     supported: bool = True
     fallback_reason: str | None = None
+    # Provenance of ``deleted``: "replace" | "mirror" | None (#693).
+    # Defaults to None so pre-existing callers keep the legacy rendering.
+    delete_reason: str | None = None
 
     @staticmethod
     def changed_fields(
@@ -249,14 +258,17 @@ def compute_diff(
     # whose key IS in the source), so the delete set comes from a separate
     # read — for the ``tracked`` strategy, the drt-managed state table.
     deleted: list[dict[str, Any]] = []
+    delete_reason: str | None = None
     if sync_options.mode == "replace":
         deleted = [
             row for key, row in dest_by_key.items() if key not in source_keys
         ]
+        delete_reason = "replace"
     elif _is_tracked_mirror(sync_options):
         deleted = _preview_tracked_mirror_deletes(
             config, sync_options, upsert_key, source_keys
         )
+        delete_reason = "mirror"
 
     truncated = (
         len(added) > limit or len(updated) > limit or len(deleted) > limit
@@ -270,4 +282,7 @@ def compute_diff(
         total_destination_rows=len(dest_rows),
         truncated=truncated,
         supported=True,
+        # Only claim a reason when there is something to explain — an empty
+        # delete set in replace mode is not a "replace deletion".
+        delete_reason=delete_reason if deleted else None,
     )
