@@ -403,15 +403,25 @@ def print_diff_table(diff: object, sync_name: str) -> None:
     else:
         console.print("\n  [dim]~ Updated: none[/dim]")
 
-    # Deleted — populated for replace mode (rows lost to the table rebuild)
-    # and for tracked mirror (rows removed by explicit DELETE statements).
-    # Those are very different blast radii, so label the mirror case (#693);
-    # the replace label is the pre-existing contract and stays as-is.
+    # Deleted — populated for replace mode (rows lost to the table rebuild) and
+    # for both mirror strategies (rows removed by explicit DELETE statements).
+    # Those are very different blast radii, so label the mirror cases (#693); the
+    # replace label is the pre-existing contract and stays as-is.
+    #
+    # The two mirror labels differ only in provenance: "mirror" came free from
+    # drt's own state table, "mirror_scan" cost a read of the destination's key
+    # set — the one strategy where previewing is not free, so the note is what
+    # keeps that round trip from being invisible.
     if n_deleted:
-        if diff.delete_reason == "mirror":
+        if diff.delete_reason in ("mirror", "mirror_scan"):
+            suffix = (
+                "key columns only, read from destination"
+                if diff.delete_reason == "mirror_scan"
+                else "key columns only"
+            )
             console.print(
                 f"\n  [red]- Deleted ({n_deleted}, mirror DELETE):[/red] "
-                "[dim](key columns only)[/dim]"
+                f"[dim]({suffix})[/dim]"
             )
         else:
             console.print(f"\n  [red]- Deleted ({n_deleted}):[/red]")
@@ -459,8 +469,10 @@ def diff_to_dict(diff: object) -> dict[str, object]:
             for old, new in diff.updated
         ],
         "deleted": diff.deleted,
-        # Why those rows go away: "replace" (table rebuild) | "mirror"
-        # (explicit DELETEs) | null. Additive — ``deleted`` keeps its shape.
+        # Why those rows go away: "replace" (table rebuild) | "mirror" (explicit
+        # DELETEs, tracked state) | "mirror_scan" (explicit DELETEs, established
+        # by reading the destination's keys) | null. Additive — ``deleted`` keeps
+        # its shape.
         "delete_reason": diff.delete_reason,
         "truncated": diff.truncated,
     }

@@ -24,6 +24,7 @@ from typing import Any
 from drt.config.models import DestinationConfig, SyncOptions
 from drt.destinations._mirror_state import diff_keys
 from drt.destinations.query import (
+    fetch_all_keys,
     fetch_rows,
     fetch_rows_by_keys,
     fetch_tracked_state,
@@ -40,15 +41,23 @@ class DiffResult:
     the real comparison. For non-queryable destinations, only ``sample`` is
     populated (with ``supported=False`` and ``fallback_reason`` set).
 
-    ``deleted`` rows carry full destination columns in ``replace`` mode; for the
-    tracked-mirror preview (#693) they carry the ``upsert_key`` columns only,
-    since the state table records keys rather than rows.
+    ``deleted`` rows carry full destination columns in ``replace`` mode; for both
+    mirror previews (#693) they carry the ``upsert_key`` columns only, since those
+    previews read keys rather than rows.
 
-    ``delete_reason`` names *why* those rows go away, because the two cases are
-    not equally alarming: ``"replace"`` rows vanish as a side effect of
-    rebuilding the table, while ``"mirror"`` rows are removed by explicit
-    DELETE statements from a table the destination otherwise keeps. It stays
-    ``None`` when nothing would be deleted.
+    ``delete_reason`` names *why* those rows go away, because the cases are not
+    equally alarming — nor equally cheap to find out:
+
+    - ``"replace"`` — rows vanish as a side effect of rebuilding the table.
+    - ``"mirror"`` — the tracked strategy's explicit DELETEs, computed from
+      drt's own state table, from a table the destination otherwise keeps.
+    - ``"mirror_scan"`` — the destination strategy's explicit DELETEs. Same
+      blast radius as ``"mirror"``, but establishing it required an *extra read
+      of the destination's key set*, which the tracked preview never pays for.
+      Naming it separately keeps that cost visible in both renderers instead of
+      hiding a per-preview round trip behind an identical label.
+
+    It stays ``None`` when nothing would be deleted.
 
     Lists are bounded by the ``limit`` parameter passed to :func:`compute_diff`;
     ``truncated`` is set when at least one list was capped.
@@ -92,14 +101,80 @@ class DiffResult:
 def _is_tracked_mirror(sync_options: SyncOptions) -> bool:
     """True for ``mode: mirror`` with ``mirror.strategy: tracked`` (#686).
 
-    The ``destination`` strategy needs a full destination read to preview
-    (tracked separately); only the tracked strategy is previewable read-only.
+    Previewable from drt's own state table, without touching the target rows.
     """
     return (
         sync_options.mode == "mirror"
         and sync_options.mirror is not None
         and sync_options.mirror.strategy == "tracked"
     )
+
+
+def _is_destination_mirror(sync_options: SyncOptions) -> bool:
+    """True for ``mode: mirror`` on the ``destination`` strategy (#340).
+
+    That is the default: an omitted ``mirror:`` block, or an explicit
+    ``strategy: destination``. ``mirror.scope`` (#687) is *not* a third strategy —
+    it narrows this same path — so it is deliberately not part of the predicate.
+    """
+    return sync_options.mode == "mirror" and (
+        sync_options.mirror is None or sync_options.mirror.strategy == "destination"
+    )
+
+
+def _observed_scopes(
+    records: list[dict[str, Any]], scope_cols: list[str]
+) -> list[tuple[Any, ...]]:
+    """The distinct ``mirror.scope`` value tuples these records would produce.
+
+    Recomputed from the source records rather than read from
+    ``BaseSqlDestination._mirror_scopes``: that set is accumulated inside
+    ``_accumulate_mirror_state`` during ``load()``, and a dry run never calls
+    ``load()``, so it would be empty here — which reads as "no scope observed"
+    and would silently drop the scope narrowing. The derivation below is the same
+    one ``_accumulate_mirror_state`` uses (``record.get(c)`` per scope column, so
+    a missing column contributes ``None``); the real run rejects a missing scope
+    column earlier via ``_validate_mirror_scope``.
+
+    Deduped like the real path's ``set``, since the values only feed an ``IN``.
+    """
+    return list({tuple(record.get(c) for c in scope_cols) for record in records})
+
+
+def _preview_destination_mirror_deletes(
+    config: DestinationConfig,
+    sync_options: SyncOptions,
+    upsert_key: list[str],
+    source_keys: set[tuple[Any, ...]],
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Read-only preview of the rows destination-strategy mirror would DELETE.
+
+    The real pass is ``_build_mirror_delete(..., negate=True)``: "DELETE the rows
+    whose key the source did not produce", optionally prefixed with a scope
+    clause. So the preview reads the destination's key set (narrowed by the same
+    scope clause) and returns ``dest_keys - source_keys`` as key-column dicts.
+
+    This is the one strategy that costs an extra destination round trip — the
+    ``NOT IN`` complement is invisible to #470's keyed fetch by construction — and
+    that cost is surfaced to the user as ``delete_reason="mirror_scan"``.
+
+    Rows are key-only for the same reason as the tracked preview: only keys are
+    read, and re-reading full rows for a preview would cost a second scan.
+
+    Any failure — including the :class:`NotImplementedError` from a dialect that
+    finalises mirror deletes its own way — degrades to "nothing to preview"
+    rather than failing the diff: the add/update comparison still stands.
+    """
+    scope_cols = sync_options.mirror.scope if sync_options.mirror else None
+    scopes = _observed_scopes(records, scope_cols) if scope_cols else None
+    try:
+        dest_keys = fetch_all_keys(config, upsert_key, scope_cols, scopes)
+    except Exception:
+        return []
+    return [
+        dict(zip(upsert_key, key)) for key in dest_keys if key not in source_keys
+    ]
 
 
 def _preview_tracked_mirror_deletes(
@@ -255,8 +330,9 @@ def compute_diff(
     #
     # Mirror mode is the exception (#693): the engine *does* drop rows, but the
     # keyed fetch above structurally cannot see them (it only returns dest rows
-    # whose key IS in the source), so the delete set comes from a separate
-    # read — for the ``tracked`` strategy, the drt-managed state table.
+    # whose key IS in the source), so the delete set comes from a separate read —
+    # the drt-managed state table for the ``tracked`` strategy, the destination's
+    # own key set for the ``destination`` strategy (incl. ``mirror.scope``).
     deleted: list[dict[str, Any]] = []
     delete_reason: str | None = None
     if sync_options.mode == "replace":
@@ -269,6 +345,14 @@ def compute_diff(
             config, sync_options, upsert_key, source_keys
         )
         delete_reason = "mirror"
+    elif _is_destination_mirror(sync_options) and records:
+        # ``and records``: ``_finalize_mirror`` returns early when no key was
+        # observed, so a transient empty source deletes nothing. Previewing a
+        # full wipe would contradict what the run would actually do.
+        deleted = _preview_destination_mirror_deletes(
+            config, sync_options, upsert_key, source_keys, records
+        )
+        delete_reason = "mirror_scan"
 
     truncated = (
         len(added) > limit or len(updated) > limit or len(deleted) > limit

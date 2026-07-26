@@ -465,19 +465,28 @@ class TestComputeDiffMirrorTracked:
 
         assert mock_state.call_args.args[1] == "public.users"
 
+    @patch("drt.engine.diff.fetch_all_keys")
     @patch("drt.engine.diff.fetch_tracked_state")
     @patch("drt.engine.diff.fetch_rows_by_keys")
-    def test_destination_strategy_mirror_not_previewed(
-        self, mock_fetch_keys: Any, mock_state: Any
+    def test_destination_strategy_does_not_read_tracked_state(
+        self, mock_fetch_keys: Any, mock_state: Any, mock_all_keys: Any
     ) -> None:
-        """Only the tracked strategy is previewed in B1 (destination = B4)."""
+        """The destination strategy has no state table — don't go looking.
+
+        Was ``test_destination_strategy_mirror_not_previewed`` in #833 (B1), when
+        the destination strategy was deliberately left unpreviewed. B4 previews
+        it from the destination's own key set, so what remains to guard is that
+        the two strategies use *disjoint* reads.
+        """
         mock_fetch_keys.return_value = []
+        mock_all_keys.return_value = []
         options = SyncOptions(mode="mirror")  # type: ignore[arg-type]
 
         result = compute_diff([{"id": "a"}], _pg_config(), options, limit=20)
 
         assert result.deleted == []
         mock_state.assert_not_called()
+        assert mock_all_keys.called
 
     @patch("drt.engine.diff.fetch_tracked_state")
     @patch("drt.engine.diff.fetch_rows_by_keys")
@@ -520,6 +529,293 @@ class TestComputeDiffMirrorTracked:
         result = compute_diff([], _pg_config(), _mirror_tracked_options(), limit=20)
 
         assert result.deleted == [{"id": "a"}]
+
+
+# ---------------------------------------------------------------------------
+# Mirror destination-strategy + scoped delete preview (#693, Tasks B3/B4)
+#
+# The destination strategy DELETEs ``dest_keys - source_keys`` (the ``NOT IN``
+# form of ``_build_mirror_delete``), so previewing it needs the destination's own
+# key set — a read #470's keyed fetch structurally cannot supply. ``mirror.scope``
+# (#687) is not a separate strategy but a narrowing of this same path.
+# ---------------------------------------------------------------------------
+
+
+def _mirror_destination_options(scope: list[str] | None = None) -> SyncOptions:
+    mirror: dict[str, Any] = {"strategy": "destination"}
+    if scope is not None:
+        mirror["scope"] = scope
+    return SyncOptions(mode="mirror", mirror=mirror)  # type: ignore[arg-type]
+
+
+class TestComputeDiffMirrorDestination:
+    @patch("drt.engine.diff.fetch_all_keys")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_previews_destination_mirror_deletes(
+        self, mock_fetch_keys: Any, mock_all_keys: Any
+    ) -> None:
+        """dest={a,b,c}, source={a,b} → deleted previews {c}."""
+        mock_fetch_keys.return_value = [{"id": "a", "score": 0.5}]
+        mock_all_keys.return_value = [("a",), ("b",), ("c",)]
+        records = [{"id": "a", "score": 0.9}, {"id": "b", "score": 0.8}]
+
+        result = compute_diff(
+            records, _pg_config(), _mirror_destination_options(), limit=20
+        )
+
+        assert result.supported
+        assert result.deleted == [{"id": "c"}]
+        # Distinct from tracked "mirror": this preview cost a destination read.
+        assert result.delete_reason == "mirror_scan"
+
+    @patch("drt.engine.diff.fetch_all_keys")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_omitted_strategy_defaults_to_destination(
+        self, mock_fetch_keys: Any, mock_all_keys: Any
+    ) -> None:
+        """``mirror:`` absent entirely is the destination strategy (#340)."""
+        mock_fetch_keys.return_value = []
+        mock_all_keys.return_value = [("a",), ("b",)]
+
+        result = compute_diff(
+            [{"id": "a"}],
+            _pg_config(),
+            SyncOptions(mode="mirror"),  # type: ignore[arg-type]
+            limit=20,
+        )
+
+        assert result.deleted == [{"id": "b"}]
+        assert result.delete_reason == "mirror_scan"
+        # No scope configured → no scope narrowing passed to the read.
+        assert mock_all_keys.call_args.args[2] is None
+        assert mock_all_keys.call_args.args[3] is None
+
+    @patch("drt.engine.diff.fetch_all_keys")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_key_read_is_bounded_to_upsert_key(
+        self, mock_fetch_keys: Any, mock_all_keys: Any
+    ) -> None:
+        """The extra read pulls key columns only, for the configured key."""
+        mock_fetch_keys.return_value = []
+        mock_all_keys.return_value = []
+
+        compute_diff(
+            [{"company_id": "c1", "user_id": "u1"}],
+            _pg_config(upsert_key=["company_id", "user_id"]),
+            _mirror_destination_options(),
+            limit=20,
+        )
+
+        assert mock_all_keys.call_args.args[1] == ["company_id", "user_id"]
+
+    @patch("drt.engine.diff.fetch_all_keys")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_composite_key_deletes_map_back_to_columns(
+        self, mock_fetch_keys: Any, mock_all_keys: Any
+    ) -> None:
+        mock_fetch_keys.return_value = []
+        mock_all_keys.return_value = [("c1", "u1"), ("c1", "u2")]
+
+        result = compute_diff(
+            [{"company_id": "c1", "user_id": "u1"}],
+            _pg_config(upsert_key=["company_id", "user_id"]),
+            _mirror_destination_options(),
+            limit=20,
+        )
+
+        assert result.deleted == [{"company_id": "c1", "user_id": "u2"}]
+
+    @patch("drt.engine.diff.fetch_all_keys")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_scope_narrows_the_read_to_observed_scope_values(
+        self, mock_fetch_keys: Any, mock_all_keys: Any
+    ) -> None:
+        """Scope values are re-derived from the source records, not from state.
+
+        ``_mirror_scopes`` is accumulated during ``load()``, which a dry run never
+        calls — so the preview must recompute the observed scope tuples the same
+        way ``_accumulate_mirror_state`` does, and hand them to the read so the
+        server-side filter matches ``_build_mirror_delete``'s scope clause.
+        """
+        mock_fetch_keys.return_value = []
+        mock_all_keys.return_value = [("a",), ("b",)]
+        records = [
+            {"id": "a", "region": "eu"},
+            {"id": "x", "region": "eu"},
+        ]
+
+        result = compute_diff(
+            records, _pg_config(), _mirror_destination_options(scope=["region"]), limit=20
+        )
+
+        scope_cols = mock_all_keys.call_args.args[2]
+        scopes = mock_all_keys.call_args.args[3]
+        assert scope_cols == ["region"]
+        assert scopes == [("eu",)]  # deduped, only observed values
+        # 'b' is inside the scope the read returned, and unobserved → deleted.
+        assert result.deleted == [{"id": "b"}]
+        assert result.delete_reason == "mirror_scan"
+
+    @patch("drt.engine.diff.fetch_all_keys")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_composite_scope_tuples_are_deduped(
+        self, mock_fetch_keys: Any, mock_all_keys: Any
+    ) -> None:
+        mock_fetch_keys.return_value = []
+        mock_all_keys.return_value = []
+        records = [
+            {"id": "a", "region": "eu", "tier": "gold"},
+            {"id": "b", "region": "eu", "tier": "gold"},
+            {"id": "c", "region": "us", "tier": "silver"},
+        ]
+
+        compute_diff(
+            records,
+            _pg_config(),
+            _mirror_destination_options(scope=["region", "tier"]),
+            limit=20,
+        )
+
+        scopes = mock_all_keys.call_args.args[3]
+        assert scopes is not None
+        assert sorted(scopes) == [("eu", "gold"), ("us", "silver")]
+
+    @patch("drt.engine.diff.fetch_all_keys")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_missing_scope_column_yields_none_scope_value(
+        self, mock_fetch_keys: Any, mock_all_keys: Any
+    ) -> None:
+        """A record without the scope column contributes ``None``.
+
+        Same ``record.get(c)`` derivation as ``_accumulate_mirror_state`` — the
+        real run fails fast on a missing scope column via
+        ``_validate_mirror_scope``, so the preview only has to not crash.
+        """
+        mock_fetch_keys.return_value = []
+        mock_all_keys.return_value = []
+
+        compute_diff(
+            [{"id": "a"}],
+            _pg_config(),
+            _mirror_destination_options(scope=["region"]),
+            limit=20,
+        )
+
+        assert mock_all_keys.call_args.args[3] == [(None,)]
+
+    @patch("drt.engine.diff.fetch_all_keys")
+    @patch("drt.engine.diff.fetch_rows")
+    def test_empty_source_previews_no_deletes(
+        self, mock_fetch: Any, mock_all_keys: Any
+    ) -> None:
+        """Empty source → no preview, because the real run skips the DELETE.
+
+        ``_finalize_mirror`` returns early on an empty ``_mirror_keys`` so a
+        transient empty source cannot wipe the destination. Previewing a full
+        wipe here would contradict what the run would actually do.
+        """
+        mock_fetch.return_value = []
+
+        result = compute_diff([], _pg_config(), _mirror_destination_options(), limit=20)
+
+        assert result.deleted == []
+        assert result.delete_reason is None
+        mock_all_keys.assert_not_called()
+
+    @patch("drt.engine.diff.fetch_all_keys")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_unsupported_dialect_degrades_to_no_preview(
+        self, mock_fetch_keys: Any, mock_all_keys: Any
+    ) -> None:
+        """ClickHouse / Snowflake raise → deleted = [], diff still usable."""
+        mock_fetch_keys.return_value = [{"id": "a"}]
+        mock_all_keys.side_effect = NotImplementedError("clickhouse")
+
+        result = compute_diff(
+            [{"id": "a"}], _pg_config(), _mirror_destination_options(), limit=20
+        )
+
+        assert result.supported
+        assert result.deleted == []
+        assert result.delete_reason is None
+
+    @patch("drt.engine.diff.fetch_all_keys")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_key_read_failure_does_not_break_the_diff(
+        self, mock_fetch_keys: Any, mock_all_keys: Any
+    ) -> None:
+        """Same degradation as the tracked preview: lose the deletes, keep the diff."""
+        mock_fetch_keys.return_value = [{"id": "a", "score": 0.5}]
+        mock_all_keys.side_effect = RuntimeError("permission denied for users")
+
+        result = compute_diff(
+            [{"id": "a", "score": 0.9}],
+            _pg_config(),
+            _mirror_destination_options(),
+            limit=20,
+        )
+
+        assert result.supported
+        assert result.deleted == []
+        assert len(result.updated) == 1
+
+    @patch("drt.engine.diff.fetch_all_keys")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_destination_preview_is_read_only(
+        self, mock_fetch_keys: Any, mock_all_keys: Any
+    ) -> None:
+        """The key read must never write: only SELECTs reach the cursor.
+
+        ``fetch_all_keys`` runs for real against a fake cursor so the read-only
+        guarantee is proved end-to-end, not just at the seam.
+        """
+        from drt.destinations.query import fetch_all_keys as real_fetch
+
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [("a",), ("b",)]
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+
+        mock_fetch_keys.return_value = []
+        mock_all_keys.side_effect = real_fetch
+
+        with patch(
+            "drt.destinations.postgres.PostgresDestination._connect",
+            return_value=conn,
+        ):
+            result = compute_diff(
+                [{"id": "a", "region": "eu"}],
+                _pg_config(table="public.users"),
+                _mirror_destination_options(scope=["region"]),
+                limit=20,
+            )
+
+        assert result.deleted == [{"id": "b"}]
+        assert cursor.execute.call_count == 1
+        for call in cursor.execute.call_args_list:
+            stmt = call[0][0]
+            text = str(stmt.seq) if hasattr(stmt, "seq") else str(stmt)
+            upper = text.upper()
+            assert "SELECT" in upper
+            for kw in ("INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "TRUNCATE"):
+                assert kw not in upper, f"write keyword {kw} in {text}"
+        cursor.executemany.assert_not_called()
+        conn.commit.assert_not_called()
+
+    @patch("drt.engine.diff.fetch_all_keys")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_truncation_applies_to_destination_preview(
+        self, mock_fetch_keys: Any, mock_all_keys: Any
+    ) -> None:
+        mock_fetch_keys.return_value = []
+        mock_all_keys.return_value = [("a",), ("b",), ("c",)]
+
+        result = compute_diff(
+            [{"id": "a"}], _pg_config(), _mirror_destination_options(), limit=1
+        )
+
+        assert result.truncated is True
+        assert len(result.deleted) == 1
 
 
 # ---------------------------------------------------------------------------

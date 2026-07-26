@@ -218,6 +218,30 @@ def test_print_diff_table_mirror_delete_is_labelled() -> None:
     assert "key columns only" in out
 
 
+def test_print_diff_table_destination_mirror_delete_names_the_extra_read() -> None:
+    """The destination strategy's preview cost a destination read — say so.
+
+    Same blast radius as tracked mirror, but the user paid a round trip to learn
+    it. A label identical to ``"mirror"`` would hide that; the note makes the
+    cost legible next to the numbers it bought.
+    """
+    out = _rendered(_deleting_diff("mirror_scan"))
+
+    assert "- Deleted (1, mirror DELETE):" in out
+    assert "- id=9" in out
+    assert "key columns only" in out
+    # The distinguishing part: where the delete set came from.
+    assert "destination" in out.lower()
+
+
+def test_print_diff_table_tracked_mirror_does_not_claim_a_destination_read() -> None:
+    """The tracked label must stay free of the destination-read note (#833)."""
+    out = _rendered(_deleting_diff("mirror"))
+
+    assert "- Deleted (1, mirror DELETE):" in out
+    assert "read from destination" not in out.lower()
+
+
 def test_print_diff_table_unlabelled_delete_falls_back_to_plain() -> None:
     """A DiffResult with deletes but no reason renders the legacy label.
 
@@ -243,6 +267,20 @@ def test_diff_to_dict_exposes_delete_reason() -> None:
     # ...and provenance is a new sibling key.
     assert replace_payload["delete_reason"] == "replace"
     assert mirror_payload["delete_reason"] == "mirror"
+
+
+def test_diff_to_dict_distinguishes_destination_strategy_mirror() -> None:
+    """The two mirror strategies are separable in JSON, not collapsed.
+
+    A consumer budgeting dry-run cost needs to tell the state-table preview from
+    the one that reads the destination.
+    """
+    from drt.cli.output import diff_to_dict
+
+    payload = diff_to_dict(_deleting_diff("mirror_scan"))
+
+    assert payload["deleted"] == [{"id": 9}]
+    assert payload["delete_reason"] == "mirror_scan"
 
 
 def test_diff_to_dict_delete_reason_none_when_nothing_deleted() -> None:
