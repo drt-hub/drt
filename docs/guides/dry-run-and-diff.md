@@ -32,7 +32,7 @@ For SQL destinations with an `upsert_key`, drt fetches the current destination s
 
 - **Added** — rows in the source that are not in the destination
 - **Updated** — rows where the upsert key matches but at least one other column changed (with field-level `old → new` rendering)
-- **Deleted** — rows that would be removed. Shown for `mode: replace` and for `mode: mirror` with `mirror.strategy: tracked`; other modes never delete, so the section is suppressed.
+- **Deleted** — rows that would be removed. Shown for `mode: replace` and for every `mode: mirror` strategy; other modes never delete, so the section is suppressed.
 
 ```
 Diff preview — customer_health
@@ -57,7 +57,7 @@ For `mode: replace`, "Deleted" lists rows that would disappear after the swap. F
 
 ### Mirror deletes are labelled separately
 
-`mode: mirror` with `mirror.strategy: tracked` also deletes rows — but by issuing explicit `DELETE` statements against a table that otherwise survives, not by rebuilding it. Because that is a different kind of change than a replace-mode swap, the preview says so:
+`mode: mirror` also deletes rows — but by issuing explicit `DELETE` statements against a table that otherwise survives, not by rebuilding it. Because that is a different kind of change than a replace-mode swap, the preview says so:
 
 ```
   - Deleted (2, mirror DELETE): (key columns only)
@@ -65,7 +65,22 @@ For `mode: replace`, "Deleted" lists rows that would disappear after the swap. F
     - id=10
 ```
 
-The rows show **only the `upsert_key` columns**. drt derives the mirror delete set from its own `_drt_synced_keys` state table, which records keys rather than full rows; re-reading the destination just to fill in the other columns would cost a second scan for a preview. This is a read-only preview — no state is written and no `DELETE` is executed during `--dry-run`.
+Both mirror strategies are previewed, and the label distinguishes them because they do not cost the same to compute:
+
+| `mirror.strategy` | Label suffix | Where the delete set comes from |
+| --- | --- | --- |
+| `tracked` | `(key columns only)` | drt's own `_drt_synced_keys` state table — no read of your data |
+| `destination` (default) | `(key columns only, read from destination)` | one extra `SELECT <upsert_key> FROM <table>` against the destination |
+
+The rows show **only the `upsert_key` columns** in both cases: the preview reads keys, and re-reading the destination just to fill in the other columns would cost a second scan.
+
+The `destination` strategy is the only one where previewing is not free. It deletes whatever keys the source did not produce, and that complement is invisible to the keyed lookup the rest of the diff uses ([#470](https://github.com/drt-hub/drt/issues/470)), so establishing it takes a dedicated read of the destination's key set. `read from destination` in the label is there so that round trip is visible next to the numbers it bought.
+
+`mirror.scope` ([#687](https://github.com/drt-hub/drt/issues/687)) narrows the preview exactly as it narrows the real `DELETE`: drt computes the scope values your source records would produce and filters the key read to those values server-side, so a scoped mirror never previews deletions under a parent this run did not touch.
+
+Whichever strategy you use, this is a **read-only** preview — no state is written, no state table is created, and no `DELETE` is executed during `--dry-run`. If the read fails (say the state table isn't readable, or the destination denies `SELECT`), the delete preview degrades to empty and the add/update diff still renders rather than the whole diff failing. Destinations whose mirror pass is dialect-specific (ClickHouse, Snowflake) are not previewed for the `destination` strategy.
+
+An **empty source previews no deletions**, matching what a real run does: drt skips the mirror `DELETE` entirely when a run observes no keys, so a transient empty source cannot wipe the destination.
 
 ### Non-queryable destinations (REST API, Slack, HubSpot, Notion, file destinations, …)
 
@@ -122,7 +137,16 @@ When `--diff` is combined with `--output json`, the diff is embedded in each syn
 }
 ```
 
-`delete_reason` tells a CI script *why* `deleted` is non-empty: `"replace"` (rows lost to the table rebuild), `"mirror"` (rows removed by explicit `DELETE` statements), or `null` when nothing would be deleted. The `deleted` list itself is unchanged, so existing consumers keep working.
+`delete_reason` tells a CI script *why* `deleted` is non-empty:
+
+| Value | Meaning |
+| --- | --- |
+| `"replace"` | rows lost to the table rebuild |
+| `"mirror"` | explicit `DELETE`s, delete set from drt's tracked state |
+| `"mirror_scan"` | explicit `DELETE`s, delete set established by reading the destination's keys |
+| `null` | nothing would be deleted |
+
+`"mirror"` and `"mirror_scan"` describe the same blast radius; they differ in what the preview cost, which is what a job budgeting dry-run time needs to know. The `deleted` list itself is unchanged, so existing consumers keep working.
 
 This makes `--diff` useful in CI scripts that gate deployments on previewed change counts.
 
@@ -131,7 +155,7 @@ This makes `--diff` useful in CI scripts that gate deployments on previewed chan
 The current implementation is intentionally simple for v0.7.1. Tracked follow-ups:
 
 - **Snowflake destination** does not yet expose query support, so `--diff` falls back to sample mode for Snowflake. Tracked in [#468](https://github.com/drt-hub/drt/issues/468).
-- The destination query is currently `SELECT * FROM <table>`, which fetches the full table into memory. For large tables this can be slow. A `WHERE id IN (...)` batched optimisation is parked at [#470](https://github.com/drt-hub/drt/issues/470) (benchmark-gated).
+- The destination read is keyed on the source primary keys (`WHERE <key> IN (…)`, batched) when an `upsert_key` is set and `mode` is not `replace` ([#470](https://github.com/drt-hub/drt/issues/470)). `mode: replace` still needs the whole table — `deleted` there is precisely the rows a keyed read cannot see — and ClickHouse falls back to the full scan for paramstyle reasons.
 - A future `--diff-fields` flag will let you limit the displayed columns ([#471](https://github.com/drt-hub/drt/issues/471)).
 - API-based diff for upsert-keyed SaaS destinations (HubSpot, Notion) is parked behind `--diff-saas` ([#472](https://github.com/drt-hub/drt/issues/472)).
 - The hardcoded "queryable types" tuple will be replaced by a `Destination.fetch_existing()` Protocol method during the v0.9 freeze prep ([#469](https://github.com/drt-hub/drt/issues/469)).
