@@ -505,3 +505,158 @@ def _fetch_tracked_state_mysql(
         return state
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# fetch_all_keys — read-only destination key read for the destination-strategy
+# mirror delete preview (#693)
+# ---------------------------------------------------------------------------
+
+
+def _key_tuples_from_rows(rows: Any, key_cols: list[str]) -> list[tuple[Any, ...]]:
+    """Normalise fetched rows to key tuples in ``key_cols`` order.
+
+    Tolerates mapping rows the way ``_fetch_rows_mysql`` does — a pymysql
+    ``DictCursor`` yields dicts rather than tuples.
+    """
+    keys: list[tuple[Any, ...]] = []
+    for row in rows:
+        if isinstance(row, dict):
+            keys.append(tuple(row[c] for c in key_cols))
+        else:
+            keys.append(tuple(row))
+    return keys
+
+
+def fetch_all_keys(
+    config: DestinationConfig,
+    key_cols: list[str],
+    scope_cols: list[str] | None = None,
+    scopes: list[tuple[Any, ...]] | None = None,
+) -> list[tuple[Any, ...]]:
+    """Read the destination's own key set, **read-only** (#693).
+
+    Issues ``SELECT <key_cols> FROM <table> [WHERE <scope> IN (…)]`` and returns
+    one tuple per row, in ``key_cols`` order. Only the key columns are selected —
+    the preview reports keys, so pulling the full rows would cost bandwidth for
+    columns nobody renders.
+
+    This is the read the *destination*-strategy mirror preview needs and #470's
+    :func:`fetch_rows_by_keys` structurally cannot provide: the destination
+    strategy DELETEs ``dest_keys - source_keys``, and a keyed fetch only ever
+    returns rows whose key IS in the source set.
+
+    ``scope_cols`` / ``scopes`` (mirror.scope, #687) narrow the read **in SQL**,
+    with the same clause shape each dialect's ``_build_mirror_delete`` emits, so
+    the preview and the real DELETE consider the same rows: Postgres binds one
+    auto-expanded tuple per ``%s``, MySQL an explicit flattened placeholder list.
+    As there, the clause is added only when both are non-empty — a scoped mirror
+    that observed no scope values deletes nothing, and the caller is expected to
+    skip the preview entirely in that case.
+
+    Postgres / MySQL only — the destinations whose mirror DELETE comes from the
+    shared ``BaseSqlDestination._finalize_mirror`` path. ClickHouse and Snowflake
+    override mirror finalisation with dialect-specific statements, so a
+    :class:`NotImplementedError` is raised rather than returning ``[]``: an empty
+    list is indistinguishable from "this mirror deletes nothing", and quietly
+    claiming that about a mirror which *will* delete rows is the one wrong answer
+    a preview must not give. Callers degrade to "not previewed".
+
+    Never writes: one ``SELECT``, no DDL/DML, no ``COMMIT``.
+    """
+    if isinstance(config, PostgresDestinationConfig):
+        return _fetch_all_keys_postgres(config, key_cols, scope_cols, scopes)
+    if isinstance(config, MySQLDestinationConfig):
+        return _fetch_all_keys_mysql(config, key_cols, scope_cols, scopes)
+    if isinstance(config, (ClickHouseDestinationConfig, SnowflakeDestinationConfig)):
+        raise NotImplementedError(
+            f"fetch_all_keys does not support {type(config).__name__} "
+            "(mirror finalisation is dialect-specific there); "
+            "caller should skip the destination-strategy delete preview."
+        )
+    raise TypeError(f"Cannot fetch keys from {type(config).__name__}")
+
+
+def _fetch_all_keys_postgres(
+    config: PostgresDestinationConfig,
+    key_cols: list[str],
+    scope_cols: list[str] | None,
+    scopes: list[tuple[Any, ...]] | None,
+) -> list[tuple[Any, ...]]:
+    """Postgres leg — mirrors ``PostgresDestination._build_mirror_delete``'s
+    scope clause (``<col> IN %s`` with psycopg2 tuple auto-expansion)."""
+    from psycopg2 import sql as _pgsql
+
+    from drt.destinations.postgres import PostgresDestination, _qualified_ident
+
+    col_list = _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in key_cols)
+    where = _pgsql.SQL("")
+    params: tuple[Any, ...] = ()
+    if scope_cols and scopes:
+        if len(scope_cols) == 1:
+            scope_expr: Any = _pgsql.Identifier(scope_cols[0])
+            params = (tuple(s[0] for s in scopes),)
+        else:
+            scope_expr = _pgsql.SQL("({})").format(
+                _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in scope_cols)
+            )
+            params = (tuple(tuple(s) for s in scopes),)
+        where = _pgsql.SQL(" WHERE {} IN %s").format(scope_expr)
+
+    stmt = _pgsql.SQL("SELECT {cols} FROM {table}{where}").format(
+        cols=col_list,
+        table=_qualified_ident(config.table),
+        where=where,
+    )
+
+    conn = PostgresDestination._connect(config)
+    try:
+        cur = conn.cursor()
+        if params:
+            cur.execute(stmt, params)
+        else:
+            cur.execute(stmt)
+        return _key_tuples_from_rows(cur.fetchall(), key_cols)
+    finally:
+        conn.close()
+
+
+def _fetch_all_keys_mysql(
+    config: MySQLDestinationConfig,
+    key_cols: list[str],
+    scope_cols: list[str] | None,
+    scopes: list[tuple[Any, ...]] | None,
+) -> list[tuple[Any, ...]]:
+    """MySQL leg — mirrors ``MySQLDestination._build_mirror_delete``'s scope
+    clause (explicit ``%s`` list, flattened params; pymysql has no
+    tuple auto-expansion)."""
+    from drt.destinations.mysql import MySQLDestination
+
+    col_list = ", ".join(f"`{c}`" for c in key_cols)
+    table_q = MySQLDestination._quote_ident(config.table)
+    where = ""
+    params: list[Any] = []
+    if scope_cols and scopes:
+        if len(scope_cols) == 1:
+            placeholders = ", ".join(["%s"] * len(scopes))
+            where = f" WHERE `{scope_cols[0]}` IN ({placeholders})"
+            params = [s[0] for s in scopes]
+        else:
+            col_tuple = "(" + ", ".join(f"`{c}`" for c in scope_cols) + ")"
+            row = "(" + ", ".join(["%s"] * len(scope_cols)) + ")"
+            placeholders = ", ".join([row] * len(scopes))
+            where = f" WHERE {col_tuple} IN ({placeholders})"
+            params = [v for s in scopes for v in s]
+
+    stmt = f"SELECT {col_list} FROM {table_q}{where}"  # noqa: S608 — idents quoted
+
+    conn = MySQLDestination._connect(config)
+    try:
+        cur = conn.cursor()
+        if params:
+            cur.execute(stmt, params)
+        else:
+            cur.execute(stmt)
+        return _key_tuples_from_rows(cur.fetchall(), key_cols)
+    finally:
+        conn.close()

@@ -16,6 +16,7 @@ from drt.config.models import (
 )
 from drt.destinations.query import (
     execute_test_query,
+    fetch_all_keys,
     fetch_rows,
     fetch_rows_by_keys,
     fetch_tracked_state,
@@ -541,3 +542,207 @@ def test_fetch_tracked_state_unsupported_dialect_returns_empty() -> None:
         )
         == {}
     )
+
+
+# ---------------------------------------------------------------------------
+# fetch_all_keys — read-only destination key read for the destination-strategy
+# mirror delete preview (#693)
+#
+# The destination strategy DELETEs ``dest_keys - source_keys``, i.e. exactly
+# the complement that ``fetch_rows_by_keys`` (#470) can never return. Previewing
+# it needs the destination's *own* key set, optionally narrowed by mirror.scope
+# the same way ``_build_mirror_delete``'s scope_clause narrows the real DELETE.
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_all_keys_postgres_selects_key_columns_only() -> None:
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [(1,), (2,), (3,)]
+    conn = _plain_conn(cursor)
+
+    with patch(
+        "drt.destinations.postgres.PostgresDestination._connect", return_value=conn
+    ):
+        keys = fetch_all_keys(_pg_config(table="public.users"), ["id"])
+
+    assert keys == [(1,), (2,), (3,)]
+    _assert_read_only(cursor)
+    stmt, = cursor.execute.call_args_list[0][0][:1]
+    rendered = _render_pg(stmt)
+    assert rendered == 'SELECT "id" FROM "public"."users"'
+    # No scope → no params bound at all.
+    assert len(cursor.execute.call_args_list[0][0]) == 1
+    conn.close.assert_called_once()
+
+
+def test_fetch_all_keys_postgres_composite_key() -> None:
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [("c1", "u1"), ("c1", "u2")]
+    conn = _plain_conn(cursor)
+
+    with patch(
+        "drt.destinations.postgres.PostgresDestination._connect", return_value=conn
+    ):
+        keys = fetch_all_keys(_pg_config(), ["company_id", "user_id"])
+
+    assert keys == [("c1", "u1"), ("c1", "u2")]
+    rendered = _render_pg(cursor.execute.call_args_list[0][0][0])
+    assert 'SELECT "company_id", "user_id"' in rendered
+    _assert_read_only(cursor)
+
+
+def test_fetch_all_keys_postgres_scope_filters_server_side() -> None:
+    """mirror.scope narrows the read in SQL, not in Python.
+
+    The clause must be the same shape ``PostgresDestination._build_mirror_delete``
+    emits (``<col> IN %s`` with psycopg2 tuple auto-expansion), so the preview
+    and the real DELETE select the same rows.
+    """
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [(1,)]
+    conn = _plain_conn(cursor)
+
+    with patch(
+        "drt.destinations.postgres.PostgresDestination._connect", return_value=conn
+    ):
+        keys = fetch_all_keys(
+            _pg_config(table="public.users"),
+            ["id"],
+            scope_cols=["region"],
+            scopes=[("eu",), ("us",)],
+        )
+
+    assert keys == [(1,)]
+    stmt, params = cursor.execute.call_args_list[0][0]
+    rendered = _render_pg(stmt)
+    assert rendered == 'SELECT "id" FROM "public"."users" WHERE "region" IN %s'
+    # Single scope column → one auto-expanded tuple of scalars (psycopg2).
+    assert params == (("eu", "us"),)
+    _assert_read_only(cursor)
+
+
+def test_fetch_all_keys_postgres_composite_scope() -> None:
+    cursor = MagicMock()
+    cursor.fetchall.return_value = []
+    conn = _plain_conn(cursor)
+
+    with patch(
+        "drt.destinations.postgres.PostgresDestination._connect", return_value=conn
+    ):
+        fetch_all_keys(
+            _pg_config(),
+            ["id"],
+            scope_cols=["region", "tier"],
+            scopes=[("eu", "gold"), ("us", "silver")],
+        )
+
+    stmt, params = cursor.execute.call_args_list[0][0]
+    rendered = _render_pg(stmt)
+    assert 'WHERE ("region", "tier") IN %s' in rendered
+    # Composite scope → tuple of tuples (psycopg2 renders row constructors).
+    assert params == ((("eu", "gold"), ("us", "silver")),)
+
+
+def test_fetch_all_keys_postgres_empty_scopes_reads_whole_table() -> None:
+    """``scope_cols`` set but nothing observed → no scope clause.
+
+    Matches ``_build_mirror_delete``, which only prepends the scope clause when
+    ``scope_cols and scopes`` are both truthy.
+    """
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [(1,)]
+    conn = _plain_conn(cursor)
+
+    with patch(
+        "drt.destinations.postgres.PostgresDestination._connect", return_value=conn
+    ):
+        fetch_all_keys(_pg_config(), ["id"], scope_cols=["region"], scopes=[])
+
+    rendered = _render_pg(cursor.execute.call_args_list[0][0][0])
+    assert "WHERE" not in rendered
+
+
+def test_fetch_all_keys_mysql_selects_key_columns_only() -> None:
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [(1,), (2,)]
+    conn = _plain_conn(cursor)
+
+    with patch("drt.destinations.mysql.MySQLDestination._connect", return_value=conn):
+        keys = fetch_all_keys(_mysql_config(table="mydb.users"), ["id"])
+
+    assert keys == [(1,), (2,)]
+    sql = cursor.execute.call_args_list[0][0][0]
+    assert sql == "SELECT `id` FROM `mydb`.`users`"
+    _assert_read_only(cursor)
+    conn.close.assert_called_once()
+
+
+def test_fetch_all_keys_mysql_scope_uses_explicit_placeholders() -> None:
+    """pymysql has no tuple auto-expansion, so the scope clause is an explicit
+    ``%s`` list with flattened params — same as ``MySQLDestination._build_mirror_delete``.
+    """
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [(1,)]
+    conn = _plain_conn(cursor)
+
+    with patch("drt.destinations.mysql.MySQLDestination._connect", return_value=conn):
+        fetch_all_keys(
+            _mysql_config(),
+            ["id"],
+            scope_cols=["region"],
+            scopes=[("eu",), ("us",)],
+        )
+
+    sql, params = cursor.execute.call_args_list[0][0]
+    assert sql == "SELECT `id` FROM `users` WHERE `region` IN (%s, %s)"
+    assert params == ["eu", "us"]
+
+
+def test_fetch_all_keys_mysql_composite_scope() -> None:
+    cursor = MagicMock()
+    cursor.fetchall.return_value = []
+    conn = _plain_conn(cursor)
+
+    with patch("drt.destinations.mysql.MySQLDestination._connect", return_value=conn):
+        fetch_all_keys(
+            _mysql_config(),
+            ["id"],
+            scope_cols=["region", "tier"],
+            scopes=[("eu", "gold")],
+        )
+
+    sql, params = cursor.execute.call_args_list[0][0]
+    assert "WHERE (`region`, `tier`) IN ((%s, %s))" in sql
+    assert params == ["eu", "gold"]
+
+
+def test_fetch_all_keys_mysql_dict_cursor_rows() -> None:
+    """A DictCursor yields mappings; keys come back in ``key_cols`` order."""
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [
+        {"user_id": "u1", "company_id": "c1"},
+        {"user_id": "u2", "company_id": "c1"},
+    ]
+    conn = _plain_conn(cursor)
+
+    with patch("drt.destinations.mysql.MySQLDestination._connect", return_value=conn):
+        keys = fetch_all_keys(_mysql_config(), ["company_id", "user_id"])
+
+    assert keys == [("c1", "u1"), ("c1", "u2")]
+
+
+def test_fetch_all_keys_unsupported_dialect_raises() -> None:
+    """ClickHouse / Snowflake implement ``_finalize_mirror`` themselves, so the
+    shared destination-strategy preview does not apply — raise so the caller
+    degrades to "no preview" explicitly rather than silently reporting zero
+    deletions for a mirror that will in fact delete rows.
+    """
+    with pytest.raises(NotImplementedError):
+        fetch_all_keys(_clickhouse_config(), ["id"])
+    with pytest.raises(NotImplementedError):
+        fetch_all_keys(_snowflake_config(), ["id"])
+    with pytest.raises(TypeError):
+        fetch_all_keys(
+            RestApiDestinationConfig(type="rest_api", url="http://x", method="POST"),
+            ["id"],
+        )
