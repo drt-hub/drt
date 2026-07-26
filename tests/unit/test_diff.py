@@ -515,20 +515,24 @@ class TestComputeDiffMirrorTracked:
 
     @patch("drt.engine.diff.fetch_tracked_state")
     @patch("drt.engine.diff.fetch_rows")
-    def test_tracked_preview_previews_full_wipe_on_empty_source(
+    def test_tracked_preview_deletes_nothing_on_empty_source(
         self, mock_fetch: Any, mock_state: Any
     ) -> None:
-        """Empty source → every tracked key is a delete candidate.
+        """Empty source → no deletes previewed, matching what the run would do.
 
-        With no records the engine takes the full-scan path (``use_keyed_fetch``
-        needs ``records``), but the tracked preview is independent of that read.
+        ``BaseSqlDestination._finalize_mirror`` bails out with
+        ``if not self._mirror_keys: return None`` *before* dispatching to the
+        tracked strategy, so a transient empty source keeps the destination (and
+        the tracked baseline) intact. Previewing a full wipe here would tell the
+        operator the opposite of what actually happens.
         """
         mock_fetch.return_value = []
         mock_state.return_value = {key_hash(("a",)): key_json(("a",))}
 
         result = compute_diff([], _pg_config(), _mirror_tracked_options(), limit=20)
 
-        assert result.deleted == [{"id": "a"}]
+        assert result.deleted == []
+        assert result.delete_reason is None
 
 
 # ---------------------------------------------------------------------------

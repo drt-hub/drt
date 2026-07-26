@@ -340,15 +340,17 @@ def compute_diff(
             row for key, row in dest_by_key.items() if key not in source_keys
         ]
         delete_reason = "replace"
-    elif _is_tracked_mirror(sync_options):
+    # ``and records`` on both mirror legs: ``_finalize_mirror`` returns early
+    # when no key was observed (``if not self._mirror_keys: return None``), and
+    # that guard sits *above* the tracked dispatch — so a transient empty source
+    # deletes nothing, on either strategy. Previewing a full wipe would tell the
+    # operator the opposite of what the run would do.
+    elif _is_tracked_mirror(sync_options) and records:
         deleted = _preview_tracked_mirror_deletes(
             config, sync_options, upsert_key, source_keys
         )
         delete_reason = "mirror"
     elif _is_destination_mirror(sync_options) and records:
-        # ``and records``: ``_finalize_mirror`` returns early when no key was
-        # observed, so a transient empty source deletes nothing. Previewing a
-        # full wipe would contradict what the run would actually do.
         deleted = _preview_destination_mirror_deletes(
             config, sync_options, upsert_key, source_keys, records
         )
