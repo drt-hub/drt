@@ -192,8 +192,13 @@ done
 # salesforce_bulk once fell out of the MCP list). Flag any regression to a
 # literal. Actual name/type parity is asserted in tests/unit/test_mcp.py.
 # ---------------------------------------------------------------------------
-list_connectors_fn=$(awk '/def drt_list_connectors/,/^    # ----/' "$MCP_SERVER")
-if ! echo "$list_connectors_fn" | grep -q "connector_inventory"; then
+# Since #723 part 1 the tool bodies live in drt/mcp/tools/<tool>.py and
+# server.py only registers thin delegates, so check the implementation module.
+MCP_LIST_CONNECTORS="drt/mcp/tools/list_connectors.py"
+if [ ! -f "$MCP_LIST_CONNECTORS" ]; then
+    report "mcp-inventory" "drt_list_connectors" \
+        "implementation module $MCP_LIST_CONNECTORS is missing (moved again?)"
+elif ! grep -q "connector_inventory" "$MCP_LIST_CONNECTORS"; then
     report "mcp-inventory" "drt_list_connectors" \
         "no longer derives from the drt.config.connectors SSoT (re-hardcoded?)"
 fi

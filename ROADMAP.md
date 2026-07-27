@@ -54,6 +54,16 @@ Closes the **Tech Foundation Hardening epic** ([#538](https://github.com/drt-hub
 
 ---
 
+## v0.8.3 — Diff Polish ✅ Shipped 2026-07-27
+
+Released as **v0.8.3** on 2026-07-27. See [CHANGELOG.md](CHANGELOG.md#083---2026-07-27) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.8.3) for the full feature list.
+
+**Theme: seeing what a run will do — and what it quietly did.** `--dry-run --diff` now previews the **mirror `DELETE` pass** ([#693](https://github.com/drt-hub/drt/issues/693)) across all three strategies, read-only and labelled distinctly from a replace-mode rebuild — previously the destructive half of a `mode: mirror` sync was invisible until it ran. The same preview got cheaper: the destination lookup batches by source primary keys instead of scanning the whole table ([#470](https://github.com/drt-hub/drt/issues/470)). **`alerts.on_degraded`** ([#784](https://github.com/drt-hub/drt/issues/784)) adds thresholds on the failure modes that *succeed* (creeping error rate, SLA breach, empty source, growing DLQ), and **`drt test`** gains custom SQL `query` tests, `severity: warn`, and `--store-failures` ([#779](https://github.com/drt-hub/drt/issues/779)). Internally the Postgres/MySQL destinations shed their duplicated orchestration into a shared base ([#719](https://github.com/drt-hub/drt/issues/719), closed) and the MCP server / `schema.py` / `run.py` were split along the same lines ([#723](https://github.com/drt-hub/drt/issues/723)). No breaking changes — drop-in upgrade from v0.8.2.
+
+*Deferred, still open:* `--diff-fields` (#471) and API-based SaaS diff (#472) remain feedback-gated parking spots; Delta/Iceberg predicate pushdown (#679) is a source-side perf item tracked separately.
+
+---
+
 ## v0.8.2 — Navigable docs hosting (single-object `--inline`) ✅ Shipped 2026-07-21
 
 Released as **v0.8.2** on 2026-07-21. See [CHANGELOG.md](CHANGELOG.md#082---2026-07-21) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.8.2) for the full feature list.
@@ -142,23 +152,6 @@ Two additive features accumulated since v0.7.5 — a new **Amplitude destination
 **Out of scope:** Enterprise boundary (→ v0.9), Rust engine work (→ v1.x), diff polish (→ v0.8.3), warehouse hardening follow-ups (→ v0.8.4).
 
 **Target:** 2026-07 · **Progress:** [milestone/5](https://github.com/drt-hub/drt/milestone/5)
-
----
-
-## v0.8.3 — Diff Polish
-
-**Theme:** Polish and follow-ups for the `--diff` feature shipped in v0.7.1.
-
-**Scope:**
-- **Diff perf** — batch lookup queries for large diff sets (#470)
-- **Mirror preview** — `--dry-run --diff` previews mirror deletions for destination / tracked / scoped strategies (#693); tracked is read-only and the highest-value preview
-- **Diff UX** *(feedback-gated, pull in on demand)* — `--diff-fields` column filter (#471, parking spot until wide-table readability is reported) · opt-in API-based diff for upsert-keyed SaaS destinations (#472)
-
-**Out of scope:** New destinations, engine features unrelated to `--diff`. Delta/Iceberg predicate pushdown (#679) is a source-side perf item, not `--diff` — tracked separately.
-
-*Already shipped:* lookup first-miss-wins ambiguity warning (#453) landed in **v0.7.5** (PR #521); the stale milestone tag is being cleared.
-
-**Target:** Cut from v0.8 once Cloud Destinations land · **Progress:** [milestone/10](https://github.com/drt-hub/drt/milestone/10)
 
 ---
 

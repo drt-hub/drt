@@ -137,6 +137,15 @@ burning quota — skipped syncs report `status: "skipped"` in `--output json`.
   the DLQ; `drt run --failed` (#773) re-runs the *syncs* whose last status
   wasn't `success` — the sync-level recovery loop after you've fixed config.
   It exits 0 (with a note) when nothing failed, so it's safe in CI.
+- **Noticing degradation before it's an incident:** a DLQ that keeps growing,
+  a creeping row-error rate, or a source that silently returns nothing are all
+  *successful* runs, so `alerts.on_failure` never fires. `alerts.on_degraded`
+  (v0.8.3+) adds thresholds on `dlq_depth`, `row_errors_pct`,
+  `duration_seconds`, and `rows_extracted` (`{eq: 0}` catches the empty
+  source) — e.g. `dlq_depth: {gt: 100}` pages once the backlog outgrows what
+  a single `drt retry` will clear. `--output json` reports which conditions
+  tripped in `conditions_tripped`, so CI can gate on it without a paging
+  target. See `docs/guides/alerts.md`.
 
 ### 7. Post-sync correctness
 
