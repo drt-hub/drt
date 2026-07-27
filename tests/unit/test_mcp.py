@@ -173,6 +173,91 @@ async def test_run_test_skips_non_queryable_destination(tmp_path: Path) -> None:
     assert "rest_api" in result["results"][0]["reason"]
 
 
+@pytest.mark.asyncio
+async def test_run_test_severity_warn_failure_does_not_flip_status(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """#836: severity: warn parity between drt_run_test and drt test /
+    drt build was enforced only by a comment. A warn-severity failure must
+    still be reported, but must not flip the top-level status to "failed" —
+    the exact rule #400 was a drift bug about."""
+    (tmp_path / "drt_project.yml").write_text("name: test\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "orders.yml").write_text(
+        "name: orders\n"
+        "model: ref('orders')\n"
+        "destination:\n"
+        "  type: postgres\n"
+        "  host: localhost\n"
+        "  dbname: test\n"
+        "  table: orders\n"
+        "  upsert_key: [id]\n"
+        "tests:\n"
+        "  - name: warn_test\n"
+        "    severity: warn\n"
+        "    not_null: { columns: [email] }\n"
+    )
+    from drt.destinations import query as query_module
+
+    monkeypatch.setattr(query_module, "is_queryable", lambda d: True)
+    monkeypatch.setattr(query_module, "get_table_name", lambda d: "orders")
+    monkeypatch.setattr(query_module, "execute_test_query", lambda d, q: 3)  # 3 nulls -> fails
+
+    srv = create_server(tmp_path)
+    result = await call(srv, "drt_run_test")
+
+    test_entry = result["results"][0]["tests"][0]
+    assert test_entry["passed"] is False
+    assert test_entry["severity"] == "warn"
+    # The failure is visible, but doesn't fail the run — same rule drt test
+    # and drt build apply.
+    assert result["status"] == "passed"
+
+
+@pytest.mark.asyncio
+async def test_run_test_severity_warn_exception_does_not_flip_status(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The exception path needs the same guard as the pass/fail path — a
+    severity: warn test that errors (destination unreachable, bad query)
+    must not flip status either."""
+    (tmp_path / "drt_project.yml").write_text("name: test\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "orders.yml").write_text(
+        "name: orders\n"
+        "model: ref('orders')\n"
+        "destination:\n"
+        "  type: postgres\n"
+        "  host: localhost\n"
+        "  dbname: test\n"
+        "  table: orders\n"
+        "  upsert_key: [id]\n"
+        "tests:\n"
+        "  - name: warn_test\n"
+        "    severity: warn\n"
+        "    not_null: { columns: [email] }\n"
+    )
+    from drt.destinations import query as query_module
+
+    def _raise(dest: object, q: str) -> int:
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(query_module, "is_queryable", lambda d: True)
+    monkeypatch.setattr(query_module, "get_table_name", lambda d: "orders")
+    monkeypatch.setattr(query_module, "execute_test_query", _raise)
+
+    srv = create_server(tmp_path)
+    result = await call(srv, "drt_run_test")
+
+    test_entry = result["results"][0]["tests"][0]
+    assert test_entry["passed"] is False
+    assert test_entry["severity"] == "warn"
+    assert "connection refused" in test_entry["error"]
+    assert result["status"] == "passed"
+
+
 # ---------------------------------------------------------------------------
 # drt_get_status
 # ---------------------------------------------------------------------------
