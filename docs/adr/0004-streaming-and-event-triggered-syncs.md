@@ -130,10 +130,10 @@ The structural pattern that reading suggested holds: **every cheap signal is a
 poll, and every push signal is already a message bus the user runs.** That is the
 strongest argument for sensors and against a native watcher — a sensor is a
 scheduled cheap poll with durable cursors, which is exactly the shape of the
-signals that actually exist. The finished matrix confirms it for eleven of
-thirteen sources, and the nearest counter-example (Databricks' table update
-trigger) turns out to be the platform's own managed polling loop invoking the
-CLI — Tier 1 working as designed, not a broker-free push. See
+signals that actually exist. The finished matrix confirms it for twelve of the
+thirteen sources, and the sole exception (Databricks' table update trigger)
+turns out to be the platform's own managed polling loop invoking the CLI —
+Tier 1 working as designed, not a broker-free push. See
 [What this means for ADR 0004](../research/warehouse-trigger-matrix.md#what-this-means-for-adr-0004)
 for the falsification check against both conditions below.
 

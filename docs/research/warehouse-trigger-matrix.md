@@ -42,9 +42,9 @@ source in a CLI-first tool — not whether the signal itself works.
 |---|---|---|---|---|---|---|
 | **PostgreSQL** | `max(updated_at)` poll | Poll | Poll interval | None (index only) | Tier 1 / Tier 2 | Poll: yes. Push: no |
 | **MySQL** | `max(updated_at)` / `MAX(id)` poll | Poll | Poll interval | None (index only) | Tier 1 / Tier 2 | Poll: yes. Push: no |
-| **Snowflake** | `STREAM` + `SYSTEM$STREAM_HAS_DATA()` in a `TASK` `WHEN` clause | Poll | 10 s floor; 1–5 min realistic | Stream + task; **warehouse required to check** | Tier 1 / Tier 2 | Yes |
+| **Snowflake** | `STREAM` + `SYSTEM$STREAM_HAS_DATA()` in a `TASK` `WHEN` clause | Poll | 1–5 min typical; 10 s via triggered tasks | Stream + task; **warehouse billed to query the stream** | Tier 1 / Tier 2 | Yes |
 | **BigQuery** | `APPENDS()` TVF poll, cursored on `_CHANGE_TIMESTAMP` | Poll | Poll interval | None beyond credentials | Tier 1 / Tier 2 | Yes (Tier 3 also viable) |
-| **Databricks** | Workflows **table update** trigger | Push (managed) | ~1–2 min | Unity Catalog + a Job | Tier 1 | Yes |
+| **Databricks** | Workflows **table update** trigger | Push (managed) | Not published | Unity Catalog + a Job | Tier 1 | Yes |
 | **Delta Lake** | `DeltaTable(...).version()` | Poll | Poll interval; sub-second check | `deltalake` lib + storage creds | Tier 1 / Tier 2 | Yes — cheapest in matrix |
 | **Apache Iceberg** | `current-snapshot-id` from `metadata.json` | Poll | Poll interval; sub-second check | pyiceberg + catalog creds | Tier 1 / Tier 2 | Yes |
 | **ClickHouse** | `system.parts` metadata probe | Poll | Poll interval | None | Tier 1 / Tier 2 | Yes |
@@ -72,13 +72,17 @@ Alternatives, both push, both rejected for drt-owned use:
 - **`LISTEN`/`NOTIFY`** — sub-second to an *already-listening* client, but
   notifications are **not durable**: a disconnected listener silently misses
   events with no replay, so a reconciling poll is still required behind it. Needs
-  a user-installed trigger (schema write access) plus a held connection. Payload
-  caps at 8000 bytes; the queue caps at 8 GB.
+  a user-installed trigger (schema write access) plus a held connection. In the
+  default configuration the payload must be shorter than 8000 bytes, and the queue
+  is 8 GB in a standard installation — both scale with configuration rather than
+  being fixed limits.
 - **Logical decoding** — lowest latency, but full CDC machinery: `wal_level=logical`
   (restart), replication slots, a `REPLICATION` role, a `pg_hba.conf` entry, and a
-  persistent consumer. An unconsumed slot retains WAL indefinitely, risking disk
-  exhaustion or a forced shutdown to avoid XID wraparound. ADR 0004 already places
-  CDC under "Still out".
+  persistent consumer. An unconsumed slot prevents `VACUUM` from removing both
+  required WAL and required system-catalog rows — WAL growth is boundable via
+  `max_slot_wal_keep_size`, but the retained catalog rows are what can, "in extreme
+  cases … cause the database to shut down to prevent transaction ID wraparound".
+  ADR 0004 already places CDC under "Still out".
 
 `xmin` is a fallback when no timestamp column exists, but it is a 32-bit XID with
 wraparound risk, unindexed, and not safely ordered against concurrent commits —
@@ -127,15 +131,26 @@ copy), and the `WHEN` clause exists precisely so a task can skip its body — an
 avoid spinning its warehouse — when nothing changed. `SnowflakeSource` itself has
 no cursor logic (`drt/sources/snowflake.py:28-89`).
 
-Tasks schedule down to `'10 SECONDS'`, but 1–5 minutes is realistic once
-scheduling overhead is counted — squarely ADR 0004's Tier 1 band, not streaming.
+`CREATE TASK` documents `SCHEDULE` as `'<num> { HOURS | MINUTES | SECONDS }'`
+with **no stated minimum**, so treat the floor as unspecified rather than a
+published number; 1–5 minutes is a realistic operating cadence once scheduling
+overhead is counted, which is ADR 0004's Tier 1 band, not streaming.
 
-**Cost is the caveat, and "cheap to poll" is relative, not free:** querying a
-stream — and even `DESCRIBE STREAM` / `SHOW STREAMS` to inspect its offset —
-**requires an active virtual warehouse**, billed per second. Worse, once
-`SYSTEM$STREAM_HAS_DATA` returns TRUE the stream **must** be consumed via DML, or
-it keeps returning TRUE, re-firing the task and re-spinning the warehouse
-indefinitely.
+Snowflake also offers **triggered tasks**, which fire on a stream having data
+rather than on a clock. These run at most every 30 seconds by default, loweable
+to 10 seconds via `USER_TASK_MINIMUM_TRIGGER_INTERVAL_IN_SECONDS` — the tightest
+documented cadence of any option here, and still Snowflake-side scheduling rather
+than a push to an external consumer.
+
+**Cost caveat — "cheap to poll" is relative, not free:** *querying* a stream
+requires a virtual warehouse, billed per second ("the main cost associated with a
+stream is the processing time used by a virtual warehouse to query the stream").
+Checking existence is cheaper than that implies, though: `SHOW STREAMS`
+explicitly "doesn't require a running warehouse to execute". The real trap is
+consumption semantics — a stream advances its offset only when used in a **DML**
+transaction, and querying alone does not advance it. So if the stream is never
+consumed, `SYSTEM$STREAM_HAS_DATA` keeps returning TRUE, tasks keep firing, and
+warehouses keep spinning.
 
 Alternatives: **Snowflake Alerts + a `WEBHOOK` notification integration** can push
 to a hardened `drt serve` (Tier 3), but the condition is still evaluated by
@@ -143,16 +158,21 @@ Snowflake-side scheduled compute, so it creates no genuinely new push capability
 it wraps a poll. **Snowpipe Streaming** is the wrong layer entirely: it is an
 *ingestion* API for writing *into* Snowflake, not a change signal for extraction.
 
-**Limitations:** `SYSTEM$STREAM_HAS_DATA` can return **false positives** (rows
-inserted, updated, then deleted back to their original state); view-backed streams
-have documented higher false-positive rates; an unconsumed stream goes stale past
-the source table's retention window (Snowflake extends this up to 14 days for
-inactive streams as a grace period, not indefinitely).
+**Limitations:** `SYSTEM$STREAM_HAS_DATA` is explicitly "not guaranteed to avoid
+false positives" — the documented case is the same rows being inserted,
+optionally updated, then deleted, returning the table to its original state.
+View-backed streams have documented higher false-positive rates. An unconsumed
+stream goes stale past the source table's retention window; Snowflake temporarily
+extends that window to prevent staleness, bounded by
+`MAX_DATA_EXTENSION_TIME_IN_DAYS` (default 14 days, and configurable — not a
+fixed ceiling).
 
 *Sources: [SYSTEM$STREAM_HAS_DATA](https://docs.snowflake.com/en/sql-reference/functions/system_stream_has_data) ·
 [streams](https://docs.snowflake.com/en/user-guide/streams-intro) ·
 [managing streams](https://docs.snowflake.com/en/user-guide/streams-manage) ·
-[tasks](https://docs.snowflake.com/en/user-guide/tasks-intro) ·
+[CREATE TASK](https://docs.snowflake.com/en/sql-reference/sql/create-task) ·
+[triggered tasks](https://docs.snowflake.com/en/user-guide/tasks-triggered) ·
+[SHOW STREAMS](https://docs.snowflake.com/en/sql-reference/sql/show-streams) ·
 [alerts](https://docs.snowflake.com/en/user-guide/alerts) ·
 [Snowpipe Streaming](https://docs.snowflake.com/en/user-guide/snowpipe-streaming/data-load-snowpipe-streaming-overview)*
 
@@ -170,23 +190,34 @@ Alternatives:
   coarse: it fires on schema-only changes and carries no row cursor. (Compare
   `lastModifiedTime` directly; the `etag` is not guaranteed to change.)
 - **Audit logs → Pub/Sub → hardened `drt serve` (Tier 3)** — genuine push,
-  seconds-scale. BigQuery Data Access audit logs (`TableDataChange`) are on by
-  default and incur no logging charge; a Log Router sink publishes to a Pub/Sub
-  topic (the sink's writer identity needs `roles/pubsub.publisher`). A Pub/Sub
-  **push** subscription then POSTs to `drt serve` — so *no persistent subscriber
-  process* is needed on either side.
+  seconds-scale. BigQuery is one of the few exceptions to Data Access audit logs
+  being disabled by default: they are on, and for BigQuery they "can't be
+  disabled". A Log Router sink publishes to a Pub/Sub topic (the sink's writer
+  identity needs `roles/pubsub.publisher`), and a Pub/Sub **push** subscription
+  POSTs to `drt serve` — so *no persistent subscriber process* is needed on either
+  side. Note this path is **not free**: Data Access logs are not in the free
+  `_Required` bucket, so they land in `_Default` and bill past the free allotment,
+  on top of Pub/Sub costs.
 - **`CHANGES()` TVF** — adds UPDATE/DELETE/TRUNCATE, but requires
-  `enable_change_history=TRUE` set in advance and costs more on delete-heavy
-  tables.
+  `enable_change_history=TRUE` set in advance, is capped at a **1-day** query
+  range, is blocked on CDC-enabled tables, and costs more on delete-heavy tables.
 
-**Limitations:** `APPENDS`/`CHANGES` are bounded by the table's time-travel window
-and unsupported on views, clones, snapshots, external and wildcard tables. More
-importantly for a push-only design: BigQuery does **not** emit Data Access events
-for *failed* jobs, so a change tied to a failed-then-retried job can be missed
+**Limitations:** `APPENDS` is a **Preview** feature — worth weighing before
+depending on it — and is bounded by the table's time-travel window (7 days by
+default). The unsupported-table lists differ between the two functions and are
+easy to conflate: `APPENDS` excludes clones, snapshots, views, materialized views,
+external and wildcard tables; `CHANGES` excludes views, materialized views,
+external and wildcard tables, and for clones/snapshots instead does not carry the
+source table's change history over. Most importantly for a push-only design:
+"if a job fails before or during execution, `TableDataChange` and `TableDataRead`
+events are not logged", so a change tied to a failed-then-retried job can be missed
 silently — which is why polling remains the safer primary signal even here.
 
 *Sources: [change history](https://docs.cloud.google.com/bigquery/docs/change-history) ·
+[APPENDS / CHANGES reference](https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/time-series-functions) ·
 [BigQuery audit logs](https://docs.cloud.google.com/bigquery/docs/reference/auditlogs) ·
+[configuring Data Access logs](https://docs.cloud.google.com/logging/docs/audit/configure-data-access) ·
+[Cloud Logging pricing](https://cloud.google.com/stackdriver/pricing) ·
 [log routing](https://docs.cloud.google.com/logging/docs/export/bigquery) ·
 [Eventarc + BigQuery](https://docs.cloud.google.com/eventarc/standard/docs/run/bigquery)*
 
@@ -199,10 +230,13 @@ metadata and starts the job itself, so drt owns no runtime.
 `DatabricksSource` is a stateless SQL-warehouse extractor with no cursor today
 (`drt/sources/databricks.py:26-39,58-83`).
 
-Note what "push" means precisely here: Databricks evaluates changes on a
-best-effort **~1-minute internal loop**, so this is *managed* polling that pushes
-to the job trigger — not a broker-free event. Configurable options include
-minimum time between triggers and a debounce after the last change.
+Note what "push" means precisely here: Databricks watches the table on its own
+side and starts the job, so from drt's perspective this is *managed polling that
+pushes* — not a broker-free event. **Databricks documents no evaluation
+interval for this trigger.** The widely-quoted "about every minute" figure is
+documented for *file arrival* triggers and should not be assumed to carry over;
+treat table-update latency as unspecified. The only documented timing knobs are
+user-set: minimum time between triggers, and a wait-after-last-change debounce.
 
 Alternatives: a Dagster sensor polling `DESCRIBE HISTORY` through the connector
 drt already has (Tier 2, more portable, costs warehouse time per poll); a
@@ -213,10 +247,15 @@ for listing tables and reading updates. Alert- or `DESCRIBE HISTORY`-based polli
 spins a SQL warehouse per poll unless one stays warm — real money at tight
 intervals.
 
-**Limitations:** Unity Catalog only; max 10 managed/Delta tables per trigger; 1,000
-concurrent job triggers per workspace without file events; view monitoring is
-restricted; system-table monitoring is Beta. The ~1–2 min figure is best-effort
-and community-reported, **not a documented SLA**.
+**Limitations:** effectively Unity Catalog only — the docs enumerate UC Delta and
+Iceberg managed tables and UC-backed external tables, and exclude views depending
+on non-UC tables, though no sentence states "requires Unity Catalog" outright.
+"You can select up to 10 managed or Delta tables per trigger" (views count toward
+that 10, with a separate 10-dependent-views limit). For tables in locations
+without file events, at most **1,000 jobs** can be configured with a table update
+trigger — a limit on jobs configured, not concurrent firings; a separate
+per-workspace 1,000 cap applies to triggers on OpenSharing objects or system
+tables. System-table monitoring is Beta. **No latency SLA is published.**
 
 *Sources: [table update triggers](https://docs.databricks.com/aws/en/jobs/trigger-table-update) ·
 [announcement](https://www.databricks.com/blog/announcing-table-update-triggers-lakeflow-jobs) ·
@@ -297,11 +336,15 @@ scanning column data, making it cheaper than `max(updated_at)` unless that colum
 happens to be the sort key. `ClickHouseSource.extract()` has no cursor logic
 (`drt/sources/clickhouse.py:26-37`).
 
-**Do not use `system.tables.metadata_modification_time`** — per ClickHouse
-maintainer guidance it reflects the `.sql` file's modification time (typically the
-last `ALTER TABLE`) and **does not fire on `INSERT`**, making it useless for
-data-change detection. This is the kind of plausible-looking wrong answer a matrix
-is for.
+**Be wary of `system.tables.metadata_modification_time`** — the obvious-looking
+choice, and probably the wrong one. The official documentation defines it only as
+"Time of latest modification of the table metadata", which does not say whether an
+`INSERT` counts. A ClickHouse maintainer states in a GitHub discussion that it
+reflects the `.sql` file's modification time and "usually … the time of the last
+`alter table`" — i.e. not data changes. **That is a community source, not
+documentation**, so treat this as a strong caution rather than a settled fact:
+verify against your own version before relying on it either way. `system.parts` is
+documented to track data parts directly and needs no such inference.
 
 ClickHouse has **no push mechanism**: no `LISTEN`/`NOTIFY`, no CDC feed for
 external consumers. Materialized Views chain `INSERT`→`INSERT` internally but never
@@ -312,9 +355,12 @@ re-run the full query, adding latency rather than removing it.
 are usage-billed, so the metadata probe's much smaller byte count matters at high
 poll frequency.
 
-**Limitations:** `modification_time` also bumps on background merges and mutations
-that add no rows, and on ReplicatedMergeTree replicas fetching parts from peers —
-both false positives. Mitigate by tracking `sum(rows)` / part count alongside it.
+**Limitations:** the docs describe `modification_time` as the time the part's
+directory was modified, "usually … the time of data part creation" — so by
+inference (not documented explicitly) it should also move when background merges,
+mutations, or a ReplicatedMergeTree replica fetching parts from peers create new
+parts without new logical rows. Treat those as likely false positives and mitigate
+by tracking `sum(rows)` / part count alongside it.
 
 *Sources: [system.parts](https://clickhouse.com/docs/operations/system-tables/parts) ·
 [system.tables](https://clickhouse.com/docs/operations/system-tables/tables) ·
@@ -328,17 +374,22 @@ connector (`drt/sources/duckdb.py:32`) and the profile
 (`drt/config/profiles.py:30-32`, a local path or `:memory:`) treat this as a local
 file.
 
-DuckDB is **single-writer by file lock** — a second read-write connection fails
-outright — and exposes **no `PRAGMA data_version` equivalent** and no
-update-hook/callback API. There is no CDC on the native format.
+DuckDB is **single-writer**: concurrency is managed via file locks, with
+read-write mode documented as "one process can both read and write", while
+read-only mode allows multiple reader processes and no writer. (Multi-process
+writing needs the separate Quack protocol or DuckLake.) It exposes **no documented
+`PRAGMA data_version` equivalent** — the pragma list has no such entry, which is
+absence of evidence rather than a documented "no" — and no update-hook/callback
+API. There is no CDC on the native format.
 
 **Event-driven is not the use case.** A single-writer local file is a
 dev/test/small-scale pattern; sub-minute activation against it is not a scenario
 worth optimizing.
 
 **Limitation:** `mtime` is checkpoint-delayed — writes land in a WAL and reach the
-main file's blocks only at checkpoint (default around 16 MB of WAL, or clean
-shutdown), so `mtime` can lag real writes substantially.
+main file only at checkpoint, governed by `checkpoint_threshold` (alias
+`wal_autocheckpoint`, default 16.0 MiB) or a clean shutdown, so `mtime` can lag
+real writes substantially.
 
 MotherDuck is a genuinely hosted, infrastructure-backed product, but drt has no
 MotherDuck profile — `duckdb.connect("md:...")` only works as an accident of
@@ -401,9 +452,11 @@ notes STL tables retain just 2–5 days and recommends unloading them to S3 for
 longer history. More moving parts than a `max(updated_at)` probe, for no gain here.
 
 **Cost:** provisioned clusters bill per node-hour regardless of query volume, so
-polling is effectively free at the margin. **Redshift Serverless bills per
-RPU-second with a 60-second minimum charge per query** — frequent polling has real
-incremental cost there.
+polling is effectively free at the margin. **Redshift Serverless bills RPU-hours
+metered per second, with a 60-second minimum charge** — and metering is per
+*transaction*, recorded once it completes, rolls back, or is stopped, not per
+query. Frequent polling therefore has real incremental cost on Serverless that it
+does not have on a provisioned cluster.
 
 *Sources: [integration events](https://docs.aws.amazon.com/redshift/latest/mgmt/integration-event-notifications.html) ·
 [Serverless EventBridge events](https://docs.aws.amazon.com/eventbridge/latest/ref/events-ref-redshift-serverless.html) ·
@@ -422,13 +475,19 @@ logic (`drt/sources/sqlserver.py:1-72`).
 purpose-built change signal, closer in kind to Snowflake's `STREAM` than to a
 `max(updated_at)` scan:
 
-- It **catches deletes**, which an `updated_at` poll structurally cannot.
+- It **catches deletes** (`SYS_CHANGE_OPERATION` reports `I`/`U`/`D`), which an
+  `updated_at` poll structurally cannot.
 - It needs **no app-owned timestamp column**.
 - It is ordered by **committed transaction**, not a mutable client timestamp.
-- It is available on **every edition, including Express** — unlike CDC
-  (Standard/Enterprise/Developer only).
-- It is far lighter than CDC: a synchronous side-table write storing current PK +
-  version, with no transaction-log reader and no SQL Server Agent job.
+- It is available on **every edition, including Express** — unlike CDC, which the
+  2022 editions matrix lists for Enterprise and Standard only (absent from Web
+  *and* Express).
+- It is far lighter than CDC: a synchronous side-table write, with no
+  transaction-log reader and no SQL Server Agent job. "The values of the primary
+  key column are the only information from the tracked table that is recorded with
+  the change information" — plus the operation type and, with
+  `TRACK_COLUMNS_UPDATED = ON`, a changed-column bitmask. No before/after row
+  images; that is what CDC is for.
 
 SQL Server does have a real push primitive — **Query Notifications /
 `SqlDependency`** over Service Broker — but it is architecturally the same shape as
@@ -443,10 +502,14 @@ and Agent is already running; **`max(updated_at)`** for zero setup, accepting
 delete-blindness.
 
 **Limitations:** CT's retention window is finite — if the sync interval exceeds
-`CHANGE_RETENTION` the cursor becomes invalid and a full resync is required, so
-`CHANGE_TRACKING_MIN_VALID_VERSION` must be checked. CT reports *which* PKs changed
-(optionally which columns), not values — drt still reads current rows via a join.
-Requires compatibility level ≥ 90.
+`CHANGE_RETENTION`, results from a later `CHANGETABLE` call "might not be valid"
+and the application "will need to re-initialize data", so
+`CHANGE_TRACKING_MIN_VALID_VERSION` must be checked before trusting a stored
+cursor. **Deletes via `TRUNCATE TABLE` are not tracked** — a real gap in the
+otherwise delete-aware story above. CT reports *which* PKs changed (optionally
+which columns), not values, so drt still reads current rows via a join. Requires
+database compatibility level ≥ 90; below that CT can be configured but
+`CHANGETABLE` returns an error.
 
 *Sources: [about Change Tracking](https://learn.microsoft.com/en-us/sql/relational-databases/track-changes/about-change-tracking-sql-server) ·
 [enable/disable CT](https://learn.microsoft.com/en-us/sql/relational-databases/track-changes/enable-and-disable-change-tracking-sql-server) ·
@@ -497,15 +560,23 @@ ADR 0004's central claim — *"every cheap signal is a poll, and every push sign
 already a message bus the user runs"* — survives the research, with one refinement
 worth stating precisely.
 
-Of the four push mechanisms found, three are the ADR's pattern exactly: BigQuery's
-is Pub/Sub (a bus); Postgres `NOTIFY` and SQL Server Query Notifications both
-require a long-lived consumer draining a queue. The fourth, **Databricks' table
-update trigger, is the closest thing to a counter-example** — a platform-managed
-push that needs no broker and no drt-side consumer. But it does not undermine the
-ADR: Databricks implements it as *its own managed ~1-minute polling loop* that then
-starts a job. It is the platform's scheduler, not a broker-free event stream, and
-it delivers by invoking drt as a process that starts, syncs, and exits — which is
-Tier 1 working as designed.
+Push mechanisms are not rare — nine turned up across the thirteen sources. What
+makes the ADR's claim hold is that every one of them falls into a category that
+keeps drt out of the consumer business:
+
+| Category | Mechanisms | Why it isn't a drt-owned watcher |
+|---|---|---|
+| **Already a broker the user provisions** | BigQuery audit logs → Pub/Sub; Delta Lake cloud-storage event notifications; Iceberg via Glue → EventBridge | The bus does the delivery; drt is a Tier 3 endpoint at most |
+| **Needs a long-lived consumer draining a queue** | Postgres `LISTEN`/`NOTIFY`; Postgres logical decoding; MySQL binlog; SQL Server Query Notifications | Exactly the daemon-per-source shape the ADR rejects |
+| **The platform's own scheduler, invoking a job** | Databricks table update trigger; Snowflake Alerts + webhook | Managed polling that starts a process — Tier 1 by another name |
+| **A property of one SaaS API, not the connector** | REST API webhooks (e.g. Stripe, GitHub, Shopify) | Can't be assumed by a connector configured against arbitrary endpoints |
+
+**Databricks' table update trigger is the closest thing to a counter-example** —
+a platform-managed push needing no broker and no drt-side consumer. But it does
+not undermine the ADR: Databricks implements it as *its own managed polling loop*
+that then starts a job. It is the platform's scheduler, not a broker-free event
+stream, and it delivers by invoking drt as a process that starts, syncs, and
+exits — which is Tier 1 working as designed.
 
 ### Falsification conditions: neither is met
 
@@ -525,9 +596,10 @@ recommendation. Checked explicitly:
 
 **The no-watcher recommendation stands, and this document changes none of ADR
 0004's conclusions.** If anything the case is slightly stronger: the cheapest
-signal for 11 of 13 sources is a poll, and the two purpose-built signals
+signal is a poll for twelve of the thirteen sources — Databricks being the sole
+exception, and managed polling underneath — and the two purpose-built signals
 (Snowflake `STREAM`, SQL Server Change Tracking) are *designed* to be polled
-cheaply — which is exactly the shape a Dagster sensor provides.
+cheaply, which is exactly the shape a Dagster sensor provides.
 
 ### Notes for the gated tiers
 
@@ -574,18 +646,35 @@ all refinements of mechanism — **no architectural conclusion changed**.
 | BigQuery | "Table change notifications → Pub/Sub; `APPENDS` TVF" | Same options, **`APPENDS` named preferred**; push path identified as audit-logs-via-Log-Router | There is no dedicated "table change notification" feature — the push path is Data Access audit logs routed to Pub/Sub |
 | Databricks | "Table triggers / DLT; Delta commit version" | **Workflows table update trigger** preferred, characterised as *managed polling* | Confirms the mechanism and pins down what "push" means: Databricks polls internally ~1 min, then starts the job |
 | REST API | non-option, cited `rest_api.py:31` | Same conclusion, citation refined to `:132-137` | Line 31 is the `extract()` signature; the HTTP call is at `:132` |
-| Snowflake, Delta Lake, Iceberg, MySQL, DuckDB | as stated | **Confirmed** | Snowflake gains the warehouse-cost and false-positive caveats; Delta/Iceberg citations verified (`deltalake.py:67`, `iceberg.py:51-52`), with the finding that both signals are reachable but unused for incrementality today |
+| Snowflake, Delta Lake, Iceberg, MySQL, DuckDB | as stated | **Mechanism confirmed** | The ADR's reading of each holds. Snowflake gains real caveats it did not carry — stream consumption requires DML, `SYSTEM$STREAM_HAS_DATA` has documented false positives, and triggered tasks (10–30 s) are tighter than scheduled ones. Delta/Iceberg citations verified (`deltalake.py:67`, `iceberg.py:51-52`), with the finding that both signals are reachable but unused for incrementality today |
 
 ## Method and limits
 
 Each row was researched independently against the vendor's official documentation
 and the connector source in this repository, then compared with ADR 0004's
 provisional reading. Every mechanism claim carries a citation; latency figures are
-mechanism floors quoted from vendor documentation, not measured benchmarks, and
-none should be read as an SLA.
+quoted from vendor documentation, not measured benchmarks, and none should be read
+as an SLA. Findings were then re-checked adversarially against the primary docs,
+which corrected several claims — the notes below record where the evidence is
+weaker than the rest of the document.
+
+**Where the evidence is thin, and why:**
+
+- **Databricks trigger latency is not published at all.** A widely-quoted
+  "about every minute" is documented for *file arrival* triggers and does not
+  demonstrably extend to table update triggers; this document therefore reports
+  the latency as unspecified rather than guessing.
+- **ClickHouse's `metadata_modification_time` caveat rests on a maintainer's
+  GitHub comment**, not documentation. The official text says only "Time of latest
+  modification of the table metadata".
+- **ClickHouse false positives from merges** are an inference from how parts are
+  created, not a documented behaviour.
+- **BigQuery `APPENDS` is a Preview feature**, so its contract may change.
+- **DuckDB's lack of a `data_version` equivalent** is absence of evidence — no
+  such pragma is documented — rather than a documented negative.
+- Several vendor limits are **configuration defaults, not fixed ceilings**
+  (Postgres's 8000-byte payload and 8 GB queue, Snowflake's 14-day extension,
+  DuckDB's 16 MiB checkpoint threshold, SQLite's 1000-page checkpoint).
 
 What this document does **not** do: benchmark anything against live warehouses,
-recommend an implementation, or revisit ADR 0004's decision. Two figures are
-explicitly weaker than the rest and flagged in place — Databricks' ~1–2 minute
-trigger latency (community-reported, no documented SLA) and BigQuery's
-audit-log-to-Pub/Sub delivery time (typically seconds, no published SLA).
+recommend an implementation, or revisit ADR 0004's decision.
