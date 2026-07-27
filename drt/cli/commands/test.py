@@ -47,21 +47,38 @@ class _SyncTestResult(TypedDict, total=False):
     reason: str
 
 
-def _test_id(test_def: SyncTest, index: int) -> str:
+def _test_id(test_def: SyncTest, index: int, seen: set[str] | None = None) -> str:
     """Filesystem-safe identifier for one test, for --store-failures paths (#779).
 
     An explicit ``name:`` is trusted as unique (the operator chose it — same
-    convention as dbt's singular-test-by-filename). Without one, falls back to
-    a slugified display name prefixed with the test's position in ``tests:``,
-    so two same-shaped tests (e.g. two ``not_null`` tests) never collide.
+    convention as dbt's singular-test-by-filename) *unless* it collides with
+    another test's slug in the same sync (#835): ``"email nn"`` and
+    ``"email/nn"`` both slugify to ``email-nn``, and without disambiguation the
+    second write silently overwrites the first test's sample — the one thing
+    ``--store-failures`` exists to preserve. ``seen`` tracks slugs already
+    claimed in this sync; a collision falls back to the same
+    ``{index}-{slug}`` prefixing the no-``name:`` path already uses, so it
+    only changes the filename for the tests that would otherwise clobber each
+    other, not every explicitly-named test.
+
+    Without a ``name:``, falls back to a slugified display name prefixed with
+    the test's position in ``tests:``, so two same-shaped tests (e.g. two
+    ``not_null`` tests) never collide in the first place.
     """
     from drt.engine.test_runner import test_display_name
 
     if test_def.name:
-        return _TEST_ID_RE.sub("-", test_def.name).strip("-").lower() or f"{index}-test"
-    base = test_display_name(test_def)
-    slug = _TEST_ID_RE.sub("-", base).strip("-").lower() or "test"
-    return f"{index}-{slug}"
+        slug = _TEST_ID_RE.sub("-", test_def.name).strip("-").lower() or f"{index}-test"
+    else:
+        base = test_display_name(test_def)
+        base_slug = _TEST_ID_RE.sub("-", base).strip("-").lower() or "test"
+        slug = f"{index}-{base_slug}"
+
+    if seen is not None:
+        if slug in seen:
+            slug = f"{index}-{slug}"
+        seen.add(slug)
+    return slug
 
 
 def _store_or_clear_failure_sample(
@@ -165,6 +182,7 @@ def execute_tests_for_sync(
         return sync_results, False
 
     table = get_table_name(sync.destination)
+    seen_test_ids: set[str] = set()
     for index, test_def in enumerate(sync.tests):
         test_name = test_display_name(test_def)
         if dry_run:
@@ -220,7 +238,7 @@ def execute_tests_for_sync(
                     stored = _store_or_clear_failure_sample(
                         sync=sync,
                         test_def=test_def,
-                        test_id=_test_id(test_def, index),
+                        test_id=_test_id(test_def, index, seen_test_ids),
                         failing_rows_query=failing_rows_query,
                         passed=passed,
                         project_dir=project_dir,

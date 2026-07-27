@@ -587,3 +587,72 @@ def test_default_severity_matches_pre_779_behavior(
     assert payload["status"] == "failed"
     assert payload["warnings"] == []
     assert payload["results"][0]["tests"][0]["severity"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# --store-failures slug collisions (#835): two differently-named tests whose
+# `name:` slugifies to the same string must not overwrite each other's file.
+# ---------------------------------------------------------------------------
+
+
+def test_store_failures_disambiguates_colliding_slugs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`"email nn"` and `"email/nn"` both slugify to `email-nn` — without
+    disambiguation the second write silently clobbers the first test's
+    sample, which is exactly the failure `--store-failures` exists to let an
+    operator see."""
+    monkeypatch.chdir(tmp_path)
+    _write_sync(
+        tmp_path,
+        {
+            "name": "orders_sync",
+            "model": "SELECT 1",
+            "destination": _DEST,
+            "tests": [
+                {"not_null": {"columns": ["email"]}, "name": "email nn"},
+                {"not_null": {"columns": ["other"]}, "name": "email/nn"},
+            ],
+        },
+    )
+    _patch_destination_query(
+        monkeypatch, count=1, rows=[{"id": 1, "email": "a@example.com"}]
+    )
+    result = runner.invoke(app, ["test", "--store-failures"])
+
+    assert result.exit_code == 1
+    failures_dir = tmp_path / ".drt" / "test_failures" / "orders_sync"
+    # Both tests failed and both must have left a sample — a collision would
+    # leave only one file (the second write clobbering the first).
+    written = sorted(p.name for p in failures_dir.glob("*.jsonl"))
+    assert len(written) == 2, f"expected 2 sample files, found {written}"
+
+
+def test_test_id_disambiguates_within_seen_set() -> None:
+    from drt.cli.commands.test import _test_id
+    from drt.config.sync_options import NotNullTest, SyncTest
+
+    a = SyncTest(name="email nn", not_null=NotNullTest(columns=["email"]))
+    b = SyncTest(name="email/nn", not_null=NotNullTest(columns=["other"]))
+
+    seen: set[str] = set()
+    id_a = _test_id(a, 0, seen)
+    id_b = _test_id(b, 1, seen)
+
+    assert id_a != id_b
+    assert id_a == "email-nn"  # first claim keeps the clean slug
+    assert id_b == "1-email-nn"  # collision falls back to the index prefix
+
+    # Without a seen set (the old call shape), both still collide — locks the
+    # bug this issue reports, not just the fix.
+    assert _test_id(a, 0) == _test_id(b, 1) == "email-nn"
+
+
+def test_test_id_path_traversal_stays_neutralized() -> None:
+    """Regression guard requested by #835: the collision fix must not
+    reopen the path-traversal case that was already handled correctly."""
+    from drt.cli.commands.test import _test_id
+    from drt.config.sync_options import NotNullTest, SyncTest
+
+    t = SyncTest(name="../../etc/passwd", not_null=NotNullTest(columns=["id"]))
+    assert _test_id(t, 0, set()) == "etc-passwd"
