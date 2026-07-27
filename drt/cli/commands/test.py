@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import typer
 
@@ -271,10 +272,17 @@ def execute_tests_for_sync(
     return sync_results, had_failures
 
 
-def _collect_warnings(results: list[_SyncTestResult]) -> list[dict[str, object]]:
+def _collect_warnings(
+    results: Sequence[_SyncTestResult] | Sequence[Mapping[str, Any]],
+) -> list[dict[str, object]]:
     """Flatten every ``severity: warn`` failure across *results* into a
     top-level list (#779) — so CI tooling can react without walking the
     nested per-sync/per-test structure.
+
+    Accepts either ``drt test``'s own ``_SyncTestResult`` or ``drt build``'s
+    per-sync ``dict[str, object]`` entries (#838) — both carry the same
+    ``sync`` + ``tests`` shape this function actually reads, so ``drt build``
+    reuses this rather than re-implementing it against a narrower type.
 
     Carries ``value`` when the test ran and returned one (a threshold
     breach — the data quality is known and numeric) or ``error`` when it

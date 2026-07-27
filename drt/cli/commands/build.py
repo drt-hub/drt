@@ -187,6 +187,19 @@ def build(
         )
 
     if json_mode:
+        from drt.cli.commands.test import _collect_warnings
+
+        # (#838) drt build runs the same tests through the same
+        # execute_tests_for_sync seam as drt test and honours the same
+        # severity rule, but its JSON had no warnings[] — a CI pipeline
+        # running drt build had to reimplement _collect_warnings in jq to
+        # get what drt test hands over directly. Each entry already carries
+        # "tests" in exactly the shape _collect_warnings expects; only the
+        # sync-name key differs (entry["name"] here vs. "sync" there, since
+        # entries also holds run-level fields _collect_warnings doesn't
+        # touch), so remap that one key rather than re-deriving the list.
+        warning_input = [{**e, "sync": e["name"]} for e in entries]
+
         print(
             json.dumps(
                 {
@@ -195,6 +208,7 @@ def build(
                     "failed": failed,
                     "skipped": skipped,
                     "total_duration_seconds": total_duration,
+                    "warnings": _collect_warnings(warning_input),
                 },
                 indent=2,
             )

@@ -278,3 +278,64 @@ def test_build_missing_project_exits_nonzero(
     result = runner.invoke(app, ["build"])
 
     assert result.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# warnings[] parity with `drt test` (#838)
+# ---------------------------------------------------------------------------
+
+
+def test_build_json_includes_warnings_array_matching_drt_test_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_runtime: dict[str, Any]
+) -> None:
+    """`drt build` shares execute_tests_for_sync and honours the same
+    severity rule as `drt test`, but its JSON had no top-level `warnings[]`
+    — a CI pipeline running `drt build` had to reimplement `_collect_warnings`
+    in jq to get what `drt test` hands over directly (#838)."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "drt_project.yml").write_text("name: demo\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "warn_sync.yml").write_text(
+        yaml.dump(
+            {
+                "name": "warn_sync",
+                "model": "SELECT 1",
+                "destination": QUERYABLE_DEST,
+                "tests": [
+                    {
+                        "not_null": {"columns": ["id"]},
+                        "severity": "warn",
+                        "name": "id_nn",
+                    }
+                ],
+            }
+        )
+    )
+    patched_runtime["null_count"]["value"] = 3  # fails the check
+
+    result = runner.invoke(app, ["build", "--output", "json"])
+
+    # A severity: warn failure is reported but must not fail the build.
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["succeeded"] == 1
+    assert len(payload["warnings"]) == 1
+    warning = payload["warnings"][0]
+    assert warning["sync"] == "warn_sync"
+    assert warning["test"] == "not_null(id_nn)"
+    # #837's split: a threshold breach carries `value`, never `error`.
+    assert warning["value"] == "3"
+    assert "error" not in warning
+
+
+def test_build_json_warnings_empty_when_no_warn_severity_failures(
+    project: Path, patched_runtime: dict[str, Any]
+) -> None:
+    """The default fixture has no severity: warn tests — warnings[] must be
+    present and empty, not absent, so JSON consumers see a stable shape."""
+    result = runner.invoke(app, ["build", "--output", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["warnings"] == []
