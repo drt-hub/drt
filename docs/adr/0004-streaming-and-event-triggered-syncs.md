@@ -1,9 +1,11 @@
 # ADR 0004 — Streaming / event-triggered syncs
 
-- **Status:** Proposed — the recommendation below is provisional until the
+- **Status:** Proposed. The recommendation was written to be falsified by the
   per-warehouse trigger matrix ([#786](https://github.com/drt-hub/drt/issues/786),
-  @Muawiya-contact) lands, and is written to be falsified by it. See
-  [Falsification condition](#falsification-condition).
+  @Muawiya-contact); that matrix has since landed as
+  [docs/research/warehouse-trigger-matrix.md](../research/warehouse-trigger-matrix.md)
+  and meets neither [falsification condition](#falsification-condition), so the
+  recommendation stands unchanged.
 - **Issue:** [#786](https://github.com/drt-hub/drt/issues/786)
 - **Implementation:** none — this ADR recommends **not** building a native
   watcher. The work it does sanction is listed under
@@ -115,31 +117,25 @@ Non-blocking, for completeness:
 - **`depends_on` (#426) — out of scope.** Ordering between syncs is an
   orchestrator's job, and Tier 2 gets it for free.
 
-### Trigger matrix — provisional, pending #786's dedicated deliverable
+### Trigger matrix
 
-> **Attribution.** The authoritative per-warehouse trigger matrix is
-> @Muawiya-contact's piece of #786. The table below is *not* it: it is my
-> reading of the shipped connector code, recorded here so this ADR is
-> self-contained and handed over as raw material. **It is superseded by that
-> matrix on landing**, and where the two disagree, the matrix wins.
+The authoritative per-warehouse trigger matrix — @Muawiya-contact's piece of
+#786 — has landed as
+[docs/research/warehouse-trigger-matrix.md](../research/warehouse-trigger-matrix.md).
+It supersedes the provisional table that stood here, covering all thirteen
+supported sources with a preferred mechanism, latency, infrastructure and cost
+for each, cited to vendor documentation and connector code.
 
-| Source | Signal | Shape | Cost / caveat |
-|---|---|---|---|
-| Postgres | `LISTEN`/`NOTIFY`; logical decoding | push; push | NOTIFY needs a trigger the user installs; logical decoding needs a replication slot and is CDC, not reverse ETL's job |
-| BigQuery | Table change notifications → Pub/Sub; `APPENDS` TVF | push; poll | Pub/Sub is the only true push here and lands in Tier 1 or 3 |
-| Snowflake | `STREAM` + `SYSTEM$STREAM_HAS_DATA` | poll | Cheap to poll, and the closest thing to a purpose-built signal |
-| Databricks | Table triggers / DLT; Delta commit version | push; poll | Delta version is a cheap monotonic cursor for a sensor |
-| Delta Lake | Table version | poll | Cheapest in the matrix, and drt already calls `DeltaTable(...).version()` (`drt/sources/deltalake.py:67`) |
-| Iceberg | Snapshot id | poll | Metadata-only read, reachable via the loaded pyiceberg table (`drt/sources/iceberg.py:52`), though drt does not read it today |
-| ClickHouse, MySQL, Redshift, SQL Server | `max(updated_at)` or count probe | poll | No native change feed worth targeting; generic and slow |
-| DuckDB / SQLite | file mtime | poll | Single-writer, local — sub-minute activation is not the use case |
-| REST API | **none — stated non-option** | — | Polling the API *is* the extract (`drt/sources/rest_api.py:31`); a separate trigger adds a round trip and no information |
-
-The structural pattern this reading suggests: **every cheap signal is a poll,
-and every push signal is already a message bus the user runs.** That is the
+The structural pattern that reading suggested holds: **every cheap signal is a
+poll, and every push signal is already a message bus the user runs.** That is the
 strongest argument for sensors and against a native watcher — a sensor is a
 scheduled cheap poll with durable cursors, which is exactly the shape of the
-signals that actually exist.
+signals that actually exist. The finished matrix confirms it for eleven of
+thirteen sources, and the nearest counter-example (Databricks' table update
+trigger) turns out to be the platform's own managed polling loop invoking the
+CLI — Tier 1 working as designed, not a broker-free push. See
+[What this means for ADR 0004](../research/warehouse-trigger-matrix.md#what-this-means-for-adr-0004)
+for the falsification check against both conditions below.
 
 ### Falsification condition
 
