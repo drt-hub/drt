@@ -479,6 +479,70 @@ def test_severity_warn_failure_reported_but_exit_zero(
     assert payload["warnings"][0]["sync"] == "s"
 
 
+def test_warnings_carry_value_for_a_threshold_breach(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#837: a warn test that ran and failed its check must surface `value`,
+    not `error` — the data quality is known (3 stale rows), not unknown."""
+    monkeypatch.chdir(tmp_path)
+    _write_sync(
+        tmp_path,
+        {
+            "name": "s",
+            "model": "SELECT 1",
+            "destination": _DEST,
+            "tests": [
+                {
+                    "freshness": {"column": "updated_at", "max_age": "1 hour"},
+                    "severity": "warn",
+                }
+            ],
+        },
+    )
+    _patch_destination_query(monkeypatch, count=3)
+    result = runner.invoke(app, ["test", "--output", "json"])
+    payload = json_mod.loads(result.output)
+    warning = payload["warnings"][0]
+    assert warning["value"] == "3"
+    assert "error" not in warning
+
+
+def test_warnings_carry_error_for_an_exception_not_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#837: a warn test whose query raised must surface `error`, not a
+    `value` masquerading as one — the exception text is not test data."""
+    monkeypatch.chdir(tmp_path)
+    _write_sync(
+        tmp_path,
+        {
+            "name": "s",
+            "model": "SELECT 1",
+            "destination": _DEST,
+            "tests": [
+                {
+                    "freshness": {"column": "updated_at", "max_age": "1 hour"},
+                    "severity": "warn",
+                }
+            ],
+        },
+    )
+    from drt.destinations import query as query_module
+
+    monkeypatch.setattr(query_module, "is_queryable", lambda d: True)
+    monkeypatch.setattr(query_module, "get_table_name", lambda d: "test_table")
+
+    def _raise(dest: object, q: str) -> int:
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(query_module, "execute_test_query", _raise)
+    result = runner.invoke(app, ["test", "--output", "json"])
+    payload = json_mod.loads(result.output)
+    warning = payload["warnings"][0]
+    assert warning["error"] == "connection refused"
+    assert "value" not in warning
+
+
 def test_severity_error_failure_exits_nonzero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

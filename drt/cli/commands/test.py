@@ -256,18 +256,28 @@ def execute_tests_for_sync(
 def _collect_warnings(results: list[_SyncTestResult]) -> list[dict[str, object]]:
     """Flatten every ``severity: warn`` failure across *results* into a
     top-level list (#779) — so CI tooling can react without walking the
-    nested per-sync/per-test structure."""
+    nested per-sync/per-test structure.
+
+    Carries ``value`` when the test ran and returned one (a threshold
+    breach — the data quality is known and numeric) or ``error`` when it
+    raised (an infrastructure failure — the data quality is simply unknown)
+    (#837). Never both, mirroring the per-test entry shape in
+    ``results[].tests[]`` that already keeps these separate. A consumer
+    counting "warnings over time" needs to be able to tell them apart —
+    collapsing them into one ``value`` key silently mixed outages into a
+    data-quality signal, and broke a numeric parse of ``value`` on the
+    exception case with no way to have predicted it.
+    """
     warnings: list[dict[str, object]] = []
     for r in results:
         for t in r.get("tests", []):
             if t.get("severity") == "warn" and t.get("passed") is False:
-                warnings.append(
-                    {
-                        "sync": r["sync"],
-                        "test": t.get("name"),
-                        "value": t.get("value", t.get("error")),
-                    }
-                )
+                entry: dict[str, object] = {"sync": r["sync"], "test": t.get("name")}
+                if "error" in t:
+                    entry["error"] = t["error"]
+                else:
+                    entry["value"] = t.get("value")
+                warnings.append(entry)
     return warnings
 
 
