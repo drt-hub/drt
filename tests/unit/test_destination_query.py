@@ -18,6 +18,7 @@ from drt.config.models import (
 from drt.destinations.query import (
     execute_test_query,
     fetch_all_keys,
+    fetch_failing_rows,
     fetch_rows,
     fetch_rows_by_keys,
     fetch_tracked_state,
@@ -776,3 +777,86 @@ def test_fetch_all_keys_unsupported_dialect_raises() -> None:
             RestApiDestinationConfig(type="rest_api", url="http://x", method="POST"),
             ["id"],
         )
+
+
+# ---------------------------------------------------------------------------
+# fetch_failing_rows driver coverage (#834) — only the Postgres path had a
+# test (test_store_failures.py); the MySQL DictCursor branch and ClickHouse's
+# distinct result-shape API were unexercised.
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_failing_rows_mysql_tuple_rows() -> None:
+    cursor = MagicMock()
+    cursor.description = [("id",), ("email",)]
+    cursor.fetchall.return_value = [(1, "a@example.com"), (2, "b@example.com")]
+    conn = _plain_conn(cursor)
+
+    with patch(
+        "drt.destinations.mysql.MySQLDestination._connect", return_value=conn
+    ):
+        rows = fetch_failing_rows(_mysql_config(), "SELECT * FROM t", limit=5)
+
+    assert rows == [
+        {"id": 1, "email": "a@example.com"},
+        {"id": 2, "email": "b@example.com"},
+    ]
+    cursor.execute.assert_called_once()
+    (sql,) = cursor.execute.call_args[0]
+    assert "LIMIT 5" in sql
+    conn.close.assert_called_once()
+
+
+def test_fetch_failing_rows_mysql_dict_cursor_rows() -> None:
+    """pymysql's DictCursor yields mappings, not positional tuples — the
+    ``isinstance(row, dict)`` branch this exercises is the one #834 flagged
+    as untested and most likely to break against a real DictCursor config."""
+    cursor = MagicMock()
+    cursor.description = [("id",), ("email",)]
+    cursor.fetchall.return_value = [{"id": 1, "email": "a@example.com"}]
+    conn = _plain_conn(cursor)
+
+    with patch(
+        "drt.destinations.mysql.MySQLDestination._connect", return_value=conn
+    ):
+        rows = fetch_failing_rows(_mysql_config(), "SELECT * FROM t", limit=5)
+
+    assert rows == [{"id": 1, "email": "a@example.com"}]
+
+
+def test_fetch_failing_rows_clickhouse_uses_column_names_and_result_rows() -> None:
+    """ClickHouse's client shares no code path with the DB-API drivers: no
+    ``cursor()``/``description``/``fetchall`` — ``client.query(...)`` returns
+    an object with ``.column_names`` / ``.result_rows`` instead."""
+    client = MagicMock()
+    result = MagicMock()
+    result.column_names = ["id", "email"]
+    result.result_rows = [(1, "a@example.com")]
+    client.query.return_value = result
+
+    with patch(
+        "drt.destinations.clickhouse.ClickHouseDestination._connect",
+        return_value=client,
+    ):
+        rows = fetch_failing_rows(_clickhouse_config(), "SELECT * FROM t", limit=5)
+
+    assert rows == [{"id": 1, "email": "a@example.com"}]
+    (sql,) = client.query.call_args[0]
+    assert "LIMIT 5" in sql
+    client.close.assert_called_once()
+
+
+def test_fetch_failing_rows_snowflake_smoke() -> None:
+    cursor = MagicMock()
+    cursor.description = [("ID",), ("EMAIL",)]
+    cursor.fetchall.return_value = [(1, "a@example.com")]
+    conn = _fake_conn(cursor)
+
+    with patch(
+        "drt.destinations.snowflake.SnowflakeDestination._connect",
+        return_value=conn,
+    ):
+        rows = fetch_failing_rows(_snowflake_config(), "SELECT * FROM t", limit=5)
+
+    assert rows == [{"ID": 1, "EMAIL": "a@example.com"}]
+    conn.close.assert_called_once()
