@@ -1,11 +1,13 @@
 # ADR 0004 — Streaming / event-triggered syncs
 
-- **Status:** Proposed. The recommendation was written to be falsified by the
+- **Status:** Accepted. The recommendation was written to be falsified by the
   per-warehouse trigger matrix ([#786](https://github.com/drt-hub/drt/issues/786),
   @Muawiya-contact); that matrix has since landed as
   [docs/research/warehouse-trigger-matrix.md](../research/warehouse-trigger-matrix.md)
   and meets neither [falsification condition](#falsification-condition), so the
-  recommendation stands unchanged.
+  recommendation stands unchanged. Accepted on that evidence rather than on
+  having been asserted first — the matrix checked both conditions explicitly
+  and found neither met.
 - **Issue:** [#786](https://github.com/drt-hub/drt/issues/786)
 - **Implementation:** none — this ADR recommends **not** building a native
   watcher. The work it does sanction is listed under
@@ -24,8 +26,10 @@ where a nightly or hourly sync is visibly wrong.
 The question this ADR answers is what an OSS, CLI-first tool should do about
 that. It is deliberately a build/no-build decision, not a design for a daemon.
 
-Three facts about the code as it stands (v0.8.2) constrain the answer more than
-the competitive framing does.
+Three facts about the code as it stands (v0.8.3) constrain the answer more than
+the competitive framing does. Every citation below was re-verified against the
+v0.8.3 tree; none of that release's changes touch `serve`, state locality, or
+the Dagster integration.
 
 **`drt serve` is a trigger endpoint, not a trigger runtime.** It exists
 (#218) and works for its designed cadence — a dbt job finishes, POST
@@ -126,14 +130,31 @@ It supersedes the provisional table that stood here, covering all thirteen
 supported sources with a preferred mechanism, latency, infrastructure and cost
 for each, cited to vendor documentation and connector code.
 
-The structural pattern that reading suggested holds: **every cheap signal is a
-poll, and every push signal is already a message bus the user runs.** That is the
-strongest argument for sensors and against a native watcher — a sensor is a
+The structural pattern that reading suggested holds — **every cheap signal is a
+poll** — and the cheapest signal is a poll for twelve of the thirteen sources.
+That is the argument for sensors and against a native watcher: a sensor is a
 scheduled cheap poll with durable cursors, which is exactly the shape of the
-signals that actually exist. The finished matrix confirms it for twelve of the
-thirteen sources, and the sole exception (Databricks' table update trigger)
-turns out to be the platform's own managed polling loop invoking the CLI —
-Tier 1 working as designed, not a broker-free push. See
+signals that actually exist. The two purpose-built signals (Snowflake `STREAM`,
+SQL Server Change Tracking) are *designed* to be polled cheaply.
+
+The matrix refines the second half of that claim, and the refinement matters
+because the loose version is wrong in a way that would invite a fair objection.
+Push is **not** rare — nine mechanisms turned up across the thirteen sources, so
+"every push signal is already a message bus" understates what exists. The claim
+holds instead because all nine fall into one of four categories, each of which
+keeps drt out of the consumer business:
+
+| Category | Why it isn't a drt-owned watcher |
+|---|---|
+| Already a broker the user provisions (BigQuery audit logs → Pub/Sub, Delta storage events, Iceberg via Glue → EventBridge) | The bus does the delivery; drt is a Tier 3 endpoint at most |
+| Needs a long-lived consumer draining a queue (Postgres `LISTEN`/`NOTIFY` and logical decoding, MySQL binlog, SQL Server Query Notifications) | Exactly the daemon-per-source shape this ADR rejects |
+| The platform's own scheduler invoking a job (Databricks table update trigger, Snowflake Alerts + webhook) | Managed polling that starts a process — Tier 1 by another name |
+| A property of one SaaS API, not the connector (REST API webhooks) | Cannot be assumed by a connector configured against arbitrary endpoints |
+
+Databricks' table update trigger is the closest counter-example — a
+platform-managed push needing no broker and no drt-side consumer — and it
+resolves as Databricks' own managed polling loop starting a job, which is Tier 1
+working as designed rather than a broker-free event stream. See
 [What this means for ADR 0004](../research/warehouse-trigger-matrix.md#what-this-means-for-adr-0004)
 for the falsification check against both conditions below.
 
@@ -199,15 +220,22 @@ cheaper: no trigger runtime means no trigger protocol to keep compatible.
 
 ## Follow-up issues
 
-Sanctioned by this ADR, to be opened separately and tagged as related to #786:
+Sanctioned by this ADR and now tracked separately, so closing #786 does not drop
+the work it authorised:
 
-1. **`drt serve` concurrency contract** — a *design* decision, not a bug fix.
-   The open question is what a concurrent trigger should get: a bounded queue,
-   `429` with `Retry-After`, or per-sync locks replacing the global one. Also
-   in scope: return `202` with a run id instead of holding the request open,
-   and add HMAC signature verification alongside the bearer token.
-2. **`dagster-drt` sensors** — a generic cheap-signal sensor plus Delta/Iceberg
-   version and Snowflake `STREAM` variants, yielding one `RunRequest` per
-   changed sync. Blocked-by #756.
-3. **Docs — "event-driven syncs" guide** covering all three tiers. Blocked-by
-   #756 and #769, per the gates above.
+1. **[#854](https://github.com/drt-hub/drt/issues/854) — `drt serve` concurrency
+   contract.** A *design* decision, not a bug fix. The open question is what a
+   concurrent trigger should get: a bounded queue, `429` with `Retry-After`, or
+   per-sync locks replacing the global one. Also in scope: return `202` with a
+   run id instead of holding the request open, and add HMAC signature
+   verification alongside the bearer token.
+2. **[#855](https://github.com/drt-hub/drt/issues/855) — `dagster-drt` sensors**
+   (the Tier 2 path). A generic cheap-signal sensor plus Delta/Iceberg version
+   and Snowflake `STREAM` variants, yielding one `RunRequest` per changed sync.
+   The two lakehouse signals are the cheapest first sensors to write: Delta's
+   `version()` is already called in shipped code (`drt/sources/deltalake.py:67`)
+   and Iceberg's snapshot id is reachable from a table drt already loads
+   (`drt/sources/iceberg.py:51-52`). **Blocked by #756.**
+3. **[#856](https://github.com/drt-hub/drt/issues/856) — "event-driven syncs"
+   guide** covering all three tiers. Tier 1 is documentable now; Tiers 2 and 3
+   are **gated on #756 and #769**, per the gates above.
