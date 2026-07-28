@@ -18,25 +18,84 @@ from collections.abc import Iterator
 from typing import Any
 
 from drt.config.credentials import DatabricksProfile, ProfileConfig, resolve_env
+from drt.config.models import RetryConfig
+from drt.destinations.retry import with_retry
 
 
 class DatabricksSource:
     """Extract records from a Databricks SQL Warehouse."""
 
-    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
-        assert isinstance(config, DatabricksProfile)
-        conn = self._connect(config)
+    def _is_transient(self, exc: Exception) -> bool:
+        """Is ``exc`` worth retrying? (#766)
+
+        Transient, from ``databricks.sql.exc``:
+
+        - ``OperationalError`` — the connector's class for connection and
+          service-availability trouble.
+        - ``RequestError`` — a failed request to the SQL endpoint. This is the
+          **warehouse cold start**: a stopped SQL warehouse takes minutes to
+          resume, and the first requests fail while it does. Observed in the
+          #654 smoke programme, and the single most valuable retry here — the
+          warehouse is coming up and the very same query will succeed shortly.
+
+        Permanent: ``ProgrammingError`` (bad SQL, missing table),
+        ``DatabaseError``, and ``NotSupportedError``.
+
+        The driver derives its exception classes from PEP 249, so
+        ``OperationalError`` and ``ProgrammingError`` are siblings under
+        ``DatabaseError``; matching the specific classes rather than the base
+        keeps a SQL typo from being retried. Note ``RequestError`` sits
+        outside that tree (it subclasses the driver's own ``Error``).
+
+        Imported inside the method — ``databricks-sql-connector`` is an
+        optional extra, and this class is imported unconditionally by the
+        connector registry.
+        """
         try:
-            cur = conn.cursor()
+            from databricks.sql import exc as dbsql_exc  # type: ignore[import-untyped]
+        except ImportError:  # pragma: no cover - driver absent, nothing to classify
+            return False
+        transient: tuple[type[BaseException], ...] = tuple(
+            cls
+            for cls in (
+                getattr(dbsql_exc, "OperationalError", None),
+                getattr(dbsql_exc, "RequestError", None),
+            )
+            if isinstance(cls, type)
+        )
+        if not transient:  # pragma: no cover - driver without the documented classes
+            return False
+        return isinstance(exc, transient)
+
+    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
+        """Run ``query`` and yield rows as dicts, retrying transient failures.
+
+        **Retry scope (#766): connection and query execution only.** A SQL
+        warehouse resuming from a cold start no longer fails the sync. A
+        failure after the first row has been yielded propagates — those rows
+        are already loaded downstream and cannot be un-sent. See the Postgres
+        source for the full rationale.
+        """
+        assert isinstance(config, DatabricksProfile)
+
+        def _connect_and_fetch() -> tuple[list[str], list[Any]]:
+            conn = self._connect(config)
             try:
-                cur.execute(query)
-                columns = [desc[0] for desc in cur.description]
-                for row in cur.fetchall():
-                    yield dict(zip(columns, row))
+                cur = conn.cursor()
+                try:
+                    cur.execute(query)
+                    columns = [desc[0] for desc in cur.description]
+                    return columns, cur.fetchall()
+                finally:
+                    cur.close()
             finally:
-                cur.close()
-        finally:
-            conn.close()
+                conn.close()
+
+        columns, rows = with_retry(_connect_and_fetch, RetryConfig(), retry_on=self._is_transient)
+
+        # Iteration stays outside the retry — a yielded row cannot be un-sent.
+        for row in rows:
+            yield dict(zip(columns, row))
 
     def test_connection(self, config: ProfileConfig) -> bool:
         assert isinstance(config, DatabricksProfile)

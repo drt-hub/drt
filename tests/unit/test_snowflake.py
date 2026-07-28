@@ -196,3 +196,117 @@ class TestSnowflakeSourceKeyPairConnect:
         kwargs = fake.connector.connect.call_args.kwargs
         assert kwargs["password"] == "pw"
         assert "private_key" not in kwargs
+
+
+# ---------------------------------------------------------------------------
+# Transient-failure retry (#766)
+# ---------------------------------------------------------------------------
+
+
+class TestSnowflakeTransientClassification:
+    """390114 (token expired) is a DatabaseError — and so are permanent errors.
+
+    That collision is the reason ``with_retry`` takes a predicate rather than
+    a tuple of exception types.
+    """
+
+    def test_token_expired_390114_is_transient(self) -> None:
+        from snowflake.connector import errors as sf_errors
+
+        exc = sf_errors.DatabaseError(msg="Authentication token has expired", errno=390114)
+        assert SnowflakeSource()._is_transient(exc) is True
+
+    def test_operational_error_is_transient(self) -> None:
+        from snowflake.connector import errors as sf_errors
+
+        assert SnowflakeSource()._is_transient(sf_errors.OperationalError(msg="conn lost")) is True
+
+    def test_revocation_check_error_is_transient(self) -> None:
+        """An unreachable CRL/OCSP endpoint — subclass of OperationalError."""
+        from snowflake.connector import errors as sf_errors
+
+        exc = sf_errors.RevocationCheckError(msg="OCSP responder unreachable")
+        assert SnowflakeSource()._is_transient(exc) is True
+
+    def test_programming_error_is_not_transient(self) -> None:
+        """ProgrammingError subclasses DatabaseError — must not be swept in."""
+        from snowflake.connector import errors as sf_errors
+
+        exc = sf_errors.ProgrammingError(msg="SQL compilation error", errno=1003)
+        assert SnowflakeSource()._is_transient(exc) is False
+
+    def test_database_error_with_other_errno_is_not_transient(self) -> None:
+        from snowflake.connector import errors as sf_errors
+
+        exc = sf_errors.DatabaseError(msg="something else", errno=1234)
+        assert SnowflakeSource()._is_transient(exc) is False
+
+    def test_unrelated_exception_is_not_transient(self) -> None:
+        assert SnowflakeSource()._is_transient(ValueError("nope")) is False
+
+
+class TestSnowflakeSourceRetry:
+    def test_expired_token_is_retried_then_succeeds(self) -> None:
+        """#654 saw long extracts outstay their session token."""
+        from snowflake.connector import errors as sf_errors
+
+        attempts: list[int] = []
+
+        def connect(_config: Any) -> MagicMock:
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise sf_errors.DatabaseError(
+                    msg="Authentication token has expired", errno=390114
+                )
+            return _fake_conn(_fake_cursor(["id"], [(1,)]))
+
+        with patch.object(SnowflakeSource, "_connect", side_effect=connect):
+            with patch("drt.destinations.retry.time.sleep"):
+                rows = list(SnowflakeSource().extract("SELECT id FROM t", _config()))
+
+        assert rows == [{"id": 1}]
+        assert len(attempts) == 3
+
+    def test_sql_compilation_error_is_not_retried(self) -> None:
+        from snowflake.connector import errors as sf_errors
+
+        attempts: list[int] = []
+
+        def connect(_config: Any) -> MagicMock:
+            attempts.append(1)
+            raise sf_errors.ProgrammingError(msg="SQL compilation error", errno=1003)
+
+        with patch.object(SnowflakeSource, "_connect", side_effect=connect):
+            with patch("drt.destinations.retry.time.sleep") as sleep:
+                with pytest.raises(sf_errors.ProgrammingError):
+                    list(SnowflakeSource().extract("SELECT nope", _config()))
+
+        assert len(attempts) == 1
+        sleep.assert_not_called()
+
+    def test_failure_after_first_row_is_not_retried(self) -> None:
+        """Scope boundary (#766): a yielded row cannot be un-sent."""
+        from snowflake.connector import errors as sf_errors
+
+        attempts: list[int] = []
+
+        def connect(_config: Any) -> MagicMock:
+            attempts.append(1)
+
+            def exploding_rows():
+                yield (1,)
+                raise sf_errors.OperationalError(msg="connection reset")
+
+            cur = MagicMock()
+            cur.description = [("id",)]
+            cur.fetchall.return_value = exploding_rows()
+            return _fake_conn(cur)
+
+        with patch.object(SnowflakeSource, "_connect", side_effect=connect):
+            with patch("drt.destinations.retry.time.sleep"):
+                gen = SnowflakeSource().extract("SELECT id FROM t", _config())
+                assert next(gen) == {"id": 1}
+                with pytest.raises(sf_errors.OperationalError):
+                    next(gen)
+
+        assert len(attempts) == 1
