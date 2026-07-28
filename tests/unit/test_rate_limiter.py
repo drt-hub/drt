@@ -586,6 +586,49 @@ class TestResolveRateLimiter:
 
         assert limiter.burst is None
 
+    def test_disabled_sentinel_does_not_disable_a_paced_endpoint(self) -> None:
+        """rps=0 means "no pacing", not "the slowest rate" (@Muawiya-contact).
+
+        Numerically 0 < every real rate, so a plain min() lets the sentinel win
+        and switches pacing off for *every* sync sharing the endpoint —
+        ``acquire()`` returns immediately at rps<=0. That inverts the point of
+        the PR: one sync opting out would remove the shared quota's protection
+        from all the others.
+        """
+        options_paced = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=10))
+        options_off = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=0))
+
+        first = resolve_rate_limiter(self._slack("HOOK_A"), options_paced)
+        second = resolve_rate_limiter(self._slack("HOOK_A"), options_off)
+
+        assert first is second
+        assert second.requests_per_second == 10
+
+    def test_a_real_rate_tightens_a_disabled_limiter(self) -> None:
+        """The reverse order, which the report did not cover but fails the same
+        way: registering the sentinel *first* left the bucket at 0 forever,
+        because no positive rate is ever numerically smaller. Registration order
+        is thread-scheduling order, so both directions have to hold.
+        """
+        options_off = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=0))
+        options_paced = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=10))
+
+        first = resolve_rate_limiter(self._slack("HOOK_A"), options_off)
+        second = resolve_rate_limiter(self._slack("HOOK_A"), options_paced)
+
+        assert first is second
+        assert second.requests_per_second == 10
+
+    def test_two_disabled_configs_stay_disabled(self) -> None:
+        """0 + 0 must remain the sentinel — tightening must not invent a rate
+        where the user asked for none."""
+        options_off = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=0))
+
+        resolve_rate_limiter(self._slack("HOOK_A"), options_off)
+        limiter = resolve_rate_limiter(self._slack("HOOK_A"), options_off)
+
+        assert limiter.requests_per_second == 0
+
     def test_tightening_preserves_pacing_state(self) -> None:
         """Tightening must mutate the shared instance, never swap it — an
         in-flight thread holds a reference, and a fresh object would reset

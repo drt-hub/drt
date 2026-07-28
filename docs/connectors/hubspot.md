@@ -106,6 +106,17 @@ destination:
 
 `destination.rate_limit` beats `sync.rate_limit`, which beats the default of 10/s. When two syncs share a portal but request different rates, the lowest wins for both.
 
+> **Syncing to more than one portal? Use `auth.token_env`, not an inline `auth.token`.**
+> Pacing is per portal, and drt identifies the portal by the *name* of the env var holding the token — it deliberately never derives the key from the token value itself. Two destinations that inline a literal token are therefore indistinguishable to the limiter and share one bucket, so they pace against each other even when they point at different portals. The failure mode is a slower sync, never a 429; giving each portal its own env var gives each its own bucket.
+>
+> ```yaml
+> destination:
+>   type: hubspot
+>   auth:
+>     type: bearer
+>     token_env: HUBSPOT_TOKEN_EU   # per-portal bucket
+> ```
+
 ## Notes
 
 - HubSpot rate limit: ~100 requests/10s for private apps. drt caps at 9 req/s automatically

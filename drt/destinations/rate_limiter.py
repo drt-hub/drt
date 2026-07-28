@@ -124,9 +124,21 @@ class RateLimiter:
 
         ``burst=None`` (interval-only, no accumulation) is the strictest
         setting, so it wins over any numeric burst.
+
+        ``requests_per_second=0`` is the "pacing disabled" **sentinel**, not a
+        rate, so it is excluded from the numeric comparison (@Muawiya-contact
+        on #858). A plain ``min()`` would let it win against every real rate —
+        ``acquire()`` returns immediately at ``rps<=0``, so one sync opting out
+        would switch pacing off for every other sync sharing the endpoint,
+        inverting the purpose of the shared bucket. Any positive rate is
+        therefore treated as stricter than the sentinel, in both directions
+        (registration order is thread-scheduling order); 0 tightening 0 stays
+        disabled, since there is no rate to adopt.
         """
         with self._lock:
-            if requests_per_second < self.requests_per_second:
+            if requests_per_second > 0 and (
+                self.requests_per_second <= 0 or requests_per_second < self.requests_per_second
+            ):
                 self.requests_per_second = requests_per_second
             if burst is None or self.burst is None:
                 self.burst = None

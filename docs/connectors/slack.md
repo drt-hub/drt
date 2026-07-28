@@ -68,7 +68,9 @@ destination:
 
 `destination.rate_limit` beats `sync.rate_limit`, which beats the default of 10/s.
 
-The limiter is shared per **webhook URL**, so several syncs posting to the same webhook concurrently (`drt run --threads 4`) pace through one bucket instead of one bucket each. Different webhooks never throttle each other. When two syncs share a webhook but request different rates, the lowest wins for both.
+The limiter is shared per **webhook URL**, so several syncs posting to the same webhook concurrently (`drt run --threads 4`) pace through one bucket instead of one bucket each. When two syncs share a webhook but request different rates, the lowest wins for both.
+
+Webhooks are told apart by the **name of the env var** holding the URL (`webhook_url_env`) — the URL is itself a credential, so drt never derives the bucket key from its value. Distinct `webhook_url_env` names therefore never throttle each other, but two destinations that inline a literal `webhook_url` look identical to the limiter and **share one bucket** even when they post to different workspaces. The failure mode is a slower sync rather than a Slack 429, and it is another reason to keep the URL in an env var (see Notes below).
 
 ## Notes
 

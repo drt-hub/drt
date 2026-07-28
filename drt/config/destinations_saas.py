@@ -32,7 +32,10 @@ def _webhook_identity(url: str | None, url_env: str | None) -> str:
     Shared by Slack / Discord / Teams, whose configs are the same shape and
     whose ``describe()`` is the literal ``"webhook"`` for every instance. The
     env-var name wins when present; a literal URL is itself the credential
-    (anyone holding it can post) so only its digest goes in the key.
+    (anyone holding it can post) and is **not** derived from at all — it
+    collapses to :data:`LITERAL_CREDENTIAL_KEY`, so every inline webhook of
+    this shape shares one bucket. See that constant for why a digest was
+    rejected.
     """
     if url_env:
         return url_env
@@ -46,7 +49,9 @@ def _auth_identity(auth: AuthConfig | None) -> str:
 
     Env-var *names* are preferred over the secrets they hold: ``token_env``
     pins the same account just as reliably, and keeps the credential out of a
-    dict key entirely. A literal is hashed. Configs sharing one credential
+    dict key entirely. A literal collapses to :data:`LITERAL_CREDENTIAL_KEY`
+    instead of being derived from — so inline-literal configs of one auth shape
+    share a bucket rather than getting one each. Configs sharing one credential
     share one vendor quota, which is exactly the bucketing the registry wants.
     """
     if auth is None:
@@ -107,7 +112,8 @@ class SlackDestinationConfig(DescribableConfig):
         """Per webhook (#769). ``describe()`` returns the literal ``"webhook"``
         for every Slack config, so keying on it would throttle unrelated
         workspaces against each other. The env-var name is preferred; a literal
-        URL is a credential and is hashed rather than embedded.
+        URL is a credential and collapses to :data:`LITERAL_CREDENTIAL_KEY`
+        rather than being embedded or digested.
         """
         return f"{self.type}:{_webhook_identity(self.webhook_url, self.webhook_url_env)}"
 
