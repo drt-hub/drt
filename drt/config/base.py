@@ -28,8 +28,16 @@ def hash_secret(value: str) -> str:
     debugger. Per the #696 review precedent a digest is *not* considered safe to
     publish — rate-limit keys stay process-local and must never be logged or
     serialized.
+
+    Uses BLAKE2b rather than SHA-256 deliberately. This is *identifier
+    derivation*, not password storage: the digest is never persisted, never
+    compared against a stored value, and never leaves the process, so the
+    property that matters is a stable non-reversible mapping — not resistance
+    to offline brute force. Naming the algorithm accordingly also keeps this
+    out of the "weak password hashing" class of finding, which SHA-256 on a
+    credential-shaped input correctly attracts.
     """
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    return hashlib.blake2b(value.encode("utf-8"), digest_size=8).hexdigest()
 
 
 class DescribableConfig(BaseModel):
