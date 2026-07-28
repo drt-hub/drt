@@ -193,6 +193,38 @@ SELECT %s, from_json(%s, 'struct<city: string, zip: string>'), parse_json(%s)
 
 The `from_json` DDL (e.g. `array<string>`, `struct<...>`) comes from the column's `full_data_type` in `information_schema`; `VARIANT` columns use `parse_json` (no DDL). The value itself stays a bind — the DDL is a literal read verbatim from `information_schema`. So a `dict`/`list` lands as a proper complex value instead of a stringified `repr`, with **no configuration**. When no column needs wrapping, the INSERT is the unchanged `VALUES (...)` form. Introspection is best-effort: if `information_schema` isn't readable for the token's principal, drt falls back to binding values directly. Disable with `introspect_schema: false`.
 
+## As a source — retry on transient extract failures ([#766](https://github.com/drt-hub/drt/issues/766))
+
+When Databricks is the **source** of a sync, opening the connection and running the model query
+are retried automatically (3 attempts, exponential backoff from 1s, capped at 60s). No
+configuration — it is always on, and separate from the `sync.retry` knobs that govern the load
+side.
+
+**Retried**, from `databricks.sql.exc`:
+
+- `OperationalError` — the connector's class for connection and service-availability trouble.
+- `RequestError` — a failed request to the SQL endpoint. In practice this is the **SQL warehouse
+  cold start**: a stopped warehouse takes minutes to resume, and the first requests fail while it
+  does. **Observed during the [#654](https://github.com/drt-hub/drt/issues/654) real-warehouse
+  smoke programme**, and the single most valuable retry here — the warehouse is coming up, and
+  the very same query succeeds shortly after. Before #766 a scheduled sync hitting an
+  auto-stopped warehouse simply failed.
+
+**Not retried:** `ProgrammingError` (bad SQL, missing table), `DatabaseError`,
+`NotSupportedError`. The driver derives its classes from PEP 249, so `OperationalError` and
+`ProgrammingError` are siblings under `DatabaseError` — matching the specific classes keeps a SQL
+typo from being retried. (`RequestError` sits outside that tree, subclassing the driver's own
+`Error`.)
+
+> If your warehouse auto-stops aggressively, note that 3 attempts with backoff capped at 60s
+> covers a short resume, not an arbitrarily long one. A warehouse with a multi-minute cold start
+> may still exhaust the attempts.
+
+⚠️ **Scope: connection + query execution + fetching the result set only.** A failure *after the
+first row has been yielded* is not retried and fails the sync — those rows are already loaded
+into the destination and cannot be un-sent. See
+[API_REFERENCE](../llm/API_REFERENCE.md#source-side-retry-766) for the full rationale.
+
 ## Notes
 
 - Requires `pip install drt-core[databricks]` (depends on `databricks-sql-connector>=3.0`).

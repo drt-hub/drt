@@ -44,6 +44,7 @@ Debug a failing drt sync.
 ### Connection errors / timeouts
 - **Cause**: Wrong URL, network issue, or destination is down.
 - **Fix**: Verify `url` with `curl -X POST <url>` manually. `drt run --dry-run` confirms config parses correctly without sending traffic.
+- **On the source side (#766, v0.8.4+)**: transient extract failures are already retried automatically (3 attempts, exponential backoff) — a Snowflake `390114` token expiry, a Databricks warehouse cold start, a Postgres connection reset, a 5xx on a REST page. No config needed. ⚠️ Retries cover **connection + query execution only**; a failure after the first row was yielded is *not* retried (those rows are already loaded and can't be un-sent), so a mid-read drop still fails the sync. Auth failures are never retried — repeated attempts can trip an account lockout, so a persistent connect error is more likely a credential/permission problem than a flaky network.
 
 ### Template errors
 - **Cause**: `{{ row.field_name }}` references a column that doesn't exist in the source.

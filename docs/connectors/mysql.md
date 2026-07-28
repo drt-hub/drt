@@ -180,6 +180,31 @@ MySQL identifier quoting applies consistently across all paths thanks to the `_q
 
 This means you can write `table: mydb.scores` without worrying about reserved words, mixed case, or schema-qualified addressing being mis-quoted on any of the replace / insert / upsert / row-count / swap / mirror paths.
 
+## As a source — retry on transient extract failures ([#766](https://github.com/drt-hub/drt/issues/766))
+
+When MySQL is the **source** of a sync, opening the connection and running the model query are
+retried automatically (3 attempts, exponential backoff from 1s, capped at 60s). No configuration
+— it is always on, and separate from the `sync.retry` knobs that govern the load side.
+
+**Retried** (pymysql):
+
+- `InterfaceError` — always; pymysql raises it when its own connection object is unusable.
+- `OperationalError` **only** with a client-side connection errno: `2002` (can't connect via
+  socket), `2003` (can't connect to host), `2006` (server has gone away), `2013` (lost connection
+  during query), `2055`.
+
+**Not retried:** anything else. Unlike the [Postgres source](postgres.md), `OperationalError` is
+*not* retried on class alone — pymysql overloads it across both the client errno space and the
+server's, where it also covers permanent conditions like **1045 access denied** and **1049
+unknown database**. Retrying a bad password three times is pure waste and can trip an
+account-lockout policy. An `OperationalError` with no usable errno is treated as permanent:
+failing fast beats retrying something unclassifiable.
+
+⚠️ **Scope: connection + query execution + fetching the result set only.** A failure *after the
+first row has been yielded* is not retried and fails the sync — those rows are already loaded
+into the destination and cannot be un-sent. See
+[API_REFERENCE](../llm/API_REFERENCE.md#source-side-retry-766) for the full rationale.
+
 ## Notes
 
 - Requires `pip install drt-core[mysql]` (uses `pymysql`)

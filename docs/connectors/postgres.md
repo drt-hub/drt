@@ -222,6 +222,36 @@ This resolves the list→JSONB-vs-ARRAY ambiguity with **no configuration**. Int
 json_columns: [profile, preferences]
 ```
 
+## As a source — retry on transient extract failures ([#766](https://github.com/drt-hub/drt/issues/766))
+
+When Postgres is the **source** of a sync, opening the connection and running the model query
+are retried automatically (3 attempts, exponential backoff from 1s, capped at 60s). No
+configuration — it is always on, and separate from the `sync.retry` knobs that govern the load
+side.
+
+**Retried** (psycopg2):
+
+- `OperationalError` — connection refused, `server closed the connection unexpectedly`,
+  `terminating connection due to administrator command` (failover, restart, idle-timeout reaper).
+- `InterfaceError` — the driver's own connection object went bad.
+
+**Not retried:** `ProgrammingError` (bad SQL, missing relation, denied privilege), `DataError`,
+`IntegrityError`. psycopg2 makes all of these *siblings* of `OperationalError` under
+`DatabaseError` (PEP 249's hierarchy), so drt matches the two specific classes rather than the
+base — testing the base would happily retry a typo in your SQL three times.
+
+**Authentication failures are never retried**, even though psycopg2 files them *under*
+`OperationalError` (`InvalidPassword`, `InvalidAuthorizationSpecification`, SQLSTATE class `28`).
+Three rapid attempts with a wrong credential can trip an account-lockout policy — turning a
+config typo into an outage.
+
+⚠️ **Scope: connection + query execution + fetching the result set only.** A failure *after the
+first row has been yielded* is not retried and fails the sync: the engine has already handed
+those rows to the destination, and loaded rows cannot be un-sent. Re-running would duplicate
+them; skipping them would need a stable ordering and offset the query doesn't promise. That is a
+checkpointing problem, not a retry problem. See
+[API_REFERENCE](../llm/API_REFERENCE.md#source-side-retry-766).
+
 ## Notes
 
 - Requires `pip install drt-core[postgres]` (uses `psycopg2`)

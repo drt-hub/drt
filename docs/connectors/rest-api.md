@@ -176,3 +176,24 @@ How the pieces compose:
 - `--cursor-value` works as usual for bounded backfills.
 - Without `incremental.start_param`, `mode: incremental` still tracks the
   watermark but re-extracts the full endpoint every run (drt logs a warning).
+
+## Retry on transient extract failures ([#766](https://github.com/drt-hub/drt/issues/766))
+
+Each page request is retried automatically (3 attempts, exponential backoff from 1s, capped at
+60s). No configuration — it is always on. The destination side has had this since
+[#277](https://github.com/drt-hub/drt/issues/277); before #766 the source side had none, so a
+single 503 on page 40 of a paginated read failed the whole sync.
+
+**Retried:** the status codes in `retryable_status_codes` (429, 500, 502, 503, 504) and
+transport-level failures (connect timeouts, DNS, resets). A `Retry-After` header on a 429/503 is
+honoured ([#769](https://github.com/drt-hub/drt/issues/769)) — drt waits
+`max(retry_after, computed_backoff)`, capped by `max_backoff`.
+
+**Not retried:** 4xx other than 429. A bad request or an unauthorized token won't succeed on
+repeat, and retrying it burns your API quota.
+
+⚠️ **Scope: one page request at a time.** A failure *between* pages is retried too, since each
+page re-enters the retry loop — but **records already yielded from earlier pages are not
+re-read**. They have been loaded into the destination and cannot be un-sent, so a mid-pagination
+failure fails the sync with the earlier pages already delivered rather than silently duplicating
+them. See [API_REFERENCE](../llm/API_REFERENCE.md#source-side-retry-766) for the full rationale.

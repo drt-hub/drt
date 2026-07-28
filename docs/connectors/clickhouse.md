@@ -140,6 +140,33 @@ This means `table: analytics.scores` renders correctly on `TRUNCATE TABLE`, `DRO
 
 The pre-v0.7.8 `get_row_count` path used `".`".join(...)` and rendered `` `db.`scores` `` (3 backticks) — a syntax error on the server that surfaced as `Code: 62` against ClickHouse 24.8 ([#512](https://github.com/drt-hub/drt/issues/512)). Upgrade to `drt-core>=0.7.8` if you use database-qualified table addressing on ClickHouse.
 
+## As a source — retry on transient extract failures ([#766](https://github.com/drt-hub/drt/issues/766))
+
+When ClickHouse is the **source** of a sync, opening the connection and running the model query
+are retried automatically (3 attempts, exponential backoff from 1s, capped at 60s). No
+configuration — it is always on, and separate from the `sync.retry` knobs that govern the load
+side.
+
+**Retried** (`clickhouse_connect.driver.exceptions`):
+
+- `OperationalError` — "an unexpected disconnect occurs".
+- `InterfaceError` — "errors related to the database interface rather than the database itself".
+- Additionally, because ClickHouse is reached over an **HTTP interface**, raw `httpx` failures
+  can surface instead of a driver class. Those need no special handling: drt's retry loop
+  natively catches `httpx.TransportError` and the retryable status codes (429/500/502/503/504),
+  and the driver-exception classification is purely additive to that.
+
+**Not retried:** `ProgrammingError` (table not found, syntax error), `DataError`,
+`IntegrityError`, `NotSupportedError`. clickhouse-connect follows PEP 249, so these are siblings
+of `OperationalError` under `DatabaseError` — matching the specific classes keeps a SQL typo from
+being retried. Note `StreamClosedError` subclasses `ProgrammingError`, so it is correctly treated
+as permanent.
+
+⚠️ **Scope: connection + query execution + fetching the result set only.** A failure *after the
+first row has been yielded* is not retried and fails the sync — those rows are already loaded
+into the destination and cannot be un-sent. See
+[API_REFERENCE](../llm/API_REFERENCE.md#source-side-retry-766) for the full rationale.
+
 ## Notes
 
 - Requires `pip install drt-core[clickhouse]` (uses `clickhouse-connect`)

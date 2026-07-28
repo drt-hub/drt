@@ -272,6 +272,69 @@ no per-row failure concept, so nothing is written for it. Off by default.
 
 ---
 
+## Source-side retry (#766)
+
+The `sync.retry` / `destination.retry` knobs above apply to the **load** side. Since #766 the
+**extract** side retries too: a transient warehouse hiccup while opening the connection or
+running the query no longer fails the whole sync. This needs no configuration — it is always on,
+using the `RetryConfig` defaults (3 attempts, 1.0s initial backoff, ×2 multiplier, 60s cap).
+
+### Scope boundary — read this before relying on it
+
+**Retries cover establishing the connection, executing the query, and fetching the result set.
+A failure after the first row has been yielded is *not* retried, and propagates.**
+
+Every source's `extract()` is a generator. Before the first row is emitted, nothing has left the
+source, so re-running the query is safe and produces the same result set. Once rows have been
+yielded, the engine has already handed them to the destination — and **loaded rows cannot be
+un-sent**. Re-running the query would re-emit them (duplicates); skipping them would require a
+stable ordering and offset the query does not promise. That is a checkpointing problem, not a
+retry problem, and it is deliberately out of scope here.
+
+So: "drt retries the source" does **not** mean every extract failure is covered. A connection
+dropped 40,000 rows into a 100,000-row read still fails the sync.
+
+### What counts as transient
+
+Each source classifies its own driver's exceptions — a predicate, not a list of exception types,
+because transient-ness often depends on an attribute rather than the class (Snowflake's `390114`
+and a permanent error can be the very same class).
+
+| Source | Retried | Not retried |
+|---|---|---|
+| `postgres` | psycopg2 `OperationalError` (connection refused, server closed the connection, failover/restart), `InterfaceError` | `ProgrammingError`, `DataError`, `IntegrityError`, **auth failures** |
+| `redshift` | Same psycopg2 classification (cluster failover, a paused serverless workgroup resuming, WLM dropping an idle session) | Same as Postgres, incl. **auth failures** |
+| `mysql` | pymysql `InterfaceError`; `OperationalError` **only** with client errnos 2002 / 2003 / 2006 / 2013 / 2055 (connection lost, server gone away) | Everything else, incl. errno 1045 access denied and 1049 unknown database |
+| `snowflake` | `OperationalError` (network / service availability, incl. `RevocationCheckError`); `DatabaseError` with errno **390114** (`Authentication token has expired`) | `ProgrammingError` (SQL compilation, missing table, insufficient privileges) |
+| `databricks` | `databricks.sql.exc.OperationalError`; `RequestError` — the **SQL warehouse cold start**, where a stopped warehouse takes minutes to resume and the first requests fail while it does | `ProgrammingError`, `DatabaseError`, `NotSupportedError` |
+| `sqlserver` | pymssql `OperationalError` (connection refused, server restarting, Azure SQL failover), `InterfaceError` | `ProgrammingError`, `DataError`, `IntegrityError`, `NotSupportedError` |
+| `clickhouse` | clickhouse-connect `OperationalError` (unexpected disconnect), `InterfaceError`; plus raw `httpx.TransportError` / retryable statuses via the HTTP interface | `ProgrammingError` (incl. `StreamClosedError`), `DataError`, `IntegrityError` |
+| `rest_api` | `retryable_status_codes` (429/500/502/503/504) and transport errors, per page request; `Retry-After` honoured (#769) | 4xx — it won't succeed on repeat, and retrying burns API quota |
+
+Snowflake's `390114` and the Databricks cold start are not hypothetical: both were observed
+during the [#654](https://github.com/drt-hub/drt/issues/654) real-warehouse smoke programme.
+
+**Authentication failures are never retried** on Postgres / Redshift / MySQL, even though those
+drivers file them under an otherwise-retryable class (psycopg2 puts `InvalidPassword` under
+`OperationalError`; pymysql puts errno 1045 there). Three rapid attempts with a bad credential
+can trip an account-lockout policy — turning a config typo into an outage.
+
+### Sources deliberately excluded
+
+- **DuckDB / SQLite** — local files. "Transient" isn't a meaningful category; retrying a locked
+  file just delays the error.
+- **BigQuery** — `google-cloud-bigquery` already retries internally. A second layer would
+  multiply the backoff and make the effective timeout far longer than either layer intends.
+- **Delta Lake / Iceberg** — covered by [#679](https://github.com/drt-hub/drt/issues/679).
+
+### No config knob (yet)
+
+`extract()` receives a `ProfileConfig`, not `SyncOptions`, so `sync.retry` is not reachable from
+inside a source. The defaults ship the resilience; a per-profile `retry:` field is a deliberate
+follow-up rather than part of #766.
+
+---
+
 ## Alerts (`alerts:` on a sync)
 
 ```yaml
