@@ -211,18 +211,21 @@ class TestSnowflakeTransientClassification:
     """
 
     def test_token_expired_390114_is_transient(self) -> None:
+        pytest.importorskip("snowflake.connector")
         from snowflake.connector import errors as sf_errors
 
         exc = sf_errors.DatabaseError(msg="Authentication token has expired", errno=390114)
         assert SnowflakeSource()._is_transient(exc) is True
 
     def test_operational_error_is_transient(self) -> None:
+        pytest.importorskip("snowflake.connector")
         from snowflake.connector import errors as sf_errors
 
         assert SnowflakeSource()._is_transient(sf_errors.OperationalError(msg="conn lost")) is True
 
     def test_revocation_check_error_is_transient(self) -> None:
         """An unreachable CRL/OCSP endpoint — subclass of OperationalError."""
+        pytest.importorskip("snowflake.connector")
         from snowflake.connector import errors as sf_errors
 
         exc = sf_errors.RevocationCheckError(msg="OCSP responder unreachable")
@@ -230,12 +233,14 @@ class TestSnowflakeTransientClassification:
 
     def test_programming_error_is_not_transient(self) -> None:
         """ProgrammingError subclasses DatabaseError — must not be swept in."""
+        pytest.importorskip("snowflake.connector")
         from snowflake.connector import errors as sf_errors
 
         exc = sf_errors.ProgrammingError(msg="SQL compilation error", errno=1003)
         assert SnowflakeSource()._is_transient(exc) is False
 
     def test_database_error_with_other_errno_is_not_transient(self) -> None:
+        pytest.importorskip("snowflake.connector")
         from snowflake.connector import errors as sf_errors
 
         exc = sf_errors.DatabaseError(msg="something else", errno=1234)
@@ -248,6 +253,7 @@ class TestSnowflakeTransientClassification:
 class TestSnowflakeSourceRetry:
     def test_expired_token_is_retried_then_succeeds(self) -> None:
         """#654 saw long extracts outstay their session token."""
+        pytest.importorskip("snowflake.connector")
         from snowflake.connector import errors as sf_errors
 
         attempts: list[int] = []
@@ -268,6 +274,7 @@ class TestSnowflakeSourceRetry:
         assert len(attempts) == 3
 
     def test_sql_compilation_error_is_not_retried(self) -> None:
+        pytest.importorskip("snowflake.connector")
         from snowflake.connector import errors as sf_errors
 
         attempts: list[int] = []
@@ -286,6 +293,7 @@ class TestSnowflakeSourceRetry:
 
     def test_failure_after_first_row_is_not_retried(self) -> None:
         """Scope boundary (#766): a yielded row cannot be un-sent."""
+        pytest.importorskip("snowflake.connector")
         from snowflake.connector import errors as sf_errors
 
         attempts: list[int] = []

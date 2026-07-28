@@ -10,6 +10,9 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+pytest.importorskip("psycopg2")
 import psycopg2
 import pytest
 
@@ -216,6 +219,7 @@ def test_is_transient_false_for_auth_failures(exc_name: str) -> None:
     (the server populates it), so the class check is what carries this test —
     which is exactly why the classifier matches on both.
     """
+    pytest.importorskip("psycopg2")
     import psycopg2
 
     exc = getattr(psycopg2.errors, exc_name)("password authentication failed")

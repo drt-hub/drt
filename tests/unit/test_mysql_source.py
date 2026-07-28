@@ -121,12 +121,14 @@ class TestMySQLSourceTransientClassification:
 
     @pytest.mark.parametrize("errno", [2002, 2003, 2006, 2013, 2055])
     def test_client_connection_errnos_are_transient(self, errno):
+        pytest.importorskip("pymysql")
         import pymysql
 
         exc = pymysql.err.OperationalError(errno, "link broken")
         assert MySQLSource()._is_transient(exc) is True
 
     def test_interface_error_is_transient(self):
+        pytest.importorskip("pymysql")
         import pymysql
 
         assert MySQLSource()._is_transient(pymysql.err.InterfaceError("bad connection")) is True
@@ -141,6 +143,7 @@ class TestMySQLSourceTransientClassification:
     )
     def test_permanent_operational_errnos_are_not_retried(self, errno, message):
         """Retrying a bad password wastes time and can trip account lockout."""
+        pytest.importorskip("pymysql")
         import pymysql
 
         assert MySQLSource()._is_transient(pymysql.err.OperationalError(errno, message)) is False
@@ -150,6 +153,7 @@ class TestMySQLSourceTransientClassification:
         ["ProgrammingError", "DataError", "IntegrityError", "DatabaseError"],
     )
     def test_permanent_exception_classes(self, exc_name):
+        pytest.importorskip("pymysql")
         import pymysql
 
         exc = getattr(pymysql.err, exc_name)("nope")
@@ -157,6 +161,7 @@ class TestMySQLSourceTransientClassification:
 
     def test_operational_error_without_errno_is_permanent(self):
         """Unclassifiable -> fail fast rather than retry blindly."""
+        pytest.importorskip("pymysql")
         import pymysql
 
         assert MySQLSource()._is_transient(pymysql.err.OperationalError()) is False
@@ -167,6 +172,7 @@ class TestMySQLSourceTransientClassification:
 
 class TestMySQLSourceRetry:
     def test_transient_failure_is_retried_then_succeeds(self):
+        pytest.importorskip("pymysql")
         import pymysql
 
         attempts = []
@@ -190,6 +196,7 @@ class TestMySQLSourceRetry:
         assert len(attempts) == 3
 
     def test_access_denied_propagates_without_retrying(self):
+        pytest.importorskip("pymysql")
         import pymysql
 
         attempts = []
@@ -208,6 +215,7 @@ class TestMySQLSourceRetry:
 
     def test_failure_after_first_row_is_not_retried(self):
         """Scope boundary (#766): a yielded row cannot be un-sent."""
+        pytest.importorskip("pymysql")
         import pymysql
 
         attempts = []

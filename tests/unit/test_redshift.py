@@ -186,6 +186,7 @@ def _rows_connection(rows: list[tuple]) -> MagicMock:
 
 @pytest.mark.parametrize("exc_name", ["OperationalError", "InterfaceError"])
 def test_is_transient_true_for_connection_errors(exc_name: str) -> None:
+    pytest.importorskip("psycopg2")
     import psycopg2
 
     exc = getattr(psycopg2, exc_name)("cluster is resuming")
@@ -197,6 +198,7 @@ def test_is_transient_true_for_connection_errors(exc_name: str) -> None:
 )
 def test_is_transient_false_for_permanent_errors(exc_name: str) -> None:
     """Siblings under DatabaseError must not be swept in by a base-class check."""
+    pytest.importorskip("psycopg2")
     import psycopg2
 
     exc = getattr(psycopg2, exc_name)("relation does not exist")
@@ -205,6 +207,7 @@ def test_is_transient_false_for_permanent_errors(exc_name: str) -> None:
 
 def test_extract_retries_transient_connection_failure() -> None:
     """A paused serverless workgroup resuming shouldn't fail the sync."""
+    pytest.importorskip("psycopg2")
     import psycopg2
 
     attempts: list[int] = []
@@ -224,6 +227,7 @@ def test_extract_retries_transient_connection_failure() -> None:
 
 
 def test_extract_does_not_retry_permanent_error() -> None:
+    pytest.importorskip("psycopg2")
     import psycopg2
 
     attempts: list[int] = []
@@ -243,6 +247,7 @@ def test_extract_does_not_retry_permanent_error() -> None:
 
 def test_extract_does_not_retry_after_first_row() -> None:
     """Scope boundary (#766): a yielded row cannot be un-sent."""
+    pytest.importorskip("psycopg2")
     import psycopg2
 
     attempts: list[int] = []
@@ -281,6 +286,7 @@ def test_is_transient_false_for_auth_failures(exc_name: str) -> None:
     (the server populates it), so the class check is what carries this test —
     which is exactly why the classifier matches on both.
     """
+    pytest.importorskip("psycopg2")
     import psycopg2
 
     exc = getattr(psycopg2.errors, exc_name)("password authentication failed")
