@@ -39,6 +39,22 @@ Create an API key in **Settings → API Keys** (Mail Send and/or Marketing scope
 export SENDGRID_API_KEY="SG.xxxxx"
 ```
 
+## Rate limiting
+
+**Vendor limit:** plan-dependent — SendGrid meters the v3 Mail Send endpoint per API key (commonly ~600 requests/minute, i.e. 10/s, on lower tiers). Check your plan. drt applies **no automatic cap** here — set one explicitly:
+
+```yaml
+destination:
+  type: sendgrid
+  rate_limit:
+    requests_per_second: 10
+    burst: 20                # optional: let idle time bank up to 20 requests
+```
+
+`destination.rate_limit` beats `sync.rate_limit`, which beats the default of 10/s.
+
+The limiter is shared per **API key**: the sending quota belongs to the key, not the From address, so two syncs sending as different senders on one key share one bucket even under `drt run --threads 4`. When they request different rates, the lowest wins for both.
+
 ## Notes
 
 - Core connector — no `pip install` extras needed.

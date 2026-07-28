@@ -44,6 +44,22 @@ Each row is upserted **by email**, one record per request:
 
 Per-record failures land in `result.row_errors` with the HTTP status (`on_error: skip` continues / `fail` stops).
 
+## Rate limiting
+
+**Vendor limit:** 75 requests/second (burst) on the profiles endpoint, 700/minute steady. drt applies **no automatic cap** here — set one explicitly:
+
+```yaml
+destination:
+  type: klaviyo
+  rate_limit:
+    requests_per_second: 10
+    burst: 75                # optional: match Klaviyo's burst allowance
+```
+
+`destination.rate_limit` beats `sync.rate_limit`, which beats the default of 10/s.
+
+The limiter is shared per **account** (API key) — `list_id` is deliberately excluded, since the quota is account-wide. Several syncs into one account concurrently (`drt run --threads 4`) pace through one bucket instead of one bucket each. When they request different rates, the lowest wins for both.
+
 ## Notes
 
 - Core connector — no `pip install` extras needed.

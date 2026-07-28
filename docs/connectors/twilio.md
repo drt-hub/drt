@@ -71,6 +71,29 @@ message_template: >
 - For high volume, set `rate_limit.requests_per_second` to match your
   Twilio account's messaging throughput.
 
+## Rate limiting
+
+**Vendor limit:** throughput is provisioned, not a flat API cap — a long-code
+US number sends ~1 message/second (MPS) by default; short codes and messaging
+services are much higher. Match your account's actual MPS. drt applies **no
+automatic cap** here — set one explicitly:
+
+```yaml
+destination:
+  type: twilio
+  from_number: "+15551234567"
+  rate_limit:
+    requests_per_second: 1
+    burst: 5                 # optional: allow a short catch-up burst after idle time
+```
+
+`destination.rate_limit` beats `sync.rate_limit`, which beats the default of 10/s.
+
+The limiter is shared per **account** (the account SID), not per sending
+number — the quota follows the account. Several syncs sending under one
+account concurrently (`drt run --threads 4`) pace through one bucket instead
+of one bucket each. When they request different rates, the lowest wins for both.
+
 ## References
 
 - [Twilio Messages API](https://www.twilio.com/docs/sms/api/message-resource)

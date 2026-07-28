@@ -40,6 +40,23 @@ export DISCORD_WEBHOOK="https://discord.com/api/webhooks/.../..."
   message_template: '{"embeds": [{"title": "{{ row.name }}", "description": "{{ row.email }}"}]}'
   ```
 
+## Rate limiting
+
+**Vendor limit:** Discord meters each webhook route separately — roughly 5 requests/second per webhook, with 429s carrying a `retry_after`. drt applies **no automatic cap** here — set one explicitly:
+
+```yaml
+destination:
+  type: discord
+  webhook_url_env: DISCORD_WEBHOOK_URL
+  rate_limit:
+    requests_per_second: 5
+    burst: 5                 # optional: allow a short catch-up burst after idle time
+```
+
+`destination.rate_limit` beats `sync.rate_limit`, which beats the default of 10/s.
+
+The limiter is shared per **webhook URL**, so several syncs posting to the same webhook concurrently (`drt run --threads 4`) pace through one bucket instead of one bucket each. Different webhooks never throttle each other. When two syncs share a webhook but request different rates, the lowest wins for both.
+
 ## Notes
 
 - Core connector — no `pip install` extras needed.

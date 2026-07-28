@@ -83,6 +83,17 @@
             }
           ],
           "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -278,6 +289,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
             },
             {
               "type": "null"
@@ -1047,6 +1069,17 @@
             }
           ],
           "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1149,6 +1182,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
             },
             {
               "type": "null"
@@ -1453,6 +1497,17 @@
             }
           ],
           "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1549,6 +1604,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
             },
             {
               "type": "null"
@@ -1669,6 +1735,17 @@
             }
           ],
           "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1718,6 +1795,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
             },
             {
               "type": "null"
@@ -1779,6 +1867,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
             },
             {
               "type": "null"
@@ -1886,6 +1985,17 @@
             }
           ],
           "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1960,6 +2070,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
             },
             {
               "type": "null"
@@ -2301,6 +2422,17 @@
             }
           ],
           "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -2541,6 +2673,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
             },
             {
               "type": "null"
@@ -2894,11 +3037,25 @@
       "type": "object"
     },
     "RateLimitConfig": {
+      "description": "Request pacing for a destination or a whole sync (#769).\n\nLives here beside :class:`RetryConfig` rather than in ``sync_options``\nbecause the destination configs now carry a ``rate_limit`` override and\n``sync_options`` imports *them* \u2014 defining it there would close an import\ncycle. ``sync_options`` re-exports it, so ``drt.config.models`` and every\nexisting import path are unchanged.",
       "properties": {
         "requests_per_second": {
           "default": 10,
           "title": "Requests Per Second",
-          "type": "integer"
+          "type": "number"
+        },
+        "burst": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Burst"
         }
       },
       "title": "RateLimitConfig",
@@ -3014,6 +3171,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
             },
             {
               "type": "null"
@@ -3392,6 +3560,17 @@
             }
           ],
           "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -3491,6 +3670,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
             },
             {
               "type": "null"
@@ -4207,6 +4397,17 @@
             }
           ],
           "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -4286,6 +4487,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
             },
             {
               "type": "null"
@@ -4594,6 +4806,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
             },
             {
               "type": "null"

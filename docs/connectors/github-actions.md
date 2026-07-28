@@ -44,6 +44,25 @@ auth:
   token_env: GITHUB_TOKEN
 ```
 
+## Rate limiting
+
+**Vendor limit:** 1,000 `workflow_dispatch` calls per hour per repository. **drt caps this destination at 5 req/s** — deliberately conservative, since one row equals one workflow run.
+
+The limiter is shared per **token**, not per repository: GitHub's REST quota is per authenticated user/app across *all* repositories, so two syncs dispatching workflows into different repos under one token still share one budget.
+
+Override to go **lower** than the cap:
+
+```yaml
+destination:
+  type: github_actions
+  owner: myorg
+  repo: myrepo
+  rate_limit:
+    requests_per_second: 1
+```
+
+`destination.rate_limit` beats `sync.rate_limit`, which beats the default of 10/s. When two syncs share a token but request different rates, the lowest wins for both.
+
 ## Notes
 
 - Core connector — no `pip install` extras needed.

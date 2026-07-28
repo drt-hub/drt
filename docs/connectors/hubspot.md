@@ -87,6 +87,25 @@ destination:
 
 The classic reverse-ETL activation case: push warehouse-computed scores/traits into contacts your reps already created in HubSpot, **without spraying a new contact for every warehouse row**. `update_only` PATCHes by `id_property` directly — a record with no HubSpot match (404) is **skipped**, never created. `create_only` is the inverse: POST only, and a record that already exists (409) is **skipped**, so a seed audience is never overwritten. Skipped rows are counted in the run's `skipped` total (`drt run` prints `… N skipped`), not as errors. The default `upsert` is unchanged (POST, then PATCH on 409).
 
+## Rate limiting
+
+**Vendor limit:** ~100 requests / 10s for private apps. **drt caps this destination at 9 req/s** and will not exceed it even if you configure a higher number.
+
+The limiter is shared per **portal** — keyed on the access token, *not* on `object_type`. Syncing `contacts` and `companies` into the same portal concurrently (`drt run --threads 4`) paces them through one bucket, matching how HubSpot actually meters the quota. Before v0.8.4 each sync built its own limiter, so four parallel syncs put 4x the intended rate on one portal.
+
+Override to go **lower** than the cap:
+
+```yaml
+destination:
+  type: hubspot
+  object_type: contacts
+  rate_limit:
+    requests_per_second: 4   # gentler than the 9/s cap
+    burst: 8                 # optional: let idle time bank up to 8 requests
+```
+
+`destination.rate_limit` beats `sync.rate_limit`, which beats the default of 10/s. When two syncs share a portal but request different rates, the lowest wins for both.
+
 ## Notes
 
 - HubSpot rate limit: ~100 requests/10s for private apps. drt caps at 9 req/s automatically

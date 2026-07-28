@@ -92,6 +92,25 @@ destination:
 
 For users, custom fields are attached as `user_fields`. For organizations, they are attached as `organization_fields`.
 
+## Rate limiting
+
+**Vendor limit:** commonly 700 requests/minute per account (plan-dependent). **drt caps this destination at 11 req/s** and will not exceed it even if you configure a higher number.
+
+The limiter is shared per **subdomain**, so several syncs targeting the same Zendesk instance concurrently (`drt run --threads 4`) pace through one bucket instead of one bucket each.
+
+Override to go **lower** than the cap:
+
+```yaml
+destination:
+  type: zendesk
+  subdomain: mycompany
+  rate_limit:
+    requests_per_second: 5
+    burst: 10                # optional: let idle time bank up to 10 requests
+```
+
+`destination.rate_limit` beats `sync.rate_limit`, which beats the default of 10/s. When two syncs share a subdomain but request different rates, the lowest wins for both.
+
 ## Notes
 
 - User upserts use Zendesk's `users/create_or_update_many` endpoint in batches of 100.

@@ -66,6 +66,23 @@ For `datetime` / `Decimal` / `UUID` values flowing into the template,
 use the `tojson_safe` filter (v0.7.6+) to avoid serialization errors:
 `"{{ row.created_at | tojson_safe }}"`.
 
+## Rate limiting
+
+**Vendor limit:** ~3 requests/second average for integrations. **drt caps this destination at 3 req/s** and will not exceed it even if you configure a higher number.
+
+The limiter is shared per **integration token**, so several syncs writing to databases under the same integration concurrently (`drt run --threads 4`) pace through one bucket instead of one bucket each.
+
+Override to go **lower** than the cap:
+
+```yaml
+destination:
+  type: notion
+  rate_limit:
+    requests_per_second: 1
+```
+
+`destination.rate_limit` beats `sync.rate_limit`, which beats the default of 10/s. When two syncs share a token but request different rates, the lowest wins for both.
+
 ## Notes
 
 - (core) — no extra install required.

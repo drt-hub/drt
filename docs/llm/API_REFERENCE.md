@@ -201,8 +201,12 @@ sync:                       # optional: all fields have defaults
   dlq:                      # optional (#278): Dead Letter Queue — persist per-record load failures for replay
     enabled: false          # default: false (opt-in) — writes FULL records to .drt/dlq/<sync>.jsonl (a PII decision)
     max_records: 10000      # default: 10000 — cap queue size; oldest entries dropped past this (0 = unbounded)
-  rate_limit:
-    requests_per_second: 10 # default: 10 — set to 0 to disable rate limiting
+  rate_limit:               # sync-level pacing (applied unless destination overrides)
+    requests_per_second: 10 # default: 10 — set to 0 to disable rate limiting; float allowed (2.5 = one request per 0.4s)
+    burst: null             # optional (#769): default null = strict minimum interval between requests.
+                            # An integer >= 1 lets idle time accumulate up to N requests' worth of
+                            # credit, spendable back-to-back — smooths bursty batches without
+                            # raising the sustained rate. null is byte-identical to pre-#769 behaviour.
   retry:                    # sync-level retry (applied unless destination overrides)
     max_attempts: 3         # default: 3
     initial_backoff: 1.0    # default: 1.0 seconds
@@ -222,6 +226,27 @@ sync:                       # optional: all fields have defaults
 #   type: notion
 #   retry:
 #     max_attempts: 7       # only this destination retries 7 times
+
+# Per-destination rate limit override (#769): set `rate_limit:` inside any HTTP
+# destination block to override `sync.rate_limit` for that destination only.
+# Priority order: destination.rate_limit > sync.rate_limit > RateLimitConfig defaults.
+# destination:
+#   type: hubspot
+#   rate_limit:
+#     requests_per_second: 4  # only this destination is paced at 4/s
+#     burst: 8
+#
+# Limiters are SHARED PER ENDPOINT across a whole `drt run`, so `--threads 4`
+# against one HubSpot portal now paces 4 concurrent syncs through ONE bucket
+# instead of four independent ones (which previously allowed 4x the intended
+# rate). The endpoint identity is the real quota holder — the HubSpot portal
+# (token, NOT object_type), the Slack webhook, the Zendesk subdomain, the
+# Airtable base (not table), the REST API host. When two syncs sharing an
+# endpoint ask for different rates, the LOWEST rate wins for all of them.
+#
+# Connectors with a known vendor ceiling clamp to it even if you configure
+# higher: HubSpot 9/s, Zendesk 11/s, GitHub Actions 5/s, Notion 3/s.
+# Configuring a LOWER rate than the ceiling is always honoured.
 
 tests:                      # optional: post-sync validation (DB destinations only)
   - row_count:

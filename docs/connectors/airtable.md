@@ -39,6 +39,23 @@ export AIRTABLE_TOKEN="pat..."
 
 Airtable caps batch writes at **10 records per request**, so the sync batch is automatically chunked into groups of 10 (one HTTP request each). Use `sync.rate_limit` to stay within Airtable's 5 req/s per-base limit.
 
+## Rate limiting
+
+**Vendor limit:** 5 requests/second **per base** (a 429 locks the base out for 30s). drt applies **no automatic cap** here — set one explicitly:
+
+```yaml
+destination:
+  type: airtable
+  base_id: appXXXXXXXXXXXXXX
+  table_name: Contacts
+  rate_limit:
+    requests_per_second: 5
+```
+
+`destination.rate_limit` beats `sync.rate_limit`, which beats the default of 10/s.
+
+The limiter is shared per **base** — `table_name` is deliberately excluded, because Airtable's 5 req/s cap covers every table in the base. Two syncs writing to different tables in one base under `drt run --threads 4` therefore share one bucket, which is what keeps them under the real limit. When they request different rates, the lowest wins for both.
+
 ## Notes
 
 - Core connector — no `pip install` extras needed.

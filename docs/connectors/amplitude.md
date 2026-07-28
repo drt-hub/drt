@@ -96,6 +96,23 @@ destination:
   api_key_env: AMPLITUDE_API_KEY_EU
 ```
 
+## Rate limiting
+
+**Vendor limit:** Amplitude throttles per project by device/user throughput rather than a flat req/s (the HTTP V2 API documents limits in events/second per device id). drt applies **no automatic cap** here — for large backfills set one explicitly:
+
+```yaml
+destination:
+  type: amplitude
+  endpoint: event
+  rate_limit:
+    requests_per_second: 10
+    burst: 20                # optional: let idle time bank up to 20 requests
+```
+
+`destination.rate_limit` beats `sync.rate_limit`, which beats the default of 10/s.
+
+The limiter is shared per **project and region** (API key + `region`). The `identify` and `event` endpoints bill against one project quota, so they share a bucket — but `region: eu` is a genuinely different host with its own budget and gets its own. Several syncs into one project concurrently (`drt run --threads 4`) pace through one bucket; when they request different rates, the lowest wins for both.
+
 ## Notes
 
 - Use separate sync YAMLs for identify vs events (one `endpoint` per destination config).

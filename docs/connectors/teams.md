@@ -59,6 +59,23 @@ message_template: |
   }
 ```
 
+## Rate limiting
+
+**Vendor limit:** Microsoft throttles incoming webhooks per connector (commonly documented as ~4 requests/second per connector, with longer-window caps). drt applies **no automatic cap** here — set one explicitly:
+
+```yaml
+destination:
+  type: teams
+  webhook_url_env: TEAMS_WEBHOOK_URL
+  rate_limit:
+    requests_per_second: 4
+    burst: 4                 # optional: allow a short catch-up burst after idle time
+```
+
+`destination.rate_limit` beats `sync.rate_limit`, which beats the default of 10/s.
+
+The limiter is shared per **webhook URL** — and since a Teams webhook is channel-scoped, that means per channel. Several syncs posting to one channel concurrently (`drt run --threads 4`) pace through one bucket instead of one bucket each. When two syncs share a webhook but request different rates, the lowest wins for both.
+
 ## Notes
 
 - (core) — no extra install required.

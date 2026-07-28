@@ -44,6 +44,22 @@ auth:
 
 See [rest-api.md](rest-api.md) for the full `auth:` block shapes (bearer / basic / api-key).
 
+## Rate limiting
+
+**Vendor limit:** commonly 1,000 requests/minute per workspace (~16/s) on the REST API; plan- and endpoint-dependent. drt applies **no automatic cap** here — set one explicitly:
+
+```yaml
+destination:
+  type: intercom
+  rate_limit:
+    requests_per_second: 10
+    burst: 20                # optional: let idle time bank up to 20 requests
+```
+
+`destination.rate_limit` beats `sync.rate_limit`, which beats the default of 10/s.
+
+The limiter is shared per **workspace**, identified by the access token, so several syncs writing to one workspace concurrently (`drt run --threads 4`) pace through one bucket instead of one bucket each. When they request different rates, the lowest wins for both.
+
 ## Notes
 
 - Core connector — no `pip install` extras needed.

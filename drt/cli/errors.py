@@ -128,7 +128,10 @@ def suggest(stage: Stage, exc: BaseException) -> str | None:
         if any(k in msg for k in ("401", "403", "unauthorized", "forbidden")):
             return "Check the destination's auth env vars (token / api key)"
         if any(k in msg for k in ("rate", "429", "too many requests")):
-            return "Reduce sync.rate_limit.requests_per_second or add retry config"
+            return (
+                "Reduce destination.rate_limit.requests_per_second (this destination "
+                "only) or sync.rate_limit.requests_per_second, or add retry config"
+            )
         if any(k in msg for k in ("timeout", "connection")):
             return "Check destination network reachability"
         return "Check the destination config (url, auth, headers)"
