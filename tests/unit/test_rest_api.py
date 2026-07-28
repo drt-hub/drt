@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 
 from drt.config.models import (
+    OffsetPaginationConfig,
     RateLimitConfig,
     RestApiDestinationConfig,
     RetryConfig,
@@ -341,3 +342,88 @@ class TestRestApiOnErrorFail:
         assert result.failed == 1
         assert result.success == 0
         assert mock_client.request.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Shared limiter bucket across both call sites (#769)
+# ---------------------------------------------------------------------------
+
+
+class TestSharedRateLimiterBucket:
+    """``rest_api`` builds two limiters; both must land in one bucket (#769).
+
+    ``load()`` paces the write loop and ``fetch_paginated()`` paces the
+    pagination reads. Before the registry these were independent instances, so
+    one host saw up to 2x the configured rate from a single sync — and
+    ``--threads N`` multiplied that again. The key is ``rest_api:<netloc>``, so
+    sharing falls out of the key rather than any coordination between the two
+    methods. Verified rather than assumed, per the plan.
+    """
+
+    def test_both_call_sites_resolve_to_one_limiter(self) -> None:
+        from drt.destinations.rate_limiter import resolve_rate_limiter
+
+        config = RestApiDestinationConfig(
+            type="rest_api", url="https://api.example.com/v1/users"
+        )
+        options = _sync_options()
+
+        first = resolve_rate_limiter(config, options)
+        second = resolve_rate_limiter(config, options)
+
+        assert first is second
+
+    def test_differing_paths_on_one_host_share_a_bucket(self) -> None:
+        """The write URL and a pagination URL differ by path, not host — the
+        vendor quota is per host, so they must not get separate buckets."""
+        from drt.destinations.rate_limiter import resolve_rate_limiter
+
+        write = RestApiDestinationConfig(type="rest_api", url="https://api.example.com/v1/users")
+        read = RestApiDestinationConfig(type="rest_api", url="https://api.example.com/v2/orders")
+        options = _sync_options()
+
+        assert resolve_rate_limiter(write, options) is resolve_rate_limiter(read, options)
+
+    def test_different_hosts_do_not_share_a_bucket(self) -> None:
+        """The converse guard: unrelated APIs must not throttle each other."""
+        from drt.destinations.rate_limiter import resolve_rate_limiter
+
+        a = RestApiDestinationConfig(type="rest_api", url="https://api.example.com/v1/users")
+        b = RestApiDestinationConfig(type="rest_api", url="https://api.other.com/v1/users")
+        options = _sync_options()
+
+        assert resolve_rate_limiter(a, options) is not resolve_rate_limiter(b, options)
+
+    def test_load_and_fetch_paginated_use_the_same_instance(self) -> None:
+        """End-to-end through the real code paths rather than the helper: both
+        methods must receive the same limiter object for one config."""
+        from drt.destinations import rate_limiter as rl_module
+
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/webhook",
+            method="POST",
+            pagination=OffsetPaginationConfig(type="offset", max_pages=1),
+        )
+        options = _sync_options()
+        seen: list[object] = []
+        real = rl_module.resolve_rate_limiter
+
+        def spy(*args, **kwargs):
+            limiter = real(*args, **kwargs)
+            seen.append(limiter)
+            return limiter
+
+        with patch("drt.destinations.rest_api.resolve_rate_limiter", side_effect=spy):
+            with patch("httpx.Client") as mock_client_cls:
+                mock_client = MagicMock()
+                mock_client_cls.return_value.__enter__.return_value = mock_client
+                mock_client.request.return_value = _make_response(200, "OK")
+                mock_client.get.return_value = _make_response(200, "[]")
+
+                dest = RestApiDestination()
+                dest.load([{"id": 1}], config, options)
+                dest.fetch_paginated(config, {}, options)
+
+        assert len(seen) == 2, "both call sites must go through the registry"
+        assert seen[0] is seen[1], "one host, one bucket"
