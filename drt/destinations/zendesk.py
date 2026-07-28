@@ -39,7 +39,7 @@ import httpx
 from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, RetryConfig, SyncOptions, ZendeskDestinationConfig
 from drt.destinations.base import SyncResult
-from drt.destinations.rate_limiter import RateLimiter
+from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import RowError
 from drt.templates.renderer import render_template
@@ -71,8 +71,14 @@ class ZendeskDestination:
         )
         headers = {"Content-Type": "application/json"}
         retry_config = resolve_retry(config.retry, sync_options)
-        rate_limiter = RateLimiter(
-            min(sync_options.rate_limit.requests_per_second, _ZENDESK_MAX_REQUESTS_PER_SECOND)
+        # The vendor ceiling is passed as a cap so it clamps the resolved rate
+        # before the shared bucket is created; _load_users / _load_organizations
+        # receive that already-capped limiter as a parameter, unchanged.
+        rate_limiter = resolve_rate_limiter(
+            config,
+            sync_options,
+            max_requests_per_second=_ZENDESK_MAX_REQUESTS_PER_SECOND,
+            limiter_factory=RateLimiter,
         )
         result = SyncResult()
 

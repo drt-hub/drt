@@ -36,7 +36,7 @@ from drt.config.models import (
     SyncOptions,
 )
 from drt.destinations.base import SyncResult
-from drt.destinations.rate_limiter import RateLimiter
+from drt.destinations.rate_limiter import resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import RowError
 from drt.templates.renderer import render_template
@@ -69,8 +69,9 @@ class NotionDestination:
         }
         pages_url = f"{_NOTION_API}/pages"
         result = SyncResult()
-        # Notion rate limit: ~3 req/s for integrations
-        rate_limiter = RateLimiter(min(sync_options.rate_limit.requests_per_second, 3))
+        # Notion rate limit: ~3 req/s for integrations. Capped at resolution
+        # time so the shared bucket is created already clamped.
+        rate_limiter = resolve_rate_limiter(config, sync_options, max_requests_per_second=3)
         retry_config = resolve_retry(config.retry, sync_options)
 
         with httpx.Client(timeout=30.0) as client:

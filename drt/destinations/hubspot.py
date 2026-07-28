@@ -50,7 +50,7 @@ import httpx
 from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, HubSpotDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
-from drt.destinations.rate_limiter import RateLimiter
+from drt.destinations.rate_limiter import resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import RowError
 from drt.templates.renderer import render_template
@@ -82,8 +82,10 @@ class HubSpotDestination:
         upsert_url = f"{_HUBSPOT_API}/{config.object_type}"
         policy = sync_options.match_policy  # #757 — upsert | update_only | create_only
         result = SyncResult()
-        # HubSpot rate limit: 100 req/10s for private apps
-        rate_limiter = RateLimiter(min(sync_options.rate_limit.requests_per_second, 9))
+        # HubSpot rate limit: 100 req/10s for private apps. Passed as a cap so
+        # it clamps the resolved rate before the shared bucket is created — a
+        # destination-level override cannot exceed what HubSpot publishes.
+        rate_limiter = resolve_rate_limiter(config, sync_options, max_requests_per_second=9)
 
         with httpx.Client(timeout=30.0) as client:
             for i, record in enumerate(records):

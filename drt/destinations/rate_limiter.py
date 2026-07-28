@@ -163,9 +163,21 @@ def _reset_limiter_registry() -> None:
         _limiter_registry.clear()
 
 
+class LimiterFactory(Protocol):
+    """Constructs a :class:`RateLimiter`. See ``resolve_rate_limiter``."""
+
+    def __call__(self, requests_per_second: float, burst: int | None) -> RateLimiter: ...
+
+
+def _default_limiter_factory(requests_per_second: float, burst: int | None) -> RateLimiter:
+    return RateLimiter(requests_per_second=requests_per_second, burst=burst)
+
+
 def resolve_rate_limiter(
     config: RateLimitKeyed,
     sync_options: SyncOptions,
+    max_requests_per_second: float | None = None,
+    limiter_factory: LimiterFactory | None = None,
 ) -> RateLimiter:
     """Return the shared limiter for this destination's endpoint (#769).
 
@@ -174,6 +186,16 @@ def resolve_rate_limiter(
     with ``config.rate_limit_key()``, then returns the registered limiter for
     that key — creating it on first use. Every sync and every worker thread
     targeting one endpoint therefore paces against one bucket.
+
+    ``max_requests_per_second`` is a **vendor ceiling** — HubSpot 9/s, Notion
+    3/s, GitHub Actions 5/s, Zendesk 11/s — published by the API owner and not
+    negotiable by config. It clamps the resolved rate *before* the registry is
+    touched, so the cap is baked into the instance the registry creates or
+    tightens. Applying it to the returned limiter instead would be a bug: the
+    instance is shared, so each caller's assignment would clobber the rate the
+    other callers rely on, and the last writer would win non-deterministically.
+    A cap is a ceiling only — it never raises a lower configured rate, and it
+    leaves the ``requests_per_second=0`` "no pacing" sentinel alone.
 
     **Same endpoint, different rates: min-wins.** When a key already has a
     limiter and the caller resolves a different rate, the *stricter* of the two
@@ -190,6 +212,14 @@ def resolve_rate_limiter(
     every other sync sharing that endpoint. That is the intended trade —
     correctness against the vendor's limit over per-sync throughput.
 
+    ``limiter_factory`` overrides how a *new* limiter is constructed (it is not
+    consulted when the key is already registered). Destinations pass their own
+    module-level ``RateLimiter`` name so that
+    ``patch("drt.destinations.<name>.RateLimiter")`` — the way several
+    destination tests assert per-record pacing — keeps intercepting
+    construction. Without the seam those patches would target a name ``load()``
+    no longer calls and the assertions would quietly pass against nothing.
+
     The returned key is process-local. Do not log or serialize it: it may embed
     an env-var name or a credential digest, and the #696 review rejected
     published digests as brute-forceable.
@@ -197,18 +227,23 @@ def resolve_rate_limiter(
     resolved = resolve_rate_limit(getattr(config, "rate_limit", None), sync_options)
     key = config.rate_limit_key()
 
+    rps = resolved.requests_per_second
+    if max_requests_per_second is not None and rps > max_requests_per_second:
+        # ``>`` rather than min(): keeps rps=0 (pacing disabled) intact, since
+        # 0 is a sentinel rather than a rate and must not become the ceiling.
+        rps = max_requests_per_second
+
+    factory = limiter_factory if limiter_factory is not None else _default_limiter_factory
+
     with _registry_lock:
         existing = _limiter_registry.get(key)
         if existing is None:
-            limiter = RateLimiter(
-                requests_per_second=resolved.requests_per_second,
-                burst=resolved.burst,
-            )
+            limiter = factory(requests_per_second=rps, burst=resolved.burst)
             _limiter_registry[key] = limiter
             return limiter
 
     # Tighten outside the registry lock: RateLimiter has its own lock, and
     # holding both here would nest them (registry -> limiter) while acquire()
     # holds only the limiter's — a needless second lock-ordering constraint.
-    existing.tighten_to(resolved.requests_per_second, resolved.burst)
+    existing.tighten_to(rps, resolved.burst)
     return existing

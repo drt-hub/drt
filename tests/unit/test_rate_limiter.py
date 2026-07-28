@@ -673,3 +673,172 @@ class TestResolveRateLimiter:
         assert all(len(ids) == 1 for ids in results.values())
         # And the four keys really are four distinct limiters.
         assert len({next(iter(ids)) for ids in results.values()}) == key_count
+
+
+class TestVendorCap:
+    """``max_requests_per_second`` pins a published vendor ceiling (#769).
+
+    HubSpot (9/s), Notion (3/s), GitHub Actions (5/s) and Zendesk (11/s)
+    clamped with ``min(rps, N)`` before the registry existed. The clamp has to
+    survive the switch, or a destination-level override would silently let a
+    user exceed a documented API limit.
+
+    Critically the cap is applied to the *resolved* rate **before** the
+    registry lookup, never to the instance afterwards: the returned limiter is
+    shared, so a post-hoc assignment would let each caller overwrite the rate
+    the others depend on.
+    """
+
+    def setup_method(self) -> None:
+        _reset_limiter_registry()
+
+    def teardown_method(self) -> None:
+        _reset_limiter_registry()
+
+    def _slack(self, hook_env: str) -> SlackDestinationConfig:
+        return SlackDestinationConfig(type="slack", webhook_url_env=hook_env)
+
+    def test_cap_clamps_a_higher_sync_level_rate(self) -> None:
+        options = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=100))
+
+        limiter = resolve_rate_limiter(self._slack("HOOK_A"), options, max_requests_per_second=9)
+
+        assert limiter.requests_per_second == 9
+
+    def test_cap_does_not_raise_a_lower_configured_rate(self) -> None:
+        """A cap is a ceiling, not a target — a slower config stays slower."""
+        options = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=2))
+
+        limiter = resolve_rate_limiter(self._slack("HOOK_A"), options, max_requests_per_second=9)
+
+        assert limiter.requests_per_second == 2
+
+    def test_destination_override_cannot_exceed_the_cap(self) -> None:
+        """The headline risk of adding destination.rate_limit: a user raising
+        their own limit past what the vendor publishes."""
+        config = self._slack("HOOK_A")
+        config.rate_limit = RateLimitConfig(requests_per_second=500)
+        options = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=1))
+
+        limiter = resolve_rate_limiter(config, options, max_requests_per_second=9)
+
+        assert limiter.requests_per_second == 9
+
+    def test_cap_applies_to_an_already_registered_limiter(self) -> None:
+        """Second caller on a hot key: the cap must clamp before tighten_to,
+        not after the instance is handed back."""
+        slow = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=100))
+        first = resolve_rate_limiter(self._slack("HOOK_A"), slow, max_requests_per_second=9)
+        assert first.requests_per_second == 9
+
+        # A second, uncapped-looking resolve on the same key must not loosen it.
+        second = resolve_rate_limiter(
+            self._slack("HOOK_A"),
+            SyncOptions(rate_limit=RateLimitConfig(requests_per_second=100)),
+            max_requests_per_second=9,
+        )
+
+        assert second is first
+        assert second.requests_per_second == 9
+
+    def test_no_cap_leaves_the_resolved_rate_untouched(self) -> None:
+        """The plain (uncapped) connectors must behave exactly as before."""
+        options = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=100))
+
+        limiter = resolve_rate_limiter(self._slack("HOOK_A"), options)
+
+        assert limiter.requests_per_second == 100
+
+    def test_cap_preserves_the_zero_means_unlimited_sentinel(self) -> None:
+        """rps=0 disables pacing entirely and many destination tests rely on
+        it; min(0, 9) would keep 0, but pin it so a future clamp rewrite
+        cannot turn the sentinel into a real 9/s rate."""
+        options = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=0))
+
+        limiter = resolve_rate_limiter(self._slack("HOOK_A"), options, max_requests_per_second=9)
+
+        assert limiter.requests_per_second == 0
+
+    def test_burst_survives_capping(self) -> None:
+        """The cap constrains the steady rate only; burst is carried through."""
+        options = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=100, burst=4))
+
+        limiter = resolve_rate_limiter(self._slack("HOOK_A"), options, max_requests_per_second=9)
+
+        assert limiter.requests_per_second == 9
+        assert limiter.burst == 4
+
+
+class TestLimiterFactory:
+    """``limiter_factory`` keeps the construction seam in the caller's module.
+
+    Several destination tests assert pacing happens by patching
+    ``drt.destinations.<name>.RateLimiter`` and counting ``acquire()`` on the
+    instance it returns. Once ``load()`` delegates construction to the registry
+    that patch would stop intercepting anything, and the tests would silently
+    assert nothing. Passing the destination module's own ``RateLimiter`` name
+    as the factory keeps those patch points live and keeps the registry's
+    construction point injectable.
+    """
+
+    def setup_method(self) -> None:
+        _reset_limiter_registry()
+
+    def teardown_method(self) -> None:
+        _reset_limiter_registry()
+
+    def _slack(self, hook_env: str) -> SlackDestinationConfig:
+        return SlackDestinationConfig(type="slack", webhook_url_env=hook_env)
+
+    def test_factory_is_used_to_build_a_cold_key(self) -> None:
+        sentinel = RateLimiter(requests_per_second=1)
+        calls: list[tuple[float, int | None]] = []
+
+        def factory(requests_per_second: float, burst: int | None) -> RateLimiter:
+            calls.append((requests_per_second, burst))
+            return sentinel
+
+        options = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=4, burst=2))
+
+        limiter = resolve_rate_limiter(self._slack("HOOK_A"), options, limiter_factory=factory)
+
+        assert limiter is sentinel
+        assert calls == [(4, 2)], "factory must receive the resolved rate and burst"
+
+    def test_factory_receives_the_capped_rate(self) -> None:
+        """The vendor cap is applied before construction, not after."""
+        calls: list[float] = []
+
+        def factory(requests_per_second: float, burst: int | None) -> RateLimiter:
+            calls.append(requests_per_second)
+            return RateLimiter(requests_per_second=requests_per_second, burst=burst)
+
+        options = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=100))
+
+        resolve_rate_limiter(
+            self._slack("HOOK_A"),
+            options,
+            max_requests_per_second=3,
+            limiter_factory=factory,
+        )
+
+        assert calls == [3]
+
+    def test_factory_is_not_called_for_a_hot_key(self) -> None:
+        """A registered endpoint is reused, so nothing new is constructed."""
+        options = SyncOptions()
+        first = resolve_rate_limiter(self._slack("HOOK_A"), options)
+
+        def factory(requests_per_second: float, burst: int | None) -> RateLimiter:
+            raise AssertionError("must reuse the registered limiter")
+
+        reused = resolve_rate_limiter(self._slack("HOOK_A"), options, limiter_factory=factory)
+        assert reused is first
+
+    def test_default_factory_builds_a_real_rate_limiter(self) -> None:
+        options = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=6))
+
+        limiter = resolve_rate_limiter(self._slack("HOOK_A"), options)
+
+        assert isinstance(limiter, RateLimiter)
+        assert limiter.requests_per_second == 6
