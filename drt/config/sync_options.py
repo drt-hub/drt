@@ -10,7 +10,10 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
-from drt.config.base import RetryConfig
+# RateLimitConfig is defined in base.py (beside RetryConfig) because the
+# destination configs imported below now carry a rate_limit override; it is
+# re-exported here so drt.config.models and existing imports are unchanged.
+from drt.config.base import RateLimitConfig, RetryConfig
 from drt.config.destinations_saas import (
     AirtableDestinationConfig,
     AmplitudeDestinationConfig,
@@ -52,17 +55,6 @@ from drt.config.destinations_storage import (
     S3DestinationConfig,
 )
 from drt.config.duration import parse_duration
-
-
-class RateLimitConfig(BaseModel):
-    # float rather than int (#769): RateLimiter.requests_per_second was already
-    # annotated float and sub-1/s rates (2.5 → one request per 0.4 s) were
-    # already exercised, so this widening is a compatibility fix, not a feature.
-    requests_per_second: float = 10
-    # Opt-in burst capacity (#769). None keeps the historical minimum-interval
-    # behaviour exactly; a value lets an idle period accumulate up to N
-    # requests' worth of credit that can be spent back-to-back.
-    burst: int | None = Field(default=None, ge=1)
 
 
 class WatermarkConfig(BaseModel):

@@ -20,6 +20,7 @@ from drt.config.base import (
     DescribableConfig,
     OAuth2ClientCredentialsAuth,
     PaginationConfig,
+    RateLimitConfig,
     RetryConfig,
     hash_secret,
 )
@@ -71,6 +72,7 @@ class RestApiDestinationConfig(DescribableConfig):
     auth: AuthConfig | None = None
     pagination: PaginationConfig | None = None
     retry: RetryConfig | None = None  # destination-level override of sync.retry
+    rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
     def _describe_detail(self) -> str:
         return f"{self.url}"
@@ -96,6 +98,7 @@ class SlackDestinationConfig(DescribableConfig):
     # If True, treat message_template as a Block Kit JSON payload
     block_kit: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
+    rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
     def _describe_detail(self) -> str:
         return "webhook"
@@ -126,6 +129,7 @@ class TwilioDestinationConfig(DescribableConfig):
     # Jinja2 template → SMS body
     message_template: str
     retry: RetryConfig | None = None  # destination-level override of sync.retry
+    rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
     def _describe_detail(self) -> str:
         return f"{self.from_number}"
@@ -166,6 +170,7 @@ class DiscordDestinationConfig(DescribableConfig):
     # If True, treat message_template as a JSON payload with embeds
     embeds: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
+    rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
     def _describe_detail(self) -> str:
         return "webhook"
@@ -188,6 +193,7 @@ class GitHubActionsDestinationConfig(DescribableConfig):
     inputs_template: str | None = None
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
     retry: RetryConfig | None = None  # destination-level override of sync.retry
+    rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
     def _describe_detail(self) -> str:
         return f"{self.owner}/{self.repo}"
@@ -225,6 +231,7 @@ class HubSpotDestinationConfig(DescribableConfig):
     properties_template: str | None = None
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
     retry: RetryConfig | None = None  # destination-level override of sync.retry
+    rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
     def _describe_detail(self) -> str:
         return f"{self.object_type}"
@@ -255,6 +262,7 @@ class ZendeskDestinationConfig(DescribableConfig):
     id_field: str | None = None
     custom_fields_template: str | None = None
     retry: RetryConfig | None = None  # destination-level override of sync.retry
+    rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
     def _describe_detail(self) -> str:
         return f"{self.object}"
@@ -284,6 +292,7 @@ class AmplitudeDestinationConfig(DescribableConfig):
     batch_size: int = 1000
     min_id_length: int | None = None
     retry: RetryConfig | None = None
+    rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
     def _describe_detail(self) -> str:
         return f"{self.endpoint}, {self.region}"
@@ -325,6 +334,7 @@ class AirtableDestinationConfig(BaseModel):
     # performUpsert / fieldsToMergeOn). Omit for append-only.
     primary_key: str | None = None
     retry: RetryConfig | None = None
+    rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
     def describe(self) -> str:
         return f"airtable ({self.base_id}/{self.table_name})"
@@ -364,6 +374,7 @@ class KlaviyoDestinationConfig(BaseModel):
     # Klaviyo API revision (sent as the `revision` header).
     revision: str = "2024-10-15"
     retry: RetryConfig | None = None
+    rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
     def describe(self) -> str:
         return "klaviyo (profiles)"
@@ -416,6 +427,7 @@ class MixpanelDestinationConfig(DescribableConfig):
 
     batch_size: int = 2000
     retry: RetryConfig | None = None
+    rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
     def _describe_detail(self) -> str:
         return f"{self.endpoint}, {self.region}"
@@ -480,6 +492,7 @@ class IntercomDestinationConfig(DescribableConfig):
     properties_template: str
 
     retry: RetryConfig | None = None  # destination-level override of sync.retry
+    rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
     def _describe_detail(self) -> str:
         return "contacts"
@@ -502,6 +515,7 @@ class SendGridDestinationConfig(BaseModel):
     list_ids: list[str] | None = None
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
     retry: RetryConfig | None = None  # destination-level override of sync.retry
+    rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
     def describe(self) -> str:
         return f"sendgrid ({self.from_email})"
@@ -528,6 +542,7 @@ class LinearDestinationConfig(BaseModel):
     assignee_id: str | None = None
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
     retry: RetryConfig | None = None  # destination-level override of sync.retry
+    rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
     def describe(self) -> str:
         return "linear (issue)"
@@ -553,6 +568,7 @@ class TeamsDestinationConfig(DescribableConfig):
     # If True, treat message_template as an Adaptive Card JSON payload
     adaptive_card: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
+    rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
     def _describe_detail(self) -> str:
         return "webhook"
@@ -575,6 +591,7 @@ class JiraDestinationConfig(BaseModel):
     description_template: str
     issue_id_field: str = "issue_id"  # row key that indicates update mode
     retry: RetryConfig | None = None  # destination-level override of sync.retry
+    rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
     def describe(self) -> str:
         return f"jira ({self.project_key})"
@@ -623,6 +640,7 @@ class NotionDestinationConfig(DescribableConfig):
     properties_template: str | None = None
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
     retry: RetryConfig | None = None  # destination-level override of sync.retry
+    rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
     def _describe_detail(self) -> str:
         return f"database {self.database_id}"
@@ -650,6 +668,7 @@ class GoogleAdsDestinationConfig(BaseModel):
     developer_token_env: str = "GOOGLE_ADS_DEVELOPER_TOKEN"
     auth: AuthConfig | None = None  # typically oauth2_client_credentials
     retry: RetryConfig | None = None  # destination-level override of sync.retry
+    rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
     def describe(self) -> str:
         return f"google_ads ({self.customer_id})"

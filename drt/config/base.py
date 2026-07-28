@@ -257,3 +257,23 @@ class RetryConfig(BaseModel):
     backoff_multiplier: float = 2.0
     max_backoff: float = 60.0
     retryable_status_codes: tuple[int, ...] = (429, 500, 502, 503, 504)
+
+
+class RateLimitConfig(BaseModel):
+    """Request pacing for a destination or a whole sync (#769).
+
+    Lives here beside :class:`RetryConfig` rather than in ``sync_options``
+    because the destination configs now carry a ``rate_limit`` override and
+    ``sync_options`` imports *them* — defining it there would close an import
+    cycle. ``sync_options`` re-exports it, so ``drt.config.models`` and every
+    existing import path are unchanged.
+    """
+
+    # float rather than int (#769): RateLimiter.requests_per_second was already
+    # annotated float and sub-1/s rates (2.5 → one request per 0.4 s) were
+    # already exercised, so this widening is a compatibility fix, not a feature.
+    requests_per_second: float = 10
+    # Opt-in burst capacity (#769). None keeps the historical minimum-interval
+    # behaviour exactly; a value lets an idle period accumulate up to N
+    # requests' worth of credit that can be spent back-to-back.
+    burst: int | None = Field(default=None, ge=1)

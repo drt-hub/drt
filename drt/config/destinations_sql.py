@@ -11,7 +11,13 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from drt.config.base import DescribableConfig, LookupConfig, RetryConfig, SslConfig
+from drt.config.base import (
+    DescribableConfig,
+    LookupConfig,
+    RateLimitConfig,
+    RetryConfig,
+    SslConfig,
+)
 
 
 class SnowflakeDestinationConfig(DescribableConfig):
@@ -166,6 +172,7 @@ class ElasticsearchDestinationConfig(DescribableConfig):
     # OpenSearch / Elasticsearch with the bundled cert).
     verify_tls: bool = True
     retry: RetryConfig | None = None  # destination-level override of sync.retry
+    rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
     def _describe_detail(self) -> str:
         return f"{self.index}"

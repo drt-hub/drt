@@ -1110,3 +1110,82 @@ class TestRateLimitKey:
         assert slack.rate_limit_key() != airtable.rate_limit_key()
         assert slack.rate_limit_key().startswith("slack:")
         assert airtable.rate_limit_key().startswith("airtable:")
+
+
+# ---------------------------------------------------------------------------
+# destination-level rate_limit override (#769)
+# ---------------------------------------------------------------------------
+
+
+def _configs_with_retry() -> list[type]:
+    """Every destination config class that carries a ``retry`` override.
+
+    ``retry`` marks the connectors that actually issue paced HTTP calls, which
+    is exactly the set that needs a ``rate_limit`` sibling. Deriving the list
+    from the union rather than hard-coding it means a connector added later is
+    swept automatically.
+    """
+    import typing
+
+    from drt.config.sync_options import DestinationConfig
+
+    members = typing.get_args(typing.get_args(DestinationConfig)[0])
+    return [m for m in members if "retry" in m.model_fields]
+
+
+class TestDestinationRateLimitOverride:
+    """``destination.rate_limit`` mirrors ``destination.retry`` (#769).
+
+    The field is repeated per class rather than hoisted to a shared base
+    because only some of these inherit ``DescribableConfig`` — normalizing the
+    ``BaseModel``-direct ones is a separate refactor. The sweep below is what
+    keeps that duplication honest.
+    """
+
+    def test_retry_capable_configs_all_expose_rate_limit(self) -> None:
+        """Any config with ``retry`` must also have ``rate_limit``.
+
+        A connector added later that copies the ``retry`` line but forgets
+        ``rate_limit`` would silently ignore destination-level overrides —
+        this fails loudly instead.
+        """
+        with_retry = _configs_with_retry()
+        assert len(with_retry) == 19, "expected 19 retry-capable configs; update the sweep"
+
+        missing = [m.__name__ for m in with_retry if "rate_limit" not in m.model_fields]
+        assert missing == []
+
+    @pytest.mark.parametrize("cls", _configs_with_retry(), ids=lambda c: c.__name__)
+    def test_rate_limit_is_optional_and_defaults_to_none(self, cls: type) -> None:
+        """Default None means "no destination override" — sync-level wins."""
+        field = cls.model_fields["rate_limit"]
+        assert field.default is None
+        assert not field.is_required()
+
+    @pytest.mark.parametrize("cls", _configs_with_retry(), ids=lambda c: c.__name__)
+    def test_rate_limit_is_typed_as_rate_limit_config(self, cls: type) -> None:
+        """A plain dict in YAML must validate into ``RateLimitConfig``."""
+        from drt.config.sync_options import RateLimitConfig
+
+        assert cls.model_fields["rate_limit"].annotation == RateLimitConfig | None
+
+    def test_rate_limit_parses_from_yaml_shape(self) -> None:
+        """End-to-end: the nested mapping a user writes becomes a config."""
+        from drt.config.sync_options import RateLimitConfig
+
+        cfg = RestApiDestinationConfig.model_validate(
+            {
+                "type": "rest_api",
+                "url": "https://api.example.com/v1/users",
+                "rate_limit": {"requests_per_second": 2.5, "burst": 4},
+            }
+        )
+        assert isinstance(cfg.rate_limit, RateLimitConfig)
+        assert cfg.rate_limit.requests_per_second == 2.5
+        assert cfg.rate_limit.burst == 4
+
+    def test_rate_limit_omitted_stays_none(self) -> None:
+        cfg = RestApiDestinationConfig.model_validate(
+            {"type": "rest_api", "url": "https://api.example.com"}
+        )
+        assert cfg.rate_limit is None
