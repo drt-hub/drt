@@ -102,3 +102,200 @@ class TestClickHouseSource:
                 username="analyst",
                 password="testpassword",
             )
+
+
+# ---------------------------------------------------------------------------
+# Transient-failure retry (#766)
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_ch_exceptions(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Provide ``clickhouse_connect.driver.exceptions`` for classification tests.
+
+    clickhouse-connect is an optional extra and is not installed in the
+    default dev environment. The stub mirrors its real hierarchy (verified
+    against clickhouse_connect/driver/exceptions.py): ClickHouseError at the
+    root, Error below it, then InterfaceError and DatabaseError, with
+    OperationalError / ProgrammingError / DataError / IntegrityError /
+    InternalError / NotSupportedError as siblings under DatabaseError, and
+    StreamClosedError under ProgrammingError.
+    """
+    import sys
+    import types
+
+    class ClickHouseError(Exception):
+        pass
+
+    class Error(ClickHouseError):
+        pass
+
+    class InterfaceError(Error):
+        pass
+
+    class DatabaseError(Error):
+        pass
+
+    class OperationalError(DatabaseError):
+        pass
+
+    class ProgrammingError(DatabaseError):
+        pass
+
+    class DataError(DatabaseError):
+        pass
+
+    class IntegrityError(DatabaseError):
+        pass
+
+    class StreamClosedError(ProgrammingError):
+        pass
+
+    exc_mod = types.ModuleType("clickhouse_connect.driver.exceptions")
+    for cls in (
+        ClickHouseError,
+        Error,
+        InterfaceError,
+        DatabaseError,
+        OperationalError,
+        ProgrammingError,
+        DataError,
+        IntegrityError,
+        StreamClosedError,
+    ):
+        setattr(exc_mod, cls.__name__, cls)
+
+    root = types.ModuleType("clickhouse_connect")
+    driver = types.ModuleType("clickhouse_connect.driver")
+    driver.exceptions = exc_mod  # type: ignore[attr-defined]
+    root.driver = driver  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "clickhouse_connect", root)
+    monkeypatch.setitem(sys.modules, "clickhouse_connect.driver", driver)
+    monkeypatch.setitem(sys.modules, "clickhouse_connect.driver.exceptions", exc_mod)
+    return exc_mod
+
+
+class TestClickHouseTransientClassification:
+    @pytest.mark.parametrize("exc_name", ["OperationalError", "InterfaceError"])
+    def test_transient_errors(self, monkeypatch: pytest.MonkeyPatch, exc_name: str) -> None:
+        mod = _install_fake_ch_exceptions(monkeypatch)
+        assert ClickHouseSource()._is_transient(getattr(mod, exc_name)("disconnect")) is True
+
+    @pytest.mark.parametrize(
+        "exc_name",
+        ["ProgrammingError", "DataError", "IntegrityError", "DatabaseError", "ClickHouseError"],
+    )
+    def test_permanent_errors(self, monkeypatch: pytest.MonkeyPatch, exc_name: str) -> None:
+        mod = _install_fake_ch_exceptions(monkeypatch)
+        assert ClickHouseSource()._is_transient(getattr(mod, exc_name)("nope")) is False
+
+    def test_stream_closed_error_is_permanent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """StreamClosedError subclasses ProgrammingError, so it must not retry."""
+        mod = _install_fake_ch_exceptions(monkeypatch)
+        assert ClickHouseSource()._is_transient(mod.StreamClosedError("closed")) is False
+
+    def test_httpx_transport_error_needs_no_classification(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ClickHouse's HTTP interface can leak httpx exceptions.
+
+        `_is_transient` returns False for them and that is correct:
+        `with_retry` catches `httpx.TransportError` natively, and `retry_on`
+        is additive to that path rather than a replacement for it.
+        """
+        import httpx
+
+        _install_fake_ch_exceptions(monkeypatch)
+        assert ClickHouseSource()._is_transient(httpx.ConnectError("boom")) is False
+
+
+class TestClickHouseSourceRetry:
+    def test_transient_failure_is_retried_then_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mod = _install_fake_ch_exceptions(monkeypatch)
+        attempts: list[int] = []
+
+        def connect(_config: Any) -> MagicMock:
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise mod.OperationalError("unexpected disconnect")
+            client = MagicMock()
+            result = MagicMock()
+            result.column_names = ["id"]
+            result.result_rows = [(1,)]
+            client.query.return_value = result
+            return client
+
+        with patch.object(ClickHouseSource, "_connect", side_effect=connect):
+            with patch("drt.destinations.retry.time.sleep"):
+                rows = list(ClickHouseSource().extract("SELECT id FROM t", _config()))
+
+        assert rows == [{"id": 1}]
+        assert len(attempts) == 3
+
+    def test_httpx_transport_error_is_retried_by_the_builtin_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The HTTP interface case, end to end."""
+        import httpx
+
+        _install_fake_ch_exceptions(monkeypatch)
+        attempts: list[int] = []
+
+        def connect(_config: Any) -> MagicMock:
+            attempts.append(1)
+            if len(attempts) < 2:
+                raise httpx.ConnectError("connection refused")
+            client = MagicMock()
+            result = MagicMock()
+            result.column_names = ["id"]
+            result.result_rows = [(7,)]
+            client.query.return_value = result
+            return client
+
+        with patch.object(ClickHouseSource, "_connect", side_effect=connect):
+            with patch("drt.destinations.retry.time.sleep"):
+                rows = list(ClickHouseSource().extract("SELECT id FROM t", _config()))
+
+        assert rows == [{"id": 7}]
+        assert len(attempts) == 2
+
+    def test_permanent_failure_is_not_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mod = _install_fake_ch_exceptions(monkeypatch)
+        attempts: list[int] = []
+
+        def connect(_config: Any) -> MagicMock:
+            attempts.append(1)
+            raise mod.ProgrammingError("Table default.nope doesn't exist")
+
+        with patch.object(ClickHouseSource, "_connect", side_effect=connect):
+            with patch("drt.destinations.retry.time.sleep") as sleep:
+                with pytest.raises(mod.ProgrammingError):
+                    list(ClickHouseSource().extract("SELECT * FROM nope", _config()))
+
+        assert len(attempts) == 1
+        sleep.assert_not_called()
+
+    def test_no_retry_once_a_row_has_been_yielded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Scope boundary (#766): a yielded row cannot be un-sent."""
+        mod = _install_fake_ch_exceptions(monkeypatch)
+        attempts: list[int] = []
+
+        def connect(_config: Any) -> MagicMock:
+            attempts.append(1)
+            client = MagicMock()
+            result = MagicMock()
+            result.column_names = ["id"]
+            result.result_rows = [(1,), (2,)]
+            client.query.return_value = result
+            return client
+
+        with patch.object(ClickHouseSource, "_connect", side_effect=connect):
+            with patch("drt.destinations.retry.time.sleep"):
+                gen = ClickHouseSource().extract("SELECT id FROM t", _config())
+                assert next(gen) == {"id": 1}
+                with pytest.raises(mod.OperationalError):
+                    gen.throw(mod.OperationalError("connection reset"))
+
+        assert len(attempts) == 1

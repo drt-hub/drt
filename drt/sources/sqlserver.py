@@ -19,24 +19,64 @@ from collections.abc import Iterator
 from typing import Any
 
 from drt.config.credentials import ProfileConfig, SQLServerProfile, resolve_env
+from drt.config.models import RetryConfig
+from drt.destinations.retry import with_retry
 
 
 class SQLServerSource:
     """Extract records from a SQL Server database."""
 
-    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
-        assert isinstance(config, SQLServerProfile)
-        conn = self._connect(config)
+    def _is_transient(self, exc: Exception) -> bool:
+        """Is ``exc`` worth retrying? (#766)
+
+        Transient: ``OperationalError`` (connection refused, the server
+        restarting, an Azure SQL failover moving the database between
+        replicas) and ``InterfaceError`` (the driver's connection object went
+        bad).
+
+        Permanent: ``ProgrammingError`` (bad SQL, missing table),
+        ``DataError``, ``IntegrityError``, ``NotSupportedError``.
+
+        pymssql follows PEP 249 exactly — verified against its
+        ``exceptions.py``: ``InterfaceError`` subclasses ``Error``, while
+        ``OperationalError``, ``ProgrammingError``, ``DataError``,
+        ``IntegrityError``, ``InternalError`` and ``NotSupportedError`` are
+        all siblings under ``DatabaseError``. Matching the two specific
+        classes rather than the base keeps a SQL typo from being retried.
+        """
         try:
-            cur = conn.cursor(as_dict=True)
+            import pymssql  # type: ignore[import-untyped]
+        except ImportError:  # pragma: no cover - driver absent, nothing to classify
+            return False
+        return isinstance(exc, (pymssql.OperationalError, pymssql.InterfaceError))
+
+    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
+        """Run ``query`` and yield rows as dicts, retrying transient failures.
+
+        **Retry scope (#766): connection and query execution only.** A failure
+        after the first row has been yielded propagates — those rows are
+        already loaded downstream and cannot be un-sent. See the Postgres
+        source for the full rationale.
+        """
+        assert isinstance(config, SQLServerProfile)
+
+        def _connect_and_fetch() -> list[Any]:
+            conn = self._connect(config)
             try:
-                cur.execute(query)
-                for row in cur.fetchall():
-                    yield dict(row)
+                cur = conn.cursor(as_dict=True)
+                try:
+                    cur.execute(query)
+                    return list(cur.fetchall())
+                finally:
+                    cur.close()
             finally:
-                cur.close()
-        finally:
-            conn.close()
+                conn.close()
+
+        rows = with_retry(_connect_and_fetch, RetryConfig(), retry_on=self._is_transient)
+
+        # Iteration stays outside the retry — a yielded row cannot be un-sent.
+        for row in rows:
+            yield dict(row)
 
     def test_connection(self, config: ProfileConfig) -> bool:
         assert isinstance(config, SQLServerProfile)
