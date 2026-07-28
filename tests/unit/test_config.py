@@ -843,3 +843,270 @@ class TestRateLimitConfig:
 
         with pytest.raises(ValidationError):
             RateLimitConfig(burst=-3)
+
+
+# ---------------------------------------------------------------------------
+# rate_limit_key() — endpoint-scoped limiter identity (#769)
+# ---------------------------------------------------------------------------
+
+
+class TestRateLimitKey:
+    """``rate_limit_key()`` names the real endpoint sharing a vendor quota.
+
+    The key exists precisely because ``describe()`` / ``describe_safe()``
+    cannot serve: the former collides for Slack (every config describes as the
+    literal ``"webhook"``) and splits for HubSpot (``object_type`` is in the
+    detail though one portal shares one quota); the latter is deliberately
+    lossy for docs safety (#696). Each test below pins one of those traps so a
+    future change that reintroduces it fails here rather than in production.
+    """
+
+    def test_hubspot_rate_limit_key_ignores_object_type(self) -> None:
+        """Same portal, different object types share one quota — keys must match."""
+        from drt.config.base import BearerAuth
+        from drt.config.destinations_saas import HubSpotDestinationConfig
+
+        auth = BearerAuth(type="bearer", token_env="HUBSPOT_TOKEN")
+        contacts = HubSpotDestinationConfig(type="hubspot", object_type="contacts", auth=auth)
+        deals = HubSpotDestinationConfig(type="hubspot", object_type="deals", auth=auth)
+
+        assert contacts.rate_limit_key() == deals.rate_limit_key()
+        # And describe() — the tempting shortcut — genuinely differs, so this
+        # test is guarding a real divergence rather than a tautology.
+        assert contacts.describe() != deals.describe()
+
+    def test_hubspot_rate_limit_key_distinguishes_portals(self) -> None:
+        """Different tokens are different portals with independent quotas."""
+        from drt.config.base import BearerAuth
+        from drt.config.destinations_saas import HubSpotDestinationConfig
+
+        a = HubSpotDestinationConfig(
+            type="hubspot", auth=BearerAuth(type="bearer", token_env="PORTAL_A")
+        )
+        b = HubSpotDestinationConfig(
+            type="hubspot", auth=BearerAuth(type="bearer", token_env="PORTAL_B")
+        )
+
+        assert a.rate_limit_key() != b.rate_limit_key()
+
+    def test_slack_rate_limit_key_distinguishes_webhooks(self) -> None:
+        """describe() returns the literal "webhook" for every Slack config — the key must not."""
+        from drt.config.destinations_saas import SlackDestinationConfig
+
+        a = SlackDestinationConfig(type="slack", webhook_url_env="HOOK_A")
+        b = SlackDestinationConfig(type="slack", webhook_url_env="HOOK_B")
+
+        assert a.rate_limit_key() != b.rate_limit_key()
+        # The trap, stated: describe() would have collided these into one bucket.
+        assert a.describe() == b.describe()
+
+    def test_slack_literal_webhook_url_is_not_exposed_in_the_key(self) -> None:
+        """A literal webhook URL is a credential — it must be hashed, not embedded."""
+        from drt.config.destinations_saas import SlackDestinationConfig
+
+        url = "https://hooks.slack.com/services/T000/B000/XXXXSECRETXXXX"
+        cfg = SlackDestinationConfig(type="slack", webhook_url=url)
+
+        key = cfg.rate_limit_key()
+        assert url not in key
+        assert "XXXXSECRETXXXX" not in key
+        # Still identifying: the same URL yields the same key, a different one doesn't.
+        assert key == SlackDestinationConfig(type="slack", webhook_url=url).rate_limit_key()
+        assert (
+            key
+            != SlackDestinationConfig(
+                type="slack", webhook_url="https://hooks.slack.com/services/T000/B000/OTHER"
+            ).rate_limit_key()
+        )
+
+    def test_airtable_rate_limit_key_ignores_table_name(self) -> None:
+        """Same base, different tables share a quota."""
+        from drt.config.destinations_saas import AirtableDestinationConfig
+
+        users = AirtableDestinationConfig(
+            type="airtable", base_id="appABC", table_name="Users", access_token_env="AT"
+        )
+        orders = AirtableDestinationConfig(
+            type="airtable", base_id="appABC", table_name="Orders", access_token_env="AT"
+        )
+
+        assert users.rate_limit_key() == orders.rate_limit_key()
+        assert users.describe() != orders.describe()
+
+    def test_airtable_rate_limit_key_distinguishes_bases(self) -> None:
+        from drt.config.destinations_saas import AirtableDestinationConfig
+
+        a = AirtableDestinationConfig(
+            type="airtable", base_id="appABC", table_name="Users", access_token_env="AT"
+        )
+        b = AirtableDestinationConfig(
+            type="airtable", base_id="appXYZ", table_name="Users", access_token_env="AT"
+        )
+
+        assert a.rate_limit_key() != b.rate_limit_key()
+
+    def test_zendesk_rate_limit_key_is_the_subdomain(self) -> None:
+        """One Zendesk subdomain is one account with one quota, whatever the object."""
+        from drt.config.destinations_saas import ZendeskDestinationConfig
+
+        users = ZendeskDestinationConfig(type="zendesk", subdomain="acme", object="user")
+        orgs = ZendeskDestinationConfig(type="zendesk", subdomain="acme", object="organization")
+        other = ZendeskDestinationConfig(type="zendesk", subdomain="globex", object="user")
+
+        assert users.rate_limit_key() == orgs.rate_limit_key()
+        assert users.rate_limit_key() != other.rate_limit_key()
+
+    def test_rest_api_rate_limit_key_is_the_host_not_the_path(self) -> None:
+        """Paths vary per sync; the published quota is per host."""
+        from drt.config.destinations_saas import RestApiDestinationConfig
+
+        users = RestApiDestinationConfig(type="rest_api", url="https://api.example.com/v1/users")
+        orders = RestApiDestinationConfig(type="rest_api", url="https://api.example.com/v2/orders")
+        elsewhere = RestApiDestinationConfig(type="rest_api", url="https://api.other.com/v1/users")
+
+        assert users.rate_limit_key() == orders.rate_limit_key()
+        assert users.rate_limit_key() != elsewhere.rate_limit_key()
+
+    def test_rest_api_rate_limit_key_separates_ports(self) -> None:
+        """netloc includes the port — two services on one host are two endpoints."""
+        from drt.config.destinations_saas import RestApiDestinationConfig
+
+        a = RestApiDestinationConfig(type="rest_api", url="http://localhost:8080/hook")
+        b = RestApiDestinationConfig(type="rest_api", url="http://localhost:9090/hook")
+
+        assert a.rate_limit_key() != b.rate_limit_key()
+
+    def test_notion_rate_limit_key_ignores_database_id(self) -> None:
+        """Notion's 3 req/s cap is per integration token, not per database."""
+        from drt.config.base import BearerAuth
+        from drt.config.destinations_saas import NotionDestinationConfig
+
+        auth = BearerAuth(type="bearer", token_env="NOTION_TOKEN")
+        a = NotionDestinationConfig(type="notion", database_id="db-1", auth=auth)
+        b = NotionDestinationConfig(type="notion", database_id="db-2", auth=auth)
+
+        assert a.rate_limit_key() == b.rate_limit_key()
+
+    def test_klaviyo_rate_limit_key_is_the_account(self) -> None:
+        from drt.config.destinations_saas import KlaviyoDestinationConfig
+
+        a = KlaviyoDestinationConfig(type="klaviyo", api_key_env="KLAVIYO_A", list_id="L1")
+        b = KlaviyoDestinationConfig(type="klaviyo", api_key_env="KLAVIYO_A", list_id="L2")
+        c = KlaviyoDestinationConfig(type="klaviyo", api_key_env="KLAVIYO_B", list_id="L1")
+
+        assert a.rate_limit_key() == b.rate_limit_key()  # same account, different lists
+        assert a.rate_limit_key() != c.rate_limit_key()
+
+    def test_jira_rate_limit_key_is_the_site_not_the_project(self) -> None:
+        """One Jira site shares a quota across projects."""
+        from drt.config.destinations_saas import JiraDestinationConfig
+
+        def _cfg(project_key: str, base_url_env: str = "JIRA_URL") -> JiraDestinationConfig:
+            return JiraDestinationConfig(
+                type="jira",
+                base_url_env=base_url_env,
+                email_env="JIRA_EMAIL",
+                token_env="JIRA_TOKEN",
+                project_key=project_key,
+                summary_template="s",
+                description_template="d",
+            )
+
+        assert _cfg("ENG").rate_limit_key() == _cfg("OPS").rate_limit_key()
+        assert _cfg("ENG").rate_limit_key() != _cfg("ENG", "OTHER_JIRA_URL").rate_limit_key()
+
+    def test_sendgrid_rate_limit_key_ignores_the_sender(self) -> None:
+        """The quota belongs to the API key, not the From address."""
+        from drt.config.base import BearerAuth
+        from drt.config.destinations_saas import SendGridDestinationConfig
+
+        def _cfg(from_email: str, token_env: str = "SG_KEY") -> SendGridDestinationConfig:
+            return SendGridDestinationConfig(
+                type="sendgrid",
+                from_email=from_email,
+                subject_template="s",
+                body_template="b",
+                auth=BearerAuth(type="bearer", token_env=token_env),
+            )
+
+        assert _cfg("a@example.com").rate_limit_key() == _cfg("b@example.com").rate_limit_key()
+        assert _cfg("a@x.com").rate_limit_key() != _cfg("a@x.com", "SG2").rate_limit_key()
+
+    def test_linear_rate_limit_key_is_the_api_key(self) -> None:
+        from drt.config.base import BearerAuth
+        from drt.config.destinations_saas import LinearDestinationConfig
+
+        def _cfg(token_env: str, team_id: str) -> LinearDestinationConfig:
+            return LinearDestinationConfig(
+                type="linear",
+                team_id=team_id,
+                title_template="t",
+                description_template="d",
+                auth=BearerAuth(type="bearer", token_env=token_env),
+            )
+
+        same_key_other_team = _cfg("LINEAR_A", "team-2").rate_limit_key()
+        other_key = _cfg("LINEAR_B", "team-1").rate_limit_key()
+        baseline = _cfg("LINEAR_A", "team-1").rate_limit_key()
+
+        assert baseline == same_key_other_team
+        assert baseline != other_key
+
+    def test_intercom_rate_limit_key_follows_the_auth(self) -> None:
+        from drt.config.base import BearerAuth
+        from drt.config.destinations_saas import IntercomDestinationConfig
+
+        def _cfg(token_env: str) -> IntercomDestinationConfig:
+            return IntercomDestinationConfig(
+                type="intercom",
+                auth=BearerAuth(type="bearer", token_env=token_env),
+                properties_template="{}",
+            )
+
+        assert _cfg("IC_A").rate_limit_key() == _cfg("IC_A").rate_limit_key()
+        assert _cfg("IC_A").rate_limit_key() != _cfg("IC_B").rate_limit_key()
+
+    def test_rate_limit_key_defaults_to_type(self) -> None:
+        """A connector with no override still gets a stable key."""
+        from drt.config.destinations_saas import GoogleSheetsDestinationConfig
+
+        cfg = GoogleSheetsDestinationConfig(type="google_sheets", spreadsheet_id="sheet-1")
+        assert cfg.rate_limit_key() == "google_sheets"
+
+    def test_default_key_is_stable_across_instances(self) -> None:
+        """Two equivalent configs must land in the same bucket, run after run."""
+        from drt.config.destinations_saas import GoogleSheetsDestinationConfig
+
+        a = GoogleSheetsDestinationConfig(type="google_sheets", spreadsheet_id="s1")
+        b = GoogleSheetsDestinationConfig(type="google_sheets", spreadsheet_id="s2")
+        assert a.rate_limit_key() == b.rate_limit_key()
+
+    def test_every_destination_config_exposes_rate_limit_key(self) -> None:
+        """The registry calls this on any config in the union — including the 10
+        SaaS classes that inherit BaseModel directly rather than
+        DescribableConfig. A connector added later without the method would
+        break the registry, so sweep the whole union here."""
+        import typing
+
+        from drt.config.sync_options import DestinationConfig
+
+        members = typing.get_args(typing.get_args(DestinationConfig)[0])
+        assert len(members) > 30, "union unexpectedly small — did the import shape change?"
+        missing = [m.__name__ for m in members if not hasattr(m, "rate_limit_key")]
+        assert missing == []
+
+    def test_keys_are_prefixed_by_type_so_connectors_cannot_collide(self) -> None:
+        """Two different connectors must never share a bucket by accident."""
+        from drt.config.destinations_saas import (
+            AirtableDestinationConfig,
+            SlackDestinationConfig,
+        )
+
+        slack = SlackDestinationConfig(type="slack", webhook_url_env="SHARED")
+        airtable = AirtableDestinationConfig(
+            type="airtable", base_id="SHARED", table_name="t", access_token_env="AT"
+        )
+
+        assert slack.rate_limit_key() != airtable.rate_limit_key()
+        assert slack.rate_limit_key().startswith("slack:")
+        assert airtable.rate_limit_key().startswith("airtable:")

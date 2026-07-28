@@ -8,9 +8,28 @@ union). ``models.py`` re-exports everything here — import sites are unchanged.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field, model_validator
+
+
+def hash_secret(value: str) -> str:
+    """Stable, non-reversible stand-in for a literal credential in a rate-limit key (#769).
+
+    Keys must *identify* an endpoint, not *reveal* it. Where a config offers an
+    env-var name (``token_env``) that name is used directly — it identifies the
+    account just as reliably without touching the secret. Only when a caller
+    inlines the literal (``webhook_url``, ``api_key``) does the value reach this
+    function, and then only its digest is kept.
+
+    Truncated to 16 hex chars: collision risk across the handful of endpoints in
+    one process is negligible, and a short digest keeps the key readable in a
+    debugger. Per the #696 review precedent a digest is *not* considered safe to
+    publish — rate-limit keys stay process-local and must never be logged or
+    serialized.
+    """
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
 
 class DescribableConfig(BaseModel):
@@ -42,6 +61,31 @@ class DescribableConfig(BaseModel):
 
     def _describe_detail(self) -> str:  # pragma: no cover - always overridden
         raise NotImplementedError
+
+    def rate_limit_key(self) -> str:
+        """Identity of the endpoint whose vendor quota this config consumes (#769).
+
+        The rate-limiter registry buckets by this key, so two configs share one
+        limiter exactly when they share one quota. Deliberately *not*
+        ``describe()``: that label is tuned for humans reading a docs site and
+        gets this wrong in both directions — ``SlackDestinationConfig`` describes
+        every webhook as the literal ``"webhook"`` (unrelated workspaces would
+        throttle each other), while ``HubSpotDestinationConfig`` includes
+        ``object_type`` (one portal's contacts and deals would get a bucket each
+        despite sharing a quota). ``describe_safe()`` is lossy on purpose (#696),
+        which is the opposite of what a key needs.
+
+        The default is the connector type: correct whenever a quota is
+        effectively global to the connector, and safe as a fallback because it
+        over-shares (one bucket) rather than under-shares — the failure mode is
+        pacing, not a 429. Connectors whose quota is per account, per host or per
+        workspace override this and prefix the type so two connectors can never
+        collide. Prefer env-var *names* over resolved secrets; hash any literal
+        credential with :func:`hash_secret`.
+
+        Never log or serialize the return value.
+        """
+        return str(self.type)  # type: ignore[attr-defined]
 
 
 class BearerAuth(BaseModel):

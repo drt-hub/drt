@@ -8,10 +8,58 @@ All ``*DestinationConfig`` here are members of the
 from __future__ import annotations
 
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from drt.config.base import AuthConfig, BearerAuth, DescribableConfig, PaginationConfig, RetryConfig
+from drt.config.base import (
+    ApiKeyAuth,
+    AuthConfig,
+    BasicAuth,
+    BearerAuth,
+    DescribableConfig,
+    OAuth2ClientCredentialsAuth,
+    PaginationConfig,
+    RetryConfig,
+    hash_secret,
+)
+
+
+def _webhook_identity(url: str | None, url_env: str | None) -> str:
+    """Identify a webhook endpoint for rate-limit keying (#769).
+
+    Shared by Slack / Discord / Teams, whose configs are the same shape and
+    whose ``describe()`` is the literal ``"webhook"`` for every instance. The
+    env-var name wins when present; a literal URL is itself the credential
+    (anyone holding it can post) so only its digest goes in the key.
+    """
+    if url_env:
+        return url_env
+    if url:
+        return hash_secret(url)
+    return "unset"
+
+
+def _auth_identity(auth: AuthConfig | None) -> str:
+    """Identify the account behind an auth block for rate-limit keying (#769).
+
+    Env-var *names* are preferred over the secrets they hold: ``token_env``
+    pins the same account just as reliably, and keeps the credential out of a
+    dict key entirely. A literal is hashed. Configs sharing one credential
+    share one vendor quota, which is exactly the bucketing the registry wants.
+    """
+    if auth is None:
+        return "noauth"
+    if isinstance(auth, BearerAuth):
+        return auth.token_env or (hash_secret(auth.token) if auth.token else "noauth")
+    if isinstance(auth, ApiKeyAuth):
+        return auth.value_env or (hash_secret(auth.value) if auth.value else "noauth")
+    if isinstance(auth, BasicAuth):
+        return auth.username_env
+    if isinstance(auth, OAuth2ClientCredentialsAuth):
+        # The token URL is the tenant; client_id_env disambiguates apps on it.
+        return f"{auth.token_url}|{auth.client_id_env}"
+    return "noauth"  # pragma: no cover - AuthConfig union is exhaustive above
 
 
 class RestApiDestinationConfig(DescribableConfig):
@@ -26,6 +74,14 @@ class RestApiDestinationConfig(DescribableConfig):
 
     def _describe_detail(self) -> str:
         return f"{self.url}"
+
+    def rate_limit_key(self) -> str:
+        """Per host (#769). Paths vary sync to sync — ``/v1/users`` and
+        ``/v2/orders`` on one API — but the published quota is per host, so
+        ``netloc`` (host plus any port) is the endpoint that shares it. This is
+        also what makes ``rest_api.py``'s two limiters resolve to one bucket.
+        """
+        return f"{self.type}:{urlparse(self.url).netloc}"
 
 
 class SlackDestinationConfig(DescribableConfig):
@@ -43,6 +99,14 @@ class SlackDestinationConfig(DescribableConfig):
 
     def _describe_detail(self) -> str:
         return "webhook"
+
+    def rate_limit_key(self) -> str:
+        """Per webhook (#769). ``describe()`` returns the literal ``"webhook"``
+        for every Slack config, so keying on it would throttle unrelated
+        workspaces against each other. The env-var name is preferred; a literal
+        URL is a credential and is hashed rather than embedded.
+        """
+        return f"{self.type}:{_webhook_identity(self.webhook_url, self.webhook_url_env)}"
 
 
 class TwilioDestinationConfig(DescribableConfig):
@@ -71,6 +135,16 @@ class TwilioDestinationConfig(DescribableConfig):
         prefix = self.from_number[:3] if self.from_number.startswith("+") else ""
         return f"{self.type} ({prefix}\u2026)" if prefix else str(self.type)
 
+    def rate_limit_key(self) -> str:
+        """Per Twilio account (#769) \u2014 the quota follows the account SID, not
+        the sending number. Note ``describe_safe()`` deliberately keeps only a
+        country-code prefix (#696); that lossiness is why it cannot be the key.
+        """
+        account = self.account_sid_env or (
+            hash_secret(self.account_sid) if self.account_sid else "unset"
+        )
+        return f"{self.type}:{account}"
+
     @model_validator(mode="after")
     def _check_auth(self) -> TwilioDestinationConfig:
         if not (self.account_sid or self.account_sid_env):
@@ -96,6 +170,12 @@ class DiscordDestinationConfig(DescribableConfig):
     def _describe_detail(self) -> str:
         return "webhook"
 
+    def rate_limit_key(self) -> str:
+        """Per webhook (#769) — Discord rate-limits each webhook route
+        separately, and ``describe()`` collides them all as ``"webhook"``.
+        """
+        return f"{self.type}:{_webhook_identity(self.webhook_url, self.webhook_url_env)}"
+
 
 class GitHubActionsDestinationConfig(DescribableConfig):
     type: Literal["github_actions"]
@@ -111,6 +191,14 @@ class GitHubActionsDestinationConfig(DescribableConfig):
 
     def _describe_detail(self) -> str:
         return f"{self.owner}/{self.repo}"
+
+    def rate_limit_key(self) -> str:
+        """Per GitHub token (#769). GitHub's REST quota is per authenticated
+        user / app across all repositories, so two syncs dispatching workflows
+        in different repos under one token still share one budget — keying on
+        ``owner/repo`` would split a quota that is not actually split.
+        """
+        return f"{self.type}:{_auth_identity(self.auth)}"
 
 
 class GoogleSheetsDestinationConfig(DescribableConfig):
@@ -141,6 +229,18 @@ class HubSpotDestinationConfig(DescribableConfig):
     def _describe_detail(self) -> str:
         return f"{self.object_type}"
 
+    def rate_limit_key(self) -> str:
+        """Per portal, i.e. per token (#769).
+
+        ``object_type`` must NOT appear here. HubSpot's quota is per portal and
+        shared across contacts / deals / companies, so keying on
+        ``describe()`` — which *does* include ``object_type`` — would hand
+        ``hubspot (contacts)`` and ``hubspot (deals)`` a limiter each and let
+        one portal be hit at twice the configured rate. That under-sharing is
+        the exact bug this key exists to prevent.
+        """
+        return f"{self.type}:{_auth_identity(self.auth)}"
+
 
 class ZendeskDestinationConfig(DescribableConfig):
     _detail_is_public = True  # object identity only (#696) — safe for hosted docs
@@ -158,6 +258,14 @@ class ZendeskDestinationConfig(DescribableConfig):
 
     def _describe_detail(self) -> str:
         return f"{self.object}"
+
+    def rate_limit_key(self) -> str:
+        """Per subdomain (#769) — one Zendesk instance, one quota, whichever
+        object a sync writes. ``describe()`` details the object instead, so
+        users and organizations on one subdomain would wrongly get a bucket each.
+        """
+        subdomain = self.subdomain_env or self.subdomain or "unset"
+        return f"{self.type}:{subdomain}"
 
 
 class AmplitudeDestinationConfig(DescribableConfig):
@@ -179,6 +287,15 @@ class AmplitudeDestinationConfig(DescribableConfig):
 
     def _describe_detail(self) -> str:
         return f"{self.endpoint}, {self.region}"
+
+    def rate_limit_key(self) -> str:
+        """Per project (API key) and region (#769). The two endpoints
+        (``identify`` / ``event``) bill against one project quota, so the
+        endpoint is excluded — but ``region`` is a genuinely different host
+        (``api.eu`` vs the default) with its own budget, so it stays.
+        """
+        account = self.api_key_env or (hash_secret(self.api_key) if self.api_key else "unset")
+        return f"{self.type}:{self.region}:{account}"
 
     @model_validator(mode="after")
     def _check_api_key(self) -> AmplitudeDestinationConfig:
@@ -215,6 +332,16 @@ class AirtableDestinationConfig(BaseModel):
     def describe_safe(self) -> str:
         return f"airtable ({self.table_name})"
 
+    def rate_limit_key(self) -> str:
+        """Per base (#769) — Airtable's 5 req/s cap is per base, shared by every
+        table in it, so ``table_name`` is deliberately excluded.
+
+        Defined here rather than inherited: this config subclasses ``BaseModel``
+        directly (it hand-rolls ``describe()``), one of ten SaaS configs that do.
+        Normalizing them onto ``DescribableConfig`` is a separate refactor.
+        """
+        return f"{self.type}:{self.base_id}"
+
     @model_validator(mode="after")
     def _check_token(self) -> AirtableDestinationConfig:
         if not self.access_token and not self.access_token_env:
@@ -243,6 +370,15 @@ class KlaviyoDestinationConfig(BaseModel):
 
     def describe_safe(self) -> str:
         return self.describe()  # detail is object identity only (#696)
+
+    def rate_limit_key(self) -> str:
+        """Per Klaviyo account (API key) (#769). ``list_id`` is excluded — the
+        quota is account-wide, and ``describe()`` is the constant
+        ``"klaviyo (profiles)"`` for every config, so it cannot serve as a key.
+        (``BaseModel``-direct config — see ``AirtableDestinationConfig``.)
+        """
+        account = self.api_key_env or (hash_secret(self.api_key) if self.api_key else "unset")
+        return f"{self.type}:{account}"
 
     @model_validator(mode="after")
     def _check_api_key(self) -> KlaviyoDestinationConfig:
@@ -283,6 +419,22 @@ class MixpanelDestinationConfig(DescribableConfig):
 
     def _describe_detail(self) -> str:
         return f"{self.endpoint}, {self.region}"
+
+    def rate_limit_key(self) -> str:
+        """Per Mixpanel project and region (#769).
+
+        The two endpoints authenticate differently — ``people_set`` with a
+        project token, ``import_events`` with a service account plus numeric
+        project id — so the identity is taken from whichever applies. Both bill
+        against one project, so the endpoint itself is not part of the key.
+        """
+        if self.endpoint == "people_set":
+            account = self.project_token_env or (
+                hash_secret(self.project_token) if self.project_token else "unset"
+            )
+        else:
+            account = self.project_id or "unset"
+        return f"{self.type}:{self.region}:{account}"
 
     @model_validator(mode="after")
     def _check_auth(self) -> MixpanelDestinationConfig:
@@ -332,6 +484,13 @@ class IntercomDestinationConfig(DescribableConfig):
     def _describe_detail(self) -> str:
         return "contacts"
 
+    def rate_limit_key(self) -> str:
+        """Per Intercom workspace, identified by its access token (#769).
+        ``describe()`` is the constant ``"contacts"`` for every config, so it
+        would collide unrelated workspaces into one bucket.
+        """
+        return f"{self.type}:{_auth_identity(self.auth)}"
+
 
 class SendGridDestinationConfig(BaseModel):
     type: Literal["sendgrid"]
@@ -351,6 +510,13 @@ class SendGridDestinationConfig(BaseModel):
         domain = self.from_email.rsplit("@", 1)[-1] if "@" in self.from_email else ""
         return f"sendgrid (\u2026@{domain})" if domain else "sendgrid"
 
+    def rate_limit_key(self) -> str:
+        """Per SendGrid API key (#769). The sending quota belongs to the key,
+        not the From address, so two syncs sending as different senders on one
+        key still share the budget. (``BaseModel``-direct config.)
+        """
+        return f"{self.type}:{_auth_identity(self.auth)}"
+
 
 class LinearDestinationConfig(BaseModel):
     type: Literal["linear"]
@@ -369,6 +535,13 @@ class LinearDestinationConfig(BaseModel):
     def describe_safe(self) -> str:
         return self.describe()  # detail is object identity only (#696)
 
+    def rate_limit_key(self) -> str:
+        """Per Linear API key (#769) — the GraphQL quota is per authenticated
+        actor across teams, so ``team_id`` is excluded. ``describe()`` is the
+        constant ``"linear (issue)"``. (``BaseModel``-direct config.)
+        """
+        return f"{self.type}:{_auth_identity(self.auth)}"
+
 
 class TeamsDestinationConfig(DescribableConfig):
     _detail_is_public = True  # object identity only (#696) — safe for hosted docs
@@ -383,6 +556,12 @@ class TeamsDestinationConfig(DescribableConfig):
 
     def _describe_detail(self) -> str:
         return "webhook"
+
+    def rate_limit_key(self) -> str:
+        """Per webhook (#769) — same shape and same ``describe()`` collision as
+        Slack and Discord.
+        """
+        return f"{self.type}:{_webhook_identity(self.webhook_url, self.webhook_url_env)}"
 
 
 class JiraDestinationConfig(BaseModel):
@@ -403,6 +582,14 @@ class JiraDestinationConfig(BaseModel):
     def describe_safe(self) -> str:
         return self.describe()  # detail is object identity only (#696)
 
+    def rate_limit_key(self) -> str:
+        """Per Jira site (#769) — one Atlassian site shares a quota across all
+        its projects, so ``project_key`` is excluded (it may even be a Jinja2
+        template, and a key must be resolvable without rendering). Both env-var
+        names are already names rather than secrets. (``BaseModel``-direct config.)
+        """
+        return f"{self.type}:{self.base_url_env}:{self.token_env}"
+
 
 class EmailSmtpDestinationConfig(DescribableConfig):
     type: Literal["email_smtp"] = "email_smtp"
@@ -421,6 +608,12 @@ class EmailSmtpDestinationConfig(DescribableConfig):
     def _describe_detail(self) -> str:
         return f"{self.host}"
 
+    def rate_limit_key(self) -> str:
+        """Per SMTP server (#769). Relays throttle per host (and per port, since
+        submission and SMTPS are separate services), not per sender.
+        """
+        return f"{self.type}:{self.host}:{self.port}"
+
 
 class NotionDestinationConfig(DescribableConfig):
     type: Literal["notion"]
@@ -436,6 +629,14 @@ class NotionDestinationConfig(DescribableConfig):
 
     def describe_safe(self) -> str:
         return f"{self.type} (database)"
+
+    def rate_limit_key(self) -> str:
+        """Per integration token (#769). Notion's documented ~3 req/s average is
+        enforced per integration across every database it can reach, so
+        ``database_id`` is excluded — two syncs writing two databases through one
+        integration must share the bucket or they will together exceed the cap.
+        """
+        return f"{self.type}:{_auth_identity(self.auth)}"
 
 
 class GoogleAdsDestinationConfig(BaseModel):
@@ -455,6 +656,15 @@ class GoogleAdsDestinationConfig(BaseModel):
 
     def describe_safe(self) -> str:
         return "google_ads"
+
+    def rate_limit_key(self) -> str:
+        """Per developer token (#769). Google Ads meters API operations against
+        the developer token, so accounts sharing one token share the budget;
+        ``customer_id`` is the narrower scope and would over-split it.
+        ``describe_safe()`` drops the id entirely (#696), another reason it
+        cannot be the key. (``BaseModel``-direct config.)
+        """
+        return f"{self.type}:{self.developer_token_env}"
 
 
 class StagedUploadPhaseConfig(BaseModel):
@@ -491,6 +701,16 @@ class StagedUploadDestinationConfig(BaseModel):
     def describe_safe(self) -> str:
         return self.describe()  # detail is object identity only (#696)
 
+    def rate_limit_key(self) -> str:
+        """Per trigger host (#769). A staged upload talks to several URLs, but
+        the stage step is usually a one-shot presigned URL on a storage host
+        while the trigger is the vendor API that actually publishes a quota — so
+        the trigger's ``netloc`` is the endpoint worth pacing.
+        ``describe()`` is the bare constant ``"staged_upload"``.
+        (``BaseModel``-direct config.)
+        """
+        return f"{self.type}:{urlparse(self.trigger.url).netloc}"
+
 
 class SalesforceBulkDestinationConfig(BaseModel):
     type: Literal["salesforce_bulk"]
@@ -511,6 +731,17 @@ class SalesforceBulkDestinationConfig(BaseModel):
 
     def describe_safe(self) -> str:
         return self.describe()  # detail is object identity only (#696)
+
+    def rate_limit_key(self) -> str:
+        """Per Salesforce org (#769). The daily API allocation is org-wide, so
+        ``object_name`` — which ``describe()`` details — is excluded: loading
+        Contacts and Accounts into one org draws on one budget. The instance is
+        identified by its env-var name where given. (``BaseModel``-direct config.)
+        """
+        org = self.instance_url_env or (
+            hash_secret(self.instance_url) if self.instance_url else "unset"
+        )
+        return f"{self.type}:{org}"
 
     @model_validator(mode="after")
     def _check_instance_url(self) -> SalesforceBulkDestinationConfig:
