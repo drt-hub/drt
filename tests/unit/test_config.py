@@ -901,7 +901,15 @@ class TestRateLimitKey:
         assert a.describe() == b.describe()
 
     def test_slack_literal_webhook_url_is_not_exposed_in_the_key(self) -> None:
-        """A literal webhook URL is a credential — it must be hashed, not embedded."""
+        """A literal webhook URL is a credential — nothing derived from it,
+        not even a digest, may reach the key.
+
+        Inline literals collapse onto ``LITERAL_CREDENTIAL_KEY``, so two
+        different inline webhooks share one bucket. That is deliberate: a
+        shared bucket is *stricter* than two, so the failure mode is a slower
+        sync rather than a 429. Naming the env var is how you get per-account
+        buckets — pinned by the sibling test below.
+        """
         from drt.config.destinations_saas import SlackDestinationConfig
 
         url = "https://hooks.slack.com/services/T000/B000/XXXXSECRETXXXX"
@@ -910,14 +918,23 @@ class TestRateLimitKey:
         key = cfg.rate_limit_key()
         assert url not in key
         assert "XXXXSECRETXXXX" not in key
-        # Still identifying: the same URL yields the same key, a different one doesn't.
+        # Stable for the same config...
         assert key == SlackDestinationConfig(type="slack", webhook_url=url).rate_limit_key()
+        # ...and errs toward one shared (stricter) bucket for inline literals.
         assert (
             key
-            != SlackDestinationConfig(
+            == SlackDestinationConfig(
                 type="slack", webhook_url="https://hooks.slack.com/services/T000/B000/OTHER"
             ).rate_limit_key()
         )
+
+    def test_slack_env_named_webhooks_get_separate_buckets(self) -> None:
+        """The documented way to get per-account buckets: name the env var."""
+        from drt.config.destinations_saas import SlackDestinationConfig
+
+        a = SlackDestinationConfig(type="slack", webhook_url_env="HOOK_A")
+        b = SlackDestinationConfig(type="slack", webhook_url_env="HOOK_B")
+        assert a.rate_limit_key() != b.rate_limit_key()
 
     def test_airtable_rate_limit_key_ignores_table_name(self) -> None:
         """Same base, different tables share a quota."""

@@ -8,36 +8,26 @@ union). ``models.py`` re-exports everything here — import sites are unchanged.
 
 from __future__ import annotations
 
-import hashlib
 from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+LITERAL_CREDENTIAL_KEY = "literal"
+"""Rate-limit identity for a config that inlines its credential (#769).
 
-def hash_secret(value: str) -> str:
-    """Stable, non-reversible stand-in for a literal credential in a rate-limit key (#769).
+Configs that name an env var (``token_env``) key on that name — it pins the
+account without the secret ever reaching a dict key. When a config inlines the
+literal instead, we deliberately do **not** derive a key from it, not even a
+digest: a rate-limit key is not worth putting credential-derived material into
+process memory for, and any fast digest of a credential-shaped value is
+correctly flagged as weak password hashing (there is no "but it's only an
+identifier" exception a scanner can see).
 
-    Keys must *identify* an endpoint, not *reveal* it. Where a config offers an
-    env-var name (``token_env``) that name is used directly — it identifies the
-    account just as reliably without touching the secret. Only when a caller
-    inlines the literal (``webhook_url``, ``api_key``) does the value reach this
-    function, and then only its digest is kept.
-
-    Truncated to 16 hex chars: collision risk across the handful of endpoints in
-    one process is negligible, and a short digest keeps the key readable in a
-    debugger. Per the #696 review precedent a digest is *not* considered safe to
-    publish — rate-limit keys stay process-local and must never be logged or
-    serialized.
-
-    Uses BLAKE2b rather than SHA-256 deliberately. This is *identifier
-    derivation*, not password storage: the digest is never persisted, never
-    compared against a stored value, and never leaves the process, so the
-    property that matters is a stable non-reversible mapping — not resistance
-    to offline brute force. Naming the algorithm accordingly also keeps this
-    out of the "weak password hashing" class of finding, which SHA-256 on a
-    credential-shaped input correctly attracts.
-    """
-    return hashlib.blake2b(value.encode("utf-8"), digest_size=8).hexdigest()
+The cost is that two destinations of the same type both using inline literals
+collapse into one bucket. That errs *toward* throttling — a shared bucket is
+stricter than two, so the failure mode is a slower sync, never a 429. Naming
+the env var is the documented way to get per-account buckets.
+"""
 
 
 class DescribableConfig(BaseModel):
@@ -88,8 +78,9 @@ class DescribableConfig(BaseModel):
         over-shares (one bucket) rather than under-shares — the failure mode is
         pacing, not a 429. Connectors whose quota is per account, per host or per
         workspace override this and prefix the type so two connectors can never
-        collide. Prefer env-var *names* over resolved secrets; hash any literal
-        credential with :func:`hash_secret`.
+        collide. Prefer env-var *names* over resolved secrets; a config that
+        inlines its credential keys on :data:`LITERAL_CREDENTIAL_KEY` rather
+        than deriving anything from the secret.
 
         Never log or serialize the return value.
         """

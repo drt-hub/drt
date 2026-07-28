@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from drt.config.base import (
+    LITERAL_CREDENTIAL_KEY,
     ApiKeyAuth,
     AuthConfig,
     BasicAuth,
@@ -22,7 +23,6 @@ from drt.config.base import (
     PaginationConfig,
     RateLimitConfig,
     RetryConfig,
-    hash_secret,
 )
 
 
@@ -37,7 +37,7 @@ def _webhook_identity(url: str | None, url_env: str | None) -> str:
     if url_env:
         return url_env
     if url:
-        return hash_secret(url)
+        return LITERAL_CREDENTIAL_KEY
     return "unset"
 
 
@@ -52,9 +52,9 @@ def _auth_identity(auth: AuthConfig | None) -> str:
     if auth is None:
         return "noauth"
     if isinstance(auth, BearerAuth):
-        return auth.token_env or (hash_secret(auth.token) if auth.token else "noauth")
+        return auth.token_env or (LITERAL_CREDENTIAL_KEY if auth.token else "noauth")
     if isinstance(auth, ApiKeyAuth):
-        return auth.value_env or (hash_secret(auth.value) if auth.value else "noauth")
+        return auth.value_env or (LITERAL_CREDENTIAL_KEY if auth.value else "noauth")
     if isinstance(auth, BasicAuth):
         return auth.username_env
     if isinstance(auth, OAuth2ClientCredentialsAuth):
@@ -145,7 +145,7 @@ class TwilioDestinationConfig(DescribableConfig):
         country-code prefix (#696); that lossiness is why it cannot be the key.
         """
         account = self.account_sid_env or (
-            hash_secret(self.account_sid) if self.account_sid else "unset"
+            LITERAL_CREDENTIAL_KEY if self.account_sid else "unset"
         )
         return f"{self.type}:{account}"
 
@@ -303,7 +303,7 @@ class AmplitudeDestinationConfig(DescribableConfig):
         endpoint is excluded — but ``region`` is a genuinely different host
         (``api.eu`` vs the default) with its own budget, so it stays.
         """
-        account = self.api_key_env or (hash_secret(self.api_key) if self.api_key else "unset")
+        account = self.api_key_env or (LITERAL_CREDENTIAL_KEY if self.api_key else "unset")
         return f"{self.type}:{self.region}:{account}"
 
     @model_validator(mode="after")
@@ -388,7 +388,7 @@ class KlaviyoDestinationConfig(BaseModel):
         ``"klaviyo (profiles)"`` for every config, so it cannot serve as a key.
         (``BaseModel``-direct config — see ``AirtableDestinationConfig``.)
         """
-        account = self.api_key_env or (hash_secret(self.api_key) if self.api_key else "unset")
+        account = self.api_key_env or (LITERAL_CREDENTIAL_KEY if self.api_key else "unset")
         return f"{self.type}:{account}"
 
     @model_validator(mode="after")
@@ -442,7 +442,7 @@ class MixpanelDestinationConfig(DescribableConfig):
         """
         if self.endpoint == "people_set":
             account = self.project_token_env or (
-                hash_secret(self.project_token) if self.project_token else "unset"
+                LITERAL_CREDENTIAL_KEY if self.project_token else "unset"
             )
         else:
             account = self.project_id or "unset"
@@ -758,7 +758,7 @@ class SalesforceBulkDestinationConfig(BaseModel):
         identified by its env-var name where given. (``BaseModel``-direct config.)
         """
         org = self.instance_url_env or (
-            hash_secret(self.instance_url) if self.instance_url else "unset"
+            LITERAL_CREDENTIAL_KEY if self.instance_url else "unset"
         )
         return f"{self.type}:{org}"
 
