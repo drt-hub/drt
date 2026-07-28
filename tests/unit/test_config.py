@@ -804,3 +804,42 @@ class TestSnowflakeKeyPairAuth:
 
         with pytest.raises(ValueError, match="private_key_env.*or password_env"):
             SnowflakeDestinationConfig(**self._base())
+
+
+# ---------------------------------------------------------------------------
+# RateLimitConfig — burst + fractional rps (#769)
+# ---------------------------------------------------------------------------
+
+
+class TestRateLimitConfig:
+    """``burst`` is opt-in and ``requests_per_second`` accepts floats (#769)."""
+
+    def test_rate_limit_config_accepts_burst_and_fractional_rps(self) -> None:
+        from drt.config.sync_options import RateLimitConfig
+
+        rl = RateLimitConfig(requests_per_second=2.5, burst=5)
+        assert rl.requests_per_second == 2.5
+        assert rl.burst == 5
+
+    def test_rate_limit_config_burst_defaults_to_none(self) -> None:
+        """None = interval-only behaviour, i.e. exactly what shipped before."""
+        from drt.config.sync_options import RateLimitConfig
+
+        assert RateLimitConfig().burst is None
+
+    def test_rate_limit_config_default_rps_unchanged(self) -> None:
+        from drt.config.sync_options import RateLimitConfig
+
+        assert RateLimitConfig().requests_per_second == 10
+
+    def test_burst_must_be_at_least_one(self) -> None:
+        from drt.config.sync_options import RateLimitConfig
+
+        with pytest.raises(ValidationError):
+            RateLimitConfig(burst=0)
+
+    def test_burst_rejects_negative(self) -> None:
+        from drt.config.sync_options import RateLimitConfig
+
+        with pytest.raises(ValidationError):
+            RateLimitConfig(burst=-3)

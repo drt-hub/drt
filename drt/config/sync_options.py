@@ -55,7 +55,14 @@ from drt.config.duration import parse_duration
 
 
 class RateLimitConfig(BaseModel):
-    requests_per_second: int = 10
+    # float rather than int (#769): RateLimiter.requests_per_second was already
+    # annotated float and sub-1/s rates (2.5 → one request per 0.4 s) were
+    # already exercised, so this widening is a compatibility fix, not a feature.
+    requests_per_second: float = 10
+    # Opt-in burst capacity (#769). None keeps the historical minimum-interval
+    # behaviour exactly; a value lets an idle period accumulate up to N
+    # requests' worth of credit that can be spent back-to-back.
+    burst: int | None = Field(default=None, ge=1)
 
 
 class WatermarkConfig(BaseModel):
