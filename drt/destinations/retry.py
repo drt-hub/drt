@@ -95,12 +95,17 @@ def _retry_after_from_response(response: object) -> float | None:
     return parse_retry_after(raw if isinstance(raw, str) else None)
 
 
-def with_retry(fn: Callable[[], T], config: RetryConfig) -> T:
+def with_retry(
+    fn: Callable[[], T],
+    config: RetryConfig,
+    retry_on: Callable[[Exception], bool] | None = None,
+) -> T:
     """Execute ``fn`` with exponential backoff on transient failures.
 
     Retries on:
     - ``httpx.HTTPStatusError`` with a status code in ``config.retryable_status_codes``
     - ``httpx.TransportError`` (network-level failures)
+    - any exception ``retry_on`` approves, when that predicate is supplied
 
     When a retryable HTTP response carries a ``Retry-After`` header (429 / 503
     from Slack, HubSpot, Intercom, Zendesk, …), the server's stated delay is
@@ -108,6 +113,18 @@ def with_retry(fn: Callable[[], T], config: RetryConfig) -> T:
     never retry *before* the API is ready, still bounded by ``max_backoff`` so
     a large or hostile header can't stall the run. Network failures and
     responses without the header keep pure exponential backoff.
+
+    ``retry_on`` (#766) opens the same backoff loop to non-HTTP callers — the
+    SQL sources classify their own driver's exceptions, since every driver is
+    an optional dependency this module cannot import. It is a **predicate, not
+    a tuple of exception types**, because transient-ness frequently depends on
+    an attribute rather than the class: Snowflake's ``390114`` session expiry
+    is an ``OperationalError``, and so are plenty of permanent errors.
+
+    ``retry_on`` is purely **additive** — it widens what counts as retryable
+    and never suppresses the built-in httpx handling. When it is ``None``
+    (every existing destination call site), behaviour is exactly as it was
+    before #766.
 
     Raises the last exception if all attempts are exhausted.
     """
@@ -124,6 +141,10 @@ def with_retry(fn: Callable[[], T], config: RetryConfig) -> T:
             last_exc = e
             retry_after = _retry_after_from_response(e.response)
         except httpx.TransportError as e:
+            last_exc = e
+        except Exception as e:
+            if retry_on is None or not retry_on(e):
+                raise
             last_exc = e
 
         if attempt < config.max_attempts:

@@ -168,3 +168,133 @@ def test_non_retryable_status_still_raises_immediately() -> None:
         with pytest.raises(httpx.HTTPStatusError):
             with_retry(fn, _config())
     sleep.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# with_retry's opt-in retry_on predicate (#766)
+# ---------------------------------------------------------------------------
+
+
+class _FakeDriverError(Exception):
+    """Stands in for a DB driver exception — not an httpx type."""
+
+    def __init__(self, message: str, errno: int = 0) -> None:
+        super().__init__(message)
+        self.errno = errno
+
+
+def test_retry_on_retries_a_custom_exception() -> None:
+    """A non-HTTP caller can opt into the same backoff loop."""
+    calls = [
+        lambda: (_ for _ in ()).throw(_FakeDriverError("connection reset")),
+        lambda: (_ for _ in ()).throw(_FakeDriverError("connection reset")),
+        lambda: "rows",
+    ]
+    fn = lambda: calls.pop(0)()  # noqa: E731
+
+    with patch("drt.destinations.retry.time.sleep") as sleep:
+        result = with_retry(fn, _config(), retry_on=lambda e: isinstance(e, _FakeDriverError))
+
+    assert result == "rows"
+    # Same exponential schedule as the HTTP path: 1.0 then 2.0.
+    assert [c.args[0] for c in sleep.call_args_list] == [1.0, 2.0]
+
+
+def test_retry_on_predicate_can_inspect_attributes_not_just_type() -> None:
+    """Transient-ness often lives on an attribute (Snowflake 390114), not the class."""
+    transient = _FakeDriverError("session expired", errno=390114)
+    permanent = _FakeDriverError("no such table", errno=2003)
+    is_transient = lambda e: getattr(e, "errno", None) == 390114  # noqa: E731
+
+    calls = [lambda: (_ for _ in ()).throw(transient), lambda: "rows"]
+    with patch("drt.destinations.retry.time.sleep"):
+        assert with_retry(lambda: calls.pop(0)(), _config(), retry_on=is_transient) == "rows"
+
+    with patch("drt.destinations.retry.time.sleep") as sleep:
+        with pytest.raises(_FakeDriverError):
+            with_retry(
+                lambda: (_ for _ in ()).throw(permanent), _config(), retry_on=is_transient
+            )
+    sleep.assert_not_called()
+
+
+def test_retry_on_rejecting_an_exception_propagates_immediately() -> None:
+    """The predicate is the whole gate: False means fail fast, no sleeping."""
+    attempts = 0
+
+    def fn() -> str:
+        nonlocal attempts
+        attempts += 1
+        raise _FakeDriverError("syntax error at or near")
+
+    with patch("drt.destinations.retry.time.sleep") as sleep:
+        with pytest.raises(_FakeDriverError):
+            with_retry(fn, _config(), retry_on=lambda e: False)
+
+    assert attempts == 1
+    sleep.assert_not_called()
+
+
+def test_retry_on_exhausts_attempts_and_raises_the_last_exception() -> None:
+    """max_attempts bounds the predicate path exactly as it bounds the HTTP path."""
+    attempts = 0
+
+    def fn() -> str:
+        nonlocal attempts
+        attempts += 1
+        raise _FakeDriverError(f"attempt {attempts}")
+
+    with patch("drt.destinations.retry.time.sleep") as sleep:
+        with pytest.raises(_FakeDriverError, match="attempt 3"):
+            with_retry(fn, _config(max_attempts=3), retry_on=lambda e: True)
+
+    assert attempts == 3
+    assert len(sleep.call_args_list) == 2  # no sleep after the final attempt
+
+
+def test_retry_on_is_additive_http_retries_still_work() -> None:
+    """Passing retry_on doesn't turn off the built-in httpx handling."""
+    calls = [
+        lambda: (_ for _ in ()).throw(_status_error(503, {"Retry-After": "30"})),
+        lambda: "ok",
+    ]
+    fn = lambda: calls.pop(0)()  # noqa: E731
+
+    with patch("drt.destinations.retry.time.sleep") as sleep:
+        result = with_retry(fn, _config(), retry_on=lambda e: isinstance(e, _FakeDriverError))
+
+    assert result == "ok"
+    sleep.assert_called_once_with(30.0)
+
+
+def test_without_retry_on_a_non_http_exception_is_not_retried() -> None:
+    """Regression guard: no retry_on -> exactly the pre-#766 HTTP-only behaviour."""
+    attempts = 0
+
+    def fn() -> str:
+        nonlocal attempts
+        attempts += 1
+        raise _FakeDriverError("connection reset")
+
+    with patch("drt.destinations.retry.time.sleep") as sleep:
+        with pytest.raises(_FakeDriverError):
+            with_retry(fn, _config())
+
+    assert attempts == 1
+    sleep.assert_not_called()
+
+
+def test_without_retry_on_http_behaviour_is_byte_identical() -> None:
+    """Regression guard for the 20 existing call sites, which pass no retry_on."""
+    calls = [
+        lambda: (_ for _ in ()).throw(_status_error(429)),
+        lambda: (_ for _ in ()).throw(httpx.ConnectError("boom")),
+        lambda: "ok",
+    ]
+    fn = lambda: calls.pop(0)()  # noqa: E731
+
+    with patch("drt.destinations.retry.time.sleep") as sleep:
+        result = with_retry(fn, _config(initial_backoff=1.0, backoff_multiplier=2.0))
+
+    assert result == "ok"
+    assert [c.args[0] for c in sleep.call_args_list] == [1.0, 2.0]
