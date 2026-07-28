@@ -40,7 +40,7 @@ from drt.config.models import (
     SyncOptions,
 )
 from drt.destinations.base import SyncResult
-from drt.destinations.rate_limiter import RateLimiter
+from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import RowError
 from drt.templates.renderer import render_template
@@ -118,7 +118,7 @@ class AmplitudeDestination:
             url = f"{base_url}/2/httpapi"
 
         retry_config = resolve_retry(config.retry, sync_options)
-        rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)
+        rate_limiter = resolve_rate_limiter(config, sync_options, limiter_factory=RateLimiter)
         result = SyncResult()
 
         indexed_payloads: list[tuple[int, dict[str, Any], dict[str, Any]]] = []

@@ -43,7 +43,7 @@ import httpx
 
 from drt.config.models import DestinationConfig, SyncOptions, TeamsDestinationConfig
 from drt.destinations.base import SyncResult
-from drt.destinations.rate_limiter import RateLimiter
+from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import RowError
 from drt.templates.renderer import render_template
@@ -66,7 +66,7 @@ class TeamsDestination:
             raise ValueError("Teams destination: provide 'webhook_url' or set 'webhook_url_env'.")
 
         result = SyncResult()
-        rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)
+        rate_limiter = resolve_rate_limiter(config, sync_options, limiter_factory=RateLimiter)
 
         with httpx.Client(timeout=30.0) as client:
             for i, record in enumerate(records):

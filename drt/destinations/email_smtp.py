@@ -34,7 +34,7 @@ from typing import Any
 
 from drt.config.models import DestinationConfig, EmailSmtpDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
-from drt.destinations.rate_limiter import RateLimiter
+from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
 from drt.destinations.row_errors import RowError
 from drt.templates.renderer import render_template
 
@@ -63,7 +63,7 @@ class EmailSmtpDestination:
             )
 
         result = SyncResult()
-        rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)
+        rate_limiter = resolve_rate_limiter(config, sync_options, limiter_factory=RateLimiter)
 
         for i, record in enumerate(records):
             rate_limiter.acquire()

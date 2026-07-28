@@ -36,7 +36,7 @@ import httpx
 from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, SendGridDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
-from drt.destinations.rate_limiter import RateLimiter
+from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import RowError
 from drt.destinations.row_errors import record_preview as _record_preview
@@ -66,7 +66,7 @@ class SendGridDestination:
 
         retry_config = resolve_retry(config.retry, sync_options)
         result = SyncResult()
-        rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)
+        rate_limiter = resolve_rate_limiter(config, sync_options, limiter_factory=RateLimiter)
 
         headers = {
             "Authorization": f"Bearer {api_key}",

@@ -51,7 +51,7 @@ import httpx
 from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, ElasticsearchDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
-from drt.destinations.rate_limiter import RateLimiter
+from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import RowError
 
@@ -72,7 +72,7 @@ class ElasticsearchDestination:
         headers = self._auth_headers(config)
         bulk_url = f"{config.url.rstrip('/')}/_bulk"
         retry_config = resolve_retry(config.retry, sync_options)
-        rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)
+        rate_limiter = resolve_rate_limiter(config, sync_options, limiter_factory=RateLimiter)
         result = SyncResult()
 
         with httpx.Client(timeout=30.0, verify=config.verify_tls) as client:

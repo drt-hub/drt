@@ -33,7 +33,7 @@ from drt.config.models import (
     TwilioDestinationConfig,
 )
 from drt.destinations.base import SyncResult
-from drt.destinations.rate_limiter import RateLimiter
+from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import RowError
 from drt.templates.renderer import render_template
@@ -79,7 +79,7 @@ class TwilioDestination:
         url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
 
         result = SyncResult()
-        rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)
+        rate_limiter = resolve_rate_limiter(config, sync_options, limiter_factory=RateLimiter)
         retry_config = resolve_retry(config.retry, sync_options)
 
         with httpx.Client(timeout=30.0, auth=(account_sid, auth_token)) as client:

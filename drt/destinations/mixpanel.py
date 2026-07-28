@@ -58,7 +58,7 @@ from drt.config.models import (
     SyncOptions,
 )
 from drt.destinations.base import SyncResult
-from drt.destinations.rate_limiter import RateLimiter
+from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import RowError
 from drt.templates.renderer import render_template
@@ -87,7 +87,7 @@ class MixpanelDestination:
 
         base_url = _MIXPANEL_HOSTS[config.region]
         retry_config = resolve_retry(config.retry, sync_options)
-        rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)
+        rate_limiter = resolve_rate_limiter(config, sync_options, limiter_factory=RateLimiter)
         result = SyncResult()
 
         if config.endpoint == "people_set":

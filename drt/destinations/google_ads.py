@@ -40,7 +40,7 @@ from drt.config.models import (
 )
 from drt.destinations.auth import AuthHandler
 from drt.destinations.base import SyncResult
-from drt.destinations.rate_limiter import RateLimiter
+from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import RowError
 
@@ -59,7 +59,7 @@ class GoogleAdsDestination:
     ) -> SyncResult:
         assert isinstance(config, GoogleAdsDestinationConfig)
         result = SyncResult()
-        rate_limiter = RateLimiter(sync_options.rate_limit.requests_per_second)
+        rate_limiter = resolve_rate_limiter(config, sync_options, limiter_factory=RateLimiter)
         retry_config = resolve_retry(config.retry, sync_options)
 
         developer_token = os.environ.get(config.developer_token_env, "")
