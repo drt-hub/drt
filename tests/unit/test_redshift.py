@@ -168,3 +168,101 @@ def test_test_connection_returns_false_on_query_error() -> None:
         ok = source.test_connection(_config())
 
     assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# Transient-failure retry (#766)
+# ---------------------------------------------------------------------------
+
+
+def _rows_connection(rows: list[tuple]) -> MagicMock:
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.description = [("id",), ("email",)]
+    cur.fetchall.return_value = rows
+    conn.cursor.return_value = cur
+    return conn
+
+
+@pytest.mark.parametrize("exc_name", ["OperationalError", "InterfaceError"])
+def test_is_transient_true_for_connection_errors(exc_name: str) -> None:
+    import psycopg2
+
+    exc = getattr(psycopg2, exc_name)("cluster is resuming")
+    assert RedshiftSource()._is_transient(exc) is True
+
+
+@pytest.mark.parametrize(
+    "exc_name", ["ProgrammingError", "DataError", "IntegrityError", "DatabaseError"]
+)
+def test_is_transient_false_for_permanent_errors(exc_name: str) -> None:
+    """Siblings under DatabaseError must not be swept in by a base-class check."""
+    import psycopg2
+
+    exc = getattr(psycopg2, exc_name)("relation does not exist")
+    assert RedshiftSource()._is_transient(exc) is False
+
+
+def test_extract_retries_transient_connection_failure() -> None:
+    """A paused serverless workgroup resuming shouldn't fail the sync."""
+    import psycopg2
+
+    attempts: list[int] = []
+
+    def connect(_config: object) -> MagicMock:
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise psycopg2.OperationalError("could not connect to server")
+        return _rows_connection([(1, "a@example.com")])
+
+    with patch.object(RedshiftSource, "_connect", side_effect=connect):
+        with patch("drt.destinations.retry.time.sleep"):
+            rows = list(RedshiftSource().extract("SELECT id, email FROM users", _config()))
+
+    assert rows == [{"id": 1, "email": "a@example.com"}]
+    assert len(attempts) == 3
+
+
+def test_extract_does_not_retry_permanent_error() -> None:
+    import psycopg2
+
+    attempts: list[int] = []
+
+    def connect(_config: object) -> MagicMock:
+        attempts.append(1)
+        raise psycopg2.ProgrammingError('relation "nope" does not exist')
+
+    with patch.object(RedshiftSource, "_connect", side_effect=connect):
+        with patch("drt.destinations.retry.time.sleep") as sleep:
+            with pytest.raises(psycopg2.ProgrammingError):
+                list(RedshiftSource().extract("SELECT * FROM nope", _config()))
+
+    assert len(attempts) == 1
+    sleep.assert_not_called()
+
+
+def test_extract_does_not_retry_after_first_row() -> None:
+    """Scope boundary (#766): a yielded row cannot be un-sent."""
+    import psycopg2
+
+    attempts: list[int] = []
+
+    def connect(_config: object) -> MagicMock:
+        attempts.append(1)
+        conn = _rows_connection([])
+
+        def exploding_rows():
+            yield (1, "a@example.com")
+            raise psycopg2.OperationalError("connection reset by peer")
+
+        conn.cursor.return_value.fetchall.return_value = exploding_rows()
+        return conn
+
+    with patch.object(RedshiftSource, "_connect", side_effect=connect):
+        with patch("drt.destinations.retry.time.sleep"):
+            gen = RedshiftSource().extract("SELECT id, email FROM users", _config())
+            assert next(gen) == {"id": 1, "email": "a@example.com"}
+            with pytest.raises(psycopg2.OperationalError):
+                next(gen)
+
+    assert len(attempts) == 1

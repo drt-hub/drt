@@ -109,3 +109,128 @@ class TestMySQLSourceConnect:
         source = MySQLSource()
         with pytest.raises(ImportError, match="MySQL support requires"):
             source._connect(_profile())
+
+
+class TestMySQLSourceTransientClassification:
+    """Transient-ness is decided by errno, not by class alone (#766).
+
+    pymysql overloads OperationalError across the client errno space
+    (2002/2003/2006/2013/2055 — link broken) and the server's, where it also
+    carries permanent conditions like 1045 access denied.
+    """
+
+    @pytest.mark.parametrize("errno", [2002, 2003, 2006, 2013, 2055])
+    def test_client_connection_errnos_are_transient(self, errno):
+        import pymysql
+
+        exc = pymysql.err.OperationalError(errno, "link broken")
+        assert MySQLSource()._is_transient(exc) is True
+
+    def test_interface_error_is_transient(self):
+        import pymysql
+
+        assert MySQLSource()._is_transient(pymysql.err.InterfaceError("bad connection")) is True
+
+    @pytest.mark.parametrize(
+        ("errno", "message"),
+        [
+            (1045, "Access denied for user 'analyst'@'host'"),
+            (1049, "Unknown database 'nope'"),
+            (1142, "SELECT command denied to user"),
+        ],
+    )
+    def test_permanent_operational_errnos_are_not_retried(self, errno, message):
+        """Retrying a bad password wastes time and can trip account lockout."""
+        import pymysql
+
+        assert MySQLSource()._is_transient(pymysql.err.OperationalError(errno, message)) is False
+
+    @pytest.mark.parametrize(
+        "exc_name",
+        ["ProgrammingError", "DataError", "IntegrityError", "DatabaseError"],
+    )
+    def test_permanent_exception_classes(self, exc_name):
+        import pymysql
+
+        exc = getattr(pymysql.err, exc_name)("nope")
+        assert MySQLSource()._is_transient(exc) is False
+
+    def test_operational_error_without_errno_is_permanent(self):
+        """Unclassifiable -> fail fast rather than retry blindly."""
+        import pymysql
+
+        assert MySQLSource()._is_transient(pymysql.err.OperationalError()) is False
+
+    def test_non_driver_exception_is_permanent(self):
+        assert MySQLSource()._is_transient(ValueError("unrelated")) is False
+
+
+class TestMySQLSourceRetry:
+    def test_transient_failure_is_retried_then_succeeds(self):
+        import pymysql
+
+        attempts = []
+
+        def connect(_config):
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise pymysql.err.OperationalError(2006, "MySQL server has gone away")
+            mock_conn = MagicMock()
+            mock_cursor = MagicMock()
+            mock_cursor.description = [("id",), ("name",)]
+            mock_cursor.fetchall.return_value = [(1, "Alice")]
+            mock_conn.cursor.return_value = mock_cursor
+            return mock_conn
+
+        with patch("drt.sources.mysql.MySQLSource._connect", side_effect=connect):
+            with patch("drt.destinations.retry.time.sleep"):
+                rows = list(MySQLSource().extract("SELECT * FROM users", _profile()))
+
+        assert rows == [{"id": 1, "name": "Alice"}]
+        assert len(attempts) == 3
+
+    def test_access_denied_propagates_without_retrying(self):
+        import pymysql
+
+        attempts = []
+
+        def connect(_config):
+            attempts.append(1)
+            raise pymysql.err.OperationalError(1045, "Access denied for user")
+
+        with patch("drt.sources.mysql.MySQLSource._connect", side_effect=connect):
+            with patch("drt.destinations.retry.time.sleep") as sleep:
+                with pytest.raises(pymysql.err.OperationalError):
+                    list(MySQLSource().extract("SELECT 1", _profile()))
+
+        assert len(attempts) == 1
+        sleep.assert_not_called()
+
+    def test_failure_after_first_row_is_not_retried(self):
+        """Scope boundary (#766): a yielded row cannot be un-sent."""
+        import pymysql
+
+        attempts = []
+
+        def connect(_config):
+            attempts.append(1)
+            mock_conn = MagicMock()
+            mock_cursor = MagicMock()
+            mock_cursor.description = [("id",), ("name",)]
+
+            def exploding_rows():
+                yield (1, "Alice")
+                raise pymysql.err.OperationalError(2013, "Lost connection during query")
+
+            mock_cursor.fetchall.return_value = exploding_rows()
+            mock_conn.cursor.return_value = mock_cursor
+            return mock_conn
+
+        with patch("drt.sources.mysql.MySQLSource._connect", side_effect=connect):
+            with patch("drt.destinations.retry.time.sleep"):
+                gen = MySQLSource().extract("SELECT * FROM users", _profile())
+                assert next(gen) == {"id": 1, "name": "Alice"}
+                with pytest.raises(pymysql.err.OperationalError):
+                    next(gen)
+
+        assert len(attempts) == 1
