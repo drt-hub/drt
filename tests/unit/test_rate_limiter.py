@@ -16,7 +16,8 @@ from __future__ import annotations
 import threading
 from unittest.mock import patch
 
-from drt.destinations.rate_limiter import RateLimiter
+from drt.config.models import RateLimitConfig, SyncOptions
+from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limit
 
 
 def _make_limiter(rps: float) -> RateLimiter:
@@ -358,3 +359,60 @@ class TestThreadSafety:
                 t.join(timeout=5)
 
         assert not overlaps, f"acquire() overlapped: {overlaps}"
+
+
+class TestResolveRateLimit:
+    """Precedence for ``rate_limit`` (#769), mirroring ``resolve_retry``.
+
+    Order: ``destination.rate_limit`` > ``sync.rate_limit`` > ``RateLimitConfig()``.
+    ``resolve_retry`` has no tests anywhere in the repo, so these spell the
+    contract out explicitly rather than leaning on the sibling's coverage.
+    """
+
+    def test_resolve_rate_limit_prefers_destination_override(self) -> None:
+        destination = RateLimitConfig(requests_per_second=3)
+        sync_options = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=50))
+
+        resolved = resolve_rate_limit(destination, sync_options)
+
+        assert resolved is destination
+        assert resolved.requests_per_second == 3
+
+    def test_resolve_rate_limit_falls_back_to_sync_level(self) -> None:
+        sync_level = RateLimitConfig(requests_per_second=50)
+        sync_options = SyncOptions(rate_limit=sync_level)
+
+        resolved = resolve_rate_limit(None, sync_options)
+
+        assert resolved is sync_level
+        assert resolved.requests_per_second == 50
+
+    def test_resolve_rate_limit_uses_default_when_neither_set(self) -> None:
+        """sync_options.rate_limit is default_factory-populated, so this is
+        the untouched ``RateLimitConfig()`` default rather than None."""
+        resolved = resolve_rate_limit(None, SyncOptions())
+
+        assert resolved.requests_per_second == RateLimitConfig().requests_per_second
+        assert resolved.burst is None
+
+    def test_destination_override_carries_burst(self) -> None:
+        """burst rides along with the override, not merged field-by-field."""
+        destination = RateLimitConfig(requests_per_second=1, burst=5)
+        sync_options = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=50))
+
+        resolved = resolve_rate_limit(destination, sync_options)
+
+        assert resolved.burst == 5
+        assert resolved.requests_per_second == 1
+
+    def test_resolution_does_not_mutate_either_config(self) -> None:
+        destination = RateLimitConfig(requests_per_second=3, burst=2)
+        sync_level = RateLimitConfig(requests_per_second=50)
+        sync_options = SyncOptions(rate_limit=sync_level)
+
+        resolve_rate_limit(destination, sync_options)
+
+        assert destination.requests_per_second == 3
+        assert destination.burst == 2
+        assert sync_level.requests_per_second == 50
+        assert sync_level.burst is None

@@ -18,6 +18,26 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+from drt.config.models import RateLimitConfig, SyncOptions
+
+
+def resolve_rate_limit(
+    config_rate_limit: RateLimitConfig | None,
+    sync_options: SyncOptions,
+) -> RateLimitConfig:
+    """Pick the rate-limit config for this destination invocation (#769).
+
+    Priority order: ``destination.rate_limit`` > ``sync.rate_limit`` >
+    ``RateLimitConfig()``. ``sync_options.rate_limit`` is always populated
+    (default_factory=RateLimitConfig), so when no destination-level override
+    is set the sync-level config wins.
+
+    The winning config is returned whole — fields are not merged one by one,
+    so a destination override that sets only ``burst`` does not inherit the
+    sync-level ``requests_per_second``. This mirrors ``resolve_retry``.
+    """
+    return config_rate_limit if config_rate_limit is not None else sync_options.rate_limit
+
 
 @dataclass
 class RateLimiter:
