@@ -266,3 +266,22 @@ def test_extract_does_not_retry_after_first_row() -> None:
                 next(gen)
 
     assert len(attempts) == 1
+
+
+@pytest.mark.parametrize(
+    "exc_name", ["InvalidPassword", "InvalidAuthorizationSpecification"]
+)
+def test_is_transient_false_for_auth_failures(exc_name: str) -> None:
+    """Auth failures live *under* OperationalError in psycopg2 — an
+    isinstance check against that base lets them through.
+
+    Regression guard: retrying a wrong credential is not merely wasted work.
+    Three rapid attempts can trip an account lockout policy, turning a config
+    typo into an outage. Note ``pgcode`` is None on a hand-built exception
+    (the server populates it), so the class check is what carries this test —
+    which is exactly why the classifier matches on both.
+    """
+    import psycopg2
+
+    exc = getattr(psycopg2.errors, exc_name)("password authentication failed")
+    assert RedshiftSource()._is_transient(exc) is False

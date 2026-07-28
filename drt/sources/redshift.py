@@ -47,15 +47,37 @@ class RedshiftSource:
         ``InterfaceError``. Permanent: ``ProgrammingError`` / ``DataError`` /
         ``IntegrityError``.
 
-        Matched by exact class, not the shared ``DatabaseError`` base — under
-        PEP 249 the permanent classes are siblings of ``OperationalError``,
-        so a base-class check would retry bad SQL.
+        Matched against ``OperationalError`` / ``InterfaceError`` rather than
+        the shared ``DatabaseError`` base — under PEP 249 the permanent
+        classes are siblings of ``OperationalError``, so a base-class check
+        would retry bad SQL.
+
+        Authentication failures are excluded even though psycopg2 files them
+        *under* ``OperationalError`` (``InvalidPassword``,
+        ``InvalidAuthorizationSpecification`` — SQLSTATE class ``28``).
+        Retrying a wrong credential three times in quick succession can trip
+        an account lockout, turning a config typo into an outage.
         """
         try:
             import psycopg2
         except ImportError:  # pragma: no cover - driver absent, nothing to classify
             return False
-        return isinstance(exc, (psycopg2.OperationalError, psycopg2.InterfaceError))
+        if not isinstance(exc, (psycopg2.OperationalError, psycopg2.InterfaceError)):
+            return False
+        # Exclude authentication failures. psycopg2 files these *under*
+        # OperationalError, so the isinstance above lets them through.
+        # Matched two ways because either can be absent: by class (works for
+        # any exception the driver constructs) and by SQLSTATE class 28,
+        # invalid_authorization_specification (set only on server-raised
+        # errors, but authoritative when present).
+        auth_errors = (
+            psycopg2.errors.InvalidAuthorizationSpecification,
+            psycopg2.errors.InvalidPassword,
+        )
+        if isinstance(exc, auth_errors):
+            return False
+        pgcode = getattr(exc, "pgcode", None)
+        return not (pgcode and str(pgcode).startswith("28"))
 
     def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
         """Execute query and yield records as dicts, retrying transient failures.

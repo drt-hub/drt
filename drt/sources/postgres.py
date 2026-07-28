@@ -41,13 +41,20 @@ class PostgresSource:
         privilege), ``DataError``, ``IntegrityError``. Retrying these only
         delays an error the user has to fix anyway.
 
-        Matched by **exact class**, not with a base-class ``isinstance``:
-        psycopg2 makes ``OperationalError``, ``ProgrammingError``,
-        ``DataError`` and ``IntegrityError`` all siblings under
-        ``DatabaseError`` (PEP 249's hierarchy), so testing against the base
-        would happily retry a typo in the user's SQL three times.
-        ``OperationalError`` and ``InterfaceError`` have no subclasses in
-        psycopg2, so ``isinstance`` against them specifically is exact.
+        Matched against ``OperationalError`` / ``InterfaceError`` specifically,
+        not the shared base: psycopg2 makes ``OperationalError``,
+        ``ProgrammingError``, ``DataError`` and ``IntegrityError`` all siblings
+        under ``DatabaseError`` (PEP 249's hierarchy), so testing against the
+        base would happily retry a typo in the user's SQL three times.
+
+        ``OperationalError`` *does* have subclasses, and not all of them are
+        transient — ``psycopg2.errors.InvalidPassword`` and
+        ``InvalidAuthorizationSpecification`` live under it. Retrying a wrong
+        password is not just wasted work: three rapid attempts can trip an
+        account lockout policy and turn a config typo into an outage. They are
+        excluded both by class and by SQLSTATE class ``28``, because neither
+        signal is always present — ``pgcode`` is only populated on errors the
+        server actually raised.
 
         ``psycopg2`` is imported inside the method: it is an optional extra,
         and this class is imported unconditionally by the connector registry.
@@ -56,7 +63,22 @@ class PostgresSource:
             import psycopg2
         except ImportError:  # pragma: no cover - driver absent, nothing to classify
             return False
-        return isinstance(exc, (psycopg2.OperationalError, psycopg2.InterfaceError))
+        if not isinstance(exc, (psycopg2.OperationalError, psycopg2.InterfaceError)):
+            return False
+        # Exclude authentication failures. psycopg2 files these *under*
+        # OperationalError, so the isinstance above lets them through.
+        # Matched two ways because either can be absent: by class (works for
+        # any exception the driver constructs) and by SQLSTATE class 28,
+        # invalid_authorization_specification (set only on server-raised
+        # errors, but authoritative when present).
+        auth_errors = (
+            psycopg2.errors.InvalidAuthorizationSpecification,
+            psycopg2.errors.InvalidPassword,
+        )
+        if isinstance(exc, auth_errors):
+            return False
+        pgcode = getattr(exc, "pgcode", None)
+        return not (pgcode and str(pgcode).startswith("28"))
 
     def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
         """Run ``query`` and yield rows as dicts, retrying transient failures.

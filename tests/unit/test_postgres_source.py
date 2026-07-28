@@ -201,3 +201,22 @@ class TestRetry:
         assert len(conns) == 2
         conns[0].close.assert_called_once()  # the failed attempt cleaned up
         conns[1].close.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "exc_name", ["InvalidPassword", "InvalidAuthorizationSpecification"]
+)
+def test_is_transient_false_for_auth_failures(exc_name: str) -> None:
+    """Auth failures live *under* OperationalError in psycopg2 — an
+    isinstance check against that base lets them through.
+
+    Regression guard: retrying a wrong credential is not merely wasted work.
+    Three rapid attempts can trip an account lockout policy, turning a config
+    typo into an outage. Note ``pgcode`` is None on a hand-built exception
+    (the server populates it), so the class check is what carries this test —
+    which is exactly why the classifier matches on both.
+    """
+    import psycopg2
+
+    exc = getattr(psycopg2.errors, exc_name)("password authentication failed")
+    assert PostgresSource()._is_transient(exc) is False
