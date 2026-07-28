@@ -218,6 +218,28 @@ class TestBurst:
         mock_sleep.assert_not_called()
         assert rl._last == 0.0
 
+    @patch("drt.destinations.rate_limiter.time.sleep")
+    @patch("drt.destinations.rate_limiter.time.monotonic")
+    def test_burst_credit_is_not_refilled_when_last_passes_through_zero(
+        self, mock_mono, mock_sleep
+    ) -> None:
+        """Burst credit must be spent once, not re-granted mid-flight.
+
+        Regression guard. "Fresh limiter" was first implemented as the value
+        sentinel ``_last == 0.0``. But with burst, ``_last`` runs *behind* the
+        clock while credit is spent — at ``monotonic() == 0.0`` it walks
+        ``-2.0 → -1.0 → 0.0`` and then hits the sentinel again, re-entering
+        the fresh-limiter branch and refilling the allowance on every third
+        call. The limiter never slept: an unbounded rate leak, exactly where
+        a rate limiter must not have one.
+        """
+        mock_mono.return_value = 0.0  # the value that made the sentinel wrong
+        rl = RateLimiter(requests_per_second=1, burst=3)
+        for _ in range(6):
+            rl.acquire()
+        # 3 free (the burst), then every subsequent call pays.
+        assert mock_sleep.call_count == 3
+
 
 class TestBurstNoneRegression:
     """``burst=None`` must be byte-identical to the pre-#769 limiter.

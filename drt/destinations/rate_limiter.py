@@ -61,11 +61,15 @@ class RateLimiter:
 
     requests_per_second: float
     burst: int | None = None
-    # _last is the "next free slot" clock. It stays 0.0 until the first
-    # acquire() so a fresh limiter counts as having been idle forever — with
-    # burst that means it starts with a full allowance, and without burst the
-    # 0.0 default reproduces the historical first-call-never-sleeps behaviour.
+    # _last is the "next free slot" clock. The 0.0 default reproduces the
+    # historical first-call-never-sleeps behaviour when burst is off.
     _last: float = field(default=0.0, init=False, repr=False)
+    # Whether acquire() has ever run. Tracked explicitly rather than inferred
+    # from ``_last == 0.0``: with burst, _last legitimately passes through 0.0
+    # while credit is being spent (it runs *behind* the clock), so a value
+    # sentinel re-triggers the fresh-limiter branch mid-flight and refills the
+    # allowance on every pass — an unbounded rate leak.
+    _used: bool = field(default=False, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def acquire(self) -> None:
@@ -79,11 +83,12 @@ class RateLimiter:
                 # Clamp how far _last may lag behind now: that backlog *is*
                 # the accumulated credit, capped at burst intervals so an
                 # arbitrarily long idle period cannot bank unbounded calls.
-                # A never-used limiter (_last == 0.0) starts fully credited,
-                # matching "idle since the dawn of the process".
+                # A never-used limiter starts fully credited, matching "idle
+                # since the dawn of the process".
                 earliest = now - min_interval * self.burst
-                if self._last == 0.0 or self._last < earliest:
+                if not self._used or self._last < earliest:
                     self._last = earliest
+            self._used = True
             elapsed = now - self._last
             wait = min_interval - elapsed
             if wait > 0:
