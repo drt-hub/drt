@@ -17,8 +17,24 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import Protocol, runtime_checkable
 
 from drt.config.models import RateLimitConfig, SyncOptions
+
+
+@runtime_checkable
+class RateLimitKeyed(Protocol):
+    """A destination config the registry can bucket (#769).
+
+    Structural rather than nominal because the destination configs share no
+    common base: 26 members of the ``DestinationConfig`` union inherit
+    ``DescribableConfig`` (and with it the default ``rate_limit_key``), while 8
+    SaaS configs subclass ``BaseModel`` directly and define the method
+    themselves. A ``Protocol`` describes exactly what the registry needs
+    without forcing those two lineages together.
+    """
+
+    def rate_limit_key(self) -> str: ...
 
 
 def resolve_rate_limit(
@@ -97,3 +113,102 @@ class RateLimiter:
             # before #769. With burst: advance by whole intervals so unspent
             # credit survives into the next call instead of being discarded.
             self._last = time.monotonic() if self.burst is None else self._last + min_interval
+
+    def tighten_to(self, requests_per_second: float, burst: int | None) -> None:
+        """Adopt the stricter of the current and given limits (#769).
+
+        Called by the registry when a second sync resolves to an endpoint that
+        already has a limiter. Mutates in place rather than returning a new
+        instance: threads already holding this object must observe the change,
+        and a replacement would reset ``_last`` and hand out a free slot.
+
+        ``burst=None`` (interval-only, no accumulation) is the strictest
+        setting, so it wins over any numeric burst.
+        """
+        with self._lock:
+            if requests_per_second < self.requests_per_second:
+                self.requests_per_second = requests_per_second
+            if burst is None or self.burst is None:
+                self.burst = None
+            else:
+                self.burst = min(self.burst, burst)
+
+
+# Process-wide limiter registry (#769).
+#
+# Before this, every destination ``load()`` constructed its own RateLimiter, so
+# ``--threads N`` against one endpoint created N independent buckets and
+# multiplied the configured rate by N — a configured 10 req/s hitting one
+# HubSpot portal at 40 req/s under ``--threads 4``. Keyed by
+# ``config.rate_limit_key()``, so configs share a limiter exactly when they
+# share a vendor quota.
+#
+# Deliberately module-level and never cleared during a run: the bucket must
+# outlive individual ``load()`` calls to pace across them. Entries are tiny
+# (one float and two locks) and bounded by the number of distinct endpoints in
+# the project, so unbounded growth is not a concern.
+_limiter_registry: dict[str, RateLimiter] = {}
+_registry_lock = threading.Lock()
+
+
+def _reset_limiter_registry() -> None:
+    """Drop every registered limiter. Test hook only.
+
+    Registry state is process-global, so without this a test that registers a
+    limiter would leak pacing state into unrelated tests. Not part of the
+    public API and never called by production code — a real run wants the
+    registry to persist for the whole process.
+    """
+    with _registry_lock:
+        _limiter_registry.clear()
+
+
+def resolve_rate_limiter(
+    config: RateLimitKeyed,
+    sync_options: SyncOptions,
+) -> RateLimiter:
+    """Return the shared limiter for this destination's endpoint (#769).
+
+    Resolves the effective config (``destination.rate_limit`` > ``sync.rate_limit``
+    > default, via :func:`resolve_rate_limit`), computes the endpoint identity
+    with ``config.rate_limit_key()``, then returns the registered limiter for
+    that key — creating it on first use. Every sync and every worker thread
+    targeting one endpoint therefore paces against one bucket.
+
+    **Same endpoint, different rates: min-wins.** When a key already has a
+    limiter and the caller resolves a different rate, the *stricter* of the two
+    is applied to the existing instance. Rationale: the tighter limit is the one
+    the endpoint actually requires — running at the looser rate is precisely how
+    a shared quota starts returning 429s — and a limit expressed anywhere in the
+    project is a statement about the endpoint, not about one sync. The
+    alternatives were rejected: last-wins makes the effective rate depend on
+    thread scheduling order, and first-wins silently ignores a deliberate
+    tightening. ``burst=None`` counts as strictest, since interval-only pacing
+    grants no accumulation at all.
+
+    The consequence worth knowing: one sync configured conservatively slows
+    every other sync sharing that endpoint. That is the intended trade —
+    correctness against the vendor's limit over per-sync throughput.
+
+    The returned key is process-local. Do not log or serialize it: it may embed
+    an env-var name or a credential digest, and the #696 review rejected
+    published digests as brute-forceable.
+    """
+    resolved = resolve_rate_limit(getattr(config, "rate_limit", None), sync_options)
+    key = config.rate_limit_key()
+
+    with _registry_lock:
+        existing = _limiter_registry.get(key)
+        if existing is None:
+            limiter = RateLimiter(
+                requests_per_second=resolved.requests_per_second,
+                burst=resolved.burst,
+            )
+            _limiter_registry[key] = limiter
+            return limiter
+
+    # Tighten outside the registry lock: RateLimiter has its own lock, and
+    # holding both here would nest them (registry -> limiter) while acquire()
+    # holds only the limiter's — a needless second lock-ordering constraint.
+    existing.tighten_to(resolved.requests_per_second, resolved.burst)
+    return existing

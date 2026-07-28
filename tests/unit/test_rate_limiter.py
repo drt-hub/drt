@@ -5,7 +5,8 @@ and verifies the v0.3.3 ZeroDivisionError fix.
 
 Also covers the #769 additions: opt-in ``burst`` credit, the regression
 guard pinning ``burst=None`` to the historical minimum-interval arithmetic,
-and thread-safe ``acquire()`` for the shared-instance case.
+thread-safe ``acquire()`` for the shared-instance case, and the process-wide
+limiter registry that makes sharing happen.
 
 See: https://github.com/drt-hub/drt/issues/101
 See: https://github.com/drt-hub/drt/issues/769
@@ -16,8 +17,15 @@ from __future__ import annotations
 import threading
 from unittest.mock import patch
 
+from drt.config.base import BearerAuth
+from drt.config.destinations_saas import HubSpotDestinationConfig, SlackDestinationConfig
 from drt.config.models import RateLimitConfig, SyncOptions
-from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limit
+from drt.destinations.rate_limiter import (
+    RateLimiter,
+    _reset_limiter_registry,
+    resolve_rate_limit,
+    resolve_rate_limiter,
+)
 
 
 def _make_limiter(rps: float) -> RateLimiter:
@@ -438,3 +446,230 @@ class TestResolveRateLimit:
         assert destination.burst == 2
         assert sync_level.requests_per_second == 50
         assert sync_level.burst is None
+
+
+class TestResolveRateLimiter:
+    """The process-wide registry (#769).
+
+    ``--threads N`` used to build N ``RateLimiter`` instances for one
+    destination endpoint, so a configured 10 req/s became 10N req/s against a
+    single vendor quota. The registry gives every worker targeting one endpoint
+    the same limiter, and ``RateLimiter.acquire()`` is locked so sharing is safe.
+    """
+
+    def setup_method(self) -> None:
+        _reset_limiter_registry()
+
+    def teardown_method(self) -> None:
+        # Module-level state: leaving entries behind would leak between tests.
+        _reset_limiter_registry()
+
+    def _slack(self, hook_env: str) -> SlackDestinationConfig:
+        return SlackDestinationConfig(type="slack", webhook_url_env=hook_env)
+
+    def test_same_key_returns_the_same_limiter_instance(self) -> None:
+        """The whole point: one endpoint, one bucket, however many syncs."""
+        config = self._slack("HOOK_A")
+        options = SyncOptions()
+
+        first = resolve_rate_limiter(config, options)
+        second = resolve_rate_limiter(config, options)
+
+        assert first is second
+
+    def test_distinct_config_objects_with_one_key_share_a_limiter(self) -> None:
+        """Identity is the *key*, not the config object — two syncs parse two
+        config instances pointing at one endpoint."""
+        options = SyncOptions()
+
+        first = resolve_rate_limiter(self._slack("HOOK_A"), options)
+        second = resolve_rate_limiter(self._slack("HOOK_A"), options)
+
+        assert first is second
+
+    def test_different_keys_return_different_limiters(self) -> None:
+        options = SyncOptions()
+
+        first = resolve_rate_limiter(self._slack("HOOK_A"), options)
+        second = resolve_rate_limiter(self._slack("HOOK_B"), options)
+
+        assert first is not second
+
+    def test_hubspot_object_types_share_one_bucket(self) -> None:
+        """End-to-end on the headline bug: one portal, two object types, one
+        limiter — the registry inherits this from rate_limit_key()."""
+        auth = BearerAuth(type="bearer", token_env="HUBSPOT_TOKEN")
+        contacts = HubSpotDestinationConfig(type="hubspot", object_type="contacts", auth=auth)
+        deals = HubSpotDestinationConfig(type="hubspot", object_type="deals", auth=auth)
+        options = SyncOptions()
+
+        assert resolve_rate_limiter(contacts, options) is resolve_rate_limiter(deals, options)
+
+    def test_limiter_uses_the_resolved_rate(self) -> None:
+        config = self._slack("HOOK_A")
+        options = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=4, burst=2))
+
+        limiter = resolve_rate_limiter(config, options)
+
+        assert limiter.requests_per_second == 4
+        assert limiter.burst == 2
+
+    def test_destination_override_beats_sync_level(self) -> None:
+        """resolve_rate_limit precedence still applies through the registry.
+
+        The ``rate_limit`` field itself lands on the destination configs in a
+        later task, so this uses a stand-in carrying the same duck-typed shape
+        the registry reads: a ``rate_limit`` attribute plus ``rate_limit_key()``.
+        """
+
+        class _ConfigWithOverride:
+            rate_limit = RateLimitConfig(requests_per_second=2)
+
+            def rate_limit_key(self) -> str:
+                return "slack:HOOK_OVERRIDE"
+
+        options = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=50))
+
+        assert resolve_rate_limiter(_ConfigWithOverride(), options).requests_per_second == 2
+
+    def test_missing_rate_limit_attribute_falls_back_to_sync_level(self) -> None:
+        """Configs without the field yet (it arrives in a later task) must
+        resolve to the sync-level rate rather than raising."""
+        options = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=7))
+
+        assert resolve_rate_limiter(self._slack("HOOK_A"), options).requests_per_second == 7
+
+    # -- same endpoint, different rps: min-wins ------------------------------
+
+    def test_lower_rps_tightens_an_existing_limiter(self) -> None:
+        """min-wins: the stricter limit is the one the endpoint actually
+        requires, so a later, slower config tightens the shared bucket."""
+        options_fast = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=10))
+        options_slow = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=2))
+
+        first = resolve_rate_limiter(self._slack("HOOK_A"), options_fast)
+        second = resolve_rate_limiter(self._slack("HOOK_A"), options_slow)
+
+        assert first is second, "must stay one bucket — tightening, not replacing"
+        assert second.requests_per_second == 2
+
+    def test_higher_rps_does_not_loosen_an_existing_limiter(self) -> None:
+        """The converse, and the reason min-wins was chosen: silently adopting
+        the looser rate is how a shared endpoint starts returning 429s."""
+        options_slow = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=2))
+        options_fast = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=10))
+
+        first = resolve_rate_limiter(self._slack("HOOK_A"), options_slow)
+        second = resolve_rate_limiter(self._slack("HOOK_A"), options_fast)
+
+        assert first is second
+        assert second.requests_per_second == 2
+
+    def test_burst_is_also_tightened_to_the_minimum(self) -> None:
+        """Burst is capacity above the steady rate, so the same argument holds:
+        the smallest declared burst is the safe one."""
+        options_big = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=5, burst=10))
+        options_small = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=5, burst=3))
+
+        resolve_rate_limiter(self._slack("HOOK_A"), options_big)
+        limiter = resolve_rate_limiter(self._slack("HOOK_A"), options_small)
+
+        assert limiter.burst == 3
+
+    def test_absent_burst_tightens_a_bursting_limiter(self) -> None:
+        """burst=None is interval-only — stricter than any burst, so it wins."""
+        options_burst = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=5, burst=10))
+        options_none = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=5))
+
+        resolve_rate_limiter(self._slack("HOOK_A"), options_burst)
+        limiter = resolve_rate_limiter(self._slack("HOOK_A"), options_none)
+
+        assert limiter.burst is None
+
+    def test_tightening_preserves_pacing_state(self) -> None:
+        """Tightening must mutate the shared instance, never swap it — an
+        in-flight thread holds a reference, and a fresh object would reset
+        ``_last`` and hand out a free slot."""
+        options_fast = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=10))
+        options_slow = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=1))
+
+        limiter = resolve_rate_limiter(self._slack("HOOK_A"), options_fast)
+        with patch("drt.destinations.rate_limiter.time.monotonic", return_value=500.0):
+            with patch("drt.destinations.rate_limiter.time.sleep"):
+                limiter.acquire()
+        assert limiter._used is True
+
+        again = resolve_rate_limiter(self._slack("HOOK_A"), options_slow)
+
+        assert again is limiter
+        assert again._used is True, "pacing state was reset — a slot was leaked"
+
+    # -- concurrency ---------------------------------------------------------
+
+    def test_registry_lookup_is_thread_safe(self) -> None:
+        """N threads racing on a cold key must all get the *same* instance.
+
+        Without a lock around check-then-create, several threads see the empty
+        slot and each construct a limiter — restoring the very N-buckets-per-
+        endpoint bug the registry exists to remove.
+        """
+        options = SyncOptions()
+        thread_count = 16
+        start = threading.Barrier(thread_count)
+        results: list[RateLimiter] = []
+        results_lock = threading.Lock()
+        errors: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                # Every thread builds its own config object, as separate syncs do.
+                config = SlackDestinationConfig(type="slack", webhook_url_env="HOOK_RACE")
+                start.wait(timeout=5)
+                limiter = resolve_rate_limiter(config, options)
+                with results_lock:
+                    results.append(limiter)
+            except BaseException as exc:  # pragma: no cover - surfaced below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(thread_count)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        assert not errors
+        assert not any(t.is_alive() for t in threads)
+        assert len(results) == thread_count
+        assert len({id(limiter) for limiter in results}) == 1, "cold-key race created extra buckets"
+
+    def test_concurrent_distinct_keys_each_get_one_limiter(self) -> None:
+        """Threads racing across several cold keys must produce exactly one
+        limiter per key — no cross-talk, no duplicates."""
+        options = SyncOptions()
+        key_count = 4
+        per_key = 4
+        total = key_count * per_key
+        start = threading.Barrier(total)
+        results: dict[str, set[int]] = {f"HOOK_{i}": set() for i in range(key_count)}
+        results_lock = threading.Lock()
+
+        def worker(hook: str) -> None:
+            config = SlackDestinationConfig(type="slack", webhook_url_env=hook)
+            start.wait(timeout=5)
+            limiter = resolve_rate_limiter(config, options)
+            with results_lock:
+                results[hook].add(id(limiter))
+
+        threads = [
+            threading.Thread(target=worker, args=(f"HOOK_{i}",))
+            for i in range(key_count)
+            for _ in range(per_key)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        assert all(len(ids) == 1 for ids in results.values())
+        # And the four keys really are four distinct limiters.
+        assert len({next(iter(ids)) for ids in results.values()}) == key_count
