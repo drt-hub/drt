@@ -12,9 +12,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# The whole module needs psycopg2: nearly every test constructs a real driver
+# exception at collection time (the parametrize lists below are evaluated on
+# import), so there is nothing left to run without it. CI's test matrix
+# installs without the DB extras.
 pytest.importorskip("psycopg2")
+
 import psycopg2
-import pytest
 
 from drt.config.credentials import PostgresProfile
 from drt.sources.postgres import PostgresSource
