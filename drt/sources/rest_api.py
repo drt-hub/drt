@@ -18,8 +18,10 @@ from drt.config.models import (
     OffsetPaginationConfig,
     PaginationConfig,
     RestIncrementalConfig,
+    RetryConfig,
 )
 from drt.destinations.auth import AuthHandler
+from drt.destinations.retry import with_retry
 from drt.sources.base import Source
 
 logger = logging.getLogger("drt")
@@ -81,6 +83,13 @@ class RestApiSource(Source):
         auth_headers = AuthHandler(auth_config).get_headers()
         headers = {**auth_headers}
 
+        # Source profiles carry no retry knob today (#766): `extract()` receives
+        # a ProfileConfig, not SyncOptions, so `sync.retry` isn't reachable
+        # here. Defaults (3 attempts, 1s initial, x2, 60s cap) ship the
+        # resilience; making it configurable is a follow-up with its own
+        # review, since profiles are plain dataclasses loaded by hand.
+        retry_config = RetryConfig()
+
         # Setup httpx client
         with httpx.Client(timeout=30.0) as client:
             page = 0
@@ -129,13 +138,31 @@ class RestApiSource(Source):
                     request_params = dict(request_params or {})
                     request_params[incremental.start_param] = cursor_value
 
-                response = client.request(
-                    method="GET",
-                    url=url_with_params,
-                    headers=headers,
-                    params=request_params,
-                )
-                response.raise_for_status()
+                # Retry transient failures (#766). The load side has had this
+                # since #277; the extract side had none, so a single 503 on
+                # page 40 of a paginated read failed the whole sync. A GET is
+                # safe to repeat, and `with_retry` only retries the statuses
+                # in RetryConfig.retryable_status_codes plus transport errors
+                # — a 4xx still fails fast rather than burning API quota.
+                #
+                # Scope: this covers one page's request. A failure *between*
+                # pages is retried too (each iteration re-enters this block),
+                # but records already yielded to the engine are not re-read —
+                # they have been loaded downstream and cannot be un-sent.
+                def _do_request(
+                    _url: str = url_with_params,
+                    _params: dict[str, Any] | None = request_params,
+                ) -> httpx.Response:
+                    resp = client.request(
+                        method="GET",
+                        url=_url,
+                        headers=headers,
+                        params=_params,
+                    )
+                    resp.raise_for_status()
+                    return resp
+
+                response = with_retry(_do_request, retry_config)
 
                 # Extract records from response
                 data = response.json()

@@ -444,3 +444,86 @@ def test_plain_extract_never_injects_even_with_config(monkeypatch: Any) -> None:
     list(source.extract("", profile))
 
     assert calls[0]["params"] is None
+
+
+# ---------------------------------------------------------------------------
+# Transient-failure retry (#766)
+#
+# The load side has had retry since #277; the extract side had none, so a
+# single 503 from a paginated API failed the whole sync. These pin that the
+# read is retried, and that a permanent 4xx still fails fast.
+# ---------------------------------------------------------------------------
+
+
+def _retry_mock_client(monkeypatch: Any, statuses: list[int]) -> dict[str, int]:
+    """Patch httpx.Client so successive requests return *statuses* in order.
+
+    A status of 200 yields one record; anything else raises
+    HTTPStatusError the way raise_for_status() would. Returns a counter dict
+    so the test can assert how many requests were actually made.
+    """
+    counter = {"requests": 0}
+    remaining = list(statuses)
+
+    class MockResponse:
+        def __init__(self, status: int) -> None:
+            self.status_code = status
+            self.headers: dict[str, str] = {}
+
+        def json(self) -> dict[str, Any]:
+            return {"data": [{"id": 1}]}
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                raise httpx.HTTPStatusError(
+                    f"{self.status_code}",
+                    request=httpx.Request("GET", "https://api.example.com/data"),
+                    response=httpx.Response(self.status_code),
+                )
+
+    class MockClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def __enter__(self) -> "MockClient":
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            pass
+
+        def request(self, *args: Any, **kwargs: Any) -> MockResponse:
+            counter["requests"] += 1
+            return MockResponse(remaining.pop(0) if remaining else 200)
+
+    monkeypatch.setattr(httpx, "Client", MockClient)
+    return counter
+
+
+def test_extract_retries_transient_5xx(monkeypatch: Any) -> None:
+    """Two 503s then a 200: the records come through, not an exception."""
+    monkeypatch.setattr("drt.destinations.retry.time.sleep", lambda _s: None)
+    counter = _retry_mock_client(monkeypatch, [503, 503, 200])
+    source = RestApiSource()
+    profile = RestApiProfile(
+        type="rest_api", url="https://api.example.com/data", result_path="data"
+    )
+
+    records = list(source.extract("", profile))
+
+    assert records == [{"id": 1}]
+    assert counter["requests"] == 3  # two failures + the success
+
+
+def test_extract_does_not_retry_permanent_4xx(monkeypatch: Any) -> None:
+    """A 404 will not succeed on repeat — fail fast rather than burn quota."""
+    monkeypatch.setattr("drt.destinations.retry.time.sleep", lambda _s: None)
+    counter = _retry_mock_client(monkeypatch, [404])
+    source = RestApiSource()
+    profile = RestApiProfile(
+        type="rest_api", url="https://api.example.com/data", result_path="data"
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        list(source.extract("", profile))
+
+    assert counter["requests"] == 1
