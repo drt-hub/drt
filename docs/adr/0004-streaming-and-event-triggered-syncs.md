@@ -8,6 +8,10 @@
   recommendation stands unchanged. Accepted on that evidence rather than on
   having been asserted first — the matrix checked both conditions explicitly
   and found neither met.
+- **Amended:** 2026-07-29 — the #769 gate is rescoped to Tier 3 only and marked
+  cleared; its cross-process residual folds into the #756 row. The decision and
+  the tiers are unchanged; only the gate table and the ordering it implies move.
+  See [Gates](#gates-two-prerequisites-block-promotion-not-authorship).
 - **Issue:** [#786](https://github.com/drt-hub/drt/issues/786)
 - **Implementation:** none — this ADR recommends **not** building a native
   watcher. The work it does sanction is listed under
@@ -29,7 +33,9 @@ that. It is deliberately a build/no-build decision, not a design for a daemon.
 Three facts about the code as it stands (v0.8.3) constrain the answer more than
 the competitive framing does. Every citation below was re-verified against the
 v0.8.3 tree; none of that release's changes touch `serve`, state locality, or
-the Dagster integration.
+the Dagster integration. Line numbers track `main` rather than the tag: nothing
+load-bearing has moved since, but post-v0.8.3 work shifted one citation
+(`deltalake.py`, [#868](https://github.com/drt-hub/drt/pull/868)).
 
 **`drt serve` is a trigger endpoint, not a trigger runtime.** It exists
 (#218) and works for its designed cadence — a dbt job finishes, POST
@@ -93,12 +99,14 @@ where the asset and resource plumbing already exists to build on. A sensor
 evaluating a cheap change signal and yielding a `RunRequest` per changed sync
 is a small package addition, and Dagster supplies the durability, cursoring and
 backfill semantics drt would otherwise have to invent.
-*Gated on #756 and #769 — see [Gates](#gates-two-prerequisites-block-promotion-not-authorship).*
+*Gated on #756 — see [Gates](#gates-two-prerequisites-block-promotion-not-authorship).*
 
 **Tier 3 — hardened `drt serve`, for push sources.**
 Keep the endpoint for what it is good at, and fix the three defects above so it
 can sit behind a real push subscription. Hardening is bounded work with a clear
-finish line; it is not a step toward a daemon. *Gated on #769.*
+finish line; it is not a step toward a daemon. *#769 gate cleared by
+[#858](https://github.com/drt-hub/drt/pull/858) — the remaining blocker is #854
+itself.*
 
 ### Gates: two prerequisites block promotion, not authorship
 
@@ -108,10 +116,24 @@ README, or a comparison table — until the gates clear. Event-driven guidance
 published before then would document a configuration that breaks quietly
 rather than loudly, which is the worst failure mode a docs deliverable has.
 
-| Gate | Blocks | Why |
-|---|---|---|
-| **#756 remote state** | Tier 2 | `.drt/state.json` is local disk (`drt/state/manager.py:43`). A sensor in an orchestrator and a CI run genuinely cannot share a watermark today. A Tier 2 recommendation shipped before this tells users to build a topology whose two halves silently disagree about what has already synced. |
-| **#769 rate limiting v2** | Tier 2, Tier 3 | Only the `Retry-After` half shipped (v0.8.1). The **per-destination `rate_limit` override** and the **shared bucket across threads** are still open. Frequent small runs multiply request bursts against SaaS destinations in a way a nightly batch never touches, and a per-process bucket that resets every run will trip limits nightly batches never saw. |
+| Gate | Blocks | Status | Why |
+|---|---|---|---|
+| **#756 remote state** | Tier 2 | Open | `.drt/state.json` is local disk (`drt/state/manager.py:43`). A sensor in an orchestrator and a CI run genuinely cannot share a watermark today. A Tier 2 recommendation shipped before this tells users to build a topology whose two halves silently disagree about what has already synced. **Also absorbs the cross-process half of the #769 gate** — see the amendment below. |
+| **#769 rate limiting v2** | Tier 3 | **Cleared** by [#858](https://github.com/drt-hub/drt/pull/858) | Originally written as blocking Tier 2 *and* Tier 3. #858 shipped both named requirements — the **per-destination `rate_limit` override** and the **shared bucket across threads** — which is the whole scope for Tier 3, since `drt serve` is one long-lived process and the registry lives for the life of the server rather than resetting per run. It does not clear Tier 2: a Dagster sensor yields one `RunRequest` per changed sync and Dagster launches each as its own process, so N changed syncs against one endpoint is still N buckets. That residual needs shared state, which is #756 — hence the fold rather than a standing second gate. |
+
+**Amendment (2026-07-29), scoping the #769 gate.** As first written, this row's
+rationale ran together two distinct harms: per-destination pacing being
+unavailable at all, and a per-process bucket resetting every run. #858 fixes the
+first completely and the second only within a process. Because a cross-process
+bucket is not achievable without shared state, the residual is not independently
+actionable and has been folded into the #756 row rather than left as a gate that
+cannot be closed on its own terms. Net effect on ordering: none — #756 already
+blocked Tier 2 and remains the longer pole. Tier 3's blocker becomes #854.
+
+One topology this does not cover: several `drt serve` replicas behind a load
+balancer are several processes, so the shared bucket degrades to one per replica.
+That is a hosting concern rather than an engine one, and sits on the drt Cloud
+side of the [open-core line](#where-the-open-core-line-falls) drawn below.
 
 Non-blocking, for completeness:
 
@@ -213,7 +235,8 @@ in the engine.
 Two prerequisites (#756, #769) are promoted from "related" to blocking, with
 the promotion scoped to *publishing* the guidance rather than writing it. The
 practical effect is ordering: Tier 1 can be documented immediately, Tier 2 and
-Tier 3 wait.
+Tier 3 wait. Since the amendment above, #769 is cleared and Tier 3's blocker is
+#854; Tier 2 continues to wait on #756 alone.
 
 Deciding against the watcher now is what makes the v1.0 protocol freeze
 cheaper: no trigger runtime means no trigger protocol to keep compatible.
@@ -233,9 +256,11 @@ the work it authorised:
    (the Tier 2 path). A generic cheap-signal sensor plus Delta/Iceberg version
    and Snowflake `STREAM` variants, yielding one `RunRequest` per changed sync.
    The two lakehouse signals are the cheapest first sensors to write: Delta's
-   `version()` is already called in shipped code (`drt/sources/deltalake.py:67`)
+   `version()` is already called in shipped code (`drt/sources/deltalake.py:91`)
    and Iceberg's snapshot id is reachable from a table drt already loads
    (`drt/sources/iceberg.py:51-52`). **Blocked by #756.**
 3. **[#856](https://github.com/drt-hub/drt/issues/856) — "event-driven syncs"
-   guide** covering all three tiers. Tier 1 is documentable now; Tiers 2 and 3
-   are **gated on #756 and #769**, per the gates above.
+   guide** covering all three tiers. Tier 1 is documentable now; **Tier 2 is
+   gated on #756**, and **Tier 3 becomes publishable once #854 lands** — its
+   #769 gate cleared with [#858](https://github.com/drt-hub/drt/pull/858), per
+   the amendment above.
