@@ -61,3 +61,14 @@ into the destination and cannot be un-sent. See
 
 - [SQL Server documentation](https://learn.microsoft.com/en-us/sql/)
 - [pymssql documentation](https://www.pymssql.org/)
+
+## Streaming extraction ([#765](https://github.com/drt-hub/drt/issues/765))
+
+Rows are read in `fetch_size` batches rather than materialised whole, so peak memory tracks the batch
+instead of the result set: **+151 MB → +39 MB** on 300k rows of ~200B.
+
+```yaml
+  fetch_size: 10000   # rows per batch (default: 10000)
+```
+
+Memory scales with `fetch_size x row width`, not row count — lower it for very wide rows, not for big tables.

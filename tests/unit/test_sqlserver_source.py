@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 from drt.config.credentials import SQLServerProfile
@@ -190,7 +192,7 @@ def test_extract_retries_transient_failure(monkeypatch: pytest.MonkeyPatch) -> N
             raise mod.OperationalError("connection refused")
         conn = MagicMock()
         cur = MagicMock()
-        cur.fetchall.return_value = [{"id": 1, "name": "Alice"}]
+        cur.__iter__.side_effect = lambda: iter([{"id": 1, "name": "Alice"}])
         conn.cursor.return_value = cur
         return conn
 
@@ -203,7 +205,7 @@ def test_extract_retries_transient_failure(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_extract_does_not_retry_permanent_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import patch
 
     mod = _install_fake_pymssql(monkeypatch)
     attempts: list[int] = []
@@ -221,19 +223,27 @@ def test_extract_does_not_retry_permanent_failure(monkeypatch: pytest.MonkeyPatc
     sleep.assert_not_called()
 
 
-def test_no_row_escapes_before_the_result_set_is_complete(
+def test_a_mid_stream_failure_is_no_longer_retried_after_streaming(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Scope boundary (#766), the strong form.
+    """Scope boundary (#766) — and a deliberate weakening from #765.
 
-    This source materialises the result set with ``list(cur.fetchall())``
-    *inside* the retried closure, so a driver that fails part-way through
-    producing rows fails before anything is yielded — and is therefore still
-    safely retryable. No row has reached the destination yet, so re-running
-    the query cannot duplicate one.
+    Before streaming, this source materialised the whole result set with
+    ``list(cur.fetchall())`` *inside* the retried closure. A driver that failed
+    part-way through producing rows therefore failed before anything was
+    yielded, and the retry could safely re-run the query: no row had reached
+    the destination, so nothing could be duplicated. That made SQL Server
+    strictly safer than Postgres/MySQL here, as an accident of buffering.
+
+    Streaming removes that accident. Rows now leave the generator as they
+    arrive, so a failure part-way through escapes to the caller with earlier
+    rows already loaded downstream — exactly the documented #766 boundary that
+    every other SQL source has always had. Re-running would duplicate them.
+
+    This is a real behaviour change, and it is the price of not holding the
+    result set in memory. It is pinned here so nobody reads the old docstring
+    and assumes the stronger guarantee still holds.
     """
-    from unittest.mock import MagicMock, patch
-
     mod = _install_fake_pymssql(monkeypatch)
     attempts: list[int] = []
 
@@ -245,22 +255,18 @@ def test_no_row_escapes_before_the_result_set_is_complete(
             raise mod.OperationalError("connection reset")
 
         conn = MagicMock()
-        cur = MagicMock()
-        # Second attempt returns a clean, complete result set.
-        cur.fetchall.return_value = (
-            exploding_rows() if len(attempts) == 1 else [{"id": 1}, {"id": 2}]
-        )
-        conn.cursor.return_value = cur
+        cur = conn.cursor.return_value
+        cur.__iter__.side_effect = exploding_rows
         return conn
 
     with patch.object(SQLServerSource, "_connect", side_effect=connect):
         with patch("drt.destinations.retry.time.sleep"):
             gen = SQLServerSource().extract("SELECT * FROM users", _profile())
-            rows = list(gen)
+            assert next(gen) == {"id": 1}
+            with pytest.raises(mod.OperationalError):
+                next(gen)
 
-    # The partial first attempt never reached the caller — no duplicate row.
-    assert rows == [{"id": 1}, {"id": 2}]
-    assert len(attempts) == 2
+    assert len(attempts) == 1, "the failure escaped mid-stream, so it must not be retried"
 
 
 def test_extract_does_not_retry_after_a_row_is_yielded(
@@ -280,7 +286,7 @@ def test_extract_does_not_retry_after_a_row_is_yielded(
         attempts.append(1)
         conn = MagicMock()
         cur = MagicMock()
-        cur.fetchall.return_value = [{"id": 1}, {"id": 2}]
+        cur.__iter__.side_effect = lambda: iter([{"id": 1}, {"id": 2}])
         conn.cursor.return_value = cur
         return conn
 
@@ -294,3 +300,70 @@ def test_extract_does_not_retry_after_a_row_is_yielded(
                 gen.throw(mod.OperationalError("connection reset"))
 
     assert len(attempts) == 1
+
+
+class TestStreamingExtraction:
+    """#765: SQL Server iterates the cursor instead of calling fetchall().
+
+    Measured on SQL Server 2022, 300k rows x ~200B, fresh process:
+    +151.2 MB RSS before, +39.3 MB after (through ``extract()`` itself).
+    """
+
+    def _conn(self, rows):
+        conn = MagicMock()
+        # The cursor must be conn's own child mock so its calls land in
+        # conn.mock_calls — that ledger is how close ordering is observed.
+        cur = conn.cursor.return_value
+        cur.__iter__.side_effect = lambda: iter(rows)
+        return conn
+
+    def test_does_not_call_fetchall(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _install_fake_pymssql(monkeypatch)
+        conn = self._conn([{"id": 1}])
+        with patch.object(SQLServerSource, "_connect", return_value=conn):
+            list(SQLServerSource().extract("SELECT 1", _profile()))
+
+        conn.cursor.return_value.fetchall.assert_not_called()
+
+    def test_arraysize_comes_from_fetch_size(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _install_fake_pymssql(monkeypatch)
+        conn = self._conn([{"id": 1}])
+        with patch.object(SQLServerSource, "_connect", return_value=conn):
+            list(SQLServerSource().extract("SELECT 1", _profile(fetch_size=2500)))
+
+        assert conn.cursor.return_value.arraysize == 2500
+
+    def test_cursor_is_closed_before_the_connection(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_fake_pymssql(monkeypatch)
+        conn = self._conn([{"id": 1}])
+        with patch.object(SQLServerSource, "_connect", return_value=conn):
+            list(SQLServerSource().extract("SELECT 1", _profile()))
+
+        names = [c[0] for c in conn.mock_calls]
+        assert "cursor().close" in names, "the cursor was never closed"
+        assert names.index("cursor().close") < names.index("close"), (
+            f"closed in the wrong order: {names}"
+        )
+
+    def test_connection_closes_when_the_generator_is_abandoned(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`--limit` / `--fail-fast` stop consuming mid-stream (#775/#774)."""
+        _install_fake_pymssql(monkeypatch)
+        conn = self._conn([{"id": i} for i in range(100)])
+        with patch.object(SQLServerSource, "_connect", return_value=conn):
+            gen = SQLServerSource().extract("SELECT 1", _profile())
+            next(gen)
+            gen.close()
+
+        names = [c[0] for c in conn.mock_calls]
+        assert "cursor().close" in names, "the cursor leaked on abandonment"
+        assert names.index("cursor().close") < names.index("close")
+
+    def test_empty_result_yields_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _install_fake_pymssql(monkeypatch)
+        conn = self._conn([])
+        with patch.object(SQLServerSource, "_connect", return_value=conn):
+            assert list(SQLServerSource().extract("SELECT 1", _profile())) == []

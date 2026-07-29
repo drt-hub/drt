@@ -29,3 +29,17 @@ warehouse:
 ## References
 
 - [SQLite documentation](https://www.sqlite.org/docs.html)
+
+## Streaming extraction ([#765](https://github.com/drt-hub/drt/issues/765))
+
+Rows are read in `fetch_size` batches rather than materialised whole, so peak memory tracks the batch
+instead of the result set: **+110.6 MB → +4.4 MB** on 300k rows of ~200B.
+
+"It's a local file" does not make buffering free: the cost this removes is holding every row as a Python
+object, which a local file incurs just as readily as a remote warehouse.
+
+```yaml
+  fetch_size: 10000   # rows per batch (default: 10000)
+```
+
+Memory scales with `fetch_size x row width`, not row count — lower it for very wide rows, not for big tables.
