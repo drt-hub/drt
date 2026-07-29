@@ -252,6 +252,37 @@ them; skipping them would need a stable ordering and offset the query doesn't pr
 checkpointing problem, not a retry problem. See
 [API_REFERENCE](../llm/API_REFERENCE.md#source-side-retry-766).
 
+## As a source — streaming extraction ([#765](https://github.com/drt-hub/drt/issues/765))
+
+Rows are read through a **server-side (named) cursor** in batches rather than buffered whole with
+`fetchall()`, so peak memory tracks the batch instead of the result set. Measured on Postgres 16
+with 300k rows of ~200B: **+182 MB RSS before, +18 MB after**.
+
+```yaml
+# ~/.drt/profiles.yml
+pg:
+  type: postgres
+  host: localhost
+  dbname: analytics
+  user: analyst
+  password_env: PG_PASSWORD
+  fetch_size: 10000        # rows per server round trip (default: 10000)
+```
+
+`fetch_size` trades round trips against memory. Memory scales with `fetch_size x row width`, not
+with the number of rows, so **lower it for very wide rows** (large `JSONB`, long text) rather than
+for big tables — a 300M-row table costs the same as a 300k-row one at the same width. Raising it
+buys progressively less.
+
+There is deliberately no setting that restores the old buffer-everything behaviour: holding the
+whole result set client-side is the problem this removes.
+
+⚠️ **The connection is now held open for the whole load**, not just the extract — the cursor lives
+on the server and dies with its session. Two consequences worth knowing: a sync is more exposed to
+an idle-session reaper or a failover mid-load (that failure is *not* retried, per the scope note
+above), and long-running syncs hold a Postgres backend for their duration. If your server enforces
+a short `idle_in_transaction_session_timeout`, a slow destination can now trip it.
+
 ## Notes
 
 - Requires `pip install drt-core[postgres]` (uses `psycopg2`)

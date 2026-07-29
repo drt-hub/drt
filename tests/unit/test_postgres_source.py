@@ -40,7 +40,13 @@ def _mock_conn(rows: list[tuple] | None = None) -> MagicMock:
     conn = MagicMock()
     cur = MagicMock()
     cur.description = [("id",), ("name",)]
-    cur.fetchall.return_value = [(1, "Alice"), (2, "Bob")] if rows is None else rows
+    data = [(1, "Alice"), (2, "Bob")] if rows is None else rows
+    cur.fetchall.return_value = data
+    # Iterable as well as fetchall-able: streaming extraction (#765) consumes
+    # the cursor with `for row in cur`, which is what a server-side cursor
+    # supports. __iter__ is a fresh iterator per call so a test may iterate
+    # twice (e.g. a retried attempt) without the second pass coming up empty.
+    cur.__iter__.side_effect = lambda: iter(data)
     conn.cursor.return_value = cur
     return conn
 
@@ -166,6 +172,12 @@ class TestRetry:
 
         Rows already yielded have been loaded downstream and cannot be
         un-sent, so re-running the query would duplicate them.
+
+        Since #765 the rows arrive by iterating the server-side cursor rather
+        than from ``fetchall()``, so the failure is injected into ``__iter__``
+        — but the guarantee under test is unchanged, and this is exactly the
+        case streaming makes more likely (the connection is now held open for
+        the whole load, so there is far more of a window for it to drop).
         """
         attempts: list[int] = []
 
@@ -177,7 +189,7 @@ class TestRetry:
                 yield (1, "Alice")
                 raise psycopg2.OperationalError("connection reset by peer")
 
-            conn.cursor.return_value.fetchall.return_value = exploding_rows()
+            conn.cursor.return_value.__iter__.side_effect = exploding_rows
             return conn
 
         with patch.object(PostgresSource, "_connect", side_effect=connect):
@@ -228,3 +240,129 @@ def test_is_transient_false_for_auth_failures(exc_name: str) -> None:
 
     exc = getattr(psycopg2.errors, exc_name)("password authentication failed")
     assert PostgresSource()._is_transient(exc) is False
+
+
+class TestStreamingExtraction:
+    """#765: extract streams through a server-side cursor instead of fetchall().
+
+    Measured on a real Postgres 16 with 300k rows x ~200B: fetchall() peaked at
+    +182 MB RSS, a named cursor at itersize=10000 peaked at +16 MB — 11x. The
+    point of these tests is the *lifecycle*, though, not the memory: a
+    server-side cursor only lives while its connection is open, so #766's
+    close-inside-the-retry-unit no longer works and every exit path has to be
+    pinned.
+    """
+
+    def test_uses_a_named_server_side_cursor(self) -> None:
+        """A plain cursor() buffers the whole result set client-side; only a
+        *named* cursor makes Postgres hold it and stream it back."""
+        conn = _mock_conn()
+        with patch.object(PostgresSource, "_connect", return_value=conn):
+            list(PostgresSource().extract("SELECT 1", _profile()))
+
+        assert conn.cursor.call_args is not None
+        assert conn.cursor.call_args.kwargs.get("name"), (
+            "cursor() was called without name= — that is a client-side buffer, "
+            "not a server-side cursor, and streams nothing"
+        )
+
+    def test_itersize_comes_from_fetch_size(self) -> None:
+        conn = _mock_conn()
+        with patch.object(PostgresSource, "_connect", return_value=conn):
+            list(PostgresSource().extract("SELECT 1", _profile(fetch_size=2500)))
+
+        assert conn.cursor.return_value.itersize == 2500
+
+    def test_does_not_call_fetchall(self) -> None:
+        """The regression this issue exists to prevent."""
+        conn = _mock_conn()
+        with patch.object(PostgresSource, "_connect", return_value=conn):
+            list(PostgresSource().extract("SELECT 1", _profile()))
+
+        conn.cursor.return_value.fetchall.assert_not_called()
+
+    def test_connection_closes_after_full_iteration(self) -> None:
+        conn = _mock_conn()
+        with patch.object(PostgresSource, "_connect", return_value=conn):
+            list(PostgresSource().extract("SELECT 1", _profile()))
+
+        conn.close.assert_called_once()
+
+    def test_connection_closes_when_the_generator_is_abandoned(self) -> None:
+        """`--limit` / `--fail-fast` stop consuming mid-stream (#775/#774).
+
+        fetchall() made abandonment harmless because the connection was already
+        closed. Streaming does not: verified against a real Postgres that
+        dropping the cursor reference and running gc leaves the server-side
+        cursor open. Only a try/finally around the yield loop closes it, via
+        GeneratorExit.
+        """
+        conn = _mock_conn(rows=[(i, "x") for i in range(100)])
+        with patch.object(PostgresSource, "_connect", return_value=conn):
+            gen = PostgresSource().extract("SELECT 1", _profile())
+            next(gen)
+            next(gen)
+            gen.close()  # what GC does to an abandoned generator
+
+        conn.close.assert_called_once()
+
+    def test_columns_are_read_after_the_first_row_not_at_execute(self) -> None:
+        """A named cursor's ``description`` is None until the first batch lands.
+
+        This is the one real behavioural difference between a plain and a
+        server-side cursor, and it is invisible to a naive mock: DECLARE does
+        not touch the server, so psycopg2 has no column metadata yet. Reading
+        ``cur.description`` right after ``execute()`` — which is correct for a
+        plain cursor, and is what the pre-#765 code did — raises
+        ``TypeError: 'NoneType' object is not iterable`` against a live
+        server. Caught exactly that way, on real Postgres 16, after the mocked
+        suite was green.
+        """
+        conn = _mock_conn()
+        cur = conn.cursor.return_value
+        cur.description = None  # as psycopg2 leaves it until the first fetch
+
+        def rows():
+            # description only becomes available once iteration has started
+            cur.description = [("id",), ("name",)]
+            yield (1, "Alice")
+            yield (2, "Bob")
+
+        cur.__iter__.side_effect = rows
+
+        with patch.object(PostgresSource, "_connect", return_value=conn):
+            result = list(PostgresSource().extract("SELECT 1", _profile()))
+
+        assert result == [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
+
+    def test_empty_result_set_does_not_touch_description(self) -> None:
+        """With no rows, ``description`` may stay None forever — reading it
+        unconditionally would turn an empty extract into a TypeError."""
+        conn = _mock_conn(rows=[])
+        conn.cursor.return_value.description = None
+
+        with patch.object(PostgresSource, "_connect", return_value=conn):
+            assert list(PostgresSource().extract("SELECT 1", _profile())) == []
+
+    def test_failed_attempt_closes_its_own_connection(self) -> None:
+        """A retried attempt must not leak the connection it opened.
+
+        #766 got this from `finally: conn.close()` inside the retried unit.
+        Streaming moves the close out, so the failure path needs its own.
+        """
+        conns: list[MagicMock] = []
+
+        def connect(_config: object) -> MagicMock:
+            conn = _mock_conn()
+            if not conns:
+                conn.cursor.return_value.execute.side_effect = psycopg2.OperationalError("boom")
+            conns.append(conn)
+            return conn
+
+        with patch.object(PostgresSource, "_connect", side_effect=connect):
+            with patch("drt.destinations.retry.time.sleep"):
+                list(PostgresSource().extract("SELECT 1", _profile()))
+
+        assert len(conns) == 2
+        conns[0].close.assert_called_once(), "failed attempt leaked its connection"
+        conns[1].close.assert_called_once()

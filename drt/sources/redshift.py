@@ -86,27 +86,57 @@ class RedshiftSource:
         after the first row has been yielded propagates — those rows are
         already loaded downstream and cannot be un-sent. See the Postgres
         source for the full rationale.
+
+        **Streaming (#765): a named (server-side) cursor in ``fetch_size``
+        batches**, so peak memory tracks the batch rather than the result set.
+        The connection is therefore held for the whole load and closed in a
+        ``finally`` that also covers ``GeneratorExit`` — see the Postgres
+        source for the lifecycle rationale, which is identical.
+
+        One Redshift-specific wrinkle: ``SET search_path`` runs on a **plain**
+        cursor, not the named one. psycopg2 implements a named cursor as
+        ``DECLARE <name> CURSOR WITHOUT HOLD FOR <query>``, and ``DECLARE …
+        FOR SET`` is a syntax error — a named cursor can only wrap something
+        that returns rows. Running it on a plain cursor first is equivalent
+        anyway: ``search_path`` is session state, so it is still in force when
+        the named cursor is declared on the same connection (verified against
+        a live server).
         """
         assert isinstance(config, RedshiftProfile)
 
-        def _connect_and_fetch() -> tuple[list[str], list[Any]]:
+        def _connect_and_execute() -> tuple[Any, Any]:
             conn = self._connect(config)
             try:
-                cur = conn.cursor()
-                # Set search_path to the configured schema
                 if config.schema:
-                    cur.execute("SET search_path TO %s", (config.schema,))
+                    # Plain cursor: this is session state, and DECLARE ... FOR
+                    # SET is not valid SQL.
+                    with conn.cursor() as setup:
+                        setup.execute("SET search_path TO %s", (config.schema,))
+                cur = conn.cursor(name="drt_extract")
+                cur.itersize = config.fetch_size
                 cur.execute(query)
-                columns = [desc[0] for desc in cur.description]
-                return columns, cur.fetchall()
-            finally:
+                return conn, cur
+            except BaseException:
+                # A failed attempt cleans up after itself: the close no longer
+                # lives in a `finally` here, since the cursor must outlive it.
                 conn.close()
+                raise
 
-        columns, rows = with_retry(_connect_and_fetch, RetryConfig(), retry_on=self._is_transient)
+        conn, cur = with_retry(_connect_and_execute, RetryConfig(), retry_on=self._is_transient)
 
         # Iteration stays outside the retry — a yielded row cannot be un-sent.
-        for row in rows:
-            yield dict(zip(columns, row))
+        try:
+            # ``description`` is None until the first batch arrives on a named
+            # cursor (DECLARE does not touch the server), so columns are read
+            # on the first iteration rather than after execute(). See the
+            # Postgres source — same driver, same trap.
+            columns: list[str] = []
+            for row in cur:
+                if not columns:
+                    columns = [desc[0] for desc in cur.description]
+                yield dict(zip(columns, row))
+        finally:
+            conn.close()
 
     def test_connection(self, config: ProfileConfig) -> bool:
         """Test if the Redshift cluster is reachable."""

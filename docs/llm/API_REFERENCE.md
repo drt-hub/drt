@@ -335,6 +335,77 @@ follow-up rather than part of #766.
 
 ---
 
+## Streaming extraction (#765)
+
+SQL sources read through a **server-side cursor** in `fetch_size` batches rather than materialising
+the result set with `fetchall()`. Peak memory tracks the batch, not the table.
+
+```yaml
+# ~/.drt/profiles.yml
+pg:
+  type: postgres
+  # ...
+  fetch_size: 10000     # rows per server round trip (default: 10000)
+```
+
+| Source | Mechanism | `fetch_size` |
+|---|---|---|
+| Postgres | named cursor, `itersize` | yes |
+| Redshift | named cursor, `itersize` | yes |
+
+Measured on Postgres 16, 300k rows x ~200B: `fetchall()` peaked at **+182 MB** RSS, streaming at
+**+18 MB**.
+
+**Sizing.** Memory scales with `fetch_size x row width`, not row count — lower it for very wide
+rows, not for big tables. There is deliberately no value that restores the old behaviour: buffering
+the whole result set client-side is what this removes.
+
+### Lifecycle — the part that matters when adding a source
+
+A server-side cursor is only valid while its connection is open, which breaks the #766 pattern of
+closing the connection inside the retried unit. The shape every streaming source follows:
+
+```python
+def _connect_and_execute():        # retried: connect + execute only
+    conn = self._connect(config)
+    try:
+        cur = conn.cursor(name="drt_extract")   # named => server-side
+        cur.itersize = config.fetch_size
+        cur.execute(query)
+        return conn, cur
+    except BaseException:
+        conn.close()               # a failed attempt cleans up after itself
+        raise
+
+conn, cur = with_retry(_connect_and_execute, RetryConfig(), retry_on=self._is_transient)
+try:
+    columns = []
+    for row in cur:
+        if not columns:            # description is None until the first batch
+            columns = [d[0] for d in cur.description]
+        yield dict(zip(columns, row))
+finally:
+    conn.close()                   # also runs on GeneratorExit
+```
+
+Three traps, each of which is invisible to a mocked test and only shows up against a real server:
+
+1. **`cur.description` is `None` until the first batch arrives.** `DECLARE` does not touch the
+   server, so there is no column metadata after `execute()` — unlike a plain cursor. Reading it up
+   front raises `TypeError: 'NoneType' object is not iterable`.
+2. **An abandoned generator leaks.** `--limit` / `--fail-fast` stop consuming mid-stream; without
+   the `finally`, the server-side cursor stays open (confirmed in `pg_cursors`). `GeneratorExit`
+   is what makes the `finally` fire.
+3. **Session-scoped setup needs a plain cursor.** `DECLARE <name> CURSOR FOR SET ...` is a syntax
+   error, so Redshift's `SET search_path` runs on a separate plain cursor — still effective,
+   because it is session state.
+
+⚠️ **The connection is held for the whole load**, not just the extract. A sync is therefore more
+exposed to idle-session reapers and failovers mid-load, and per #766 those failures are *not*
+retried once a row has been yielded.
+
+---
+
 ## Alerts (`alerts:` on a sync)
 
 ```yaml

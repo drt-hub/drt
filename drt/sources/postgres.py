@@ -93,27 +93,65 @@ class PostgresSource:
         destination; re-running the query would re-emit them, and skipping
         them would need a stable ordering the query does not promise. That is
         a checkpointing problem, not a retry problem — see #766.
+
+        **Streaming (#765).** Rows arrive through a *named* (server-side)
+        cursor in ``fetch_size`` batches rather than a single ``fetchall()``,
+        so peak memory tracks the batch instead of the result set: measured on
+        Postgres 16 with 300k rows of ~200B, ``fetchall()`` peaked at +182 MB
+        RSS against +16 MB here. A plain ``cursor()`` would not do — psycopg2
+        buffers the whole result set client-side unless the cursor is named.
+
+        The lifecycle is the subtle part. A server-side cursor lives only as
+        long as its connection, so #766's ``finally: conn.close()`` *inside*
+        the retried unit is no longer possible — closing there would invalidate
+        the cursor before the first row is read. Instead:
+
+        - the retried unit connects and executes, and closes its own
+          connection on failure, so a retried attempt leaks nothing;
+        - the yield loop owns the connection afterwards and closes it in a
+          ``finally``, which also runs on ``GeneratorExit`` when a consumer
+          abandons the iterator (``--limit`` / ``--fail-fast``, #775/#774).
+
+        That last case is a real leak, not a theoretical one: verified against
+        a live Postgres that dropping the cursor reference and forcing a GC
+        leaves the server-side cursor open in ``pg_cursors``.
         """
         assert isinstance(config, PostgresProfile)
 
-        def _connect_and_fetch() -> tuple[list[str], list[Any]]:
+        def _connect_and_execute() -> tuple[Any, Any]:
             conn = self._connect(config)
             try:
-                cur = conn.cursor()
+                # Named cursor => server-side. The name only has to be unique
+                # within the session, and each extract() gets its own
+                # connection, so a fixed name is safe.
+                cur = conn.cursor(name="drt_extract")
+                cur.itersize = config.fetch_size
                 cur.execute(query)
-                columns = [desc[0] for desc in cur.description]
-                return columns, cur.fetchall()
-            finally:
-                # Close inside the retried unit: a failed attempt must not
-                # leak its half-open connection while we back off.
+                return conn, cur
+            except BaseException:
+                # The failed attempt cleans up after itself — with the close
+                # moved out of `finally`, nothing else would.
                 conn.close()
+                raise
 
-        columns, rows = with_retry(_connect_and_fetch, RetryConfig(), retry_on=self._is_transient)
+        conn, cur = with_retry(_connect_and_execute, RetryConfig(), retry_on=self._is_transient)
 
-        # Iteration sits outside the retry: see the docstring: once a row is
-        # yielded it cannot be un-sent, so re-running is not safe.
-        for row in rows:
-            yield dict(zip(columns, row))
+        # Iteration sits outside the retry: once a row is yielded it cannot be
+        # un-sent, so re-running is not safe. The finally also fires on
+        # GeneratorExit, so an abandoned generator still closes the connection.
+        try:
+            # ``cur.description`` is None until the first batch actually
+            # arrives — a named cursor has not touched the server at DECLARE
+            # time, unlike a plain one where execute() populates it
+            # immediately. So columns are read inside the loop, on the first
+            # iteration, rather than up front.
+            columns: list[str] = []
+            for row in cur:
+                if not columns:
+                    columns = [desc[0] for desc in cur.description]
+                yield dict(zip(columns, row))
+        finally:
+            conn.close()
 
     def test_connection(self, config: ProfileConfig) -> bool:
         assert isinstance(config, PostgresProfile)

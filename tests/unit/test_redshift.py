@@ -32,7 +32,11 @@ def _config(**overrides: object) -> RedshiftProfile:
 
 def _fake_connection() -> MagicMock:
     conn = MagicMock()
-    conn.cursor.return_value = MagicMock()
+    cur = MagicMock()
+    # Streaming (#765) consumes the server-side cursor with `for row in cur`,
+    # so the mock has to be iterable; empty by default.
+    cur.__iter__.side_effect = lambda: iter([])
+    conn.cursor.return_value = cur
     return conn
 
 
@@ -92,8 +96,9 @@ def test_extract_maps_rows_to_dicts_and_sets_schema() -> None:
     source = RedshiftSource()
     conn = _fake_connection()
     cur = conn.cursor.return_value
+    rows = [(1, "a@example.com"), (2, "b@example.com")]
     cur.description = [("id",), ("email",)]
-    cur.fetchall.return_value = [(1, "a@example.com"), (2, "b@example.com")]
+    cur.__iter__.side_effect = lambda: iter(rows)
 
     with patch.object(source, "_connect", return_value=conn):
         result = list(source.extract("SELECT id, email FROM users", _config(schema="analytics")))
@@ -102,8 +107,13 @@ def test_extract_maps_rows_to_dicts_and_sets_schema() -> None:
         {"id": 1, "email": "a@example.com"},
         {"id": 2, "email": "b@example.com"},
     ]
-    assert cur.execute.call_count == 2
-    assert cur.execute.call_args_list[1].args[0] == "SELECT id, email FROM users"
+    # Since #765 the SELECT runs on the named cursor and `SET search_path` on a
+    # separate plain one (DECLARE ... FOR SET is a syntax error), so the named
+    # cursor sees exactly one execute.
+    cur.execute.assert_called_once_with("SELECT id, email FROM users")
+    setup = conn.cursor.return_value.__enter__.return_value
+    assert setup.execute.call_args.args[0] == "SET search_path TO %s"
+    assert setup.execute.call_args.args[1] == ("analytics",)
     conn.close.assert_called_once()
 
 
@@ -112,7 +122,7 @@ def test_extract_incremental_query_passthrough() -> None:
     conn = _fake_connection()
     cur = conn.cursor.return_value
     cur.description = [("id",), ("updated_at",)]
-    cur.fetchall.return_value = [(42, "2026-03-31T00:00:00")]
+    cur.__iter__.side_effect = lambda: iter([(42, "2026-03-31T00:00:00")])
 
     query = (
         "SELECT id, updated_at FROM events "
@@ -122,20 +132,75 @@ def test_extract_incremental_query_passthrough() -> None:
         result = list(source.extract(query, _config(schema="public")))
 
     assert result == [{"id": 42, "updated_at": "2026-03-31T00:00:00"}]
-    assert cur.execute.call_args_list[1].args[0] == query
+    # The named cursor carries the SELECT alone since #765 — SET search_path
+    # moved to a plain cursor.
+    cur.execute.assert_called_once_with(query)
 
 
 def test_extract_raises_on_query_error_and_closes_connection() -> None:
     source = RedshiftSource()
     conn = _fake_connection()
     cur = conn.cursor.return_value
-    cur.execute.side_effect = [None, RuntimeError("query failed")]
+    # Only the named cursor's execute now — the SET runs on a separate one.
+    cur.execute.side_effect = RuntimeError("query failed")
 
     with patch.object(source, "_connect", return_value=conn):
         with pytest.raises(RuntimeError, match="query failed"):
             list(source.extract("SELECT * FROM broken", _config(schema="analytics")))
 
+    # The failed attempt closes its own connection: with #765 the close moved
+    # out of a `finally` in the retried unit, so this is the path that would
+    # leak a server-side cursor if the except branch were dropped.
     conn.close.assert_called_once()
+
+
+def test_columns_are_read_after_the_first_row_not_at_execute() -> None:
+    """Named-cursor ``description`` is None until the first batch (#765).
+
+    Same trap as the Postgres source — same driver. Reading it right after
+    execute() raises TypeError against a live server while a mock with a
+    pre-populated ``description`` sails through, so this pins the real order.
+    """
+    source = RedshiftSource()
+    conn = _fake_connection()
+    cur = conn.cursor.return_value
+    cur.description = None
+
+    def rows():
+        cur.description = [("id",), ("email",)]
+        yield (7, "z@example.com")
+
+    cur.__iter__.side_effect = rows
+
+    with patch.object(source, "_connect", return_value=conn):
+        result = list(source.extract("SELECT id, email FROM users", _config(schema="public")))
+
+    assert result == [{"id": 7, "email": "z@example.com"}]
+
+
+def test_empty_result_set_does_not_touch_description() -> None:
+    """No rows means ``description`` may stay None — must not TypeError."""
+    source = RedshiftSource()
+    conn = _fake_connection()
+    conn.cursor.return_value.description = None
+
+    with patch.object(source, "_connect", return_value=conn):
+        assert list(source.extract("SELECT 1", _config(schema="public"))) == []
+
+
+def test_search_path_runs_on_a_plain_cursor_not_the_named_one() -> None:
+    """DECLARE <name> CURSOR FOR SET is a syntax error (verified on a live
+    server), so the SET must not be issued on the streaming cursor."""
+    source = RedshiftSource()
+    conn = _fake_connection()
+
+    with patch.object(source, "_connect", return_value=conn):
+        list(source.extract("SELECT 1", _config(schema="analytics")))
+
+    named_sql = [c.args[0] for c in conn.cursor.return_value.execute.call_args_list]
+    assert not any("SET search_path" in q for q in named_sql), (
+        "SET was issued on the named cursor — that is a syntax error on a real server"
+    )
 
 
 def test_test_connection_success() -> None:
@@ -180,6 +245,9 @@ def _rows_connection(rows: list[tuple]) -> MagicMock:
     cur = MagicMock()
     cur.description = [("id",), ("email",)]
     cur.fetchall.return_value = rows
+    # Fresh iterator per call so a retried attempt re-reads the same rows
+    # instead of finding the cursor exhausted (#765).
+    cur.__iter__.side_effect = lambda: iter(rows)
     conn.cursor.return_value = cur
     return conn
 
@@ -260,7 +328,7 @@ def test_extract_does_not_retry_after_first_row() -> None:
             yield (1, "a@example.com")
             raise psycopg2.OperationalError("connection reset by peer")
 
-        conn.cursor.return_value.fetchall.return_value = exploding_rows()
+        conn.cursor.return_value.__iter__.side_effect = exploding_rows
         return conn
 
     with patch.object(RedshiftSource, "_connect", side_effect=connect):

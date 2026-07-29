@@ -44,6 +44,20 @@ class SQLiteProfile:
         return f"{self.type} ({self.database})"
 
 
+#: Rows per driver round trip for streaming SQL sources (#765).
+#:
+#: There is deliberately no value that reproduces the old ``fetchall()``
+#: behaviour — buffering the entire result set client-side *is* what #765
+#: removes, so a "compatibility" default would just be a knob nobody should
+#: set. 10000 is the trade-off point: measured on Postgres 16 with 300k rows
+#: of ~200B, ``fetchall()`` peaked at +182 MB RSS while a named cursor at this
+#: itersize peaked at +16 MB, for round trips that stay a rounding error next
+#: to the per-row work the engine does downstream. Lower it for very wide rows
+#: (memory scales with ``fetch_size x row width``, not row count); raising it
+#: buys progressively less.
+DEFAULT_FETCH_SIZE = 10000
+
+
 @dataclass
 class PostgresProfile:
     type: Literal["postgres"]
@@ -53,6 +67,8 @@ class PostgresProfile:
     user: str = ""
     password_env: str | None = None  # env var name
     password: str | None = None  # explicit (non-recommended)
+    #: Rows per server round trip when streaming (#765). See DEFAULT_FETCH_SIZE.
+    fetch_size: int = DEFAULT_FETCH_SIZE
 
     def describe(self) -> str:
         return f"{self.type} ({self.host}:{self.port}/{self.dbname})"
@@ -81,6 +97,8 @@ class RedshiftProfile:
     password_env: str | None = None  # env var name
     password: str | None = None  # explicit (non-recommended)
     schema: str = "public"  # Redshift schema
+    #: Rows per server round trip when streaming (#765). See DEFAULT_FETCH_SIZE.
+    fetch_size: int = DEFAULT_FETCH_SIZE
 
     def describe(self) -> str:
         return f"{self.type} ({self.host}:{self.port}/{self.dbname})"
