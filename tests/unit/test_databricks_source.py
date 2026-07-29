@@ -188,29 +188,52 @@ def test_is_transient_true_for_request_error_without_an_http_code(
     assert DatabricksSource()._is_transient(server_error) is True
 
 
-def test_the_fake_exception_hierarchy_matches_the_real_driver() -> None:
-    """Pin the fake against the real package when it happens to be installed.
+def test_the_fake_exception_hierarchy_matches_the_real_driver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compare the double against the real driver, class by class.
 
-    The fake originally had ``RequestError(Error)``, outside the PEP 249 tree.
-    The real driver has ``RequestError(OperationalError)``, and that single
-    difference is what hid the auth-retry bug: with the wrong base, a 401 never
-    reaches the isinstance check the exclusion guards, so the mocked suite was
-    green while a real 401 was retried three times.
+    The double originally had ``RequestError(Error)``, outside the PEP 249
+    tree. The real driver has ``RequestError(OperationalError)``, and that one
+    difference is what hid the auth-retry bug this PR fixes: with the wrong
+    base a 401 never reaches the isinstance check the exclusion guards, so the
+    mocked suite was green while a real 401 was retried three times.
+
+    Comparing against the *real* hierarchy alone would not catch that — the
+    double is what every other test in this file actually runs against, so the
+    two have to be compared directly.
 
     Skipped when the extra is absent (CI's default matrix), which is exactly
     why the bug survived — so this is a backstop, not the primary guard. The
     behavioural tests above run everywhere.
     """
-    exc = pytest.importorskip("databricks.sql").exc
+    real = pytest.importorskip("databricks.sql").exc
+    fake = _install_fake_dbsql_exc(monkeypatch)
 
-    assert issubclass(exc.RequestError, exc.OperationalError), (
-        "the real driver changed RequestError's base — the fake, and the auth "
-        "exclusion that depends on the isinstance path, both need revisiting"
-    )
-    assert issubclass(exc.OperationalError, exc.DatabaseError)
-    assert issubclass(exc.ProgrammingError, exc.DatabaseError)
+    for name in [
+        "Error",
+        "DatabaseError",
+        "OperationalError",
+        "ProgrammingError",
+        "NotSupportedError",
+        "RequestError",
+    ]:
+        real_cls = getattr(real, name, None)
+        fake_cls = getattr(fake, name, None)
+        assert real_cls is not None, f"{name} vanished from the real driver"
+        assert fake_cls is not None, f"the double is missing {name}"
+
+        real_bases = [b.__name__ for b in real_cls.__mro__[1:] if b is not object]
+        fake_bases = [b.__name__ for b in fake_cls.__mro__[1:] if b is not object]
+        assert fake_bases == real_bases, (
+            f"the double's {name} has bases {fake_bases} but the driver says "
+            f"{real_bases} — every classification test here is running against "
+            f"a hierarchy the driver does not have"
+        )
+
     # The auth exclusion reads the HTTP status from here.
-    assert exc.RequestError("m", {"http-code": 401}).context == {"http-code": 401}
+    assert real.RequestError("m", {"http-code": 401}).context == {"http-code": 401}
+    assert fake.RequestError("m", {"http-code": 401}).context == {"http-code": 401}
 
 
 def test_is_transient_false_for_unrelated_exception(monkeypatch: pytest.MonkeyPatch) -> None:
