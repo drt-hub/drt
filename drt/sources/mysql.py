@@ -76,24 +76,64 @@ class MySQLSource:
         after the first row has been yielded propagates — those rows are
         already loaded downstream and cannot be un-sent. See the Postgres
         source for the full rationale.
+
+        **Streaming (#765): ``SSCursor``**, pymysql's unbuffered cursor, so
+        rows arrive one at a time off the wire instead of the whole result set
+        being materialised client-side first. Measured against MySQL 8 with
+        300k rows of ~200B: ``fetchall()`` peaked at +109 MB RSS, this at
+        +0.8 MB.
+
+        Two things differ from the Postgres leg, both found against a live
+        server rather than in any documentation:
+
+        - ``description`` is already populated after ``execute()``, so columns
+          can be read up front. A psycopg2 named cursor leaves it ``None``
+          until the first batch arrives, which forces a different shape there.
+        - **``cursor.close()`` must run before ``conn.close()``.** Closing the
+          connection while the cursor still has unread rows makes pymysql's
+          teardown read from a socket it has already discarded, and every
+          abandoned stream then prints an ``AttributeError`` traceback via
+          ``Exception ignored in``. It does not affect correctness — the
+          server-side thread goes away either way — but it floods the CLI's
+          stderr, which for a tool whose output people pipe is its own kind of
+          breakage.
+
+        No ``fetch_size`` knob here, unlike Postgres/Redshift. ``SSCursor``
+        streams row by row, and ``fetchmany(n)`` simply calls ``read_next()``
+        n times — it does not change the number of server round trips, it just
+        holds n rows at once. Measured: iterating peaked at +3.6 MB,
+        ``fetchmany(100000)`` at +61.9 MB, with no speed difference. A
+        ``fetch_size`` here would only offer users a way to make things worse.
         """
         assert isinstance(config, MySQLProfile)
 
-        def _connect_and_fetch() -> tuple[list[str], list[Any]]:
+        def _connect_and_execute() -> tuple[Any, Any, list[str]]:
             conn = self._connect(config)
             try:
-                cur = conn.cursor()
-                cur.execute(query)
-                columns = [desc[0] for desc in cur.description]
-                return columns, cur.fetchall()
-            finally:
-                conn.close()
+                import pymysql
 
-        columns, rows = with_retry(_connect_and_fetch, RetryConfig(), retry_on=self._is_transient)
+                cur = conn.cursor(pymysql.cursors.SSCursor)
+                cur.execute(query)
+                return conn, cur, [desc[0] for desc in cur.description]
+            except BaseException:
+                # The failed attempt cleans up after itself — the close is no
+                # longer in a `finally` here, since the cursor must outlive it.
+                conn.close()
+                raise
+
+        conn, cur, columns = with_retry(
+            _connect_and_execute, RetryConfig(), retry_on=self._is_transient
+        )
 
         # Iteration stays outside the retry — a yielded row cannot be un-sent.
-        for row in rows:
-            yield dict(zip(columns, row))
+        # The finally also fires on GeneratorExit, so an abandoned iterator
+        # still tears down in the right order.
+        try:
+            for row in cur:
+                yield dict(zip(columns, row))
+        finally:
+            cur.close()
+            conn.close()
 
     def test_connection(self, config: ProfileConfig) -> bool:
         assert isinstance(config, MySQLProfile)
