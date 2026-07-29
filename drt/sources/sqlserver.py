@@ -43,12 +43,30 @@ class SQLServerSource:
         ``IntegrityError``, ``InternalError`` and ``NotSupportedError`` are
         all siblings under ``DatabaseError``. Matching the two specific
         classes rather than the base keeps a SQL typo from being retried.
+
+        **Login failures are excluded.** That hierarchy is a red herring here:
+        ``pymssql.connect()`` wraps *every* ``_mssql.MSSQLDatabaseException``
+        into ``OperationalError``, so SQL Server error 18456 ("Login failed for
+        user") arrives as an otherwise perfectly retryable class. Retrying a
+        bad credential three times in quick succession can trip an AD account
+        lockout policy, turning a config typo into an outage — the same hazard
+        already excluded on Postgres/Redshift (SQLSTATE class 28) and MySQL
+        (errno 1045).
+
+        Matched on the message rather than the error number because the number
+        does not survive translation: ``connect()`` re-raises with
+        ``e.args[0]`` alone, discarding the exception object that carried
+        ``.number``. Substring rather than equality, since the text often
+        arrives with the server's own prefix ("Adaptive Server connection
+        failed …") ahead of the login message.
         """
         try:
             import pymssql  # type: ignore[import-untyped]
         except ImportError:  # pragma: no cover - driver absent, nothing to classify
             return False
-        return isinstance(exc, (pymssql.OperationalError, pymssql.InterfaceError))
+        if not isinstance(exc, (pymssql.OperationalError, pymssql.InterfaceError)):
+            return False
+        return "login failed for user" not in str(exc).lower()
 
     def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
         """Run ``query`` and yield rows as dicts, retrying transient failures.

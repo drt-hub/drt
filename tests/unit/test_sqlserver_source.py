@@ -139,6 +139,44 @@ def test_is_transient_false_for_permanent_errors(
     assert SQLServerSource()._is_transient(getattr(mod, exc_name)("nope")) is False
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Login failed for user 'drt_reader'.",
+        "Adaptive Server connection failed (db.example.com:1433)\n"
+        "Login failed for user 'drt_reader'.",
+        "login failed for user 'sa'.",  # server casing varies
+    ],
+)
+def test_is_transient_false_for_login_failures(
+    monkeypatch: pytest.MonkeyPatch, message: str
+) -> None:
+    """Auth failures must not be retried, and pymssql hides them.
+
+    ``pymssql.connect()`` translates *every* ``MSSQLDatabaseException`` into
+    ``OperationalError`` — including SQL Server error 18456, "Login failed for
+    user" — so the plain isinstance check lets a bad credential through and
+    retries it three times. Three rapid failed logins can trip an AD account
+    lockout policy, turning a config typo into an outage. Same hazard already
+    handled on Postgres/Redshift (SQLSTATE 28) and MySQL (errno 1045).
+
+    Matched on the message because the number does not survive: ``connect()``
+    re-raises with ``e.args[0]`` only, dropping the exception object that
+    carried ``.number``.
+    """
+    mod = _install_fake_pymssql(monkeypatch)
+    assert SQLServerSource()._is_transient(mod.OperationalError(message)) is False
+
+
+def test_is_transient_true_for_non_login_operational_errors(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The login-failure exclusion must not swallow real connection trouble."""
+    mod = _install_fake_pymssql(monkeypatch)
+    exc = mod.OperationalError("Adaptive Server connection failed: server restarting")
+    assert SQLServerSource()._is_transient(exc) is True
+
+
 def test_extract_retries_transient_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """An Azure SQL failover shouldn't fail the sync."""
     from unittest.mock import MagicMock, patch
