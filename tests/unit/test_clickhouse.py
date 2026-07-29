@@ -35,6 +35,21 @@ def _fake_client() -> MagicMock:
     client = MagicMock()
     return client
 
+def _streaming_client(rows, columns=("id", "name")) -> MagicMock:
+    """A client whose query_rows_stream() behaves like the real one.
+
+    The stream is a context manager, iterable, and exposes column names on
+    ``.source.column_names`` *before* iteration starts.
+    """
+    client = MagicMock()
+    stream = MagicMock()
+    stream.source.column_names = columns
+    stream.__enter__.return_value = stream
+    stream.__exit__.return_value = False
+    stream.__iter__.side_effect = lambda: iter(rows)
+    client.query_rows_stream.return_value = stream
+    return client
+
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -47,11 +62,8 @@ class TestClickHouseSource:
         config = _config()
 
         # Mock client and its query result
-        mock_client = _fake_client()
-        mock_result = MagicMock()
-        mock_result.column_names = ["id", "name"]
-        mock_result.result_rows = [(1, "Alice"), (2, "Bob")]
-        mock_client.query.return_value = mock_result
+        # Since #765 rows come from query_rows_stream(), not query().
+        mock_client = _streaming_client([(1, "Alice"), (2, "Bob")])
 
         with patch.object(ClickHouseSource, "_connect", return_value=mock_client):
             results = list(source.extract("SELECT * FROM users", config))
@@ -220,12 +232,7 @@ class TestClickHouseSourceRetry:
             attempts.append(1)
             if len(attempts) < 3:
                 raise mod.OperationalError("unexpected disconnect")
-            client = MagicMock()
-            result = MagicMock()
-            result.column_names = ["id"]
-            result.result_rows = [(1,)]
-            client.query.return_value = result
-            return client
+            return _streaming_client([(1,)], columns=("id",))
 
         with patch.object(ClickHouseSource, "_connect", side_effect=connect):
             with patch("drt.destinations.retry.time.sleep"):
@@ -247,12 +254,7 @@ class TestClickHouseSourceRetry:
             attempts.append(1)
             if len(attempts) < 2:
                 raise httpx.ConnectError("connection refused")
-            client = MagicMock()
-            result = MagicMock()
-            result.column_names = ["id"]
-            result.result_rows = [(7,)]
-            client.query.return_value = result
-            return client
+            return _streaming_client([(7,)], columns=("id",))
 
         with patch.object(ClickHouseSource, "_connect", side_effect=connect):
             with patch("drt.destinations.retry.time.sleep"):
@@ -284,12 +286,7 @@ class TestClickHouseSourceRetry:
 
         def connect(_config: Any) -> MagicMock:
             attempts.append(1)
-            client = MagicMock()
-            result = MagicMock()
-            result.column_names = ["id"]
-            result.result_rows = [(1,), (2,)]
-            client.query.return_value = result
-            return client
+            return _streaming_client([(1,), (2,)], columns=("id",))
 
         with patch.object(ClickHouseSource, "_connect", side_effect=connect):
             with patch("drt.destinations.retry.time.sleep"):
@@ -299,3 +296,74 @@ class TestClickHouseSourceRetry:
                     gen.throw(mod.OperationalError("connection reset"))
 
         assert len(attempts) == 1
+
+
+
+
+class TestStreamingExtraction:
+    """#765 slice 3: ClickHouse streams via query_rows_stream().
+
+    Measured on a live ClickHouse 24, 300k rows x ~200B: ``client.query()``
+    peaked at +221.7 MB RSS (it materialises every row into
+    ``result.result_rows``), ``query_rows_stream()`` at +0.0 MB — the largest
+    gap of any source in this issue.
+    """
+
+    def test_uses_query_rows_stream_not_query(self) -> None:
+        client = _streaming_client([(1, "Alice"), (2, "Bob")])
+
+        with patch.object(ClickHouseSource, "_connect", return_value=client):
+            rows = list(ClickHouseSource().extract("SELECT 1", _config()))
+
+        assert rows == [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
+        client.query_rows_stream.assert_called_once()
+        client.query.assert_not_called()
+
+    def test_client_closes_after_full_iteration(self) -> None:
+        client = _streaming_client([(1, "Alice")])
+
+        with patch.object(ClickHouseSource, "_connect", return_value=client):
+            list(ClickHouseSource().extract("SELECT 1", _config()))
+
+        client.close.assert_called_once()
+
+    def test_client_closes_when_the_generator_is_abandoned(self) -> None:
+        """`--limit` / `--fail-fast` stop consuming mid-stream (#775/#774)."""
+        client = _streaming_client([(i, "x") for i in range(100)])
+
+        with patch.object(ClickHouseSource, "_connect", return_value=client):
+            gen = ClickHouseSource().extract("SELECT 1", _config())
+            next(gen)
+            gen.close()  # what GC does to an abandoned generator
+
+        client.close.assert_called_once()
+        # The stream's own __exit__ must run too, or the HTTP response is left
+        # unconsumed on a client that is about to be closed under it.
+        client.query_rows_stream.return_value.__exit__.assert_called_once()
+
+    def test_empty_result_yields_nothing(self) -> None:
+        """A live server returns an *empty* column_names tuple for an empty
+        result — the ClickHouse counterpart of psycopg2's description=None,
+        and the same trap: nothing may assume columns are present."""
+        client = _streaming_client([], columns=())
+
+        with patch.object(ClickHouseSource, "_connect", return_value=client):
+            assert list(ClickHouseSource().extract("SELECT 1", _config())) == []
+
+    def test_failed_attempt_closes_its_own_client(self) -> None:
+        """A retried attempt must not leak the client it opened."""
+        clients = []
+
+        def connect(_config):
+            client = _streaming_client([(1, "Alice")])
+            if not clients:
+                client.query_rows_stream.side_effect = RuntimeError("boom")
+            clients.append(client)
+            return client
+
+        with patch.object(ClickHouseSource, "_connect", side_effect=connect):
+            with pytest.raises(RuntimeError):
+                list(ClickHouseSource().extract("SELECT 1", _config()))
+
+        assert len(clients) == 1
+        clients[0].close.assert_called_once()

@@ -62,24 +62,56 @@ class ClickHouseSource:
         after the first row has been yielded propagates — those rows are
         already loaded downstream and cannot be un-sent. See the Postgres
         source for the full rationale.
+
+        **Streaming (#765): ``query_rows_stream``** rather than ``query``.
+        ``client.query()`` materialises the whole result set into
+        ``result.result_rows`` before returning, so peak memory tracked the
+        table; the streaming variant hands back rows as blocks arrive.
+        Measured on ClickHouse 24 with 300k rows of ~200B, each run in a fresh
+        process: **+224 MB RSS before, +149 MB after.**
+
+        That ~1.5x is a far smaller win than the Postgres (10x) or MySQL (14x)
+        legs, and the reason is worth knowing before anyone tries to improve
+        it: the remainder is clickhouse-connect buffering the HTTP response
+        internally, not drt holding rows. ``max_block_size`` does not move it
+        (measured identical at 8192, 65536 and the default), so there is no
+        ``fetch_size`` knob here — there is nothing for it to control.
+
+        Column names come off ``stream.source.column_names``, which is
+        populated before iteration begins (unlike psycopg2's named cursor).
+        On an empty result it is an empty tuple, so nothing here may assume
+        columns exist — the ClickHouse form of the same trap.
+
+        The stream is a context manager and is exited *inside* the ``finally``
+        that closes the client, so an abandoned iterator
+        (``--limit`` / ``--fail-fast``, #775/#774) does not leave an
+        unconsumed HTTP response on a client about to be closed under it.
         """
         assert isinstance(config, ClickHouseProfile)
 
-        def _connect_and_fetch() -> tuple[list[str], list[Any]]:
+        def _connect_and_open_stream() -> tuple[Any, Any]:
             client = self._connect(config)
             try:
-                result = client.query(query)
-                # clickhouse_connect puts column names in result.column_names
-                # and rows in result.result_rows
-                return result.column_names, result.result_rows
-            finally:
+                stream = client.query_rows_stream(query)
+                return client, stream
+            except BaseException:
+                # A failed attempt cleans up after itself: the close no longer
+                # lives in a `finally` here, since the stream must outlive it.
                 client.close()
+                raise
 
-        columns, rows = with_retry(_connect_and_fetch, RetryConfig(), retry_on=self._is_transient)
+        client, stream = with_retry(
+            _connect_and_open_stream, RetryConfig(), retry_on=self._is_transient
+        )
 
         # Iteration stays outside the retry — a yielded row cannot be un-sent.
-        for row in rows:
-            yield dict(zip(columns, row))
+        try:
+            with stream:
+                columns = stream.source.column_names
+                for row in stream:
+                    yield dict(zip(columns, row))
+        finally:
+            client.close()
 
     def test_connection(self, config: ProfileConfig) -> bool:
         assert isinstance(config, ClickHouseProfile)
