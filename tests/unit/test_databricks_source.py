@@ -77,14 +77,20 @@ def _install_fake_dbsql_exc(monkeypatch: pytest.MonkeyPatch) -> object:
     ``databricks-sql-connector`` is an optional extra and is not installed in
     the default dev environment, so the exception classes are recreated with
     the driver's real shape: OperationalError and ProgrammingError as PEP 249
-    siblings under DatabaseError, and RequestError outside that tree under the
-    driver's own Error base.
+    siblings under DatabaseError, and RequestError *under* OperationalError —
+    which is what makes a 401 look retryable unless it is excluded explicitly.
+    The base also carries ``context``, the dict holding ``http-code``.
     """
     import sys
     import types
 
     class Error(Exception):
-        pass
+        def __init__(self, message=None, context=None, *args):
+            super().__init__(message, *args)
+            self.message = message
+            # The real driver stores the HTTP status here; without it a mock
+            # cannot reproduce the 401 path at all.
+            self.context = context or {}
 
     class DatabaseError(Error):
         pass
@@ -98,7 +104,10 @@ def _install_fake_dbsql_exc(monkeypatch: pytest.MonkeyPatch) -> object:
     class NotSupportedError(DatabaseError):
         pass
 
-    class RequestError(Error):
+    class RequestError(OperationalError):
+        # Mirrors the real driver: RequestError subclasses OperationalError,
+        # not Error. Getting this wrong hides the auth-retry bug below, since
+        # a 401 arrives as a RequestError.
         pass
 
     exc_mod = types.ModuleType("databricks.sql.exc")
@@ -144,6 +153,64 @@ def test_is_transient_false_for_permanent(
     exc_mod = _install_fake_dbsql_exc(monkeypatch)
     exc = getattr(exc_mod, exc_name)("nope")
     assert DatabricksSource()._is_transient(exc) is False
+
+
+@pytest.mark.parametrize("http_code", [401, 403])
+def test_is_transient_false_for_auth_failures(
+    monkeypatch: pytest.MonkeyPatch, http_code: int
+) -> None:
+    """A 401/403 must not be retried.
+
+    databricks-sql-connector's own retry policy classes these as *never*
+    retryable — auth/retry.py returns "Received 401 - UNAUTHORIZED. Confirm
+    your authentication credentials." and "403 codes are not retried" — and
+    then surfaces them as RequestError, which subclasses OperationalError.
+    So the driver gives up and drt was retrying anyway, three times, against a
+    credential that cannot work. Verified against the real package: before this
+    fix, _is_transient returned True for both.
+    """
+    exc_mod = _install_fake_dbsql_exc(monkeypatch)
+    exc = exc_mod.RequestError("Received 401 - UNAUTHORIZED", {"http-code": http_code})
+    assert DatabricksSource()._is_transient(exc) is False
+
+
+def test_is_transient_true_for_request_error_without_an_http_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The auth exclusion must not swallow the cold-start case it exists for.
+
+    A resuming warehouse raises RequestError with no http-code (or a 5xx), and
+    that is the single most valuable retry in this source (#654).
+    """
+    exc_mod = _install_fake_dbsql_exc(monkeypatch)
+    assert DatabricksSource()._is_transient(exc_mod.RequestError("starting", {})) is True
+    server_error = exc_mod.RequestError("gateway", {"http-code": 503})
+    assert DatabricksSource()._is_transient(server_error) is True
+
+
+def test_the_fake_exception_hierarchy_matches_the_real_driver() -> None:
+    """Pin the fake against the real package when it happens to be installed.
+
+    The fake originally had ``RequestError(Error)``, outside the PEP 249 tree.
+    The real driver has ``RequestError(OperationalError)``, and that single
+    difference is what hid the auth-retry bug: with the wrong base, a 401 never
+    reaches the isinstance check the exclusion guards, so the mocked suite was
+    green while a real 401 was retried three times.
+
+    Skipped when the extra is absent (CI's default matrix), which is exactly
+    why the bug survived — so this is a backstop, not the primary guard. The
+    behavioural tests above run everywhere.
+    """
+    exc = pytest.importorskip("databricks.sql").exc
+
+    assert issubclass(exc.RequestError, exc.OperationalError), (
+        "the real driver changed RequestError's base — the fake, and the auth "
+        "exclusion that depends on the isinstance path, both need revisiting"
+    )
+    assert issubclass(exc.OperationalError, exc.DatabaseError)
+    assert issubclass(exc.ProgrammingError, exc.DatabaseError)
+    # The auth exclusion reads the HTTP status from here.
+    assert exc.RequestError("m", {"http-code": 401}).context == {"http-code": 401}
 
 
 def test_is_transient_false_for_unrelated_exception(monkeypatch: pytest.MonkeyPatch) -> None:

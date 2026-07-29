@@ -65,7 +65,22 @@ class DatabricksSource:
         )
         if not transient:  # pragma: no cover - driver without the documented classes
             return False
-        return isinstance(exc, transient)
+        if not isinstance(exc, transient):
+            return False
+        # Exclude authentication failures. The driver's own retry policy
+        # already treats these as hopeless — auth/retry.py answers 401 with
+        # "Confirm your authentication credentials" and 403 with "403 codes
+        # are not retried" — but it then surfaces them as ``RequestError``,
+        # which subclasses ``OperationalError``, so the isinstance above lets
+        # them straight back in and drt retried what the driver had just given
+        # up on. Three rapid attempts with a bad token is exactly the shape
+        # that trips a workspace lockout or an SSO alert.
+        #
+        # Keyed on the HTTP status in ``context`` rather than the message,
+        # which is free text. Anything without a status — the warehouse cold
+        # start this retry exists for (#654) — is unaffected.
+        http_code = (getattr(exc, "context", None) or {}).get("http-code")
+        return http_code not in (401, 403)
 
     def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
         """Run ``query`` and yield rows as dicts, retrying transient failures.
