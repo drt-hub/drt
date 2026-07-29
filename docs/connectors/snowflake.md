@@ -207,6 +207,33 @@ unavailable warehouse *on the way in* is retried. A failure *after the first row
 yielded* is not retried and fails the sync — those rows are already loaded into the destination
 and cannot be un-sent. See [API_REFERENCE](../llm/API_REFERENCE.md#source-side-retry-766).
 
+## As a source — streaming extraction ([#765](https://github.com/drt-hub/drt/issues/765))
+
+Rows are read by iterating the cursor in `fetch_size` batches rather than buffered whole with
+`fetchall()`, so peak memory tracks the batch instead of the result set.
+
+```yaml
+# ~/.drt/profiles.yml
+sf:
+  type: snowflake
+  account: xy12345.us-east-1
+  user: analyst
+  private_key_env: SNOWFLAKE_PRIVATE_KEY
+  database: ANALYTICS
+  schema: PUBLIC
+  warehouse: COMPUTE_WH
+  fetch_size: 10000        # rows per round trip (default: 10000)
+```
+
+Memory scales with `fetch_size x row width`, not with the number of rows — lower it for very wide
+rows (large VARIANT/OBJECT columns), not for big tables.
+
+⚠️ **The connection is held open for the whole load**, not just the extract: the result set lives
+server-side until consumed. A slow destination therefore keeps a Snowflake session — and its
+warehouse — busy for the duration, which is worth knowing if you are billing on warehouse uptime.
+Per [#766](https://github.com/drt-hub/drt/issues/766) a failure after the first row has been
+yielded is not retried.
+
 ## Notes
 
 - Requires `pip install drt-core[snowflake]` (uses `snowflake-connector-python`)

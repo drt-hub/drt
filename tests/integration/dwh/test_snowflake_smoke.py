@@ -35,11 +35,12 @@ from typing import Any
 
 import pytest
 
-from drt.config.credentials import DuckDBProfile
+from drt.config.credentials import DuckDBProfile, SnowflakeProfile
 from drt.config.models import SnowflakeDestinationConfig, SyncConfig, SyncOptions
 from drt.destinations.snowflake import SnowflakeDestination
 from drt.engine.sync import run_sync
 from drt.sources.duckdb import DuckDBSource
+from drt.sources.snowflake import SnowflakeSource
 
 from .conftest import require_env, seed_duckdb_users, unique_table
 
@@ -428,3 +429,111 @@ def test_snowflake_mirror_deletes_unobserved_keys(tmp_path: Path) -> None:
         assert count == 3, f"stale row not deleted — expected 3 rows, got {count}"
     finally:
         _drop_table(creds, table)
+
+
+# ---------------------------------------------------------------------------
+# Source-side streaming extraction (#765)
+# ---------------------------------------------------------------------------
+#
+# Everything above drives Snowflake as a *destination*. These exercise it as a
+# *source*, which nothing else in the harness does — and which #765 changed
+# from fetchall() to iterating the cursor in fetch_size batches.
+#
+# This leg exists because the other streaming slices were each verified against
+# a live server (Postgres 16, MySQL 8, ClickHouse 24) and every one of them
+# turned up a behaviour no mock predicted: description=None on a psycopg2 named
+# cursor, pymysql needing cursor.close() before conn.close(), clickhouse-connect
+# buffering HTTP internally. Snowflake has no local server, so this is the only
+# place the equivalent can be caught.
+
+
+def _snowflake_source_profile(creds: dict[str, str], **overrides: object) -> SnowflakeProfile:
+    auth: dict[str, object] = {}
+    if os.environ.get(KEY_ENV):
+        auth["private_key_env"] = KEY_ENV
+    else:
+        auth["password_env"] = PASSWORD_ENV
+    return SnowflakeProfile(
+        type="snowflake",
+        account=creds[ACCOUNT_ENV],
+        user=creds[USER_ENV],
+        database=creds["DRT_SMOKE_SNOWFLAKE_DATABASE"],
+        schema=creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"],
+        warehouse=creds["DRT_SMOKE_SNOWFLAKE_WAREHOUSE"],
+        **auth,  # type: ignore[arg-type]
+    )
+
+
+def test_snowflake_source_streams_a_generated_result_set() -> None:
+    """Extract 50k generated rows and confirm every one arrives, in order.
+
+    ``GENERATOR`` avoids needing a seeded table, so this asserts the streaming
+    path itself rather than any fixture. 50k is enough to span many
+    ``fetch_size`` batches (default 10000) — a boundary bug would show up as a
+    short read or a duplicated row, both of which the checks below catch.
+    """
+    creds = _require_creds()
+    profile = _snowflake_source_profile(creds)
+
+    rows = list(
+        SnowflakeSource().extract(
+            "SELECT SEQ4() AS ID, 'x' AS PAYLOAD "
+            "FROM TABLE(GENERATOR(ROWCOUNT => 50000)) ORDER BY ID",
+            profile,
+        )
+    )
+
+    assert len(rows) == 50000, "short read — a fetch_size batch boundary was dropped"
+    assert rows[0] == {"ID": 0, "PAYLOAD": "x"}
+    assert rows[-1] == {"ID": 49999, "PAYLOAD": "x"}
+    assert len({r["ID"] for r in rows}) == 50000, "duplicate rows across batches"
+
+
+def test_snowflake_source_respects_a_small_fetch_size() -> None:
+    """A tiny fetch_size must change nothing about the rows returned.
+
+    The batch size is a memory/round-trip knob, never a correctness one. Pinned
+    at 100 against 1000 rows, so the result set spans ten batches instead of
+    one.
+    """
+    creds = _require_creds()
+    profile = _snowflake_source_profile(creds)
+    profile.fetch_size = 100
+
+    rows = list(
+        SnowflakeSource().extract(
+            "SELECT SEQ4() AS ID FROM TABLE(GENERATOR(ROWCOUNT => 1000)) ORDER BY ID",
+            profile,
+        )
+    )
+
+    assert [r["ID"] for r in rows] == list(range(1000))
+
+
+def test_snowflake_source_empty_result_yields_nothing() -> None:
+    """An empty result must not trip on column metadata."""
+    creds = _require_creds()
+    profile = _snowflake_source_profile(creds)
+
+    assert list(SnowflakeSource().extract("SELECT 1 AS ID WHERE 1 = 0", profile)) == []
+
+
+def test_snowflake_source_abandoned_mid_stream_does_not_hang() -> None:
+    """`--limit` / `--fail-fast` stop consuming mid-stream (#775/#774).
+
+    With the result set live server-side, the generator's ``finally`` is what
+    closes the cursor and connection. If it did not run — or if closing a
+    partially-read Snowflake cursor blocked — this would hang rather than fail,
+    which is why it is worth a real-warehouse check rather than only a mock.
+    """
+    creds = _require_creds()
+    profile = _snowflake_source_profile(creds)
+
+    gen = SnowflakeSource().extract(
+        "SELECT SEQ4() AS ID FROM TABLE(GENERATOR(ROWCOUNT => 50000)) ORDER BY ID",
+        profile,
+    )
+    first = [next(gen) for _ in range(3)]
+    gen.close()
+
+    assert [r["ID"] for r in first] == [0, 1, 2]

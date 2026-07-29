@@ -32,6 +32,10 @@ def _fake_cursor(columns, rows):
     cur = MagicMock()
     cur.description = [(col,) for col in columns]
     cur.fetchall.return_value = rows
+    # Since #765 rows come from iterating the cursor, not fetchall(). A fresh
+    # iterator per call so a retried attempt re-reads rather than finding the
+    # cursor exhausted.
+    cur.__iter__.side_effect = lambda: iter(rows)
     return cur
 
 
@@ -307,7 +311,7 @@ class TestSnowflakeSourceRetry:
 
             cur = MagicMock()
             cur.description = [("id",)]
-            cur.fetchall.return_value = exploding_rows()
+            cur.__iter__.side_effect = exploding_rows
             return _fake_conn(cur)
 
         with patch.object(SnowflakeSource, "_connect", side_effect=connect):
@@ -318,3 +322,72 @@ class TestSnowflakeSourceRetry:
                     next(gen)
 
         assert len(attempts) == 1
+
+
+def _streaming_conn(rows, description=None):
+    """A connection whose cursor streams rather than buffering.
+
+    Snowflake's cursor is iterable and honours ``arraysize``, so the shape
+    mirrors the Postgres leg rather than needing an explicit fetchmany loop.
+    """
+    conn = MagicMock()
+    cur = conn.cursor.return_value
+    cur.description = description if description is not None else [("id",), ("name",)]
+    cur.__iter__.side_effect = lambda: iter(rows)
+    return conn
+
+
+class TestSnowflakeStreamingExtraction:
+    """#765: SnowflakeSource streams instead of calling fetchall().
+
+    ``fetchall()`` materialises the entire result set before the first row
+    reaches the engine. The cursor is iterable and respects ``arraysize``, so
+    iterating it fetches in batches of that size instead.
+    """
+
+    def test_does_not_call_fetchall(self):
+        conn = _streaming_conn([(1, "Alice")])
+        with patch.object(SnowflakeSource, "_connect", return_value=conn):
+            list(SnowflakeSource().extract("SELECT 1", _config()))
+
+        conn.cursor.return_value.fetchall.assert_not_called()
+
+    def test_arraysize_comes_from_fetch_size(self):
+        conn = _streaming_conn([(1, "Alice")])
+        with patch.object(SnowflakeSource, "_connect", return_value=conn):
+            list(SnowflakeSource().extract("SELECT 1", _config(fetch_size=2500)))
+
+        assert conn.cursor.return_value.arraysize == 2500
+
+    def test_rows_are_mapped_to_dicts(self):
+        conn = _streaming_conn([(1, "Alice"), (2, "Bob")])
+        with patch.object(SnowflakeSource, "_connect", return_value=conn):
+            rows = list(SnowflakeSource().extract("SELECT 1", _config()))
+
+        assert rows == [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
+
+    def test_cursor_is_closed_before_the_connection(self):
+        conn = _streaming_conn([(1, "Alice")])
+        with patch.object(SnowflakeSource, "_connect", return_value=conn):
+            list(SnowflakeSource().extract("SELECT 1", _config()))
+
+        names = [c[0] for c in conn.mock_calls]
+        assert "cursor().close" in names, "the cursor was never closed"
+        assert names.index("cursor().close") < names.index("close")
+
+    def test_connection_closes_when_the_generator_is_abandoned(self):
+        """`--limit` / `--fail-fast` stop consuming mid-stream (#775/#774)."""
+        conn = _streaming_conn([(i, "x") for i in range(100)])
+        with patch.object(SnowflakeSource, "_connect", return_value=conn):
+            gen = SnowflakeSource().extract("SELECT 1", _config())
+            next(gen)
+            gen.close()
+
+        names = [c[0] for c in conn.mock_calls]
+        assert "cursor().close" in names, "the cursor leaked on abandonment"
+        assert names.index("cursor().close") < names.index("close")
+
+    def test_empty_result_yields_nothing(self):
+        conn = _streaming_conn([], description=[("id",)])
+        with patch.object(SnowflakeSource, "_connect", return_value=conn):
+            assert list(SnowflakeSource().extract("SELECT 1", _config())) == []

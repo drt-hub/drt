@@ -26,10 +26,11 @@ from typing import Any
 
 import pytest
 
-from drt.config.credentials import DuckDBProfile
+from drt.config.credentials import DatabricksProfile, DuckDBProfile
 from drt.config.models import DatabricksDestinationConfig, SyncConfig, SyncOptions
 from drt.destinations.databricks import DatabricksDestination
 from drt.engine.sync import run_sync
+from drt.sources.databricks import DatabricksSource
 from drt.sources.duckdb import DuckDBSource
 
 from .conftest import require_env, seed_duckdb_users, unique_table
@@ -436,3 +437,82 @@ def test_databricks_mirror_deletes_unobserved_keys(tmp_path: Path) -> None:
                 cur.execute(f"DROP TABLE IF EXISTS {keys_fqn}")
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Source-side streaming extraction (#765)
+# ---------------------------------------------------------------------------
+#
+# Everything above drives Databricks as a *destination*. These exercise it as a
+# *source*, which nothing else in the harness does — and which #765 changed
+# from fetchall() to iterating the cursor.
+#
+# Databricks has no local server, so a live warehouse is the only place a
+# streaming regression can surface. Every other slice of #765 that *did* have a
+# local server turned up a behaviour no mock predicted, so this leg is doing
+# real work rather than ceremony.
+
+
+def _databricks_source_creds() -> dict[str, str]:
+    return require_env(
+        HOST_ENV,
+        HTTP_PATH_ENV,
+        TOKEN_ENV,
+        "DRT_SMOKE_DATABRICKS_CATALOG",
+        "DRT_SMOKE_DATABRICKS_SCHEMA",
+    )
+
+
+def _databricks_source_profile(creds: dict[str, str]) -> DatabricksProfile:
+    return DatabricksProfile(
+        type="databricks",
+        server_hostname=creds[HOST_ENV],
+        http_path=creds[HTTP_PATH_ENV],
+        access_token_env=TOKEN_ENV,
+        catalog=creds["DRT_SMOKE_DATABRICKS_CATALOG"],
+        schema=creds["DRT_SMOKE_DATABRICKS_SCHEMA"],
+    )
+
+
+def test_databricks_source_streams_a_generated_result_set() -> None:
+    """Extract 50k generated rows and confirm every one arrives, in order.
+
+    ``range()`` avoids needing a seeded table, so this asserts the streaming
+    path itself. 50k spans many internal fetch batches — a boundary bug shows
+    up as a short read or a duplicate, both checked below.
+    """
+    profile = _databricks_source_profile(_databricks_source_creds())
+
+    rows = list(
+        DatabricksSource().extract(
+            "SELECT id, 'x' AS payload FROM range(50000) ORDER BY id", profile
+        )
+    )
+
+    assert len(rows) == 50000, "short read — a fetch batch boundary was dropped"
+    assert rows[0] == {"id": 0, "payload": "x"}
+    assert rows[-1] == {"id": 49999, "payload": "x"}
+    assert len({r["id"] for r in rows}) == 50000, "duplicate rows across batches"
+
+
+def test_databricks_source_empty_result_yields_nothing() -> None:
+    """An empty result must not trip on column metadata."""
+    profile = _databricks_source_profile(_databricks_source_creds())
+
+    assert list(DatabricksSource().extract("SELECT 1 AS id WHERE 1 = 0", profile)) == []
+
+
+def test_databricks_source_abandoned_mid_stream_does_not_hang() -> None:
+    """`--limit` / `--fail-fast` stop consuming mid-stream (#775/#774).
+
+    The generator's ``finally`` is what closes the cursor and connection. If it
+    did not run — or if closing a partially-read Databricks cursor blocked —
+    this would hang rather than fail, which a mock cannot tell you.
+    """
+    profile = _databricks_source_profile(_databricks_source_creds())
+
+    gen = DatabricksSource().extract("SELECT id FROM range(50000) ORDER BY id", profile)
+    first = [next(gen) for _ in range(3)]
+    gen.close()
+
+    assert [r["id"] for r in first] == [0, 1, 2]

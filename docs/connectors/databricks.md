@@ -225,6 +225,21 @@ first row has been yielded* is not retried and fails the sync — those rows are
 into the destination and cannot be un-sent. See
 [API_REFERENCE](../llm/API_REFERENCE.md#source-side-retry-766) for the full rationale.
 
+## As a source — streaming extraction ([#765](https://github.com/drt-hub/drt/issues/765))
+
+Rows are read by iterating the cursor rather than buffered whole with `fetchall()`, so peak memory
+tracks the batch instead of the result set. The cursor's iterator is a `fetchone()` loop over the
+result set, so this streams without any extra configuration.
+
+Databricks takes **no `fetch_size`** (unlike Postgres/Redshift/Snowflake): its cursor exposes no
+`arraysize`, and `fetchmany(size)` takes a required argument rather than reading a configured one,
+so there would be nothing for a profile field to set.
+
+⚠️ **The connection is held open for the whole load**, not just the extract. A slow destination
+keeps the SQL warehouse busy for the duration. Per
+[#766](https://github.com/drt-hub/drt/issues/766) a failure after the first row has been yielded is
+not retried.
+
 ## Notes
 
 - Requires `pip install drt-core[databricks]` (depends on `databricks-sql-connector>=3.0`).

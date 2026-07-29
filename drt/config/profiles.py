@@ -165,6 +165,8 @@ class SnowflakeProfile:
     schema: str = "PUBLIC"
     warehouse: str = ""
     role: str | None = None
+    #: Rows per server round trip when streaming (#765). See DEFAULT_FETCH_SIZE.
+    fetch_size: int = DEFAULT_FETCH_SIZE
 
     def describe(self) -> str:
         return f"{self.type} ({self.account}/{self.database}.{self.schema})"

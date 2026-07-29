@@ -71,27 +71,48 @@ class SnowflakeSource:
         retried with exponential backoff. A failure after the first row has
         been yielded propagates — those rows are already loaded downstream and
         cannot be un-sent. See the Postgres source for the full rationale.
+
+        **Streaming (#765).** Rows arrive by iterating the cursor in
+        ``fetch_size`` batches rather than through a single ``fetchall()``, so
+        peak memory tracks the batch instead of the result set. The Snowflake
+        cursor is iterable and honours ``arraysize``, so this needs no explicit
+        ``fetchmany`` loop — the same shape as the Postgres leg.
+
+        ``description`` is available right after ``execute()`` here (unlike a
+        psycopg2 named cursor), so columns are read up front.
+
+        The connection is held open for the whole load, since the result set
+        lives server-side until it is consumed. As on every streaming source,
+        the cursor is closed before the connection, and both happen in a
+        ``finally`` that also fires on ``GeneratorExit`` — so an abandoned
+        iterator (``--limit`` / ``--fail-fast``, #775/#774) still tears down.
         """
         assert isinstance(config, SnowflakeProfile)
 
-        def _connect_and_fetch() -> tuple[list[str], list[Any]]:
+        def _connect_and_execute() -> tuple[Any, Any, list[str]]:
             conn = self._connect(config)
             try:
                 cur = conn.cursor()
-                try:
-                    cur.execute(query)
-                    columns = [desc[0] for desc in cur.description]
-                    return columns, cur.fetchall()
-                finally:
-                    cur.close()
-            finally:
+                cur.arraysize = config.fetch_size
+                cur.execute(query)
+                return conn, cur, [desc[0] for desc in cur.description]
+            except BaseException:
+                # The failed attempt cleans up after itself — with the close
+                # moved out of `finally`, nothing else would.
                 conn.close()
+                raise
 
-        columns, rows = with_retry(_connect_and_fetch, RetryConfig(), retry_on=self._is_transient)
+        conn, cur, columns = with_retry(
+            _connect_and_execute, RetryConfig(), retry_on=self._is_transient
+        )
 
         # Iteration stays outside the retry — a yielded row cannot be un-sent.
-        for row in rows:
-            yield dict(zip(columns, row))
+        try:
+            for row in cur:
+                yield dict(zip(columns, row))
+        finally:
+            cur.close()
+            conn.close()
 
     def test_connection(self, config: ProfileConfig) -> bool:
         assert isinstance(config, SnowflakeProfile)

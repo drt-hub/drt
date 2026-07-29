@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 from drt.config.credentials import DatabricksProfile
@@ -243,8 +245,6 @@ def test_is_transient_false_for_unrelated_exception(monkeypatch: pytest.MonkeyPa
 
 def test_extract_retries_cold_start(monkeypatch: pytest.MonkeyPatch) -> None:
     """Warehouse cold start: two RequestErrors, then rows come through."""
-    from unittest.mock import MagicMock, patch
-
     exc_mod = _install_fake_dbsql_exc(monkeypatch)
     attempts: list[int] = []
 
@@ -255,7 +255,7 @@ def test_extract_retries_cold_start(monkeypatch: pytest.MonkeyPatch) -> None:
         conn = MagicMock()
         cur = MagicMock()
         cur.description = [("id",)]
-        cur.fetchall.return_value = [(1,)]
+        cur.__iter__.side_effect = lambda: iter([(1,)])
         conn.cursor.return_value = cur
         return conn
 
@@ -268,8 +268,6 @@ def test_extract_retries_cold_start(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_extract_does_not_retry_bad_sql(monkeypatch: pytest.MonkeyPatch) -> None:
-    from unittest.mock import MagicMock, patch
-
     exc_mod = _install_fake_dbsql_exc(monkeypatch)
     attempts: list[int] = []
 
@@ -288,8 +286,6 @@ def test_extract_does_not_retry_bad_sql(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_extract_does_not_retry_after_first_row(monkeypatch: pytest.MonkeyPatch) -> None:
     """Scope boundary (#766): a yielded row cannot be un-sent."""
-    from unittest.mock import MagicMock, patch
-
     exc_mod = _install_fake_dbsql_exc(monkeypatch)
     attempts: list[int] = []
 
@@ -303,7 +299,7 @@ def test_extract_does_not_retry_after_first_row(monkeypatch: pytest.MonkeyPatch)
         conn = MagicMock()
         cur = MagicMock()
         cur.description = [("id",)]
-        cur.fetchall.return_value = exploding_rows()
+        cur.__iter__.side_effect = exploding_rows
         conn.cursor.return_value = cur
         return conn
 
@@ -315,3 +311,66 @@ def test_extract_does_not_retry_after_first_row(monkeypatch: pytest.MonkeyPatch)
                 next(gen)
 
     assert len(attempts) == 1
+
+
+def _streaming_conn(rows, description=None):
+    conn = MagicMock()
+    cur = conn.cursor.return_value
+    cur.description = description if description is not None else [("id",), ("name",)]
+    cur.__iter__.side_effect = lambda: iter(rows)
+    return conn
+
+
+class TestStreamingExtraction:
+    """#765: DatabricksSource streams instead of calling fetchall().
+
+    The cursor's ``__iter__`` delegates to the result set, whose own
+    ``__iter__`` is a ``fetchone()`` loop — so iterating genuinely streams
+    rather than materialising. Verified against databricks-sql-connector's
+    source; there is no live-server measurement for this leg (no local server
+    exists), which is why the dwh-smoke leg added alongside matters.
+
+    No ``fetch_size`` knob: this cursor has no ``arraysize`` attribute, and
+    ``fetchmany(size)`` takes a required argument rather than reading one, so
+    there is nothing for a profile field to set.
+    """
+
+    def test_does_not_call_fetchall(self):
+        conn = _streaming_conn([(1, "Alice")])
+        with patch.object(DatabricksSource, "_connect", return_value=conn):
+            list(DatabricksSource().extract("SELECT 1", _profile()))
+
+        conn.cursor.return_value.fetchall.assert_not_called()
+
+    def test_rows_are_mapped_to_dicts(self):
+        conn = _streaming_conn([(1, "Alice"), (2, "Bob")])
+        with patch.object(DatabricksSource, "_connect", return_value=conn):
+            rows = list(DatabricksSource().extract("SELECT 1", _profile()))
+
+        assert rows == [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
+
+    def test_cursor_is_closed_before_the_connection(self):
+        conn = _streaming_conn([(1, "Alice")])
+        with patch.object(DatabricksSource, "_connect", return_value=conn):
+            list(DatabricksSource().extract("SELECT 1", _profile()))
+
+        names = [c[0] for c in conn.mock_calls]
+        assert "cursor().close" in names, "the cursor was never closed"
+        assert names.index("cursor().close") < names.index("close")
+
+    def test_connection_closes_when_the_generator_is_abandoned(self):
+        """`--limit` / `--fail-fast` stop consuming mid-stream (#775/#774)."""
+        conn = _streaming_conn([(i, "x") for i in range(100)])
+        with patch.object(DatabricksSource, "_connect", return_value=conn):
+            gen = DatabricksSource().extract("SELECT 1", _profile())
+            next(gen)
+            gen.close()
+
+        names = [c[0] for c in conn.mock_calls]
+        assert "cursor().close" in names, "the cursor leaked on abandonment"
+        assert names.index("cursor().close") < names.index("close")
+
+    def test_empty_result_yields_nothing(self):
+        conn = _streaming_conn([], description=[("id",)])
+        with patch.object(DatabricksSource, "_connect", return_value=conn):
+            assert list(DatabricksSource().extract("SELECT 1", _profile())) == []

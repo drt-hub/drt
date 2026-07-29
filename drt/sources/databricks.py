@@ -90,27 +90,49 @@ class DatabricksSource:
         failure after the first row has been yielded propagates — those rows
         are already loaded downstream and cannot be un-sent. See the Postgres
         source for the full rationale.
+
+        **Streaming (#765).** Rows arrive by iterating the cursor rather than
+        through ``fetchall()``. The cursor's ``__iter__`` delegates to the
+        result set, whose own ``__iter__`` is a ``fetchone()`` loop, so this
+        streams rather than materialising.
+
+        No ``fetch_size`` knob here, unlike Postgres/Redshift/Snowflake: this
+        cursor exposes no ``arraysize``, and ``fetchmany(size)`` takes a
+        required argument rather than reading a configured one, so there is
+        nothing for a profile field to set.
+
+        The connection is held for the whole load. The cursor is closed before
+        the connection, both in a ``finally`` that also fires on
+        ``GeneratorExit`` — so an abandoned iterator (``--limit`` /
+        ``--fail-fast``, #775/#774) still tears down.
         """
         assert isinstance(config, DatabricksProfile)
 
-        def _connect_and_fetch() -> tuple[list[str], list[Any]]:
+        def _connect_and_execute() -> tuple[Any, Any, list[str]]:
             conn = self._connect(config)
             try:
                 cur = conn.cursor()
-                try:
-                    cur.execute(query)
-                    columns = [desc[0] for desc in cur.description]
-                    return columns, cur.fetchall()
-                finally:
-                    cur.close()
-            finally:
+                cur.execute(query)
+                return conn, cur, [desc[0] for desc in cur.description]
+            except BaseException:
+                # The failed attempt cleans up after itself — with the close
+                # moved out of `finally`, nothing else would.
                 conn.close()
+                raise
 
-        columns, rows = with_retry(_connect_and_fetch, RetryConfig(), retry_on=self._is_transient)
+        conn, cur, columns = with_retry(
+            _connect_and_execute, RetryConfig(), retry_on=self._is_transient
+        )
 
         # Iteration stays outside the retry — a yielded row cannot be un-sent.
-        for row in rows:
-            yield dict(zip(columns, row))
+        # The finally also fires on GeneratorExit, so an abandoned iterator
+        # still tears down in the right order.
+        try:
+            for row in cur:
+                yield dict(zip(columns, row))
+        finally:
+            cur.close()
+            conn.close()
 
     def test_connection(self, config: ProfileConfig) -> bool:
         assert isinstance(config, DatabricksProfile)
