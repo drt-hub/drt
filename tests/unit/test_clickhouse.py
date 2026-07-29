@@ -303,10 +303,12 @@ class TestClickHouseSourceRetry:
 class TestStreamingExtraction:
     """#765 slice 3: ClickHouse streams via query_rows_stream().
 
-    Measured on a live ClickHouse 24, 300k rows x ~200B: ``client.query()``
-    peaked at +221.7 MB RSS (it materialises every row into
-    ``result.result_rows``), ``query_rows_stream()`` at +0.0 MB — the largest
-    gap of any source in this issue.
+    Measured on a live ClickHouse 24, 300k rows x ~200B, each variant in a
+    fresh process: ``client.query()`` peaked at +224 MB RSS (it materialises
+    every row into ``result.result_rows``), ``query_rows_stream()`` at
+    +149 MB. The remainder is clickhouse-connect buffering the HTTP response
+    internally, not drt holding rows — a far smaller gap than the Postgres or
+    MySQL legs, and deliberately reported as-is.
     """
 
     def test_uses_query_rows_stream_not_query(self) -> None:
@@ -367,3 +369,45 @@ class TestStreamingExtraction:
 
         assert len(clients) == 1
         clients[0].close.assert_called_once()
+def test_the_fake_exception_hierarchy_matches_the_real_driver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compare the double against the real driver, class by class.
+
+    Generalised from #861: a Databricks double had ``RequestError`` inheriting
+    from the wrong base, and that single difference made an auth-retry bug
+    structurally untestable — the mocked suite stayed green while a real 401
+    was retried three times. Every optional-driver source is tested against a
+    hand-written double, so a double that drifts produces confidently green
+    tests for broken code.
+
+    Asserting the *real* hierarchy alone would not catch that: the double is
+    what the other tests actually run against, so the two have to be compared
+    directly. Skips in CI's default matrix (no extras) — a backstop, not the
+    primary guard.
+    """
+    real = pytest.importorskip("clickhouse_connect.driver.exceptions")
+    fake = _install_fake_ch_exceptions(monkeypatch)
+
+    for name in [
+        'Error',
+        'InterfaceError',
+        'DatabaseError',
+        'OperationalError',
+        'ProgrammingError',
+        'DataError',
+        'IntegrityError',
+        'StreamClosedError',
+    ]:
+        real_cls = getattr(real, name, None)
+        fake_cls = getattr(fake, name, None)
+        assert real_cls is not None, f"{name} vanished from the real driver"
+        assert fake_cls is not None, f"the double is missing {name}"
+
+        real_bases = [b.__name__ for b in real_cls.__mro__[1:] if b is not object]
+        fake_bases = [b.__name__ for b in fake_cls.__mro__[1:] if b is not object]
+        assert fake_bases == real_bases, (
+            f"the double's {name} has bases {fake_bases} but the driver says "
+            f"{real_bases} — every classification test here is running against "
+            f"a hierarchy the driver does not have"
+        )
