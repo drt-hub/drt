@@ -146,7 +146,7 @@ Two additive features accumulated since v0.7.5 — a new **Amplitude destination
 - **Docs site (release gate)** — `drt docs` sync catalog & lineage UI (#499 / #500 / #701 / #696 / #697 / #702) — *`generate --format mermaid|json|html` shipped v0.7.5–v0.7.11*
 - **DX pull-ins** *(from the 2026-07-10 dbt/dlt/competitor gap batch, #755–#786)* — `watermark.lag` (#759) · REST API source incremental (#767) · selection v2: glob / union / `--exclude` / `destination:`/`source:` (#771) · `drt run --failed` (#773) · `drt run --limit` (#774) · `--fail-fast` (#775) · `drt build` (#777) · dbt exposures export (#781, starts after #752 lands) · `drt deploy github-actions` (#785)
 - **Docs / skills debt** — skills freshness sweep (#717) · `sync.mask` documentation (#716)
-- **Growth / README (non-blocking)** — hero section redesign (#281) · "Why OSS Reverse ETL" blog (#284) · production use case doc (#375) · Discord (#378) · X account link (#379) — these ride alongside the release and do **not** gate the tag; Reddit/HN launch (#289) stays opportunistic post-v0.8
+- **Growth / README (non-blocking)** — hero section redesign (#281) · "Why OSS Reverse ETL" blog (#284) · production use case doc (#375) · Discord (#378, blocked on the server itself existing — #294) · X account link (#379) — these ride alongside the release and do **not** gate the tag; Reddit/HN launch (#289) stays opportunistic post-v0.8. Growth / GTM issues are **deliberately left without a milestone**: they are date-driven rather than release-gating, and milestoning them would keep a shipped version milestone permanently open. Track them via the `growth` / `gtm` title prefixes, or a dedicated non-version milestone if that ever becomes worth it
 - **Shipped early on the v0.7.x line** — cloud destinations: BigQuery (#165) · Databricks Delta Lake (#167) · S3 (#168) · GCS (#169) · Azure Blob (#170) · Snowflake (#164) — sources: REST API (#422) · Delta Lake (#172) · Iceberg (#173) — reliability/correctness: DLQ (#278) · schema-aware serialization (#317) · `sync.mode: mirror` (#340) — ecosystem: GitHub Action (#292) · VS Code extension (#293) — dev tooling: FakeSource (#364) · `drt_run_test` (#368) · `/drt-troubleshoot` (#369) · `/drt-changelog` (#372) · validate connection test (#367)
 
 **Out of scope:** Enterprise boundary (→ v0.9), Rust engine work (→ v1.x), diff polish (→ v0.8.3), warehouse hardening follow-ups (→ v0.8.4).
@@ -183,16 +183,19 @@ Two additive features accumulated since v0.7.5 — a new **Amplitude destination
 - **Protocol stability** — review and freeze preparation (#300) · config encryption for secrets at rest (#303) — *`drt cloud push` stub (#302) shipped early in v0.7 via PR #409*
 - **Observability** — OpenTelemetry traces + metrics for sync execution (epic #429) — *Phase 1 (config schema + `[otel]` extras) shipped early via PR #527; Phase 2 (NoOpTracer global provider, #531) and Phases 3–4 (engine instrumentation + counter metrics) continue in parallel with v0.8 work*
 - **Performance** — benchmark suite (#280) + I/O vs CPU profiling for Rust migration decision (#301)
-- **Engine foundation** *(2026-07-10 gap batch)* — diff-based incremental (#755) · remote state backend for run state / history / DLQ (#756) · windowed backfill (#758) · first-class `run_id` + metadata columns (#762)
+- **Engine foundation** *(2026-07-10 gap batch)* — diff-based incremental (#755) · remote state backend for run state / history / DLQ (#756) · windowed backfill (#758) · first-class `run_id` + metadata columns (#762) · `computed_fields` (#763) · pre/post-sync SQL hooks + `on_run_start/end` (#764, needs #762's `run_id` plumbing for the audit-row case)
 - **Schema management** — managed destination tables + `on_schema_change` (#760) · column contracts (#761)
 - **CI / artifacts** — `state:modified` selector (#772) · `run_results.json` run artifacts (#778)
 - **Testing depth** — custom SQL tests + `severity: warn` + store-failures (#779) · sync unit tests (#780)
 - **Security** — secret provider URIs: AWS/GCP Secret Manager, Vault (#782) — pairs with config encryption (#303)
-- **Research** — streaming / event-triggered syncs ADR (#786)
+- **Event-driven activation** — the streaming / event-triggered syncs ADR (#786) is **accepted** as [ADR 0004](docs/adr/0004-streaming-and-event-triggered-syncs.md) with a [per-warehouse trigger matrix](docs/research/warehouse-trigger-matrix.md); the follow-through is its Tier 2 recommendation — dagster-drt sensors (#855, hard-blocked by #756 since a sensor and a CI run cannot share a local-disk watermark) — plus the three-tier user guide (#856)
+- **Integrations** — dagster-drt: `DrtEventIterator` for chainable post-processing (#182) · `DrtSyncComponent` for declarative YAML (#183) · `@op` context support in `DagsterDrtResource` (#184)
 
 **Out of scope:** Implementing RBAC/audit log in OSS, actual Cloud service backend, Rust migration itself.
 
-**Unscheduled backlog** *(no milestone — pull in when a release theme fits)*: `match_policy` update_only/create_only (#757) · `computed_fields` (#763) · pre/post-sync hooks (#764) · rate limiting v2 (#769) · REST batch mode (#770, good first issue) · project vars (#783) · alert conditions (#784, good first issue).
+**Unscheduled backlog** *(no milestone — pull in when a release theme fits)*: REST API `body_mode: batch` (#770, good first issue). Its own *Milestone fit* note says v0.8.x, but v0.8.4's theme is warehouse hardening — it needs either a new v0.8.5 or a move to v0.9 before it can be milestoned.
+
+*Cleared from this list since it was written:* project `vars` (#783, shipped v0.8.0) · alert conditions (#784, shipped v0.8.3) · `match_policy` (#757 — Postgres + HubSpot legs shipped v0.8.1, remaining destinations tracked on the issue) · rate limiting v2 (#769, in review) · `computed_fields` (#763) and pre/post-sync hooks (#764), both now scoped above.
 
 **Target:** 2026-09 · **Progress:** [milestone/6](https://github.com/drt-hub/drt/milestone/6)
 
