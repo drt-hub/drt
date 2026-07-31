@@ -31,7 +31,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.chdir(tmp_path)
     (tmp_path / "syncs").mkdir()
     (tmp_path / "drt_project.yml").write_text(
-        yaml.safe_dump({"name": "p", "profile": "dev", "version": 1})
+        yaml.safe_dump({"name": "p", "profile": "dev", "version": "1"})
     )
     mgr = StateManager(tmp_path)
     mgr.save_sync(
