@@ -12,11 +12,35 @@ Help the user migrate from an existing Reverse ETL tool (Census, Hightouch, Poly
 
 1. Ask the user to share their existing sync configuration (screenshot, YAML, JSON, or description).
 
-2. Map their existing config to drt equivalents using the tables below.
+2. If they do not have a drt project yet, scaffold one first — the syncs need a
+   project and a profile to live in:
+   ```bash
+   mkdir my-drt-project && cd my-drt-project
+   drt init                  # interactive: project name, source type, connection fields
+   drt profile test <name>   # prove the warehouse credential works before migrating anything
+   ```
+   Use the `/drt-init` skill if they want to be walked through it.
 
-3. Generate a valid `syncs/<name>.yml` for each sync.
+3. Map their existing config to drt equivalents using the tables below.
 
-4. Note any features that need manual setup (auth env vars, profiles.yml).
+4. Generate a valid `syncs/<name>.yml` for each sync.
+
+5. Note any features that need manual setup (auth env vars, profiles.yml).
+
+6. **Run the first migrated sync as a preview, not a send.** This is the step
+   that matters most in a migration: the old tool is still running, the
+   destination has live records, and a mismapped `sync.mode` or `upsert_key`
+   writes to production on the first invocation.
+   ```bash
+   drt validate                          # catches schema errors and hardcoded secrets
+   drt run --select <name> --dry-run     # no data written
+   drt run --select <name> --dry-run --diff   # record-level preview on queryable destinations
+   drt run --select <name> --limit 10    # first real send, capped at 10 rows
+   ```
+   Only after the diff looks right should they run it uncapped. Flag explicitly
+   that `mode: mirror` and `replace` **delete or truncate** destination rows, and
+   that `--limit` is refused for both — so those two modes go straight from
+   `--dry-run --diff` to a full run, with no sampled middle step.
 
 ## Concept Mapping
 

@@ -24,11 +24,22 @@ Create a drt sync YAML configuration file for the user.
 
 3. Output the YAML in a code block and suggest where to save it: `syncs/<name>.yml`
 
-4. Show the command to validate and run it:
+4. Show the commands to check, preview, then run it:
    ```bash
-   drt validate
-   drt run --select <name> --dry-run
-   drt run --select <name>
+   drt validate                          # YAML schema check
+   drt list                              # confirm the new sync is discovered
+   drt run --select <name> --dry-run     # preview — no data written
+   drt run --select <name> --limit 10    # real send, capped at 10 rows
+   drt run --select <name>               # full run
+   ```
+   `drt list` is worth the extra line: sync discovery is glob-based, so a file
+   saved outside `syncs/` or with a mismatched `name:` validates cleanly and then
+   silently never runs.
+
+5. If the sync declares a `tests:` block, show how to run it after the sync:
+   ```bash
+   drt test --select <name>    # post-sync validation (row counts, freshness, unique, custom SQL)
+   drt build --select <name>   # run + test in one pass
    ```
 
 ## Rules

@@ -62,12 +62,24 @@ Guide the user through initializing a new drt project.
    - **DuckDB / SQLite**: nothing — file path only
    - **REST API source**: set the bearer token env var the profile references (e.g. `export REST_API_TOKEN=...`)
 
-4. Validate the setup:
+   Both `drt init` flows already write a profile to `~/.drt/profiles.yml`. To add
+   another later (a second warehouse, a prod/dev split) without re-running init:
    ```bash
-   drt doctor       # env-level triage — catches missing env vars, malformed profile, etc.
-   drt validate     # YAML schema check
-   drt list         # confirm syncs are discovered
+   drt profile add <name>     # interactive — prompts for source type + connection fields
+   drt profile list           # names + source types already configured
+   drt profile show <name>    # inspect one, inline secrets masked
    ```
+
+4. Validate the setup — **credential first**, since that is the step most likely to fail:
+   ```bash
+   drt profile test <name>   # actually connects, using the source's own connection check
+   drt doctor                # env-level triage — catches missing env vars, malformed profile, etc.
+   drt validate              # YAML schema check
+   drt list                  # confirm syncs are discovered
+   ```
+   `drt doctor` and `drt validate` inspect configuration; only `drt profile test`
+   proves the warehouse accepts the credential. Run it before the first sync so a
+   bad password surfaces here rather than mid-run.
 
 5. Offer to create a first sync using the `/drt-create-sync` skill.
 
