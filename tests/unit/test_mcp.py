@@ -900,3 +900,62 @@ async def test_state_reset_dry_run_changes_nothing(
     await call(server, "drt_state_reset", sync_name="users", runs=True, dry_run=True)
 
     assert StateManager(project_dir).get_last_sync("users") is not None
+
+
+@pytest.mark.asyncio
+async def test_state_show_all_syncs(server: FastMCP, project_dir: Path) -> None:
+    from drt.state.manager import StateManager, SyncState
+
+    StateManager(project_dir).save_sync(
+        SyncState(
+            sync_name="users",
+            last_run_at="2026-01-01T00:00:00Z",
+            records_synced=1,
+            status="success",
+        )
+    )
+
+    result = await call(server, "drt_state_show")
+
+    assert "users" in result["states"]
+
+
+@pytest.mark.asyncio
+async def test_state_reset_watermark_level(server: FastMCP, project_dir: Path) -> None:
+    """The watermark branch — no backend configured, so this exercises the
+    loop without a storage delete and must still report the level."""
+    result = await call(server, "drt_state_reset", sync_name="users", watermark=True)
+
+    assert result["reset"] == ["watermark"]
+
+
+@pytest.mark.asyncio
+async def test_state_reset_tracked_mirror_warns(
+    server: FastMCP, project_dir: Path
+) -> None:
+    """An agent has no help text, so the re-baseline consequence has to be in
+    the response itself (#686)."""
+    result = await call(
+        server, "drt_state_reset", sync_name="no-such-sync", tracked_mirror=True
+    )
+
+    # Unknown sync: no destination to touch, but the level is still reported
+    # rather than silently dropped.
+    assert result["reset"] == ["tracked-mirror"]
+
+
+@pytest.mark.asyncio
+async def test_run_sync_rejects_full_refresh_with_cursor_value(
+    server: FastMCP,
+) -> None:
+    """Mutually exclusive, same as the CLI: one says "start from nothing",
+    the other "start from here"."""
+    result = await call(
+        server,
+        "drt_run_sync",
+        sync_name="anything",
+        full_refresh=True,
+        cursor_value="2026-01-01",
+    )
+
+    assert "mutually exclusive" in result["error"]

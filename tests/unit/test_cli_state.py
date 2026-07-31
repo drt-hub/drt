@@ -14,7 +14,7 @@ is never implied by a broader flag.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -105,3 +105,85 @@ class TestResetTrackedMirrorIsOptIn:
             runner.invoke(app, ["state", "reset", "users", "--runs", "--yes"])
 
         reset_tracked.assert_not_called()
+
+
+class TestShowEmptyProject:
+    def test_reports_nothing_recorded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "syncs").mkdir()
+        (tmp_path / "drt_project.yml").write_text(
+            yaml.safe_dump({"name": "p", "profile": "dev", "version": "1"})
+        )
+
+        result = runner.invoke(app, ["state", "show"])
+
+        assert result.exit_code == 0
+        assert "no state" in result.output.lower()
+
+
+class TestResetWatermark:
+    """The --watermark level, including the case with no backend configured.
+
+    That path is worth pinning: with no watermark storage, the *fallback*
+    cursor in .drt/state.json is the live watermark, so the command has to say
+    so rather than silently reporting success at clearing nothing.
+    """
+
+    def test_reports_when_no_backend_is_configured(self, project: Path) -> None:
+        result = runner.invoke(
+            app, ["state", "reset", "users", "--watermark", "--yes"]
+        )
+
+        assert result.exit_code == 0
+        assert "--runs" in result.output, (
+            "with no backend the fallback cursor is cleared by --runs; say so"
+        )
+
+    def test_clears_a_configured_backend(self, project: Path) -> None:
+        storage = MagicMock()
+        with patch("drt.cli._helpers.get_watermark_storage", return_value=storage):
+            result = runner.invoke(
+                app, ["state", "reset", "users", "--watermark", "--yes"]
+            )
+
+        assert result.exit_code == 0
+
+
+class TestResetDeclined:
+    def test_declining_the_prompt_changes_nothing(self, project: Path) -> None:
+        result = runner.invoke(app, ["state", "reset", "users", "--runs"], input="n\n")
+
+        assert result.exit_code == 0
+        assert "Aborted" in result.output
+        assert StateManager(project).get_last_sync("users") is not None
+
+
+class TestResetTrackedMirror:
+    def test_warns_before_touching_the_destination(self, project: Path) -> None:
+        """The re-baseline warning must appear — an operator has no other
+        signal that this changes deletion semantics (#686)."""
+        with patch("drt.cli.commands.state._reset_tracked_state", return_value=3):
+            result = runner.invoke(
+                app, ["state", "reset", "users", "--tracked-mirror", "--yes"]
+            )
+
+        assert result.exit_code == 0
+        assert "re-baseline" in result.output.lower()
+        assert "3" in result.output
+
+    def test_reports_when_there_was_nothing_to_clear(self, project: Path) -> None:
+        with patch("drt.cli.commands.state._reset_tracked_state", return_value=0):
+            result = runner.invoke(
+                app, ["state", "reset", "users", "--tracked-mirror", "--yes"]
+            )
+
+        assert "no tracked-mirror state" in result.output.lower()
+
+    def test_unknown_sync_is_reported_not_crashed(self, project: Path) -> None:
+        from drt.cli.commands.state import _reset_tracked_state
+
+        removed = _reset_tracked_state("no-such-sync")
+
+        assert removed == 0
