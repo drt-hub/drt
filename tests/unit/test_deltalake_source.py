@@ -18,15 +18,19 @@ from drt.sources.deltalake import DeltaLakeSource, _table_name
 
 
 def _mock_libs(monkeypatch: pytest.MonkeyPatch, rows: list[tuple], cols: list[str]):
+    # A *dataset*, not a table: since #679 the source registers the lazy
+    # dataset so DuckDB pushes filters and column selection into the scan.
     arrow = object()
     dt = MagicMock()
-    dt.to_pyarrow_table.return_value = arrow
+    dt.to_pyarrow_dataset.return_value = arrow
     deltalake_mod = MagicMock()
     deltalake_mod.DeltaTable.return_value = dt
     monkeypatch.setitem(sys.modules, "deltalake", deltalake_mod)
 
     result = MagicMock()
     result.description = [(c,) for c in cols]
+    # Batched since #765 — one full batch then empty terminates the loop.
+    result.fetchmany.side_effect = [rows, []]
     result.fetchall.return_value = rows
     conn = MagicMock()
     conn.execute.return_value = result
@@ -132,3 +136,58 @@ def test_connection_false_without_extra(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setitem(sys.modules, "deltalake", None)
     cfg = DeltaLakeProfile(type="deltalake", location="/x/users")
     assert DeltaLakeSource().test_connection(cfg) is False
+
+
+def test_registers_a_lazy_dataset_not_a_materialised_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#679: the whole point is that the table is never fully read.
+
+    ``to_pyarrow_table()`` pulled every row into memory before DuckDB saw the
+    query, so a model's incremental WHERE reduced nothing. Measured on a 300k
+    row table (~200B rows), fresh process, selecting 2 of 3 columns and ~1/9th
+    of the rows: +244 MB RSS before, +120 MB after.
+    """
+    deltalake_mod, conn, dataset = _mock_libs(monkeypatch, rows=[(1,)], cols=["id"])
+    cfg = DeltaLakeProfile(type="deltalake", location="/tmp/d", table="t")
+
+    list(DeltaLakeSource().extract("SELECT id FROM t", cfg))
+
+    dt = deltalake_mod.DeltaTable.return_value
+    dt.to_pyarrow_table.assert_not_called()
+    dt.to_pyarrow_dataset.assert_called_once()
+    conn.register.assert_called_once_with("t", dataset)
+
+
+def test_result_is_fetched_in_batches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The result set is not materialised either (#765)."""
+    _mod, conn, _ds = _mock_libs(monkeypatch, rows=[(1,), (2,)], cols=["id"])
+    cfg = DeltaLakeProfile(type="deltalake", location="/tmp/d", table="t")
+
+    rows = list(DeltaLakeSource().extract("SELECT id FROM t", cfg))
+
+    assert rows == [{"id": 1}, {"id": 2}]
+    conn.execute.return_value.fetchall.assert_not_called()
+
+
+@pytest.mark.parametrize("query", ["SELECT count(*) FROM t a JOIN t b ON a.id = b.id"])
+def test_a_two_pass_query_is_still_correct(query: str, tmp_path: Any) -> None:
+    """Guards the trap that ruled out `to_arrow_batch_reader()`.
+
+    A batch reader is single-pass: DuckDB drains it on the first scan and the
+    second sees nothing, so a self-join returns **0 rather than raising** —
+    silently wrong results, which is worse than a failure. A dataset can be
+    scanned repeatedly. Verified against a real Delta table rather than a mock,
+    since the mock cannot reproduce exhaustion.
+    """
+    deltalake = pytest.importorskip("deltalake")
+    pa = pytest.importorskip("pyarrow")
+    pytest.importorskip("duckdb")
+
+    loc = str(tmp_path / "t")
+    deltalake.write_deltalake(loc, pa.table({"id": pa.array(range(100))}))
+    cfg = DeltaLakeProfile(type="deltalake", location=loc, table="t")
+
+    rows = list(DeltaLakeSource().extract(query, cfg))
+
+    assert rows[0]["count_star()"] == 100, "the table was drained by the first scan"
