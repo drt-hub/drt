@@ -22,6 +22,8 @@
 #   6. Every MCP tool is listed in drt/mcp/server.py's module docstring
 #   7. Every MCP tool appears in README.md's MCP tools table
 #   8. Every registered connector appears in the drt_list_connectors inventory
+#   9. Every behaviour-changing CLI option reaches the MCP tool covering the
+#      same command (#871, via scripts/check_cli_mcp_parity.py)
 #
 # Baseline: scripts/drift_baseline.txt holds known-accepted gaps, one
 # `check_id:item` per line (e.g. `dest-doc:discord`). Baselined items
@@ -202,6 +204,40 @@ elif ! grep -q "connector_inventory" "$MCP_LIST_CONNECTORS"; then
     report "mcp-inventory" "drt_list_connectors" \
         "no longer derives from the drt.config.connectors SSoT (re-hardcoded?)"
 fi
+
+# ---------------------------------------------------------------------------
+# Check 9: every behaviour-changing CLI option reaches the MCP tool covering
+# the same command (#871). Checks 6-8 verify a tool *exists*; nothing verified
+# that a tool kept up with its command's flags, which is why the v0.8.0 wave
+# (--limit, --fail-fast, --failed, --vars, --threads) shipped without MCP
+# parity and went unnoticed for three releases (#870).
+#
+# Delegated to Python because this needs to introspect the Typer/Click tree
+# and the tool signatures — grep cannot see either. The script owns the
+# structural exclusions (presentation flags, selection flags) and the
+# command->tool map; this loop only feeds its findings through the same
+# baseline ratchet as every other check.
+#
+# It exits 2 rather than reporting "no gaps" if introspection breaks, so a
+# Typer/Click change surfaces as an error instead of a silent pass. Run it
+# directly for the human-readable listing: python3 scripts/check_cli_mcp_parity.py
+# ---------------------------------------------------------------------------
+PARITY_SCRIPT="scripts/check_cli_mcp_parity.py"
+if [ ! -f "$PARITY_SCRIPT" ]; then
+    echo "ERROR: expected file not found: $PARITY_SCRIPT" >&2
+    exit 2
+fi
+parity_out="$(mktemp)"
+trap 'rm -f "$parity_out"' EXIT
+if ! python3 "$PARITY_SCRIPT" --porcelain > "$parity_out"; then
+    echo "ERROR: $PARITY_SCRIPT could not introspect the CLI/MCP surfaces (see above)." >&2
+    echo "       Refusing to report a clean audit on an unreliable enumeration." >&2
+    exit 2
+fi
+while IFS=$'\t' read -r item message; do
+    [ -z "$item" ] && continue
+    report "cli-mcp" "$item" "$message"
+done < "$parity_out"
 
 # ---------------------------------------------------------------------------
 # Summary

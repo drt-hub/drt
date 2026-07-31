@@ -34,10 +34,17 @@ on:
     paths:
       - 'drt/connectors/registry.py'
       - 'drt/mcp/server.py'
+      # Check 9 (#871) compares CLI options against MCP tool parameters, so a
+      # change to either side must trigger the audit. Without drt/cli/** and
+      # drt/mcp/tools/**, adding a flag would only be caught by the weekly
+      # cron — which is the three-release lag (#870) this check exists to fix.
+      - 'drt/cli/**'
+      - 'drt/mcp/tools/**'
       - 'docs/connectors/**'
       - 'skills/**'
       - 'README.md'
       - 'scripts/check_drift.sh'
+      - 'scripts/check_cli_mcp_parity.py'
       - 'scripts/drift_baseline.txt'
   schedule:
     # Monday 01:00 UTC — offset from contributors-audit (00:30) and the
@@ -55,6 +62,18 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+
+      # Checks 1-8 are pure bash + grep, but check 9 (#871) introspects the
+      # Typer command tree and the MCP tool signatures, so drt must be
+      # importable. Core install only — the parity check reads function
+      # signatures and never connects to anything, so no connector extras.
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install drt (needed by check 9)
+        run: pip install -e .
 
       - name: Run drift check
         id: drift
