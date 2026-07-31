@@ -125,6 +125,12 @@ COMMAND_EXCLUSIONS: dict[str, dict[str, str]] = {
     "docs generate": {
         "--inline": "HTML packaging (single-object bundling); MCP returns the manifest",
     },
+    "state reset": {
+        "--yes": (
+            "skips a TTY confirmation prompt (#776); MCP has no TTY and "
+            "drt_state_reset never prompts, so there is nothing to skip"
+        ),
+    },
 }
 
 # --- Naming ----------------------------------------------------------------
@@ -202,17 +208,30 @@ def collect_cli_options() -> dict[str, set[str]]:
 
 
 def collect_mcp_parameters() -> dict[str, set[str]]:
-    """Return ``{tool module name: {parameter, ...}}`` for every MCP tool."""
+    """Return ``{tool name: {parameter, ...}}`` for every MCP tool.
+
+    Most modules hold exactly one tool function named after the module
+    (``run_sync.py`` -> ``run_sync``), which a plain ``getattr(module, name)``
+    finds. ``state.py`` is the first exception (#776): one module, two
+    commands, two functions (``state_show``, ``state_reset``) — matching how
+    ``server.py`` imports them. So every top-level function whose name is the
+    module name or starts with ``f"{name}_"`` is collected, not just the exact
+    match. Keyed by function name (== the MCP tool's ``drt_`` suffix), not
+    module name, so both of ``state.py``'s tools get their own entry rather
+    than one clobbering the other.
+    """
     import drt.mcp.tools as tools_pkg
 
     found: dict[str, set[str]] = {}
     for module_info in pkgutil.iter_modules(tools_pkg.__path__):
         name = module_info.name
         module = importlib.import_module(f"drt.mcp.tools.{name}")
-        func = getattr(module, name, None)
-        if func is None or not inspect.isfunction(func):
-            continue
-        found[name] = {p for p in inspect.signature(func).parameters if p != "ctx"}
+        for attr_name, obj in vars(module).items():
+            if not inspect.isfunction(obj) or obj.__module__ != module.__name__:
+                continue
+            if attr_name != name and not attr_name.startswith(f"{name}_"):
+                continue
+            found[attr_name] = {p for p in inspect.signature(obj).parameters if p != "ctx"}
     return found
 
 
@@ -226,9 +245,20 @@ def _assert_enumeration_sane(cli: dict[str, set[str]], mcp: dict[str, set[str]])
     for command, option in ENUMERATION_CANARY.items():
         if option not in cli.get(command, set()):
             problems.append(f"canary missing: `drt {command} {option}` did not enumerate")
-    for tool in sorted({t for tools in COMMAND_TO_TOOLS.values() for t in tools}):
-        if tool not in mcp:
-            problems.append(f"mapped MCP tool not found: {tool}")
+    # Only for commands the CLI actually has today — mirrors find_gaps()'s own
+    # `cli.get(command, set())` gate. A COMMAND_TO_TOOLS entry may legitimately
+    # be registered before its command lands (two PRs landing the CLI half and
+    # the MCP half in either order, e.g. #776/#877): that pairing is not a
+    # broken enumeration, it is an ordering choice, and the *command* being
+    # absent from `cli` is what find_gaps() already treats as "not classified
+    # yet" rather than "gap". The canary stays strict for anything the CLI can
+    # currently see.
+    for command, tools in sorted(COMMAND_TO_TOOLS.items()):
+        if command not in cli:
+            continue
+        for tool in tools:
+            if tool not in mcp:
+                problems.append(f"mapped MCP tool not found: {tool}")
     if problems:
         print(
             "ERROR: CLI/MCP introspection looks broken, refusing to report success:",

@@ -56,6 +56,27 @@ def test_mcp_enumeration_finds_tool_parameters() -> None:
     assert "ctx" not in mcp["run_sync"]
 
 
+def test_mcp_enumeration_finds_every_function_in_a_multi_tool_module() -> None:
+    """``state.py`` is the first module holding more than one tool function
+    (#776) — ``getattr(module, module_name)`` finds neither, since the
+    functions are ``state_show`` / ``state_reset``, not ``state``. Regression
+    guard for the near-miss this shape caused: the sanity check exited 2 with
+    ``mapped MCP tool not found: state_reset`` until collect_mcp_parameters()
+    was widened from an exact-name match to "the module name or
+    ``f'{name}_'``-prefixed".
+
+    Skips until #776 lands ``drt/mcp/tools/state.py`` — this branch adds the
+    generalisation and its COMMAND_TO_TOOLS/COMMAND_EXCLUSIONS entries ahead
+    of the module existing, so whichever of #776/#877 merges first does not
+    red-build waiting on the other. Once merged, this stops skipping and
+    starts asserting for real; nothing else needs to change."""
+    pytest.importorskip("drt.mcp.tools.state")
+    mcp = mod.collect_mcp_parameters()
+    assert "state_show" in mcp
+    assert "state_reset" in mcp
+    assert {"watermark", "runs", "tracked_mirror", "dry_run"} <= mcp["state_reset"]
+
+
 # ---------------------------------------------------------------------------
 # The false-green guard
 # ---------------------------------------------------------------------------
