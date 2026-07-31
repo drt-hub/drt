@@ -16,11 +16,50 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import typer
+
 if TYPE_CHECKING:
     from drt.config.credentials import ProfileConfig
     from drt.config.models import SyncConfig
     from drt.destinations.base import Destination
     from drt.sources.base import Source
+
+
+def confirm_destructive(prompt: str, yes: bool) -> bool:
+    """Confirm a destructive operation, or explain how to skip the prompt.
+
+    Shared so every destructive command behaves the same way (#776). The case
+    that matters is **non-interactive**: calling ``typer.confirm`` directly
+    there aborts with a bare ``Aborted.``, which fails correctly but names
+    neither the cause nor the fix — and the ``[y/N]`` it prints actively
+    misleads, since it suggests piping ``y`` would work when the real answer
+    is ``--yes``.
+
+    Deliberately *not* gated on ``sys.stdin.isatty()``. A pipe carrying a real
+    answer is not a TTY either, so an isatty check refuses input that was
+    genuinely supplied — including every ``CliRunner(input=...)`` test, which
+    is how this was caught. Instead the prompt is attempted and only the EOF
+    case (``click.Abort``) is translated: that is precisely "nothing to read",
+    which is the CI situation and nothing else.
+
+    ``--yes`` always skips the prompt — it means "don't ask me", not "ask me
+    anyway".
+    """
+    import click
+
+    if yes:
+        return True
+
+    try:
+        return bool(typer.confirm(prompt))
+    except (click.Abort, EOFError):
+        typer.secho(
+            "\nError: this is a destructive operation and needs confirmation.\n"
+            "       Re-run with --yes in a non-interactive context.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(1) from None
 
 
 def exit_code_for_signal(signum: int) -> int:

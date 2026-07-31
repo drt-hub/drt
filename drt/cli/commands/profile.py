@@ -181,9 +181,14 @@ def profile_remove(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
 ) -> None:
     """Delete a profile entry from ~/.drt/profiles.yml."""
+    # Shared with `drt state reset` (#776). Previously this called
+    # typer.confirm directly, which in CI printed a [y/N] prompt nobody could
+    # answer and aborted with a bare "Aborted." — failing correctly but naming
+    # neither the cause nor `--yes`.
+    from drt.cli._helpers import confirm_destructive
     from drt.config.credentials import remove_profile
 
-    if not yes and not typer.confirm(f"Remove profile '{name}'?"):
+    if not confirm_destructive(f"Remove profile '{name}'?", yes=yes):
         console.print("[dim]Aborted.[/dim]")
         raise typer.Exit(0)
 
