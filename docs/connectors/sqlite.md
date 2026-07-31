@@ -33,7 +33,8 @@ warehouse:
 ## Streaming extraction ([#765](https://github.com/drt-hub/drt/issues/765))
 
 Rows are read in `fetch_size` batches rather than materialised whole, so peak memory tracks the batch
-instead of the result set: **+110.6 MB → +4.4 MB** on 300k rows of ~200B.
+instead of the result set — roughly a 25× reduction on a 300k-row extract. Measured figures for
+every source are collected in [Extraction memory](../research/extraction-memory.md).
 
 "It's a local file" does not make buffering free: the cost this removes is holding every row as a Python
 object, which a local file incurs just as readily as a remote warehouse.

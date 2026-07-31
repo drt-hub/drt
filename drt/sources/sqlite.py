@@ -35,8 +35,8 @@ class SQLiteSource:
             # rather than materialising the result set. "It's a local file" is
             # not the same as "it's free" — the cost being removed is holding
             # every row as a Python object, which a local file incurs just as
-            # readily as a remote warehouse. Measured on 300k rows of ~200B,
-            # fresh process: +110.6 MB RSS for fetchall(), +4.4 MB iterating.
+            # readily as a remote warehouse. Measured figures:
+            # docs/research/extraction-memory.md.
             result.arraysize = config.fetch_size
             for row in result:
                 yield dict(zip(columns, row))

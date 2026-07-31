@@ -56,14 +56,15 @@ class DeltaLakeSource:
         # DuckDB pushes the filter and the column list into the Parquet scan, so
         # only matching row groups and referenced columns are read.
         #
-        # Measured on a 300k-row Delta table (~200B rows), fresh process,
-        # selecting 2 of 3 columns and ~1/9th of the rows:
-        # ``to_pyarrow_table()`` peaked at +244 MB RSS, this at +120 MB.
+        # Measured with 2 of 3 columns and ~1/9th of the rows selected; figures
+        # in docs/research/extraction-memory.md, which is the single source.
         #
-        # DuckDB's ``delta_scan()`` is faster still (+19 MB measured) but needs
-        # the ``delta`` extension, which DuckDB fetches from its repository on
-        # first use — an implicit network call at sync time that would break
-        # air-gapped and offline installs. Not worth it for an extract path.
+        # DuckDB's ``delta_scan()`` is faster still (+19 MB measured, kept here
+        # because it is the argument for rejecting a dependency rather than a
+        # benchmark) but needs the ``delta`` extension, which DuckDB fetches
+        # from its repository on first use — an implicit network call at sync
+        # time that would break air-gapped and offline installs. Not worth it
+        # for an extract path.
         dataset = DeltaTable(config.location, storage_options=options).to_pyarrow_dataset()
 
         conn = duckdb.connect()

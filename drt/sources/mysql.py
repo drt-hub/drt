@@ -79,9 +79,10 @@ class MySQLSource:
 
         **Streaming (#765): ``SSCursor``**, pymysql's unbuffered cursor, so
         rows arrive one at a time off the wire instead of the whole result set
-        being materialised client-side first. Measured against MySQL 8 with
-        300k rows of ~200B: ``fetchall()`` peaked at +109 MB RSS, this at
-        +0.8 MB.
+        being materialised client-side first — the largest reduction of any
+        source here. Measured figures live in
+        ``docs/research/extraction-memory.md``, which is the single source for
+        them.
 
         Two things differ from the Postgres leg, both found against a live
         server rather than in any documentation:
@@ -104,6 +105,8 @@ class MySQLSource:
         holds n rows at once. Measured: iterating peaked at +3.6 MB,
         ``fetchmany(100000)`` at +61.9 MB, with no speed difference. A
         ``fetch_size`` here would only offer users a way to make things worse.
+        (These two stay inline because they are the argument for omitting the
+        knob, not a benchmark; see ``docs/research/extraction-memory.md``.)
         """
         assert isinstance(config, MySQLProfile)
 

@@ -67,11 +67,11 @@ class ClickHouseSource:
         ``client.query()`` materialises the whole result set into
         ``result.result_rows`` before returning, so peak memory tracked the
         table; the streaming variant hands back rows as blocks arrive.
-        Measured on ClickHouse 24 with 300k rows of ~200B, each run in a fresh
-        process: **+224 MB RSS before, +149 MB after.**
+        Measured figures live in ``docs/research/extraction-memory.md``, which
+        is the single source for them.
 
-        That ~1.5x is a far smaller win than the Postgres (10x) or MySQL (14x)
-        legs, and the reason is worth knowing before anyone tries to improve
+        The reduction here is ~1.5x — a far smaller win than the Postgres or
+        MySQL legs, and the reason is worth knowing before anyone tries to improve
         it: the remainder is clickhouse-connect buffering the HTTP response
         internally, not drt holding rows. ``max_block_size`` does not move it
         (measured identical at 8192, 65536 and the default), so there is no

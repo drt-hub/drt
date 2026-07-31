@@ -37,8 +37,7 @@ class DuckDBSource:
             # whole result set. "It's a local file" is not the same as "it's
             # free" — the cost being removed is holding every row as a Python
             # object, which a local file incurs just as readily as a remote
-            # warehouse. Measured on 300k rows of ~200B, fresh process:
-            # +150.9 MB RSS for fetchall(), +42.2 MB batched.
+            # warehouse. Measured figures: docs/research/extraction-memory.md.
             #
             # An explicit fetchmany loop rather than iterating: DuckDB's result
             # object has no __iter__, unlike sqlite3/pymssql/snowflake.

@@ -96,10 +96,11 @@ class PostgresSource:
 
         **Streaming (#765).** Rows arrive through a *named* (server-side)
         cursor in ``fetch_size`` batches rather than a single ``fetchall()``,
-        so peak memory tracks the batch instead of the result set: measured on
-        Postgres 16 with 300k rows of ~200B, ``fetchall()`` peaked at +182 MB
-        RSS against +16 MB here. A plain ``cursor()`` would not do — psycopg2
-        buffers the whole result set client-side unless the cursor is named.
+        so peak memory tracks the batch instead of the result set — an order of
+        magnitude lower on a 300k-row extract. Measured figures live in
+        ``docs/research/extraction-memory.md``, which is the single source for
+        them. A plain ``cursor()`` would not do — psycopg2 buffers the whole
+        result set client-side unless the cursor is named.
 
         The lifecycle is the subtle part. A server-side cursor lives only as
         long as its connection, so #766's ``finally: conn.close()`` *inside*

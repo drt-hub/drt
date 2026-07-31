@@ -378,8 +378,8 @@ pg:
 | Postgres | named cursor, `itersize` | yes |
 | Redshift | named cursor, `itersize` | yes |
 
-Measured on Postgres 16, 300k rows x ~200B: `fetchall()` peaked at **+182 MB** RSS, streaming at
-**+18 MB**.
+Peak memory tracks the batch rather than the result set — an order of magnitude lower on a 300k-row
+extract. Measured figures for every source: [Extraction memory](../research/extraction-memory.md).
 
 **Sizing.** Memory scales with `fetch_size x row width`, not row count — lower it for very wide
 rows, not for big tables. There is deliberately no value that restores the old behaviour: buffering

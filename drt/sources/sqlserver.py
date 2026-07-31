@@ -78,9 +78,9 @@ class SQLServerSource:
 
         **Streaming (#765).** Rows arrive by iterating the cursor in
         ``fetch_size`` batches rather than through a single ``fetchall()``, so
-        peak memory tracks the batch instead of the result set. Measured on
-        SQL Server 2022 with 300k rows of ~200B, each run in a fresh process:
-        **+110.8 MB RSS before, +4.3 MB after.**
+        peak memory tracks the batch instead of the result set. Measured
+        figures live in ``docs/research/extraction-memory.md``, which is the
+        single source for them.
 
         The cursor is opened with ``as_dict=True``, so each row already arrives
         as a mapping and no column list is needed.

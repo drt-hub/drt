@@ -255,8 +255,9 @@ checkpointing problem, not a retry problem. See
 ## As a source — streaming extraction ([#765](https://github.com/drt-hub/drt/issues/765))
 
 Rows are read through a **server-side (named) cursor** in batches rather than buffered whole with
-`fetchall()`, so peak memory tracks the batch instead of the result set. Measured on Postgres 16
-with 300k rows of ~200B: **+182 MB RSS before, +18 MB after**.
+`fetchall()`, so peak memory tracks the batch instead of the result set — an order of magnitude
+lower on a 300k-row extract. Measured figures for every source are collected in
+[Extraction memory](../research/extraction-memory.md).
 
 ```yaml
 # ~/.drt/profiles.yml

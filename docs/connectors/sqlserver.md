@@ -65,7 +65,8 @@ into the destination and cannot be un-sent. See
 ## Streaming extraction ([#765](https://github.com/drt-hub/drt/issues/765))
 
 Rows are read in `fetch_size` batches rather than materialised whole, so peak memory tracks the batch
-instead of the result set: **+151 MB → +39 MB** on 300k rows of ~200B.
+instead of the result set — roughly a 4× reduction on a 300k-row extract. Measured figures for
+every source are collected in [Extraction memory](../research/extraction-memory.md).
 
 ```yaml
   fetch_size: 10000   # rows per batch (default: 10000)
