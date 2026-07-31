@@ -70,6 +70,9 @@ COMMAND_TO_TOOLS: dict[str, tuple[str, ...]] = {
     "docs generate": ("get_manifest",),
     "profile list": ("list_profiles",),
     "profile test": ("test_profile",),
+    # #776, landed alongside this check.
+    "state show": ("state_show",),
+    "state reset": ("state_reset",),
 }
 
 # Commands deliberately absent from MCP, with the reason. Kept explicit rather
