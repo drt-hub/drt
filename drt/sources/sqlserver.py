@@ -142,7 +142,13 @@ class SQLServerSource:
 
         return pymssql.connect(
             server=config.host,
-            port=config.port,
+            # pymssql's own stub types `port` as `str`, though the driver
+            # accepts an int at runtime (verified: an int port fails on the
+            # connection, not on the argument). Passing the string satisfies
+            # the stub without changing behaviour — the alternative was a
+            # `type: ignore` for a third-party stub inaccuracy, which is
+            # noisier and would outlive the stub being fixed.
+            port=str(config.port),
             user=config.user,
             password=password,
             database=config.database,
