@@ -799,3 +799,104 @@ async def test_server_lists_new_parity_tools() -> None:
         "drt_list_profiles",
         "drt_test_profile",
     } <= names
+
+
+# ---------------------------------------------------------------------------
+# drt_state_show / drt_state_reset (#776)
+# ---------------------------------------------------------------------------
+#
+# Added with the feature rather than retrofitted. The #870 audit found the
+# v0.8.0 flag wave (--limit / --fail-fast / --failed / --vars) never reached
+# MCP at all, so an agent driving drt could not do the safe thing. Shipping
+# the CLI and the tool together is the fix for that pattern, not just for
+# this feature.
+
+
+@pytest.mark.asyncio
+async def test_state_show_reports_no_state(server: FastMCP) -> None:
+    result = await call(server, "drt_state_show", sync_name="never-run")
+    assert result.get("state") is None
+
+
+@pytest.mark.asyncio
+async def test_state_show_returns_the_stored_watermark(
+    server: FastMCP, project_dir: Path
+) -> None:
+    from drt.state.manager import StateManager, SyncState
+
+    StateManager(project_dir).save_sync(
+        SyncState(
+            sync_name="users",
+            last_run_at="2026-01-01T00:00:00Z",
+            records_synced=7,
+            status="success",
+            last_cursor_value="2026-06-01",
+        )
+    )
+
+    result = await call(server, "drt_state_show", sync_name="users")
+
+    assert result["state"]["last_cursor_value"] == "2026-06-01"
+
+
+@pytest.mark.asyncio
+async def test_state_reset_requires_a_level(server: FastMCP, project_dir: Path) -> None:
+    """Same safety property as the CLI: never treat "no level" as "all of it".
+
+    An agent is *more* likely to call this with defaults than a human is, so
+    the refusal matters more here, not less.
+    """
+    from drt.state.manager import StateManager, SyncState
+
+    StateManager(project_dir).save_sync(
+        SyncState(
+            sync_name="users",
+            last_run_at="2026-01-01T00:00:00Z",
+            records_synced=7,
+            status="success",
+        )
+    )
+
+    result = await call(server, "drt_state_reset", sync_name="users")
+
+    assert "error" in result
+    assert StateManager(project_dir).get_last_sync("users") is not None
+
+
+@pytest.mark.asyncio
+async def test_state_reset_runs_clears_state(server: FastMCP, project_dir: Path) -> None:
+    from drt.state.manager import StateManager, SyncState
+
+    StateManager(project_dir).save_sync(
+        SyncState(
+            sync_name="users",
+            last_run_at="2026-01-01T00:00:00Z",
+            records_synced=7,
+            status="success",
+        )
+    )
+
+    result = await call(server, "drt_state_reset", sync_name="users", runs=True)
+
+    assert result.get("reset") == ["runs"]
+    assert StateManager(project_dir).get_last_sync("users") is None
+
+
+@pytest.mark.asyncio
+async def test_state_reset_dry_run_changes_nothing(
+    server: FastMCP, project_dir: Path
+) -> None:
+    from drt.state.manager import StateManager, SyncState
+
+    StateManager(project_dir).save_sync(
+        SyncState(
+            sync_name="users",
+            last_run_at="2026-01-01T00:00:00Z",
+            records_synced=7,
+            status="success",
+        )
+    )
+
+    await call(server, "drt_state_reset", sync_name="users", runs=True, dry_run=True)
+
+    assert StateManager(project_dir).get_last_sync("users") is not None
