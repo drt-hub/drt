@@ -132,6 +132,7 @@ def _install_fake_ch_exceptions(monkeypatch: pytest.MonkeyPatch) -> Any:
     InternalError / NotSupportedError as siblings under DatabaseError, and
     StreamClosedError under ProgrammingError.
     """
+    import builtins
     import sys
     import types
 
@@ -162,6 +163,30 @@ def _install_fake_ch_exceptions(monkeypatch: pytest.MonkeyPatch) -> Any:
     class StreamClosedError(ProgrammingError):
         pass
 
+    # Added in #862 once the pin enumerated the real module instead of a
+    # hand-kept list, which is exactly how their absence surfaced.
+    # StreamFailureError and StreamCompleteException descend from plain
+    # Exception rather than DatabaseError — worth mirroring precisely, since
+    # re-parenting either under OperationalError is what would silently start
+    # retrying a stream failure.
+    class InternalError(DatabaseError):
+        pass
+
+    class NotSupportedError(DatabaseError):
+        pass
+
+    class StreamCompleteException(Exception):
+        pass
+
+    class StreamFailureError(Exception):
+        pass
+
+    # The driver's Warning subclasses the *builtin* Warning as well as its own
+    # base. Referenced via `builtins` because defining a class named Warning in
+    # this scope makes the bare name local.
+    class Warning(builtins.Warning, ClickHouseError):  # noqa: A001 - mirrors the driver
+        pass
+
     exc_mod = types.ModuleType("clickhouse_connect.driver.exceptions")
     for cls in (
         ClickHouseError,
@@ -173,6 +198,11 @@ def _install_fake_ch_exceptions(monkeypatch: pytest.MonkeyPatch) -> Any:
         DataError,
         IntegrityError,
         StreamClosedError,
+        InternalError,
+        NotSupportedError,
+        StreamCompleteException,
+        StreamFailureError,
+        Warning,
     ):
         setattr(exc_mod, cls.__name__, cls)
 
@@ -383,27 +413,37 @@ def test_the_fake_exception_hierarchy_matches_the_real_driver(
 
     Asserting the *real* hierarchy alone would not catch that: the double is
     what the other tests actually run against, so the two have to be compared
-    directly. Skips in CI's default matrix (no extras) — a backstop, not the
-    primary guard.
+    directly.
+
+    The class list is **enumerated from the real module**, not hardcoded
+    (@Muawiya-contact on #862). A literal list is the same drift surface one
+    level up: it silently stops covering anything the driver adds, and the
+    dangerous case is a *new* class re-parented under ``OperationalError``,
+    which would start being retried with the pin unable to see it. Enumerating
+    means a new driver exception is covered the day it appears.
+
+    This runs for real in CI — ``ci.yml`` installs the ``clickhouse`` extra
+    precisely so these suites are not silently skipped.
     """
     real = pytest.importorskip("clickhouse_connect.driver.exceptions")
     fake = _install_fake_ch_exceptions(monkeypatch)
 
-    for name in [
-        'Error',
-        'InterfaceError',
-        'DatabaseError',
-        'OperationalError',
-        'ProgrammingError',
-        'DataError',
-        'IntegrityError',
-        'StreamClosedError',
-    ]:
-        real_cls = getattr(real, name, None)
-        fake_cls = getattr(fake, name, None)
-        assert real_cls is not None, f"{name} vanished from the real driver"
-        assert fake_cls is not None, f"the double is missing {name}"
+    # Every exception class the real module defines, not a hand-kept list.
+    real_names = sorted(
+        n
+        for n, obj in vars(real).items()
+        if isinstance(obj, type) and issubclass(obj, BaseException) and not n.startswith("_")
+    )
+    assert real_names, "found no exception classes — did the module move?"
 
+    missing = [n for n in real_names if getattr(fake, n, None) is None]
+    assert not missing, (
+        f"the double is missing {missing} — the driver defines exception classes "
+        f"the double does not, so anything raising them is untested here"
+    )
+
+    for name in real_names:
+        real_cls, fake_cls = getattr(real, name), getattr(fake, name)
         real_bases = [b.__name__ for b in real_cls.__mro__[1:] if b is not object]
         fake_bases = [b.__name__ for b in fake_cls.__mro__[1:] if b is not object]
         assert fake_bases == real_bases, (

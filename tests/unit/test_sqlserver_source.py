@@ -107,6 +107,22 @@ def _install_fake_pymssql(monkeypatch: pytest.MonkeyPatch) -> object:
     class IntegrityError(DatabaseError):
         pass
 
+    # Added in #862 once the pin enumerated the real module rather than a
+    # hand-kept list. ColumnsWithoutNamesError sits under InterfaceError —
+    # a class the classifier treats as *retryable* — so its shape is not
+    # incidental.
+    class InternalError(DatabaseError):
+        pass
+
+    class NotSupportedError(DatabaseError):
+        pass
+
+    class ColumnsWithoutNamesError(InterfaceError):
+        pass
+
+    class Warning(Exception):  # noqa: A001 - mirrors the driver's name
+        pass
+
     mod = types.ModuleType("pymssql")
     for cls in (
         Error,
@@ -116,6 +132,10 @@ def _install_fake_pymssql(monkeypatch: pytest.MonkeyPatch) -> object:
         ProgrammingError,
         DataError,
         IntegrityError,
+        InternalError,
+        NotSupportedError,
+        ColumnsWithoutNamesError,
+        Warning,
     ):
         setattr(mod, cls.__name__, cls)
     monkeypatch.setitem(sys.modules, "pymssql", mod)
@@ -422,22 +442,29 @@ def test_the_fake_exception_hierarchy_matches_the_real_driver(
     directly. Skips in CI's default matrix (no extras) — a backstop, not the
     primary guard.
     """
-    real = pytest.importorskip("pymssql")
+    pymssql = pytest.importorskip("pymssql")
     fake = _install_fake_pymssql(monkeypatch)
 
-    for name in [
-        'Error',
-        'InterfaceError',
-        'DatabaseError',
-        'OperationalError',
-        'ProgrammingError',
-        'DataError',
-        'IntegrityError',
-    ]:
-        real_cls = getattr(real, name, None)
-        fake_cls = getattr(fake, name, None)
-        assert real_cls is not None, f"{name} vanished from the real driver"
-        assert fake_cls is not None, f"the double is missing {name}"
+    # Enumerated from the real module rather than hardcoded (@Muawiya-contact
+    # on #862): a literal list is the same drift surface one level up — it
+    # silently stops covering anything the driver adds, and a *new* class
+    # re-parented under OperationalError would start being retried with the
+    # pin unable to see it.
+    real_names = sorted(
+        n
+        for n, obj in vars(pymssql).items()
+        if isinstance(obj, type) and issubclass(obj, BaseException) and not n.startswith("_")
+    )
+    assert real_names, "found no exception classes — did pymssql move them?"
+
+    missing = [n for n in real_names if getattr(fake, n, None) is None]
+    assert not missing, (
+        f"the double is missing {missing} — the driver defines exception classes "
+        f"the double does not, so anything raising them is untested here"
+    )
+
+    for name in real_names:
+        real_cls, fake_cls = getattr(pymssql, name), getattr(fake, name)
 
         real_bases = [b.__name__ for b in real_cls.__mro__[1:] if b is not object]
         fake_bases = [b.__name__ for b in fake_cls.__mro__[1:] if b is not object]
