@@ -19,6 +19,15 @@ class WatermarkStorage(Protocol):
     def get(self, sync_name: str) -> str | None: ...
     def save(self, sync_name: str, value: str) -> None: ...
 
+    def delete(self, sync_name: str) -> None:
+        """Clear the stored watermark for ``sync_name`` (#776).
+
+        A no-op when nothing is stored: reset is a recovery path, and someone
+        clearing a poisoned cursor should not have to know whether a watermark
+        was ever written. Never raises for an unknown sync.
+        """
+        ...
+
 
 class LocalWatermarkStorage:
     """File-based watermark storage using .drt/watermarks.json."""
@@ -48,6 +57,12 @@ class LocalWatermarkStorage:
     def save(self, sync_name: str, value: str) -> None:
         data = self._load()
         data[sync_name] = value
+        self._save_all(data)
+
+    def delete(self, sync_name: str) -> None:
+        data = self._load()
+        if data.pop(sync_name, None) is None:
+            return  # nothing stored — don't create the file on a fresh project
         self._save_all(data)
 
 
@@ -96,6 +111,15 @@ class GCSWatermarkStorage:
     def save(self, sync_name: str, value: str) -> None:
         data = self._load()
         data[sync_name] = value
+        self._blob().upload_from_string(
+            json.dumps(data, indent=2),
+            content_type="application/json",
+        )
+
+    def delete(self, sync_name: str) -> None:
+        data = self._load()
+        if data.pop(sync_name, None) is None:
+            return  # nothing stored — skip the upload round trip entirely
         self._blob().upload_from_string(
             json.dumps(data, indent=2),
             content_type="application/json",
@@ -189,3 +213,14 @@ class BigQueryWatermarkStorage:
             ]
         )
         client.query(merge, job_config=job_config).result()
+
+    def delete(self, sync_name: str) -> None:
+        # Parameterised like `save` above — a sync name is user-supplied and
+        # has no business being interpolated into SQL. DELETE on a row that
+        # isn't there is already a no-op in BigQuery, so an unknown sync needs
+        # no special case.
+        self._ensure_table()
+        client = self._client()
+        sql = f"DELETE FROM {self._table} WHERE sync_name = @sync_name"
+        job_config = self._query_config([("sync_name", "STRING", sync_name)])
+        client.query(sql, job_config=job_config).result()
