@@ -440,15 +440,37 @@ def _tracked_options() -> SyncOptions:
     return opts
 
 
-def _state_client(rows: list[tuple[str, str]], exists: bool = True) -> MagicMock:
-    """A fake client wired for the state-table read path: ``EXISTS TABLE``
-    then ``SELECT key_hash, key_json ...``."""
+def _state_client(
+    raw_diff: list[tuple[str, str]] | None = None,
+    new_hashes: list[str] | None = None,
+    previous_exists: bool = True,
+    exists: bool = True,
+) -> MagicMock:
+    """A fake client wired for the #694 part 2 read path — ``EXISTS TABLE``,
+    a baseline existence probe, the SQL-side diff, and the genuinely-new-
+    keys probe all go through ``client.query()``, dispatched here by the
+    query's SQL text since ``query()`` is now called up to four times per
+    run (no staging table on ClickHouse — see the docstring in
+    ``clickhouse.py`` for why: ``Array(String)`` parameters already hold
+    the whole current-key-hash set as one bound value).
+
+    ``raw_diff`` is what ``previous - current`` would have computed
+    server-side; ``new_hashes`` is what ``current - previous`` would have.
+    """
     client = _fake_client()
-    # query() is called twice (EXISTS TABLE, then the state SELECT) with
-    # different results each time — side_effect gives each call its own.
-    exists_result = MagicMock(result_rows=[(1 if exists else 0,)])
-    state_result = MagicMock(result_rows=rows)
-    client.query.side_effect = [exists_result, state_result]
+
+    def query_side_effect(sql: str, *args: Any, **kwargs: Any) -> MagicMock:
+        if sql.startswith("EXISTS TABLE"):
+            return MagicMock(result_rows=[(1 if exists else 0,)])
+        if "LIMIT 1" in sql:
+            return MagicMock(result_rows=[(1,)] if previous_exists else [])
+        if sql.startswith("SELECT key_hash, key_json"):
+            return MagicMock(result_rows=list(raw_diff or []))
+        if sql.startswith("SELECT arrayJoin"):
+            return MagicMock(result_rows=[(h,) for h in (new_hashes or [])])
+        return MagicMock(result_rows=[])
+
+    client.query.side_effect = query_side_effect
     return client
 
 
@@ -457,7 +479,7 @@ def test_tracked_creates_state_table_when_absent_clickhouse() -> None:
     default, mirrors #695's pre-provisioning probe on the other dialects)."""
     dest = ClickHouseDestination()
     load_client = _fake_client()
-    finalize_client = _state_client(rows=[], exists=False)
+    finalize_client = _state_client(exists=False)
 
     with patch.object(ClickHouseDestination, "_connect", return_value=load_client):
         dest.load([{"id": 1}], _config(), _tracked_options())
@@ -478,7 +500,7 @@ def test_tracked_skips_create_when_state_table_preprovisioned_clickhouse() -> No
     """``EXISTS TABLE`` -> 1: no CREATE TABLE is issued."""
     dest = ClickHouseDestination()
     load_client = _fake_client()
-    finalize_client = _state_client(rows=[], exists=True)
+    finalize_client = _state_client(exists=True)
 
     with patch.object(ClickHouseDestination, "_connect", return_value=load_client):
         dest.load([{"id": 1}], _config(), _tracked_options())
@@ -492,9 +514,15 @@ def test_tracked_skips_create_when_state_table_preprovisioned_clickhouse() -> No
 
 
 def test_tracked_first_run_baselines_without_deleting_clickhouse() -> None:
+    from drt.destinations._mirror_state import key_hash
+
     dest = ClickHouseDestination()
     load_client = _fake_client()
-    finalize_client = _state_client(rows=[])
+    finalize_client = _state_client(
+        raw_diff=[],
+        new_hashes=[key_hash((1,)), key_hash((2,))],
+        previous_exists=False,
+    )
 
     with patch.object(ClickHouseDestination, "_connect", return_value=load_client):
         dest.load([{"id": 1}, {"id": 2}], _config(), _tracked_options())
@@ -516,9 +544,7 @@ def test_tracked_second_run_deletes_only_stale_tracked_keys_clickhouse() -> None
 
     dest = ClickHouseDestination()
     load_client = _fake_client()
-    finalize_client = _state_client(
-        rows=[(key_hash((k,)), key_json((k,))) for k in (1, 2, 3)]
-    )
+    finalize_client = _state_client(raw_diff=[(key_hash((3,)), key_json((3,)))])
 
     with patch.object(ClickHouseDestination, "_connect", return_value=load_client):
         dest.load([{"id": 1}, {"id": 2}], _config(), _tracked_options())
@@ -548,9 +574,13 @@ def test_tracked_empty_source_is_noop_clickhouse() -> None:
 
 
 def test_tracked_baseline_logs_warning_clickhouse(caplog: pytest.LogCaptureFixture) -> None:
+    from drt.destinations._mirror_state import key_hash
+
     dest = ClickHouseDestination()
     load_client = _fake_client()
-    finalize_client = _state_client(rows=[])
+    finalize_client = _state_client(
+        raw_diff=[], new_hashes=[key_hash((1,))], previous_exists=False
+    )
 
     with patch.object(ClickHouseDestination, "_connect", return_value=load_client):
         dest.load([{"id": 1}], _config(), _tracked_options())
@@ -577,15 +607,16 @@ def _tracked_scoped_options(scope: list[str] = ["parent_id"]) -> SyncOptions:
 def test_tracked_scoped_deletes_only_stale_keys_within_observed_scope_clickhouse() -> None:
     """Prior state has parent 1: {(1,"a"),(1,"b")} and parent 2: {(2,"x")}.
     This run only touches parent 1 with just (1,"a") -> (1,"b") is stale and
-    deleted; (2,"x") is under a parent this run never saw and must survive."""
-    import json
-
+    deleted; (2,"x") is under a parent this run never saw and must survive
+    (#694 part 2: never read or rewritten at all — never even queried, let
+    alone reinserted)."""
     from drt.destinations._mirror_state import key_hash, key_json
 
     dest = ClickHouseDestination()
     load_client = _fake_client()
     finalize_client = _state_client(
-        rows=[(key_hash(k), key_json(k)) for k in ((1, "a"), (1, "b"), (2, "x"))]
+        raw_diff=[(key_hash(k), key_json(k)) for k in ((1, "b"), (2, "x"))],
+        new_hashes=[],  # (1,"a") already tracked
     )
     config = _config(upsert_key=["parent_id", "id"])
 
@@ -602,9 +633,14 @@ def test_tracked_scoped_deletes_only_stale_keys_within_observed_scope_clickhouse
     assert len(target_deletes) == 1
     assert target_deletes[0].kwargs["parameters"]["keys"] == [("1", "b")]
 
-    insert_rows = finalize_client.insert.call_args.args[1]
-    persisted_keys = {tuple(json.loads(r[2])) for r in insert_rows}
-    assert persisted_keys == {(1, "a"), (2, "x")}
+    state_delete_calls = [
+        call
+        for call in finalize_client.command.call_args_list
+        if "DELETE" in (call.args[0] if call.args else "") and "`scores`" not in call.args[0]
+    ]
+    assert len(state_delete_calls) == 1
+    assert state_delete_calls[0].kwargs["parameters"]["hashes"] == [key_hash((1, "b"))]
+    finalize_client.insert.assert_not_called()
 
 
 def test_tracked_scoped_first_touch_of_a_scope_is_not_a_baseline_warning_clickhouse(
@@ -614,7 +650,10 @@ def test_tracked_scoped_first_touch_of_a_scope_is_not_a_baseline_warning_clickho
 
     dest = ClickHouseDestination()
     load_client = _fake_client()
-    finalize_client = _state_client(rows=[(key_hash((2, "x")), key_json((2, "x")))])
+    finalize_client = _state_client(
+        raw_diff=[(key_hash((2, "x")), key_json((2, "x")))],
+        new_hashes=[key_hash((1, "a"))],
+    )
     config = _config(upsert_key=["parent_id", "id"])
 
     with patch.object(ClickHouseDestination, "_connect", return_value=load_client):
@@ -630,14 +669,20 @@ def test_tracked_scoped_first_touch_of_a_scope_is_not_a_baseline_warning_clickho
         sql = call.args[0] if call.args else ""
         if "DELETE" in sql:
             assert "`scores`" not in sql
+    insert_rows = finalize_client.insert.call_args.args[1]
+    assert [(r[0], r[1]) for r in insert_rows] == [("scores_sync", key_hash((1, "a")))]
 
 
 def test_tracked_scoped_genuinely_no_prior_state_still_warns_baseline_clickhouse(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    from drt.destinations._mirror_state import key_hash
+
     dest = ClickHouseDestination()
     load_client = _fake_client()
-    finalize_client = _state_client(rows=[])
+    finalize_client = _state_client(
+        raw_diff=[], new_hashes=[key_hash((1, "a"))], previous_exists=False
+    )
     config = _config(upsert_key=["parent_id", "id"])
 
     with patch.object(ClickHouseDestination, "_connect", return_value=load_client):

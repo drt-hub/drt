@@ -441,16 +441,41 @@ class ClickHouseDestination:
           gone-from-state keys still present on the target with nothing to
           ever clean them up.
 
-        ``mirror.scope`` + ``strategy: tracked`` (#694) prunes both the state
-        read and the state rewrite to the observed scope — see
+        ``mirror.scope`` + ``strategy: tracked`` (#694 part 1) prunes both
+        the state read and the state rewrite to the observed scope — see
         ``BaseSqlDestination._finalize_mirror_tracked`` for the full
         rationale; the algorithm here is identical, just against
         ClickHouse's own mutation/insert primitives.
+
+        SQL-side diff (#694 part 2): unlike the other three dialects, no
+        scratch/temp table is used here — ClickHouse's ``Array(String)``
+        named parameters already hold this run's entire key-hash set as a
+        *single* bound value (no per-element placeholder, so no marker-count
+        limit the way Databricks' native paramstyle has), so both directions
+        of the diff are plain ``NOT IN`` / ``arrayJoin`` queries against that
+        one parameter instead of a joined-against table. ``previous -
+        current`` (the diff, still typically small) and ``current -
+        previous`` (genuinely-new keys) both run entirely in ClickHouse; only
+        their results — never the full tracked-key history — reach Python.
+        Scope-filtering the diff in Python afterward is mathematically
+        equivalent to filtering the full previous set by scope first (same
+        proof as the base implementation: scope membership and current-
+        membership are independent conditions). The old "read every
+        untouched row so it can be reinserted unchanged" step for
+        scope-preserved rows is gone — untouched rows are simply never
+        selected by either query.
+
+        The failure-mode ordering above still holds with the split state
+        rewrite (delete-diffed-hashes, then insert-new-hashes, rather than
+        one blanket delete-all-then-insert-current): if the state DELETE
+        half succeeds but the INSERT half fails, only the *new* keys this
+        run observed go untracked — strictly narrower exposure than the
+        original blanket rewrite, where the same failure lost tracking for
+        every key in the current run.
         """
-        import json
         import logging
 
-        from drt.destinations._mirror_state import STATE_TABLE, diff_keys, key_hash, key_json
+        from drt.destinations._mirror_state import STATE_TABLE, decode_key, key_hash, key_json
 
         assert isinstance(config, ClickHouseDestinationConfig)
         sync_name = sync_options._sync_name or config.table
@@ -459,6 +484,8 @@ class ClickHouseDestination:
         assert upsert_cols  # guarded in load()
         table_q = self._quote_ident(config.table)
         state_q = self._quote_ident(STATE_TABLE)
+        current_by_hash = {key_hash(k): k for k in current}
+        current_hashes = list(current_by_hash.keys())
 
         scope_cols = sync_options.mirror.scope if sync_options.mirror is not None else None
         scope_positions = [upsert_cols.index(c) for c in scope_cols] if scope_cols else None
@@ -476,36 +503,37 @@ class ClickHouseDestination:
                     "sync_name String, key_hash String, key_json String"
                     ") ENGINE = MergeTree ORDER BY (sync_name, key_hash)"
                 )
-            state_result = client.query(
-                f"SELECT key_hash, key_json FROM {state_q} "
-                "WHERE sync_name = {sync_name:String}",
+
+            # Baseline check: a cheap existence probe, never a full read.
+            baseline_probe = client.query(
+                f"SELECT 1 FROM {state_q} WHERE sync_name = {{sync_name:String}} LIMIT 1",
                 parameters={"sync_name": sync_name},
             )
-            previous = {row[0]: row[1] for row in state_result.result_rows}
+            previous_exists = bool(baseline_probe.result_rows)
+
+            diff_result = client.query(
+                f"SELECT key_hash, key_json FROM {state_q} "
+                "WHERE sync_name = {sync_name:String} "
+                "AND key_hash NOT IN {current_hashes:Array(String)}",
+                parameters={"sync_name": sync_name, "current_hashes": current_hashes},
+            )
+            raw_diff = diff_result.result_rows
 
             if scope_positions is not None and observed_scopes is not None:
-                previous_in_scope = {
-                    h: kj
-                    for h, kj in previous.items()
-                    if tuple(json.loads(kj)[p] for p in scope_positions) in observed_scopes
-                }
-                preserved = [
-                    tuple(json.loads(kj))
-                    for h, kj in previous.items()
-                    if h not in previous_in_scope
+                to_delete = [
+                    decode_key(kj)
+                    for _h, kj in raw_diff
+                    if tuple(decode_key(kj)[p] for p in scope_positions) in observed_scopes
                 ]
             else:
-                previous_in_scope = previous
-                preserved = []
+                to_delete = [decode_key(kj) for _h, kj in raw_diff]
 
-            if previous_in_scope:
-                to_delete = diff_keys(previous_in_scope, current)
-                if to_delete:
-                    sql, params = self._build_mirror_delete(
-                        table_q, upsert_cols, to_delete, None, None, negate=False
-                    )
-                    client.command(sql, parameters=params, settings={"mutations_sync": 1})
-            elif not previous:
+            if to_delete:
+                sql, params = self._build_mirror_delete(
+                    table_q, upsert_cols, to_delete, None, None, negate=False
+                )
+                client.command(sql, parameters=params, settings={"mutations_sync": 1})
+            elif not previous_exists:
                 logging.getLogger(__name__).warning(
                     "tracked mirror: no prior state for sync %r in %s — "
                     "baselining this run's %d key(s); no deletes this run.",
@@ -514,17 +542,31 @@ class ClickHouseDestination:
                     len(current),
                 )
 
-            # Rewrite state — mutation-delete then bulk insert (no
-            # cross-statement transaction; see the failure-mode note above).
-            client.command(
-                f"ALTER TABLE {state_q} DELETE WHERE sync_name = {{sync_name:String}}",
-                parameters={"sync_name": sync_name},
-                settings={"mutations_sync": 1},
+            if to_delete:
+                client.command(
+                    f"ALTER TABLE {state_q} DELETE WHERE sync_name = {{sync_name:String}} "
+                    "AND key_hash IN {hashes:Array(String)}",
+                    parameters={
+                        "sync_name": sync_name,
+                        "hashes": [key_hash(k) for k in to_delete],
+                    },
+                    settings={"mutations_sync": 1},
+                )
+
+            new_hashes_result = client.query(
+                "SELECT arrayJoin({current_hashes:Array(String)}) AS key_hash "
+                f"WHERE key_hash NOT IN (SELECT key_hash FROM {state_q} "
+                "WHERE sync_name = {sync_name:String})",
+                parameters={"sync_name": sync_name, "current_hashes": current_hashes},
             )
-            state_rows = [
-                [sync_name, key_hash(k), key_json(k)] for k in (current + preserved)
-            ]
-            client.insert(state_q, state_rows, column_names=["sync_name", "key_hash", "key_json"])
+            new_hashes = [row[0] for row in new_hashes_result.result_rows]
+            if new_hashes:
+                state_rows = [
+                    [sync_name, h, key_json(current_by_hash[h])] for h in new_hashes
+                ]
+                client.insert(
+                    state_q, state_rows, column_names=["sync_name", "key_hash", "key_json"]
+                )
         finally:
             client.close()
 
