@@ -58,6 +58,49 @@ def _fake_connection() -> MagicMock:
     return conn
 
 
+def _state_conn(
+    raw_diff: list[tuple[str, str]] | None = None,
+    to_insert: list[tuple[str, str]] | None = None,
+    previous_exists: bool = True,
+    table_exists: bool = True,
+) -> MagicMock:
+    """A finalize-side connection whose cursor answers the three distinct
+    reads #694 part 2 introduced, dispatched by the most recent ``execute()``
+    call's SQL text (mirroring the dialect-agnostic double in
+    ``test_sql_base.py``):
+
+    - the state-table existence probe (``to_regclass`` — a single-value
+      ``fetchone``, matched by exclusion since it's the only ``fetchone``
+      call whose SQL doesn't contain ``LIMIT 1``)
+    - the #694 part 2 baseline-existence probe (``... LIMIT 1``, another
+      ``fetchone``) — ``previous_exists``
+    - the SQL-side diff (``previous - current`` via ``NOT EXISTS`` against
+      the staged current keys, ``SELECT s.key_hash`` prefix) — ``raw_diff``
+    - the genuinely-new-keys probe (``current - previous``, ``SELECT
+      c.key_hash`` prefix) — ``to_insert``
+    """
+    conn = _fake_connection()
+    cur = conn.cursor.return_value
+
+    def fetchone_side_effect() -> Any:
+        sql = str(cur.execute.call_args.args[0])
+        if "LIMIT 1" in sql:
+            return (1,) if previous_exists else None
+        return (1,) if table_exists else None
+
+    def fetchall_side_effect() -> list[tuple[str, str]]:
+        sql = str(cur.execute.call_args.args[0])
+        if "SELECT s.key_hash" in sql:
+            return list(raw_diff or [])
+        if "SELECT c.key_hash" in sql:
+            return list(to_insert or [])
+        return []
+
+    cur.fetchone.side_effect = fetchone_side_effect
+    cur.fetchall.side_effect = fetchall_side_effect
+    return conn
+
+
 # ---------------------------------------------------------------------------
 # SyncOptions schema
 # ---------------------------------------------------------------------------
@@ -337,11 +380,16 @@ def _executed_sql(cur: MagicMock) -> str:
 
 def test_tracked_first_run_baselines_without_deleting() -> None:
     """No prior state: current keys are inserted, the target sees no DELETE."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
     dest = PostgresDestination()
     load_conn = _fake_connection()
-    finalize_conn = _fake_connection()
+    finalize_conn = _state_conn(
+        raw_diff=[],
+        to_insert=[(key_hash((k,)), key_json((k,))) for k in (1, 2)],
+        previous_exists=False,
+    )
     cur = finalize_conn.cursor.return_value
-    cur.fetchall.return_value = []  # state read: empty -> baseline
 
     with patch.object(PostgresDestination, "_connect", return_value=load_conn):
         dest.load([{"id": 1}, {"id": 2}], _config(), _tracked_options())
@@ -368,11 +416,10 @@ def test_tracked_second_run_deletes_only_stale_tracked_keys() -> None:
 
     dest = PostgresDestination()
     load_conn = _fake_connection()
-    finalize_conn = _fake_connection()
+    finalize_conn = _state_conn(
+        raw_diff=[(key_hash((3,)), key_json((3,)))], to_insert=[]
+    )
     cur = finalize_conn.cursor.return_value
-    cur.fetchall.return_value = [
-        (key_hash((k,)), key_json((k,))) for k in (1, 2, 3)
-    ]
 
     with patch.object(PostgresDestination, "_connect", return_value=load_conn):
         dest.load([{"id": 1}, {"id": 2}], _config(), _tracked_options())
@@ -391,15 +438,10 @@ def test_tracked_second_run_deletes_only_stale_tracked_keys() -> None:
 
 def test_tracked_second_run_all_keys_still_present_deletes_nothing() -> None:
     """prev == current -> no target DELETE, state simply rewritten."""
-    from drt.destinations._mirror_state import key_hash, key_json
-
     dest = PostgresDestination()
     load_conn = _fake_connection()
-    finalize_conn = _fake_connection()
+    finalize_conn = _state_conn(raw_diff=[], to_insert=[])
     cur = finalize_conn.cursor.return_value
-    cur.fetchall.return_value = [
-        (key_hash((k,)), key_json((k,))) for k in (1, 2)
-    ]
 
     with patch.object(PostgresDestination, "_connect", return_value=load_conn):
         dest.load([{"id": 1}, {"id": 2}], _config(), _tracked_options())
@@ -430,12 +472,10 @@ def test_tracked_composite_key_uses_tuple_in_form() -> None:
 
     dest = PostgresDestination()
     load_conn = _fake_connection()
-    finalize_conn = _fake_connection()
+    finalize_conn = _state_conn(
+        raw_diff=[(key_hash((2, "b")), key_json((2, "b")))], to_insert=[]
+    )
     cur = finalize_conn.cursor.return_value
-    cur.fetchall.return_value = [
-        (key_hash((1, "a")), key_json((1, "a"))),
-        (key_hash((2, "b")), key_json((2, "b"))),
-    ]
     config = _config(upsert_key=["tenant_id", "user_id"])
 
     with patch.object(PostgresDestination, "_connect", return_value=load_conn):
@@ -456,10 +496,15 @@ def test_tracked_composite_key_uses_tuple_in_form() -> None:
 
 def test_tracked_baseline_logs_warning(caplog: pytest.LogCaptureFixture) -> None:
     """First run / lost state must be loudly visible, not silent."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
     dest = PostgresDestination()
     load_conn = _fake_connection()
-    finalize_conn = _fake_connection()
-    finalize_conn.cursor.return_value.fetchall.return_value = []
+    finalize_conn = _state_conn(
+        raw_diff=[],
+        to_insert=[(key_hash((1,)), key_json((1,)))],
+        previous_exists=False,
+    )
 
     with patch.object(PostgresDestination, "_connect", return_value=load_conn):
         dest.load([{"id": 1}], _config(), _tracked_options())
@@ -491,11 +536,11 @@ def test_tracked_scoped_deletes_only_stale_keys_within_observed_scope() -> None:
 
     dest = PostgresDestination()
     load_conn = _fake_connection()
-    finalize_conn = _fake_connection()
+    finalize_conn = _state_conn(
+        raw_diff=[(key_hash(k), key_json(k)) for k in ((1, "b"), (2, "x"))],
+        to_insert=[],  # (1,"a") is already tracked
+    )
     cur = finalize_conn.cursor.return_value
-    cur.fetchall.return_value = [
-        (key_hash(k), key_json(k)) for k in ((1, "a"), (1, "b"), (2, "x"))
-    ]
     config = _config(upsert_key=["parent_id", "id"])
 
     with patch.object(PostgresDestination, "_connect", return_value=load_conn):
@@ -513,18 +558,19 @@ def test_tracked_scoped_deletes_only_stale_keys_within_observed_scope() -> None:
 
 
 def test_tracked_scoped_rewrite_preserves_out_of_scope_state() -> None:
-    """The state-table rewrite must carry (2,"x") through unchanged alongside
-    this run's own (1,"a") — not silently drop it because this run's own
-    state read only asked about parent 1's stale keys."""
+    """(2,"x") is under a parent this run never observed — #694 part 2 never
+    reads or rewrites it at all (not even to reinsert it unchanged): it's
+    simply never a candidate for either the diff-delete or the insert-new
+    query, so it's absent from every state-table executemany call."""
     from drt.destinations._mirror_state import key_hash, key_json
 
     dest = PostgresDestination()
     load_conn = _fake_connection()
-    finalize_conn = _fake_connection()
+    finalize_conn = _state_conn(
+        raw_diff=[(key_hash(k), key_json(k)) for k in ((1, "b"), (2, "x"))],
+        to_insert=[],
+    )
     cur = finalize_conn.cursor.return_value
-    cur.fetchall.return_value = [
-        (key_hash(k), key_json(k)) for k in ((1, "a"), (1, "b"), (2, "x"))
-    ]
     config = _config(upsert_key=["parent_id", "id"])
 
     with patch.object(PostgresDestination, "_connect", return_value=load_conn):
@@ -532,9 +578,16 @@ def test_tracked_scoped_rewrite_preserves_out_of_scope_state() -> None:
     with patch.object(PostgresDestination, "_connect", return_value=finalize_conn):
         dest.finalize_sync(config, _tracked_scoped_options())
 
-    rows = cur.executemany.call_args.args[1]
-    persisted_keys = {tuple(json.loads(r[2])) for r in rows}
-    assert persisted_keys == {(1, "a"), (2, "x")}
+    state_delete_calls = [
+        c
+        for c in cur.executemany.call_args_list
+        if "DELETE" in str(c.args[0]) and "scores" not in str(c.args[0])
+    ]
+    assert len(state_delete_calls) == 1
+    deleted_hashes = {row[1] for row in state_delete_calls[0].args[1]}
+    assert deleted_hashes == {key_hash((1, "b"))}
+    for call in cur.executemany.call_args_list:
+        assert key_hash((2, "x")) not in str(call.args[1])
 
 
 def test_tracked_scoped_first_touch_of_a_scope_is_not_a_baseline_warning(
@@ -547,9 +600,11 @@ def test_tracked_scoped_first_touch_of_a_scope_is_not_a_baseline_warning(
 
     dest = PostgresDestination()
     load_conn = _fake_connection()
-    finalize_conn = _fake_connection()
+    finalize_conn = _state_conn(
+        raw_diff=[(key_hash((2, "x")), key_json((2, "x")))],
+        to_insert=[(key_hash((1, "a")), key_json((1, "a")))],
+    )
     cur = finalize_conn.cursor.return_value
-    cur.fetchall.return_value = [(key_hash((2, "x")), key_json((2, "x")))]
     config = _config(upsert_key=["parent_id", "id"])
 
     with patch.object(PostgresDestination, "_connect", return_value=load_conn):
@@ -565,9 +620,15 @@ def test_tracked_scoped_first_touch_of_a_scope_is_not_a_baseline_warning(
         stmt = str(call.args[0])
         if "DELETE" in stmt:
             assert "scores" not in stmt
-    rows = cur.executemany.call_args.args[1]
-    persisted_keys = {tuple(json.loads(r[2])) for r in rows}
-    assert persisted_keys == {(1, "a"), (2, "x")}
+    # only the newly-observed (1,"a") is inserted; (2,"x") is untouched
+    insert_calls = [
+        c
+        for c in cur.executemany.call_args_list
+        if "INSERT" in str(c.args[0]) and "_drt_synced_keys" in str(c.args[0])
+    ]
+    assert len(insert_calls) == 1
+    persisted_keys = {tuple(json.loads(r[2])) for r in insert_calls[0].args[1]}
+    assert persisted_keys == {(1, "a")}
 
 
 def test_tracked_scoped_genuinely_no_prior_state_still_warns_baseline(
@@ -575,10 +636,15 @@ def test_tracked_scoped_genuinely_no_prior_state_still_warns_baseline(
 ) -> None:
     """No prior state at all (not just none in scope) -> still the ordinary
     #686 baseline warning, unaffected by scope being configured."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
     dest = PostgresDestination()
     load_conn = _fake_connection()
-    finalize_conn = _fake_connection()
-    finalize_conn.cursor.return_value.fetchall.return_value = []
+    finalize_conn = _state_conn(
+        raw_diff=[],
+        to_insert=[(key_hash((1, "a")), key_json((1, "a")))],
+        previous_exists=False,
+    )
     config = _config(upsert_key=["parent_id", "id"])
 
     with patch.object(PostgresDestination, "_connect", return_value=load_conn):
@@ -599,12 +665,13 @@ def test_tracked_scoped_composite_scope_columns() -> None:
 
     dest = PostgresDestination()
     load_conn = _fake_connection()
-    finalize_conn = _fake_connection()
+    finalize_conn = _state_conn(
+        raw_diff=[
+            (key_hash(k), key_json(k)) for k in ((1, 1, "b"), (1, 2, "x"))
+        ],
+        to_insert=[],
+    )
     cur = finalize_conn.cursor.return_value
-    cur.fetchall.return_value = [
-        (key_hash(k), key_json(k))
-        for k in ((1, 1, "a"), (1, 1, "b"), (1, 2, "x"))
-    ]
     config = _config(upsert_key=["tenant_id", "parent_id", "id"])
     opts = _tracked_scoped_options(scope=["tenant_id", "parent_id"])
 

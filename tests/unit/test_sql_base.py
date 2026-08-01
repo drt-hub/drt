@@ -649,7 +649,9 @@ def test_finalize_mirror_closes_connection_when_execute_raises() -> None:
 
 def _tracked_dest(
     events: list[str],
-    previous: list[tuple[str, str]] | None = None,
+    raw_diff: list[tuple[str, str]] | None = None,
+    to_insert: list[tuple[str, str]] | None = None,
+    previous_exists: bool = True,
     exists: bool = True,
 ) -> Any:
     """A BaseSqlDestination subclass recording the tracked-state hook calls.
@@ -658,17 +660,40 @@ def _tracked_dest(
     and the ``template → executable`` translation that hides ``Composed`` vs
     ``str``) is stubbed to a plain string so the base control flow can be
     asserted dialect-free.
+
+    #694 part 2: the base now issues three distinct read queries against the
+    (fake) cursor — a baseline existence probe (``fetchone``, distinguished
+    by ``LIMIT 1``), the SQL-side diff (``fetchall``, ``SELECT s.key_hash``
+    prefix — state joined against the staged current keys), and the
+    genuinely-new-keys-to-insert query (``fetchall``, ``SELECT c.key_hash``
+    prefix — staged keys joined against state). ``raw_diff``/``to_insert``
+    are what the *database* would have computed for each; the base's own
+    Python-side diffing is gone, so these are supplied directly rather than
+    derived from a full ``previous`` key set the way the old fixture did.
     """
 
     class _Cur:
+        def __init__(self) -> None:
+            self._last_sql = ""
+
         def execute(self, stmt: Any, params: Any = None) -> None:
             events.append(f"execute:{stmt}:{params}")
+            self._last_sql = str(stmt)
 
         def executemany(self, stmt: Any, rows: Any) -> None:
             events.append(f"executemany:{stmt}:{rows}")
 
+        def fetchone(self) -> Any:
+            if "LIMIT 1" in self._last_sql:
+                return (1,) if previous_exists else None
+            return None
+
         def fetchall(self) -> list[tuple[str, str]]:
-            return list(previous or [])
+            if self._last_sql.startswith("SELECT s.key_hash"):
+                return list(raw_diff or [])
+            if self._last_sql.startswith("SELECT c.key_hash"):
+                return list(to_insert or [])
+            return []
 
     class _Conn:
         def cursor(self) -> _Cur:
@@ -743,8 +768,14 @@ def test_tracked_creates_state_table_only_when_absent() -> None:
 def test_tracked_baseline_skips_delete_and_warns(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    from drt.destinations._mirror_state import key_hash, key_json
+
     events: list[str] = []
-    d = _tracked_dest(events, previous=[])
+    d = _tracked_dest(
+        events,
+        previous_exists=False,
+        to_insert=[(key_hash((1,)), key_json((1,)))],
+    )
     d._mirror_keys = [(1,), (1,)]
     with caplog.at_level("WARNING"):
         result = d._finalize_mirror_tracked(
@@ -763,7 +794,7 @@ def test_tracked_deletes_previous_minus_current_via_build_hook() -> None:
     from drt.destinations._mirror_state import key_hash, key_json
 
     events: list[str] = []
-    d = _tracked_dest(events, previous=[(key_hash((k,)), key_json((k,))) for k in (1, 2)])
+    d = _tracked_dest(events, raw_diff=[(key_hash((2,)), key_json((2,)))])
     d._mirror_keys = [(1,)]
     d._finalize_mirror_tracked(
         SimpleNamespace(table="t", upsert_key=["id"]), _tracked_opts()
@@ -773,10 +804,8 @@ def test_tracked_deletes_previous_minus_current_via_build_hook() -> None:
 
 
 def test_tracked_no_stale_keys_issues_no_target_delete() -> None:
-    from drt.destinations._mirror_state import key_hash, key_json
-
     events: list[str] = []
-    d = _tracked_dest(events, previous=[(key_hash((1,)), key_json((1,)))])
+    d = _tracked_dest(events, raw_diff=[], to_insert=[])
     d._mirror_keys = [(1,)]
     d._finalize_mirror_tracked(
         SimpleNamespace(table="t", upsert_key=["id"]), _tracked_opts()
@@ -784,9 +813,59 @@ def test_tracked_no_stale_keys_issues_no_target_delete() -> None:
     assert not any("DELETE t" in e for e in events)
 
 
-def test_tracked_falls_back_to_table_name_when_sync_name_absent() -> None:
+def test_tracked_stages_current_keys_before_diffing() -> None:
+    """#694 part 2: current's keys are staged into a scratch table *before*
+    the diff query runs, and the scratch table is dropped at the end — the
+    diff (``previous - current``) and the new-keys query (``current -
+    previous``) both join against it rather than reading the full state
+    table into Python."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
     events: list[str] = []
-    d = _tracked_dest(events, previous=[])
+    d = _tracked_dest(events)
+    d._mirror_keys = [(1,), (2,)]
+    d._finalize_mirror_tracked(
+        SimpleNamespace(table="t", upsert_key=["id"]), _tracked_opts()
+    )
+    create_idx = next(
+        i for i, e in enumerate(events) if e.startswith("execute:CREATE TEMPORARY TABLE")
+    )
+    diff_idx = next(i for i, e in enumerate(events) if e.startswith("execute:SELECT s.key_hash"))
+    drop_idx = next(i for i, e in enumerate(events) if e.startswith("execute:DROP TABLE"))
+    assert create_idx < diff_idx < drop_idx
+    # both current keys' hash/json were inserted into the staging table
+    stage_insert = next(e for e in events if e.startswith("executemany:INSERT INTO __drt"))
+    for k in (1, 2):
+        assert key_hash((k,)) in stage_insert and key_json((k,)) in stage_insert
+
+
+def test_tracked_inserts_only_genuinely_new_keys() -> None:
+    """A current key already tracked under the same hash never needs
+    rewriting (hash is a pure function of key_json) — only rows the
+    ``NOT EXISTS`` query actually returns as new get inserted."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    events: list[str] = []
+    d = _tracked_dest(events, raw_diff=[], to_insert=[(key_hash((2,)), key_json((2,)))])
+    d._mirror_keys = [(1,), (2,)]
+    d._finalize_mirror_tracked(
+        SimpleNamespace(table="t", upsert_key=["id"]), _tracked_opts()
+    )
+    insert_calls = [e for e in events if e.startswith("executemany:INSERT INTO STATE")]
+    assert len(insert_calls) == 1
+    assert "'s1'" in insert_calls[0] and key_hash((2,)) in insert_calls[0]
+    assert key_hash((1,)) not in insert_calls[0]
+
+
+def test_tracked_falls_back_to_table_name_when_sync_name_absent() -> None:
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    events: list[str] = []
+    d = _tracked_dest(
+        events,
+        previous_exists=False,
+        to_insert=[(key_hash((1,)), key_json((1,)))],
+    )
     d._mirror_keys = [(1,)]
     opts = SimpleNamespace(
         mode="mirror", mirror=SimpleNamespace(scope=None, strategy="tracked")

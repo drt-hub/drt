@@ -505,23 +505,36 @@ class BaseSqlDestination:
         The target DELETE reuses ``_build_mirror_delete`` in its
         ``negate=False`` ("delete exactly these keys") form.
 
-        ``mirror.scope`` + ``strategy: tracked`` (#694): prunes both the
-        state *read* (the diff only ever considers previously-tracked keys
-        whose scope is one this run actually observed) and the state
+        ``mirror.scope`` + ``strategy: tracked`` (#694 part 1): prunes both
+        the state *read* (the diff only ever considers previously-tracked
+        keys whose scope is one this run actually observed) and the state
         *rewrite* (a scope this run never touched keeps its previously
-        tracked keys untouched, rather than being wiped by a blanket
-        delete-all-then-insert-current). Scope values come from
-        ``key_json`` positionally — validated as a subset of ``upsert_key``
-        by ``_validate_mirror_scope`` — so no new state-table column and no
+        tracked keys untouched). Scope values come from ``key_json``
+        positionally — validated as a subset of ``upsert_key`` by
+        ``_validate_mirror_scope`` — so no new state-table column and no
         migration story for tables ``CREATE TABLE IF NOT EXISTS`` already
         created before #694.
+
+        SQL-side diff (#694 part 2): the v0.7.10 implementation SELECTed
+        every tracked key for this sync into Python and diffed it against
+        ``current`` with a Python set — fine at hundreds of keys, but it
+        means a state table with millions of rows gets read into memory in
+        full just to compute a diff that's typically tiny (most runs only
+        change a handful of rows). This version stages ``current`` into a
+        scratch table and lets the database compute ``previous - current``
+        via ``NOT EXISTS`` — only the (small) diff ever reaches Python. The
+        old "read every untouched row so it can be reinserted unchanged"
+        step for the scope-preserved rows is gone too: since untouched rows
+        are simply never selected as part of the diff, not touching them at
+        all has the same effect as reading and reinserting them unchanged,
+        without ever having to.
         """
-        import json
         import logging
 
         from drt.destinations._mirror_state import (
+            DIFF_STAGING_TABLE,
             STATE_TABLE,
-            diff_keys,
+            decode_key,
             key_hash,
             key_json,
         )
@@ -545,50 +558,81 @@ class BaseSqlDestination:
             # concurrent-first-run race.
             if not self._state_table_exists(cur, state_scope, state_raw):
                 self._create_state_table(cur, state_ident)
+
+            # Baseline check (#694 part 2): a cheap existence probe, never a
+            # full read — the only thing this needs to know is "has this sync
+            # ever tracked anything at all", to tell a genuine first run
+            # (WARN) apart from a run that's simply the first to touch this
+            # particular scope (silent — see below).
             cur.execute(
                 self._state_sql(
-                    "SELECT key_hash, key_json FROM {} WHERE sync_name = %s",
+                    "SELECT 1 FROM {} WHERE sync_name = %s LIMIT 1", state_ident
+                ),
+                (sync_name,),
+            )
+            previous_exists = cur.fetchone() is not None
+
+            # `TEMPORARY` (not `TEMP`) is the one spelling both Postgres and
+            # MySQL accept — session-scoped on both, so no manual DROP is
+            # strictly required, but one is issued anyway for clarity and to
+            # keep the connection reusable if pooling is ever introduced.
+            # Unqualified/unquoted: DIFF_STAGING_TABLE is a fixed constant,
+            # never user-configured, so it needs no Composable-safe quoting
+            # the way `state_ident` (schema-qualified from `config.table`)
+            # does.
+            cur.execute(
+                f"CREATE TEMPORARY TABLE {DIFF_STAGING_TABLE} "
+                "(key_hash VARCHAR(64), key_json TEXT)"
+            )
+            if current:
+                cur.executemany(
+                    f"INSERT INTO {DIFF_STAGING_TABLE} (key_hash, key_json) VALUES (%s, %s)",
+                    [(key_hash(k), key_json(k)) for k in current],
+                )
+
+            cur.execute(
+                self._state_sql(
+                    "SELECT s.key_hash, s.key_json FROM {} s WHERE s.sync_name = %s "
+                    f"AND NOT EXISTS (SELECT 1 FROM {DIFF_STAGING_TABLE} c "
+                    "WHERE c.key_hash = s.key_hash)",
                     state_ident,
                 ),
                 (sync_name,),
             )
-            previous = {row[0]: row[1] for row in cur.fetchall()}
+            raw_diff = cur.fetchall()
 
+            # Scope-filtering the (small) diff after the SQL-side subtraction
+            # is equivalent to filtering `previous` by scope *before*
+            # diffing (the #694 part 1 approach): scope membership doesn't
+            # depend on `current`, and `current`-membership doesn't depend on
+            # scope, so `(previous ∩ scope) - current == (previous - current)
+            # ∩ scope`. This is what lets the scope check stay in Python
+            # without ever materialising `previous` — it now only ever sees
+            # the rows that are actually about to be deleted.
             if scope_positions is not None and observed_scopes is not None:
-                previous_in_scope = {
-                    h: kj
-                    for h, kj in previous.items()
-                    if tuple(json.loads(kj)[p] for p in scope_positions) in observed_scopes
-                }
-                # Kept as-is in the rewrite below — a scope this run never
-                # touched (a different parent, another pipeline's sync)
-                # must not lose its previously tracked keys.
-                preserved = [
-                    tuple(json.loads(kj))
-                    for h, kj in previous.items()
-                    if h not in previous_in_scope
+                to_delete = [
+                    decode_key(kj)
+                    for _h, kj in raw_diff
+                    if tuple(decode_key(kj)[p] for p in scope_positions) in observed_scopes
                 ]
             else:
-                previous_in_scope = previous
-                preserved = []
+                to_delete = [decode_key(kj) for _h, kj in raw_diff]
 
-            if previous_in_scope:
-                to_delete = diff_keys(previous_in_scope, current)
-                if to_delete:
-                    stmt, params = self._build_mirror_delete(
-                        config.table,
-                        upsert_cols,
-                        to_delete,
-                        None,
-                        None,
-                        negate=False,
-                    )
-                    cur.execute(stmt, params)
-            elif not previous:
+            if to_delete:
+                stmt, params = self._build_mirror_delete(
+                    config.table,
+                    upsert_cols,
+                    to_delete,
+                    None,
+                    None,
+                    negate=False,
+                )
+                cur.execute(stmt, params)
+            elif not previous_exists:
                 # No prior state at all for this sync (never run, or lost
                 # state) — baseline. Prior state existing for *other* scopes
-                # only (previous non-empty, previous_in_scope empty) is not
-                # a baseline situation — it's simply the first run to touch
+                # only (previous_exists True, to_delete empty) is not a
+                # baseline situation — it's simply the first run to touch
                 # this particular scope, and needs no warning.
                 logging.getLogger(__name__).warning(
                     "tracked mirror: no prior state for sync %r in %s — "
@@ -598,24 +642,45 @@ class BaseSqlDestination:
                     len(current),
                 )
 
-            # Rewrite this sync's state: unscoped, the current run's keys are
-            # the full truth (unchanged #686 behaviour). Scoped, the current
-            # run only speaks for the scopes it observed — `preserved` carries
-            # every other scope's tracked keys through unchanged so the same
-            # unconditional delete-all-then-insert below never has to know
-            # which specific rows belong to which scope.
+            # Rewrite this sync's state: remove exactly the stale rows just
+            # identified, add exactly the current keys that weren't already
+            # tracked. A row whose key_hash is already present never needs
+            # touching — key_hash is a pure function of key_json, so a
+            # matching hash guarantees the stored key_json is already
+            # correct. Untouched rows (other scopes, other syncs' keys under
+            # the same sync_name — there are none, but also rows under
+            # scopes this run never observed) are simply never selected by
+            # either step, which is the #694 part 2 replacement for
+            # `preserved`: not reading and not touching a row is equivalent
+            # to reading it and reinserting it unchanged.
+            if to_delete:
+                cur.executemany(
+                    self._state_sql(
+                        "DELETE FROM {} WHERE sync_name = %s AND key_hash = %s",
+                        state_ident,
+                    ),
+                    [(sync_name, key_hash(k)) for k in to_delete],
+                )
             cur.execute(
-                self._state_sql("DELETE FROM {} WHERE sync_name = %s", state_ident),
-                (sync_name,),
-            )
-            cur.executemany(
                 self._state_sql(
-                    "INSERT INTO {} (sync_name, key_hash, key_json) "
-                    "VALUES (%s, %s, %s)",
+                    "SELECT c.key_hash, c.key_json FROM "
+                    f"{DIFF_STAGING_TABLE} c WHERE NOT EXISTS "
+                    "(SELECT 1 FROM {} s WHERE s.sync_name = %s AND s.key_hash = c.key_hash)",
                     state_ident,
                 ),
-                [(sync_name, key_hash(k), key_json(k)) for k in (current + preserved)],
+                (sync_name,),
             )
+            to_insert = cur.fetchall()
+            if to_insert:
+                cur.executemany(
+                    self._state_sql(
+                        "INSERT INTO {} (sync_name, key_hash, key_json) "
+                        "VALUES (%s, %s, %s)",
+                        state_ident,
+                    ),
+                    [(sync_name, h, kj) for h, kj in to_insert],
+                )
+            cur.execute(f"DROP TABLE {DIFF_STAGING_TABLE}")
             conn.commit()
         finally:
             conn.close()

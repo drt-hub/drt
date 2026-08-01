@@ -154,6 +154,7 @@ Tracked-specific behaviour:
 
 - **First run baselines** — records the key set, deletes nothing (the second and subsequent runs account for deletions).
 - **Lost / missing state re-baselines** — a WARN is logged and no deletes happen that run; the state is rebuilt from the current run.
+- **The diff runs in SQL, not Python ([#694 part 2](https://github.com/drt-hub/drt/issues/694))** — this run's keys are staged into a scratch table and `previously-synced − current-source` is computed with a `NOT EXISTS` join against `_drt_synced_keys`, so a state table with millions of rows is never read into memory just to compute a diff that's typically small. Only the diffed rows (and the genuinely-new keys to insert) ever reach drt's process.
 - **Target delete + state rewrite are one transaction** — they commit or roll back together, so the bookkeeping can't drift from the data.
 - **State survives ephemeral runners** — it lives in the destination next to the data (`sync_name`, `key_hash`, `key_json` — one row per synced key, scoped per sync), not in local `.drt/` state.
 - **Key types** — int / str keys round-trip exactly; non-JSON-native key types (datetime, Decimal, UUID) are stringified in the state table, a documented limitation.
@@ -202,7 +203,7 @@ sync:
     scope: [parent_id]
 ```
 
-Composing the two: `scope` must be a subset of `destination.upsert_key` (`upsert_key: [parent_id, id]` for the example above) — a run touching one parent leaves every other parent's tracked state untouched (not wiped by a blanket rewrite), and the state diff itself only ever compares previously-tracked keys under the *observed* scope, so a large table's full key history is never read for a run that only touches one parent's children. Scope values are derived from the already-tracked key rather than stored in a separate state-table column — the reason for the subset requirement, and why no `_drt_synced_keys` migration is needed for tables created before #694. A scope column that isn't part of `upsert_key` fails fast, same as the missing-column check above.
+Composing the two: `scope` must be a subset of `destination.upsert_key` (`upsert_key: [parent_id, id]` for the example above) — a run touching one parent leaves every other parent's tracked state untouched (not wiped by a blanket rewrite). Scope values are derived from the already-tracked key rather than stored in a separate state-table column — the reason for the subset requirement, and why no `_drt_synced_keys` migration is needed for tables created before #694. A scope column that isn't part of `upsert_key` fails fast, same as the missing-column check above. Since #694 part 2, the SQL-side diff (previous bullet) already means a large table's full key history is never read regardless of scope; scope additionally restricts *which* stale keys this run is even allowed to delete, to the parents it actually observed.
 
 `scope` alone (without `tracked`) still assumes drt owns all rows under the observed parents.
 

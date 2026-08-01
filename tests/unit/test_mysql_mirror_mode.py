@@ -60,6 +60,40 @@ def _fake_connection() -> MagicMock:
     return conn
 
 
+def _state_conn(
+    raw_diff: list[tuple[str, str]] | None = None,
+    to_insert: list[tuple[str, str]] | None = None,
+    previous_exists: bool = True,
+    table_exists: bool = True,
+) -> MagicMock:
+    """A finalize-side connection whose cursor answers the three distinct
+    reads #694 part 2 introduced, dispatched by the most recent ``execute()``
+    call's SQL text — see the Postgres test file's twin helper for the full
+    rationale (identical shape; MySQL's ``_state_sql`` is plain ``str``
+    instead of ``psycopg2.sql.Composed``, but the dispatch substrings are
+    the same across both)."""
+    conn = _fake_connection()
+    cur = conn.cursor.return_value
+
+    def fetchone_side_effect() -> Any:
+        sql = str(cur.execute.call_args.args[0])
+        if "LIMIT 1" in sql:
+            return (1,) if previous_exists else None
+        return (1,) if table_exists else None
+
+    def fetchall_side_effect() -> list[tuple[str, str]]:
+        sql = str(cur.execute.call_args.args[0])
+        if "SELECT s.key_hash" in sql:
+            return list(raw_diff or [])
+        if "SELECT c.key_hash" in sql:
+            return list(to_insert or [])
+        return []
+
+    cur.fetchone.side_effect = fetchone_side_effect
+    cur.fetchall.side_effect = fetchall_side_effect
+    return conn
+
+
 # ---------------------------------------------------------------------------
 # SyncOptions schema
 # ---------------------------------------------------------------------------
@@ -360,11 +394,16 @@ def _tracked_options() -> SyncOptions:
 
 def test_tracked_first_run_baselines_without_deleting_mysql() -> None:
     """No prior state: keys inserted into _drt_synced_keys, target untouched."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
     dest = MySQLDestination()
     load_conn = _fake_connection()
-    finalize_conn = _fake_connection()
+    finalize_conn = _state_conn(
+        raw_diff=[],
+        to_insert=[(key_hash((k,)), key_json((k,))) for k in (1, 2)],
+        previous_exists=False,
+    )
     cur = finalize_conn.cursor.return_value
-    cur.fetchall.return_value = []
 
     with patch.object(MySQLDestination, "_connect", return_value=load_conn):
         dest.load([{"id": 1}, {"id": 2}], _config(), _tracked_options())
@@ -387,11 +426,10 @@ def test_tracked_second_run_deletes_only_stale_tracked_keys_mysql() -> None:
 
     dest = MySQLDestination()
     load_conn = _fake_connection()
-    finalize_conn = _fake_connection()
+    finalize_conn = _state_conn(
+        raw_diff=[(key_hash((3,)), key_json((3,)))], to_insert=[]
+    )
     cur = finalize_conn.cursor.return_value
-    cur.fetchall.return_value = [
-        (key_hash((k,)), key_json((k,))) for k in (1, 2, 3)
-    ]
 
     with patch.object(MySQLDestination, "_connect", return_value=load_conn):
         dest.load([{"id": 1}, {"id": 2}], _config(), _tracked_options())
@@ -416,12 +454,10 @@ def test_tracked_composite_key_flattens_params_mysql() -> None:
 
     dest = MySQLDestination()
     load_conn = _fake_connection()
-    finalize_conn = _fake_connection()
+    finalize_conn = _state_conn(
+        raw_diff=[(key_hash((2, "b")), key_json((2, "b")))], to_insert=[]
+    )
     cur = finalize_conn.cursor.return_value
-    cur.fetchall.return_value = [
-        (key_hash((1, "a")), key_json((1, "a"))),
-        (key_hash((2, "b")), key_json((2, "b"))),
-    ]
     config = _config(upsert_key=["tenant_id", "user_id"])
 
     with patch.object(MySQLDestination, "_connect", return_value=load_conn):
@@ -473,11 +509,11 @@ def test_tracked_scoped_deletes_only_stale_keys_within_observed_scope_mysql() ->
 
     dest = MySQLDestination()
     load_conn = _fake_connection()
-    finalize_conn = _fake_connection()
+    finalize_conn = _state_conn(
+        raw_diff=[(key_hash(k), key_json(k)) for k in ((1, "b"), (2, "x"))],
+        to_insert=[],
+    )
     cur = finalize_conn.cursor.return_value
-    cur.fetchall.return_value = [
-        (key_hash(k), key_json(k)) for k in ((1, "a"), (1, "b"), (2, "x"))
-    ]
     config = _config(upsert_key=["parent_id", "id"])
 
     with patch.object(MySQLDestination, "_connect", return_value=load_conn):
@@ -496,17 +532,19 @@ def test_tracked_scoped_deletes_only_stale_keys_within_observed_scope_mysql() ->
 
 
 def test_tracked_scoped_rewrite_preserves_out_of_scope_state_mysql() -> None:
-    """The state-table rewrite must carry (2,"x") through unchanged alongside
-    this run's own (1,"a")."""
+    """(2,"x") is under a parent this run never observed — #694 part 2 never
+    reads or rewrites it: it's absent from every state-table executemany
+    call, which is what "preserved" now means (never touched, not
+    read-and-reinserted-unchanged)."""
     from drt.destinations._mirror_state import key_hash, key_json
 
     dest = MySQLDestination()
     load_conn = _fake_connection()
-    finalize_conn = _fake_connection()
+    finalize_conn = _state_conn(
+        raw_diff=[(key_hash(k), key_json(k)) for k in ((1, "b"), (2, "x"))],
+        to_insert=[],
+    )
     cur = finalize_conn.cursor.return_value
-    cur.fetchall.return_value = [
-        (key_hash(k), key_json(k)) for k in ((1, "a"), (1, "b"), (2, "x"))
-    ]
     config = _config(upsert_key=["parent_id", "id"])
 
     with patch.object(MySQLDestination, "_connect", return_value=load_conn):
@@ -514,9 +552,16 @@ def test_tracked_scoped_rewrite_preserves_out_of_scope_state_mysql() -> None:
     with patch.object(MySQLDestination, "_connect", return_value=finalize_conn):
         dest.finalize_sync(config, _tracked_scoped_options())
 
-    rows = cur.executemany.call_args.args[1]
-    persisted_keys = {tuple(json.loads(r[2])) for r in rows}
-    assert persisted_keys == {(1, "a"), (2, "x")}
+    state_delete_calls = [
+        c
+        for c in cur.executemany.call_args_list
+        if "DELETE" in str(c.args[0]) and "`scores`" not in str(c.args[0])
+    ]
+    assert len(state_delete_calls) == 1
+    deleted_hashes = {row[1] for row in state_delete_calls[0].args[1]}
+    assert deleted_hashes == {key_hash((1, "b"))}
+    for call in cur.executemany.call_args_list:
+        assert key_hash((2, "x")) not in str(call.args[1])
 
 
 def test_tracked_scoped_first_touch_of_a_scope_is_not_a_baseline_warning_mysql(
@@ -528,9 +573,11 @@ def test_tracked_scoped_first_touch_of_a_scope_is_not_a_baseline_warning_mysql(
 
     dest = MySQLDestination()
     load_conn = _fake_connection()
-    finalize_conn = _fake_connection()
+    finalize_conn = _state_conn(
+        raw_diff=[(key_hash((2, "x")), key_json((2, "x")))],
+        to_insert=[(key_hash((1, "a")), key_json((1, "a")))],
+    )
     cur = finalize_conn.cursor.return_value
-    cur.fetchall.return_value = [(key_hash((2, "x")), key_json((2, "x")))]
     config = _config(upsert_key=["parent_id", "id"])
 
     with patch.object(MySQLDestination, "_connect", return_value=load_conn):
@@ -546,6 +593,14 @@ def test_tracked_scoped_first_touch_of_a_scope_is_not_a_baseline_warning_mysql(
         stmt = str(call.args[0])
         if "DELETE" in stmt:
             assert "`scores`" not in stmt
+    insert_calls = [
+        c
+        for c in cur.executemany.call_args_list
+        if "INSERT" in str(c.args[0]) and "_drt_synced_keys" in str(c.args[0])
+    ]
+    assert len(insert_calls) == 1
+    persisted_keys = {tuple(json.loads(r[2])) for r in insert_calls[0].args[1]}
+    assert persisted_keys == {(1, "a")}
 
 
 def test_tracked_scoped_genuinely_no_prior_state_still_warns_baseline_mysql(
@@ -553,10 +608,15 @@ def test_tracked_scoped_genuinely_no_prior_state_still_warns_baseline_mysql(
 ) -> None:
     """No prior state at all -> ordinary #686 baseline warning, unaffected
     by scope being configured."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
     dest = MySQLDestination()
     load_conn = _fake_connection()
-    finalize_conn = _fake_connection()
-    finalize_conn.cursor.return_value.fetchall.return_value = []
+    finalize_conn = _state_conn(
+        raw_diff=[],
+        to_insert=[(key_hash((1, "a")), key_json((1, "a")))],
+        previous_exists=False,
+    )
     config = _config(upsert_key=["parent_id", "id"])
 
     with patch.object(MySQLDestination, "_connect", return_value=load_conn):
