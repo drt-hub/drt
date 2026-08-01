@@ -864,15 +864,36 @@ def _tracked_scoped_options(scope: list[str] = ["parent_id"]) -> SyncOptions:
     return opts
 
 
-def _state_conn(rows: list[tuple[str, str]], exists: bool = True) -> MagicMock:
-    """A fake connection wired for the state-table read path: ``SHOW TABLES``
-    then ``SELECT key_hash, key_json ...`` — two sequential ``fetchall()``
-    calls on the same cursor, each needing its own return value."""
+def _state_conn(
+    raw_diff: list[tuple[str, str]] | None = None,
+    to_insert: list[tuple[str, str]] | None = None,
+    previous_exists: bool = True,
+    exists: bool = True,
+) -> MagicMock:
+    """A fake connection wired for the #694 part 2 read path — ``SHOW
+    TABLES``, a baseline existence probe, the SQL-side diff, and the
+    genuinely-new-keys probe, dispatched by the executed SQL's text since
+    the cursor now answers up to four distinct reads per run instead of
+    two. ``raw_diff`` is what ``previous - current`` would have computed
+    server-side; ``to_insert`` is what ``current - previous`` would have."""
     conn = _fake_conn()
-    conn._cur.fetchall.side_effect = [
-        [("_drt_synced_keys",)] if exists else [],
-        rows,
-    ]
+    cur = conn._cur
+
+    def fetchone_side_effect() -> Any:
+        return (1,) if previous_exists else None
+
+    def fetchall_side_effect() -> list[tuple[str, str]]:
+        sql = cur.execute.call_args.args[0] if cur.execute.call_args.args else ""
+        if sql.startswith("SHOW TABLES"):
+            return [("_drt_synced_keys",)] if exists else []
+        if sql.startswith("SELECT s.key_hash"):
+            return list(raw_diff or [])
+        if sql.startswith("SELECT c.key_hash"):
+            return list(to_insert or [])
+        return []
+
+    cur.fetchone.side_effect = fetchone_side_effect
+    cur.fetchall.side_effect = fetchall_side_effect
     return conn
 
 
@@ -882,7 +903,7 @@ def test_tracked_creates_state_table_when_absent_databricks(
     _set_creds(monkeypatch)
     dest = DatabricksDestination()
     load_conn = _fake_conn()
-    finalize_conn = _state_conn(rows=[], exists=False)
+    finalize_conn = _state_conn(exists=False)
     config = _config(upsert_key=["id"])
 
     with patch.dict("sys.modules", _mocked_databricks_modules(load_conn)):
@@ -906,7 +927,7 @@ def test_tracked_skips_create_when_state_table_preprovisioned_databricks(
     _set_creds(monkeypatch)
     dest = DatabricksDestination()
     load_conn = _fake_conn()
-    finalize_conn = _state_conn(rows=[], exists=True)
+    finalize_conn = _state_conn(exists=True)
     config = _config(upsert_key=["id"])
 
     with patch.dict("sys.modules", _mocked_databricks_modules(load_conn)):
@@ -923,10 +944,16 @@ def test_tracked_skips_create_when_state_table_preprovisioned_databricks(
 def test_tracked_first_run_baselines_without_deleting_databricks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from drt.destinations._mirror_state import key_hash, key_json
+
     _set_creds(monkeypatch)
     dest = DatabricksDestination()
     load_conn = _fake_conn()
-    finalize_conn = _state_conn(rows=[])
+    finalize_conn = _state_conn(
+        raw_diff=[],
+        to_insert=[(key_hash((k,)), key_json((k,))) for k in (1, 2)],
+        previous_exists=False,
+    )
     config = _config(upsert_key=["id"])
 
     with patch.dict("sys.modules", _mocked_databricks_modules(load_conn)):
@@ -963,9 +990,7 @@ def test_tracked_second_run_deletes_only_stale_tracked_keys_databricks(
     _set_creds(monkeypatch)
     dest = DatabricksDestination()
     load_conn = _fake_conn()
-    finalize_conn = _state_conn(
-        rows=[(key_hash((k,)), key_json((k,))) for k in (1, 2, 3)]
-    )
+    finalize_conn = _state_conn(raw_diff=[(key_hash((3,)), key_json((3,)))])
     config = _config(upsert_key=["id"])
 
     with patch.dict("sys.modules", _mocked_databricks_modules(load_conn)):
@@ -988,6 +1013,73 @@ def test_tracked_second_run_deletes_only_stale_tracked_keys_databricks(
     assert "NOT IN" not in delete_call.args[0]
 
 
+def test_tracked_stages_current_keys_before_diffing_databricks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#694 part 2: current's keys are staged into the diff scratch table
+    (distinct from the target-delete's own ``keys_table``) before the diff
+    query runs, and it's dropped at the end."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    _set_creds(monkeypatch)
+    dest = DatabricksDestination()
+    load_conn = _fake_conn()
+    finalize_conn = _state_conn()
+    config = _config(upsert_key=["id"])
+    diff_tbl = "main.default.__drt_mirror_diff_keys"
+
+    with patch.dict("sys.modules", _mocked_databricks_modules(load_conn)):
+        dest.load([{"id": 1}, {"id": 2}], config, _tracked_options())
+    with patch.dict("sys.modules", _mocked_databricks_modules(finalize_conn)):
+        dest.finalize_sync(config, _tracked_options())
+
+    calls = finalize_conn._cur.execute.call_args_list
+    create_sql = f"CREATE OR REPLACE TABLE {diff_tbl}"
+    create_idx = next(
+        i for i, c in enumerate(calls) if c.args and c.args[0].startswith(create_sql)
+    )
+    diff_idx = next(
+        i for i, c in enumerate(calls) if c.args and c.args[0].startswith("SELECT s.key_hash")
+    )
+    drop_sql = f"DROP TABLE IF EXISTS {diff_tbl}"
+    drop_idx = next(i for i, c in enumerate(calls) if c.args and c.args[0] == drop_sql)
+    assert create_idx < diff_idx < drop_idx
+    stage_insert = next(
+        c for c in calls if c.args and c.args[0].startswith(f"INSERT INTO {diff_tbl}")
+    )
+    assert stage_insert.args[1] == [
+        key_hash((1,)), key_json((1,)), key_hash((2,)), key_json((2,))
+    ]
+
+
+def test_tracked_inserts_only_genuinely_new_keys_databricks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A current key already tracked under the same hash never needs
+    rewriting — only rows the new-keys query actually returns get
+    inserted."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    _set_creds(monkeypatch)
+    dest = DatabricksDestination()
+    load_conn = _fake_conn()
+    finalize_conn = _state_conn(raw_diff=[], to_insert=[(key_hash((2,)), key_json((2,)))])
+    config = _config(upsert_key=["id"])
+
+    with patch.dict("sys.modules", _mocked_databricks_modules(load_conn)):
+        dest.load([{"id": 1}, {"id": 2}], config, _tracked_options())
+    with patch.dict("sys.modules", _mocked_databricks_modules(finalize_conn)):
+        dest.finalize_sync(config, _tracked_options())
+
+    insert_calls = [
+        c
+        for c in finalize_conn._cur.execute.call_args_list
+        if c.args and c.args[0].startswith("INSERT INTO main.default._drt_synced_keys")
+    ]
+    assert len(insert_calls) == 1
+    assert insert_calls[0].args[1] == ["scores_sync", key_hash((2,)), key_json((2,))]
+
+
 def test_tracked_empty_source_is_noop_databricks(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_creds(monkeypatch)
     dest = DatabricksDestination()
@@ -1004,10 +1096,14 @@ def test_tracked_empty_source_is_noop_databricks(monkeypatch: pytest.MonkeyPatch
 def test_tracked_baseline_logs_warning_databricks(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    from drt.destinations._mirror_state import key_hash, key_json
+
     _set_creds(monkeypatch)
     dest = DatabricksDestination()
     load_conn = _fake_conn()
-    finalize_conn = _state_conn(rows=[])
+    finalize_conn = _state_conn(
+        raw_diff=[], to_insert=[(key_hash((1,)), key_json((1,)))], previous_exists=False
+    )
     config = _config(upsert_key=["id"])
 
     with patch.dict("sys.modules", _mocked_databricks_modules(load_conn)):
@@ -1031,16 +1127,16 @@ def test_tracked_scoped_deletes_only_stale_keys_within_observed_scope_databricks
 ) -> None:
     """Prior state has parent 1: {(1,"a"),(1,"b")} and parent 2: {(2,"x")}.
     This run only touches parent 1 with just (1,"a") -> (1,"b") is stale and
-    deleted; (2,"x") is under a parent this run never saw and must survive."""
-    import json
-
+    deleted; (2,"x") is under a parent this run never saw and must survive
+    (#694 part 2: never read or rewritten at all)."""
     from drt.destinations._mirror_state import key_hash, key_json
 
     _set_creds(monkeypatch)
     dest = DatabricksDestination()
     load_conn = _fake_conn()
     finalize_conn = _state_conn(
-        rows=[(key_hash(k), key_json(k)) for k in ((1, "a"), (1, "b"), (2, "x"))]
+        raw_diff=[(key_hash(k), key_json(k)) for k in ((1, "b"), (2, "x"))],
+        to_insert=[],  # (1,"a") already tracked
     )
     config = _config(upsert_key=["parent_id", "id"])
 
@@ -1056,16 +1152,21 @@ def test_tracked_scoped_deletes_only_stale_keys_within_observed_scope_databricks
     )
     assert key_insert.args[1] == [1, "b"]
 
-    state_inserts = [
+    state_delete_calls = [
         c
         for c in calls
-        if c.args and c.args[0].startswith("INSERT INTO main.default._drt_synced_keys")
+        if c.args
+        and c.args[0].startswith("DELETE FROM main.default._drt_synced_keys")
     ]
-    assert len(state_inserts) == 1
-    params = state_inserts[0].args[1]
-    # 2 rows x 3 cols (sync_name, key_hash, key_json) flattened
-    persisted_keys = {tuple(json.loads(params[i * 3 + 2])) for i in range(len(params) // 3)}
-    assert persisted_keys == {(1, "a"), (2, "x")}
+    assert len(state_delete_calls) == 1
+    assert state_delete_calls[0].args[1] == ["scores_sync", key_hash((1, "b"))]
+    assert not any(
+        c.args and key_hash((2, "x")) in c.args[1] for c in calls if len(c.args) > 1
+    )
+    assert not any(
+        c.args and c.args[0].startswith("INSERT INTO main.default._drt_synced_keys")
+        for c in calls
+    )
 
 
 def test_tracked_scoped_first_touch_of_a_scope_is_not_a_baseline_warning_databricks(
@@ -1076,7 +1177,10 @@ def test_tracked_scoped_first_touch_of_a_scope_is_not_a_baseline_warning_databri
     _set_creds(monkeypatch)
     dest = DatabricksDestination()
     load_conn = _fake_conn()
-    finalize_conn = _state_conn(rows=[(key_hash((2, "x")), key_json((2, "x")))])
+    finalize_conn = _state_conn(
+        raw_diff=[(key_hash((2, "x")), key_json((2, "x")))],
+        to_insert=[(key_hash((1, "a")), key_json((1, "a")))],
+    )
     config = _config(upsert_key=["parent_id", "id"])
 
     with patch.dict("sys.modules", _mocked_databricks_modules(load_conn)):
@@ -1092,15 +1196,26 @@ def test_tracked_scoped_first_touch_of_a_scope_is_not_a_baseline_warning_databri
         sql = c.args[0] if c.args else ""
         if sql.startswith("DELETE FROM"):
             assert "user_scores" not in sql
+    insert_calls = [
+        c
+        for c in finalize_conn._cur.execute.call_args_list
+        if c.args and c.args[0].startswith("INSERT INTO main.default._drt_synced_keys")
+    ]
+    assert len(insert_calls) == 1
+    assert insert_calls[0].args[1] == ["scores_sync", key_hash((1, "a")), key_json((1, "a"))]
 
 
 def test_tracked_scoped_genuinely_no_prior_state_still_warns_baseline_databricks(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    from drt.destinations._mirror_state import key_hash, key_json
+
     _set_creds(monkeypatch)
     dest = DatabricksDestination()
     load_conn = _fake_conn()
-    finalize_conn = _state_conn(rows=[])
+    finalize_conn = _state_conn(
+        raw_diff=[], to_insert=[(key_hash((1, "a")), key_json((1, "a")))], previous_exists=False
+    )
     config = _config(upsert_key=["parent_id", "id"])
 
     with patch.dict("sys.modules", _mocked_databricks_modules(load_conn)):

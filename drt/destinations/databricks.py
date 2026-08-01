@@ -762,16 +762,40 @@ class DatabricksDestination:
         identically here; a tracked table's stale-key list can just as
         easily exceed the limit.
 
-        ``mirror.scope`` + ``strategy: tracked`` (#694) prunes both the state
-        read and the state rewrite to the observed scope — see
+        ``mirror.scope`` + ``strategy: tracked`` (#694 part 1) prunes both
+        the state read and the state rewrite to the observed scope — see
         ``BaseSqlDestination._finalize_mirror_tracked`` for the full
         rationale; the algorithm here is identical, just against
         Databricks' own cursor and staged-delete primitives.
+
+        SQL-side diff (#694 part 2, same rationale/proof as the other three
+        dialects): this run's keys are staged into a second scratch table
+        (``_mirror_state.DIFF_STAGING_TABLE``, distinct from
+        :meth:`_delete_via_staged_keys`'s ``keys_table`` — that one's schema
+        matches ``upsert_cols``' types for the target-table anti-join,
+        this one is always ``(key_hash, key_json)`` for the state-table
+        diff) and ``previous - current`` is computed with a ``NOT EXISTS``
+        join against ``_drt_synced_keys`` in SQL, so a state table with
+        millions of rows never gets read into Python just to compute a
+        typically-small diff. Chunked inserts reuse ``_rows_per_chunk`` —
+        the native ``?`` paramstyle's 255-marker limit applies here exactly
+        as it does to ``_delete_via_staged_keys``'s own staging inserts.
+        Scope-filtering the diff in Python afterward is mathematically
+        equivalent to filtering the full previous set by scope first (same
+        proof as the base implementation). The old "read every untouched
+        row so it can be reinserted unchanged" step is gone: untouched rows
+        are simply never selected by either the diff query or the new-keys
+        query.
         """
-        import json
         import logging
 
-        from drt.destinations._mirror_state import STATE_TABLE, diff_keys, key_hash, key_json
+        from drt.destinations._mirror_state import (
+            DIFF_STAGING_TABLE,
+            STATE_TABLE,
+            decode_key,
+            key_hash,
+            key_json,
+        )
 
         assert isinstance(config, DatabricksDestinationConfig)
         sync_name = sync_options._sync_name or config.table
@@ -781,6 +805,7 @@ class DatabricksDestination:
         table_fq = f"{config.catalog}.{config.schema_}.{config.table}"
         state_fq = f"{config.catalog}.{config.schema_}.{STATE_TABLE}"
         keys_table = f"{config.catalog}.{config.schema_}.__drt_mirror_keys_{config.table}"
+        diff_table = f"{config.catalog}.{config.schema_}.{DIFF_STAGING_TABLE}"
 
         scope_cols = sync_options.mirror.scope if sync_options.mirror is not None else None
         scope_positions = [upsert_cols.index(c) for c in scope_cols] if scope_cols else None
@@ -801,35 +826,52 @@ class DatabricksDestination:
                         "sync_name STRING, key_hash STRING, key_json STRING"
                         ") USING DELTA"
                     )
+
+                # Baseline check: a cheap existence probe, never a full read.
                 cur.execute(
-                    f"SELECT key_hash, key_json FROM {state_fq} WHERE sync_name = ?",
+                    f"SELECT 1 FROM {state_fq} WHERE sync_name = ? LIMIT 1", [sync_name]
+                )
+                previous_exists = cur.fetchone() is not None
+
+                cur.execute(
+                    f"CREATE OR REPLACE TABLE {diff_table} "
+                    "(key_hash STRING, key_json STRING) USING DELTA"
+                )
+                if current:
+                    insert_prefix = (
+                        f"INSERT INTO {diff_table} (key_hash, key_json) VALUES "
+                    )
+                    rows_per = _rows_per_chunk(2)
+                    diff_rows = [[key_hash(k), key_json(k)] for k in current]
+                    for start in range(0, len(diff_rows), rows_per):
+                        chunk = diff_rows[start : start + rows_per]
+                        cur.execute(
+                            insert_prefix + ", ".join(["(?, ?)"] * len(chunk)),
+                            [v for row in chunk for v in row],
+                        )
+
+                cur.execute(
+                    f"SELECT s.key_hash, s.key_json FROM {state_fq} s WHERE s.sync_name = ? "
+                    f"AND NOT EXISTS (SELECT 1 FROM {diff_table} c WHERE c.key_hash = s.key_hash)",
                     [sync_name],
                 )
-                previous = {row[0]: row[1] for row in cur.fetchall()}
+                raw_diff = cur.fetchall()
 
                 if scope_positions is not None and observed_scopes is not None:
-                    previous_in_scope = {
-                        h: kj
-                        for h, kj in previous.items()
-                        if tuple(json.loads(kj)[p] for p in scope_positions) in observed_scopes
-                    }
-                    preserved = [
-                        tuple(json.loads(kj))
-                        for h, kj in previous.items()
-                        if h not in previous_in_scope
+                    to_delete = [
+                        decode_key(kj)
+                        for _h, kj in raw_diff
+                        if tuple(decode_key(kj)[p] for p in scope_positions) in observed_scopes
                     ]
                 else:
-                    previous_in_scope = previous
-                    preserved = []
+                    to_delete = [decode_key(kj) for _h, kj in raw_diff]
 
-                if previous_in_scope:
-                    to_delete = diff_keys(previous_in_scope, current)
-                    if to_delete:
-                        self._delete_via_staged_keys(
-                            cur, table_fq, upsert_cols, to_delete, keys_table, None, None,
-                            negate=False,
-                        )
-                elif not previous:
+                if to_delete:
+                    self._delete_via_staged_keys(
+                        cur, table_fq, upsert_cols, to_delete, keys_table, None, None,
+                        negate=False,
+                    )
+                elif not previous_exists:
                     logging.getLogger(__name__).warning(
                         "tracked mirror: no prior state for sync %r in %s — "
                         "baselining this run's %d key(s); no deletes this run.",
@@ -838,21 +880,40 @@ class DatabricksDestination:
                         len(current),
                     )
 
-                # Rewrite this sync's state to the current (+ preserved
-                # out-of-scope) key set.
-                cur.execute(f"DELETE FROM {state_fq} WHERE sync_name = ?", [sync_name])
-                state_rows = [
-                    [sync_name, key_hash(k), key_json(k)] for k in (current + preserved)
-                ]
-                insert_prefix = f"INSERT INTO {state_fq} (sync_name, key_hash, key_json) VALUES "
-                row_marker = "(?, ?, ?)"
-                rows_per = _rows_per_chunk(3)
-                for start in range(0, len(state_rows), rows_per):
-                    chunk = state_rows[start : start + rows_per]
-                    cur.execute(
-                        insert_prefix + ", ".join([row_marker] * len(chunk)),
-                        [v for row in chunk for v in row],
+                if to_delete:
+                    delete_prefix = f"DELETE FROM {state_fq} WHERE sync_name = ? AND key_hash IN ("
+                    # -1 reserves the marker `sync_name` itself binds, on top
+                    # of the chunk's hash markers, under the 255 limit.
+                    rows_per = _rows_per_chunk(1) - 1
+                    to_delete_hashes = [key_hash(k) for k in to_delete]
+                    for start in range(0, len(to_delete_hashes), rows_per):
+                        hash_chunk = to_delete_hashes[start : start + rows_per]
+                        cur.execute(
+                            delete_prefix + ", ".join(["?"] * len(hash_chunk)) + ")",
+                            [sync_name, *hash_chunk],
+                        )
+
+                cur.execute(
+                    f"SELECT c.key_hash, c.key_json FROM {diff_table} c "
+                    f"WHERE NOT EXISTS (SELECT 1 FROM {state_fq} s "
+                    "WHERE s.sync_name = ? AND s.key_hash = c.key_hash)",
+                    [sync_name],
+                )
+                to_insert = cur.fetchall()
+                if to_insert:
+                    insert_prefix = (
+                        f"INSERT INTO {state_fq} (sync_name, key_hash, key_json) VALUES "
                     )
+                    rows_per = _rows_per_chunk(3)
+                    state_rows = [[sync_name, h, kj] for h, kj in to_insert]
+                    for start in range(0, len(state_rows), rows_per):
+                        chunk = state_rows[start : start + rows_per]
+                        cur.execute(
+                            insert_prefix + ", ".join(["(?, ?, ?)"] * len(chunk)),
+                            [v for row in chunk for v in row],
+                        )
+
+                cur.execute(f"DROP TABLE IF EXISTS {diff_table}")
         finally:
             conn.close()
 
