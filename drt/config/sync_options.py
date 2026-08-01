@@ -177,11 +177,12 @@ class MirrorConfig(BaseModel):
       re-baselines (or loses) tracked state for every other parent.
 
     ``scope`` + ``strategy: tracked`` requires ``scope`` to be a subset of
-    ``destination.upsert_key`` (checked in ``check_mirror_supported``, which
-    also needs ``upsert_key`` — not visible from this model alone). Scope
-    values are then derived positionally from the already-tracked key
-    tuple rather than persisted separately, so no state-table schema change
-    (and no migration story for tables created before #694) is needed.
+    ``destination.upsert_key`` (checked in
+    ``BaseSqlDestination._validate_mirror_scope``, which also needs
+    ``upsert_key`` — not visible from this model alone). Scope values are
+    then derived positionally from the already-tracked key tuple rather
+    than persisted separately, so no state-table schema change (and no
+    migration story for tables created before #694) is needed.
     """
 
     strategy: Literal["destination", "tracked"] = "destination"
