@@ -68,15 +68,31 @@ def test_connection_import_error_handled(
             src._connect(_profile())
 
 
+def _mocked_databricks_modules(connect: MagicMock | None = None) -> dict[str, MagicMock]:
+    """sys.modules entries satisfying ``from databricks import sql`` — no real
+    ``databricks-sql-connector`` install required. CI's default extras
+    (`[dev,mcp,duckdb,postgres,mysql,clickhouse,sqlserver]`, see ci.yml) don't
+    include ``[databricks]``, so a test gated on the real package would be
+    silently skipped there even though it passes in a dev env that happens
+    to have it installed — exactly what left the query_tags branch below
+    uncovered on #879's own codecov run the first time around."""
+    mock_sql = MagicMock()
+    if connect is not None:
+        mock_sql.connect = connect
+    mock_databricks = MagicMock()
+    mock_databricks.sql = mock_sql
+    return {"databricks": mock_databricks, "databricks.sql": mock_sql}
+
+
 def test_connect_with_query_tags_passes_native_kwarg(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#768 — query_tags pass straight through to the driver's own
     `query_tags` connect kwarg."""
-    pytest.importorskip("databricks.sql")
     monkeypatch.setenv("DATABRICKS_TOKEN", "fake-token")
     src = DatabricksSource()
-    with patch("databricks.sql.connect") as mock_connect:
+    mock_connect = MagicMock()
+    with patch.dict("sys.modules", _mocked_databricks_modules(mock_connect)):
         src._connect(_profile(), query_tags={"sync": "s", "run_id": "r"})
     mock_connect.assert_called_once_with(
         server_hostname="dbc-xxx.cloud.databricks.com",
@@ -90,16 +106,15 @@ def test_connect_with_query_tags_passes_native_kwarg(
 def test_connect_without_query_tags_omits_native_kwarg(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pytest.importorskip("databricks.sql")
     monkeypatch.setenv("DATABRICKS_TOKEN", "fake-token")
     src = DatabricksSource()
-    with patch("databricks.sql.connect") as mock_connect:
+    mock_connect = MagicMock()
+    with patch.dict("sys.modules", _mocked_databricks_modules(mock_connect)):
         src._connect(_profile())
     assert "query_tags" not in mock_connect.call_args.kwargs
 
 
 def test_extract_passes_query_tags_to_connect(monkeypatch: pytest.MonkeyPatch) -> None:
-    pytest.importorskip("databricks.sql")
     monkeypatch.setenv("DATABRICKS_TOKEN", "fake-token")
     src = DatabricksSource()
     cur = MagicMock()
