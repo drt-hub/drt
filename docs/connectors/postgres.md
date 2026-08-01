@@ -159,7 +159,7 @@ Tracked-specific behaviour:
 - **Key types** — int / str keys round-trip exactly; non-JSON-native key types (datetime, Decimal, UUID) are stringified in the state table, a documented limitation.
 - The empty-source and failed-rows guards above apply to tracked as well — a transient empty source also leaves the tracked baseline untouched.
 
-Choose `destination` when drt owns the table (slightly cheaper: no state I/O). Choose `tracked` when anything else writes to the table. Currently supported on **Postgres and MySQL**; ClickHouse / Snowflake / Databricks reject `strategy: tracked` with a clear error until their follow-ups land.
+Choose `destination` when drt owns the table (slightly cheaper: no state I/O). Choose `tracked` when anything else writes to the table. Currently supported on **Postgres, MySQL, and Snowflake** ([#692](https://github.com/drt-hub/drt/issues/692)); ClickHouse / Databricks reject `strategy: tracked` with a clear error until their follow-ups land.
 
 **Required destination privileges ([#695](https://github.com/drt-hub/drt/issues/695)):** tracked mirror needs two grants beyond the `mode: full` set (`SELECT, INSERT, UPDATE` on the target). A least-privilege user hardened for `full` writes will otherwise fail — and, because of trap #1 below, often not until weeks later:
 
@@ -190,7 +190,7 @@ sync:
     scope: [parent_id]
 ```
 
-The stateless fit for the parent + child-link shape: a parent entity is periodically regenerated together with its child rows, so stale children **under that parent** must go — but rows under parents *not present in this run* (other pipelines, the application) must not be touched. With `scope`, the mirror DELETE becomes `WHERE parent_id IN (observed parents) AND upsert_key NOT IN (observed keys)` — every run recomputes the diff within the observed scope, so there is no state to lose. A scope column missing from the model output fails fast before any write. Composite scopes (`scope: [tenant_id, parent_id]`) are supported. `scope` still assumes drt owns all rows *under the observed parents* — if co-writers touch the same parents, combine it with `strategy: tracked` (below). Postgres + MySQL only for now.
+The stateless fit for the parent + child-link shape: a parent entity is periodically regenerated together with its child rows, so stale children **under that parent** must go — but rows under parents *not present in this run* (other pipelines, the application) must not be touched. With `scope`, the mirror DELETE becomes `WHERE parent_id IN (observed parents) AND upsert_key NOT IN (observed keys)` — every run recomputes the diff within the observed scope, so there is no state to lose. A scope column missing from the model output fails fast before any write. Composite scopes (`scope: [tenant_id, parent_id]`) are supported. `scope` still assumes drt owns all rows *under the observed parents* — if co-writers touch the same parents, combine it with `strategy: tracked` (below). Postgres, MySQL, and Snowflake ([#692](https://github.com/drt-hub/drt/issues/692)) for now.
 
 **Tracked + scoped mirror ([#694](https://github.com/drt-hub/drt/issues/694)) — co-writer-safe 1:N regeneration:**
 

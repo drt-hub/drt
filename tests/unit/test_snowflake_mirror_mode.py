@@ -412,31 +412,281 @@ def test_finalize_sync_returns_none_for_non_mirror_mode(
     assert result is None
 
 
-def test_tracked_strategy_rejected_on_snowflake(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``mirror.strategy: tracked`` (#686) is Postgres/MySQL-only for now.
-
-    Must fail fast rather than silently falling back to the destination
-    diff, whose delete semantics are co-writer-unsafe.
-    """
+def test_tracked_strategy_accepted_on_snowflake(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``mirror.strategy: tracked`` (#692) is now supported on Snowflake."""
     _set_creds(monkeypatch)
     dest = SnowflakeDestination()
     conn = _fake_conn()
+    conn._cur.fetchall.return_value = []  # SHOW TABLES + state SELECT, both empty
     opts = _options(mirror={"strategy": "tracked"})
 
     with patch.dict("sys.modules", _mocked_snowflake_modules(conn)):
-        with pytest.raises(ValueError, match="not yet supported"):
-            dest.load([{"id": 1, "score": 100}], _config(), opts)
+        result = dest.load([{"id": 1, "score": 100}], _config(), opts)
+
+    assert result.failed == 0
 
 
-def test_scope_rejected_on_snowflake(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``mirror.scope`` (#687) is Postgres/MySQL-only for now — fail fast."""
+def test_scope_accepted_on_snowflake(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``mirror.scope`` (#692, destination strategy) is now supported."""
     _set_creds(monkeypatch)
     dest = SnowflakeDestination()
     conn = _fake_conn()
     opts = _options(mirror={"scope": ["parent_id"]})
 
     with patch.dict("sys.modules", _mocked_snowflake_modules(conn)):
-        with pytest.raises(ValueError, match="mirror.scope are not yet supported"):
-            dest.load([{"id": 1, "parent_id": 10}], _config(), opts)
+        result = dest.load([{"id": 1, "parent_id": 10}], _config(), opts)
+
+    assert result.failed == 0
+
+
+def test_scope_missing_column_fails_fast_on_snowflake(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_creds(monkeypatch)
+    dest = SnowflakeDestination()
+    conn = _fake_conn()
+    opts = _options(mirror={"scope": ["parent_id"]})
+
+    with patch.dict("sys.modules", _mocked_snowflake_modules(conn)):
+        with pytest.raises(ValueError, match="mirror.scope columns missing"):
+            dest.load([{"id": 1}], _config(), opts)
+
+
+def test_scoped_mirror_deletes_within_observed_parents_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Destination-strategy scope: the DELETE only ever considers rows under
+    parents this run actually observed."""
+    _set_creds(monkeypatch)
+    dest = SnowflakeDestination()
+    load_conn = _fake_conn()
+    finalize_conn = _fake_conn()
+    config = _config(upsert_key=["parent_id", "id"])
+    opts = _options(mirror={"scope": ["parent_id"]})
+
+    with patch.dict("sys.modules", _mocked_snowflake_modules(load_conn)):
+        dest.load([{"parent_id": 1, "id": "a", "score": 1}], config, opts)
+
+    with patch.dict("sys.modules", _mocked_snowflake_modules(finalize_conn)):
+        dest.finalize_sync(config, opts)
+
+    delete_call = next(
+        call
+        for call in finalize_conn._cur.execute.call_args_list
+        if "DELETE FROM" in (call.args[0] if call.args else "")
+    )
+    stmt, params = delete_call.args
+    assert "parent_id IN" in stmt
+    assert params == [1, 1, "a"]
+
+
+def test_scope_rejected_with_tracked_when_not_subset_of_upsert_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#694's composition constraint applies on Snowflake too."""
+    _set_creds(monkeypatch)
+    dest = SnowflakeDestination()
+    conn = _fake_conn()
+    opts = _options(mirror={"strategy": "tracked", "scope": ["parent_id"]})
+
+    with patch.dict("sys.modules", _mocked_snowflake_modules(conn)):
+        with pytest.raises(ValueError, match="mirror.scope columns must be part of"):
+            dest.load([{"id": 1, "parent_id": 10}], _config(upsert_key=["id"]), opts)
+
+
+# ---------------------------------------------------------------------------
+# mirror.strategy: tracked (#692, mirroring Postgres/MySQL's #686)
+# ---------------------------------------------------------------------------
+
+
+def _tracked_options() -> SyncOptions:
+    opts = _options(mirror={"strategy": "tracked"})
+    opts._sync_name = "scores_sync"
+    return opts
+
+
+def test_tracked_first_run_baselines_without_deleting_snowflake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_creds(monkeypatch)
+    dest = SnowflakeDestination()
+    load_conn = _fake_conn()
+    finalize_conn = _fake_conn()
+    finalize_conn._cur.fetchall.return_value = []  # SHOW TABLES + state SELECT
+
+    with patch.dict("sys.modules", _mocked_snowflake_modules(load_conn)):
+        dest.load([{"id": 1}, {"id": 2}], _config(), _tracked_options())
+    with patch.dict("sys.modules", _mocked_snowflake_modules(finalize_conn)):
+        result = dest.finalize_sync(_config(), _tracked_options())
+
+    assert result is not None
+    for call in finalize_conn._cur.execute.call_args_list:
+        stmt = call.args[0] if call.args else ""
+        if "DELETE FROM" in stmt:
+            assert "USER_SCORES" not in stmt
+    rows = finalize_conn._cur.executemany.call_args.args[1]
+    assert [r[0] for r in rows] == ["scores_sync", "scores_sync"]
+
+
+def test_tracked_second_run_deletes_only_stale_tracked_keys_snowflake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """prev={1,2,3}, current={1,2} -> DELETE USER_SCORES WHERE id IN (%s) w/ [3]."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    _set_creds(monkeypatch)
+    dest = SnowflakeDestination()
+    load_conn = _fake_conn()
+    finalize_conn = _fake_conn()
+    finalize_conn._cur.fetchall.side_effect = [
+        [("_DRT_SYNCED_KEYS",)],  # SHOW TABLES -> exists, skip CREATE
+        [(key_hash((k,)), key_json((k,))) for k in (1, 2, 3)],  # state SELECT
+    ]
+
+    with patch.dict("sys.modules", _mocked_snowflake_modules(load_conn)):
+        dest.load([{"id": 1}, {"id": 2}], _config(), _tracked_options())
+    with patch.dict("sys.modules", _mocked_snowflake_modules(finalize_conn)):
+        dest.finalize_sync(_config(), _tracked_options())
+
+    target_deletes = [
+        call
+        for call in finalize_conn._cur.execute.call_args_list
+        if "DELETE FROM" in (call.args[0] if call.args else "")
+        and "USER_SCORES" in call.args[0]
+    ]
+    assert len(target_deletes) == 1
+    stmt, params = target_deletes[0].args
+    assert "IN (%s)" in stmt and "NOT IN" not in stmt
+    assert params == [3]
+
+
+def test_tracked_empty_source_is_noop_snowflake(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_creds(monkeypatch)
+    dest = SnowflakeDestination()
+    finalize_conn = _fake_conn()
+
+    with patch.dict("sys.modules", _mocked_snowflake_modules(finalize_conn)):
+        result = dest.finalize_sync(_config(), _tracked_options())
+
+    assert result is None
+    finalize_conn._cur.execute.assert_not_called()
+
+
+def test_tracked_baseline_logs_warning_snowflake(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _set_creds(monkeypatch)
+    dest = SnowflakeDestination()
+    load_conn = _fake_conn()
+    finalize_conn = _fake_conn()
+    finalize_conn._cur.fetchall.return_value = []
+
+    with patch.dict("sys.modules", _mocked_snowflake_modules(load_conn)):
+        dest.load([{"id": 1}], _config(), _tracked_options())
+    with (
+        patch.dict("sys.modules", _mocked_snowflake_modules(finalize_conn)),
+        caplog.at_level("WARNING"),
+    ):
+        dest.finalize_sync(_config(), _tracked_options())
+
+    assert any("baselin" in r.message.lower() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# mirror.scope + strategy: tracked (#694, extended to Snowflake by #692)
+# ---------------------------------------------------------------------------
+
+
+def _tracked_scoped_options(scope: list[str] = ["parent_id"]) -> SyncOptions:
+    opts = _options(mirror={"strategy": "tracked", "scope": scope})
+    opts._sync_name = "scores_sync"
+    return opts
+
+
+def test_tracked_scoped_deletes_only_stale_keys_within_observed_scope_snowflake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prior state has parent 1: {(1,"a"),(1,"b")} and parent 2: {(2,"x")}.
+    This run only touches parent 1 with just (1,"a") -> (1,"b") is stale and
+    deleted; (2,"x") is under a parent this run never saw and must survive."""
+    import json
+
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    _set_creds(monkeypatch)
+    dest = SnowflakeDestination()
+    load_conn = _fake_conn()
+    finalize_conn = _fake_conn()
+    finalize_conn._cur.fetchall.side_effect = [
+        [("_DRT_SYNCED_KEYS",)],  # SHOW TABLES -> exists
+        [(key_hash(k), key_json(k)) for k in ((1, "a"), (1, "b"), (2, "x"))],
+    ]
+    config = _config(upsert_key=["parent_id", "id"])
+
+    with patch.dict("sys.modules", _mocked_snowflake_modules(load_conn)):
+        dest.load([{"parent_id": 1, "id": "a"}], config, _tracked_scoped_options())
+    with patch.dict("sys.modules", _mocked_snowflake_modules(finalize_conn)):
+        dest.finalize_sync(config, _tracked_scoped_options())
+
+    target_deletes = [
+        call
+        for call in finalize_conn._cur.execute.call_args_list
+        if "DELETE FROM" in (call.args[0] if call.args else "")
+        and "USER_SCORES" in call.args[0]
+    ]
+    assert len(target_deletes) == 1
+    _, params = target_deletes[0].args
+    assert params == [1, "b"]
+
+    rows = finalize_conn._cur.executemany.call_args.args[1]
+    persisted_keys = {tuple(json.loads(r[2])) for r in rows}
+    assert persisted_keys == {(1, "a"), (2, "x")}
+
+
+def test_tracked_scoped_first_touch_of_a_scope_is_not_a_baseline_warning_snowflake(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    _set_creds(monkeypatch)
+    dest = SnowflakeDestination()
+    load_conn = _fake_conn()
+    finalize_conn = _fake_conn()
+    finalize_conn._cur.fetchall.side_effect = [
+        [("_DRT_SYNCED_KEYS",)],
+        [(key_hash((2, "x")), key_json((2, "x")))],
+    ]
+    config = _config(upsert_key=["parent_id", "id"])
+
+    with patch.dict("sys.modules", _mocked_snowflake_modules(load_conn)):
+        dest.load([{"parent_id": 1, "id": "a"}], config, _tracked_scoped_options())
+    with (
+        patch.dict("sys.modules", _mocked_snowflake_modules(finalize_conn)),
+        caplog.at_level("WARNING"),
+    ):
+        dest.finalize_sync(config, _tracked_scoped_options())
+
+    assert not any("baselin" in r.message.lower() for r in caplog.records)
+    for call in finalize_conn._cur.execute.call_args_list:
+        stmt = call.args[0] if call.args else ""
+        if "DELETE FROM" in stmt:
+            assert "USER_SCORES" not in stmt
+
+
+def test_tracked_scoped_genuinely_no_prior_state_still_warns_baseline_snowflake(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _set_creds(monkeypatch)
+    dest = SnowflakeDestination()
+    load_conn = _fake_conn()
+    finalize_conn = _fake_conn()
+    finalize_conn._cur.fetchall.return_value = []
+    config = _config(upsert_key=["parent_id", "id"])
+
+    with patch.dict("sys.modules", _mocked_snowflake_modules(load_conn)):
+        dest.load([{"parent_id": 1, "id": "a"}], config, _tracked_scoped_options())
+    with (
+        patch.dict("sys.modules", _mocked_snowflake_modules(finalize_conn)),
+        caplog.at_level("WARNING"),
+    ):
+        dest.finalize_sync(config, _tracked_scoped_options())
+
+    assert any("baselin" in r.message.lower() for r in caplog.records)

@@ -141,6 +141,21 @@ Memory constraint: the in-process key set is memory-bound to source key cardinal
 
 Same `sync.mode: mirror` is supported on **Postgres** (Step 1), **MySQL** (Step 2), and **ClickHouse** (Step 3). BigQuery follows once contributor PR [#584](https://github.com/drt-hub/drt/pull/584) lands.
 
+**Tracked mirror (`mirror.strategy: tracked`, [#686](https://github.com/drt-hub/drt/issues/686)/[#692](https://github.com/drt-hub/drt/issues/692)) — for tables the application also writes to:**
+
+```yaml
+sync:
+  mode: mirror
+  mirror:
+    strategy: tracked   # default: "destination" (the NOT IN behaviour above)
+```
+
+Same Census-style semantics as Postgres/MySQL (see the [Postgres tracked-mirror section](postgres.md) for the full write-up): drt persists the set of `upsert_key` tuples it has itself synced in a drt-managed `<database>.<schema>._drt_synced_keys` table, and each run deletes only `previously-synced − current-source` keys — rows drt never wrote are never deletion candidates. First run baselines (WARN, no deletes); lost/missing state re-baselines the same way.
+
+The state table uses the same `sync_name` / `key_hash` / `key_json` shape as Postgres/MySQL, created lazily via `CREATE TABLE IF NOT EXISTS`, pre-provisioning-friendly the same way (`SHOW TABLES LIKE '_drt_synced_keys' IN SCHEMA <database>.<schema>` stands in for `to_regclass`/`information_schema.tables`, mirroring the existence check `_target_exists` already uses for the replace-swap path). No `PRIMARY KEY` enforcement gotcha to worry about here beyond the usual Snowflake caveat that primary keys are informational, not enforced — drt controls the INSERT/DELETE pairing itself and never relies on a uniqueness constraint to reject a duplicate.
+
+**Scoped mirror (`mirror.scope`, [#687](https://github.com/drt-hub/drt/issues/687)/[#692](https://github.com/drt-hub/drt/issues/692)):** `scope: [parent_id]` restricts the mirror DELETE to rows whose scope values appeared in this run's source — the fit for 1:N regeneration. Composable with `strategy: tracked` ([#694](https://github.com/drt-hub/drt/issues/694)) provided `scope` is a subset of `upsert_key`. See the [Postgres scoped-mirror section](postgres.md) for the full semantics — identical on Snowflake, built on the same explicit-placeholder DELETE shape (single-column `IN (%s, %s, ...)` / composite `(c1, c2) IN ((%s, %s), ...)`) already used for the plain mirror DELETE above.
+
 ## Replace mode ([#434](https://github.com/drt-hub/drt/issues/434))
 
 `sync.mode: replace` rebuilds the destination table from the current source snapshot. Two strategies:

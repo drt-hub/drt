@@ -11,6 +11,7 @@ from drt.destinations.sql_utils import (
     RowCountable,
     backtick_quote_ident,
     check_mirror_supported,
+    check_scope_subset_of_upsert_key,
     get_row_count_for_destination,
     unsupported_tracked_scope_msg,
 )
@@ -76,10 +77,12 @@ def test_upsert_key_message_is_stable() -> None:
 
 
 def test_unsupported_tracked_scope_message_names_dialect() -> None:
-    msg = unsupported_tracked_scope_msg("snowflake")
+    """clickhouse (not snowflake, since #692 added Snowflake support) — a
+    dialect this message still actually rejects."""
+    msg = unsupported_tracked_scope_msg("clickhouse")
     assert msg == (
-        "mirror.strategy: tracked / mirror.scope are not yet supported on snowflake "
-        "(supported: postgres, mysql — see #686 follow-ups)."
+        "mirror.strategy: tracked / mirror.scope are not yet supported on clickhouse "
+        "(supported: postgres, mysql, snowflake — see #692 follow-ups)."
     )
 
 
@@ -120,3 +123,62 @@ def test_check_mirror_supported_rejects_tracked_and_scope() -> None:
 
 def test_check_mirror_supported_ok_for_plain_mirror() -> None:
     check_mirror_supported(SimpleNamespace(upsert_key=["id"]), _mirror_opts(), "snowflake")
+
+
+def test_check_mirror_supported_allows_tracked_and_scope_when_dialect_opts_in() -> None:
+    """#692 — a dialect passing supports_tracked_scope=True (Snowflake) is
+    not rejected the way clickhouse/databricks still are."""
+    cfg = SimpleNamespace(upsert_key=["id"])
+    check_mirror_supported(
+        cfg, _mirror_opts(strategy="tracked"), "snowflake", supports_tracked_scope=True
+    )
+    check_mirror_supported(
+        cfg, _mirror_opts(scope=["parent_id"]), "snowflake", supports_tracked_scope=True
+    )
+
+
+def test_check_mirror_supported_still_enforces_scope_subset_when_supported() -> None:
+    """Opting into tracked/scope support doesn't waive #694's scope ⊆
+    upsert_key constraint for the tracked+scope combination."""
+    cfg = SimpleNamespace(upsert_key=["id"])
+    with pytest.raises(ValueError, match="mirror.scope columns must be part of"):
+        check_mirror_supported(
+            cfg,
+            _mirror_opts(strategy="tracked", scope=["parent_id"]),
+            "snowflake",
+            supports_tracked_scope=True,
+        )
+
+
+# ---------------------------------------------------------------------------
+# check_scope_subset_of_upsert_key (#694)
+# ---------------------------------------------------------------------------
+
+
+def test_check_scope_subset_of_upsert_key_noop_for_destination_strategy() -> None:
+    """The subset constraint is tracked-only; destination-strategy scope
+    (#687) has no state to derive from and isn't constrained by it."""
+    check_scope_subset_of_upsert_key(
+        SimpleNamespace(upsert_key=["id"]), _mirror_opts(scope=["parent_id"])
+    )
+
+
+def test_check_scope_subset_of_upsert_key_noop_when_no_scope() -> None:
+    check_scope_subset_of_upsert_key(
+        SimpleNamespace(upsert_key=["id"]), _mirror_opts(strategy="tracked")
+    )
+
+
+def test_check_scope_subset_of_upsert_key_accepts_subset() -> None:
+    check_scope_subset_of_upsert_key(
+        SimpleNamespace(upsert_key=["parent_id", "id"]),
+        _mirror_opts(strategy="tracked", scope=["parent_id"]),
+    )
+
+
+def test_check_scope_subset_of_upsert_key_rejects_non_subset() -> None:
+    with pytest.raises(ValueError, match="mirror.scope columns must be part of"):
+        check_scope_subset_of_upsert_key(
+            SimpleNamespace(upsert_key=["id"]),
+            _mirror_opts(strategy="tracked", scope=["parent_id"]),
+        )

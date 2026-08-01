@@ -258,12 +258,14 @@ class BaseSqlDestination:
         """mirror.scope (#687): a scope column absent from the model output is a
         config error — fail fast before any row is written.
 
-        ``scope`` + ``strategy: tracked`` (#694) has a second constraint:
-        ``scope`` must be a subset of ``upsert_key``. Scope values for a
-        tracked key are derived positionally from the already-persisted
-        ``key_json`` (see ``_finalize_mirror_tracked``) rather than stored in
-        a separate state-table column, so a scope column drt never observed
-        as part of the tracked key has nothing to derive from.
+        ``scope`` + ``strategy: tracked`` (#694) has a second constraint,
+        checked via the shared ``check_scope_subset_of_upsert_key`` (also
+        used by Snowflake's ``check_mirror_supported``, #692): ``scope`` must
+        be a subset of ``upsert_key``. Scope values for a tracked key are
+        derived positionally from the already-persisted ``key_json`` (see
+        ``_finalize_mirror_tracked``) rather than stored in a separate
+        state-table column, so a scope column drt never observed as part of
+        the tracked key has nothing to derive from.
         """
         if (
             sync_options.mode == "mirror"
@@ -276,15 +278,9 @@ class BaseSqlDestination:
                     "mirror.scope columns missing from the model output: "
                     f"{missing} (available: {sorted(records[0].keys())})"
                 )
-            if sync_options.mirror.strategy == "tracked":
-                extra = [c for c in sync_options.mirror.scope if c not in (config.upsert_key or [])]
-                if extra:
-                    raise ValueError(
-                        "mirror.scope columns must be part of destination.upsert_key "
-                        f"when combined with strategy: tracked: {extra} not in "
-                        f"upsert_key {config.upsert_key} (#694 derives scope values "
-                        "from the tracked key rather than storing them separately)."
-                    )
+            from drt.destinations.sql_utils import check_scope_subset_of_upsert_key
+
+            check_scope_subset_of_upsert_key(config, sync_options)
 
     def _accumulate_mirror_state(
         self,

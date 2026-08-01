@@ -69,20 +69,57 @@ MIRROR_UPSERT_KEY_MSG = (
 
 def unsupported_tracked_scope_msg(dialect: str) -> str:
     """Message for ``mirror.strategy: tracked`` / ``mirror.scope`` on a
-    destination that doesn't support them yet (Postgres/MySQL only, #686)."""
+    destination that doesn't support them yet (#686/#687, extended per
+    dialect by #692)."""
     return (
         f"mirror.strategy: tracked / mirror.scope are not yet supported on {dialect} "
-        "(supported: postgres, mysql — see #686 follow-ups)."
+        "(supported: postgres, mysql, snowflake — see #692 follow-ups)."
     )
 
 
-def check_mirror_supported(config: Any, sync_options: Any, dialect: str) -> None:
+def scope_not_subset_of_upsert_key_msg(scope: list[str], upsert_key: list[str] | None) -> str:
+    return (
+        "mirror.scope columns must be part of destination.upsert_key when combined "
+        f"with strategy: tracked: {scope} not in upsert_key {upsert_key} (#694 derives "
+        "scope values from the tracked key rather than storing them separately)."
+    )
+
+
+def check_scope_subset_of_upsert_key(config: Any, sync_options: Any) -> None:
+    """``mirror.scope`` + ``strategy: tracked`` (#694) requires ``scope`` to be
+    a subset of ``upsert_key`` — shared by every dialect implementing tracked
+    mirror (Postgres/MySQL via ``BaseSqlDestination._validate_mirror_scope``,
+    Snowflake via ``check_mirror_supported`` below), so the constraint and its
+    wording can't drift between them.
+
+    No-op unless both ``strategy: tracked`` and ``scope`` are set — the
+    stateless destination-strategy scope (#687) has no state to derive from
+    and isn't constrained by this.
+    """
+    if (
+        sync_options.mode == "mirror"
+        and sync_options.mirror is not None
+        and sync_options.mirror.scope
+        and sync_options.mirror.strategy == "tracked"
+    ):
+        extra = [c for c in sync_options.mirror.scope if c not in (config.upsert_key or [])]
+        if extra:
+            raise ValueError(
+                scope_not_subset_of_upsert_key_msg(extra, config.upsert_key)
+            )
+
+
+def check_mirror_supported(
+    config: Any, sync_options: Any, dialect: str, *, supports_tracked_scope: bool = False
+) -> None:
     """Fail fast on a ``sync.mode: mirror`` config a SQL destination can't serve.
 
     - mirror requires an ``upsert_key`` (to know which rows to DELETE)
-    - ``mirror.strategy: tracked`` / ``mirror.scope`` are Postgres/MySQL-only, so
-      reject them on ``dialect`` rather than silently falling back to the
-      (co-writer-unsafe) destination diff.
+    - ``mirror.strategy: tracked`` / ``mirror.scope`` are opt-in per dialect
+      (``supports_tracked_scope``) — reject them where unsupported rather
+      than silently falling back to the (co-writer-unsafe) destination diff.
+    - where supported, ``scope`` + ``strategy: tracked`` additionally requires
+      ``scope ⊆ upsert_key`` (#694).
 
     No-op for non-mirror syncs. Callers holding an open connection should close
     it before re-raising (``try: check_mirror_supported(...) except ValueError:
@@ -92,7 +129,8 @@ def check_mirror_supported(config: Any, sync_options: Any, dialect: str) -> None
         return
     if not config.upsert_key:
         raise ValueError(MIRROR_UPSERT_KEY_MSG)
-    if sync_options.mirror is not None and (
+    if not supports_tracked_scope and sync_options.mirror is not None and (
         sync_options.mirror.strategy == "tracked" or sync_options.mirror.scope
     ):
         raise ValueError(unsupported_tracked_scope_msg(dialect))
+    check_scope_subset_of_upsert_key(config, sync_options)

@@ -84,6 +84,11 @@ class SnowflakeDestination:
         # records); finalize_sync treats that as "skip DELETE" — safety
         # against deleting everything when the source produced no data.
         self._mirror_keys: list[tuple[Any, ...]] | None = None
+        # mirror.scope (#692, mirroring #687) — distinct scope-column value
+        # tuples observed across batches; the finalize DELETE (destination or
+        # tracked strategy) is restricted to rows whose scope values are in
+        # this set.
+        self._mirror_scopes: set[tuple[Any, ...]] | None = None
 
         # sync.mode: replace (#434) — per-sync state, reused across batches.
         # ``_replace_truncated`` ensures TRUNCATE runs once for the truncate
@@ -130,16 +135,30 @@ class SnowflakeDestination:
         # upsert_key here so the misconfiguration is surfaced before any
         # row touches Snowflake.
         is_mirror = sync_options.mode == "mirror"
-        # Reject an unserveable mirror config (missing upsert_key, or
-        # tracked/scope which are Postgres/MySQL-only) before writing; close the
-        # connection we just opened before surfacing the error.
+        # Reject an unserveable mirror config (missing upsert_key, or a
+        # scope+tracked composition where scope isn't a subset of
+        # upsert_key, #694) before writing; close the connection we just
+        # opened before surfacing the error. tracked/scope themselves are
+        # supported on Snowflake since #692.
         from drt.destinations.sql_utils import check_mirror_supported
 
         try:
-            check_mirror_supported(config, sync_options, "snowflake")
+            check_mirror_supported(config, sync_options, "snowflake", supports_tracked_scope=True)
         except ValueError:
             conn.close()
             raise
+        if (
+            is_mirror
+            and sync_options.mirror is not None
+            and sync_options.mirror.scope
+        ):
+            missing = [c for c in sync_options.mirror.scope if c not in records[0]]
+            if missing:
+                conn.close()
+                raise ValueError(
+                    "mirror.scope columns missing from the model output: "
+                    f"{missing} (available: {sorted(records[0].keys())})"
+                )
         try:
             with conn.cursor() as cur:
                 columns = list(records[0].keys())
@@ -259,6 +278,13 @@ class SnowflakeDestination:
                         assert config.upsert_key  # guarded above
                         if self._mirror_keys is None:
                             self._mirror_keys = []
+                        scope_cols = (
+                            sync_options.mirror.scope
+                            if sync_options.mirror is not None
+                            else None
+                        )
+                        if scope_cols and self._mirror_scopes is None:
+                            self._mirror_scopes = set()
                         failed_indices = {re.batch_index for re in result.row_errors}
                         for idx, record in enumerate(records):
                             if idx in failed_indices:
@@ -266,6 +292,11 @@ class SnowflakeDestination:
                             self._mirror_keys.append(
                                 tuple(record.get(k) for k in config.upsert_key)
                             )
+                            if scope_cols:
+                                assert self._mirror_scopes is not None
+                                self._mirror_scopes.add(
+                                    tuple(record.get(c) for c in scope_cols)
+                                )
 
                 else:
                     raise ValueError(f"Unsupported mode: {config.mode}")
@@ -400,6 +431,7 @@ class SnowflakeDestination:
         if sync_options.mode == "mirror":
             result = self._finalize_mirror(config, sync_options)
             self._mirror_keys = None
+            self._mirror_scopes = None
             return result
 
         if not self._swap_shadow_created or self._swap_table is None:
@@ -430,24 +462,78 @@ class SnowflakeDestination:
             conn.close()
         return SyncResult()
 
+    def _build_mirror_delete(
+        self,
+        table_fq: str,
+        upsert_cols: list[str],
+        keys: list[tuple[Any, ...]],
+        scope_cols: list[str] | None,
+        scopes: list[tuple[Any, ...]] | None,
+        negate: bool,
+    ) -> tuple[str, list[Any]]:
+        """Build a mirror ``DELETE`` statement (#340 Step 4 / #687 / #692).
+
+        The connector uses ``%s`` placeholders (same family as psycopg2 /
+        pymysql), but Snowflake SQL does not auto-expand a tuple-of-tuples —
+        so, mirroring the MySQL destination's approach (rather than
+        Postgres's tuple auto-expansion), the placeholder list is always
+        built explicitly:
+
+        - single-column form: ``WHERE col [NOT] IN (%s, %s, ...)`` with a
+          flat values list
+        - composite form: ``WHERE (c1, c2) [NOT] IN ((%s, %s), (%s, %s), ...)``
+          with the values flattened in row-major order
+
+        ``scope_cols``/``scopes`` (#692, mirroring Postgres/MySQL's #687
+        handling) prepend a ``scope IN (observed) AND`` clause in the same
+        shape. ``negate`` selects destination-strategy (``NOT IN``, delete
+        what's absent) vs. tracked-strategy (``IN``, delete exactly these
+        keys).
+        """
+        op = "NOT IN" if negate else "IN"
+        scope_clause = ""
+        scope_params: list[Any] = []
+        if scope_cols and scopes:
+            if len(scope_cols) == 1:
+                scope_placeholders = ", ".join(["%s"] * len(scopes))
+                scope_clause = f"{scope_cols[0]} IN ({scope_placeholders}) AND "
+                scope_params = [s[0] for s in scopes]
+            else:
+                scope_col_tuple = "(" + ", ".join(scope_cols) + ")"
+                scope_row_placeholder = "(" + ", ".join(["%s"] * len(scope_cols)) + ")"
+                scope_placeholders = ", ".join([scope_row_placeholder] * len(scopes))
+                scope_clause = f"{scope_col_tuple} IN ({scope_placeholders}) AND "
+                scope_params = [v for s in scopes for v in s]
+
+        if len(upsert_cols) == 1:
+            placeholders = ", ".join(["%s"] * len(keys))
+            stmt = (
+                f"DELETE FROM {table_fq} WHERE {scope_clause}{upsert_cols[0]} "
+                f"{op} ({placeholders})"
+            )
+            params = [*scope_params, *(k[0] for k in keys)]
+        else:
+            col_tuple = "(" + ", ".join(upsert_cols) + ")"
+            row_placeholder = "(" + ", ".join(["%s"] * len(upsert_cols)) + ")"
+            placeholders = ", ".join([row_placeholder] * len(keys))
+            stmt = f"DELETE FROM {table_fq} WHERE {scope_clause}{col_tuple} {op} ({placeholders})"
+            params = [*scope_params, *(v for key in keys for v in key)]
+        return stmt, params
+
     def _finalize_mirror(
         self,
         config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult | None:
-        """``sync.mode: mirror`` end-of-sync DELETE pass (#340 Step 4).
+        """``sync.mode: mirror`` end-of-sync DELETE pass (#340 Step 4 / #687).
 
         Issues ``DELETE FROM <db>.<schema>.<table> WHERE key NOT IN
-        (<observed>)`` against Snowflake. The connector uses ``%s``
-        placeholders (same family as psycopg2 / pymysql), but Snowflake
-        SQL does not auto-expand a tuple-of-tuples — so the placeholder
-        list is built explicitly:
+        (<observed>)`` against Snowflake, via :meth:`_build_mirror_delete`.
 
-        - single-column form:
-          ``WHERE col NOT IN (%s, %s, ...)`` with a flat values list
-        - composite form:
-          ``WHERE (c1, c2) NOT IN ((%s, %s), (%s, %s), ...)`` with the
-          values flattened in row-major order
+        ``mirror.strategy: tracked`` (#692) dispatches to
+        :meth:`_finalize_mirror_tracked` instead — state-based diff rather
+        than the whole-table diff below. Shares the empty-source guard, so
+        a transient empty source also keeps a tracked baseline intact.
 
         Returns ``None`` when ``_mirror_keys`` is empty or ``None`` —
         treats "no batch with records was ever observed" as a signal to
@@ -458,6 +544,9 @@ class SnowflakeDestination:
         if not self._mirror_keys:
             return None
 
+        if sync_options.mirror is not None and sync_options.mirror.strategy == "tracked":
+            return self._finalize_mirror_tracked(config, sync_options)
+
         upsert_cols = config.upsert_key
         assert upsert_cols  # guarded in load()
 
@@ -465,19 +554,18 @@ class SnowflakeDestination:
         keys = list({tuple(k) for k in self._mirror_keys})
         table_fq = f"{config.database}.{config.schema_}.{config.table}"
 
+        # mirror.scope (#687/#692) — restrict the diff to rows under parents
+        # this run actually observed. list(), not sorted() — scope values
+        # may include None (unorderable).
+        scope_cols = sync_options.mirror.scope if sync_options.mirror is not None else None
+        scopes = list(self._mirror_scopes or set()) if scope_cols else None
+
         conn = self._connect(config)
         try:
             with conn.cursor() as cur:
-                if len(upsert_cols) == 1:
-                    placeholders = ", ".join(["%s"] * len(keys))
-                    stmt = f"DELETE FROM {table_fq} WHERE {upsert_cols[0]} NOT IN ({placeholders})"
-                    params: list[Any] = [k[0] for k in keys]
-                else:
-                    col_tuple = "(" + ", ".join(upsert_cols) + ")"
-                    row_placeholder = "(" + ", ".join(["%s"] * len(upsert_cols)) + ")"
-                    placeholders = ", ".join([row_placeholder] * len(keys))
-                    stmt = f"DELETE FROM {table_fq} WHERE {col_tuple} NOT IN ({placeholders})"
-                    params = [v for key in keys for v in key]
+                stmt, params = self._build_mirror_delete(
+                    table_fq, upsert_cols, keys, scope_cols, scopes, negate=True
+                )
                 cur.execute(stmt, params)
         finally:
             conn.close()
@@ -485,6 +573,114 @@ class SnowflakeDestination:
         # SyncResult has no dedicated `deleted` field; future work tracks
         # this separately. Returning a bare SyncResult signals "finalize
         # ran successfully" to the engine without inflating success/failed.
+        return SyncResult()
+
+    def _finalize_mirror_tracked(
+        self, config: Any, sync_options: SyncOptions
+    ) -> SyncResult | None:
+        """``mirror.strategy: tracked`` (#692) — delete only rows drt synced.
+
+        Snowflake counterpart of ``BaseSqlDestination._finalize_mirror_tracked``
+        (Postgres/MySQL, #686/#694) — same algorithm, own connection/cursor
+        and ``SHOW TABLES`` existence probe (Snowflake has no
+        ``to_regclass``/``information_schema.tables`` equivalent as cheap as
+        the one already used by ``_target_exists`` for the replace-swap path).
+
+        Reads the previously-synced key set for this sync from the
+        drt-managed ``_drt_synced_keys`` table (created lazily in the
+        target's database/schema), deletes ``previous - current`` from the
+        target, and rewrites the state to the current key set.
+
+        First run (or lost state) baselines: record keys, delete nothing,
+        WARN. Rows the application wrote are never candidates for deletion
+        because they were never in the tracked set.
+
+        ``mirror.scope`` + ``strategy: tracked`` (#694) prunes both the state
+        read and the state rewrite to the observed scope — see
+        ``BaseSqlDestination._finalize_mirror_tracked`` for the full
+        rationale; the algorithm here is identical, just against Snowflake's
+        own connection/cursor and explicit-placeholder DELETE shape.
+        """
+        import json
+        import logging
+
+        from drt.destinations._mirror_state import STATE_TABLE, diff_keys, key_hash, key_json
+
+        assert isinstance(config, SnowflakeDestinationConfig)
+        sync_name = sync_options._sync_name or config.table
+        current = list({tuple(k) for k in self._mirror_keys or []})
+        upsert_cols = config.upsert_key
+        assert upsert_cols  # guarded in load()
+        table_fq = f"{config.database}.{config.schema_}.{config.table}"
+        state_fq = f"{config.database}.{config.schema_}.{STATE_TABLE}"
+
+        scope_cols = sync_options.mirror.scope if sync_options.mirror is not None else None
+        scope_positions = [upsert_cols.index(c) for c in scope_cols] if scope_cols else None
+        observed_scopes = set(self._mirror_scopes or set()) if scope_positions else None
+
+        conn = self._connect(config)
+        try:
+            with conn.cursor() as cur:
+                # Pre-provisioning (mirrors #695): only CREATE when the state
+                # table is genuinely absent, so a locked-down destination
+                # user can run against one an admin created ahead of time.
+                cur.execute(
+                    f"SHOW TABLES LIKE '{STATE_TABLE}' IN SCHEMA {config.database}.{config.schema_}"
+                )
+                if not cur.fetchall():
+                    cur.execute(
+                        f"CREATE TABLE IF NOT EXISTS {state_fq} ("
+                        "sync_name VARCHAR(255) NOT NULL, "
+                        "key_hash CHAR(64) NOT NULL, "
+                        "key_json VARCHAR NOT NULL, "
+                        "PRIMARY KEY (sync_name, key_hash))"
+                    )
+                cur.execute(
+                    f"SELECT key_hash, key_json FROM {state_fq} WHERE sync_name = %s",
+                    [sync_name],
+                )
+                previous = {row[0]: row[1] for row in cur.fetchall()}
+
+                if scope_positions is not None and observed_scopes is not None:
+                    previous_in_scope = {
+                        h: kj
+                        for h, kj in previous.items()
+                        if tuple(json.loads(kj)[p] for p in scope_positions) in observed_scopes
+                    }
+                    preserved = [
+                        tuple(json.loads(kj))
+                        for h, kj in previous.items()
+                        if h not in previous_in_scope
+                    ]
+                else:
+                    previous_in_scope = previous
+                    preserved = []
+
+                if previous_in_scope:
+                    to_delete = diff_keys(previous_in_scope, current)
+                    if to_delete:
+                        stmt, params = self._build_mirror_delete(
+                            table_fq, upsert_cols, to_delete, None, None, negate=False
+                        )
+                        cur.execute(stmt, params)
+                elif not previous:
+                    logging.getLogger(__name__).warning(
+                        "tracked mirror: no prior state for sync %r in %s — "
+                        "baselining this run's %d key(s); no deletes this run.",
+                        sync_name,
+                        STATE_TABLE,
+                        len(current),
+                    )
+
+                cur.execute(f"DELETE FROM {state_fq} WHERE sync_name = %s", [sync_name])
+                cur.executemany(
+                    f"INSERT INTO {state_fq} (sync_name, key_hash, key_json) "
+                    "VALUES (%s, %s, %s)",
+                    [(sync_name, key_hash(k), key_json(k)) for k in (current + preserved)],
+                )
+        finally:
+            conn.close()
+
         return SyncResult()
 
     def test_connection(self, config: DestinationConfig) -> None:
