@@ -32,6 +32,7 @@ from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, SnowflakeDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
+from drt.destinations.sql_utils import tagged_cursor
 
 _SWAP_SUFFIX = "__drt_swap"
 
@@ -122,7 +123,7 @@ class SnowflakeDestination:
         assert isinstance(config, SnowflakeDestinationConfig)
         if not records:
             return SyncResult()
-        conn = self._connect(config)
+        conn = self._connect(config, query_tags=sync_options._query_tags)
         result = SyncResult()
 
         # sync.mode: mirror forces the MERGE write path regardless of
@@ -141,7 +142,7 @@ class SnowflakeDestination:
             conn.close()
             raise
         try:
-            with conn.cursor() as cur:
+            with tagged_cursor(conn.cursor(), sync_options) as cur:
                 columns = list(records[0].keys())
                 table_fq = f"{config.database}.{config.schema_}.{config.table}"
                 # Layer 3 (#317): map columns to type categories once per sync.
@@ -410,9 +411,9 @@ class SnowflakeDestination:
         assert isinstance(config, SnowflakeDestinationConfig)
         table_fq = self._swap_table
         shadow_fq = f"{table_fq}{_SWAP_SUFFIX}"
-        conn = self._connect(config)
+        conn = self._connect(config, query_tags=sync_options._query_tags)
         try:
-            with conn.cursor() as cur:
+            with tagged_cursor(conn.cursor(), sync_options) as cur:
                 # Atomic exchange — preserves grants on the original name.
                 # Snowflake autocommits, so the SWAP commits before the DROP
                 # (mirrors the separate-transaction split in postgres.py).
@@ -465,9 +466,9 @@ class SnowflakeDestination:
         keys = list({tuple(k) for k in self._mirror_keys})
         table_fq = f"{config.database}.{config.schema_}.{config.table}"
 
-        conn = self._connect(config)
+        conn = self._connect(config, query_tags=sync_options._query_tags)
         try:
-            with conn.cursor() as cur:
+            with tagged_cursor(conn.cursor(), sync_options) as cur:
                 if len(upsert_cols) == 1:
                     placeholders = ", ".join(["%s"] * len(keys))
                     stmt = f"DELETE FROM {table_fq} WHERE {upsert_cols[0]} NOT IN ({placeholders})"
@@ -553,8 +554,15 @@ class SnowflakeDestination:
         return dropped, failed
 
     @classmethod
-    def _connect(cls, config: SnowflakeDestinationConfig) -> Any:
-        """Establish a connection to Snowflake."""
+    def _connect(
+        cls, config: SnowflakeDestinationConfig, *, query_tags: dict[str, str] | None = None
+    ) -> Any:
+        """Establish a connection to Snowflake.
+
+        ``query_tags`` (#768) sets the session's ``QUERY_TAG`` — Snowflake's
+        native cost-attribution mechanism, applied to every query the session
+        runs. Same approach as the Snowflake source's ``_connect``.
+        """
         try:
             import snowflake.connector
         except ImportError as e:
@@ -584,6 +592,11 @@ class SnowflakeDestination:
             )
         else:
             auth["password"] = password
+
+        if query_tags:
+            import json
+
+            auth["session_parameters"] = {"QUERY_TAG": json.dumps(query_tags, sort_keys=True)}
 
         return snowflake.connector.connect(
             account=account,

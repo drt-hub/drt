@@ -237,6 +237,7 @@ yielded is not retried.
 ## Notes
 
 - Requires `pip install drt-core[snowflake]` (uses `snowflake-connector-python`)
+- **Query tagging** ([#768](https://github.com/drt-hub/drt/issues/768)): every write query gets both a `QUERY_TAG` session parameter (set at connect, JSON payload — Snowflake's native cost-attribution mechanism, visible in `QUERY_HISTORY.QUERY_TAG`) and a leading `/* drt app=drt sync=<name> run_id=<id> ... */` comment, by default — see `query_tagging` in `docs/llm/API_REFERENCE.md`.
 - Tables are addressed fully-qualified as `<database>.<schema>.<table>` (e.g. `ANALYTICS.PUBLIC.USER_SCORES`)
 - The `schema:` YAML key maps to `schema_` on the model — see the model alias note above
 - `upsert_key` columns identify a logical primary key for `mode: merge` and `sync.mode: mirror`

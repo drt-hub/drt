@@ -25,6 +25,7 @@ from typing import Any
 from drt.config.models import DestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
+from drt.destinations.sql_utils import tagged_cursor as _tagged_cursor
 
 
 class BaseSqlDestination:
@@ -79,7 +80,7 @@ class BaseSqlDestination:
         result = SyncResult()
 
         try:
-            cur = conn.cursor()
+            cur = _tagged_cursor(conn.cursor(), sync_options)
             columns = list(records[0].keys())
 
             if sync_options.mode == "replace":
@@ -156,7 +157,7 @@ class BaseSqlDestination:
 
         conn = self._dialect_connect(config)
         try:
-            cur = conn.cursor()
+            cur = _tagged_cursor(conn.cursor(), sync_options)
             self._rename_swap(conn, cur, table, shadow, old)
         finally:
             conn.close()
@@ -215,7 +216,7 @@ class BaseSqlDestination:
 
         conn = self._dialect_connect(config)
         try:
-            cur = conn.cursor()
+            cur = _tagged_cursor(conn.cursor(), sync_options)
             stmt, params = self._build_mirror_delete(
                 config.table,
                 upsert_cols,
@@ -507,7 +508,7 @@ class BaseSqlDestination:
 
         conn = self._dialect_connect(config)
         try:
-            cur = conn.cursor()
+            cur = _tagged_cursor(conn.cursor(), sync_options)
             # Pre-provisioning (#695): check existence before issuing DDL so a
             # locked-down destination user (no CREATE privilege) can run against
             # a state table an admin created ahead of time. Only CREATE when the

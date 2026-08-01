@@ -492,11 +492,18 @@ def _run_sync_body(
     # directly into ``query`` here so it works for every dialect with zero
     # per-connector support required. Pure string/dict work — no I/O — so
     # this stays inside the Rust-boundary-safe engine.
+    #
+    # Also stashed on ``sync.sync._query_tags`` (a ``SyncOptions`` private
+    # attr, same smuggling pattern ``_sync_name`` already uses for tracked
+    # mirror, #686) so the destination side can render the same payload —
+    # the ``Destination`` Protocol only receives ``sync_options``, not this
+    # local variable.
     query_tags: dict[str, str] | None = None
     if query_tagging is None or query_tagging.enabled:
         extra = query_tagging.extra if query_tagging else {}
         query_tags = build_query_tags(sync.name, new_run_id(), extra)
         query = f"{render_comment_header(query_tags)}\n{query}"
+    sync.sync._query_tags = query_tags
 
     # Source extraction wrapped via generator helper so exceptions raised
     # during iteration (not just the initial call) carry stage="source" (#544).

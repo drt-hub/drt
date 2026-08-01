@@ -236,6 +236,13 @@ class SyncOptions(BaseModel):
     # state in the destination-side ``_drt_synced_keys`` table.
     _sync_name: str | None = PrivateAttr(default=None)
 
+    # Query-tagging payload (#768), injected by the engine at run time (not a
+    # YAML field, and not set by ``_inject_sync_name`` below — unlike the sync
+    # name, this needs a fresh run_id per execution, not just per parse).
+    # ``None`` when query_tagging.enabled is false. Destinations render it
+    # into a SQL comment / native tag; see ``drt.config.query_tags``.
+    _query_tags: dict[str, str] | None = PrivateAttr(default=None)
+
     @model_validator(mode="after")
     def _check_incremental_cursor(self) -> SyncOptions:
         if self.mode == "incremental" and not self.cursor_field:

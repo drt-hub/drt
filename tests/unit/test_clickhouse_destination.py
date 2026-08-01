@@ -122,6 +122,21 @@ class TestClickHouseDestinationLoad:
         mock_connect.assert_not_called()
 
     @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_query_tags_prepend_a_comment_on_the_truncate(self, mock_connect: MagicMock) -> None:
+        """#768 — client.insert() (the main row-write path) has no SQL to
+        tag, but client.command() (TRUNCATE/DDL/mutations) does."""
+        client = _fake_client()
+        mock_connect.return_value = client
+
+        options = _options(mode="replace")
+        options._query_tags = {"sync": "s", "run_id": "r"}
+        ClickHouseDestination().load([{"id": 1, "score": 0.95}], _config(), options)
+
+        command_sql = client.command.call_args.args[0]
+        assert command_sql.startswith("/* drt sync=s run_id=r */\n")
+        assert "TRUNCATE TABLE" in command_sql
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
     def test_row_error_on_error_skip(self, mock_connect: MagicMock) -> None:
         client = _fake_client()
         # First row fails, second succeeds
