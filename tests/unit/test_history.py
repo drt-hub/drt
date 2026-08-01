@@ -251,7 +251,9 @@ class TestEngineHistoryIntegration:
         from drt.engine.sync import run_sync
 
         class FakeSource:
-            def extract(self, query: str, config: object, *, query_tags: dict[str, str] | None = None):
+            def extract(
+                self, query: str, config: object, *, query_tags: dict[str, str] | None = None
+            ):
                 yield {"id": 1}
 
             def test_connection(self, config: object) -> bool:
