@@ -130,6 +130,46 @@ class TestSnowflakeSource:
             call_kwargs = mock_connector.connect.call_args[1]
             assert "role" not in call_kwargs
 
+    def test_connect_with_query_tags_sets_session_parameter(self) -> None:
+        """#768 — query_tags become the QUERY_TAG session parameter,
+        JSON-encoded so QUERY_HISTORY carries structured attribution."""
+        source = SnowflakeSource()
+        config = _config()
+        mock_module = MagicMock()
+        mock_connector = MagicMock()
+        mock_module.connector = mock_connector
+        modules = {"snowflake": mock_module, "snowflake.connector": mock_connector}
+        with patch.dict("sys.modules", modules):
+            source._connect(config, query_tags={"sync": "s", "run_id": "r"})
+            call_kwargs = mock_connector.connect.call_args[1]
+            import json
+
+            assert json.loads(call_kwargs["session_parameters"]["QUERY_TAG"]) == {
+                "sync": "s",
+                "run_id": "r",
+            }
+
+    def test_connect_without_query_tags_omits_session_parameters(self) -> None:
+        source = SnowflakeSource()
+        config = _config()
+        mock_module = MagicMock()
+        mock_connector = MagicMock()
+        mock_module.connector = mock_connector
+        modules = {"snowflake": mock_module, "snowflake.connector": mock_connector}
+        with patch.dict("sys.modules", modules):
+            source._connect(config)
+            call_kwargs = mock_connector.connect.call_args[1]
+            assert "session_parameters" not in call_kwargs
+
+    def test_extract_passes_query_tags_to_connect(self) -> None:
+        source = SnowflakeSource()
+        config = _config()
+        cur = _fake_cursor(["id"], [(1,)])
+        conn = _fake_conn(cur)
+        with patch.object(SnowflakeSource, "_connect", return_value=conn) as mock_connect:
+            list(source.extract("SELECT 1", config, query_tags={"sync": "s"}))
+        mock_connect.assert_called_once_with(config, query_tags={"sync": "s"})
+
     def test_connect_password_from_env(self) -> None:
         source = SnowflakeSource()
         config = _config(password=None, password_env="SNOWFLAKE_PASSWORD")

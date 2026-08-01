@@ -68,6 +68,50 @@ def test_connection_import_error_handled(
             src._connect(_profile())
 
 
+def test_connect_with_query_tags_passes_native_kwarg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#768 — query_tags pass straight through to the driver's own
+    `query_tags` connect kwarg."""
+    pytest.importorskip("databricks.sql")
+    monkeypatch.setenv("DATABRICKS_TOKEN", "fake-token")
+    src = DatabricksSource()
+    with patch("databricks.sql.connect") as mock_connect:
+        src._connect(_profile(), query_tags={"sync": "s", "run_id": "r"})
+    mock_connect.assert_called_once_with(
+        server_hostname="dbc-xxx.cloud.databricks.com",
+        http_path="/sql/1.0/warehouses/abc",
+        access_token="fake-token",
+        schema="default",
+        query_tags={"sync": "s", "run_id": "r"},
+    )
+
+
+def test_connect_without_query_tags_omits_native_kwarg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("databricks.sql")
+    monkeypatch.setenv("DATABRICKS_TOKEN", "fake-token")
+    src = DatabricksSource()
+    with patch("databricks.sql.connect") as mock_connect:
+        src._connect(_profile())
+    assert "query_tags" not in mock_connect.call_args.kwargs
+
+
+def test_extract_passes_query_tags_to_connect(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("databricks.sql")
+    monkeypatch.setenv("DATABRICKS_TOKEN", "fake-token")
+    src = DatabricksSource()
+    cur = MagicMock()
+    cur.description = [("id",)]
+    cur.__iter__.side_effect = lambda: iter([(1,)])
+    conn = MagicMock()
+    conn.cursor.return_value = cur
+    with patch.object(DatabricksSource, "_connect", return_value=conn) as mock_connect:
+        list(src.extract("SELECT 1", _profile(), query_tags={"sync": "s"}))
+    mock_connect.assert_called_once_with(_profile(), query_tags={"sync": "s"})
+
+
 # ---------------------------------------------------------------------------
 # Transient-failure retry (#766)
 # ---------------------------------------------------------------------------
