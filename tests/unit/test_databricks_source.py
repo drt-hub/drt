@@ -248,7 +248,7 @@ def test_extract_retries_cold_start(monkeypatch: pytest.MonkeyPatch) -> None:
     exc_mod = _install_fake_dbsql_exc(monkeypatch)
     attempts: list[int] = []
 
-    def connect(_config: object) -> MagicMock:
+    def connect(_config: object, **_kwargs: object) -> MagicMock:
         attempts.append(1)
         if len(attempts) < 3:
             raise exc_mod.RequestError("Warehouse is starting")
@@ -271,7 +271,7 @@ def test_extract_does_not_retry_bad_sql(monkeypatch: pytest.MonkeyPatch) -> None
     exc_mod = _install_fake_dbsql_exc(monkeypatch)
     attempts: list[int] = []
 
-    def connect(_config: object) -> MagicMock:
+    def connect(_config: object, **_kwargs: object) -> MagicMock:
         attempts.append(1)
         raise exc_mod.ProgrammingError("Table or view not found")
 
@@ -289,7 +289,7 @@ def test_extract_does_not_retry_after_first_row(monkeypatch: pytest.MonkeyPatch)
     exc_mod = _install_fake_dbsql_exc(monkeypatch)
     attempts: list[int] = []
 
-    def connect(_config: object) -> MagicMock:
+    def connect(_config: object, **_kwargs: object) -> MagicMock:
         attempts.append(1)
 
         def exploding_rows():

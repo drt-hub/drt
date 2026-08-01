@@ -39,7 +39,16 @@ def _table_name(profile: DeltaLakeProfile) -> str:
 class DeltaLakeSource:
     """Extract records from a Delta Lake table."""
 
-    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
+    def extract(
+        self,
+        query: str,
+        config: ProfileConfig,
+        *,
+        query_tags: dict[str, str] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        # query_tags unused: local/object-store Delta has no session/job
+        # tagging primitive; the SQL comment already prepended to `query`
+        # by the engine is this connector's only attribution (#768).
         assert isinstance(config, DeltaLakeProfile)
         try:
             from deltalake import DeltaTable

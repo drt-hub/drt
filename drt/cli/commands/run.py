@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any
 import typer
 
 if TYPE_CHECKING:
+    from drt.config.base import QueryTaggingConfig
     from drt.config.credentials import ProfileConfig
     from drt.config.models import SyncConfig
     from drt.destinations.base import Destination  # noqa: F401 — _RunContext field
@@ -116,6 +117,9 @@ class _RunContext:
     # Project vars (#783) — resolved `vars:` + DRT_VAR_* + --vars, for var()
     # in model SQL. The YAML side is applied at load_syncs time.
     vars: dict[str, Any] | None = None
+    # Query tagging (#768) — drt_project.yml's query_tagging: block, passed
+    # straight through to run_sync().
+    query_tagging: QueryTaggingConfig | None = None
 
 
 def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
@@ -191,6 +195,7 @@ def _run_one(
                 observer=observer,
                 extract_limit=ctx.extract_limit,
                 vars=ctx.vars,
+                query_tagging=ctx.query_tagging,
             )
         except Exception as e:
             from drt.cli.errors import format_error, render_to_console
@@ -695,6 +700,7 @@ def run(
         diff_limit=diff_limit,
         extract_limit=limit,
         vars=project_vars,
+        query_tagging=project.query_tagging,
     )
 
     # Execute syncs — parallel if threads > 1, sequential otherwise

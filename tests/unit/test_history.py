@@ -185,7 +185,9 @@ class TestEngineHistoryIntegration:
         from drt.destinations.base import SyncResult
 
         class FakeSource:
-            def extract(self, query: str, config: object) -> Iterator[dict]:
+            def extract(
+                self, query: str, config: object, *, query_tags: dict[str, str] | None = None
+            ) -> Iterator[dict]:
                 yield from [{"id": 1}, {"id": 2}, {"id": 3}]
 
             def test_connection(self, config: object) -> bool:
@@ -249,7 +251,7 @@ class TestEngineHistoryIntegration:
         from drt.engine.sync import run_sync
 
         class FakeSource:
-            def extract(self, query: str, config: object):
+            def extract(self, query: str, config: object, *, query_tags: dict[str, str] | None = None):
                 yield {"id": 1}
 
             def test_connection(self, config: object) -> bool:

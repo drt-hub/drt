@@ -40,7 +40,16 @@ def _catalog_properties(config: IcebergProfile) -> dict[str, str]:
 class IcebergSource:
     """Extract records from an Apache Iceberg table."""
 
-    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
+    def extract(
+        self,
+        query: str,
+        config: ProfileConfig,
+        *,
+        query_tags: dict[str, str] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        # query_tags unused: local/catalog-backed Iceberg has no session/job
+        # tagging primitive; the SQL comment already prepended to `query`
+        # by the engine is this connector's only attribution (#768).
         assert isinstance(config, IcebergProfile)
         try:
             from pyiceberg.catalog import load_catalog

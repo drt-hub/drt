@@ -268,7 +268,7 @@ def test_real_otel_records_exception_on_failure(tmp_path: Path) -> None:
     provider.add_span_processor(SimpleSpanProcessor(exporter))
 
     class _Boom:
-        def extract(self, query: str, config: Any) -> Any:
+        def extract(self, query: str, config: Any, *, query_tags: dict[str, str] | None = None) -> Any:
             yield {"id": 0}
             raise RuntimeError("kaboom")
 

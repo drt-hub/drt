@@ -262,7 +262,7 @@ class TestSnowflakeSourceRetry:
 
         attempts: list[int] = []
 
-        def connect(_config: Any) -> MagicMock:
+        def connect(_config: Any, **_kwargs: Any) -> MagicMock:
             attempts.append(1)
             if len(attempts) < 3:
                 raise sf_errors.DatabaseError(
@@ -283,7 +283,7 @@ class TestSnowflakeSourceRetry:
 
         attempts: list[int] = []
 
-        def connect(_config: Any) -> MagicMock:
+        def connect(_config: Any, **_kwargs: Any) -> MagicMock:
             attempts.append(1)
             raise sf_errors.ProgrammingError(msg="SQL compilation error", errno=1003)
 
@@ -302,7 +302,7 @@ class TestSnowflakeSourceRetry:
 
         attempts: list[int] = []
 
-        def connect(_config: Any) -> MagicMock:
+        def connect(_config: Any, **_kwargs: Any) -> MagicMock:
             attempts.append(1)
 
             def exploding_rows():

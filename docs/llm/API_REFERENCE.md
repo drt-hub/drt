@@ -17,10 +17,24 @@ history:                  # optional: sync execution history (#276)
 vars:                     # optional: project vars (#783) — reviewed, in-repo defaults
   lookback_days: 7        # referenced as {{ var('lookback_days') }}
   hubspot_pipeline: default
+query_tagging:            # optional: cost-attribution query tagging (#768)
+  enabled: true           # default: true — every query gets an SQL comment/label; false disables
+  extra:                  # optional: merged into every tag payload
+    team: growth
 ```
 
 History is stored under `.drt/history/<sync_name>.jsonl` (one file per sync, JSONL format).
 Inspect via `drt status --history` or the `drt_get_history` MCP tool.
+
+### Query tagging (#768)
+
+Every extract query gets a leading `/* drt app=drt sync=<name> run_id=<id> ... */` SQL comment
+by default — the universal fallback every dialect understands. BigQuery, Snowflake, and
+Databricks additionally get warehouse-native tagging (BigQuery job `labels`, Snowflake session
+`QUERY_TAG`, Databricks `query_tags`), so `INFORMATION_SCHEMA.JOBS` / `QUERY_HISTORY` queries can
+attribute warehouse spend per sync without grepping SQL text. `extra` keys are merged into every
+tag payload alongside drt's own `app` / `sync` / `run_id` — set `query_tagging.enabled: false` to
+turn it off entirely.
 
 ### Project vars (#783)
 
