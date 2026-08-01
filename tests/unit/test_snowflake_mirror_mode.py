@@ -478,6 +478,34 @@ def test_scoped_mirror_deletes_within_observed_parents_only(
     assert params == [1, 1, "a"]
 
 
+def test_scoped_mirror_composite_scope_uses_tuple_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multi-column scope -> the composite `(c1, c2) IN ((%s, %s), ...)`
+    branch of the scope clause, not just the single-column form above."""
+    _set_creds(monkeypatch)
+    dest = SnowflakeDestination()
+    load_conn = _fake_conn()
+    finalize_conn = _fake_conn()
+    config = _config(upsert_key=["tenant_id", "parent_id", "id"])
+    opts = _options(mirror={"scope": ["tenant_id", "parent_id"]})
+
+    with patch.dict("sys.modules", _mocked_snowflake_modules(load_conn)):
+        dest.load([{"tenant_id": 1, "parent_id": 1, "id": "a", "score": 1}], config, opts)
+
+    with patch.dict("sys.modules", _mocked_snowflake_modules(finalize_conn)):
+        dest.finalize_sync(config, opts)
+
+    delete_call = next(
+        call
+        for call in finalize_conn._cur.execute.call_args_list
+        if "DELETE FROM" in (call.args[0] if call.args else "")
+    )
+    stmt, params = delete_call.args
+    assert "(tenant_id, parent_id) IN ((%s, %s))" in stmt
+    assert params == [1, 1, 1, 1, "a"]
+
+
 def test_scope_rejected_with_tracked_when_not_subset_of_upsert_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
