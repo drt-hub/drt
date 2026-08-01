@@ -190,7 +190,21 @@ sync:
     scope: [parent_id]
 ```
 
-The stateless fit for the parent + child-link shape: a parent entity is periodically regenerated together with its child rows, so stale children **under that parent** must go — but rows under parents *not present in this run* (other pipelines, the application) must not be touched. With `scope`, the mirror DELETE becomes `WHERE parent_id IN (observed parents) AND upsert_key NOT IN (observed keys)` — every run recomputes the diff within the observed scope, so there is no state to lose. A scope column missing from the model output fails fast before any write. Composite scopes (`scope: [tenant_id, parent_id]`) are supported. `scope` still assumes drt owns all rows *under the observed parents* — if co-writers touch the same parents, use `strategy: tracked` instead (combining the two is a follow-up). Postgres + MySQL only for now.
+The stateless fit for the parent + child-link shape: a parent entity is periodically regenerated together with its child rows, so stale children **under that parent** must go — but rows under parents *not present in this run* (other pipelines, the application) must not be touched. With `scope`, the mirror DELETE becomes `WHERE parent_id IN (observed parents) AND upsert_key NOT IN (observed keys)` — every run recomputes the diff within the observed scope, so there is no state to lose. A scope column missing from the model output fails fast before any write. Composite scopes (`scope: [tenant_id, parent_id]`) are supported. `scope` still assumes drt owns all rows *under the observed parents* — if co-writers touch the same parents, combine it with `strategy: tracked` (below). Postgres + MySQL only for now.
+
+**Tracked + scoped mirror ([#694](https://github.com/drt-hub/drt/issues/694)) — co-writer-safe 1:N regeneration:**
+
+```yaml
+sync:
+  mode: mirror
+  mirror:
+    strategy: tracked
+    scope: [parent_id]
+```
+
+Composing the two: `scope` must be a subset of `destination.upsert_key` (`upsert_key: [parent_id, id]` for the example above) — a run touching one parent leaves every other parent's tracked state untouched (not wiped by a blanket rewrite), and the state diff itself only ever compares previously-tracked keys under the *observed* scope, so a large table's full key history is never read for a run that only touches one parent's children. Scope values are derived from the already-tracked key rather than stored in a separate state-table column — the reason for the subset requirement, and why no `_drt_synced_keys` migration is needed for tables created before #694. A scope column that isn't part of `upsert_key` fails fast, same as the missing-column check above.
+
+`scope` alone (without `tracked`) still assumes drt owns all rows under the observed parents.
 
 Same `sync.mode: mirror` is supported on **MySQL** (explicit `%s` placeholder list), **ClickHouse** (`ALTER TABLE ... DELETE WHERE` mutation with `mutations_sync=1`), and **Snowflake** (forces the MERGE write path regardless of `config.mode`). BigQuery follows once contributor PR [#584](https://github.com/drt-hub/drt/pull/584) lands.
 

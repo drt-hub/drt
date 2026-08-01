@@ -167,26 +167,25 @@ class MirrorConfig(BaseModel):
       table in the destination. Safe on tables the application also
       writes to (Census-style semantics: first run baselines without
       deleting; lost state re-baselines with a warning).
-    - ``scope`` (#687) — restrict destination-strategy deletes to rows
-      whose scope-column values appeared in this run's source. The
-      stateless fit for 1:N regeneration (parent + child link rows):
-      stale children under observed parents are deleted, rows under
-      unobserved parents are untouched.
+    - ``scope`` (#687) — restrict deletes to rows whose scope-column values
+      appeared in this run's source. The fit for 1:N regeneration (parent +
+      child link rows): stale children under observed parents are deleted,
+      rows under unobserved parents are untouched. With ``strategy:
+      destination`` this narrows the whole-table diff; with ``strategy:
+      tracked`` (#694) it additionally prunes the state read/rewrite to
+      the observed scope, so a run touching one parent's children never
+      re-baselines (or loses) tracked state for every other parent.
+
+    ``scope`` + ``strategy: tracked`` requires ``scope`` to be a subset of
+    ``destination.upsert_key`` (checked in ``check_mirror_supported``, which
+    also needs ``upsert_key`` — not visible from this model alone). Scope
+    values are then derived positionally from the already-tracked key
+    tuple rather than persisted separately, so no state-table schema change
+    (and no migration story for tables created before #694) is needed.
     """
 
     strategy: Literal["destination", "tracked"] = "destination"
     scope: list[str] | None = Field(default=None, min_length=1)
-
-    @model_validator(mode="after")
-    def _check_scope_strategy(self) -> MirrorConfig:
-        # Composing scope with tracked (pruning the state diff to observed
-        # parents) is a #687 follow-up — reject rather than half-apply.
-        if self.scope is not None and self.strategy == "tracked":
-            raise ValueError(
-                "mirror.scope with strategy: tracked is not supported yet — "
-                "use scope (stateless) or tracked (stateful), not both."
-            )
-        return self
 
 
 class SyncOptions(BaseModel):

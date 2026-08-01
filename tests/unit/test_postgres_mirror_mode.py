@@ -17,6 +17,8 @@ SQL with the right parameter shape, given a series of batches?
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 pytest.importorskip("psycopg2.sql")
@@ -468,6 +470,156 @@ def test_tracked_baseline_logs_warning(caplog: pytest.LogCaptureFixture) -> None
         dest.finalize_sync(_config(), _tracked_options())
 
     assert any("baselin" in r.message.lower() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# mirror.scope + strategy: tracked (#694)
+# ---------------------------------------------------------------------------
+
+
+def _tracked_scoped_options(scope: list[str] = ["parent_id"]) -> SyncOptions:
+    opts = _options(mirror={"strategy": "tracked", "scope": scope})
+    opts._sync_name = "scores_sync"
+    return opts
+
+
+def test_tracked_scoped_deletes_only_stale_keys_within_observed_scope() -> None:
+    """Prior state has parent 1: {(1,"a"),(1,"b")} and parent 2: {(2,"x")}.
+    This run only touches parent 1 with just (1,"a") -> (1,"b") is stale and
+    deleted; (2,"x") is under a parent this run never saw and must survive."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    dest = PostgresDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    cur = finalize_conn.cursor.return_value
+    cur.fetchall.return_value = [
+        (key_hash(k), key_json(k)) for k in ((1, "a"), (1, "b"), (2, "x"))
+    ]
+    config = _config(upsert_key=["parent_id", "id"])
+
+    with patch.object(PostgresDestination, "_connect", return_value=load_conn):
+        dest.load([{"parent_id": 1, "id": "a"}], config, _tracked_scoped_options())
+    with patch.object(PostgresDestination, "_connect", return_value=finalize_conn):
+        dest.finalize_sync(config, _tracked_scoped_options())
+
+    target_deletes = [
+        c
+        for c in cur.execute.call_args_list
+        if "DELETE" in str(c.args[0]) and "scores" in str(c.args[0])
+    ]
+    assert len(target_deletes) == 1
+    assert target_deletes[0].args[1] == (((1, "b"),),)
+
+
+def test_tracked_scoped_rewrite_preserves_out_of_scope_state() -> None:
+    """The state-table rewrite must carry (2,"x") through unchanged alongside
+    this run's own (1,"a") — not silently drop it because this run's own
+    state read only asked about parent 1's stale keys."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    dest = PostgresDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    cur = finalize_conn.cursor.return_value
+    cur.fetchall.return_value = [
+        (key_hash(k), key_json(k)) for k in ((1, "a"), (1, "b"), (2, "x"))
+    ]
+    config = _config(upsert_key=["parent_id", "id"])
+
+    with patch.object(PostgresDestination, "_connect", return_value=load_conn):
+        dest.load([{"parent_id": 1, "id": "a"}], config, _tracked_scoped_options())
+    with patch.object(PostgresDestination, "_connect", return_value=finalize_conn):
+        dest.finalize_sync(config, _tracked_scoped_options())
+
+    rows = cur.executemany.call_args.args[1]
+    persisted_keys = {tuple(json.loads(r[2])) for r in rows}
+    assert persisted_keys == {(1, "a"), (2, "x")}
+
+
+def test_tracked_scoped_first_touch_of_a_scope_is_not_a_baseline_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Prior state exists, just not for the parent this run touches — not
+    the same as never having run before, so no baseline warning and no
+    target delete (nothing tracked here yet to diff against)."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    dest = PostgresDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    cur = finalize_conn.cursor.return_value
+    cur.fetchall.return_value = [(key_hash((2, "x")), key_json((2, "x")))]
+    config = _config(upsert_key=["parent_id", "id"])
+
+    with patch.object(PostgresDestination, "_connect", return_value=load_conn):
+        dest.load([{"parent_id": 1, "id": "a"}], config, _tracked_scoped_options())
+    with (
+        patch.object(PostgresDestination, "_connect", return_value=finalize_conn),
+        caplog.at_level("WARNING"),
+    ):
+        dest.finalize_sync(config, _tracked_scoped_options())
+
+    assert not any("baselin" in r.message.lower() for r in caplog.records)
+    for call in cur.execute.call_args_list:
+        stmt = str(call.args[0])
+        if "DELETE" in stmt:
+            assert "scores" not in stmt
+    rows = cur.executemany.call_args.args[1]
+    persisted_keys = {tuple(json.loads(r[2])) for r in rows}
+    assert persisted_keys == {(1, "a"), (2, "x")}
+
+
+def test_tracked_scoped_genuinely_no_prior_state_still_warns_baseline(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No prior state at all (not just none in scope) -> still the ordinary
+    #686 baseline warning, unaffected by scope being configured."""
+    dest = PostgresDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    finalize_conn.cursor.return_value.fetchall.return_value = []
+    config = _config(upsert_key=["parent_id", "id"])
+
+    with patch.object(PostgresDestination, "_connect", return_value=load_conn):
+        dest.load([{"parent_id": 1, "id": "a"}], config, _tracked_scoped_options())
+    with (
+        patch.object(PostgresDestination, "_connect", return_value=finalize_conn),
+        caplog.at_level("WARNING"),
+    ):
+        dest.finalize_sync(config, _tracked_scoped_options())
+
+    assert any("baselin" in r.message.lower() for r in caplog.records)
+
+
+def test_tracked_scoped_composite_scope_columns() -> None:
+    """A two-column scope (e.g. tenant_id + parent_id) derives correctly
+    from a three-column upsert_key."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    dest = PostgresDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    cur = finalize_conn.cursor.return_value
+    cur.fetchall.return_value = [
+        (key_hash(k), key_json(k))
+        for k in ((1, 1, "a"), (1, 1, "b"), (1, 2, "x"))
+    ]
+    config = _config(upsert_key=["tenant_id", "parent_id", "id"])
+    opts = _tracked_scoped_options(scope=["tenant_id", "parent_id"])
+
+    with patch.object(PostgresDestination, "_connect", return_value=load_conn):
+        dest.load([{"tenant_id": 1, "parent_id": 1, "id": "a"}], config, opts)
+    with patch.object(PostgresDestination, "_connect", return_value=finalize_conn):
+        dest.finalize_sync(config, opts)
+
+    target_deletes = [
+        c
+        for c in cur.execute.call_args_list
+        if "DELETE" in str(c.args[0]) and "scores" in str(c.args[0])
+    ]
+    assert len(target_deletes) == 1
+    assert target_deletes[0].args[1] == (((1, 1, "b"),),)
 
 
 def test_tracked_creates_state_table_when_absent() -> None:

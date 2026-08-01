@@ -19,6 +19,8 @@ These tests mock ``pymysql`` connections — no real MySQL needed.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 pytest.importorskip("pymysql")
@@ -450,6 +452,122 @@ def test_tracked_empty_source_is_noop_mysql() -> None:
 
     assert result is None
     finalize_conn.cursor.return_value.execute.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# mirror.scope + strategy: tracked (#694)
+# ---------------------------------------------------------------------------
+
+
+def _tracked_scoped_options(scope: list[str] = ["parent_id"]) -> SyncOptions:
+    opts = _options(mirror={"strategy": "tracked", "scope": scope})
+    opts._sync_name = "scores_sync"
+    return opts
+
+
+def test_tracked_scoped_deletes_only_stale_keys_within_observed_scope_mysql() -> None:
+    """Prior state has parent 1: {(1,"a"),(1,"b")} and parent 2: {(2,"x")}.
+    This run only touches parent 1 with just (1,"a") -> (1,"b") is stale and
+    deleted; (2,"x") is under a parent this run never saw and must survive."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    dest = MySQLDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    cur = finalize_conn.cursor.return_value
+    cur.fetchall.return_value = [
+        (key_hash(k), key_json(k)) for k in ((1, "a"), (1, "b"), (2, "x"))
+    ]
+    config = _config(upsert_key=["parent_id", "id"])
+
+    with patch.object(MySQLDestination, "_connect", return_value=load_conn):
+        dest.load([{"parent_id": 1, "id": "a"}], config, _tracked_scoped_options())
+    with patch.object(MySQLDestination, "_connect", return_value=finalize_conn):
+        dest.finalize_sync(config, _tracked_scoped_options())
+
+    target_deletes = [
+        c
+        for c in cur.execute.call_args_list
+        if "DELETE" in str(c.args[0]) and "`scores`" in str(c.args[0])
+    ]
+    assert len(target_deletes) == 1
+    _, params = target_deletes[0].args
+    assert params == [1, "b"]
+
+
+def test_tracked_scoped_rewrite_preserves_out_of_scope_state_mysql() -> None:
+    """The state-table rewrite must carry (2,"x") through unchanged alongside
+    this run's own (1,"a")."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    dest = MySQLDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    cur = finalize_conn.cursor.return_value
+    cur.fetchall.return_value = [
+        (key_hash(k), key_json(k)) for k in ((1, "a"), (1, "b"), (2, "x"))
+    ]
+    config = _config(upsert_key=["parent_id", "id"])
+
+    with patch.object(MySQLDestination, "_connect", return_value=load_conn):
+        dest.load([{"parent_id": 1, "id": "a"}], config, _tracked_scoped_options())
+    with patch.object(MySQLDestination, "_connect", return_value=finalize_conn):
+        dest.finalize_sync(config, _tracked_scoped_options())
+
+    rows = cur.executemany.call_args.args[1]
+    persisted_keys = {tuple(json.loads(r[2])) for r in rows}
+    assert persisted_keys == {(1, "a"), (2, "x")}
+
+
+def test_tracked_scoped_first_touch_of_a_scope_is_not_a_baseline_warning_mysql(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Prior state exists, just not for the parent this run touches — not
+    the same as never having run before."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    dest = MySQLDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    cur = finalize_conn.cursor.return_value
+    cur.fetchall.return_value = [(key_hash((2, "x")), key_json((2, "x")))]
+    config = _config(upsert_key=["parent_id", "id"])
+
+    with patch.object(MySQLDestination, "_connect", return_value=load_conn):
+        dest.load([{"parent_id": 1, "id": "a"}], config, _tracked_scoped_options())
+    with (
+        patch.object(MySQLDestination, "_connect", return_value=finalize_conn),
+        caplog.at_level("WARNING"),
+    ):
+        dest.finalize_sync(config, _tracked_scoped_options())
+
+    assert not any("baselin" in r.message.lower() for r in caplog.records)
+    for call in cur.execute.call_args_list:
+        stmt = str(call.args[0])
+        if "DELETE" in stmt:
+            assert "`scores`" not in stmt
+
+
+def test_tracked_scoped_genuinely_no_prior_state_still_warns_baseline_mysql(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No prior state at all -> ordinary #686 baseline warning, unaffected
+    by scope being configured."""
+    dest = MySQLDestination()
+    load_conn = _fake_connection()
+    finalize_conn = _fake_connection()
+    finalize_conn.cursor.return_value.fetchall.return_value = []
+    config = _config(upsert_key=["parent_id", "id"])
+
+    with patch.object(MySQLDestination, "_connect", return_value=load_conn):
+        dest.load([{"parent_id": 1, "id": "a"}], config, _tracked_scoped_options())
+    with (
+        patch.object(MySQLDestination, "_connect", return_value=finalize_conn),
+        caplog.at_level("WARNING"),
+    ):
+        dest.finalize_sync(config, _tracked_scoped_options())
+
+    assert any("baselin" in r.message.lower() for r in caplog.records)
 
 
 def test_tracked_state_table_in_target_database_mysql() -> None:

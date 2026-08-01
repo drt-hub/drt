@@ -12,8 +12,14 @@ from drt.destinations.row_errors import RowError
 from drt.destinations.sql_base import BaseSqlDestination
 
 
-def _mirror(scope: list[str] | None = None) -> SimpleNamespace:
-    return SimpleNamespace(mode="mirror", mirror=SimpleNamespace(scope=scope))
+def _mirror(scope: list[str] | None = None, strategy: str = "destination") -> SimpleNamespace:
+    return SimpleNamespace(
+        mode="mirror", mirror=SimpleNamespace(scope=scope, strategy=strategy)
+    )
+
+
+def _cfg(upsert_key: list[str] | None = None) -> SimpleNamespace:
+    return SimpleNamespace(upsert_key=upsert_key)
 
 
 # ---------------------------------------------------------------------------
@@ -39,17 +45,53 @@ def test_init_defaults() -> None:
 def test_validate_mirror_scope_raises_on_missing_column() -> None:
     d = BaseSqlDestination()
     with pytest.raises(ValueError, match="mirror.scope columns missing"):
-        d._validate_mirror_scope([{"id": 1}], _mirror(scope=["parent_id"]))
+        d._validate_mirror_scope([{"id": 1}], _cfg(), _mirror(scope=["parent_id"]))
 
 
 def test_validate_mirror_scope_ok_when_present() -> None:
     d = BaseSqlDestination()
-    d._validate_mirror_scope([{"parent_id": 1, "id": 2}], _mirror(scope=["parent_id"]))
+    d._validate_mirror_scope(
+        [{"parent_id": 1, "id": 2}], _cfg(), _mirror(scope=["parent_id"])
+    )
 
 
 def test_validate_mirror_scope_noop_when_not_mirror() -> None:
     d = BaseSqlDestination()
-    d._validate_mirror_scope([{"id": 1}], SimpleNamespace(mode="upsert", mirror=None))
+    d._validate_mirror_scope([{"id": 1}], _cfg(), SimpleNamespace(mode="upsert", mirror=None))
+
+
+def test_validate_mirror_scope_tracked_requires_scope_subset_of_upsert_key() -> None:
+    """#694 — scope + strategy: tracked needs scope columns to also be
+    upsert_key columns, so scope values can be derived from the tracked
+    key rather than persisted separately."""
+    d = BaseSqlDestination()
+    with pytest.raises(ValueError, match="mirror.scope columns must be part of"):
+        d._validate_mirror_scope(
+            [{"parent_id": 1, "id": 2}],
+            _cfg(upsert_key=["id"]),
+            _mirror(scope=["parent_id"], strategy="tracked"),
+        )
+
+
+def test_validate_mirror_scope_tracked_accepts_scope_subset_of_upsert_key() -> None:
+    d = BaseSqlDestination()
+    d._validate_mirror_scope(
+        [{"parent_id": 1, "id": 2}],
+        _cfg(upsert_key=["parent_id", "id"]),
+        _mirror(scope=["parent_id"], strategy="tracked"),
+    )
+
+
+def test_validate_mirror_scope_destination_strategy_allows_scope_outside_upsert_key() -> None:
+    """The subset requirement is tracked-only — destination-strategy scope
+    (#687, unchanged) never persists a state table, so there's nothing to
+    derive scope from and the constraint doesn't apply."""
+    d = BaseSqlDestination()
+    d._validate_mirror_scope(
+        [{"parent_id": 1, "id": 2}],
+        _cfg(upsert_key=["id"]),
+        _mirror(scope=["parent_id"], strategy="destination"),
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -73,7 +73,7 @@ class BaseSqlDestination:
         # helpers use. The ``_dialect_connect`` / ``_load_*`` hooks each assert
         # the concrete config type internally.
         cfg: Any = config
-        self._validate_mirror_scope(records, sync_options)
+        self._validate_mirror_scope(records, cfg, sync_options)
 
         conn = self._dialect_connect(config)
         result = SyncResult()
@@ -252,10 +252,19 @@ class BaseSqlDestination:
     def _validate_mirror_scope(
         self,
         records: list[dict[str, Any]],
+        config: Any,
         sync_options: SyncOptions,
     ) -> None:
         """mirror.scope (#687): a scope column absent from the model output is a
-        config error — fail fast before any row is written."""
+        config error — fail fast before any row is written.
+
+        ``scope`` + ``strategy: tracked`` (#694) has a second constraint:
+        ``scope`` must be a subset of ``upsert_key``. Scope values for a
+        tracked key are derived positionally from the already-persisted
+        ``key_json`` (see ``_finalize_mirror_tracked``) rather than stored in
+        a separate state-table column, so a scope column drt never observed
+        as part of the tracked key has nothing to derive from.
+        """
         if (
             sync_options.mode == "mirror"
             and sync_options.mirror is not None
@@ -267,6 +276,15 @@ class BaseSqlDestination:
                     "mirror.scope columns missing from the model output: "
                     f"{missing} (available: {sorted(records[0].keys())})"
                 )
+            if sync_options.mirror.strategy == "tracked":
+                extra = [c for c in sync_options.mirror.scope if c not in (config.upsert_key or [])]
+                if extra:
+                    raise ValueError(
+                        "mirror.scope columns must be part of destination.upsert_key "
+                        f"when combined with strategy: tracked: {extra} not in "
+                        f"upsert_key {config.upsert_key} (#694 derives scope values "
+                        "from the tracked key rather than storing them separately)."
+                    )
 
     def _accumulate_mirror_state(
         self,
@@ -490,7 +508,19 @@ class BaseSqlDestination:
         ``Composed``/``str`` binding of the state statements (``_state_sql``).
         The target DELETE reuses ``_build_mirror_delete`` in its
         ``negate=False`` ("delete exactly these keys") form.
+
+        ``mirror.scope`` + ``strategy: tracked`` (#694): prunes both the
+        state *read* (the diff only ever considers previously-tracked keys
+        whose scope is one this run actually observed) and the state
+        *rewrite* (a scope this run never touched keeps its previously
+        tracked keys untouched, rather than being wiped by a blanket
+        delete-all-then-insert-current). Scope values come from
+        ``key_json`` positionally — validated as a subset of ``upsert_key``
+        by ``_validate_mirror_scope`` — so no new state-table column and no
+        migration story for tables ``CREATE TABLE IF NOT EXISTS`` already
+        created before #694.
         """
+        import json
         import logging
 
         from drt.destinations._mirror_state import (
@@ -504,6 +534,10 @@ class BaseSqlDestination:
         current = list({tuple(k) for k in self._mirror_keys or []})
         upsert_cols = config.upsert_key
         state_ident, state_scope, state_raw = self._state_table_ident(config)
+
+        scope_cols = sync_options.mirror.scope if sync_options.mirror is not None else None
+        scope_positions = [upsert_cols.index(c) for c in scope_cols] if scope_cols else None
+        observed_scopes = set(self._mirror_scopes or set()) if scope_positions else None
 
         conn = self._dialect_connect(config)
         try:
@@ -524,8 +558,26 @@ class BaseSqlDestination:
             )
             previous = {row[0]: row[1] for row in cur.fetchall()}
 
-            if previous:
-                to_delete = diff_keys(previous, current)
+            if scope_positions is not None and observed_scopes is not None:
+                previous_in_scope = {
+                    h: kj
+                    for h, kj in previous.items()
+                    if tuple(json.loads(kj)[p] for p in scope_positions) in observed_scopes
+                }
+                # Kept as-is in the rewrite below — a scope this run never
+                # touched (a different parent, another pipeline's sync)
+                # must not lose its previously tracked keys.
+                preserved = [
+                    tuple(json.loads(kj))
+                    for h, kj in previous.items()
+                    if h not in previous_in_scope
+                ]
+            else:
+                previous_in_scope = previous
+                preserved = []
+
+            if previous_in_scope:
+                to_delete = diff_keys(previous_in_scope, current)
                 if to_delete:
                     stmt, params = self._build_mirror_delete(
                         config.table,
@@ -536,7 +588,12 @@ class BaseSqlDestination:
                         negate=False,
                     )
                     cur.execute(stmt, params)
-            else:
+            elif not previous:
+                # No prior state at all for this sync (never run, or lost
+                # state) — baseline. Prior state existing for *other* scopes
+                # only (previous non-empty, previous_in_scope empty) is not
+                # a baseline situation — it's simply the first run to touch
+                # this particular scope, and needs no warning.
                 logging.getLogger(__name__).warning(
                     "tracked mirror: no prior state for sync %r in %s — "
                     "baselining this run's %d key(s); no deletes this run.",
@@ -545,7 +602,12 @@ class BaseSqlDestination:
                     len(current),
                 )
 
-            # Rewrite this sync's state to the current key set.
+            # Rewrite this sync's state: unscoped, the current run's keys are
+            # the full truth (unchanged #686 behaviour). Scoped, the current
+            # run only speaks for the scopes it observed — `preserved` carries
+            # every other scope's tracked keys through unchanged so the same
+            # unconditional delete-all-then-insert below never has to know
+            # which specific rows belong to which scope.
             cur.execute(
                 self._state_sql("DELETE FROM {} WHERE sync_name = %s", state_ident),
                 (sync_name,),
@@ -556,7 +618,7 @@ class BaseSqlDestination:
                     "VALUES (%s, %s, %s)",
                     state_ident,
                 ),
-                [(sync_name, key_hash(k), key_json(k)) for k in current],
+                [(sync_name, key_hash(k), key_json(k)) for k in (current + preserved)],
             )
             conn.commit()
         finally:

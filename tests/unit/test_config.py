@@ -758,12 +758,18 @@ class TestMirrorScope:
         assert opts.mirror.scope == ["parent_id"]
         assert opts.mirror.strategy == "destination"
 
-    def test_scope_with_tracked_strategy_rejected_for_now(self) -> None:
-        with pytest.raises(ValueError, match="scope.*tracked|tracked.*scope"):
-            SyncOptions(
-                mode="mirror",
-                mirror={"strategy": "tracked", "scope": ["parent_id"]},
-            )
+    def test_scope_with_tracked_strategy_accepted_at_config_level(self) -> None:
+        """#694 — tracked+scope composition is now valid config; the
+        scope-subset-of-upsert_key constraint is checked destination-side
+        (BaseSqlDestination._validate_mirror_scope, needs `upsert_key`,
+        which isn't visible from MirrorConfig alone)."""
+        opts = SyncOptions(
+            mode="mirror",
+            mirror={"strategy": "tracked", "scope": ["parent_id"]},
+        )
+        assert opts.mirror is not None
+        assert opts.mirror.strategy == "tracked"
+        assert opts.mirror.scope == ["parent_id"]
 
     def test_empty_scope_list_rejected(self) -> None:
         with pytest.raises(ValidationError):
