@@ -341,31 +341,311 @@ def test_finalize_sync_swap_still_works_when_mode_not_mirror() -> None:
     assert any("DROP TABLE" in cmd for cmd in commands)
 
 
-def test_tracked_strategy_rejected_on_clickhouse() -> None:
-    """``mirror.strategy: tracked`` (#686) is Postgres/MySQL-only for now.
-
-    Must fail fast rather than silently falling back to the destination
-    diff, whose delete semantics are co-writer-unsafe.
-    """
+def test_tracked_strategy_accepted_on_clickhouse() -> None:
+    """``mirror.strategy: tracked`` (#692) is now supported on ClickHouse."""
     dest = ClickHouseDestination()
     client = _fake_client()
     opts = _options(mirror={"strategy": "tracked"})
 
     with patch.object(ClickHouseDestination, "_connect", return_value=client):
-        with pytest.raises(ValueError, match="not yet supported"):
-            dest.load([{"id": 1, "score": 100}], _config(), opts)
+        result = dest.load([{"id": 1, "score": 100}], _config(), opts)
 
-    client.insert.assert_not_called()
+    assert result.failed == 0
 
 
-def test_scope_rejected_on_clickhouse() -> None:
-    """``mirror.scope`` (#687) is Postgres/MySQL-only for now — fail fast."""
+def test_scope_accepted_on_clickhouse() -> None:
+    """``mirror.scope`` (#692, destination strategy) is now supported."""
     dest = ClickHouseDestination()
     client = _fake_client()
     opts = _options(mirror={"scope": ["parent_id"]})
 
     with patch.object(ClickHouseDestination, "_connect", return_value=client):
-        with pytest.raises(ValueError, match="mirror.scope are not yet supported"):
-            dest.load([{"id": 1, "parent_id": 10}], _config(), opts)
+        result = dest.load([{"id": 1, "parent_id": 10}], _config(), opts)
+
+    assert result.failed == 0
+
+
+def test_scope_missing_column_fails_fast_on_clickhouse() -> None:
+    dest = ClickHouseDestination()
+    client = _fake_client()
+    opts = _options(mirror={"scope": ["parent_id"]})
+
+    with patch.object(ClickHouseDestination, "_connect", return_value=client):
+        with pytest.raises(ValueError, match="mirror.scope columns missing"):
+            dest.load([{"id": 1}], _config(), opts)
 
     client.insert.assert_not_called()
+
+
+def test_scoped_mirror_deletes_within_observed_parents_only_clickhouse() -> None:
+    """Destination-strategy scope: the DELETE only ever considers rows under
+    parents this run actually observed."""
+    dest = ClickHouseDestination()
+    load_client = _fake_client()
+    finalize_client = _fake_client()
+    config = _config(upsert_key=["parent_id", "id"])
+    opts = _options(mirror={"scope": ["parent_id"]})
+
+    with patch.object(ClickHouseDestination, "_connect", return_value=load_client):
+        dest.load([{"parent_id": 1, "id": "a", "score": 1}], config, opts)
+    with patch.object(ClickHouseDestination, "_connect", return_value=finalize_client):
+        dest.finalize_sync(config, opts)
+
+    args, kwargs = finalize_client.command.call_args
+    sql = args[0]
+    assert "toString(`parent_id`) IN {scope_keys:Array(String)} AND" in sql
+    assert kwargs["parameters"]["scope_keys"] == ["1"]
+
+
+def test_scoped_mirror_composite_scope_uses_tuple_form_clickhouse() -> None:
+    dest = ClickHouseDestination()
+    load_client = _fake_client()
+    finalize_client = _fake_client()
+    config = _config(upsert_key=["tenant_id", "parent_id", "id"])
+    opts = _options(mirror={"scope": ["tenant_id", "parent_id"]})
+
+    with patch.object(ClickHouseDestination, "_connect", return_value=load_client):
+        dest.load([{"tenant_id": 1, "parent_id": 1, "id": "a", "score": 1}], config, opts)
+    with patch.object(ClickHouseDestination, "_connect", return_value=finalize_client):
+        dest.finalize_sync(config, opts)
+
+    args, kwargs = finalize_client.command.call_args
+    sql = args[0]
+    assert (
+        "(toString(`tenant_id`), toString(`parent_id`)) "
+        "IN {scope_keys:Array(Tuple(String, String))} AND" in sql
+    )
+    assert kwargs["parameters"]["scope_keys"] == [("1", "1")]
+
+
+def test_scope_rejected_with_tracked_when_not_subset_of_upsert_key_clickhouse() -> None:
+    """#694's composition constraint applies on ClickHouse too."""
+    dest = ClickHouseDestination()
+    client = _fake_client()
+    opts = _options(mirror={"strategy": "tracked", "scope": ["parent_id"]})
+
+    with patch.object(ClickHouseDestination, "_connect", return_value=client):
+        with pytest.raises(ValueError, match="mirror.scope columns must be part of"):
+            dest.load([{"id": 1, "parent_id": 10}], _config(upsert_key=["id"]), opts)
+
+
+# ---------------------------------------------------------------------------
+# mirror.strategy: tracked (#692, mirroring Postgres/MySQL/Snowflake's #686)
+# ---------------------------------------------------------------------------
+
+
+def _tracked_options() -> SyncOptions:
+    opts = _options(mirror={"strategy": "tracked"})
+    opts._sync_name = "scores_sync"
+    return opts
+
+
+def _state_client(rows: list[tuple[str, str]], exists: bool = True) -> MagicMock:
+    """A fake client wired for the state-table read path: ``EXISTS TABLE``
+    then ``SELECT key_hash, key_json ...``."""
+    client = _fake_client()
+    # query() is called twice (EXISTS TABLE, then the state SELECT) with
+    # different results each time — side_effect gives each call its own.
+    exists_result = MagicMock(result_rows=[(1 if exists else 0,)])
+    state_result = MagicMock(result_rows=rows)
+    client.query.side_effect = [exists_result, state_result]
+    return client
+
+
+def test_tracked_creates_state_table_when_absent_clickhouse() -> None:
+    """``EXISTS TABLE`` -> 0: the state table is created (lazy-create
+    default, mirrors #695's pre-provisioning probe on the other dialects)."""
+    dest = ClickHouseDestination()
+    load_client = _fake_client()
+    finalize_client = _state_client(rows=[], exists=False)
+
+    with patch.object(ClickHouseDestination, "_connect", return_value=load_client):
+        dest.load([{"id": 1}], _config(), _tracked_options())
+    with patch.object(ClickHouseDestination, "_connect", return_value=finalize_client):
+        dest.finalize_sync(_config(), _tracked_options())
+
+    create_calls = [
+        call.args[0]
+        for call in finalize_client.command.call_args_list
+        if "CREATE TABLE" in (call.args[0] if call.args else "")
+    ]
+    assert len(create_calls) == 1
+    assert "_drt_synced_keys" in create_calls[0]
+    assert "ENGINE = MergeTree" in create_calls[0]
+
+
+def test_tracked_skips_create_when_state_table_preprovisioned_clickhouse() -> None:
+    """``EXISTS TABLE`` -> 1: no CREATE TABLE is issued."""
+    dest = ClickHouseDestination()
+    load_client = _fake_client()
+    finalize_client = _state_client(rows=[], exists=True)
+
+    with patch.object(ClickHouseDestination, "_connect", return_value=load_client):
+        dest.load([{"id": 1}], _config(), _tracked_options())
+    with patch.object(ClickHouseDestination, "_connect", return_value=finalize_client):
+        dest.finalize_sync(_config(), _tracked_options())
+
+    assert not any(
+        "CREATE TABLE" in (call.args[0] if call.args else "")
+        for call in finalize_client.command.call_args_list
+    )
+
+
+def test_tracked_first_run_baselines_without_deleting_clickhouse() -> None:
+    dest = ClickHouseDestination()
+    load_client = _fake_client()
+    finalize_client = _state_client(rows=[])
+
+    with patch.object(ClickHouseDestination, "_connect", return_value=load_client):
+        dest.load([{"id": 1}, {"id": 2}], _config(), _tracked_options())
+    with patch.object(ClickHouseDestination, "_connect", return_value=finalize_client):
+        result = dest.finalize_sync(_config(), _tracked_options())
+
+    assert result is not None
+    for call in finalize_client.command.call_args_list:
+        sql = call.args[0] if call.args else ""
+        if "DELETE" in sql:
+            assert "`scores`" not in sql
+    insert_rows = finalize_client.insert.call_args.args[1]
+    assert [r[0] for r in insert_rows] == ["scores_sync", "scores_sync"]
+
+
+def test_tracked_second_run_deletes_only_stale_tracked_keys_clickhouse() -> None:
+    """prev={1,2,3}, current={1,2} -> ALTER TABLE `scores` DELETE ... IN {keys:...} w/ ["3"]."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    dest = ClickHouseDestination()
+    load_client = _fake_client()
+    finalize_client = _state_client(
+        rows=[(key_hash((k,)), key_json((k,))) for k in (1, 2, 3)]
+    )
+
+    with patch.object(ClickHouseDestination, "_connect", return_value=load_client):
+        dest.load([{"id": 1}, {"id": 2}], _config(), _tracked_options())
+    with patch.object(ClickHouseDestination, "_connect", return_value=finalize_client):
+        dest.finalize_sync(_config(), _tracked_options())
+
+    target_deletes = [
+        call
+        for call in finalize_client.command.call_args_list
+        if "DELETE" in (call.args[0] if call.args else "") and "`scores`" in call.args[0]
+    ]
+    assert len(target_deletes) == 1
+    sql, kwargs = target_deletes[0].args[0], target_deletes[0].kwargs
+    assert "IN {keys:Array(String)}" in sql and "NOT IN" not in sql
+    assert kwargs["parameters"]["keys"] == ["3"]
+
+
+def test_tracked_empty_source_is_noop_clickhouse() -> None:
+    dest = ClickHouseDestination()
+    finalize_client = _fake_client()
+
+    with patch.object(ClickHouseDestination, "_connect", return_value=finalize_client):
+        result = dest.finalize_sync(_config(), _tracked_options())
+
+    assert result is None
+    finalize_client.command.assert_not_called()
+
+
+def test_tracked_baseline_logs_warning_clickhouse(caplog: pytest.LogCaptureFixture) -> None:
+    dest = ClickHouseDestination()
+    load_client = _fake_client()
+    finalize_client = _state_client(rows=[])
+
+    with patch.object(ClickHouseDestination, "_connect", return_value=load_client):
+        dest.load([{"id": 1}], _config(), _tracked_options())
+    with (
+        patch.object(ClickHouseDestination, "_connect", return_value=finalize_client),
+        caplog.at_level("WARNING"),
+    ):
+        dest.finalize_sync(_config(), _tracked_options())
+
+    assert any("baselin" in r.message.lower() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# mirror.scope + strategy: tracked (#694, extended to ClickHouse by #692)
+# ---------------------------------------------------------------------------
+
+
+def _tracked_scoped_options(scope: list[str] = ["parent_id"]) -> SyncOptions:
+    opts = _options(mirror={"strategy": "tracked", "scope": scope})
+    opts._sync_name = "scores_sync"
+    return opts
+
+
+def test_tracked_scoped_deletes_only_stale_keys_within_observed_scope_clickhouse() -> None:
+    """Prior state has parent 1: {(1,"a"),(1,"b")} and parent 2: {(2,"x")}.
+    This run only touches parent 1 with just (1,"a") -> (1,"b") is stale and
+    deleted; (2,"x") is under a parent this run never saw and must survive."""
+    import json
+
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    dest = ClickHouseDestination()
+    load_client = _fake_client()
+    finalize_client = _state_client(
+        rows=[(key_hash(k), key_json(k)) for k in ((1, "a"), (1, "b"), (2, "x"))]
+    )
+    config = _config(upsert_key=["parent_id", "id"])
+
+    with patch.object(ClickHouseDestination, "_connect", return_value=load_client):
+        dest.load([{"parent_id": 1, "id": "a"}], config, _tracked_scoped_options())
+    with patch.object(ClickHouseDestination, "_connect", return_value=finalize_client):
+        dest.finalize_sync(config, _tracked_scoped_options())
+
+    target_deletes = [
+        call
+        for call in finalize_client.command.call_args_list
+        if "DELETE" in (call.args[0] if call.args else "") and "`scores`" in call.args[0]
+    ]
+    assert len(target_deletes) == 1
+    assert target_deletes[0].kwargs["parameters"]["keys"] == [("1", "b")]
+
+    insert_rows = finalize_client.insert.call_args.args[1]
+    persisted_keys = {tuple(json.loads(r[2])) for r in insert_rows}
+    assert persisted_keys == {(1, "a"), (2, "x")}
+
+
+def test_tracked_scoped_first_touch_of_a_scope_is_not_a_baseline_warning_clickhouse(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    dest = ClickHouseDestination()
+    load_client = _fake_client()
+    finalize_client = _state_client(rows=[(key_hash((2, "x")), key_json((2, "x")))])
+    config = _config(upsert_key=["parent_id", "id"])
+
+    with patch.object(ClickHouseDestination, "_connect", return_value=load_client):
+        dest.load([{"parent_id": 1, "id": "a"}], config, _tracked_scoped_options())
+    with (
+        patch.object(ClickHouseDestination, "_connect", return_value=finalize_client),
+        caplog.at_level("WARNING"),
+    ):
+        dest.finalize_sync(config, _tracked_scoped_options())
+
+    assert not any("baselin" in r.message.lower() for r in caplog.records)
+    for call in finalize_client.command.call_args_list:
+        sql = call.args[0] if call.args else ""
+        if "DELETE" in sql:
+            assert "`scores`" not in sql
+
+
+def test_tracked_scoped_genuinely_no_prior_state_still_warns_baseline_clickhouse(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    dest = ClickHouseDestination()
+    load_client = _fake_client()
+    finalize_client = _state_client(rows=[])
+    config = _config(upsert_key=["parent_id", "id"])
+
+    with patch.object(ClickHouseDestination, "_connect", return_value=load_client):
+        dest.load([{"parent_id": 1, "id": "a"}], config, _tracked_scoped_options())
+    with (
+        patch.object(ClickHouseDestination, "_connect", return_value=finalize_client),
+        caplog.at_level("WARNING"),
+    ):
+        dest.finalize_sync(config, _tracked_scoped_options())
+
+    assert any("baselin" in r.message.lower() for r in caplog.records)

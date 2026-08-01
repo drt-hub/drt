@@ -77,12 +77,12 @@ def test_upsert_key_message_is_stable() -> None:
 
 
 def test_unsupported_tracked_scope_message_names_dialect() -> None:
-    """clickhouse (not snowflake, since #692 added Snowflake support) — a
+    """databricks (not snowflake/clickhouse, both now supported by #692) — a
     dialect this message still actually rejects."""
-    msg = unsupported_tracked_scope_msg("clickhouse")
+    msg = unsupported_tracked_scope_msg("databricks")
     assert msg == (
-        "mirror.strategy: tracked / mirror.scope are not yet supported on clickhouse "
-        "(supported: postgres, mysql, snowflake — see #692 follow-ups)."
+        "mirror.strategy: tracked / mirror.scope are not yet supported on databricks "
+        "(supported: postgres, mysql, snowflake, clickhouse — see #692 follow-ups)."
     )
 
 
@@ -114,11 +114,13 @@ def test_check_mirror_supported_requires_upsert_key() -> None:
 
 
 def test_check_mirror_supported_rejects_tracked_and_scope() -> None:
+    """databricks — the one dialect still genuinely rejected (not passing
+    ``supports_tracked_scope=True``, which every real caller here does)."""
     cfg = SimpleNamespace(upsert_key=["id"])
     with pytest.raises(ValueError, match="not yet supported on databricks"):
         check_mirror_supported(cfg, _mirror_opts(strategy="tracked"), "databricks")
-    with pytest.raises(ValueError, match="not yet supported on clickhouse"):
-        check_mirror_supported(cfg, _mirror_opts(scope=["parent_id"]), "clickhouse")
+    with pytest.raises(ValueError, match="not yet supported on databricks"):
+        check_mirror_supported(cfg, _mirror_opts(scope=["parent_id"]), "databricks")
 
 
 def test_check_mirror_supported_ok_for_plain_mirror() -> None:

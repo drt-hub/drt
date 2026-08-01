@@ -129,6 +129,24 @@ Memory constraint: the in-process key set is memory-bound to source key cardinal
 
 Same `sync.mode: mirror` is supported on **Postgres** (Step 1), **MySQL** (Step 2), and **Snowflake** (Step 4). BigQuery follows once contributor PR [#584](https://github.com/drt-hub/drt/pull/584) lands.
 
+**Tracked mirror (`mirror.strategy: tracked`, [#686](https://github.com/drt-hub/drt/issues/686)/[#692](https://github.com/drt-hub/drt/issues/692)) — for tables the application also writes to:**
+
+```yaml
+sync:
+  mode: mirror
+  mirror:
+    strategy: tracked   # default: "destination" (the NOT IN behaviour above)
+```
+
+Same Census-style semantics as the other three dialects (see the [Postgres tracked-mirror section](postgres.md) for the full write-up): drt persists the set of `upsert_key` tuples it has itself synced in a drt-managed `_drt_synced_keys` table, and each run deletes only `previously-synced − current-source` keys.
+
+Two ClickHouse-specific notes:
+
+- The state table is created with `ENGINE = MergeTree ORDER BY (sync_name, key_hash)` — ClickHouse requires an explicit engine, unlike Postgres/MySQL/Snowflake. Existence is checked via `EXISTS TABLE` (skip CREATE when a pre-provisioned table is already there, mirroring [#695](https://github.com/drt-hub/drt/issues/695)'s pattern on the other dialects), and reads/writes go through `client.query()`/`client.insert()`/mutation `ALTER TABLE ... DELETE`, matching how the rest of this connector already talks to ClickHouse.
+- **No cross-statement transaction.** The other three dialects commit the target DELETE and the state rewrite together; ClickHouse mutations and inserts here are each their own statement. The target DELETE always runs *first*, so a failure partway through degrades safely — either a stale key gets deleted again next run (a harmless no-op) or the state table reads back empty and the existing "no prior state" baseline path takes over (WARN, re-baseline, no wrongful deletes) rather than ever deleting something it shouldn't.
+
+**Scoped mirror (`mirror.scope`, [#687](https://github.com/drt-hub/drt/issues/687)/[#692](https://github.com/drt-hub/drt/issues/692)):** `scope: [parent_id]` restricts the mirror DELETE to rows whose scope values appeared in this run's source — the fit for 1:N regeneration. Composable with `strategy: tracked` ([#694](https://github.com/drt-hub/drt/issues/694)) provided `scope` is a subset of `upsert_key`. See the [Postgres scoped-mirror section](postgres.md) for the full semantics — identical on ClickHouse, built on the same `{name:Type}`-parameterized mutation shape already used for the plain mirror DELETE above.
+
 ## Identifier quoting
 
 ClickHouse identifier quoting applies consistently across all SQL command paths thanks to the `_quote_ident` helper introduced in v0.7.7 ([PR #598](https://github.com/drt-hub/drt/pull/598)) for the mirror DELETE and extended in v0.7.8 ([PR #610](https://github.com/drt-hub/drt/pull/610)) to every remaining path:

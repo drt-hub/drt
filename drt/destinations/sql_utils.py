@@ -73,7 +73,7 @@ def unsupported_tracked_scope_msg(dialect: str) -> str:
     dialect by #692)."""
     return (
         f"mirror.strategy: tracked / mirror.scope are not yet supported on {dialect} "
-        "(supported: postgres, mysql, snowflake — see #692 follow-ups)."
+        "(supported: postgres, mysql, snowflake, clickhouse — see #692 follow-ups)."
     )
 
 

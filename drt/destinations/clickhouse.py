@@ -61,6 +61,11 @@ class ClickHouseDestination:
         # records); finalize_sync treats that as "skip DELETE" — safety
         # against deleting everything when the source produced no data.
         self._mirror_keys: list[tuple[Any, ...]] | None = None
+        # mirror.scope (#692, mirroring #687) — distinct scope-column value
+        # tuples observed across batches; the finalize DELETE (destination or
+        # tracked strategy) is restricted to rows whose scope values are in
+        # this set.
+        self._mirror_scopes: set[tuple[Any, ...]] | None = None
 
     def load(
         self,
@@ -100,10 +105,27 @@ class ClickHouseDestination:
                 # before any INSERT so a misconfigured sync fails fast
                 # rather than after partially populating the table.
                 # Reject an unserveable mirror config (missing upsert_key, or
-                # tracked/scope which are Postgres/MySQL-only) before any INSERT.
+                # a scope+tracked composition where scope isn't a subset of
+                # upsert_key, #694) before any INSERT. tracked/scope
+                # themselves are supported on ClickHouse since #692.
                 from drt.destinations.sql_utils import check_mirror_supported
 
-                check_mirror_supported(config, sync_options, "clickhouse")
+                check_mirror_supported(
+                    config, sync_options, "clickhouse", supports_tracked_scope=True
+                )
+                if (
+                    sync_options.mode == "mirror"
+                    and sync_options.mirror is not None
+                    and sync_options.mirror.scope
+                ):
+                    missing = [
+                        c for c in sync_options.mirror.scope if c not in records[0]
+                    ]
+                    if missing:
+                        raise ValueError(
+                            "mirror.scope columns missing from the model output: "
+                            f"{missing} (available: {sorted(records[0].keys())})"
+                        )
 
                 # clickhouse-connect's client.insert(table=...) interpolates
                 # the table raw into "INSERT INTO {table} ..." with no quoting
@@ -137,6 +159,13 @@ class ClickHouseDestination:
                     assert config.upsert_key  # guarded above
                     if self._mirror_keys is None:
                         self._mirror_keys = []
+                    scope_cols = (
+                        sync_options.mirror.scope
+                        if sync_options.mirror is not None
+                        else None
+                    )
+                    if scope_cols and self._mirror_scopes is None:
+                        self._mirror_scopes = set()
                     failed_indices = {
                         re.batch_index for re in result.row_errors
                     }
@@ -146,6 +175,11 @@ class ClickHouseDestination:
                         self._mirror_keys.append(
                             tuple(record.get(k) for k in config.upsert_key)
                         )
+                        if scope_cols:
+                            assert self._mirror_scopes is not None
+                            self._mirror_scopes.add(
+                                tuple(record.get(c) for c in scope_cols)
+                            )
         finally:
             client.close()
 
@@ -227,6 +261,7 @@ class ClickHouseDestination:
             result = self._finalize_mirror(config, sync_options)
             # Reset mirror state regardless of result so a re-run starts fresh.
             self._mirror_keys = None
+            self._mirror_scopes = None
             return result
 
         if not self._swap_shadow_created or self._swap_table is None:
@@ -250,27 +285,85 @@ class ClickHouseDestination:
 
         return SyncResult()
 
-    def _finalize_mirror(
+    def _build_mirror_delete(
         self,
-        config: DestinationConfig,
-        sync_options: SyncOptions,
-    ) -> SyncResult | None:
-        """``sync.mode: mirror`` end-of-sync DELETE pass (#340 Step 3).
-
-        Deletes destination rows whose ``upsert_key`` tuple is not in the
-        set of keys observed across all batches via an ``ALTER TABLE ...
-        DELETE`` mutation. Runs with ``mutations_sync=1`` so the call
-        blocks until the mutation finishes.
+        table_q: str,
+        upsert_cols: list[str],
+        keys: list[tuple[Any, ...]],
+        scope_cols: list[str] | None,
+        scopes: list[tuple[Any, ...]] | None,
+        negate: bool,
+    ) -> tuple[str, dict[str, Any]]:
+        """Build an ``ALTER TABLE ... DELETE`` mutation (#340 Step 3 / #687 / #692).
 
         Uses clickhouse_connect's native ``{name:Type}`` parameter
         substitution with ``Array(String)`` (single column) or
         ``Array(Tuple(String, ...))`` (composite). Both column references
         and parameter values are coerced with ``toString()`` so the
         comparison works regardless of the source column type — at the
-        cost of skipping any index on the upsert_key column. Mirror mode
-        is intended for small/medium reference tables where this is
-        acceptable; the temp-table strategy (#340 follow-up) targets the
-        high-cardinality case.
+        cost of skipping any index on the upsert_key column.
+
+        ``scope_cols``/``scopes`` (#692, mirroring Postgres/MySQL/Snowflake's
+        #687 handling) prepend a ``scope IN {scope_keys:...} AND`` clause in
+        the same shape. ``negate`` selects destination-strategy (``NOT IN``,
+        delete what's absent) vs. tracked-strategy (``IN``, delete exactly
+        these keys). Caller runs the returned statement with
+        ``settings={"mutations_sync": 1}`` so the call blocks until the
+        mutation finishes.
+        """
+        op = "NOT IN" if negate else "IN"
+        scope_clause = ""
+        params: dict[str, Any] = {}
+        if scope_cols and scopes:
+            if len(scope_cols) == 1:
+                scope_col_q = f"toString(`{scope_cols[0]}`)"
+                scope_clause = f"{scope_col_q} IN {{scope_keys:Array(String)}} AND "
+                params["scope_keys"] = [str(s[0]) for s in scopes]
+            else:
+                scope_col_tuple = (
+                    "(" + ", ".join(f"toString(`{c}`)" for c in scope_cols) + ")"
+                )
+                scope_tuple_type = "Tuple(" + ", ".join(["String"] * len(scope_cols)) + ")"
+                scope_clause = (
+                    f"{scope_col_tuple} IN {{scope_keys:Array({scope_tuple_type})}} AND "
+                )
+                params["scope_keys"] = [tuple(str(v) for v in s) for s in scopes]
+
+        if len(upsert_cols) == 1:
+            col_q = f"toString(`{upsert_cols[0]}`)"
+            sql = (
+                f"ALTER TABLE {table_q} DELETE "
+                f"WHERE {scope_clause}{col_q} {op} {{keys:Array(String)}}"
+            )
+            params["keys"] = [str(k[0]) for k in keys]
+        else:
+            col_tuple = "(" + ", ".join(f"toString(`{c}`)" for c in upsert_cols) + ")"
+            tuple_type = "Tuple(" + ", ".join(["String"] * len(upsert_cols)) + ")"
+            sql = (
+                f"ALTER TABLE {table_q} DELETE "
+                f"WHERE {scope_clause}{col_tuple} {op} {{keys:Array({tuple_type})}}"
+            )
+            params["keys"] = [tuple(str(v) for v in k) for k in keys]
+        return sql, params
+
+    def _finalize_mirror(
+        self,
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult | None:
+        """``sync.mode: mirror`` end-of-sync DELETE pass (#340 Step 3 / #687).
+
+        Deletes destination rows whose ``upsert_key`` tuple is not in the
+        set of keys observed across all batches, via
+        :meth:`_build_mirror_delete`. Mirror mode is intended for
+        small/medium reference tables — the ``toString()`` comparison skips
+        any index on the upsert_key column; the temp-table strategy (#340
+        follow-up) targets the high-cardinality case.
+
+        ``mirror.strategy: tracked`` (#692) dispatches to
+        :meth:`_finalize_mirror_tracked` instead — state-based diff rather
+        than the whole-table diff below. Shares the empty-source guard, so
+        a transient empty source also keeps a tracked baseline intact.
 
         Returns ``None`` when ``_mirror_keys`` is empty or ``None`` —
         treats "no batch with records was ever observed" as a signal to
@@ -281,6 +374,9 @@ class ClickHouseDestination:
         if not self._mirror_keys:
             return None
 
+        if sync_options.mirror is not None and sync_options.mirror.strategy == "tracked":
+            return self._finalize_mirror_tracked(config, sync_options)
+
         upsert_cols = config.upsert_key
         assert upsert_cols  # guarded in load()
 
@@ -288,29 +384,17 @@ class ClickHouseDestination:
         keys = list({tuple(k) for k in self._mirror_keys})
         table_q = self._quote_ident(config.table)
 
+        # mirror.scope (#687/#692) — restrict the diff to rows under parents
+        # this run actually observed. list(), not sorted() — scope values
+        # may include None (unorderable).
+        scope_cols = sync_options.mirror.scope if sync_options.mirror is not None else None
+        scopes = list(self._mirror_scopes or set()) if scope_cols else None
+
         client = self._connect(config)
         try:
-            if len(upsert_cols) == 1:
-                col_q = f"`{upsert_cols[0]}`"
-                sql = (
-                    f"ALTER TABLE {table_q} DELETE "
-                    f"WHERE toString({col_q}) NOT IN {{keys:Array(String)}}"
-                )
-                params: dict[str, Any] = {
-                    "keys": [str(k[0]) for k in keys]
-                }
-            else:
-                col_tuple = (
-                    "(" + ", ".join(f"toString(`{c}`)" for c in upsert_cols) + ")"
-                )
-                tuple_type = "Tuple(" + ", ".join(["String"] * len(upsert_cols)) + ")"
-                sql = (
-                    f"ALTER TABLE {table_q} DELETE "
-                    f"WHERE {col_tuple} NOT IN {{keys:Array({tuple_type})}}"
-                )
-                params = {
-                    "keys": [tuple(str(v) for v in k) for k in keys]
-                }
+            sql, params = self._build_mirror_delete(
+                table_q, upsert_cols, keys, scope_cols, scopes, negate=True
+            )
             client.command(sql, parameters=params, settings={"mutations_sync": 1})
         finally:
             client.close()
@@ -318,6 +402,132 @@ class ClickHouseDestination:
         # SyncResult has no dedicated `deleted` field; future work tracks
         # this separately. Returning a bare SyncResult signals "finalize
         # ran successfully" to the engine without inflating success/failed.
+        return SyncResult()
+
+    def _finalize_mirror_tracked(
+        self, config: Any, sync_options: SyncOptions
+    ) -> SyncResult | None:
+        """``mirror.strategy: tracked`` (#692) — delete only rows drt synced.
+
+        Same Census-style algorithm as
+        ``BaseSqlDestination._finalize_mirror_tracked`` (Postgres/MySQL,
+        #686/#694) and the Snowflake destination's version: reads the
+        previously-synced key set for this sync from a drt-managed
+        ``_drt_synced_keys`` table, deletes ``previous - current`` from the
+        target, and rewrites the state to the current key set. First run
+        (or lost state) baselines: record keys, delete nothing, WARN.
+
+        Two real ClickHouse-specific differences from the other three
+        dialects:
+
+        - **No table qualification needed** — like the target table
+          (``config.table``, unqualified — see ``ClickHouseDestinationConfig``),
+          the state table is created and addressed unqualified, resolving
+          against the connection's own default database (set at connect
+          time via ``database``/``database_env``).
+        - **No cross-statement transaction.** Postgres/MySQL/Snowflake commit
+          the target DELETE and the state rewrite together; ClickHouse has no
+          such thing here — each statement is its own mutation. Ordering is
+          chosen so a failure between them degrades safely: the target
+          DELETE runs *first*, so if the state rewrite fails afterward, the
+          state table is left holding entries for now-deleted target rows —
+          harmless (a stale key deleted a second time is a no-op) — or, if
+          the state table's own DELETE half succeeds but the INSERT half
+          doesn't, ``previous`` reads back empty next run and the algorithm's
+          existing "no prior state" baseline path takes over (WARN,
+          re-baseline, no deletes) rather than deleting anything wrongly.
+          Reversing the order — state first, target DELETE second — would
+          fail the other way: a target-DELETE failure would leave already-
+          gone-from-state keys still present on the target with nothing to
+          ever clean them up.
+
+        ``mirror.scope`` + ``strategy: tracked`` (#694) prunes both the state
+        read and the state rewrite to the observed scope — see
+        ``BaseSqlDestination._finalize_mirror_tracked`` for the full
+        rationale; the algorithm here is identical, just against
+        ClickHouse's own mutation/insert primitives.
+        """
+        import json
+        import logging
+
+        from drt.destinations._mirror_state import STATE_TABLE, diff_keys, key_hash, key_json
+
+        assert isinstance(config, ClickHouseDestinationConfig)
+        sync_name = sync_options._sync_name or config.table
+        current = list({tuple(k) for k in self._mirror_keys or []})
+        upsert_cols = config.upsert_key
+        assert upsert_cols  # guarded in load()
+        table_q = self._quote_ident(config.table)
+        state_q = self._quote_ident(STATE_TABLE)
+
+        scope_cols = sync_options.mirror.scope if sync_options.mirror is not None else None
+        scope_positions = [upsert_cols.index(c) for c in scope_cols] if scope_cols else None
+        observed_scopes = set(self._mirror_scopes or set()) if scope_positions else None
+
+        client = self._connect(config)
+        try:
+            # Pre-provisioning (mirrors #695): only CREATE when the state
+            # table is genuinely absent, so a locked-down destination user
+            # can run against one an admin created ahead of time.
+            exists = client.query(f"EXISTS TABLE {state_q}")
+            if not exists.result_rows[0][0]:
+                client.command(
+                    f"CREATE TABLE IF NOT EXISTS {state_q} ("
+                    "sync_name String, key_hash String, key_json String"
+                    ") ENGINE = MergeTree ORDER BY (sync_name, key_hash)"
+                )
+            state_result = client.query(
+                f"SELECT key_hash, key_json FROM {state_q} "
+                "WHERE sync_name = {sync_name:String}",
+                parameters={"sync_name": sync_name},
+            )
+            previous = {row[0]: row[1] for row in state_result.result_rows}
+
+            if scope_positions is not None and observed_scopes is not None:
+                previous_in_scope = {
+                    h: kj
+                    for h, kj in previous.items()
+                    if tuple(json.loads(kj)[p] for p in scope_positions) in observed_scopes
+                }
+                preserved = [
+                    tuple(json.loads(kj))
+                    for h, kj in previous.items()
+                    if h not in previous_in_scope
+                ]
+            else:
+                previous_in_scope = previous
+                preserved = []
+
+            if previous_in_scope:
+                to_delete = diff_keys(previous_in_scope, current)
+                if to_delete:
+                    sql, params = self._build_mirror_delete(
+                        table_q, upsert_cols, to_delete, None, None, negate=False
+                    )
+                    client.command(sql, parameters=params, settings={"mutations_sync": 1})
+            elif not previous:
+                logging.getLogger(__name__).warning(
+                    "tracked mirror: no prior state for sync %r in %s — "
+                    "baselining this run's %d key(s); no deletes this run.",
+                    sync_name,
+                    STATE_TABLE,
+                    len(current),
+                )
+
+            # Rewrite state — mutation-delete then bulk insert (no
+            # cross-statement transaction; see the failure-mode note above).
+            client.command(
+                f"ALTER TABLE {state_q} DELETE WHERE sync_name = {{sync_name:String}}",
+                parameters={"sync_name": sync_name},
+                settings={"mutations_sync": 1},
+            )
+            state_rows = [
+                [sync_name, key_hash(k), key_json(k)] for k in (current + preserved)
+            ]
+            client.insert(state_q, state_rows, column_names=["sync_name", "key_hash", "key_json"])
+        finally:
+            client.close()
+
         return SyncResult()
 
     @staticmethod
