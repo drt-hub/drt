@@ -69,6 +69,40 @@ def _fake_conn() -> MagicMock:
     return conn
 
 
+def _configure_state_cur(
+    conn: MagicMock,
+    raw_diff: list[tuple[str, str]] | None = None,
+    to_insert: list[tuple[str, str]] | None = None,
+    previous_exists: bool = True,
+    table_exists: bool = True,
+) -> None:
+    """Configure a ``_fake_conn()``'s cursor to answer the #694 part 2 reads,
+    dispatched by the most recent ``execute()`` call's SQL text — see the
+    Postgres test file's twin helper for the full rationale. Also covers
+    the ``SHOW TABLES`` existence probe (Snowflake's own ``fetchall``-based
+    check, unlike Postgres/MySQL's ``fetchone``-based one)."""
+    cur = conn._cur
+
+    def fetchone_side_effect() -> Any:
+        sql = cur.execute.call_args.args[0] if cur.execute.call_args.args else ""
+        if "LIMIT 1" in sql:
+            return (1,) if previous_exists else None
+        return None
+
+    def fetchall_side_effect() -> list[tuple[str, str]]:
+        sql = cur.execute.call_args.args[0] if cur.execute.call_args.args else ""
+        if "SHOW TABLES" in sql:
+            return [("_DRT_SYNCED_KEYS",)] if table_exists else []
+        if "SELECT s.key_hash" in sql:
+            return list(raw_diff or [])
+        if "SELECT c.key_hash" in sql:
+            return list(to_insert or [])
+        return []
+
+    cur.fetchone.side_effect = fetchone_side_effect
+    cur.fetchall.side_effect = fetchall_side_effect
+
+
 def _mocked_snowflake_modules(conn: MagicMock | None = None) -> dict[str, MagicMock]:
     """Build sys.modules entries that satisfy ``import snowflake.connector``."""
     mock_module = MagicMock()
@@ -534,11 +568,19 @@ def _tracked_options() -> SyncOptions:
 def test_tracked_first_run_baselines_without_deleting_snowflake(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from drt.destinations._mirror_state import key_hash, key_json
+
     _set_creds(monkeypatch)
     dest = SnowflakeDestination()
     load_conn = _fake_conn()
     finalize_conn = _fake_conn()
-    finalize_conn._cur.fetchall.return_value = []  # SHOW TABLES + state SELECT
+    _configure_state_cur(
+        finalize_conn,
+        raw_diff=[],
+        to_insert=[(key_hash((k,)), key_json((k,))) for k in (1, 2)],
+        previous_exists=False,
+        table_exists=False,
+    )
 
     with patch.dict("sys.modules", _mocked_snowflake_modules(load_conn)):
         dest.load([{"id": 1}, {"id": 2}], _config(), _tracked_options())
@@ -564,10 +606,11 @@ def test_tracked_second_run_deletes_only_stale_tracked_keys_snowflake(
     dest = SnowflakeDestination()
     load_conn = _fake_conn()
     finalize_conn = _fake_conn()
-    finalize_conn._cur.fetchall.side_effect = [
-        [("_DRT_SYNCED_KEYS",)],  # SHOW TABLES -> exists, skip CREATE
-        [(key_hash((k,)), key_json((k,))) for k in (1, 2, 3)],  # state SELECT
-    ]
+    _configure_state_cur(
+        finalize_conn,
+        raw_diff=[(key_hash((3,)), key_json((3,)))],
+        to_insert=[],
+    )
 
     with patch.dict("sys.modules", _mocked_snowflake_modules(load_conn)):
         dest.load([{"id": 1}, {"id": 2}], _config(), _tracked_options())
@@ -586,6 +629,71 @@ def test_tracked_second_run_deletes_only_stale_tracked_keys_snowflake(
     assert params == [3]
 
 
+def test_tracked_stages_current_keys_before_diffing_snowflake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#694 part 2: current's keys are staged into a scratch TEMPORARY table
+    before the diff query runs, and the scratch table is dropped at the end."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    _set_creds(monkeypatch)
+    dest = SnowflakeDestination()
+    load_conn = _fake_conn()
+    finalize_conn = _fake_conn()
+    _configure_state_cur(finalize_conn)
+
+    with patch.dict("sys.modules", _mocked_snowflake_modules(load_conn)):
+        dest.load([{"id": 1}, {"id": 2}], _config(), _tracked_options())
+    with patch.dict("sys.modules", _mocked_snowflake_modules(finalize_conn)):
+        dest.finalize_sync(_config(), _tracked_options())
+
+    calls = finalize_conn._cur.execute.call_args_list
+    create_idx = next(
+        i for i, c in enumerate(calls) if "CREATE TEMPORARY TABLE" in c.args[0]
+    )
+    diff_idx = next(i for i, c in enumerate(calls) if c.args[0].startswith("SELECT s.key_hash"))
+    drop_idx = next(i for i, c in enumerate(calls) if c.args[0].startswith("DROP TABLE"))
+    assert create_idx < diff_idx < drop_idx
+    stage_insert = next(
+        c
+        for c in finalize_conn._cur.executemany.call_args_list
+        if "INSERT INTO" in c.args[0] and "DIFF_KEYS" in c.args[0].upper()
+    )
+    for k in (1, 2):
+        assert (key_hash((k,)), key_json((k,))) in stage_insert.args[1]
+
+
+def test_tracked_inserts_only_genuinely_new_keys_snowflake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A current key already tracked under the same hash never needs
+    rewriting — only rows the new-keys query actually returns get inserted."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    _set_creds(monkeypatch)
+    dest = SnowflakeDestination()
+    load_conn = _fake_conn()
+    finalize_conn = _fake_conn()
+    _configure_state_cur(
+        finalize_conn, raw_diff=[], to_insert=[(key_hash((2,)), key_json((2,)))]
+    )
+
+    with patch.dict("sys.modules", _mocked_snowflake_modules(load_conn)):
+        dest.load([{"id": 1}, {"id": 2}], _config(), _tracked_options())
+    with patch.dict("sys.modules", _mocked_snowflake_modules(finalize_conn)):
+        dest.finalize_sync(_config(), _tracked_options())
+
+    insert_calls = [
+        c
+        for c in finalize_conn._cur.executemany.call_args_list
+        if "INSERT INTO" in c.args[0] and "USER_SCORES" not in c.args[0]
+        and "DIFF_KEYS" not in c.args[0].upper()
+    ]
+    assert len(insert_calls) == 1
+    rows = insert_calls[0].args[1]
+    assert rows == [("scores_sync", key_hash((2,)), key_json((2,)))]
+
+
 def test_tracked_empty_source_is_noop_snowflake(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_creds(monkeypatch)
     dest = SnowflakeDestination()
@@ -601,11 +709,19 @@ def test_tracked_empty_source_is_noop_snowflake(monkeypatch: pytest.MonkeyPatch)
 def test_tracked_baseline_logs_warning_snowflake(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    from drt.destinations._mirror_state import key_hash, key_json
+
     _set_creds(monkeypatch)
     dest = SnowflakeDestination()
     load_conn = _fake_conn()
     finalize_conn = _fake_conn()
-    finalize_conn._cur.fetchall.return_value = []
+    _configure_state_cur(
+        finalize_conn,
+        raw_diff=[],
+        to_insert=[(key_hash((1,)), key_json((1,)))],
+        previous_exists=False,
+        table_exists=False,
+    )
 
     with patch.dict("sys.modules", _mocked_snowflake_modules(load_conn)):
         dest.load([{"id": 1}], _config(), _tracked_options())
@@ -634,19 +750,19 @@ def test_tracked_scoped_deletes_only_stale_keys_within_observed_scope_snowflake(
 ) -> None:
     """Prior state has parent 1: {(1,"a"),(1,"b")} and parent 2: {(2,"x")}.
     This run only touches parent 1 with just (1,"a") -> (1,"b") is stale and
-    deleted; (2,"x") is under a parent this run never saw and must survive."""
-    import json
-
+    deleted; (2,"x") is under a parent this run never saw and must survive
+    (never appears in any executemany call — #694 part 2 never touches it)."""
     from drt.destinations._mirror_state import key_hash, key_json
 
     _set_creds(monkeypatch)
     dest = SnowflakeDestination()
     load_conn = _fake_conn()
     finalize_conn = _fake_conn()
-    finalize_conn._cur.fetchall.side_effect = [
-        [("_DRT_SYNCED_KEYS",)],  # SHOW TABLES -> exists
-        [(key_hash(k), key_json(k)) for k in ((1, "a"), (1, "b"), (2, "x"))],
-    ]
+    _configure_state_cur(
+        finalize_conn,
+        raw_diff=[(key_hash(k), key_json(k)) for k in ((1, "b"), (2, "x"))],
+        to_insert=[],
+    )
     config = _config(upsert_key=["parent_id", "id"])
 
     with patch.dict("sys.modules", _mocked_snowflake_modules(load_conn)):
@@ -664,9 +780,16 @@ def test_tracked_scoped_deletes_only_stale_keys_within_observed_scope_snowflake(
     _, params = target_deletes[0].args
     assert params == [1, "b"]
 
-    rows = finalize_conn._cur.executemany.call_args.args[1]
-    persisted_keys = {tuple(json.loads(r[2])) for r in rows}
-    assert persisted_keys == {(1, "a"), (2, "x")}
+    state_delete_calls = [
+        c
+        for c in finalize_conn._cur.executemany.call_args_list
+        if "DELETE FROM" in c.args[0] and "USER_SCORES" not in c.args[0]
+    ]
+    assert len(state_delete_calls) == 1
+    deleted_hashes = {row[1] for row in state_delete_calls[0].args[1]}
+    assert deleted_hashes == {key_hash((1, "b"))}
+    for call in finalize_conn._cur.executemany.call_args_list:
+        assert key_hash((2, "x")) not in str(call.args[1])
 
 
 def test_tracked_scoped_first_touch_of_a_scope_is_not_a_baseline_warning_snowflake(
@@ -678,10 +801,11 @@ def test_tracked_scoped_first_touch_of_a_scope_is_not_a_baseline_warning_snowfla
     dest = SnowflakeDestination()
     load_conn = _fake_conn()
     finalize_conn = _fake_conn()
-    finalize_conn._cur.fetchall.side_effect = [
-        [("_DRT_SYNCED_KEYS",)],
-        [(key_hash((2, "x")), key_json((2, "x")))],
-    ]
+    _configure_state_cur(
+        finalize_conn,
+        raw_diff=[(key_hash((2, "x")), key_json((2, "x")))],
+        to_insert=[(key_hash((1, "a")), key_json((1, "a")))],
+    )
     config = _config(upsert_key=["parent_id", "id"])
 
     with patch.dict("sys.modules", _mocked_snowflake_modules(load_conn)):
@@ -702,11 +826,19 @@ def test_tracked_scoped_first_touch_of_a_scope_is_not_a_baseline_warning_snowfla
 def test_tracked_scoped_genuinely_no_prior_state_still_warns_baseline_snowflake(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    from drt.destinations._mirror_state import key_hash, key_json
+
     _set_creds(monkeypatch)
     dest = SnowflakeDestination()
     load_conn = _fake_conn()
     finalize_conn = _fake_conn()
-    finalize_conn._cur.fetchall.return_value = []
+    _configure_state_cur(
+        finalize_conn,
+        raw_diff=[],
+        to_insert=[(key_hash((1, "a")), key_json((1, "a")))],
+        previous_exists=False,
+        table_exists=False,
+    )
     config = _config(upsert_key=["parent_id", "id"])
 
     with patch.dict("sys.modules", _mocked_snowflake_modules(load_conn)):

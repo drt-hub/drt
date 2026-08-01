@@ -595,16 +595,34 @@ class SnowflakeDestination:
         WARN. Rows the application wrote are never candidates for deletion
         because they were never in the tracked set.
 
-        ``mirror.scope`` + ``strategy: tracked`` (#694) prunes both the state
-        read and the state rewrite to the observed scope — see
+        ``mirror.scope`` + ``strategy: tracked`` (#694 part 1) prunes both
+        the state read and the state rewrite to the observed scope — see
         ``BaseSqlDestination._finalize_mirror_tracked`` for the full
         rationale; the algorithm here is identical, just against Snowflake's
         own connection/cursor and explicit-placeholder DELETE shape.
+
+        SQL-side diff (#694 part 2, same rationale/proof as the Postgres/
+        MySQL implementation): this run's keys are staged into a scratch
+        table and ``previous - current`` is computed with a ``NOT EXISTS``
+        join against ``_drt_synced_keys`` in SQL, so a state table with
+        millions of rows never gets read into Python just to compute a
+        typically-small diff. Scope-filtering happens in Python afterward,
+        on the (small) diff — mathematically equivalent to filtering the
+        full previous set by scope first, since scope membership and
+        current-membership are independent conditions. The old
+        "read every untouched row so it can be reinserted unchanged" step
+        is gone: untouched rows are simply never selected by either the
+        diff query or the new-keys query.
         """
-        import json
         import logging
 
-        from drt.destinations._mirror_state import STATE_TABLE, diff_keys, key_hash, key_json
+        from drt.destinations._mirror_state import (
+            DIFF_STAGING_TABLE,
+            STATE_TABLE,
+            decode_key,
+            key_hash,
+            key_json,
+        )
 
         assert isinstance(config, SnowflakeDestinationConfig)
         sync_name = sync_options._sync_name or config.table
@@ -613,6 +631,7 @@ class SnowflakeDestination:
         assert upsert_cols  # guarded in load()
         table_fq = f"{config.database}.{config.schema_}.{config.table}"
         state_fq = f"{config.database}.{config.schema_}.{STATE_TABLE}"
+        diff_table = f"{config.database}.{config.schema_}.{DIFF_STAGING_TABLE}"
 
         scope_cols = sync_options.mirror.scope if sync_options.mirror is not None else None
         scope_positions = [upsert_cols.index(c) for c in scope_cols] if scope_cols else None
@@ -635,35 +654,48 @@ class SnowflakeDestination:
                         "key_json VARCHAR NOT NULL, "
                         "PRIMARY KEY (sync_name, key_hash))"
                     )
+
+                # Baseline check: a cheap existence probe, never a full read.
                 cur.execute(
-                    f"SELECT key_hash, key_json FROM {state_fq} WHERE sync_name = %s",
+                    f"SELECT 1 FROM {state_fq} WHERE sync_name = %s LIMIT 1", [sync_name]
+                )
+                previous_exists = cur.fetchone() is not None
+
+                # Snowflake has session-scoped TEMPORARY tables, same as
+                # Postgres/MySQL — no manual DROP is strictly required, but
+                # one is issued anyway for clarity.
+                cur.execute(
+                    f"CREATE TEMPORARY TABLE {diff_table} "
+                    "(key_hash VARCHAR(64), key_json VARCHAR)"
+                )
+                if current:
+                    cur.executemany(
+                        f"INSERT INTO {diff_table} (key_hash, key_json) VALUES (%s, %s)",
+                        [(key_hash(k), key_json(k)) for k in current],
+                    )
+
+                cur.execute(
+                    f"SELECT s.key_hash, s.key_json FROM {state_fq} s WHERE s.sync_name = %s "
+                    f"AND NOT EXISTS (SELECT 1 FROM {diff_table} c WHERE c.key_hash = s.key_hash)",
                     [sync_name],
                 )
-                previous = {row[0]: row[1] for row in cur.fetchall()}
+                raw_diff = cur.fetchall()
 
                 if scope_positions is not None and observed_scopes is not None:
-                    previous_in_scope = {
-                        h: kj
-                        for h, kj in previous.items()
-                        if tuple(json.loads(kj)[p] for p in scope_positions) in observed_scopes
-                    }
-                    preserved = [
-                        tuple(json.loads(kj))
-                        for h, kj in previous.items()
-                        if h not in previous_in_scope
+                    to_delete = [
+                        decode_key(kj)
+                        for _h, kj in raw_diff
+                        if tuple(decode_key(kj)[p] for p in scope_positions) in observed_scopes
                     ]
                 else:
-                    previous_in_scope = previous
-                    preserved = []
+                    to_delete = [decode_key(kj) for _h, kj in raw_diff]
 
-                if previous_in_scope:
-                    to_delete = diff_keys(previous_in_scope, current)
-                    if to_delete:
-                        stmt, params = self._build_mirror_delete(
-                            table_fq, upsert_cols, to_delete, None, None, negate=False
-                        )
-                        cur.execute(stmt, params)
-                elif not previous:
+                if to_delete:
+                    stmt, params = self._build_mirror_delete(
+                        table_fq, upsert_cols, to_delete, None, None, negate=False
+                    )
+                    cur.execute(stmt, params)
+                elif not previous_exists:
                     logging.getLogger(__name__).warning(
                         "tracked mirror: no prior state for sync %r in %s — "
                         "baselining this run's %d key(s); no deletes this run.",
@@ -672,12 +704,25 @@ class SnowflakeDestination:
                         len(current),
                     )
 
-                cur.execute(f"DELETE FROM {state_fq} WHERE sync_name = %s", [sync_name])
-                cur.executemany(
-                    f"INSERT INTO {state_fq} (sync_name, key_hash, key_json) "
-                    "VALUES (%s, %s, %s)",
-                    [(sync_name, key_hash(k), key_json(k)) for k in (current + preserved)],
+                if to_delete:
+                    cur.executemany(
+                        f"DELETE FROM {state_fq} WHERE sync_name = %s AND key_hash = %s",
+                        [(sync_name, key_hash(k)) for k in to_delete],
+                    )
+                cur.execute(
+                    f"SELECT c.key_hash, c.key_json FROM {diff_table} c "
+                    f"WHERE NOT EXISTS (SELECT 1 FROM {state_fq} s "
+                    "WHERE s.sync_name = %s AND s.key_hash = c.key_hash)",
+                    [sync_name],
                 )
+                to_insert = cur.fetchall()
+                if to_insert:
+                    cur.executemany(
+                        f"INSERT INTO {state_fq} (sync_name, key_hash, key_json) "
+                        "VALUES (%s, %s, %s)",
+                        [(sync_name, h, kj) for h, kj in to_insert],
+                    )
+                cur.execute(f"DROP TABLE {diff_table}")
         finally:
             conn.close()
 
