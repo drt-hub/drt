@@ -142,6 +142,11 @@ class DatabricksDestination:
         # treats that as "skip DELETE" — safety against deleting
         # everything when the source produced no data.
         self._mirror_keys: list[tuple[Any, ...]] | None = None
+        # mirror.scope (#692, mirroring #687) — distinct scope-column value
+        # tuples observed across batches; the finalize DELETE (destination or
+        # tracked strategy) is restricted to rows whose scope values are in
+        # this set.
+        self._mirror_scopes: set[tuple[Any, ...]] | None = None
 
         # sync.mode: replace (#643) — per-sync state, reused across batches.
         # ``_replace_truncated`` ensures TRUNCATE runs once for the truncate
@@ -209,16 +214,28 @@ class DatabricksDestination:
         # upsert_key here so the misconfiguration is surfaced before any
         # row touches Databricks.
         is_mirror = sync_options.mode == "mirror"
-        # Reject an unserveable mirror config (missing upsert_key, or
-        # tracked/scope which are Postgres/MySQL-only) before writing; close the
-        # connection we just opened before surfacing the error.
+        # Reject an unserveable mirror config (missing upsert_key, or a
+        # scope+tracked composition where scope isn't a subset of
+        # upsert_key, #694) before writing; close the connection we just
+        # opened before surfacing the error. tracked/scope themselves are
+        # supported on Databricks since #692.
         from drt.destinations.sql_utils import check_mirror_supported
 
         try:
-            check_mirror_supported(config, sync_options, "databricks")
+            check_mirror_supported(
+                config, sync_options, "databricks", supports_tracked_scope=True
+            )
         except ValueError:
             conn.close()
             raise
+        if is_mirror and sync_options.mirror is not None and sync_options.mirror.scope:
+            missing = [c for c in sync_options.mirror.scope if c not in records[0]]
+            if missing:
+                conn.close()
+                raise ValueError(
+                    "mirror.scope columns missing from the model output: "
+                    f"{missing} (available: {sorted(records[0].keys())})"
+                )
         try:
             with conn.cursor() as cur:
                 columns = list(records[0].keys())
@@ -335,6 +352,13 @@ class DatabricksDestination:
                         assert config.upsert_key
                         if self._mirror_keys is None:
                             self._mirror_keys = []
+                        scope_cols = (
+                            sync_options.mirror.scope
+                            if sync_options.mirror is not None
+                            else None
+                        )
+                        if scope_cols and self._mirror_scopes is None:
+                            self._mirror_scopes = set()
                         failed_indices = {re.batch_index for re in result.row_errors}
                         for idx, record in enumerate(records):
                             if idx in failed_indices:
@@ -342,6 +366,11 @@ class DatabricksDestination:
                             self._mirror_keys.append(
                                 tuple(record.get(k) for k in config.upsert_key)
                             )
+                            if scope_cols:
+                                assert self._mirror_scopes is not None
+                                self._mirror_scopes.add(
+                                    tuple(record.get(c) for c in scope_cols)
+                                )
 
                 else:
                     raise ValueError(f"Unsupported mode: {config.mode}")
@@ -562,6 +591,7 @@ class DatabricksDestination:
         if sync_options.mode == "mirror":
             result = self._finalize_mirror(config, sync_options)
             self._mirror_keys = None
+            self._mirror_scopes = None
             return result
 
         if not self._swap_shadow_created or self._swap_table is None:
@@ -586,23 +616,97 @@ class DatabricksDestination:
             self._swap_direct_write = False
         return SyncResult()
 
+    def _delete_via_staged_keys(
+        self,
+        cur: Any,
+        table_fq: str,
+        upsert_cols: list[str],
+        keys: list[tuple[Any, ...]],
+        keys_table: str,
+        scope_cols: list[str] | None,
+        scopes: list[tuple[Any, ...]] | None,
+        negate: bool,
+    ) -> None:
+        """Stage ``keys`` into a scratch Delta table, then DELETE from
+        ``table_fq`` by set membership against it (#340 family / #687 / #692).
+
+        Under native ``?`` binding (#707) the per-statement parameter limit
+        rules out inlining every observed key into a single ``NOT IN (?, ?,
+        ...)``/``IN (?, ?, ...)``, so the keys are staged (chunked multi-row
+        INSERTs sized to the marker limit, #734) and removed via a subquery —
+        ``DELETE ... WHERE key [NOT] IN (SELECT key FROM staging)`` binds
+        *no* key parameters in the DELETE itself, so it scales past the limit
+        regardless of how many keys were observed. Delta has no session-local
+        temp tables, so the scratch table lives in the target's own
+        catalog/schema (the principal needs ``CREATE`` there in addition to
+        ``MODIFY`` on the target) and is dropped at the end.
+
+        ``scope_cols``/``scopes`` (#692, mirroring the other three dialects'
+        #687 handling) are inlined directly as an ``IN (?, ...)`` clause
+        rather than staged — scope cardinality (distinct parents) is
+        expected to stay well under the marker limit even when the key
+        cardinality it restricts does not.
+        """
+        key_cols = ", ".join(upsert_cols)
+        where_cols = upsert_cols[0] if len(upsert_cols) == 1 else f"({key_cols})"
+        row_marker = "(" + ", ".join(["?"] * len(upsert_cols)) + ")"
+
+        cur.execute(
+            f"CREATE OR REPLACE TABLE {keys_table} AS SELECT {key_cols} FROM {table_fq} WHERE 1=0"
+        )
+        insert_key_prefix = f"INSERT INTO {keys_table} ({key_cols}) VALUES "
+        rows_per = _rows_per_chunk(len(upsert_cols))
+        for start in range(0, len(keys), rows_per):
+            chunk = keys[start : start + rows_per]
+            cur.execute(
+                insert_key_prefix + ", ".join([row_marker] * len(chunk)),
+                [v for key in chunk for v in key],
+            )
+
+        op = "NOT IN" if negate else "IN"
+        scope_clause = ""
+        scope_params: list[Any] = []
+        if scope_cols and scopes:
+            scope_expr = (
+                scope_cols[0] if len(scope_cols) == 1 else "(" + ", ".join(scope_cols) + ")"
+            )
+            scope_marker = (
+                "?" if len(scope_cols) == 1 else "(" + ", ".join(["?"] * len(scope_cols)) + ")"
+            )
+            scope_clause = f"{scope_expr} IN ({', '.join([scope_marker] * len(scopes))}) AND "
+            scope_params = (
+                [s[0] for s in scopes]
+                if len(scope_cols) == 1
+                else [v for s in scopes for v in s]
+            )
+
+        delete_sql = (
+            f"DELETE FROM {table_fq} WHERE {scope_clause}{where_cols} "
+            f"{op} (SELECT {key_cols} FROM {keys_table})"
+        )
+        # No params arg at all when unscoped — byte-identical to the
+        # pre-#692 call shape (existing tests assert the anti-join binds no
+        # parameters), not just an empty list.
+        if scope_params:
+            cur.execute(delete_sql, scope_params)
+        else:
+            cur.execute(delete_sql)
+        cur.execute(f"DROP TABLE IF EXISTS {keys_table}")
+
     def _finalize_mirror(
         self,
         config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult | None:
-        """``sync.mode: mirror`` end-of-sync DELETE pass.
+        """``sync.mode: mirror`` end-of-sync DELETE pass (#687 scope added #692).
 
-        Deletes rows whose ``upsert_key`` was not observed in the source. Under
-        native ``?`` binding (#707) the per-statement parameter limit rules out
-        inlining every observed key into a single ``NOT IN (?, ?, ...)``, so the
-        keys are staged into a scratch Delta table (chunked multi-row INSERTs
-        sized to the marker limit, #734) and removed via anti-join: ``DELETE ...
-        WHERE key NOT IN (SELECT key FROM staging)`` binds *no* key parameters
-        in the DELETE, so it scales past the limit regardless of how many keys
-        were observed. Reuses the MERGE path's
-        staging approach (Delta has no session-local temp tables; the principal
-        needs ``CREATE`` on the schema plus ``MODIFY`` on the target).
+        Deletes rows whose ``upsert_key`` was not observed in the source, via
+        :meth:`_delete_via_staged_keys`.
+
+        ``mirror.strategy: tracked`` (#692) dispatches to
+        :meth:`_finalize_mirror_tracked` instead — state-based diff rather
+        than the whole-table diff below. Shares the empty-source guard, so
+        a transient empty source also keeps a tracked baseline intact.
 
         Returns ``None`` when ``_mirror_keys`` is empty or ``None`` — treats "no
         batch with records was ever observed" as a signal to skip the DELETE
@@ -612,37 +716,143 @@ class DatabricksDestination:
         if not self._mirror_keys:
             return None
 
+        if sync_options.mirror is not None and sync_options.mirror.strategy == "tracked":
+            return self._finalize_mirror_tracked(config, sync_options)
+
         upsert_cols = config.upsert_key
         assert upsert_cols  # guarded in load()
 
         # Dedupe the observed keys.
         keys = list({tuple(k) for k in self._mirror_keys})
         table_fq = f"{config.catalog}.{config.schema_}.{config.table}"
-        key_cols = ", ".join(upsert_cols)
-        where_cols = upsert_cols[0] if len(upsert_cols) == 1 else f"({key_cols})"
         keys_table = f"{config.catalog}.{config.schema_}.__drt_mirror_keys_{config.table}"
-        row_marker = "(" + ", ".join(["?"] * len(upsert_cols)) + ")"
+
+        # mirror.scope (#687/#692) — restrict the diff to rows under parents
+        # this run actually observed. list(), not sorted() — scope values
+        # may include None (unorderable).
+        scope_cols = sync_options.mirror.scope if sync_options.mirror is not None else None
+        scopes = list(self._mirror_scopes or set()) if scope_cols else None
 
         conn = self._connect(config)
         try:
             with conn.cursor() as cur:
-                cur.execute(
-                    f"CREATE OR REPLACE TABLE {keys_table} AS "
-                    f"SELECT {key_cols} FROM {table_fq} WHERE 1=0"
+                self._delete_via_staged_keys(
+                    cur, table_fq, upsert_cols, keys, keys_table, scope_cols, scopes, negate=True
                 )
-                insert_key_prefix = f"INSERT INTO {keys_table} ({key_cols}) VALUES "
-                rows_per = _rows_per_chunk(len(upsert_cols))
-                for start in range(0, len(keys), rows_per):
-                    chunk = keys[start : start + rows_per]
+        finally:
+            conn.close()
+
+        return SyncResult()
+
+    def _finalize_mirror_tracked(
+        self, config: Any, sync_options: SyncOptions
+    ) -> SyncResult | None:
+        """``mirror.strategy: tracked`` (#692) — delete only rows drt synced.
+
+        Same Census-style algorithm as ``BaseSqlDestination._finalize_mirror_tracked``
+        (Postgres/MySQL, #686/#694) and the Snowflake/ClickHouse destinations'
+        versions: reads the previously-synced key set for this sync from a
+        drt-managed ``_drt_synced_keys`` table, deletes ``previous - current``
+        from the target, and rewrites the state to the current key set.
+        First run (or lost state) baselines: record keys, delete nothing, WARN.
+
+        The target DELETE reuses :meth:`_delete_via_staged_keys` with
+        ``negate=False`` — the same 255-marker-limit reasoning that already
+        forced the destination-strategy path onto a staged anti-join applies
+        identically here; a tracked table's stale-key list can just as
+        easily exceed the limit.
+
+        ``mirror.scope`` + ``strategy: tracked`` (#694) prunes both the state
+        read and the state rewrite to the observed scope — see
+        ``BaseSqlDestination._finalize_mirror_tracked`` for the full
+        rationale; the algorithm here is identical, just against
+        Databricks' own cursor and staged-delete primitives.
+        """
+        import json
+        import logging
+
+        from drt.destinations._mirror_state import STATE_TABLE, diff_keys, key_hash, key_json
+
+        assert isinstance(config, DatabricksDestinationConfig)
+        sync_name = sync_options._sync_name or config.table
+        current = list({tuple(k) for k in self._mirror_keys or []})
+        upsert_cols = config.upsert_key
+        assert upsert_cols  # guarded in load()
+        table_fq = f"{config.catalog}.{config.schema_}.{config.table}"
+        state_fq = f"{config.catalog}.{config.schema_}.{STATE_TABLE}"
+        keys_table = f"{config.catalog}.{config.schema_}.__drt_mirror_keys_{config.table}"
+
+        scope_cols = sync_options.mirror.scope if sync_options.mirror is not None else None
+        scope_positions = [upsert_cols.index(c) for c in scope_cols] if scope_cols else None
+        observed_scopes = set(self._mirror_scopes or set()) if scope_positions else None
+
+        conn = self._connect(config)
+        try:
+            with conn.cursor() as cur:
+                # Pre-provisioning (mirrors #695): only CREATE when the state
+                # table is genuinely absent, so a locked-down destination
+                # user can run against one an admin created ahead of time.
+                cur.execute(
+                    f"SHOW TABLES IN {config.catalog}.{config.schema_} LIKE '{STATE_TABLE}'"
+                )
+                if not cur.fetchall():
                     cur.execute(
-                        insert_key_prefix + ", ".join([row_marker] * len(chunk)),
-                        [v for key in chunk for v in key],
+                        f"CREATE TABLE IF NOT EXISTS {state_fq} ("
+                        "sync_name STRING, key_hash STRING, key_json STRING"
+                        ") USING DELTA"
                     )
                 cur.execute(
-                    f"DELETE FROM {table_fq} WHERE {where_cols} "
-                    f"NOT IN (SELECT {key_cols} FROM {keys_table})"
+                    f"SELECT key_hash, key_json FROM {state_fq} WHERE sync_name = ?",
+                    [sync_name],
                 )
-                cur.execute(f"DROP TABLE IF EXISTS {keys_table}")
+                previous = {row[0]: row[1] for row in cur.fetchall()}
+
+                if scope_positions is not None and observed_scopes is not None:
+                    previous_in_scope = {
+                        h: kj
+                        for h, kj in previous.items()
+                        if tuple(json.loads(kj)[p] for p in scope_positions) in observed_scopes
+                    }
+                    preserved = [
+                        tuple(json.loads(kj))
+                        for h, kj in previous.items()
+                        if h not in previous_in_scope
+                    ]
+                else:
+                    previous_in_scope = previous
+                    preserved = []
+
+                if previous_in_scope:
+                    to_delete = diff_keys(previous_in_scope, current)
+                    if to_delete:
+                        self._delete_via_staged_keys(
+                            cur, table_fq, upsert_cols, to_delete, keys_table, None, None,
+                            negate=False,
+                        )
+                elif not previous:
+                    logging.getLogger(__name__).warning(
+                        "tracked mirror: no prior state for sync %r in %s — "
+                        "baselining this run's %d key(s); no deletes this run.",
+                        sync_name,
+                        STATE_TABLE,
+                        len(current),
+                    )
+
+                # Rewrite this sync's state to the current (+ preserved
+                # out-of-scope) key set.
+                cur.execute(f"DELETE FROM {state_fq} WHERE sync_name = ?", [sync_name])
+                state_rows = [
+                    [sync_name, key_hash(k), key_json(k)] for k in (current + preserved)
+                ]
+                insert_prefix = f"INSERT INTO {state_fq} (sync_name, key_hash, key_json) VALUES "
+                row_marker = "(?, ?, ?)"
+                rows_per = _rows_per_chunk(3)
+                for start in range(0, len(state_rows), rows_per):
+                    chunk = state_rows[start : start + rows_per]
+                    cur.execute(
+                        insert_prefix + ", ".join([row_marker] * len(chunk)),
+                        [v for row in chunk for v in row],
+                    )
         finally:
             conn.close()
 

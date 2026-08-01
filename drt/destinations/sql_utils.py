@@ -70,10 +70,15 @@ MIRROR_UPSERT_KEY_MSG = (
 def unsupported_tracked_scope_msg(dialect: str) -> str:
     """Message for ``mirror.strategy: tracked`` / ``mirror.scope`` on a
     destination that doesn't support them yet (#686/#687, extended per
-    dialect by #692)."""
+    dialect by #692).
+
+    Every SQL destination that implements ``sync.mode: mirror`` at all
+    (Postgres, MySQL, Snowflake, ClickHouse, Databricks) now supports
+    tracked/scope, so this only fires for a future dialect that adds mirror
+    mode without tracked/scope support from day one."""
     return (
         f"mirror.strategy: tracked / mirror.scope are not yet supported on {dialect} "
-        "(supported: postgres, mysql, snowflake, clickhouse — see #692 follow-ups)."
+        "(supported: postgres, mysql, snowflake, clickhouse, databricks)."
     )
 
 

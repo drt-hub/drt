@@ -147,6 +147,21 @@ Mirror semantics fit the same shape as Postgres / MySQL / ClickHouse /
 Snowflake mirror destinations (see #340) — same `upsert_key` contract,
 same source-key-cardinality memory bound on `_mirror_keys`.
 
+**Tracked mirror (`mirror.strategy: tracked`, [#686](https://github.com/drt-hub/drt/issues/686)/[#692](https://github.com/drt-hub/drt/issues/692)) — for tables the application also writes to:**
+
+```yaml
+sync:
+  mode: mirror
+  mirror:
+    strategy: tracked   # default: "destination" (the NOT IN behaviour above)
+```
+
+Same Census-style semantics as the other three dialects (see the [Postgres tracked-mirror section](postgres.md) for the full write-up): drt persists the set of `upsert_key` tuples it has itself synced in a drt-managed `catalog.schema._drt_synced_keys` Delta table, and each run deletes only `previously-synced − current-source` keys.
+
+The target DELETE reuses the exact same staged-anti-join mechanism the destination-strategy DELETE above already needs (`_delete_via_staged_keys`) — a tracked table's stale-key list can just as easily exceed the native `?` paramstyle's 255-marker-per-statement limit as the destination-strategy diff can, so there was never a simpler path available here even for the tracked case. State reads/writes bind a single `sync_name` parameter (well under the limit) and don't need staging.
+
+**Scoped mirror (`mirror.scope`, [#687](https://github.com/drt-hub/drt/issues/687)/[#692](https://github.com/drt-hub/drt/issues/692)):** `scope: [parent_id]` restricts the mirror DELETE to rows whose scope values appeared in this run's source — the fit for 1:N regeneration. Composable with `strategy: tracked` ([#694](https://github.com/drt-hub/drt/issues/694)) provided `scope` is a subset of `upsert_key`. See the [Postgres scoped-mirror section](postgres.md) for the full semantics. Scope values are inlined as `?` markers directly (not staged) — expected distinct-parent cardinality stays well under the marker limit even when the key cardinality it restricts does not.
+
 ### `sync.mode: replace` ([#643](https://github.com/drt-hub/drt/issues/643))
 
 Rebuilds the destination table from the current source snapshot. Two strategies:

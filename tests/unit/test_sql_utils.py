@@ -77,12 +77,16 @@ def test_upsert_key_message_is_stable() -> None:
 
 
 def test_unsupported_tracked_scope_message_names_dialect() -> None:
-    """databricks (not snowflake/clickhouse, both now supported by #692) — a
-    dialect this message still actually rejects."""
-    msg = unsupported_tracked_scope_msg("databricks")
+    """#692 closed out tracked/scope support on every SQL destination that
+    implements mirror mode (postgres, mysql, snowflake, clickhouse,
+    databricks), so no live call site passes ``supports_tracked_scope=False``
+    anymore. This exercises the message's string formatting directly with a
+    placeholder for whatever future dialect might add mirror mode without
+    tracked/scope from day one."""
+    msg = unsupported_tracked_scope_msg("newdialect")
     assert msg == (
-        "mirror.strategy: tracked / mirror.scope are not yet supported on databricks "
-        "(supported: postgres, mysql, snowflake, clickhouse — see #692 follow-ups)."
+        "mirror.strategy: tracked / mirror.scope are not yet supported on newdialect "
+        "(supported: postgres, mysql, snowflake, clickhouse, databricks)."
     )
 
 
