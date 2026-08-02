@@ -959,3 +959,58 @@ async def test_run_sync_rejects_full_refresh_with_cursor_value(
     )
 
     assert "mutually exclusive" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_run_sync_full_refresh_dry_run_does_not_clear_watermark(
+    project_dir: Path, monkeypatch: Any
+) -> None:
+    """``dry_run=True`` is documented as a preview — ``full_refresh=True``
+    combined with it must not actually delete the stored watermark (#876:
+    it did, silently, mirroring the same bug fixed in the CLI's
+    ``drt run --full-refresh --dry-run``)."""
+    from unittest.mock import MagicMock
+
+    from drt.engine.sync import SyncResult
+
+    def fake_run_sync(*_args: Any, **_kwargs: Any) -> SyncResult:
+        return SyncResult()
+
+    storage = MagicMock()
+    monkeypatch.setattr("drt.engine.sync.run_sync", fake_run_sync)
+    monkeypatch.setattr("drt.cli.main._get_source", lambda _profile: object())
+    monkeypatch.setattr("drt.cli.main._get_destination", lambda _sync: object())
+    monkeypatch.setattr("drt.config.credentials.load_profile", lambda _name: object())
+    monkeypatch.setattr("drt.cli._helpers.get_watermark_storage", lambda *_a, **_k: storage)
+
+    srv = create_server(project_dir)
+    await call(srv, "drt_run_sync", sync_name="notify", dry_run=True, full_refresh=True)
+
+    storage.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_sync_full_refresh_real_run_clears_watermark(
+    project_dir: Path, monkeypatch: Any
+) -> None:
+    """The other half of the #876 fix: a real (non-dry-run) run with
+    ``full_refresh=True`` must still actually clear the watermark — the
+    ``not dry_run`` guard must not have swallowed the real path too."""
+    from unittest.mock import MagicMock
+
+    from drt.engine.sync import SyncResult
+
+    def fake_run_sync(*_args: Any, **_kwargs: Any) -> SyncResult:
+        return SyncResult()
+
+    storage = MagicMock()
+    monkeypatch.setattr("drt.engine.sync.run_sync", fake_run_sync)
+    monkeypatch.setattr("drt.cli.main._get_source", lambda _profile: object())
+    monkeypatch.setattr("drt.cli.main._get_destination", lambda _sync: object())
+    monkeypatch.setattr("drt.config.credentials.load_profile", lambda _name: object())
+    monkeypatch.setattr("drt.cli._helpers.get_watermark_storage", lambda *_a, **_k: storage)
+
+    srv = create_server(project_dir)
+    await call(srv, "drt_run_sync", sync_name="notify", dry_run=False, full_refresh=True)
+
+    storage.delete.assert_called_once_with("notify")

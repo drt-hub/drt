@@ -377,7 +377,7 @@ def _print_watermark_summary(results: list[dict[str, object]]) -> None:
 
 
 def _reset_watermarks_for(
-    syncs: list[SyncConfig], *, json_mode: bool, quiet: bool
+    syncs: list[SyncConfig], *, json_mode: bool, quiet: bool, dry_run: bool = False
 ) -> None:
     """Clear stored watermarks for ``syncs`` ahead of a --full-refresh run.
 
@@ -391,6 +391,14 @@ def _reset_watermarks_for(
     ``_drt_synced_keys`` makes rows other systems wrote into deletion
     candidates on the next mirror pass (#686), which has to be an explicit
     request via ``drt state reset --tracked-mirror``.
+
+    ``dry_run``: skips the actual delete/reset calls — ``--dry-run`` is
+    documented as "preview without writing data," and a stored watermark is
+    data. Without this guard, ``--full-refresh --dry-run`` silently
+    destroyed the real watermark despite the flag's contract (caught in
+    review before merge, #876). Still prints what *would* be cleared, so a
+    dry run stays informative rather than pretending ``--full-refresh``
+    wasn't passed.
     """
     from drt.state.manager import StateManager
 
@@ -398,19 +406,26 @@ def _reset_watermarks_for(
     state_mgr = StateManager(project)
     incremental = [s for s in syncs if s.sync.mode == "incremental"]
 
-    for sync in incremental:
-        storage = get_watermark_storage(sync, project)
-        if storage is not None:
-            storage.delete(sync.name)
-        # Also the fallback copy — see the docstring.
-        state_mgr.reset(sync.name)
+    if not dry_run:
+        for sync in incremental:
+            storage = get_watermark_storage(sync, project)
+            if storage is not None:
+                storage.delete(sync.name)
+            # Also the fallback copy — see the docstring.
+            state_mgr.reset(sync.name)
 
     if incremental and not json_mode and not quiet:
         names = ", ".join(s.name for s in incremental)
-        console.print(
-            f"[yellow]--full-refresh: watermark cleared for {names} — "
-            "re-reading from the start.[/yellow]"
-        )
+        if dry_run:
+            console.print(
+                f"[yellow]--full-refresh (dry-run): would clear watermark for "
+                f"{names} — re-reading from the start. Not cleared.[/yellow]"
+            )
+        else:
+            console.print(
+                f"[yellow]--full-refresh: watermark cleared for {names} — "
+                "re-reading from the start.[/yellow]"
+            )
 
 
 @app.command()
@@ -658,7 +673,7 @@ def run(
         raise typer.Exit(1)
 
     if full_refresh:
-        _reset_watermarks_for(syncs, json_mode=json_mode, quiet=quiet)
+        _reset_watermarks_for(syncs, json_mode=json_mode, quiet=quiet, dry_run=dry_run)
 
     if cursor_value is not None:
         incremental = [s for s in syncs if s.sync.mode == "incremental"]

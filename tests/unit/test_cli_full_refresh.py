@@ -92,9 +92,24 @@ def test_clears_the_fallback_cursor_when_no_backend_is_configured(project: Path)
 def test_clears_a_configured_watermark_backend(project: Path) -> None:
     storage = MagicMock()
     with patch("drt.cli.commands.run.get_watermark_storage", return_value=storage):
-        runner.invoke(app, ["run", "--select", "users", "--full-refresh", "--dry-run"])
+        runner.invoke(app, ["run", "--select", "users", "--full-refresh"])
 
     storage.delete.assert_called_once_with("users")
+
+
+def test_dry_run_previews_without_actually_clearing(project: Path) -> None:
+    """`--dry-run` is documented as "preview without writing data," and a
+    stored watermark is data — `--full-refresh --dry-run` must not actually
+    delete it (#876: it did, silently, until this was caught in review)."""
+    storage = MagicMock()
+    with patch("drt.cli.commands.run.get_watermark_storage", return_value=storage):
+        runner.invoke(app, ["run", "--select", "users", "--full-refresh", "--dry-run"])
+
+    storage.delete.assert_not_called()
+    after = StateManager(project).get_last_sync("users")
+    assert after is not None and after.last_cursor_value == "2026-06-01", (
+        "--full-refresh --dry-run must not touch the real watermark"
+    )
 
 
 def test_without_the_flag_nothing_is_reset(project: Path) -> None:
