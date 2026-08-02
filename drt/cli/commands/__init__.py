@@ -30,6 +30,7 @@ from drt.cli.commands import (
     retry,  # noqa: F401 — registers `drt retry` (DLQ replay)
     run,  # noqa: F401 — registers `drt run`
     serve,  # noqa: F401
+    state,  # noqa: F401 — registers `drt state` sub-app (#776)
     status,  # noqa: F401 — registers `drt status`
     test,  # noqa: F401 — registers `drt test`
     validate,  # noqa: F401 — registers `drt validate`

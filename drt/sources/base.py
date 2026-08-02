@@ -14,8 +14,25 @@ from drt.config.credentials import ProfileConfig
 class Source(Protocol):
     """Extract records from a data warehouse or database."""
 
-    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
-        """Yield records one at a time from the source."""
+    def extract(
+        self,
+        query: str,
+        config: ProfileConfig,
+        *,
+        query_tags: dict[str, str] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield records one at a time from the source.
+
+        ``query_tags`` (#768) is the cost-attribution payload (``app`` /
+        ``sync`` / ``run_id`` / project ``extra``) — ``None`` when
+        ``query_tagging.enabled`` is false. The universal SQL-comment
+        fallback is already baked into ``query`` by the engine before this
+        is called, so implementations with no warehouse-native tagging
+        mechanism (BigQuery job labels, Snowflake ``QUERY_TAG``, Databricks
+        session tags) can ignore the parameter entirely and still be tagged.
+        Keyword-only and default-``None`` so every existing implementation
+        and test caller keeps working unchanged.
+        """
         ...
 
     def test_connection(self, config: ProfileConfig) -> bool:
@@ -37,7 +54,15 @@ class IncrementalSource(Protocol):
     """
 
     def extract_incremental(
-        self, query: str, config: ProfileConfig, cursor_value: str | None
+        self,
+        query: str,
+        config: ProfileConfig,
+        cursor_value: str | None,
+        *,
+        query_tags: dict[str, str] | None = None,
     ) -> Iterator[dict[str, Any]]:
-        """Yield records, filtering server-side from ``cursor_value`` when possible."""
+        """Yield records, filtering server-side from ``cursor_value`` when possible.
+
+        ``query_tags`` — see :meth:`Source.extract`.
+        """
         ...

@@ -16,9 +16,11 @@ from itertools import islice
 from pathlib import Path
 from typing import Any, Literal
 
+from drt.config.base import QueryTaggingConfig
 from drt.config.credentials import ProfileConfig
 from drt.config.duration import parse_duration
 from drt.config.models import LookupConfig, SyncConfig
+from drt.config.query_tags import build_query_tags, new_run_id, render_comment_header
 from drt.destinations.base import (
     Destination,
     MatchPolicyCapable,
@@ -194,6 +196,7 @@ def _staged_source_iter(
     profile: ProfileConfig,
     cursor_value: str | None = None,
     incremental: bool = False,
+    query_tags: dict[str, str] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Wrap ``source.extract`` so iteration errors get tagged with stage="source".
 
@@ -206,12 +209,21 @@ def _staged_source_iter(
     ``IncrementalSource`` capability (#767) receive the resolved watermark
     directly via ``extract_incremental`` — API-shaped sources have no SQL
     query to carry it. SQL sources keep consuming it through ``query``.
+
+    ``query_tags`` (#768) is the cost-attribution payload — ``None`` when
+    ``query_tagging.enabled`` is false. Passed as a keyword so every source
+    implementation, including ones with no native tagging mechanism, keeps
+    working unchanged; the universal SQL-comment fallback is already baked
+    into ``query`` by the caller before this is reached, so a connector that
+    ignores the kwarg entirely is still tagged.
     """
     with _stage_ctx("source"):
         if incremental and isinstance(source, IncrementalSource):
-            yield from source.extract_incremental(query, profile, cursor_value)
+            yield from source.extract_incremental(
+                query, profile, cursor_value, query_tags=query_tags
+            )
         else:
-            yield from source.extract(query, profile)
+            yield from source.extract(query, profile, query_tags=query_tags)
 
 
 def run_sync(
@@ -232,6 +244,7 @@ def run_sync(
     observer: SyncObserver | None = None,
     extract_limit: int | None = None,
     vars: dict[str, Any] | None = None,
+    query_tagging: QueryTaggingConfig | None = None,
 ) -> SyncResult:
     """Run a single sync: extract from source, load to destination.
 
@@ -319,6 +332,7 @@ def run_sync(
                     tracer=tracer,
                     extract_limit=extract_limit,
                     vars=vars,
+                    query_tagging=query_tagging,
                 )
             except BaseException as exc:
                 raised = exc
@@ -403,6 +417,7 @@ def _run_sync_body(
     tracer: Any,
     extract_limit: int | None = None,
     vars: dict[str, Any] | None = None,
+    query_tagging: QueryTaggingConfig | None = None,
 ) -> SyncResult:
     """Inner body of run_sync. Mutates `total_result` in place so the outer
     finally-block can read partial results when an exception propagates.
@@ -468,6 +483,21 @@ def _run_sync_body(
         sync.model, project_dir, profile, cursor_field, effective_cursor_value, vars=vars
     )
 
+    # Query tagging (#768): cost attribution needs *some* way to tell one
+    # sync's queries apart from another's in the warehouse's own query
+    # history, and every query drt issues arrives anonymous without this.
+    # ``query_tags`` carries the raw payload to connectors with a native
+    # mechanism (BigQuery job labels, Snowflake QUERY_TAG, Databricks
+    # session tags); the SQL comment is the universal fallback, baked
+    # directly into ``query`` here so it works for every dialect with zero
+    # per-connector support required. Pure string/dict work — no I/O — so
+    # this stays inside the Rust-boundary-safe engine.
+    query_tags: dict[str, str] | None = None
+    if query_tagging is None or query_tagging.enabled:
+        extra = query_tagging.extra if query_tagging else {}
+        query_tags = build_query_tags(sync.name, new_run_id(), extra)
+        query = f"{render_comment_header(query_tags)}\n{query}"
+
     # Source extraction wrapped via generator helper so exceptions raised
     # during iteration (not just the initial call) carry stage="source" (#544).
     # IncrementalSource capability (#767) receives the same lag-adjusted
@@ -478,6 +508,7 @@ def _run_sync_body(
         profile,
         cursor_value=effective_cursor_value,
         incremental=cursor_field is not None,
+        query_tags=query_tags,
     )
     # Sampling (#774): cap extraction engine-side — dialect-agnostic (works
     # for REST/file sources and avoids per-dialect LIMIT/TOP SQL rendering).

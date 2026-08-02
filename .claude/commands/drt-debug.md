@@ -58,6 +58,13 @@ Debug a failing drt sync.
 - **Cause**: `mode: incremental` set but no saved cursor yet (first run syncs all rows).
 - **Fix**: Expected on the first run. Check `drt status` after first run — `last_cursor_value` should be set. To replay or backfill, use `drt run --cursor-value '<value>' --select <name>` (v0.6.2+).
 
+### Poisoned or stuck watermark
+- **Cause**: a bad cursor value got persisted (a timezone bug, a bad backfill, a rebuilt source table), so the sync now filters out rows it should send — or sends nothing at all.
+- **Diagnose**: `drt state show <name>` — shows the stored watermark, last status and row count. Works for remote watermark backends (GCS / BigQuery) too, which `.drt/*.json` inspection does not.
+- **Fix**: `drt run --select <name> --full-refresh` re-reads everything and persists a fresh watermark (v0.8.4+). Prefer this over hand-editing `.drt/watermarks.json`, which does nothing when a remote backend is configured.
+- **Note**: `--cursor-value` is a *probe* — it overrides one run and leaves stored state untouched. `--full-refresh` is the reset.
+- **Not included**: `--full-refresh` does not reset tracked-mirror state. If mirror deletes look wrong, that is `drt state reset <name> --tracked-mirror` — read its warning first, since re-baselining makes rows written by other systems into deletion candidates.
+
 ### `on_error: fail` stopping early
 - **Cause**: Default behavior for some destinations — first failure stops the sync.
 - **Fix**: Change to `on_error: skip` to continue past failures and see the full error count via `drt run --verbose` or `drt status`.
