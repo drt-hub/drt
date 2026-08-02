@@ -208,6 +208,7 @@ into the destination and cannot be un-sent. See
 ## Notes
 
 - Requires `pip install drt-core[mysql]` (uses `pymysql`)
+- **Query tagging** ([#768](https://github.com/drt-hub/drt/issues/768)): every write query gets a leading `/* drt app=drt sync=<name> run_id=<id> ... */` comment by default (MySQL has no native session/job-tagging mechanism) — see `query_tagging` in `docs/llm/API_REFERENCE.md`.
 - `upsert_key` columns must have a UNIQUE or PRIMARY KEY constraint on the target table
 - `drt test` validators (row_count, not_null, freshness, unique, accepted_values, query) work with MySQL
 - `--dry-run` shows row count diff for `mode: replace`

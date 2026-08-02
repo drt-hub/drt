@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any
 import typer
 
 if TYPE_CHECKING:
+    from drt.config.base import QueryTaggingConfig
     from drt.config.credentials import ProfileConfig
     from drt.config.models import SyncConfig
     from drt.destinations.base import Destination  # noqa: F401 — _RunContext field
@@ -116,6 +117,9 @@ class _RunContext:
     # Project vars (#783) — resolved `vars:` + DRT_VAR_* + --vars, for var()
     # in model SQL. The YAML side is applied at load_syncs time.
     vars: dict[str, Any] | None = None
+    # Query tagging (#768) — drt_project.yml's query_tagging: block, passed
+    # straight through to run_sync().
+    query_tagging: QueryTaggingConfig | None = None
 
 
 def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
@@ -191,6 +195,7 @@ def _run_one(
                 observer=observer,
                 extract_limit=ctx.extract_limit,
                 vars=ctx.vars,
+                query_tagging=ctx.query_tagging,
             )
         except Exception as e:
             from drt.cli.errors import format_error, render_to_console
@@ -376,6 +381,58 @@ def _print_watermark_summary(results: list[dict[str, object]]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _reset_watermarks_for(
+    syncs: list[SyncConfig], *, json_mode: bool, quiet: bool, dry_run: bool = False
+) -> None:
+    """Clear stored watermarks for ``syncs`` ahead of a --full-refresh run.
+
+    Clears **both** sources deliberately. ``engine/sync.py`` resolves a cursor
+    from ``watermark_storage`` first and from ``StateManager.last_cursor_value``
+    only when no storage is configured — an ``elif``, so exactly one applies per
+    project. Clearing just one would make the flag silently do nothing in the
+    other configuration, and "no watermark backend" is the default.
+
+    Watermark only. Tracked-mirror state is untouched: re-baselining
+    ``_drt_synced_keys`` makes rows other systems wrote into deletion
+    candidates on the next mirror pass (#686), which has to be an explicit
+    request via ``drt state reset --tracked-mirror``.
+
+    ``dry_run``: skips the actual delete/reset calls — ``--dry-run`` is
+    documented as "preview without writing data," and a stored watermark is
+    data. Without this guard, ``--full-refresh --dry-run`` silently
+    destroyed the real watermark despite the flag's contract (caught in
+    review before merge, #876). Still prints what *would* be cleared, so a
+    dry run stays informative rather than pretending ``--full-refresh``
+    wasn't passed.
+    """
+    from drt.state.manager import StateManager
+
+    project = Path(".")
+    state_mgr = StateManager(project)
+    incremental = [s for s in syncs if s.sync.mode == "incremental"]
+
+    if not dry_run:
+        for sync in incremental:
+            storage = get_watermark_storage(sync, project)
+            if storage is not None:
+                storage.delete(sync.name)
+            # Also the fallback copy — see the docstring.
+            state_mgr.reset(sync.name)
+
+    if incremental and not json_mode and not quiet:
+        names = ", ".join(s.name for s in incremental)
+        if dry_run:
+            console.print(
+                f"[yellow]--full-refresh (dry-run): would clear watermark for "
+                f"{names} — re-reading from the start. Not cleared.[/yellow]"
+            )
+        else:
+            console.print(
+                f"[yellow]--full-refresh: watermark cleared for {names} — "
+                "re-reading from the start.[/yellow]"
+            )
+
+
 @app.command()
 def run(
     select: list[str] = typer.Option(
@@ -451,6 +508,15 @@ def run(
         None,
         "--cursor-value",
         help="Override cursor/watermark value for incremental syncs (backfill/recovery).",
+    ),
+    full_refresh: bool = typer.Option(
+        False,
+        "--full-refresh",
+        help=(
+            "Clear the stored watermark first, so this run re-reads everything "
+            "and then persists a fresh watermark. Does NOT reset tracked-mirror "
+            "state — use `drt state reset --tracked-mirror` for that."
+        ),
     ),
     diff: bool = typer.Option(
         False,
@@ -605,6 +671,15 @@ def run(
                 f"[yellow]--limit {limit}: sampled run — watermarks will not advance.[/yellow]"
             )
 
+    if full_refresh and cursor_value is not None:
+        # One says "start from nothing", the other "start from here". Silently
+        # picking a winner would make a backfill look like it worked.
+        print_error("--full-refresh and --cursor-value are mutually exclusive.")
+        raise typer.Exit(1)
+
+    if full_refresh:
+        _reset_watermarks_for(syncs, json_mode=json_mode, quiet=quiet, dry_run=dry_run)
+
     if cursor_value is not None:
         incremental = [s for s in syncs if s.sync.mode == "incremental"]
         if not incremental:
@@ -695,6 +770,7 @@ def run(
         diff_limit=diff_limit,
         extract_limit=limit,
         vars=project_vars,
+        query_tagging=project.query_tagging,
     )
 
     # Execute syncs — parallel if threads > 1, sequential otherwise

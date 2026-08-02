@@ -151,6 +151,44 @@ class TestSnowflakeDestinationLoad:
         assert conn_kwargs["user"] == "user"
         assert conn_kwargs["password"] == "pwd"
 
+    def test_query_tags_set_session_parameter_and_comment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#768 — query_tags become both the native QUERY_TAG session
+        parameter at connect and a SQL comment on the executed statement."""
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        modules = _mocked_snowflake_modules(conn)
+
+        options = _options()
+        options._query_tags = {"sync": "s", "run_id": "r"}
+        with patch.dict("sys.modules", modules):
+            result = SnowflakeDestination().load([{"id": 1}], _config(), options)
+
+        assert result.failed == 0
+        conn_kwargs = modules["snowflake.connector"].connect.call_args[1]
+        import json
+
+        assert json.loads(conn_kwargs["session_parameters"]["QUERY_TAG"]) == {
+            "sync": "s",
+            "run_id": "r",
+        }
+        query = conn._cur.execute.call_args.args[0]
+        assert query.startswith("/* drt sync=s run_id=r */\n")
+
+    def test_no_query_tags_omits_session_parameter(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        modules = _mocked_snowflake_modules(conn)
+
+        with patch.dict("sys.modules", modules):
+            SnowflakeDestination().load([{"id": 1}], _config(), _options())
+
+        conn_kwargs = modules["snowflake.connector"].connect.call_args[1]
+        assert "session_parameters" not in conn_kwargs
+        query = conn._cur.execute.call_args.args[0]
+        assert not query.startswith("/* drt")
+
     def test_import_error_when_extras_missing(self) -> None:
         # Build config/options BEFORE patching __import__ — pydantic may
         # lazily finish a deferred validator on first model_validate, and

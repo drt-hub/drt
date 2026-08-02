@@ -1,14 +1,16 @@
 """Shared utilities for SQL destinations.
 
-Identifier quoting, row-count capability discovery, and mirror-mode guard
-messages — factored out so the SQL destinations don't each hand-roll them.
+Identifier quoting, row-count capability discovery, mirror-mode guard
+messages, and query tagging — factored out so the SQL destinations don't
+each hand-roll them.
 """
 
 from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
-from drt.config.models import DestinationConfig
+from drt.config.models import DestinationConfig, SyncOptions
+from drt.config.query_tags import render_comment_header
 
 
 def backtick_quote_ident(table: str) -> str:
@@ -134,3 +136,88 @@ def check_mirror_supported(
     ):
         raise ValueError(unsupported_tracked_scope_msg(dialect))
     check_scope_subset_of_upsert_key(config, sync_options)
+
+
+class TaggedCursor:
+    """Cursor wrapper that prepends the query-tagging comment header (#768)
+    to every statement — used by every SQL destination that has no
+    warehouse-native tagging mechanism of its own (Postgres, MySQL,
+    ClickHouse) or that needs the comment in addition to its native
+    mechanism (Snowflake, Databricks — session-level tags don't retroactively
+    label queries issued before they were set).
+
+    Wrapping once, where a dialect obtains its cursor, tags every subsequent
+    ``execute()`` on it without touching each individual call site.
+
+    Handles both plain strings (every dialect here except Postgres's DDL) and
+    ``psycopg2.sql.Composable`` objects (``+`` against a plain string raises
+    ``TypeError``).
+
+    Explicitly implements ``__enter__``/``__exit__`` rather than relying on
+    ``__getattr__`` to find them on the wrapped cursor: Python looks up
+    dunder methods used by implicit protocols (``with``, ``len()``, ...) on
+    the *type*, bypassing instance-level ``__getattr__`` entirely. Snowflake's
+    destination uses ``with conn.cursor() as cur:``; without this override
+    that would raise ``TypeError: ... does not support the context manager
+    protocol`` on a wrapped cursor.
+    """
+
+    def __init__(self, cursor: Any, comment: str) -> None:
+        self._cursor = cursor
+        self._comment = comment
+
+    def __enter__(self) -> TaggedCursor:
+        # DB-API cursors conventionally return ``self`` from ``__enter__``,
+        # but nothing guarantees it — honour whatever comes back rather than
+        # assuming identity, same as any other context-manager consumer would.
+        self._cursor = self._cursor.__enter__()
+        return self
+
+    def __exit__(self, *exc_info: Any) -> Any:
+        return self._cursor.__exit__(*exc_info)
+
+    def execute(self, query: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(query, str):
+            tagged = f"{self._comment}\n{query}"
+        else:
+            from psycopg2 import sql as _pgsql
+
+            tagged = _pgsql.SQL(f"{self._comment}\n") + query
+        return self._cursor.execute(tagged, *args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cursor, name)
+
+
+def tagged_cursor(cur: Any, sync_options: SyncOptions) -> Any:
+    """Wrap ``cur`` with :class:`TaggedCursor` when query tags are present;
+    returns ``cur`` unchanged (no wrapper overhead) when tagging is off.
+
+    ``getattr`` rather than direct attribute access: plenty of existing
+    white-box tests build a bare ``SimpleNamespace(mode=..., mirror=...)``
+    in place of a real ``SyncOptions`` (they only need the fields their own
+    dialect hook reads), and ``_query_tags`` is a private attr those fakes
+    were never told about. Treating it as optional keeps this backward
+    compatible with every fake already in the test suite rather than
+    requiring each one to grow a field it doesn't otherwise care about.
+    """
+    tags = getattr(sync_options, "_query_tags", None)
+    if not tags:
+        return cur
+    return TaggedCursor(cur, render_comment_header(tags))
+
+
+def tag_query(query: str, sync_options: SyncOptions) -> str:
+    """Prepend the query-tagging comment header (#768) to a plain SQL string.
+
+    For destinations with no cursor ``execute()`` to wrap wholesale —
+    ClickHouse's ``client.command()`` / ``client.query()`` take a string
+    directly, so there's no single seam to intercept the way there is for
+    ``BaseSqlDestination``'s shared ``cur = conn.cursor()``. Returns ``query``
+    unchanged when tagging is off. ``getattr`` for the same reason as
+    :func:`tagged_cursor` above.
+    """
+    tags = getattr(sync_options, "_query_tags", None)
+    if not tags:
+        return query
+    return f"{render_comment_header(tags)}\n{query}"
