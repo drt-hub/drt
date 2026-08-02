@@ -595,6 +595,21 @@ class SnowflakeDestination:
         WARN. Rows the application wrote are never candidates for deletion
         because they were never in the tracked set.
 
+        Unlike Postgres/MySQL, the target DELETE, the state DELETE, and the
+        state INSERT here are **not** one transaction — this Snowflake
+        connection autocommits by default (same as the replace-swap path
+        elsewhere in this file), and nothing here turns autocommit off. A
+        failure between the state DELETE and the state INSERT can leave
+        this sync's state partial. In the common case this still degrades
+        safely (an empty/partial ``previous`` next run reads as "no prior
+        state," triggering the baseline WARN above rather than a wrong
+        delete), but it isn't the code-level guarantee the shared
+        ``BaseSqlDestination`` docstring describes for Postgres/MySQL —
+        caught in review; not fixed here since it would mean wrapping every
+        statement in this method in an explicit
+        ``conn.autocommit(False)``/``conn.commit()`` pair, a larger change
+        than this docstring correction.
+
         ``mirror.scope`` + ``strategy: tracked`` (#694 part 1) prunes both
         the state read and the state rewrite to the observed scope — see
         ``BaseSqlDestination._finalize_mirror_tracked`` for the full

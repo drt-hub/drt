@@ -762,6 +762,24 @@ class DatabricksDestination:
         identically here; a tracked table's stale-key list can just as
         easily exceed the limit.
 
+        No cross-statement transaction — this is a Delta Lake platform
+        limitation (each DML statement is its own Delta commit; nothing in
+        this codebase wraps multiple statements into one transaction for
+        Databricks), not an oversight this method could fix on its own.
+        Unlike ClickHouse's version of this method (single, non-chunked
+        state DELETE/INSERT statements, so a mid-sequence failure has one
+        clean boundary), the state rewrite here is chunked (255-marker
+        limit) into several independently-committed ``cur.execute()``
+        calls. A failure partway through the state DELETE loop is harmless
+        (a stale key deleted from state a second time next run is a
+        no-op); a failure partway through the state INSERT loop silently
+        and permanently loses tracking for whichever keys were in
+        not-yet-executed chunks — the next run's "no prior state" baseline
+        safety net does not catch this, since ``previous`` still reads back
+        non-empty. Caught in review; not fixed here (would need Databricks
+        to support genuine multi-statement transactions, which Delta
+        doesn't).
+
         ``mirror.scope`` + ``strategy: tracked`` (#694 part 1) prunes both
         the state read and the state rewrite to the observed scope — see
         ``BaseSqlDestination._finalize_mirror_tracked`` for the full
