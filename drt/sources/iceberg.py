@@ -3,6 +3,21 @@
 Loads a table through a pyiceberg catalog (REST / SQL / Hive / local) into
 Arrow, registers it in an in-memory DuckDB, then runs your model SQL against it.
 
+Unlike ``deltalake.py``, this reads the whole table eagerly (``.scan().to_arrow()``)
+rather than pushing the model's WHERE/column list into the scan — a deliberate,
+not-yet-fixed gap (#679; the Delta leg shipped filter/projection pushdown via
+``to_pyarrow_dataset()`` in #868). pyiceberg 0.11 has no equivalent lazy
+``pyarrow.dataset.Dataset`` for DuckDB to push into: ``DataScan.to_arrow()``
+materializes fully, and the only streaming alternative,
+``to_arrow_batch_reader()``, returns a single-pass ``pa.RecordBatchReader`` —
+a model query that references the registered table more than once (e.g. a
+self-join) would silently get an empty/short result on the second reference
+once the reader's exhausted, rather than an error. True pushdown would need
+drt to parse the model SQL's WHERE/SELECT and pass them as pyiceberg's
+``row_filter``/``selected_fields`` *before* the scan starts — real SQL-parsing
+work with its own fragility, not attempted here. Left materializing on
+purpose until that's worth doing.
+
 Requires: pip install drt-core[iceberg]
 
 Example ~/.drt/profiles.yml:

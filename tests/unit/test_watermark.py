@@ -126,3 +126,82 @@ class TestBigQueryWatermarkStorage:
         call_args = mock_client.return_value.query.call_args_list
         merge_sql = call_args[-1][0][0]
         assert "MERGE" in merge_sql
+
+
+class TestDelete:
+    """#776: resetting a watermark needs a delete the Protocol never had.
+
+    `WatermarkStorage` exposed only get/save, so `drt state reset` had no way
+    to clear a stored watermark on any backend — the reason the issue calls
+    out that hand-editing JSON "does nothing for remote backends".
+
+    Deleting an unknown sync is a no-op rather than an error: reset is a
+    recovery path, and a user recovering from a poisoned cursor should not
+    have to know whether a watermark was ever written.
+    """
+
+    def test_local_delete_removes_only_that_sync(self, tmp_path: Path) -> None:
+        storage = LocalWatermarkStorage(tmp_path)
+        storage.save("a", "2026-01-01")
+        storage.save("b", "2026-02-02")
+
+        storage.delete("a")
+
+        assert storage.get("a") is None
+        assert storage.get("b") == "2026-02-02", "an unrelated sync was cleared"
+
+    def test_local_delete_unknown_sync_is_a_noop(self, tmp_path: Path) -> None:
+        storage = LocalWatermarkStorage(tmp_path)
+        storage.save("a", "2026-01-01")
+
+        storage.delete("never-synced")  # must not raise
+
+        assert storage.get("a") == "2026-01-01"
+
+    def test_local_delete_with_no_file_is_a_noop(self, tmp_path: Path) -> None:
+        """Reset on a project that has never run must not create or crash."""
+        LocalWatermarkStorage(tmp_path).delete("a")
+
+    @patch("drt.state.watermark._gcs_client")
+    def test_gcs_delete_rewrites_without_that_key(self, mock_client: MagicMock) -> None:
+        from drt.state.watermark import GCSWatermarkStorage
+
+        blob = mock_client.return_value.bucket.return_value.blob.return_value
+        blob.exists.return_value = True
+        blob.download_as_text.return_value = json.dumps({"a": "1", "b": "2"})
+
+        GCSWatermarkStorage(bucket="bkt", key="w.json").delete("a")
+
+        written = json.loads(blob.upload_from_string.call_args.args[0])
+        assert written == {"b": "2"}
+
+    @patch("drt.state.watermark._gcs_client")
+    def test_gcs_delete_unknown_sync_is_a_noop(self, mock_client: MagicMock) -> None:
+        from drt.state.watermark import GCSWatermarkStorage
+
+        blob = mock_client.return_value.bucket.return_value.blob.return_value
+        blob.exists.return_value = True
+        blob.download_as_text.return_value = json.dumps({"a": "1"})
+
+        GCSWatermarkStorage(bucket="bkt", key="w.json").delete("nope")
+
+        # No upload at all: nothing was stored, so there is nothing to rewrite.
+        # Skipping the round trip also means `state reset` on a sync that never
+        # ran cannot fail on a network error.
+        blob.upload_from_string.assert_not_called()
+
+    @patch("drt.state.watermark._bq_client")
+    def test_bigquery_delete_is_parameterised(self, mock_client: MagicMock) -> None:
+        """The sync name must be a query parameter, not interpolated —
+        matching how `save` builds its MERGE."""
+        from drt.state.watermark import BigQueryWatermarkStorage
+
+        storage = BigQueryWatermarkStorage(project="p", dataset="d")
+        storage._query_config = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
+
+        storage.delete("my_sync")
+
+        sql = mock_client.return_value.query.call_args.args[0]
+        assert "DELETE" in sql.upper()
+        assert "my_sync" not in sql, "the sync name was interpolated into SQL"
+        assert "@sync_name" in sql

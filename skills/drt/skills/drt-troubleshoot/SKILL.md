@@ -101,7 +101,10 @@ destination.
   records / `--diff` look correct.
 - **🔴 common failures:** 0 rows (the source query / `model` filters
   everything out, or `mode: incremental` already consumed the watermark —
-  check `drt status`, replay with `--cursor-value`); `{{ row.field }}`
+  inspect it with `drt state show <name>`, which also covers remote
+  watermark backends; probe a value with `--cursor-value`, or start over
+  with `drt run --full-refresh` when the stored cursor is wrong rather than
+  merely advanced, v0.8.4+); `{{ row.field }}`
   referencing a column the source doesn't return (use `tojson_safe` for
   datetime/Decimal/UUID, v0.7.6+); wrong column names in the template.
 

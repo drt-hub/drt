@@ -445,6 +445,51 @@ retried once a row has been yielded.
 
 ---
 
+## State reset (#776)
+
+drt keeps three kinds of durable state. Each is cleared separately — there is
+no "reset everything" switch.
+
+| what | where | cleared by |
+|---|---|---|
+| watermark | `.drt/watermarks.json`, or GCS / BigQuery | `--full-refresh`, or `state reset --watermark` |
+| run state | `.drt/state.json` (status, rows, fallback cursor) | `state reset --runs` |
+| tracked-mirror keys | `_drt_synced_keys`, **in the destination** | `state reset --tracked-mirror` |
+
+```bash
+drt run --select users --full-refresh      # re-read everything, then persist a fresh watermark
+drt state show [sync]                      # stored watermark + last run
+drt state reset users --watermark --runs   # combine levels explicitly
+drt state reset users --tracked-mirror     # see the warning below
+```
+
+MCP: `drt_state_show`, `drt_state_reset`, and `full_refresh` on `drt_run_sync`.
+
+**`--full-refresh` is watermark-only.** It does not touch tracked-mirror
+state. dbt's flag is the mental model users arrive with — "re-read
+everything" — and folding a destination-side re-baseline into it would make a
+routine backfill quietly change deletion semantics.
+
+⚠️ **`--tracked-mirror` re-baselines the destination.** Afterwards the next
+mirror pass treats whatever is currently in the target as drt's own, so rows
+written by the application (or another pipeline) become deletion candidates.
+That is the exact scenario tracked mirror (#686) exists to prevent, which is
+why it must be named explicitly and is never implied by another flag.
+
+**Both watermark sources are cleared together.** `engine/sync.py` resolves a
+cursor from `watermark_storage` first and from `StateManager.last_cursor_value`
+only when no storage is configured — an `elif`, so exactly one applies per
+project. Clearing one alone would make a reset silently ineffective in the
+other configuration, and "no watermark backend" is the default.
+
+**Guards.** `drt state reset` with no level exits 2 rather than assuming all
+of them. In a non-interactive context it refuses without `--yes`, with an
+error that names the flag (previously such commands aborted with a bare
+`Aborted.`; `drt profile remove` now shares the same helper).
+
+Out of scope, deliberately: destination **data** deletion (never), DLQ purge
+(`drt retry --clear`), history pruning (retention config).
+
 ## Alerts (`alerts:` on a sync)
 
 ```yaml
