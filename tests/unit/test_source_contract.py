@@ -43,9 +43,15 @@ def test_implements_source_protocol(cls: type) -> None:
 
 @pytest.mark.parametrize("cls", ALL_SOURCES, ids=lambda c: c.__name__)
 def test_extract_method_signature(cls: type) -> None:
+    """``query_tags`` (#768) is keyword-only with a ``None`` default on every
+    source — additive, so a caller passing only ``(query, config)`` keeps
+    working unchanged."""
     sig = inspect.signature(cls.extract)
     params = list(sig.parameters.keys())
-    assert params == ["self", "query", "config"]
+    assert params == ["self", "query", "config", "query_tags"]
+    query_tags_param = sig.parameters["query_tags"]
+    assert query_tags_param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert query_tags_param.default is None
 
 
 @pytest.mark.parametrize("cls", ALL_SOURCES, ids=lambda c: c.__name__)

@@ -243,6 +243,7 @@ not retried.
 ## Notes
 
 - Requires `pip install drt-core[databricks]` (depends on `databricks-sql-connector>=3.0`).
+- **Query tagging** ([#768](https://github.com/drt-hub/drt/issues/768)): every write query gets both the driver's native `query_tags` connect kwarg (a `QUERY_TAGS` session config applied to every query the session runs) and a leading `/* drt app=drt sync=<name> run_id=<id> ... */` comment, by default — see `query_tagging` in `docs/llm/API_REFERENCE.md`.
 - Target table must be a **Delta Lake table**. Non-Delta formats fail at `MERGE INTO` time with a Databricks server error.
 - Empty batches short-circuit before any `databricks.sql` import or warehouse call — the same "no driver was imported" contract used by the SQL destinations (#595). A run with zero source rows produces zero warehouse statements.
 - Errors during the connect step (missing env vars, bad token, network) raise immediately; errors during row INSERT are captured per-row and surface in `result.row_errors`.

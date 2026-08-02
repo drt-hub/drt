@@ -175,6 +175,22 @@ class HistoryConfig(BaseModel):
     retention_days: int = 30
 
 
+class QueryTaggingConfig(BaseModel):
+    """Cost-attribution tagging on extract/destination queries (#768).
+
+    On by default (dbt's ``query_comment`` precedent): a query with no tag at
+    all is the thing that made per-sync warehouse cost attribution impossible
+    in the first place (see #710/#738's smoke-account digest, which had to
+    fall back to account-level spend). ``extra`` is merged into every tag
+    payload alongside drt's own ``app``/``sync``/``run_id`` — e.g.
+    ``{"team": "growth"}`` to carry a cost-center through to
+    ``INFORMATION_SCHEMA.JOBS`` / ``QUERY_HISTORY`` queries.
+    """
+
+    enabled: bool = True
+    extra: dict[str, str] = Field(default_factory=dict)
+
+
 class ProjectConfig(BaseModel):
     name: str
     version: str = "0.1"
@@ -186,6 +202,7 @@ class ProjectConfig(BaseModel):
     # string fields. Overridden by DRT_VAR_* env and `--vars` at run time —
     # see drt.config.vars for the precedence chain.
     vars: dict[str, Any] = Field(default_factory=dict)
+    query_tagging: QueryTaggingConfig = Field(default_factory=QueryTaggingConfig)
 
 
 class LookupConfig(BaseModel):

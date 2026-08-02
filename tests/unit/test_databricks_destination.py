@@ -149,6 +149,37 @@ class TestDatabricksDestinationLoad:
             with pytest.raises(ImportError, match=r"drt-core\[databricks\]"):
                 DatabricksDestination().load([{"id": 1}], config, options)
 
+    def test_query_tags_set_native_kwarg_and_comment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """#768 — query_tags pass straight through to the driver's native
+        `query_tags` connect kwarg, and also land as a SQL comment."""
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        modules = _mocked_databricks_modules(conn)
+
+        options = _options()
+        options._query_tags = {"sync": "s", "run_id": "r"}
+        with patch.dict("sys.modules", modules):
+            result = DatabricksDestination().load([{"id": 1}], _config(), options)
+
+        assert result.failed == 0
+        connect_kwargs = modules["databricks.sql"].connect.call_args[1]
+        assert connect_kwargs["query_tags"] == {"sync": "s", "run_id": "r"}
+        query = conn._cur.execute.call_args.args[0]
+        assert query.startswith("/* drt sync=s run_id=r */\n")
+
+    def test_no_query_tags_omits_native_kwarg(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        modules = _mocked_databricks_modules(conn)
+
+        with patch.dict("sys.modules", modules):
+            DatabricksDestination().load([{"id": 1}], _config(), _options())
+
+        connect_kwargs = modules["databricks.sql"].connect.call_args[1]
+        assert "query_tags" not in connect_kwargs
+        query = conn._cur.execute.call_args.args[0]
+        assert not query.startswith("/* drt")
+
     def test_connect_uses_databricks_sql_kwargs(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Confirm the connect() call uses the Databricks SQL Connector
         kwargs (``server_hostname``, ``http_path``, ``access_token``)

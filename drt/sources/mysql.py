@@ -69,7 +69,13 @@ class MySQLSource:
             return errno in _MYSQL_TRANSIENT_ERRNOS
         return False
 
-    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
+    def extract(
+        self,
+        query: str,
+        config: ProfileConfig,
+        *,
+        query_tags: dict[str, str] | None = None,
+    ) -> Iterator[dict[str, Any]]:
         """Run ``query`` and yield rows as dicts, retrying transient failures.
 
         **Retry scope (#766): connection and query execution only.** A failure
@@ -107,6 +113,10 @@ class MySQLSource:
         ``fetch_size`` here would only offer users a way to make things worse.
         (These two stay inline because they are the argument for omitting the
         knob, not a benchmark; see ``docs/research/extraction-memory.md``.)
+
+        ``query_tags`` is unused — MySQL has no session/job-level tagging
+        primitive drt can reach, so the SQL comment the engine already
+        prepended to ``query`` is this connector's only attribution (#768).
         """
         assert isinstance(config, MySQLProfile)
 

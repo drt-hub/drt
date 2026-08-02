@@ -23,7 +23,9 @@ class FakeSource:
     def __init__(self, rows: list[dict]) -> None:
         self._rows = rows
 
-    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict]:
+    def extract(
+        self, query: str, config: ProfileConfig, *, query_tags: dict[str, str] | None = None
+    ) -> Iterator[dict]:
         yield from self._rows
 
     def test_connection(self, config: ProfileConfig) -> bool:
@@ -390,7 +392,9 @@ def test_incremental_uses_saved_cursor(tmp_path: Path) -> None:
     captured_queries: list[str] = []
 
     class CapturingSource:
-        def extract(self, query: str, config: object) -> list[dict]:
+        def extract(
+            self, query: str, config: object, *, query_tags: dict[str, str] | None = None
+        ) -> list[dict]:
             captured_queries.append(query)
             return []
 
@@ -424,7 +428,9 @@ def test_watermark_storage_used_when_configured(tmp_path: Path) -> None:
     captured_queries: list[str] = []
 
     class CapturingSource:
-        def extract(self, query: str, config: object) -> list[dict]:
+        def extract(
+            self, query: str, config: object, *, query_tags: dict[str, str] | None = None
+        ) -> list[dict]:
             captured_queries.append(query)
             return [{"id": 1, "ts": "2024-01-05"}]
 
@@ -700,7 +706,9 @@ def test_incremental_first_run_uses_default_value(tmp_path: Path) -> None:
     captured_queries: list[str] = []
 
     class CapturingSource:
-        def extract(self, query: str, config: object) -> list[dict]:
+        def extract(
+            self, query: str, config: object, *, query_tags: dict[str, str] | None = None
+        ) -> list[dict]:
             captured_queries.append(query)
             return [{"id": 1, "ts": "2026-05-01"}]
 
@@ -736,7 +744,9 @@ def test_cursor_value_override_takes_priority(tmp_path: Path) -> None:
     captured_queries: list[str] = []
 
     class CapturingSource:
-        def extract(self, query: str, config: object) -> list[dict]:
+        def extract(
+            self, query: str, config: object, *, query_tags: dict[str, str] | None = None
+        ) -> list[dict]:
             captured_queries.append(query)
             return []
 
@@ -1214,12 +1224,19 @@ class FakeIncrementalSource:
         self.extract_calls: list[str] = []
         self.incremental_calls: list[str | None] = []
 
-    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict]:
+    def extract(
+        self, query: str, config: ProfileConfig, *, query_tags: dict[str, str] | None = None
+    ) -> Iterator[dict]:
         self.extract_calls.append(query)
         yield from self._rows
 
     def extract_incremental(
-        self, query: str, config: ProfileConfig, cursor_value: str | None
+        self,
+        query: str,
+        config: ProfileConfig,
+        cursor_value: str | None,
+        *,
+        query_tags: dict[str, str] | None = None,
     ) -> Iterator[dict]:
         self.incremental_calls.append(cursor_value)
         yield from self._rows

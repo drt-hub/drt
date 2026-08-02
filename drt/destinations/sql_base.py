@@ -25,6 +25,7 @@ from typing import Any
 from drt.config.models import DestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
+from drt.destinations.sql_utils import tagged_cursor as _tagged_cursor
 
 
 class BaseSqlDestination:
@@ -79,7 +80,7 @@ class BaseSqlDestination:
         result = SyncResult()
 
         try:
-            cur = conn.cursor()
+            cur = _tagged_cursor(conn.cursor(), sync_options)
             columns = list(records[0].keys())
 
             if sync_options.mode == "replace":
@@ -156,7 +157,7 @@ class BaseSqlDestination:
 
         conn = self._dialect_connect(config)
         try:
-            cur = conn.cursor()
+            cur = _tagged_cursor(conn.cursor(), sync_options)
             self._rename_swap(conn, cur, table, shadow, old)
         finally:
             conn.close()
@@ -215,7 +216,7 @@ class BaseSqlDestination:
 
         conn = self._dialect_connect(config)
         try:
-            cur = conn.cursor()
+            cur = _tagged_cursor(conn.cursor(), sync_options)
             stmt, params = self._build_mirror_delete(
                 config.table,
                 upsert_cols,
@@ -481,6 +482,52 @@ class BaseSqlDestination:
         """
         raise NotImplementedError
 
+    def reset_tracked_state(self, config: Any, sync_name: str) -> int:
+        """Clear one sync's rows from ``_drt_synced_keys`` (#776).
+
+        The destination-side half of ``drt state reset --tracked-mirror``.
+        Returns the number of rows removed so the CLI can say "nothing to
+        reset" rather than implying it cleared something.
+
+        This is the most dangerous of the three reset levels and the only one
+        that writes to the destination, so three properties are pinned by
+        tests rather than left to review:
+
+        * **Scoped to one sync.** ``sync_name`` is part of the state table's
+          primary key, and it is *bound*, never interpolated.
+        * **Never touches the target table.** The only DELETE issued names
+          ``_drt_synced_keys``. Deleting user data is explicitly out of scope
+          for #776 ("destination data deletion: never").
+        * **No DDL.** A sync that never ran tracked mirror has no state table,
+          and reset must not create one just to empty it — that would also
+          fail for the locked-down, no-CREATE-privilege user #695 supports.
+
+        What the *next* run does after this is the part worth understanding:
+        it re-baselines. Keys are recorded, nothing is deleted, and a warning
+        is emitted — identical to first-run/lost-state semantics. Rows the
+        application wrote therefore become part of drt's tracked set, and so
+        become deletion candidates on subsequent passes. That is why this is
+        opt-in per level and never folded into ``--full-refresh``.
+        """
+        from drt.destinations._mirror_state import STATE_TABLE  # noqa: F401
+
+        state_ident, state_scope, state_raw = self._state_table_ident(config)
+
+        conn = self._dialect_connect(config)
+        try:
+            cur = conn.cursor()
+            if not self._state_table_exists(cur, state_scope, state_raw):
+                return 0  # never ran tracked mirror — nothing to clear
+            cur.execute(
+                self._state_sql("DELETE FROM {} WHERE sync_name = %s", state_ident),
+                (sync_name,),
+            )
+            removed = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            conn.commit()
+            return int(removed)
+        finally:
+            conn.close()
+
     def _finalize_mirror_tracked(
         self, config: Any, sync_options: SyncOptions
     ) -> SyncResult | None:
@@ -537,7 +584,7 @@ class BaseSqlDestination:
 
         conn = self._dialect_connect(config)
         try:
-            cur = conn.cursor()
+            cur = _tagged_cursor(conn.cursor(), sync_options)
             # Pre-provisioning (#695): check existence before issuing DDL so a
             # locked-down destination user (no CREATE privilege) can run against
             # a state table an admin created ahead of time. Only CREATE when the

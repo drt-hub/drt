@@ -68,6 +68,65 @@ def test_connection_import_error_handled(
             src._connect(_profile())
 
 
+def _mocked_databricks_modules(connect: MagicMock | None = None) -> dict[str, MagicMock]:
+    """sys.modules entries satisfying ``from databricks import sql`` — no real
+    ``databricks-sql-connector`` install required. CI's default extras
+    (`[dev,mcp,duckdb,postgres,mysql,clickhouse,sqlserver]`, see ci.yml) don't
+    include ``[databricks]``, so a test gated on the real package would be
+    silently skipped there even though it passes in a dev env that happens
+    to have it installed — exactly what left the query_tags branch below
+    uncovered on #879's own codecov run the first time around."""
+    mock_sql = MagicMock()
+    if connect is not None:
+        mock_sql.connect = connect
+    mock_databricks = MagicMock()
+    mock_databricks.sql = mock_sql
+    return {"databricks": mock_databricks, "databricks.sql": mock_sql}
+
+
+def test_connect_with_query_tags_passes_native_kwarg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#768 — query_tags pass straight through to the driver's own
+    `query_tags` connect kwarg."""
+    monkeypatch.setenv("DATABRICKS_TOKEN", "fake-token")
+    src = DatabricksSource()
+    mock_connect = MagicMock()
+    with patch.dict("sys.modules", _mocked_databricks_modules(mock_connect)):
+        src._connect(_profile(), query_tags={"sync": "s", "run_id": "r"})
+    mock_connect.assert_called_once_with(
+        server_hostname="dbc-xxx.cloud.databricks.com",
+        http_path="/sql/1.0/warehouses/abc",
+        access_token="fake-token",
+        schema="default",
+        query_tags={"sync": "s", "run_id": "r"},
+    )
+
+
+def test_connect_without_query_tags_omits_native_kwarg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATABRICKS_TOKEN", "fake-token")
+    src = DatabricksSource()
+    mock_connect = MagicMock()
+    with patch.dict("sys.modules", _mocked_databricks_modules(mock_connect)):
+        src._connect(_profile())
+    assert "query_tags" not in mock_connect.call_args.kwargs
+
+
+def test_extract_passes_query_tags_to_connect(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABRICKS_TOKEN", "fake-token")
+    src = DatabricksSource()
+    cur = MagicMock()
+    cur.description = [("id",)]
+    cur.__iter__.side_effect = lambda: iter([(1,)])
+    conn = MagicMock()
+    conn.cursor.return_value = cur
+    with patch.object(DatabricksSource, "_connect", return_value=conn) as mock_connect:
+        list(src.extract("SELECT 1", _profile(), query_tags={"sync": "s"}))
+    mock_connect.assert_called_once_with(_profile(), query_tags={"sync": "s"})
+
+
 # ---------------------------------------------------------------------------
 # Transient-failure retry (#766)
 # ---------------------------------------------------------------------------
@@ -248,7 +307,7 @@ def test_extract_retries_cold_start(monkeypatch: pytest.MonkeyPatch) -> None:
     exc_mod = _install_fake_dbsql_exc(monkeypatch)
     attempts: list[int] = []
 
-    def connect(_config: object) -> MagicMock:
+    def connect(_config: object, **_kwargs: object) -> MagicMock:
         attempts.append(1)
         if len(attempts) < 3:
             raise exc_mod.RequestError("Warehouse is starting")
@@ -271,7 +330,7 @@ def test_extract_does_not_retry_bad_sql(monkeypatch: pytest.MonkeyPatch) -> None
     exc_mod = _install_fake_dbsql_exc(monkeypatch)
     attempts: list[int] = []
 
-    def connect(_config: object) -> MagicMock:
+    def connect(_config: object, **_kwargs: object) -> MagicMock:
         attempts.append(1)
         raise exc_mod.ProgrammingError("Table or view not found")
 
@@ -289,7 +348,7 @@ def test_extract_does_not_retry_after_first_row(monkeypatch: pytest.MonkeyPatch)
     exc_mod = _install_fake_dbsql_exc(monkeypatch)
     attempts: list[int] = []
 
-    def connect(_config: object) -> MagicMock:
+    def connect(_config: object, **_kwargs: object) -> MagicMock:
         attempts.append(1)
 
         def exploding_rows():
