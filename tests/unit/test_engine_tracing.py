@@ -117,7 +117,9 @@ class _RaisingSource:
     def __init__(self, rows_before_error: int = 1) -> None:
         self._n = rows_before_error
 
-    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
+    def extract(
+        self, query: str, config: ProfileConfig, *, query_tags: dict[str, str] | None = None
+    ) -> Iterator[dict[str, Any]]:
         for i in range(self._n):
             yield {"id": i}
         raise RuntimeError("source blew up mid-stream")

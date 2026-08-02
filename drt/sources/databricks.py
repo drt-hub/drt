@@ -82,7 +82,13 @@ class DatabricksSource:
         http_code = (getattr(exc, "context", None) or {}).get("http-code")
         return http_code not in (401, 403)
 
-    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
+    def extract(
+        self,
+        query: str,
+        config: ProfileConfig,
+        *,
+        query_tags: dict[str, str] | None = None,
+    ) -> Iterator[dict[str, Any]]:
         """Run ``query`` and yield rows as dicts, retrying transient failures.
 
         **Retry scope (#766): connection and query execution only.** A SQL
@@ -105,11 +111,18 @@ class DatabricksSource:
         the connection, both in a ``finally`` that also fires on
         ``GeneratorExit`` — so an abandoned iterator (``--limit`` /
         ``--fail-fast``, #775/#774) still tears down.
+
+        ``query_tags`` (#768) passes straight through to the driver's own
+        ``query_tags`` connect kwarg, which the driver serializes into a
+        ``QUERY_TAGS`` session config — Databricks' native attribution
+        mechanism, applied to every query the session runs. More than the
+        SQL-comment fallback offers, which is why this connector gets its
+        own path.
         """
         assert isinstance(config, DatabricksProfile)
 
         def _connect_and_execute() -> tuple[Any, Any, list[str]]:
-            conn = self._connect(config)
+            conn = self._connect(config, query_tags=query_tags)
             try:
                 cur = conn.cursor()
                 cur.execute(query)
@@ -151,7 +164,9 @@ class DatabricksSource:
             if conn:
                 conn.close()
 
-    def _connect(self, config: DatabricksProfile) -> Any:
+    def _connect(
+        self, config: DatabricksProfile, *, query_tags: dict[str, str] | None = None
+    ) -> Any:
         token = resolve_env(config.access_token, config.access_token_env) or ""
         if not token:
             raise ValueError(
@@ -175,5 +190,7 @@ class DatabricksSource:
             connect_args["catalog"] = config.catalog
         if config.schema:
             connect_args["schema"] = config.schema
+        if query_tags:
+            connect_args["query_tags"] = query_tags
 
         return sql.connect(**connect_args)

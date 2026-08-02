@@ -30,19 +30,37 @@ logger = logging.getLogger("drt")
 class RestApiSource(Source):
     """Extract records from a REST API endpoint."""
 
-    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
+    def extract(
+        self,
+        query: str,
+        config: ProfileConfig,
+        *,
+        query_tags: dict[str, str] | None = None,
+    ) -> Iterator[dict[str, Any]]:
         """Extract records from the configured REST endpoint.
 
         The ``query`` argument is part of the ``Source`` Protocol (used by SQL
         sources for the SELECT statement) and is **ignored** here — for REST,
         the endpoint URL and pagination strategy come from ``config`` (the
         ``RestApiProfile`` block in ``profiles.yml``).
+
+        ``query_tags`` (#768) is likewise unused: the engine's SQL-comment
+        fallback has nothing to attach to since ``query`` is never sent, and
+        a REST endpoint isn't a warehouse with a job-label/session-tag
+        mechanism to native-tag either — #768 scoped that to BigQuery /
+        Snowflake / Databricks. Accepted for ``Source`` Protocol conformance
+        only.
         """
         assert isinstance(config, RestApiProfile)
         yield from self._extract_impl(config, incremental=None, cursor_value=None)
 
     def extract_incremental(
-        self, query: str, config: ProfileConfig, cursor_value: str | None
+        self,
+        query: str,
+        config: ProfileConfig,
+        cursor_value: str | None,
+        *,
+        query_tags: dict[str, str] | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Extract with the sync's watermark pushed to the API (#767).
 
@@ -52,6 +70,8 @@ class RestApiSource(Source):
         request query parameter so the API filters server-side; without it,
         extraction falls back to the full endpoint (and warns, since the
         engine still cursors but every run re-pulls everything).
+
+        ``query_tags`` — see :meth:`extract`; unused for the same reason.
         """
         assert isinstance(config, RestApiProfile)
         incremental: RestIncrementalConfig | None = None

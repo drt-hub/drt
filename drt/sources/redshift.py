@@ -79,7 +79,13 @@ class RedshiftSource:
         pgcode = getattr(exc, "pgcode", None)
         return not (pgcode and str(pgcode).startswith("28"))
 
-    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
+    def extract(
+        self,
+        query: str,
+        config: ProfileConfig,
+        *,
+        query_tags: dict[str, str] | None = None,
+    ) -> Iterator[dict[str, Any]]:
         """Execute query and yield records as dicts, retrying transient failures.
 
         **Retry scope (#766): connection and query execution only.** A failure
@@ -101,6 +107,11 @@ class RedshiftSource:
         anyway: ``search_path`` is session state, so it is still in force when
         the named cursor is declared on the same connection (verified against
         a live server).
+
+        ``query_tags`` is unused — Redshift (psycopg2, same as Postgres) has
+        no session/job-level tagging primitive drt can reach, so the SQL
+        comment the engine already prepended to ``query`` is this
+        connector's only attribution (#768).
         """
         assert isinstance(config, RedshiftProfile)
 

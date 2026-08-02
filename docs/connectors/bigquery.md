@@ -107,6 +107,7 @@ then drops the temp table. Composite keys are supported (`upsert_key: [tenant_id
 ## Notes
 
 - Requires `pip install drt-core[bigquery]` (`google-cloud-bigquery`).
+- **Query tagging** ([#768](https://github.com/drt-hub/drt/issues/768)): `mode: merge`'s load + `MERGE` jobs get `labels` (BigQuery's native cost-attribution mechanism, queryable via `INFORMATION_SCHEMA.JOBS`) by default. `mode: insert`'s streaming insert (`insert_rows_json`) is a REST call, not a job, so it isn't labeled — labels are job-scoped. See `query_tagging` in `docs/llm/API_REFERENCE.md`.
 - Tables are addressed fully-qualified as `<project>.<dataset>.<table>`.
 - The target table must already exist with a compatible schema — drt writes into it, it does not create it.
 - `--dry-run` is honoured — `destination.load()` is never called when dry_run is on.

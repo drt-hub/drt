@@ -29,6 +29,7 @@ import os
 from typing import Any
 
 from drt.config.models import BigQueryDestinationConfig, DestinationConfig, SyncOptions
+from drt.config.query_tags import normalize_bigquery_label
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 
@@ -110,14 +111,24 @@ class BigQueryDestination:
         sync_options: SyncOptions,
         result: SyncResult,
     ) -> None:
-        """Upsert via a temp table + a single MERGE statement."""
+        """Upsert via a temp table + a single MERGE statement.
+
+        Both calls are BigQuery *jobs* (unlike ``_insert``'s streaming-insert
+        REST call, which has no job to label), so both get ``labels`` from
+        ``sync_options._query_tags`` (#768) — the load and the query use
+        different config classes (``LoadJobConfig`` / ``QueryJobConfig``),
+        so this builds one of each rather than sharing a single object.
+        """
         keys = config.upsert_key
         assert keys  # guarded in load()
         tmp_table_id = f"{table_id}_drt_tmp"
         columns = list(records[0].keys())
+        labels = self._labels(sync_options._query_tags)
 
         try:
-            client.load_table_from_json(records, tmp_table_id).result()
+            client.load_table_from_json(
+                records, tmp_table_id, job_config=self._load_job_config(labels)
+            ).result()
 
             on_clause = " AND ".join([f"T.{k} = S.{k}" for k in keys])
             update_cols = [c for c in columns if c not in keys]
@@ -134,7 +145,7 @@ class BigQueryDestination:
                 f"{matched}"
                 f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})"
             )
-            client.query(merge_sql).result()
+            client.query(merge_sql, job_config=self._query_job_config(labels)).result()
             result.success += len(records)
         except Exception as e:
             result.failed += len(records)
@@ -150,6 +161,31 @@ class BigQueryDestination:
                 raise
         finally:
             client.delete_table(tmp_table_id, not_found_ok=True)
+
+    def _labels(self, query_tags: dict[str, str] | None) -> dict[str, str] | None:
+        """BigQuery-safe label dict from the raw tag payload (#768), or
+        ``None`` when tagging is off — see :func:`normalize_bigquery_label`
+        for the constraint (lowercase ``[a-z0-9_-]``, <=63 chars)."""
+        if not query_tags:
+            return None
+        return {
+            normalize_bigquery_label(k): normalize_bigquery_label(v)
+            for k, v in query_tags.items()
+        }
+
+    def _load_job_config(self, labels: dict[str, str] | None) -> Any:
+        if labels is None:
+            return None
+        from google.cloud import bigquery
+
+        return bigquery.LoadJobConfig(labels=labels)
+
+    def _query_job_config(self, labels: dict[str, str] | None) -> Any:
+        if labels is None:
+            return None
+        from google.cloud import bigquery
+
+        return bigquery.QueryJobConfig(labels=labels)
 
     def test_connection(self, config: DestinationConfig) -> None:
         """Test connectivity by running ``SELECT 1``."""

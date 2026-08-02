@@ -17,7 +17,9 @@ class FakeSource:
     def __init__(self, rows: list[dict]) -> None:
         self._rows = rows
 
-    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict]:
+    def extract(
+        self, query: str, config: ProfileConfig, *, query_tags: dict[str, str] | None = None
+    ) -> Iterator[dict]:
         yield from self._rows
 
     def test_connection(self, config: ProfileConfig) -> bool:

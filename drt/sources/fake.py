@@ -61,15 +61,29 @@ class FakeSource:
             :meth:`extract` — useful for asserting that the engine
             issued the expected query template (e.g., with the
             interpolated cursor value).
+        query_tags_received: Ordered list of ``query_tags`` passed to
+            :meth:`extract` (#768), one entry per call, ``None`` when
+            tagging was disabled for that call — asserts the engine
+            actually threads the cost-attribution payload through.
     """
 
     rows: list[dict[str, Any]] = field(default_factory=list)
     connection_ok: bool = True
     queries_executed: list[str] = field(default_factory=list, init=False, repr=False)
+    query_tags_received: list[dict[str, str] | None] = field(
+        default_factory=list, init=False, repr=False
+    )
 
-    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
-        """Yield each configured row in order, recording the query."""
+    def extract(
+        self,
+        query: str,
+        config: ProfileConfig,
+        *,
+        query_tags: dict[str, str] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield each configured row in order, recording the query (and its tags)."""
         self.queries_executed.append(query)
+        self.query_tags_received.append(query_tags)
         yield from self.rows
 
     def test_connection(self, config: ProfileConfig) -> bool:

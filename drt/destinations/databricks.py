@@ -56,6 +56,7 @@ from drt.config.credentials import resolve_env
 from drt.config.models import DatabricksDestinationConfig, DestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
+from drt.destinations.sql_utils import tagged_cursor
 
 _SWAP_SUFFIX = "__drt_swap"
 
@@ -207,7 +208,7 @@ class DatabricksDestination:
             return SyncResult()
 
         result = SyncResult()
-        conn = self._connect(config)
+        conn = self._connect(config, query_tags=sync_options._query_tags)
 
         # sync.mode: mirror forces the MERGE write path regardless of
         # config.mode — mirror semantics require upsert. Validate
@@ -237,7 +238,7 @@ class DatabricksDestination:
                     f"{missing} (available: {sorted(records[0].keys())})"
                 )
         try:
-            with conn.cursor() as cur:
+            with tagged_cursor(conn.cursor(), sync_options) as cur:
                 columns = list(records[0].keys())
                 table_fq = f"{config.catalog}.{config.schema_}.{config.table}"
                 # Layer 3 (#317): map columns to type categories + json DDLs once
@@ -602,9 +603,9 @@ class DatabricksDestination:
         assert isinstance(config, DatabricksDestinationConfig)
         table_fq = self._swap_table
         shadow_fq = f"{table_fq}{_SWAP_SUFFIX}"
-        conn = self._connect(config)
+        conn = self._connect(config, query_tags=sync_options._query_tags)
         try:
-            with conn.cursor() as cur:
+            with tagged_cursor(conn.cursor(), sync_options) as cur:
                 # Atomic data overwrite — Delta snapshot isolation; the target
                 # table object (grants / properties / clustering) is preserved.
                 cur.execute(f"INSERT OVERWRITE {table_fq} SELECT * FROM {shadow_fq}")
@@ -733,9 +734,9 @@ class DatabricksDestination:
         scope_cols = sync_options.mirror.scope if sync_options.mirror is not None else None
         scopes = list(self._mirror_scopes or set()) if scope_cols else None
 
-        conn = self._connect(config)
+        conn = self._connect(config, query_tags=sync_options._query_tags)
         try:
-            with conn.cursor() as cur:
+            with tagged_cursor(conn.cursor(), sync_options) as cur:
                 self._delete_via_staged_keys(
                     cur, table_fq, upsert_cols, keys, keys_table, scope_cols, scopes, negate=True
                 )
@@ -786,9 +787,9 @@ class DatabricksDestination:
         scope_positions = [upsert_cols.index(c) for c in scope_cols] if scope_cols else None
         observed_scopes = set(self._mirror_scopes or set()) if scope_positions else None
 
-        conn = self._connect(config)
+        conn = self._connect(config, query_tags=sync_options._query_tags)
         try:
-            with conn.cursor() as cur:
+            with tagged_cursor(conn.cursor(), sync_options) as cur:
                 # Pre-provisioning (mirrors #695): only CREATE when the state
                 # table is genuinely absent, so a locked-down destination
                 # user can run against one an admin created ahead of time.
@@ -923,8 +924,16 @@ class DatabricksDestination:
         return dropped, failed
 
     @classmethod
-    def _connect(cls, config: DatabricksDestinationConfig) -> Any:
-        """Establish a connection to Databricks via SQL Connector."""
+    def _connect(
+        cls, config: DatabricksDestinationConfig, *, query_tags: dict[str, str] | None = None
+    ) -> Any:
+        """Establish a connection to Databricks via SQL Connector.
+
+        ``query_tags`` (#768) passes straight through to the driver's native
+        ``query_tags`` connect kwarg (serialized into a ``QUERY_TAGS`` session
+        config, applied to every query the session runs). Same approach as
+        the Databricks source's ``_connect``.
+        """
         try:
             from databricks import sql  # type: ignore[import-untyped]
         except ImportError as e:
@@ -947,8 +956,12 @@ class DatabricksDestination:
         # binding). No `use_inline_params` opt-in: its client-side inline
         # rendering is deprecated upstream and carries an escaping-based
         # injection surface that native binding removes.
-        return sql.connect(
-            server_hostname=host,
-            http_path=http_path,
-            access_token=token,
-        )
+        connect_args: dict[str, Any] = {
+            "server_hostname": host,
+            "http_path": http_path,
+            "access_token": token,
+        }
+        if query_tags:
+            connect_args["query_tags"] = query_tags
+
+        return sql.connect(**connect_args)
