@@ -1026,7 +1026,7 @@ def test_tracked_stages_current_keys_before_diffing_databricks(
     load_conn = _fake_conn()
     finalize_conn = _state_conn()
     config = _config(upsert_key=["id"])
-    diff_tbl = "main.default.__drt_mirror_diff_keys"
+    diff_tbl = "main.default.__drt_mirror_diff_keys_user_scores"
 
     with patch.dict("sys.modules", _mocked_databricks_modules(load_conn)):
         dest.load([{"id": 1}, {"id": 2}], config, _tracked_options())
@@ -1050,6 +1050,39 @@ def test_tracked_stages_current_keys_before_diffing_databricks(
     assert stage_insert.args[1] == [
         key_hash((1,)), key_json((1,)), key_hash((2,)), key_json((2,))
     ]
+
+
+def test_tracked_diff_staging_table_is_disambiguated_by_target_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Databricks has no session-local temp tables, so the diff scratch
+    table is a real, shared, persistent object per catalog.schema. Two
+    tracked-mirror syncs targeting different tables in the same
+    catalog.schema — a realistic `drt run --threads N>1` scenario — must
+    get distinct scratch table names, or they'd race on a shared one
+    (caught in review; the diff scratch table lacked the suffix its
+    sibling ``keys_table`` already had)."""
+    _set_creds(monkeypatch)
+    dest = DatabricksDestination()
+    load_conn = _fake_conn()
+    finalize_conn = _state_conn()
+    config = _config(upsert_key=["id"], table="orders")
+
+    with patch.dict("sys.modules", _mocked_databricks_modules(load_conn)):
+        dest.load([{"id": 1}], config, _tracked_options())
+    with patch.dict("sys.modules", _mocked_databricks_modules(finalize_conn)):
+        dest.finalize_sync(config, _tracked_options())
+
+    create_prefix = "CREATE OR REPLACE TABLE main.default.__drt_mirror_diff_keys"
+    create_calls = [
+        c.args[0]
+        for c in finalize_conn._cur.execute.call_args_list
+        if c.args and c.args[0].startswith(create_prefix)
+    ]
+    assert len(create_calls) == 1
+    assert create_calls[0].startswith(
+        "CREATE OR REPLACE TABLE main.default.__drt_mirror_diff_keys_orders "
+    )
 
 
 def test_tracked_inserts_only_genuinely_new_keys_databricks(

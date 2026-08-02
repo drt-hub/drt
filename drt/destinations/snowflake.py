@@ -606,13 +606,17 @@ class SnowflakeDestination:
         table and ``previous - current`` is computed with a ``NOT EXISTS``
         join against ``_drt_synced_keys`` in SQL, so a state table with
         millions of rows never gets read into Python just to compute a
-        typically-small diff. Scope-filtering happens in Python afterward,
-        on the (small) diff — mathematically equivalent to filtering the
-        full previous set by scope first, since scope membership and
-        current-membership are independent conditions. The old
-        "read every untouched row so it can be reinserted unchanged" step
-        is gone: untouched rows are simply never selected by either the
-        diff query or the new-keys query.
+        typically-small diff — **for unscoped tracked mirror**. Scope-
+        filtering happens in Python afterward, on the diff — mathematically
+        equivalent to filtering the full previous set by scope first, since
+        scope membership and current-membership are independent conditions
+        — but the diff itself isn't scope-narrowed in SQL, so a scoped run
+        touching one of many historically-tracked scopes doesn't get the
+        same memory win (#890; see
+        ``BaseSqlDestination._finalize_mirror_tracked`` for the full
+        caveat). The old "read every untouched row so it can be reinserted
+        unchanged" step is gone: untouched rows are simply never selected
+        by either the diff query or the new-keys query.
         """
         import logging
 

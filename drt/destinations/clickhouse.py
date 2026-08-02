@@ -454,15 +454,17 @@ class ClickHouseDestination:
         limit the way Databricks' native paramstyle has), so both directions
         of the diff are plain ``NOT IN`` / ``arrayJoin`` queries against that
         one parameter instead of a joined-against table. ``previous -
-        current`` (the diff, still typically small) and ``current -
-        previous`` (genuinely-new keys) both run entirely in ClickHouse; only
-        their results — never the full tracked-key history — reach Python.
-        Scope-filtering the diff in Python afterward is mathematically
-        equivalent to filtering the full previous set by scope first (same
-        proof as the base implementation: scope membership and current-
-        membership are independent conditions). The old "read every
-        untouched row so it can be reinserted unchanged" step for
-        scope-preserved rows is gone — untouched rows are simply never
+        current`` (the diff, typically small **for unscoped tracked
+        mirror**) and ``current - previous`` (genuinely-new keys) both run
+        entirely in ClickHouse; only their results reach Python. Scope-
+        filtering the diff in Python afterward is mathematically equivalent
+        to filtering the full previous set by scope first (same proof as
+        the base implementation: scope membership and current-membership
+        are independent conditions) — but the diff query itself has no
+        scope predicate, so a scoped run touching one of many historically-
+        tracked scopes doesn't get the same memory win (#890). The old
+        "read every untouched row so it can be reinserted unchanged" step
+        for scope-preserved rows is gone — untouched rows are simply never
         selected by either query.
 
         The failure-mode ordering above still holds with the split state

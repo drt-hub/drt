@@ -777,15 +777,18 @@ class DatabricksDestination:
         diff) and ``previous - current`` is computed with a ``NOT EXISTS``
         join against ``_drt_synced_keys`` in SQL, so a state table with
         millions of rows never gets read into Python just to compute a
-        typically-small diff. Chunked inserts reuse ``_rows_per_chunk`` —
-        the native ``?`` paramstyle's 255-marker limit applies here exactly
-        as it does to ``_delete_via_staged_keys``'s own staging inserts.
-        Scope-filtering the diff in Python afterward is mathematically
-        equivalent to filtering the full previous set by scope first (same
-        proof as the base implementation). The old "read every untouched
-        row so it can be reinserted unchanged" step is gone: untouched rows
-        are simply never selected by either the diff query or the new-keys
-        query.
+        typically-small diff — **for unscoped tracked mirror**. Chunked
+        inserts reuse ``_rows_per_chunk`` — the native ``?`` paramstyle's
+        255-marker limit applies here exactly as it does to
+        ``_delete_via_staged_keys``'s own staging inserts. Scope-filtering
+        the diff in Python afterward is mathematically equivalent to
+        filtering the full previous set by scope first (same proof as the
+        base implementation) — but the diff query itself has no scope
+        predicate, so a scoped run touching one of many historically-
+        tracked scopes doesn't get the same memory win (#890). The old
+        "read every untouched row so it can be reinserted unchanged" step
+        is gone: untouched rows are simply never selected by either the
+        diff query or the new-keys query.
         """
         import logging
 
@@ -805,7 +808,16 @@ class DatabricksDestination:
         table_fq = f"{config.catalog}.{config.schema_}.{config.table}"
         state_fq = f"{config.catalog}.{config.schema_}.{STATE_TABLE}"
         keys_table = f"{config.catalog}.{config.schema_}.__drt_mirror_keys_{config.table}"
-        diff_table = f"{config.catalog}.{config.schema_}.{DIFF_STAGING_TABLE}"
+        # Suffixed by config.table, same as keys_table above — Databricks has
+        # no session-local temp tables (see _delete_via_staged_keys), so this
+        # is a real, shared, persistent object per catalog.schema. Without
+        # the suffix, two tracked-mirror syncs targeting different tables in
+        # the same catalog.schema running concurrently (`drt run --threads
+        # N>1`) would share one scratch table and race on it — one thread's
+        # CREATE OR REPLACE/INSERT could be clobbered mid-flight by another's,
+        # corrupting raw_diff/to_insert for both (caught in review, #890
+        # follow-up territory but fixed directly since it's a one-line fix).
+        diff_table = f"{config.catalog}.{config.schema_}.{DIFF_STAGING_TABLE}_{config.table}"
 
         scope_cols = sync_options.mirror.scope if sync_options.mirror is not None else None
         scope_positions = [upsert_cols.index(c) for c in scope_cols] if scope_cols else None

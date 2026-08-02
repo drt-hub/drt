@@ -522,12 +522,24 @@ class BaseSqlDestination:
         full just to compute a diff that's typically tiny (most runs only
         change a handful of rows). This version stages ``current`` into a
         scratch table and lets the database compute ``previous - current``
-        via ``NOT EXISTS`` — only the (small) diff ever reaches Python. The
-        old "read every untouched row so it can be reinserted unchanged"
-        step for the scope-preserved rows is gone too: since untouched rows
-        are simply never selected as part of the diff, not touching them at
-        all has the same effect as reading and reinserting them unchanged,
-        without ever having to.
+        via ``NOT EXISTS`` — only the (small) diff ever reaches Python **for
+        unscoped tracked mirror**. The old "read every untouched row so it
+        can be reinserted unchanged" step for the scope-preserved rows is
+        gone too: since untouched rows are simply never selected as part of
+        the diff, not touching them at all has the same effect as reading
+        and reinserting them unchanged, without ever having to.
+
+        Caveat for ``mirror.scope`` + ``strategy: tracked``: the diff query
+        below filters only by ``sync_name``, not by scope (scope isn't a
+        separate state-table column — see above), so when ``current``
+        covers one scope out of many historically-tracked ones, the SQL
+        diff's result is close to the *entire* previous state rather than a
+        small diff. The final ``to_delete`` set is still correct (scope
+        membership and current-run membership are independent, so filtering
+        the diff by scope in Python afterward is equivalent to filtering
+        the full previous set by scope first) — this is a missed
+        performance win for the scoped case, not a correctness bug. Tracked
+        as #890.
         """
         import logging
 
