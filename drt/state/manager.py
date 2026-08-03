@@ -1,4 +1,8 @@
-"""StateManager — persists sync state to local JSON.
+"""Run-state persistence — the ``StateStore`` Protocol and its local impl.
+
+``LocalStateManager`` persists to local JSON and is the default. The Protocol
+exists so state can also live somewhere that survives an ephemeral runner
+(#756); ``StateManager`` remains as an alias for it.
 
 Simple by design: no external dependencies, no infrastructure.
 Future: bincode (Rust) for fast binary serialization.

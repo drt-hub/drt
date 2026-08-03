@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from drt.state.dlq import DeadLetter, DlqStore
+from tests.conftest import public_methods
 
 
 def _dl(value: int, *, attempts: int = 1) -> DeadLetter:
@@ -136,9 +137,4 @@ def test_dlq_store_alias_preserved() -> None:
 def test_dlq_backend_protocol_covers_local_public_api() -> None:
     from drt.state.dlq import LocalDlqStore
 
-    public = {
-        name
-        for name in vars(LocalDlqStore)
-        if not name.startswith("_") and callable(getattr(LocalDlqStore, name))
-    }
-    assert public == _DLQ_BACKEND_METHODS
+    assert public_methods(LocalDlqStore) == _DLQ_BACKEND_METHODS

@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from drt.state.history import HistoryEntry, HistoryManager
+from tests.conftest import public_methods
 
 
 def _entry(
@@ -310,9 +311,4 @@ def test_history_manager_alias_preserved() -> None:
 def test_history_store_protocol_covers_local_public_api() -> None:
     from drt.state.history import LocalHistoryManager
 
-    public = {
-        name
-        for name in vars(LocalHistoryManager)
-        if not name.startswith("_") and callable(getattr(LocalHistoryManager, name))
-    }
-    assert public == _HISTORY_STORE_METHODS
+    assert public_methods(LocalHistoryManager) == _HISTORY_STORE_METHODS

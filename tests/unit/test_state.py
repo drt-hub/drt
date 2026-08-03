@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from drt.state.manager import StateManager, SyncState
+from tests.conftest import public_methods
 
 
 def test_get_last_sync_missing(tmp_path: Path) -> None:
@@ -143,9 +144,4 @@ def test_state_store_protocol_covers_local_public_api() -> None:
     """
     from drt.state.manager import LocalStateManager
 
-    public = {
-        name
-        for name in vars(LocalStateManager)
-        if not name.startswith("_") and callable(getattr(LocalStateManager, name))
-    }
-    assert public == _STATE_STORE_METHODS
+    assert public_methods(LocalStateManager) == _STATE_STORE_METHODS
