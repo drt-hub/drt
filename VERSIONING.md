@@ -30,7 +30,7 @@ Removing or renaming methods in:
 
 **Example:** Renaming `Destination.load(records, config, sync_options)` → `Destination.process_records()` requires a MAJOR bump.
 
-> See also: [#300 — Protocol stability review and freeze preparation](https://github.com/drt-hub/drt/issues/300) (v0.9 ROADMAP).
+> See also: [#300 — Protocol stability review and freeze preparation](https://github.com/drt-hub/drt/issues/300) (v0.10 ROADMAP).
 
 ### Sync YAML Schema Breaking Changes
 

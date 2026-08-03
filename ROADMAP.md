@@ -163,30 +163,43 @@ Released as **v0.8.4** on 2026-08-03. See [CHANGELOG.md](CHANGELOG.md#084---2026
 
 ---
 
-## v0.9 — Enterprise Foundation
+## v0.9 — Engine Foundation
 
-**Theme:** Open Core boundary design — interfaces for Enterprise features without implementing them in OSS.
+**Theme:** the pieces the engine itself has been missing — a real incremental strategy when there's no cursor column, state that survives an ephemeral CI runner, backfills that don't OOM on day one, and the schema/hook surface a managed-table workflow needs. Split out 2026-08-03 from the old "v0.9 — Enterprise Foundation" milestone, which had drifted into bundling this concrete, close-to-shippable cluster together with genuinely separate Enterprise-interface-design work; the latter moved to [v0.10](#v010--enterprise-boundary--ecosystem).
+
+**Scope:**
+- **Incremental & state** — diff-based incremental, warehouse-side snapshot diff with no cursor column required (#755) · remote state backend for run state / history / DLQ, CI-safe and team-shared (#756) · windowed backfill with per-window checkpointing (#758)
+- **Write-path semantics** — `match_policy` remaining destinations (#757 — Postgres + HubSpot legs shipped v0.8.1, issue stays open for the rest) · first-class `run_id` + opt-in metadata columns (#762) · `computed_fields` — declarative derived columns (#763) · pre/post-sync SQL hooks + `on_run_start/end` (#764, needs #762's `run_id` plumbing for the audit-row case)
+- **Schema management** — managed destination tables + `on_schema_change` drift policy (#760) · column contracts — declared columns/types enforced before load (#761)
+- **CI / artifacts** — `state:modified` selector, run only syncs changed vs. a baseline manifest (#772) · versioned `run_results.json` run artifacts (#778)
+- **Testing depth** — sync unit tests, fixture rows in / expected payload out, zero credentials (#780)
+- **Security** — secret provider URIs: AWS/GCP Secret Manager, Vault (#782)
+- **Older backlog carried forward** *(pre-dates the 2026-07-10 gap batch, never cleanly fit an earlier milestone)* — multi-destination fan-out (#425) · sync dependency graph, `depends_on` between sync files (#426) · built-in scheduler, `drt schedule` (#428) · `Destination.fetch_existing()` Protocol refactor (#469) · automated upstream API change detection in CI (#649) · reconciliation sync pattern doc for fire-and-forget destinations (#825)
+
+**Out of scope:** Enterprise-interface design (→ v0.10), Rust migration itself (→ v0.10 perf-prep informs the decision, migration is post-v1.0).
+
+**Unscheduled backlog** *(no milestone — pull in when a release theme fits)*: REST API `body_mode: batch` (#770, good first issue) — fits this milestone's theme but not yet pulled in.
+
+*Cleared from this list since it was written:* project `vars` (#783, shipped v0.8.0) · alert conditions (#784, shipped v0.8.3) · custom SQL tests / `severity: warn` / store-failures (#779, shipped v0.8.3) · rate limiting v2 (#769, shipped v0.8.4).
+
+**Target:** 2026-09 · **Progress:** [milestone/6](https://github.com/drt-hub/drt/milestone/6)
+
+---
+
+## v0.10 — Enterprise Boundary & Ecosystem
+
+**Theme:** Open Core boundary design — interfaces for Enterprise features without implementing them in OSS — plus the dagster-drt integration depth and Rust-migration groundwork that share nothing scope-wise with [v0.9](#v09--engine-foundation)'s concrete engine work. Split out 2026-08-03; see v0.9's note for why.
 
 **Scope:**
 - **Interfaces** — RBAC interface spec (#298) · audit log hooks (#299) · plugin system for third-party connectors (#297)
 - **Protocol stability** — review and freeze preparation (#300) · config encryption for secrets at rest (#303) — *`drt cloud push` stub (#302) shipped early in v0.7 via PR #409*
-- **Observability** — OpenTelemetry traces + metrics for sync execution (epic #429) — *Phase 1 (config schema + `[otel]` extras) shipped early via PR #527; Phase 2 (NoOpTracer global provider, #531) and Phases 3–4 (engine instrumentation + counter metrics) continue in parallel with v0.8 work*
 - **Performance** — benchmark suite (#280) + I/O vs CPU profiling for Rust migration decision (#301)
-- **Engine foundation** *(2026-07-10 gap batch)* — diff-based incremental (#755) · remote state backend for run state / history / DLQ (#756) · windowed backfill (#758) · first-class `run_id` + metadata columns (#762) · `computed_fields` (#763) · pre/post-sync SQL hooks + `on_run_start/end` (#764, needs #762's `run_id` plumbing for the audit-row case)
-- **Schema management** — managed destination tables + `on_schema_change` (#760) · column contracts (#761)
-- **CI / artifacts** — `state:modified` selector (#772) · `run_results.json` run artifacts (#778)
-- **Testing depth** — custom SQL tests + `severity: warn` + store-failures (#779) · sync unit tests (#780)
-- **Security** — secret provider URIs: AWS/GCP Secret Manager, Vault (#782) — pairs with config encryption (#303)
-- **Event-driven activation** — the streaming / event-triggered syncs ADR (#786) is **accepted** as [ADR 0004](docs/adr/0004-streaming-and-event-triggered-syncs.md) with a [per-warehouse trigger matrix](docs/research/warehouse-trigger-matrix.md); the follow-through is its Tier 2 recommendation — dagster-drt sensors (#855, hard-blocked by #756 since a sensor and a CI run cannot share a local-disk watermark) — plus the three-tier user guide (#856)
+- **Event-driven activation** — the streaming / event-triggered syncs ADR ([ADR 0004](docs/adr/0004-streaming-and-event-triggered-syncs.md), accepted) named a Tier 2 recommendation as its follow-through — dagster-drt sensors (#855, hard-blocked by [v0.9](#v09--engine-foundation)'s #756 since a sensor and a CI run cannot share a local-disk watermark) — plus the three-tier user guide (#856)
 - **Integrations** — dagster-drt: `DrtEventIterator` for chainable post-processing (#182) · `DrtSyncComponent` for declarative YAML (#183) · `@op` context support in `DagsterDrtResource` (#184)
 
 **Out of scope:** Implementing RBAC/audit log in OSS, actual Cloud service backend, Rust migration itself.
 
-**Unscheduled backlog** *(no milestone — pull in when a release theme fits)*: REST API `body_mode: batch` (#770, good first issue). Its own *Milestone fit* note says v0.8.x, but v0.8.4's theme is warehouse hardening — it needs either a new v0.8.5 or a move to v0.9 before it can be milestoned.
-
-*Cleared from this list since it was written:* project `vars` (#783, shipped v0.8.0) · alert conditions (#784, shipped v0.8.3) · `match_policy` (#757 — Postgres + HubSpot legs shipped v0.8.1, remaining destinations tracked on the issue) · rate limiting v2 (#769, in review) · `computed_fields` (#763) and pre/post-sync hooks (#764), both now scoped above.
-
-**Target:** 2026-09 · **Progress:** [milestone/6](https://github.com/drt-hub/drt/milestone/6)
+**Target:** after v0.9 · **Progress:** [milestone/13](https://github.com/drt-hub/drt/milestone/13)
 
 ---
 
@@ -205,4 +218,4 @@ Released as **v0.8.4** on 2026-08-03. See [CHANGELOG.md](CHANGELOG.md#084---2026
 
 ## v1.x — Rust Engine
 
-Rewrite `engine/sync.py` in Rust via PyO3. Decision gated on benchmark data from v0.9 (#301). Module boundaries are already drawn for this transition — `engine/sync.py` is kept pure (no I/O side effects beyond protocol calls).
+Rewrite `engine/sync.py` in Rust via PyO3. Decision gated on benchmark data from v0.10 (#301). Module boundaries are already drawn for this transition — `engine/sync.py` is kept pure (no I/O side effects beyond protocol calls).

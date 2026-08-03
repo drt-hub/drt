@@ -158,4 +158,4 @@ The current implementation is intentionally simple for v0.7.1. Tracked follow-up
 - The destination read is keyed on the source primary keys (`WHERE <key> IN (…)`, batched) when an `upsert_key` is set and `mode` is not `replace` ([#470](https://github.com/drt-hub/drt/issues/470)). `mode: replace` still needs the whole table — `deleted` there is precisely the rows a keyed read cannot see — and ClickHouse falls back to the full scan for paramstyle reasons.
 - A future `--diff-fields` flag will let you limit the displayed columns ([#471](https://github.com/drt-hub/drt/issues/471)).
 - API-based diff for upsert-keyed SaaS destinations (HubSpot, Notion) is parked behind `--diff-saas` ([#472](https://github.com/drt-hub/drt/issues/472)).
-- The hardcoded "queryable types" tuple will be replaced by a `Destination.fetch_existing()` Protocol method during the v0.9 freeze prep ([#469](https://github.com/drt-hub/drt/issues/469)).
+- The hardcoded "queryable types" tuple will be replaced by a `Destination.fetch_existing()` Protocol method, tracked in v0.9 ([#469](https://github.com/drt-hub/drt/issues/469)).

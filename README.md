@@ -396,8 +396,9 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | **v0.8.1** ✅        | **`sync.match_policy`** `update_only` / `create_only` (Postgres + HubSpot) · `drt docs generate --inline` (self-contained HTML for object-store hosting) · manifest schema v2 (run history · column facts · DLQ depth) · tracked-mirror no-`CREATE`-grant · `Retry-After` |
 | **v0.8.2** ✅        | **`drt docs --inline` → single navigable HTML object** — the whole catalog in one file with in-page nav, so it renders *and* navigates on an authenticated GCS / S3 object URL (completes v0.8.1's `--inline`) |
 | **v0.8.3** ✅        | **`--dry-run --diff` previews mirror `DELETE`s** (tracked / destination / scoped, read-only, labelled apart from a replace rebuild) · keyed destination lookup instead of a full scan · **`alerts.on_degraded`** (row-error %, duration SLA, empty source, DLQ depth) · `drt test` custom SQL `query` tests, `severity: warn`, `--store-failures` |
+| **v0.8.4** ✅        | **Mirror symmetry closes out** — `strategy: tracked` + `scope` composed together, on every SQL destination (Postgres/MySQL/Snowflake/ClickHouse/Databricks) · tracked mirror's state diff moves from Python to a server-side SQL join · **query tagging** (SQL comment + native BigQuery/Snowflake/Databricks tags) · streaming extraction · source-side retry · rate limiting v2 · `--full-refresh` + `drt state show/reset` |
 
-**Next:** [v0.8.3 Diff Polish](ROADMAP.md#v083--diff-polish) → [v0.9 Enterprise Foundation](ROADMAP.md#v09--enterprise-foundation) → [v1.0 Stable Release](ROADMAP.md#v10--stable-release) → [v1.x Rust Engine](ROADMAP.md#v1x--rust-engine)
+**Next:** [v0.9 Engine Foundation](ROADMAP.md#v09--engine-foundation) → [v0.10 Enterprise Boundary & Ecosystem](ROADMAP.md#v010--enterprise-boundary--ecosystem) → [v1.0 Stable Release](ROADMAP.md#v10--stable-release) → [v1.x Rust Engine](ROADMAP.md#v1x--rust-engine)
 
 ---
 
