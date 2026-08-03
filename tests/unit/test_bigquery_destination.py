@@ -194,6 +194,38 @@ class TestBigQueryDestinationLoad:
         assert result.failed == 2
         assert result.success == 0
 
+    def test_merge_query_tags_become_labels_on_both_jobs(self) -> None:
+        """#768 — the load-into-tmp-table and the MERGE are both jobs, so
+        both get `labels`; `_insert`'s streaming API has no job to label
+        (see test_insert_ignores_query_tags_no_job_to_label below)."""
+        client = _fake_client()
+        modules = _mocked_bq_modules(client)
+        records = [{"id": 1, "score": 0.95}]
+        config = _config(mode="merge", upsert_key=["id"])
+        options = _options()
+        options._query_tags = {"sync": "s", "run_id": "r"}
+        with patch.dict("sys.modules", modules):
+            result = BigQueryDestination().load(records, config, options)
+
+        assert result.success == 1
+        bq_mod = modules["google.cloud.bigquery"]
+        bq_mod.LoadJobConfig.assert_called_once_with(labels={"sync": "s", "run_id": "r"})
+        bq_mod.QueryJobConfig.assert_called_once_with(labels={"sync": "s", "run_id": "r"})
+
+    def test_insert_ignores_query_tags_no_job_to_label(self) -> None:
+        """insert_rows_json is a streaming-insert REST call, not a job —
+        BigQuery labels are job-scoped, so there's nothing to attach to."""
+        client = _fake_client()
+        modules = _mocked_bq_modules(client)
+        options = _options()
+        options._query_tags = {"sync": "s", "run_id": "r"}
+        with patch.dict("sys.modules", modules):
+            BigQueryDestination().load([{"id": 1}], _config(), options)
+
+        client.insert_rows_json.assert_called_once_with(
+            "my-proj.analytics.user_scores", [{"id": 1}]
+        )
+
     def test_merge_success(self) -> None:
         client = _fake_client()
         modules = _mocked_bq_modules(client)
@@ -203,7 +235,7 @@ class TestBigQueryDestinationLoad:
             result = BigQueryDestination().load(records, config, _options())
         assert result.success == 1
         client.load_table_from_json.assert_called_once_with(
-            records, "my-proj.analytics.user_scores_drt_tmp"
+            records, "my-proj.analytics.user_scores_drt_tmp", job_config=None
         )
         merge = next(s for s in _sqls(client) if "MERGE" in s)
         assert "MERGE `my-proj.analytics.user_scores` T" in merge

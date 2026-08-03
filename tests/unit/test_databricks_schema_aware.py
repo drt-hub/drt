@@ -71,7 +71,7 @@ def _load(
     cfg = _cfg(mode=mode, upsert_key=upsert_key)
     dest = DatabricksDestination()
     cur = _FakeCursor()
-    dest._connect = lambda c: _FakeConn(cur)  # type: ignore[method-assign]
+    dest._connect = lambda c, **_kw: _FakeConn(cur)  # type: ignore[method-assign]
     dest._schema_cache = {"t": category}
     dest._ddl_cache = {"t": ddls}
     dest.load(records, cfg, sync or SyncOptions(mode="full"))
@@ -173,7 +173,7 @@ def test_introspect_schema_off_skips_introspection() -> None:
         cfg = _cfg(introspect_schema=False)
         dest = DatabricksDestination()
         cur = _FakeCursor()
-        dest._connect = lambda c: _FakeConn(cur)  # type: ignore[method-assign]
+        dest._connect = lambda c, **_kw: _FakeConn(cur)  # type: ignore[method-assign]
         dest.load([{"id": 1, "doc": {"x": 1}}], cfg, SyncOptions(mode="full"))
     finally:
         schema_mod.describe_columns = orig  # type: ignore[assignment]

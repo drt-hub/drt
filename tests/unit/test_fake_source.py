@@ -53,6 +53,15 @@ def test_extract_records_query_even_when_no_rows(profile: Any) -> None:
     assert source.queries_executed == ["SELECT 1"]
 
 
+def test_extract_records_query_tags(profile: Any) -> None:
+    """``query_tags_received`` (#768) lets engine tests assert the
+    cost-attribution payload was actually threaded through."""
+    source = FakeSource(rows=[{"id": 1}])
+    list(source.extract("SELECT 1", profile, query_tags={"sync": "s", "run_id": "r"}))
+    list(source.extract("SELECT 2", profile))
+    assert source.query_tags_received == [{"sync": "s", "run_id": "r"}, None]
+
+
 def test_extract_is_a_generator(profile: Any) -> None:
     """``extract`` returns an iterator, not a pre-materialised list."""
     source = FakeSource(rows=[{"id": 1}, {"id": 2}])

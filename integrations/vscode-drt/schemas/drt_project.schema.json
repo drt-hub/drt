@@ -17,6 +17,25 @@
       "title": "HistoryConfig",
       "type": "object"
     },
+    "QueryTaggingConfig": {
+      "description": "Cost-attribution tagging on extract/destination queries (#768).\n\nOn by default (dbt's ``query_comment`` precedent): a query with no tag at\nall is the thing that made per-sync warehouse cost attribution impossible\nin the first place (see #710/#738's smoke-account digest, which had to\nfall back to account-level spend). ``extra`` is merged into every tag\npayload alongside drt's own ``app``/``sync``/``run_id`` \u2014 e.g.\n``{\"team\": \"growth\"}`` to carry a cost-center through to\n``INFORMATION_SCHEMA.JOBS`` / ``QUERY_HISTORY`` queries.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "extra": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Extra",
+          "type": "object"
+        }
+      },
+      "title": "QueryTaggingConfig",
+      "type": "object"
+    },
     "SourceConfig": {
       "properties": {
         "type": {
@@ -107,6 +126,9 @@
       "additionalProperties": true,
       "title": "Vars",
       "type": "object"
+    },
+    "query_tagging": {
+      "$ref": "#/$defs/QueryTaggingConfig"
     }
   },
   "required": [
