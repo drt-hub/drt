@@ -268,6 +268,8 @@ drt mcp run
 | `drt_list_profiles`   | List credential profiles (name + type, no secrets)                                    |
 | `drt_test_profile`    | Connectivity check for a credential profile                                            |
 | `drt_doctor`          | Environment diagnostics (mirrors `drt doctor`)                                        |
+| `drt_state_show`      | Stored watermark + last-run state                                                     |
+| `drt_state_reset`     | Reset watermark / run state / tracked-mirror keys                                     |
 
 ---
 

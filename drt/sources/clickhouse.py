@@ -55,7 +55,13 @@ class ClickHouseSource:
             return False
         return isinstance(exc, (ch_exc.OperationalError, ch_exc.InterfaceError))
 
-    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
+    def extract(
+        self,
+        query: str,
+        config: ProfileConfig,
+        *,
+        query_tags: dict[str, str] | None = None,
+    ) -> Iterator[dict[str, Any]]:
         """Run ``query`` and yield rows as dicts, retrying transient failures.
 
         **Retry scope (#766): connection and query execution only.** A failure
@@ -86,6 +92,12 @@ class ClickHouseSource:
         that closes the client, so an abandoned iterator
         (``--limit`` / ``--fail-fast``, #775/#774) does not leave an
         unconsumed HTTP response on a client about to be closed under it.
+
+        ``query_tags`` is unused. ClickHouse does have a native
+        ``log_comment`` query setting that lands in ``system.query_log`` —
+        a real follow-up — but #768 scoped native tagging to BigQuery /
+        Snowflake / Databricks only, so this connector gets the SQL comment
+        the engine already prepended to ``query`` and nothing more for now.
         """
         assert isinstance(config, ClickHouseProfile)
 

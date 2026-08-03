@@ -23,7 +23,16 @@ from drt.config.credentials import ProfileConfig, SQLiteProfile
 class SQLiteSource:
     """Extract records from a SQLite database."""
 
-    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
+    def extract(
+        self,
+        query: str,
+        config: ProfileConfig,
+        *,
+        query_tags: dict[str, str] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        # query_tags unused: local SQLite has no session/job tagging
+        # primitive; the SQL comment already prepended to `query` by the
+        # engine is this connector's only attribution (#768).
         if not isinstance(config, SQLiteProfile):
             raise TypeError("Expected SQLiteProfile")
 

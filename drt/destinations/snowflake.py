@@ -32,6 +32,7 @@ from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, SnowflakeDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
+from drt.destinations.sql_utils import tagged_cursor
 
 _SWAP_SUFFIX = "__drt_swap"
 
@@ -127,7 +128,7 @@ class SnowflakeDestination:
         assert isinstance(config, SnowflakeDestinationConfig)
         if not records:
             return SyncResult()
-        conn = self._connect(config)
+        conn = self._connect(config, query_tags=sync_options._query_tags)
         result = SyncResult()
 
         # sync.mode: mirror forces the MERGE write path regardless of
@@ -160,7 +161,7 @@ class SnowflakeDestination:
                     f"{missing} (available: {sorted(records[0].keys())})"
                 )
         try:
-            with conn.cursor() as cur:
+            with tagged_cursor(conn.cursor(), sync_options) as cur:
                 columns = list(records[0].keys())
                 table_fq = f"{config.database}.{config.schema_}.{config.table}"
                 # Layer 3 (#317): map columns to type categories once per sync.
@@ -442,9 +443,9 @@ class SnowflakeDestination:
         assert isinstance(config, SnowflakeDestinationConfig)
         table_fq = self._swap_table
         shadow_fq = f"{table_fq}{_SWAP_SUFFIX}"
-        conn = self._connect(config)
+        conn = self._connect(config, query_tags=sync_options._query_tags)
         try:
-            with conn.cursor() as cur:
+            with tagged_cursor(conn.cursor(), sync_options) as cur:
                 # Atomic exchange — preserves grants on the original name.
                 # Snowflake autocommits, so the SWAP commits before the DROP
                 # (mirrors the separate-transaction split in postgres.py).
@@ -560,9 +561,9 @@ class SnowflakeDestination:
         scope_cols = sync_options.mirror.scope if sync_options.mirror is not None else None
         scopes = list(self._mirror_scopes or set()) if scope_cols else None
 
-        conn = self._connect(config)
+        conn = self._connect(config, query_tags=sync_options._query_tags)
         try:
-            with conn.cursor() as cur:
+            with tagged_cursor(conn.cursor(), sync_options) as cur:
                 stmt, params = self._build_mirror_delete(
                     table_fq, upsert_cols, keys, scope_cols, scopes, negate=True
                 )
@@ -637,9 +638,9 @@ class SnowflakeDestination:
         scope_positions = [upsert_cols.index(c) for c in scope_cols] if scope_cols else None
         observed_scopes = set(self._mirror_scopes or set()) if scope_positions else None
 
-        conn = self._connect(config)
+        conn = self._connect(config, query_tags=sync_options._query_tags)
         try:
-            with conn.cursor() as cur:
+            with tagged_cursor(conn.cursor(), sync_options) as cur:
                 # Pre-provisioning (mirrors #695): only CREATE when the state
                 # table is genuinely absent, so a locked-down destination
                 # user can run against one an admin created ahead of time.
@@ -794,8 +795,15 @@ class SnowflakeDestination:
         return dropped, failed
 
     @classmethod
-    def _connect(cls, config: SnowflakeDestinationConfig) -> Any:
-        """Establish a connection to Snowflake."""
+    def _connect(
+        cls, config: SnowflakeDestinationConfig, *, query_tags: dict[str, str] | None = None
+    ) -> Any:
+        """Establish a connection to Snowflake.
+
+        ``query_tags`` (#768) sets the session's ``QUERY_TAG`` — Snowflake's
+        native cost-attribution mechanism, applied to every query the session
+        runs. Same approach as the Snowflake source's ``_connect``.
+        """
         try:
             import snowflake.connector
         except ImportError as e:
@@ -825,6 +833,11 @@ class SnowflakeDestination:
             )
         else:
             auth["password"] = password
+
+        if query_tags:
+            import json
+
+            auth["session_parameters"] = {"QUERY_TAG": json.dumps(query_tags, sort_keys=True)}
 
         return snowflake.connector.connect(
             account=account,
