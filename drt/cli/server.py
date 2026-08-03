@@ -35,7 +35,7 @@ Auth (``--auth`` on ``drt serve``):
             are also accepted, which covers Shopify's header format)
 
 Pub/Sub push authenticates with an OIDC JWT instead of a body signature; that
-verification path is a follow-up (it needs a JWT dependency decision) and until
+verification path is a follow-up (#903 — it needs a JWT dependency decision) and until
 then Pub/Sub still requires a verifying proxy in front.
 """
 

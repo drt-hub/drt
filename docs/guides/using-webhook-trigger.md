@@ -145,7 +145,7 @@ work out of the box. Stripe's timestamped `t=...,v1=...` scheme is different
 (replay tolerance) and is not covered.
 
 Pub/Sub push authenticates with an **OIDC JWT**, not a body signature — that
-verification path is a planned follow-up, and until it lands Pub/Sub still needs
+verification path is [#903](https://github.com/drt-hub/drt/issues/903), and until it lands Pub/Sub still needs
 a verifying proxy in front.
 
 ## Use cases

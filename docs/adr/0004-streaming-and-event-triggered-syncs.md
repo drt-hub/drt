@@ -18,7 +18,7 @@
   bearer → pluggable `none`/`bearer`/`hmac`). Tier 3's remaining blocker
   clears, with one carve-out: Pub/Sub push authenticates with an OIDC JWT
   rather than a body signature, so that leg still needs a verifying proxy
-  until the OIDC follow-up lands. The Context section's `serve` citations
+  until the OIDC follow-up (#903) lands. The Context section's `serve` citations
   describe the pre-#854 code deliberately — they are the evidence the
   decision was made on.
 - **Issue:** [#786](https://github.com/drt-hub/drt/issues/786)
@@ -116,7 +116,7 @@ can sit behind a real push subscription. Hardening is bounded work with a clear
 finish line; it is not a step toward a daemon. *#769 gate cleared by
 [#858](https://github.com/drt-hub/drt/pull/858); #854 landed — see the
 2026-08-03 amendment. Remaining Tier 3 residual: OIDC verification for
-Pub/Sub push.*
+Pub/Sub push (#903).*
 
 ### Gates: two prerequisites block promotion, not authorship
 
