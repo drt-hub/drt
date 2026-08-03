@@ -19,6 +19,8 @@ Tools:
     drt_list_profiles   — list credential profiles (name + type, no secrets)
     drt_test_profile    — connectivity check for a credential profile
     drt_doctor          — environment diagnostics (mirrors `drt doctor` CLI)
+    drt_state_show      — stored watermark + last-run state (#776)
+    drt_state_reset     — reset watermark / run state / mirror keys (#776)
 
 Business logic for each tool lives in ``drt/mcp/tools/`` (one module per
 tool, independently testable without a running server); this module wires
@@ -46,6 +48,8 @@ from drt.mcp.tools.list_syncs import list_syncs as _list_syncs
 from drt.mcp.tools.retry import retry as _retry
 from drt.mcp.tools.run_sync import run_sync as _run_sync
 from drt.mcp.tools.run_test import run_test as _run_test
+from drt.mcp.tools.state import state_reset as _state_reset
+from drt.mcp.tools.state import state_show as _state_show
 from drt.mcp.tools.test_profile import test_profile as _test_profile
 from drt.mcp.tools.validate import validate as _validate
 
@@ -94,6 +98,7 @@ def create_server(project_dir: Path | None = None) -> Any:
         diff_limit: int = 20,
         cursor_value: str | None = None,
         profile_name: str | None = None,
+        full_refresh: bool = False,
     ) -> dict[str, Any]:
         """Run a specific drt sync.
 
@@ -111,6 +116,12 @@ def create_server(project_dir: Path | None = None) -> Any:
                 for non-incremental syncs.
             profile_name: Override the profile resolved from drt_project.yml /
                 ``DRT_PROFILE`` (mirrors ``drt run --profile``).
+            full_refresh: Clear the stored watermark first, so this run
+                re-reads everything and then persists a fresh watermark
+                (mirrors ``drt run --full-refresh``, #776). Mutually exclusive
+                with ``cursor_value``. Does **not** reset tracked-mirror
+                state — use ``drt_state_reset(tracked_mirror=True)`` for that,
+                and read its warning before doing so.
 
         Returns:
             Result summary with success count, failed count, errors, and
@@ -125,6 +136,7 @@ def create_server(project_dir: Path | None = None) -> Any:
             diff_limit=diff_limit,
             cursor_value=cursor_value,
             profile_name=profile_name,
+            full_refresh=full_refresh,
         )
 
     # -----------------------------------------------------------------------
@@ -172,6 +184,52 @@ def create_server(project_dir: Path | None = None) -> Any:
             status, last_cursor_value).
         """
         return _get_status(ctx, sync_name)
+
+    # -----------------------------------------------------------------------
+    # drt_state_show / drt_state_reset (#776)
+    # -----------------------------------------------------------------------
+
+    @mcp.tool()
+    def drt_state_show(sync_name: str | None = None) -> dict[str, Any]:
+        """Show drt's stored state for a sync (watermark + last run).
+
+        Args:
+            sync_name: Sync to inspect. If omitted, returns all syncs.
+
+        Returns:
+            The stored watermark, last run time, status and row count.
+        """
+        return _state_show(ctx, sync_name)
+
+    @mcp.tool()
+    def drt_state_reset(
+        sync_name: str,
+        watermark: bool = False,
+        runs: bool = False,
+        tracked_mirror: bool = False,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Reset one sync's durable state. At least one level is required.
+
+        The levels are separate on purpose and none is implied by another.
+
+        Args:
+            sync_name: Sync whose state to reset.
+            watermark: Clear the stored watermark, so the next run re-reads
+                everything. This is the equivalent of `drt run --full-refresh`.
+            runs: Clear recorded run state (last status, row count, and the
+                fallback cursor used when no watermark backend is configured).
+            tracked_mirror: Re-baseline the destination's `_drt_synced_keys`.
+                **Destructive in a non-obvious way**: afterwards, rows written
+                by other systems count as drt's own and become deletion
+                candidates on the next mirror pass. Ask for this only when
+                that is intended.
+            dry_run: Report what would be reset without changing anything.
+
+        Returns:
+            Which levels were reset, or an error if none was requested.
+        """
+        return _state_reset(ctx, sync_name, watermark, runs, tracked_mirror, dry_run)
 
     # -----------------------------------------------------------------------
     # drt_get_history

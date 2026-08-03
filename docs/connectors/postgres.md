@@ -304,6 +304,7 @@ a short `idle_in_transaction_session_timeout`, a slow destination can now trip i
 ## Notes
 
 - Requires `pip install drt-core[postgres]` (uses `psycopg2`)
+- **Query tagging** ([#768](https://github.com/drt-hub/drt/issues/768)): every write query gets a leading `/* drt app=drt sync=<name> run_id=<id> ... */` comment by default (Postgres has no native session/job-tagging mechanism) — see `query_tagging` in `docs/llm/API_REFERENCE.md`.
 - `upsert_key` columns must have a UNIQUE constraint on the target table
 - `drt test` validators (row_count, not_null, freshness, unique, accepted_values, query) work with PostgreSQL
 - `--dry-run` shows row count diff for `mode: replace`
