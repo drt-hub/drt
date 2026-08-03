@@ -12,12 +12,35 @@ drt serve --port 8080 --token-env DRT_WEBHOOK_TOKEN
 
 - `--host` (default `127.0.0.1`)
 - `--port` (default `8080`)
-- `--token-env` (default `DRT_WEBHOOK_TOKEN`) — env var holding the bearer token. Empty or unset means no auth (local dev only).
+- `--auth` (default `auto`) — `none`, `bearer`, `hmac`, or `auto` (bearer if the token env var is set, else none)
+- `--token-env` (default `DRT_WEBHOOK_TOKEN`) — env var holding the bearer token
+- `--hmac-secret-env` (default `DRT_WEBHOOK_HMAC_SECRET`) — env var holding the HMAC signing secret
+- `--hmac-header` (default `X-Hub-Signature-256`) — header carrying the HMAC signature
 
 ```bash
 export DRT_WEBHOOK_TOKEN="$(openssl rand -hex 32)"
 drt serve --port 8080
 ```
+
+## The delivery contract
+
+This is a promise, not an implementation detail (#854):
+
+- **A trigger accepted with `202` will run.** Nothing accepted is silently dropped.
+- **Different syncs run concurrently.** Only same-sync overlap is serialized.
+- **Same-sync triggers coalesce.** While a sync is running, the first new trigger
+  creates one *pending* run; further triggers while it is pending are answered with
+  the **same** run id (`"coalesced": true`). drt syncs are watermark-driven, so the
+  one pending run picks up everything that accumulated — a queue of N would do the
+  same work as a queue of 1.
+- Dry-run and real triggers coalesce **separately** — a real trigger is never folded
+  into a dry-run preview.
+
+Run ids are valid **for the lifetime of the `drt serve` process** — they are held in
+memory, so `GET /runs/<id>` goes blank after a restart. Don't build a durable
+workflow on them yet; [#762](https://github.com/drt-hub/drt/issues/762) (first-class
+run ids) is the upgrade path, and only the id's durability will change, not this
+contract.
 
 ## Endpoints
 
@@ -25,70 +48,130 @@ drt serve --port 8080
 
 ```bash
 curl http://localhost:8080/health
-# {"status": "ok", "version": "0.6.0-dev"}
+# {"status": "ok", "version": "0.8.4"}
 ```
 
 ### `POST /sync/<name>`
 
-Trigger a sync by name. Optional `?dry_run=true` for preview.
+Trigger a sync by name. Returns `202` immediately — the sync runs in the background,
+so a sender with a delivery timeout (Pub/Sub push, GitHub, EventBridge) records
+success as soon as the trigger is accepted.
 
 ```bash
 curl -X POST http://localhost:8080/sync/sync_users \
   -H "Authorization: Bearer $DRT_WEBHOOK_TOKEN"
 ```
 
-Response (success):
 ```json
 {
+  "run_id": "3f2a9c...",
   "sync_name": "sync_users",
-  "status": "success",
-  "rows_synced": 42,
-  "rows_failed": 0,
-  "duration_seconds": 1.5,
+  "state": "running",
   "dry_run": false,
-  "errors": []
+  "coalesced": false,
+  "url": "/runs/3f2a9c..."
 }
 ```
+
+Optional query parameters:
+
+- `?dry_run=true` — preview without writing
+- `?wait=true` — block until the run finishes and return the full result with the
+  pre-#854 semantics (`200` success, `207` partial/failed). If the sync is already
+  running, the request coalesces into the pending run and blocks until *that*
+  completes.
+
+### `GET /runs/<id>`
+
+```bash
+curl http://localhost:8080/runs/3f2a9c...
+```
+
+```json
+{
+  "run_id": "3f2a9c...",
+  "sync_name": "sync_users",
+  "state": "success",
+  "dry_run": false,
+  "created_at": "2026-08-03T12:00:00+00:00",
+  "started_at": "2026-08-03T12:00:00+00:00",
+  "finished_at": "2026-08-03T12:00:01+00:00",
+  "result": {"sync_name": "sync_users", "status": "success", "rows_synced": 42, "...": "..."},
+  "error": null
+}
+```
+
+`state` is one of `pending`, `running`, `success`, `partial`, `failed`, `error`.
 
 ### Status codes
 
 | Code | Meaning |
 |------|---------|
-| 200  | sync succeeded |
-| 207  | sync partial or failed (result body has details) |
+| 202  | trigger accepted — it **will** run; poll `GET /runs/<id>` |
+| 200  | `?wait=true` only: sync succeeded / run found |
+| 207  | `?wait=true` only: sync partial or failed (result body has details) |
 | 400  | sync name missing from URL |
-| 401  | bearer token missing or wrong (when auth enabled) |
-| 404  | sync name not found in project |
-| 423  | another sync is already running (one at a time) |
+| 401  | auth missing or wrong (when auth enabled) |
+| 404  | sync name not found in project, or unknown run id |
+| 413  | request body over 1 MiB |
 | 500  | unexpected error |
+
+> Before v0.8.5, concurrent requests were answered `423 Locked` and **dropped** —
+> the sender believed it delivered, and nothing ran. That status is gone; a
+> concurrent trigger now coalesces and is never lost.
+
+## Auth schemes
+
+### Bearer token
+
+```bash
+drt serve --auth bearer --token-env DRT_WEBHOOK_TOKEN
+```
+
+Static shared secret in the `Authorization: Bearer ...` header, compared in
+constant time.
+
+### HMAC body signature
+
+```bash
+export DRT_WEBHOOK_HMAC_SECRET="$(openssl rand -hex 32)"
+drt serve --auth hmac
+```
+
+Verifies an HMAC-SHA256 signature of the raw request body. Accepts GitHub's
+`sha256=<hex>` format (default header `X-Hub-Signature-256`), bare hex, and
+base64 digests — so GitHub and Shopify (`--hmac-header X-Shopify-Hmac-Sha256`)
+work out of the box. Stripe's timestamped `t=...,v1=...` scheme is different
+(replay tolerance) and is not covered.
+
+Pub/Sub push authenticates with an **OIDC JWT**, not a body signature — that
+verification path is a planned follow-up, and until it lands Pub/Sub still needs
+a verifying proxy in front.
 
 ## Use cases
 
 ### GitHub webhook → run sync on push
 
-```yaml
-# .github/workflows/trigger-drt.yml
-on:
-  push:
-    branches: [main]
-
-jobs:
-  trigger:
-    runs-on: ubuntu-latest
-    steps:
-      - run: |
-          curl -X POST $DRT_HOST/sync/sync_users \
-            -H "Authorization: Bearer ${{ secrets.DRT_WEBHOOK_TOKEN }}"
-```
+Point a repository webhook at `https://your-drt-host/sync/sync_users` with a
+secret, and run `drt serve --auth hmac` with the same secret in
+`DRT_WEBHOOK_HMAC_SECRET`. GitHub signs each delivery; drt verifies it.
 
 ### dbt Cloud job completion → sync downstream
 
-Add a post-job webhook in dbt Cloud pointing to `https://your-drt-host/sync/sync_users` with the bearer token.
+Add a post-job webhook in dbt Cloud pointing to `https://your-drt-host/sync/sync_users`
+with the bearer token. If your workflow needs the result in the webhook response,
+use `?wait=true`.
 
 ## Design notes
 
-- **One sync at a time** — concurrent requests return 423 Locked. This keeps state consistent without needing a queue or DB.
 - **No persistent state** beyond what `StateManager` already does (`.drt/state.json`).
-- **Stdlib only** — `http.server.ThreadingHTTPServer`, no FastAPI/uvicorn. Keeps drt-core dependency-free.
+  One `StateManager` instance is shared across all runs so concurrent syncs can't
+  race the state file.
+- **Stdlib only** — `http.server.ThreadingHTTPServer`, no FastAPI/uvicorn. Keeps
+  drt-core dependency-free.
+- **Ctrl+C exits immediately**; in-flight runs are abandoned (unchanged from
+  previous behaviour). Pending coalesced runs die with the process — the 202
+  promise holds only while the process lives, which is why senders should still
+  monitor sync freshness (`alerts.on_degraded`).
 
 For production, run behind a reverse proxy (nginx, Caddy) for TLS and rate limiting.

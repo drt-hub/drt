@@ -136,7 +136,7 @@ drt destinations                  # list available destination connectors
 drt status                        # show recent sync results
 drt status --output json          # JSON output for status
 drt mcp run                       # start MCP server (requires drt-core[mcp])
-drt serve --port 8080             # start HTTP webhook endpoint (POST /sync/<name>)
+drt serve --port 8080             # HTTP webhook endpoint — POST /sync/<name> answers 202 + run id (poll GET /runs/<id>, or ?wait=true for the result); same-sync triggers coalesce, different syncs run concurrently, nothing accepted is dropped (#854). Auth: --auth none|bearer|hmac
 drt docs generate                 # static docs site to target/docs/ (html; also --format mermaid|json). Destination labels are docs-safe by default (#696): object identity (table/channel/sheet/bucket) stays, endpoints/hosts/phones/emails do not
 drt docs generate --full-labels   # verbatim describe() labels + unredacted error text — trusted/internal hosting only (#696/#698)
 drt docs generate --history-depth 20  # recent runs per sync embedded in the manifest from .drt/history (schema v2, #698; default 10, 0 disables, --no-state omits)

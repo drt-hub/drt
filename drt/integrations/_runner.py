@@ -7,7 +7,10 @@ Keep this free of any orchestrator dependency.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from drt.state.manager import StateManager
 
 
 def run_drt_sync(
@@ -15,6 +18,7 @@ def run_drt_sync(
     project_dir: str = ".",
     dry_run: bool = False,
     profile: str | None = None,
+    state_manager: StateManager | None = None,
 ) -> dict[str, Any]:
     """Run a drt sync and return the result as a dict.
 
@@ -26,6 +30,11 @@ def run_drt_sync(
         project_dir: Path to the drt project directory.
         dry_run: If True, extract but don't write to destination.
         profile: Override profile name (default: from drt_project.yml).
+        state_manager: Share a StateManager across calls. Its thread-safety
+            is an instance lock, so callers running syncs concurrently in one
+            process (``drt serve``) must pass a shared instance; the default
+            per-call instance is fine for one-run-per-process callers
+            (Airflow, Prefect).
 
     Returns:
         Dict with sync_name, status, rows_synced, rows_failed,
@@ -53,7 +62,7 @@ def run_drt_sync(
     sync = matched[0]
     source = _get_source(prof)
     dest = _get_destination(sync)
-    state_mgr = StateManager(pdir)
+    state_mgr = state_manager if state_manager is not None else StateManager(pdir)
 
     result = run_sync(sync, source, dest, prof, pdir, dry_run, state_mgr)
 
