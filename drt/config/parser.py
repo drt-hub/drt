@@ -102,7 +102,7 @@ def load_project(project_dir: Path = Path(".")) -> ProjectConfig:
     return ProjectConfig.model_validate(data)
 
 
-def _expand_sync_vars(data: Any, variables: dict[str, Any]) -> Any:
+def expand_sync_vars(data: Any, variables: dict[str, Any]) -> Any:
     """Render ``var()`` in a sync's YAML string fields, leaving ``model:`` alone.
 
     Model SQL shares its template surface with ``{{ cursor_value }}`` /
@@ -155,7 +155,7 @@ def load_syncs(
         with path.open() as f:
             data = yaml.safe_load(f)
         data = expand_env_vars(data)
-        data = _expand_sync_vars(data, resolved)
+        data = expand_sync_vars(data, resolved)
         syncs.append(SyncConfig.model_validate(data))
     return syncs
 
@@ -178,7 +178,7 @@ def load_syncs_safe(
             data = yaml.safe_load(f)
         try:
             data = expand_env_vars(data)
-            data = _expand_sync_vars(data, resolved)
+            data = expand_sync_vars(data, resolved)
             # Check for deprecated keys before validation
             deprecations = _check_deprecated_keys(data)
             sync = SyncConfig.model_validate(data)
