@@ -24,7 +24,7 @@ jobs:
         run: pip install uv
 
       - name: Install dependencies
-        run: uv pip install --system -e ".[dev,mcp,duckdb]"
+        run: uv pip install --system -e ".[dev,mcp,duckdb,postgres,mysql,clickhouse,sqlserver]"
 
       - name: Lint (ruff)
         run: ruff check drt tests
