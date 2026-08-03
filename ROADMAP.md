@@ -155,22 +155,11 @@ Two additive features accumulated since v0.7.5 — a new **Amplitude destination
 
 ---
 
-## v0.8.4 — Warehouse hardening & security
+## v0.8.4 — Warehouse hardening & security ✅ Shipped 2026-08-03
 
-**Theme:** make the DWH legs secure, fast, and fully symmetrical — the follow-ups the v0.7.10 mirror work and the real-machine smoke program (#654, all three warehouses now live-validated nightly) surfaced.
+Released as **v0.8.4** on 2026-08-03. See [CHANGELOG.md](CHANGELOG.md#084---2026-08-03) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.8.4) for the full feature list.
 
-**Scope:**
-- **Security** — Snowflake key-pair authentication for destination + source ([#737](https://github.com/drt-hub/drt/issues/737)) — new Snowflake accounts already enforce MFA on password users, so `TYPE = SERVICE` + key-pair is the unblock; migrates the smoke/cost users off passwords
-- **Performance** — Databricks batched writes ([#734](https://github.com/drt-hub/drt/issues/734)) — row-per-statement is one HTTP round trip per row on a live warehouse (300-key mirror smoke ≈ 19 min)
-- **Mirror symmetry** — `strategy: tracked` / `scope` for ClickHouse / Snowflake / Databricks ([#692](https://github.com/drt-hub/drt/issues/692)) · tracked+scope composition & SQL-JOIN state diff ([#694](https://github.com/drt-hub/drt/issues/694)) · tracked-mirror destination privileges doc ([#695](https://github.com/drt-hub/drt/issues/695))
-- **Cleanups** — Snowflake/Databricks `_insert_rows` dead-branch removal ([#699](https://github.com/drt-hub/drt/issues/699)) · `drt docs generate` hardening — rmtree guard / ImportError hint / slug collision ([#703](https://github.com/drt-hub/drt/issues/703))
-- **Extract robustness** *(2026-07-10 gap batch)* — streaming extraction via server-side cursors / `fetchmany` ([#765](https://github.com/drt-hub/drt/issues/765)) · source-side retry for transient extract failures ([#766](https://github.com/drt-hub/drt/issues/766))
-- **Cost attribution** — query tagging: BigQuery job labels / Snowflake `QUERY_TAG` / SQL comment header ([#768](https://github.com/drt-hub/drt/issues/768))
-- **State ops** — `--full-refresh` + `drt state show/reset` ([#776](https://github.com/drt-hub/drt/issues/776))
-
-**Out of scope:** diff work (→ v0.8.3), enterprise boundary (→ v0.9), engine refactors (#719–#723 land opportunistically).
-
-**Target:** rolling, after the v0.8 Growth push · **Progress:** [milestone/12](https://github.com/drt-hub/drt/milestone/12)
+**Theme: the warehouse legs go fast, safe, and fully symmetrical.** Mirror symmetry closes out in full: `strategy: tracked` + `scope` composition, and the SQL-JOIN state diff that replaces a Python-side full read of `_drt_synced_keys` ([#692](https://github.com/drt-hub/drt/issues/692) / [#694](https://github.com/drt-hub/drt/issues/694), both closed) — every SQL destination implementing `sync.mode: mirror` now supports both, on every dialect. **Query tagging** ([#768](https://github.com/drt-hub/drt/issues/768)) puts a `sync`/`run_id` SQL comment — plus native BigQuery/Snowflake/Databricks tagging — on every query drt issues, read or write. Extract robustness (streaming via server-side cursors, [#765](https://github.com/drt-hub/drt/issues/765); source-side retry, [#766](https://github.com/drt-hub/drt/issues/766)) and rate limiting v2 ([#769](https://github.com/drt-hub/drt/issues/769)) — both from the 2026-07-10 gap batch — land here too, alongside a sanctioned way to reset drt's own state (`--full-refresh` + `drt state show`/`reset`, [#776](https://github.com/drt-hub/drt/issues/776)). Three items originally scoped here shipped early once their urgency became clear, ahead of this milestone: Snowflake key-pair auth ([#737](https://github.com/drt-hub/drt/issues/737)) and Databricks batched writes ([#734](https://github.com/drt-hub/drt/issues/734)) in v0.7.11, and the tracked-mirror destination-privileges doc ([#695](https://github.com/drt-hub/drt/issues/695)) in v0.8.1; the dead-branch/docs-hardening cleanups ([#699](https://github.com/drt-hub/drt/issues/699)/[#703](https://github.com/drt-hub/drt/issues/703)) were already closed by the time this milestone was scoped. No breaking changes — drop-in upgrade from v0.8.3.
 
 ---
 
