@@ -170,7 +170,7 @@ Released as **v0.8.4** on 2026-08-03. See [CHANGELOG.md](CHANGELOG.md#084---2026
 **Scope:**
 - **Incremental & state** — diff-based incremental, warehouse-side snapshot diff with no cursor column required (#755) · remote state backend for run state / history / DLQ, CI-safe and team-shared (#756) · windowed backfill with per-window checkpointing (#758) · scope-aware SQL diff for tracked+scoped mirror, closing the memory-win gap #694 part 2 left open (#890)
 - **Write-path semantics** — `match_policy` remaining destinations (#757 — Postgres + HubSpot legs shipped v0.8.1, issue stays open for the rest) · first-class `run_id` + opt-in metadata columns (#762) · `computed_fields` — declarative derived columns (#763) · pre/post-sync SQL hooks + `on_run_start/end` (#764, needs #762's `run_id` plumbing for the audit-row case)
-- **Schema management** — managed destination tables + `on_schema_change` drift policy (#760) · column contracts — declared columns/types enforced before load (#761)
+- **Schema management** — managed destination tables + `on_schema_change` drift policy (#760) · column contracts — declared columns/types enforced before load (#761), plus deriving them straight from a dbt model's own `columns:` contract instead of hand-maintaining a duplicate (#896)
 - **CI / artifacts** — `state:modified` selector, run only syncs changed vs. a baseline manifest (#772) · versioned `run_results.json` run artifacts (#778)
 - **Testing depth** — sync unit tests, fixture rows in / expected payload out, zero credentials (#780)
 - **Security** — secret provider URIs: AWS/GCP Secret Manager, Vault (#782)
@@ -178,7 +178,7 @@ Released as **v0.8.4** on 2026-08-03. See [CHANGELOG.md](CHANGELOG.md#084---2026
 
 **Out of scope:** Enterprise-interface design (→ v0.10), Rust migration itself (→ v0.10 perf-prep informs the decision, migration is post-v1.0).
 
-**Unscheduled backlog** *(no milestone — pull in when a release theme fits)*: REST API `body_mode: batch` (#770, good first issue) — fits this milestone's theme but not yet pulled in.
+**Unscheduled backlog** *(no milestone — pull in when a release theme fits)*: REST API `body_mode: batch` (#770, good first issue) — fits this milestone's theme but not yet pulled in. Idempotency keys for fire-and-forget destinations (#897) — smaller and destination-count-dependent (needs a per-connector survey first), parked until a duplicate-side-effect report justifies pulling it in.
 
 *Cleared from this list since it was written:* project `vars` (#783, shipped v0.8.0) · alert conditions (#784, shipped v0.8.3) · custom SQL tests / `severity: warn` / store-failures (#779, shipped v0.8.3) · rate limiting v2 (#769, shipped v0.8.4).
 
