@@ -114,3 +114,31 @@ def test_all_depths_reports_every_nonempty_queue(tmp_path: Path) -> None:
 
 def test_all_depths_empty_when_no_dir(tmp_path: Path) -> None:
     assert DlqStore(tmp_path).all_depths() == {}
+
+
+# --- DlqBackend Protocol (#756) ----------------------------------------------
+
+_DLQ_BACKEND_METHODS = {"append", "replace", "clear", "read", "depth", "all_depths"}
+
+
+def test_local_dlq_store_satisfies_dlq_backend(tmp_path: Path) -> None:
+    from drt.state.dlq import DlqBackend, LocalDlqStore
+
+    assert isinstance(LocalDlqStore(tmp_path), DlqBackend)
+
+
+def test_dlq_store_alias_preserved() -> None:
+    from drt.state.dlq import DlqStore, LocalDlqStore
+
+    assert DlqStore is LocalDlqStore
+
+
+def test_dlq_backend_protocol_covers_local_public_api() -> None:
+    from drt.state.dlq import LocalDlqStore
+
+    public = {
+        name
+        for name in vars(LocalDlqStore)
+        if not name.startswith("_") and callable(getattr(LocalDlqStore, name))
+    }
+    assert public == _DLQ_BACKEND_METHODS

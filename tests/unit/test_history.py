@@ -288,3 +288,31 @@ class TestEngineHistoryIntegration:
         e = entries[0]
         assert e.status == "failed"
         assert any("upstream down" in err for err in e.errors)
+
+
+# --- HistoryStore Protocol (#756) --------------------------------------------
+
+_HISTORY_STORE_METHODS = {"append", "read", "prune"}
+
+
+def test_local_history_manager_satisfies_history_store(tmp_path: Path) -> None:
+    from drt.state.history import HistoryStore, LocalHistoryManager
+
+    assert isinstance(LocalHistoryManager(tmp_path), HistoryStore)
+
+
+def test_history_manager_alias_preserved() -> None:
+    from drt.state.history import HistoryManager, LocalHistoryManager
+
+    assert HistoryManager is LocalHistoryManager
+
+
+def test_history_store_protocol_covers_local_public_api() -> None:
+    from drt.state.history import LocalHistoryManager
+
+    public = {
+        name
+        for name in vars(LocalHistoryManager)
+        if not name.startswith("_") and callable(getattr(LocalHistoryManager, name))
+    }
+    assert public == _HISTORY_STORE_METHODS
