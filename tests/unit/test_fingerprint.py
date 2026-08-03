@@ -212,3 +212,74 @@ def test_undefined_env_var_elsewhere_does_not_hide_the_sync(tmp_path: Path) -> N
     )
     _project(tmp_path, {"a.yml": body}, {"users.sql": "SELECT 1"})
     assert "users_to_api" in sync_fingerprints(tmp_path)
+
+
+# --- degenerate inputs -------------------------------------------------------
+#
+# Every branch below decides whether a sync is *visible* to state:modified.
+# An invisible sync is a sync CI silently does not run, so these paths deserve
+# tests more than the happy path does.
+
+
+def test_inline_sql_model_is_supported(tmp_path: Path) -> None:
+    """``model:`` may be raw SQL rather than ``ref()`` — a normal usage, not an edge.
+
+    There is no .sql file to read in that case; the SQL is already inside the
+    yaml bytes being hashed, so editing it still moves the fingerprint.
+    """
+    body = _SYNC_YAML.replace("model: ref('users')", "model: SELECT id FROM users")
+    before = _one(tmp_path, yaml_body=body)
+
+    other_body = body.replace("SELECT id FROM users", "SELECT id, email FROM users")
+    (tmp_path / "syncs" / "a.yml").write_text(other_body)
+    assert sync_fingerprints(tmp_path)["users_to_api"] != before
+
+
+def test_malformed_yaml_does_not_poison_the_other_syncs(tmp_path: Path) -> None:
+    """One broken file must not make the whole project invisible.
+
+    ``drt validate`` is where a broken sync gets reported; a selector that blew
+    up on an unrelated malformed file would be worse than one that skips it.
+    """
+    _project(
+        tmp_path,
+        {"a.yml": _SYNC_YAML, "broken.yml": "name: [unclosed\n  : :\n"},
+        {"users.sql": "SELECT 1"},
+    )
+    prints = sync_fingerprints(tmp_path)
+    assert "users_to_api" in prints
+
+
+def test_non_mapping_yaml_is_skipped(tmp_path: Path) -> None:
+    _project(tmp_path, {"a.yml": _SYNC_YAML, "list.yml": "- just\n- a list\n"}, {})
+    assert list(sync_fingerprints(tmp_path)) == ["users_to_api"]
+
+
+def test_sync_without_a_name_is_skipped(tmp_path: Path) -> None:
+    _project(tmp_path, {"a.yml": _SYNC_YAML, "anon.yml": "model: ref('x')\n"}, {})
+    assert list(sync_fingerprints(tmp_path)) == ["users_to_api"]
+
+
+def test_missing_or_non_string_model_is_tolerated(tmp_path: Path) -> None:
+    body = _SYNC_YAML.replace("model: ref('users')\n", "")
+    _project(tmp_path, {"a.yml": body}, {})
+    assert sync_fingerprints(tmp_path)["users_to_api"]
+
+    listy = _SYNC_YAML.replace("model: ref('users')", "model:\n  - not\n  - a string")
+    (tmp_path / "syncs" / "a.yml").write_text(listy)
+    assert sync_fingerprints(tmp_path)["users_to_api"]
+
+
+def test_unresolvable_name_falls_back_to_the_literal(tmp_path: Path) -> None:
+    """The name's own expansion failing must not delete the sync either.
+
+    Distinct from the undefined-var-elsewhere case above: there the name
+    resolves fine and the failure is in another field. Here expansion of the
+    name itself fails, and the literal is kept so the sync stays visible rather
+    than vanishing from the map.
+    """
+    body = _SYNC_YAML.replace("name: users_to_api", "name: ${NOT_SET_NAME_VAR}")
+    _project(tmp_path, {"a.yml": body}, {"users.sql": "SELECT 1"})
+    prints = sync_fingerprints(tmp_path)
+    assert len(prints) == 1
+    assert next(iter(prints.values()))

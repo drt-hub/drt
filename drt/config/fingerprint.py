@@ -81,15 +81,31 @@ def sync_fingerprints(project_dir: Path | str = Path(".")) -> dict[str, str]:
     # project's syncs are.
     for path in sorted(syncs_dir.glob("*.yml")):
         raw = path.read_bytes()
-        name = _resolved_name(raw, variables)
+        data = _parse(raw)
+        if data is None:
+            continue
+        name = _resolved_name(data, variables)
         if name is None:
             continue
-        fingerprints[name] = _digest(raw, _model_bytes(raw, root))
+        fingerprints[name] = _digest(raw, _model_bytes(data, root))
 
     return fingerprints
 
 
-def _resolved_name(raw: bytes, variables: dict[str, Any]) -> str | None:
+def _parse(raw: bytes) -> dict[str, Any] | None:
+    """Parse one sync file, or None if it is not a YAML mapping.
+
+    The single parse point for the module: everything downstream takes the
+    parsed mapping, so no helper has to re-check that it got one.
+    """
+    try:
+        data = yaml.safe_load(raw)
+    except Exception:  # noqa: BLE001 — malformed files are drt validate's job
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _resolved_name(data: dict[str, Any], variables: dict[str, Any]) -> str | None:
     """The sync's ``name:`` with env vars and ``var()`` applied, or None.
 
     Expansion is applied to the **name value alone**, never to the whole
@@ -102,16 +118,10 @@ def _resolved_name(raw: bytes, variables: dict[str, Any]) -> str | None:
     to avoid. Isolating the name keeps an unresolvable field elsewhere from
     deciding whether the sync is visible at all.
 
-    Only a file that is not parseable YAML, or has no ``name:``, is skipped —
-    reporting those is ``drt validate``'s job, and a selector that raised on an
-    unrelated malformed file would be worse than one that cannot see it.
+    Only a sync with no ``name:`` is skipped here — reporting a broken sync is
+    ``drt validate``'s job, and a selector that raised on an unrelated malformed
+    file would be worse than one that cannot see it.
     """
-    try:
-        data = yaml.safe_load(raw)
-    except Exception:  # noqa: BLE001 — malformed files are drt validate's job
-        return None
-    if not isinstance(data, dict):
-        return None
     name = data.get("name")
     if not name:
         return None
@@ -121,7 +131,7 @@ def _resolved_name(raw: bytes, variables: dict[str, Any]) -> str | None:
         return str(name)
 
 
-def _model_bytes(raw: bytes, project_dir: Path) -> bytes:
+def _model_bytes(data: dict[str, Any], project_dir: Path) -> bytes:
     """Raw bytes of the ``.sql`` file a ``ref()`` resolves to, else empty.
 
     Read straight off disk rather than through
@@ -133,12 +143,6 @@ def _model_bytes(raw: bytes, project_dir: Path) -> bytes:
     A missing file is not an error: ``ref()`` may name a dbt model or a bare
     warehouse table with no local SQL.
     """
-    try:
-        data = yaml.safe_load(raw)
-    except Exception:  # noqa: BLE001 — see _resolved_name
-        return b""
-    if not isinstance(data, dict):
-        return b""
     model = data.get("model")
     if not isinstance(model, str):
         return b""
