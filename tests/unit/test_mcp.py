@@ -799,3 +799,218 @@ async def test_server_lists_new_parity_tools() -> None:
         "drt_list_profiles",
         "drt_test_profile",
     } <= names
+
+
+# ---------------------------------------------------------------------------
+# drt_state_show / drt_state_reset (#776)
+# ---------------------------------------------------------------------------
+#
+# Added with the feature rather than retrofitted. The #870 audit found the
+# v0.8.0 flag wave (--limit / --fail-fast / --failed / --vars) never reached
+# MCP at all, so an agent driving drt could not do the safe thing. Shipping
+# the CLI and the tool together is the fix for that pattern, not just for
+# this feature.
+
+
+@pytest.mark.asyncio
+async def test_state_show_reports_no_state(server: FastMCP) -> None:
+    result = await call(server, "drt_state_show", sync_name="never-run")
+    assert result.get("state") is None
+
+
+@pytest.mark.asyncio
+async def test_state_show_returns_the_stored_watermark(
+    server: FastMCP, project_dir: Path
+) -> None:
+    from drt.state.manager import StateManager, SyncState
+
+    StateManager(project_dir).save_sync(
+        SyncState(
+            sync_name="users",
+            last_run_at="2026-01-01T00:00:00Z",
+            records_synced=7,
+            status="success",
+            last_cursor_value="2026-06-01",
+        )
+    )
+
+    result = await call(server, "drt_state_show", sync_name="users")
+
+    assert result["state"]["last_cursor_value"] == "2026-06-01"
+
+
+@pytest.mark.asyncio
+async def test_state_reset_requires_a_level(server: FastMCP, project_dir: Path) -> None:
+    """Same safety property as the CLI: never treat "no level" as "all of it".
+
+    An agent is *more* likely to call this with defaults than a human is, so
+    the refusal matters more here, not less.
+    """
+    from drt.state.manager import StateManager, SyncState
+
+    StateManager(project_dir).save_sync(
+        SyncState(
+            sync_name="users",
+            last_run_at="2026-01-01T00:00:00Z",
+            records_synced=7,
+            status="success",
+        )
+    )
+
+    result = await call(server, "drt_state_reset", sync_name="users")
+
+    assert "error" in result
+    assert StateManager(project_dir).get_last_sync("users") is not None
+
+
+@pytest.mark.asyncio
+async def test_state_reset_runs_clears_state(server: FastMCP, project_dir: Path) -> None:
+    from drt.state.manager import StateManager, SyncState
+
+    StateManager(project_dir).save_sync(
+        SyncState(
+            sync_name="users",
+            last_run_at="2026-01-01T00:00:00Z",
+            records_synced=7,
+            status="success",
+        )
+    )
+
+    result = await call(server, "drt_state_reset", sync_name="users", runs=True)
+
+    assert result.get("reset") == ["runs"]
+    assert StateManager(project_dir).get_last_sync("users") is None
+
+
+@pytest.mark.asyncio
+async def test_state_reset_dry_run_changes_nothing(
+    server: FastMCP, project_dir: Path
+) -> None:
+    from drt.state.manager import StateManager, SyncState
+
+    StateManager(project_dir).save_sync(
+        SyncState(
+            sync_name="users",
+            last_run_at="2026-01-01T00:00:00Z",
+            records_synced=7,
+            status="success",
+        )
+    )
+
+    await call(server, "drt_state_reset", sync_name="users", runs=True, dry_run=True)
+
+    assert StateManager(project_dir).get_last_sync("users") is not None
+
+
+@pytest.mark.asyncio
+async def test_state_show_all_syncs(server: FastMCP, project_dir: Path) -> None:
+    from drt.state.manager import StateManager, SyncState
+
+    StateManager(project_dir).save_sync(
+        SyncState(
+            sync_name="users",
+            last_run_at="2026-01-01T00:00:00Z",
+            records_synced=1,
+            status="success",
+        )
+    )
+
+    result = await call(server, "drt_state_show")
+
+    assert "users" in result["states"]
+
+
+@pytest.mark.asyncio
+async def test_state_reset_watermark_level(server: FastMCP, project_dir: Path) -> None:
+    """The watermark branch — no backend configured, so this exercises the
+    loop without a storage delete and must still report the level."""
+    result = await call(server, "drt_state_reset", sync_name="users", watermark=True)
+
+    assert result["reset"] == ["watermark"]
+
+
+@pytest.mark.asyncio
+async def test_state_reset_tracked_mirror_warns(
+    server: FastMCP, project_dir: Path
+) -> None:
+    """An agent has no help text, so the re-baseline consequence has to be in
+    the response itself (#686)."""
+    result = await call(
+        server, "drt_state_reset", sync_name="no-such-sync", tracked_mirror=True
+    )
+
+    # Unknown sync: no destination to touch, but the level is still reported
+    # rather than silently dropped.
+    assert result["reset"] == ["tracked-mirror"]
+
+
+@pytest.mark.asyncio
+async def test_run_sync_rejects_full_refresh_with_cursor_value(
+    server: FastMCP,
+) -> None:
+    """Mutually exclusive, same as the CLI: one says "start from nothing",
+    the other "start from here"."""
+    result = await call(
+        server,
+        "drt_run_sync",
+        sync_name="anything",
+        full_refresh=True,
+        cursor_value="2026-01-01",
+    )
+
+    assert "mutually exclusive" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_run_sync_full_refresh_dry_run_does_not_clear_watermark(
+    project_dir: Path, monkeypatch: Any
+) -> None:
+    """``dry_run=True`` is documented as a preview — ``full_refresh=True``
+    combined with it must not actually delete the stored watermark (#876:
+    it did, silently, mirroring the same bug fixed in the CLI's
+    ``drt run --full-refresh --dry-run``)."""
+    from unittest.mock import MagicMock
+
+    from drt.engine.sync import SyncResult
+
+    def fake_run_sync(*_args: Any, **_kwargs: Any) -> SyncResult:
+        return SyncResult()
+
+    storage = MagicMock()
+    monkeypatch.setattr("drt.engine.sync.run_sync", fake_run_sync)
+    monkeypatch.setattr("drt.cli.main._get_source", lambda _profile: object())
+    monkeypatch.setattr("drt.cli.main._get_destination", lambda _sync: object())
+    monkeypatch.setattr("drt.config.credentials.load_profile", lambda _name: object())
+    monkeypatch.setattr("drt.cli._helpers.get_watermark_storage", lambda *_a, **_k: storage)
+
+    srv = create_server(project_dir)
+    await call(srv, "drt_run_sync", sync_name="notify", dry_run=True, full_refresh=True)
+
+    storage.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_sync_full_refresh_real_run_clears_watermark(
+    project_dir: Path, monkeypatch: Any
+) -> None:
+    """The other half of the #876 fix: a real (non-dry-run) run with
+    ``full_refresh=True`` must still actually clear the watermark — the
+    ``not dry_run`` guard must not have swallowed the real path too."""
+    from unittest.mock import MagicMock
+
+    from drt.engine.sync import SyncResult
+
+    def fake_run_sync(*_args: Any, **_kwargs: Any) -> SyncResult:
+        return SyncResult()
+
+    storage = MagicMock()
+    monkeypatch.setattr("drt.engine.sync.run_sync", fake_run_sync)
+    monkeypatch.setattr("drt.cli.main._get_source", lambda _profile: object())
+    monkeypatch.setattr("drt.cli.main._get_destination", lambda _sync: object())
+    monkeypatch.setattr("drt.config.credentials.load_profile", lambda _name: object())
+    monkeypatch.setattr("drt.cli._helpers.get_watermark_storage", lambda *_a, **_k: storage)
+
+    srv = create_server(project_dir)
+    await call(srv, "drt_run_sync", sync_name="notify", dry_run=False, full_refresh=True)
+
+    storage.delete.assert_called_once_with("notify")

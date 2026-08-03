@@ -43,6 +43,7 @@ from drt.config.credentials import resolve_env
 from drt.config.models import ClickHouseDestinationConfig, DestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
+from drt.destinations.sql_utils import tag_query
 
 
 class ClickHouseDestination:
@@ -97,7 +98,9 @@ class ClickHouseDestination:
             else:
                 if sync_options.mode == "replace" and not self._replace_truncated:
                     client.command(
-                        f"TRUNCATE TABLE {self._quote_ident(config.table)}"
+                        tag_query(
+                            f"TRUNCATE TABLE {self._quote_ident(config.table)}", sync_options
+                        )
                     )
                     self._replace_truncated = True
 
@@ -205,8 +208,8 @@ class ClickHouseDestination:
         table_q = self._quote_ident(table)
 
         if not self._swap_shadow_created:
-            client.command(f"DROP TABLE IF EXISTS {shadow_q}")
-            client.command(f"CREATE TABLE {shadow_q} AS {table_q}")
+            client.command(tag_query(f"DROP TABLE IF EXISTS {shadow_q}", sync_options))
+            client.command(tag_query(f"CREATE TABLE {shadow_q} AS {table_q}", sync_options))
             self._swap_shadow_created = True
             self._swap_table = table
 
@@ -231,7 +234,7 @@ class ClickHouseDestination:
                     # try/finally guarantees state reset even if DROP fails;
                     # at worst we leave an orphan shadow (tracked by #433).
                     try:
-                        client.command(f"DROP TABLE IF EXISTS {shadow_q}")
+                        client.command(tag_query(f"DROP TABLE IF EXISTS {shadow_q}", sync_options))
                     finally:
                         self._swap_shadow_created = False
                         self._swap_table = None
@@ -275,9 +278,9 @@ class ClickHouseDestination:
 
         client = self._connect(config)
         try:
-            client.command(f"EXCHANGE TABLES {table_q} AND {shadow_q}")
+            client.command(tag_query(f"EXCHANGE TABLES {table_q} AND {shadow_q}", sync_options))
             # Shadow now contains the OLD data — drop it.
-            client.command(f"DROP TABLE {shadow_q}")
+            client.command(tag_query(f"DROP TABLE {shadow_q}", sync_options))
         finally:
             client.close()
             self._swap_shadow_created = False
@@ -395,7 +398,9 @@ class ClickHouseDestination:
             sql, params = self._build_mirror_delete(
                 table_q, upsert_cols, keys, scope_cols, scopes, negate=True
             )
-            client.command(sql, parameters=params, settings={"mutations_sync": 1})
+            client.command(
+                tag_query(sql, sync_options), parameters=params, settings={"mutations_sync": 1}
+            )
         finally:
             client.close()
 
@@ -469,16 +474,22 @@ class ClickHouseDestination:
             # Pre-provisioning (mirrors #695): only CREATE when the state
             # table is genuinely absent, so a locked-down destination user
             # can run against one an admin created ahead of time.
-            exists = client.query(f"EXISTS TABLE {state_q}")
+            exists = client.query(tag_query(f"EXISTS TABLE {state_q}", sync_options))
             if not exists.result_rows[0][0]:
                 client.command(
-                    f"CREATE TABLE IF NOT EXISTS {state_q} ("
-                    "sync_name String, key_hash String, key_json String"
-                    ") ENGINE = MergeTree ORDER BY (sync_name, key_hash)"
+                    tag_query(
+                        f"CREATE TABLE IF NOT EXISTS {state_q} ("
+                        "sync_name String, key_hash String, key_json String"
+                        ") ENGINE = MergeTree ORDER BY (sync_name, key_hash)",
+                        sync_options,
+                    )
                 )
             state_result = client.query(
-                f"SELECT key_hash, key_json FROM {state_q} "
-                "WHERE sync_name = {sync_name:String}",
+                tag_query(
+                    f"SELECT key_hash, key_json FROM {state_q} "
+                    "WHERE sync_name = {sync_name:String}",
+                    sync_options,
+                ),
                 parameters={"sync_name": sync_name},
             )
             previous = {row[0]: row[1] for row in state_result.result_rows}
@@ -504,7 +515,11 @@ class ClickHouseDestination:
                     sql, params = self._build_mirror_delete(
                         table_q, upsert_cols, to_delete, None, None, negate=False
                     )
-                    client.command(sql, parameters=params, settings={"mutations_sync": 1})
+                    client.command(
+                        tag_query(sql, sync_options),
+                        parameters=params,
+                        settings={"mutations_sync": 1},
+                    )
             elif not previous:
                 logging.getLogger(__name__).warning(
                     "tracked mirror: no prior state for sync %r in %s — "
@@ -517,7 +532,10 @@ class ClickHouseDestination:
             # Rewrite state — mutation-delete then bulk insert (no
             # cross-statement transaction; see the failure-mode note above).
             client.command(
-                f"ALTER TABLE {state_q} DELETE WHERE sync_name = {{sync_name:String}}",
+                tag_query(
+                    f"ALTER TABLE {state_q} DELETE WHERE sync_name = {{sync_name:String}}",
+                    sync_options,
+                ),
                 parameters={"sync_name": sync_name},
                 settings={"mutations_sync": 1},
             )

@@ -170,6 +170,36 @@ class TestPostgresDestinationLoad:
         assert _split_identifier_text("marketing", "email_events") in query
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_query_tags_prepend_a_comment_when_present(self, mock_connect: MagicMock) -> None:
+        """#768 — sync_options._query_tags flows through load() and lands on
+        the actual executed query, via the sql_base.py cursor wrapper."""
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        options = _options()
+        options._query_tags = {"sync": "s", "run_id": "r"}
+        PostgresDestination().load([{"id": 1, "score": 0.95}], _config(), options)
+
+        # The upsert path composes a psycopg2.sql.Composed object rather than
+        # a plain string, so str() gives its repr — the comment fragment is
+        # still the leading component (asserted precisely for the plain-str
+        # and Composable cases in test_sql_base_tagging.py).
+        query = _query_text(cur.execute.call_args.args[0])
+        assert query.startswith("Composed([SQL('/* drt sync=s run_id=r */\\n')")
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_no_query_tags_is_byte_identical_to_before(self, mock_connect: MagicMock) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        PostgresDestination().load([{"id": 1, "score": 0.95}], _config(), _options())
+
+        query = _query_text(cur.execute.call_args.args[0])
+        assert not query.startswith("/* drt")
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
     def test_empty_records(self, mock_connect: MagicMock) -> None:
         result = PostgresDestination().load([], _config(), _options())
         assert result.success == 0

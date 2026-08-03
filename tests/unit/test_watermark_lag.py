@@ -154,7 +154,9 @@ class QueryCapturingSource:
         self._rows = rows
         self.queries: list[str] = []
 
-    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict]:
+    def extract(
+        self, query: str, config: ProfileConfig, *, query_tags: dict[str, str] | None = None
+    ) -> Iterator[dict]:
         self.queries.append(query)
         yield from self._rows
 

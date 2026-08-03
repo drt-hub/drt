@@ -83,5 +83,30 @@ class StateManager:
             data[state.sync_name] = asdict(state)
             self._save_all(data)
 
+    def reset(self, sync_name: str) -> bool:
+        """Drop the recorded run state for ``sync_name`` (#776).
+
+        Returns whether anything was actually removed, so the CLI can report
+        "nothing to reset" rather than implying it cleared something.
+
+        This also drops ``last_cursor_value``, which matters more than it
+        looks: that field is the **fallback watermark**. ``engine/sync.py``
+        resolves a cursor from ``watermark_storage`` first and from here only
+        when no storage is configured — an ``elif``, so exactly one applies.
+        Leaving it behind would make a reset silently ineffective for every
+        project without a configured watermark backend, which is the default.
+
+        Takes the same lock as ``save_sync``: ``drt run --threads`` writes
+        state concurrently, and a read-modify-write here would otherwise race
+        a run finishing.
+        """
+        with self._lock:
+            data = self._load_all()
+            if sync_name not in data:
+                return False  # never run — nothing to clear, and no file to create
+            del data[sync_name]
+            self._save_all(data)
+            return True
+
     def now(self) -> str:
         return datetime.now(timezone.utc).isoformat()

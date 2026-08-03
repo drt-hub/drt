@@ -68,7 +68,13 @@ class SQLServerSource:
             return False
         return "login failed for user" not in str(exc).lower()
 
-    def extract(self, query: str, config: ProfileConfig) -> Iterator[dict[str, Any]]:
+    def extract(
+        self,
+        query: str,
+        config: ProfileConfig,
+        *,
+        query_tags: dict[str, str] | None = None,
+    ) -> Iterator[dict[str, Any]]:
         """Run ``query`` and yield rows as dicts, retrying transient failures.
 
         **Retry scope (#766): connection and query execution only.** A failure
@@ -89,6 +95,11 @@ class SQLServerSource:
         the connection, both in a ``finally`` that also fires on
         ``GeneratorExit`` — so an abandoned iterator (``--limit`` /
         ``--fail-fast``, #775/#774) still tears down.
+
+        ``query_tags`` is unused — SQL Server (pymssql) has no session/job-
+        level tagging primitive drt can reach, so the SQL comment the engine
+        already prepended to ``query`` is this connector's only attribution
+        (#768).
         """
         assert isinstance(config, SQLServerProfile)
 

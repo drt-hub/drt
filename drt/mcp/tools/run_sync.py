@@ -24,6 +24,7 @@ def run_sync(
     diff_limit: int = 20,
     cursor_value: str | None = None,
     profile_name: str | None = None,
+    full_refresh: bool = False,
 ) -> dict[str, Any]:
     from drt.cli._helpers import resolve_profile_name
     from drt.cli.main import _get_destination, _get_source
@@ -37,6 +38,14 @@ def run_sync(
             "`drt run --dry-run --diff` CLI contract)."
         }
 
+    if full_refresh and cursor_value is not None:
+        # Same exclusion as the CLI: one says "start from nothing", the other
+        # "start from here". Picking a winner silently would make a backfill
+        # look like it worked.
+        return {
+            "error": "full_refresh and cursor_value are mutually exclusive."
+        }
+
     project = ctx.load_project()
     profile = load_profile(resolve_profile_name(profile_name, project.profile))
 
@@ -47,6 +56,23 @@ def run_sync(
     source = _get_source(profile)
     dest = _get_destination(sync)
     state_mgr = StateManager(ctx.project_dir)
+
+    if full_refresh and not dry_run:
+        # Clear both watermark sources, mirroring `drt run --full-refresh`.
+        # engine/sync.py reads watermark_storage first and the state manager's
+        # cursor only when no storage is configured, so clearing one alone is
+        # silently a no-op in the other configuration.
+        #
+        # `not dry_run` guard (#876): dry_run is documented as a read-only
+        # preview, and a stored watermark is data — clearing it for real
+        # under dry_run=True contradicted that contract (same bug as the
+        # CLI's `drt run --full-refresh --dry-run`, fixed alongside this).
+        from drt.cli._helpers import get_watermark_storage
+
+        storage = get_watermark_storage(sync, ctx.project_dir)
+        if storage is not None:
+            storage.delete(sync_name)
+        state_mgr.reset(sync_name)
 
     result = engine_run_sync(
         sync,

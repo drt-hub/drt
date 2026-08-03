@@ -818,3 +818,79 @@ def test_scoped_mirror_empty_source_still_skips_delete() -> None:
         assert dest.finalize_sync(_config(), _scoped_options()) is None
 
     finalize_conn.cursor.return_value.execute.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# tracked-mirror state reset (#776)
+# ---------------------------------------------------------------------------
+
+
+class TestResetTrackedState:
+    """`drt state reset --tracked-mirror` clears one sync's tracked keys.
+
+    This is the most dangerous of the three reset levels, and the only one
+    that writes to the *destination*. Re-baselining means the next mirror pass
+    treats whatever is in the target as drt's own — so rows the application
+    wrote become deletion candidates, which is the exact risk #686 exists to
+    prevent. Hence: scoped to one sync, never touches the target table, and
+    reports whether it actually removed anything.
+    """
+
+    def test_deletes_only_this_syncs_rows(self) -> None:
+        dest = PostgresDestination()
+        conn = _fake_connection()
+        cur = conn.cursor.return_value
+        cur.rowcount = 3
+
+        with patch.object(PostgresDestination, "_connect", return_value=conn):
+            removed = dest.reset_tracked_state(_config(), "scores_sync")
+
+        executed = _executed_sql(cur)
+        assert "_drt_synced_keys" in executed
+        assert "DELETE" in executed.upper()
+        # the sync name is bound, never interpolated
+        delete_calls = [c for c in cur.execute.call_args_list if "DELETE" in str(c.args[0]).upper()]
+        assert delete_calls, "no DELETE was issued"
+        assert delete_calls[-1].args[1] == ("scores_sync",)
+        assert removed == 3
+        conn.commit.assert_called_once()
+
+    def test_never_touches_the_target_table(self) -> None:
+        """The one thing this must never do is delete user data."""
+        dest = PostgresDestination()
+        conn = _fake_connection()
+        cur = conn.cursor.return_value
+        cur.rowcount = 0
+
+        with patch.object(PostgresDestination, "_connect", return_value=conn):
+            dest.reset_tracked_state(_config(), "scores_sync")
+
+        for call in cur.execute.call_args_list:
+            stmt = str(call.args[0])
+            if "DELETE" in stmt.upper():
+                assert "_drt_synced_keys" in stmt, f"DELETE hit a non-state table: {stmt}"
+
+    def test_missing_state_table_is_a_noop(self) -> None:
+        """Resetting a sync that never ran tracked mirror must not error, and
+        must not create the table just to empty it."""
+        dest = PostgresDestination()
+        conn = _fake_connection()
+
+        with patch.object(PostgresDestination, "_connect", return_value=conn):
+            with patch.object(PostgresDestination, "_state_table_exists", return_value=False):
+                removed = dest.reset_tracked_state(_config(), "scores_sync")
+
+        assert removed == 0
+        executed = _executed_sql(conn.cursor.return_value)
+        assert "CREATE TABLE" not in executed.upper()
+
+    def test_connection_is_closed_on_failure(self) -> None:
+        dest = PostgresDestination()
+        conn = _fake_connection()
+        conn.cursor.return_value.execute.side_effect = RuntimeError("boom")
+
+        with patch.object(PostgresDestination, "_connect", return_value=conn):
+            with pytest.raises(RuntimeError):
+                dest.reset_tracked_state(_config(), "scores_sync")
+
+        conn.close.assert_called_once()
