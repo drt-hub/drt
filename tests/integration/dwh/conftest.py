@@ -81,10 +81,12 @@ def duckdb_users(tmp_path: Path) -> Iterator[tuple[DuckDBSource, DuckDBProfile]]
 
 
 def seed_duckdb_children(tmp_path: Path) -> tuple[DuckDBSource, DuckDBProfile]:
-    """Seed a DuckDB ``children`` table with a composite key (#908).
+    """Seed a DuckDB ``children`` table with a composite key.
 
-    A 1:N parent/child shape. Only ``parent_id = 1`` is emitted, which is what
-    lets a mirror smoke prove that an unobserved composite key is deleted.
+    A 1:N parent/child shape — the case ``mirror.scope`` was built for. Only
+    ``parent_id = 1`` is emitted, which lets a live run prove two things: that
+    an unobserved *composite* key is deleted at all (#908), and that a stale
+    child of parent 1 goes while everything under parent 2 survives (#890).
     """
     duckdb = pytest.importorskip("duckdb")
     db_path = str(tmp_path / "smoke_children.duckdb")

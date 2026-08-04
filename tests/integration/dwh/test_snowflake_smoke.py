@@ -42,7 +42,12 @@ from drt.engine.sync import run_sync
 from drt.sources.duckdb import DuckDBSource
 from drt.sources.snowflake import SnowflakeSource
 
-from .conftest import require_env, seed_duckdb_users, unique_table
+from .conftest import (
+    require_env,
+    seed_duckdb_children,
+    seed_duckdb_users,
+    unique_table,
+)
 
 pytestmark = pytest.mark.dwh_smoke
 
@@ -537,3 +542,119 @@ def test_snowflake_source_abandoned_mid_stream_does_not_hang() -> None:
     gen.close()
 
     assert [r["ID"] for r in first] == [0, 1, 2]
+
+
+# ---------------------------------------------------------------------------
+# Tracked + scoped mirror (#686 / #687 / #692 / #694) — and the #890 backfill
+# ---------------------------------------------------------------------------
+#
+# Nothing in this harness covered `strategy: tracked` or `mirror.scope` before,
+# on any warehouse — the mirror smoke above is plain `mode: mirror`. So the
+# composition has shipped since v0.7.10 (and across five dialects in v0.8.4)
+# with mock coverage only. This closes that, and is also the only place #890's
+# scope-column migration can be exercised against a real Snowflake: the ALTER,
+# the backfill of rows tracked before the columns existed, and the predicate.
+
+
+def test_snowflake_tracked_scoped_mirror_and_scope_backfill(tmp_path: Path) -> None:
+    """A pre-#890 state table is migrated, backfilled, and filtered correctly.
+
+    Sets up the exact upgrade path an existing user is on: a ``_drt_synced_keys``
+    table with the three original columns, already tracking keys under two
+    parents. A scoped run touching only parent 1 must then
+
+    * add the scope columns (``ALTER``),
+    * delete the stale child of parent 1 and nothing else,
+    * leave parent 2's rows in the target untouched,
+    * and heal the pre-existing state rows so later runs filter in SQL.
+    """
+    from drt.destinations._mirror_state import STATE_TABLE, key_hash, key_json
+
+    creds = _require_creds()
+    source, profile = seed_duckdb_children(tmp_path)  # parent 1: a, b
+    table = unique_table("DRT_SMOKE_TRACKED_SCOPED")
+    db, schema = creds["DRT_SMOKE_SNOWFLAKE_DATABASE"], creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"]
+    state_fq = f"{db}.{schema}.{STATE_TABLE}"
+    sync_name = f"tracked_scoped_{table.lower()}"
+
+    dest = SnowflakeDestinationConfig(
+        type="snowflake",
+        account_env=ACCOUNT_ENV,
+        user_env=USER_ENV,
+        **_auth_config_kwargs(),
+        database=db,
+        schema=schema,
+        table=table,
+        warehouse=creds["DRT_SMOKE_SNOWFLAKE_WAREHOUSE"],
+        mode="merge",
+        upsert_key=["parent_id", "id"],
+    )
+    sync = SyncConfig(
+        name=sync_name,
+        model="ref('children')",
+        destination=dest,
+        sync=SyncOptions(
+            mode="mirror",
+            batch_size=10,
+            mirror={"strategy": "tracked", "scope": ["parent_id"]},
+        ),
+    )
+
+    tracked = [(1, "a"), (1, "stale"), (2, "other")]
+    conn = _connect(creds)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"CREATE TABLE {table} (parent_id INTEGER, id VARCHAR, label VARCHAR)")
+            for p, i in tracked:
+                cur.execute(f"INSERT INTO {table} VALUES ({p}, '{i}', 'seeded')")
+            # A state table in its pre-#890 shape — three columns, no scope.
+            cur.execute(f"DROP TABLE IF EXISTS {state_fq}")
+            cur.execute(
+                f"CREATE TABLE {state_fq} (sync_name VARCHAR(255) NOT NULL, "
+                "key_hash CHAR(64) NOT NULL, key_json VARCHAR NOT NULL, "
+                "PRIMARY KEY (sync_name, key_hash))"
+            )
+            for k in tracked:
+                cur.execute(
+                    f"INSERT INTO {state_fq} VALUES (%s, %s, %s)",
+                    (sync_name, key_hash(k), key_json(k)),
+                )
+    finally:
+        conn.close()
+
+    try:
+        result = run_sync(sync, source, SnowflakeDestination(), profile, tmp_path)
+        assert result.failed == 0, f"tracked+scoped sync had failures: {result.errors[:3]}"
+
+        conn = _connect(creds)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT parent_id, id FROM {table} ORDER BY parent_id, id")
+                rows = {(r[0], r[1]) for r in cur.fetchall()}
+                # (1,'stale') was tracked, is under the observed scope, and this
+                # run did not emit it -> deleted. (2,'other') is under a parent
+                # this run never saw -> must survive.
+                assert (1, "stale") not in rows, f"stale in-scope row not deleted: {rows}"
+                assert (2, "other") in rows, f"out-of-scope row was deleted: {rows}"
+                assert (1, "a") in rows and (1, "b") in rows, rows
+
+                cur.execute(
+                    f"SELECT scope_spec, scope_key FROM {state_fq} WHERE sync_name = %s "
+                    "AND key_json = %s",
+                    (sync_name, key_json((2, "other"))),
+                )
+                healed = cur.fetchone()
+                # #890: the row tracked before the columns existed must have been
+                # backfilled, or the SQL filter would never engage on an upgraded
+                # table. This is what no mock could catch.
+                assert healed == ('["parent_id"]', "[2]"), f"scope backfill did not run: {healed}"
+        finally:
+            conn.close()
+    finally:
+        _drop_table(creds, table)
+        conn = _connect(creds)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"DELETE FROM {state_fq} WHERE sync_name = %s", (sync_name,))
+        finally:
+            conn.close()
