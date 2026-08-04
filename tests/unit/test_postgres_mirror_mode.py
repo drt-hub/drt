@@ -63,6 +63,7 @@ def _state_conn(
     to_insert: list[tuple[str, str]] | None = None,
     previous_exists: bool = True,
     table_exists: bool = True,
+    scope_key_of: dict[str, str | None] | None = None,
 ) -> MagicMock:
     """A finalize-side connection whose cursor answers the three distinct
     reads #694 part 2 introduced, dispatched by the most recent ``execute()``
@@ -81,6 +82,7 @@ def _state_conn(
     """
     conn = _fake_connection()
     cur = conn.cursor.return_value
+    scope_key_of = scope_key_of or {}
 
     def fetchone_side_effect() -> Any:
         sql = str(cur.execute.call_args.args[0])
@@ -88,10 +90,17 @@ def _state_conn(
             return (1,) if previous_exists else None
         return (1,) if table_exists else None
 
-    def fetchall_side_effect() -> list[tuple[str, str]]:
+    def fetchall_side_effect() -> list[tuple[Any, ...]]:
         sql = str(cur.execute.call_args.args[0])
         if "SELECT s.key_hash" in sql:
-            return list(raw_diff or [])
+            # #890: a scoped run asks for scope_key as a third column so it can
+            # spot rows written before that column existed. Model the projection
+            # actually requested — a fake that always returns two columns would
+            # hide a real shape mismatch.
+            rows = list(raw_diff or [])
+            if "s.scope_key" in sql:
+                return [(h, kj, scope_key_of.get(h)) for h, kj in rows]
+            return rows
         if "SELECT c.key_hash" in sql:
             return list(to_insert or [])
         return []
@@ -586,8 +595,18 @@ def test_tracked_scoped_rewrite_preserves_out_of_scope_state() -> None:
     assert len(state_delete_calls) == 1
     deleted_hashes = {row[1] for row in state_delete_calls[0].args[1]}
     assert deleted_hashes == {key_hash((1, "b"))}
-    for call in cur.executemany.call_args_list:
-        assert key_hash((2, "x")) not in str(call.args[1])
+    # #694 part 2 pinned that an out-of-scope row is never touched at all. #890
+    # narrows that: it may be touched *once*, by the scope backfill, and only
+    # while its scope columns are still NULL. It is still never deleted and
+    # never re-inserted, and once healed it is filtered out in SQL and never
+    # read again. Asserting the shape rather than dropping the check, so a
+    # future change that starts deleting or rewriting it still fails here.
+    touched = [
+        c for c in cur.executemany.call_args_list if key_hash((2, "x")) in str(c.args[1])
+    ]
+    assert len(touched) <= 1
+    for call in touched:
+        assert str(call.args[0]).startswith("UPDATE") or "SET scope_spec" in str(call.args[0])
 
 
 def test_tracked_scoped_first_touch_of_a_scope_is_not_a_baseline_warning(
@@ -1015,3 +1034,56 @@ def test_scoped_insert_records_spec_alongside_the_scope_value() -> None:
     )
     assert "scope_spec" in str(insert.args[0])
     assert insert.args[1][0][3:] == ('["parent_id"]', "[1]")
+
+
+def test_scope_backfill_heals_pre_890_rows_but_not_doomed_ones() -> None:
+    """Rows tracked before the scope columns existed get healed in place.
+
+    Without this they stay NULL forever: #694 part 2 deliberately never
+    rewrites an already-tracked row, so there is no write for the new columns
+    to ride along with, and on an upgraded state table the SQL filter would
+    never engage at all. Caught by running against a real server, not by a
+    mock — see #890.
+    """
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    survivor, doomed = (2, "other-scope"), (1, "stale")
+    conn = _state_conn(
+        raw_diff=[(key_hash(k), key_json(k)) for k in (survivor, doomed)],
+        to_insert=[],
+        scope_key_of={key_hash(survivor): None, key_hash(doomed): None},
+    )
+    cur = conn.cursor.return_value
+
+    with patch.object(PostgresDestination, "_state_scope_columns_exist", return_value=True):
+        _run_tracked_scoped(PostgresDestination(), conn, _fake_connection())
+
+    updates = [c for c in cur.executemany.call_args_list if "SET scope_spec" in str(c.args[0])]
+    assert len(updates) == 1
+    healed = {row[3] for row in updates[0].args[1]}
+
+    assert key_hash(survivor) in healed
+    # the doomed row is deleted two statements later — healing it is pure waste
+    assert key_hash(doomed) not in healed
+    assert updates[0].args[1][0][:2] == ('["parent_id"]', "[2]")
+
+
+def test_scope_backfill_is_capped_per_run() -> None:
+    """Bounded on purpose: expand/contract says backfill in batches, and a sync
+    run is the hot path. A big state table converges over a few runs rather
+    than one run paying for the whole history."""
+    from drt.destinations._mirror_state import SCOPE_BACKFILL_PER_RUN, key_hash, key_json
+
+    keys = [(9, f"k{i}") for i in range(SCOPE_BACKFILL_PER_RUN + 25)]
+    conn = _state_conn(
+        raw_diff=[(key_hash(k), key_json(k)) for k in keys],
+        to_insert=[],
+        scope_key_of={key_hash(k): None for k in keys},
+    )
+    cur = conn.cursor.return_value
+
+    with patch.object(PostgresDestination, "_state_scope_columns_exist", return_value=True):
+        _run_tracked_scoped(PostgresDestination(), conn, _fake_connection())
+
+    updates = [c for c in cur.executemany.call_args_list if "SET scope_spec" in str(c.args[0])]
+    assert len(updates[0].args[1]) == SCOPE_BACKFILL_PER_RUN

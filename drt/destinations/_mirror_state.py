@@ -38,6 +38,13 @@ STATE_TABLE = "_drt_synced_keys"
 # user-configured identifier, so it never needs Composable-safe quoting.
 DIFF_STAGING_TABLE = "__drt_mirror_diff_keys"
 
+# How many pre-#890 state rows one run may heal (see the backfill note in
+# ``_finalize_mirror_tracked``). Bounded on purpose: the expand/contract
+# guidance is to backfill in batches rather than in one pass inside the hot
+# path, and a sync run *is* the hot path here. A state table converges over a
+# few runs instead of one run paying for the whole history.
+SCOPE_BACKFILL_PER_RUN = 5_000
+
 
 def decode_key(key_json_str: str) -> tuple[Any, ...]:
     """Inverse of ``key_json`` — a diffed state row's JSON back to a key tuple."""

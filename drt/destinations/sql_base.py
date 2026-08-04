@@ -613,6 +613,7 @@ class BaseSqlDestination:
 
         from drt.destinations._mirror_state import (
             DIFF_STAGING_TABLE,
+            SCOPE_BACKFILL_PER_RUN,
             STATE_TABLE,
             decode_key,
             key_hash,
@@ -709,8 +710,11 @@ class BaseSqlDestination:
             # every previously written row: no observed scope matches its stale
             # scope_key, so it drops out of the diff and stops being a deletion
             # candidate silently and forever.
+            projection = (
+                "s.key_hash, s.key_json, s.scope_key" if scope_sql else "s.key_hash, s.key_json"
+            )
             diff_sql = (
-                "SELECT s.key_hash, s.key_json FROM {} s WHERE s.sync_name = %s "
+                f"SELECT {projection} FROM {{}} s WHERE s.sync_name = %s "
                 f"AND NOT EXISTS (SELECT 1 FROM {DIFF_STAGING_TABLE} c "
                 "WHERE c.key_hash = s.key_hash)"
             )
@@ -724,7 +728,11 @@ class BaseSqlDestination:
                 )
                 diff_params = (sync_name, scope_spec, *observed_json)
             cur.execute(self._state_sql(diff_sql, state_ident), diff_params)
-            raw_diff = cur.fetchall()
+            fetched = cur.fetchall()
+            stale_scope = (
+                [(h, kj) for h, kj, sk in fetched if sk is None] if scope_sql else []
+            )
+            raw_diff = [row[:2] for row in fetched]
 
             # Scope-filtering the (small) diff after the SQL-side subtraction
             # is equivalent to filtering `previous` by scope *before*
@@ -742,6 +750,45 @@ class BaseSqlDestination:
                 ]
             else:
                 to_delete = [decode_key(kj) for _h, kj in raw_diff]
+
+            # #890 backfill. Rows tracked before the scope columns existed are
+            # never rewritten by the state pass — #694 part 2 deliberately
+            # leaves an already-tracked row alone, which is what makes the diff
+            # cheap — so without this they would keep their NULL scope forever
+            # and keep falling through to the Python filter. On an upgraded
+            # state table that means the optimisation never engages at all.
+            #
+            # The rows are already here: fetched, decoded, and their scope
+            # already computed for the filter above. Healing them costs one
+            # UPDATE. Capped per run because the expand/contract guidance is to
+            # backfill in batches rather than in one pass inside the hot path,
+            # and a sync run is the hot path — the table converges over a few
+            # runs instead of one run paying for the whole history.
+            #
+            # Rows about to be deleted are skipped: writing a scope onto a row
+            # that goes away two statements later is pure waste.
+            if stale_scope and scope_positions is not None:
+                doomed = {key_hash(k) for k in to_delete}
+                heal = [(h, kj) for h, kj in stale_scope if h not in doomed][
+                    :SCOPE_BACKFILL_PER_RUN
+                ]
+                if heal:
+                    cur.executemany(
+                        self._state_sql(
+                            "UPDATE {} SET scope_spec = %s, scope_key = %s "
+                            "WHERE sync_name = %s AND key_hash = %s",
+                            state_ident,
+                        ),
+                        [
+                            (
+                                scope_spec,
+                                scope_key_json(decode_key(kj), scope_positions),
+                                sync_name,
+                                h,
+                            )
+                            for h, kj in heal
+                        ],
+                    )
 
             if to_delete:
                 stmt, params = self._build_mirror_delete(

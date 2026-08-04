@@ -65,6 +65,7 @@ def _state_conn(
     to_insert: list[tuple[str, str]] | None = None,
     previous_exists: bool = True,
     table_exists: bool = True,
+    scope_key_of: dict[str, str | None] | None = None,
 ) -> MagicMock:
     """A finalize-side connection whose cursor answers the three distinct
     reads #694 part 2 introduced, dispatched by the most recent ``execute()``
@@ -74,6 +75,7 @@ def _state_conn(
     the same across both)."""
     conn = _fake_connection()
     cur = conn.cursor.return_value
+    scope_key_of = scope_key_of or {}
 
     def fetchone_side_effect() -> Any:
         sql = str(cur.execute.call_args.args[0])
@@ -81,10 +83,16 @@ def _state_conn(
             return (1,) if previous_exists else None
         return (1,) if table_exists else None
 
-    def fetchall_side_effect() -> list[tuple[str, str]]:
+    def fetchall_side_effect() -> list[tuple[Any, ...]]:
         sql = str(cur.execute.call_args.args[0])
         if "SELECT s.key_hash" in sql:
-            return list(raw_diff or [])
+            # #890: model the projection actually asked for — a scoped run adds
+            # scope_key as a third column so pre-#890 rows can be spotted. A
+            # fake that always returned two columns would hide a shape mismatch.
+            rows = list(raw_diff or [])
+            if "s.scope_key" in sql:
+                return [(h, kj, scope_key_of.get(h)) for h, kj in rows]
+            return rows
         if "SELECT c.key_hash" in sql:
             return list(to_insert or [])
         return []
@@ -560,8 +568,18 @@ def test_tracked_scoped_rewrite_preserves_out_of_scope_state_mysql() -> None:
     assert len(state_delete_calls) == 1
     deleted_hashes = {row[1] for row in state_delete_calls[0].args[1]}
     assert deleted_hashes == {key_hash((1, "b"))}
-    for call in cur.executemany.call_args_list:
-        assert key_hash((2, "x")) not in str(call.args[1])
+    # #694 part 2 pinned that an out-of-scope row is never touched at all. #890
+    # narrows that: it may be touched *once*, by the scope backfill, and only
+    # while its scope columns are still NULL. It is still never deleted and
+    # never re-inserted, and once healed it is filtered out in SQL and never
+    # read again. Asserting the shape rather than dropping the check, so a
+    # future change that starts deleting or rewriting it still fails here.
+    touched = [
+        c for c in cur.executemany.call_args_list if key_hash((2, "x")) in str(c.args[1])
+    ]
+    assert len(touched) <= 1
+    for call in touched:
+        assert str(call.args[0]).startswith("UPDATE") or "SET scope_spec" in str(call.args[0])
 
 
 def test_tracked_scoped_first_touch_of_a_scope_is_not_a_baseline_warning_mysql(
