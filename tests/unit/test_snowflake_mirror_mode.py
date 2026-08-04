@@ -75,6 +75,7 @@ def _configure_state_cur(
     to_insert: list[tuple[str, str]] | None = None,
     previous_exists: bool = True,
     table_exists: bool = True,
+    scope_key_of: dict[str, str | None] | None = None,
 ) -> None:
     """Configure a ``_fake_conn()``'s cursor to answer the #694 part 2 reads,
     dispatched by the most recent ``execute()`` call's SQL text — see the
@@ -82,6 +83,7 @@ def _configure_state_cur(
     the ``SHOW TABLES`` existence probe (Snowflake's own ``fetchall``-based
     check, unlike Postgres/MySQL's ``fetchone``-based one)."""
     cur = conn._cur
+    scope_key_of = scope_key_of or {}
 
     def fetchone_side_effect() -> Any:
         sql = cur.execute.call_args.args[0] if cur.execute.call_args.args else ""
@@ -94,7 +96,12 @@ def _configure_state_cur(
         if "SHOW TABLES" in sql:
             return [("_DRT_SYNCED_KEYS",)] if table_exists else []
         if "SELECT s.key_hash" in sql:
-            return list(raw_diff or [])
+            # #890: model the projection actually asked for — a scoped run adds
+            # scope_key as a third column so pre-#890 rows can be spotted.
+            rows = list(raw_diff or [])
+            if "s.scope_key" in sql:
+                return [(h, kj, scope_key_of.get(h)) for h, kj in rows]
+            return rows
         if "SELECT c.key_hash" in sql:
             return list(to_insert or [])
         return []
@@ -788,8 +795,20 @@ def test_tracked_scoped_deletes_only_stale_keys_within_observed_scope_snowflake(
     assert len(state_delete_calls) == 1
     deleted_hashes = {row[1] for row in state_delete_calls[0].args[1]}
     assert deleted_hashes == {key_hash((1, "b"))}
-    for call in finalize_conn._cur.executemany.call_args_list:
-        assert key_hash((2, "x")) not in str(call.args[1])
+    # #694 part 2 pinned that an out-of-scope row is never touched at all. #890
+    # narrows that: it may be touched *once*, by the scope backfill, and only
+    # while its scope columns are still NULL. It is still never deleted and
+    # never re-inserted, and once healed it is filtered out in SQL. Asserting
+    # the shape rather than dropping the check, so a future change that starts
+    # deleting or rewriting it still fails here.
+    touched = [
+        c
+        for c in finalize_conn._cur.executemany.call_args_list
+        if key_hash((2, "x")) in str(c.args[1])
+    ]
+    assert len(touched) <= 1
+    for call in touched:
+        assert "SET scope_spec" in str(call.args[0])
 
 
 def test_tracked_scoped_first_touch_of_a_scope_is_not_a_baseline_warning_snowflake(
