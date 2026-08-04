@@ -332,8 +332,28 @@ class MySQLDestination(BaseSqlDestination):
             "sync_name VARCHAR(255) NOT NULL, "
             "key_hash CHAR(64) NOT NULL, "
             "key_json TEXT NOT NULL, "
+            "scope_spec TEXT, "
+            "scope_key TEXT, "
             "PRIMARY KEY (sync_name, key_hash))"
         )
+
+    def _state_scope_columns_exist(self, cur: Any, scope: Any, raw: str) -> bool:
+        from drt.destinations._mirror_state import STATE_TABLE
+
+        schema_clause = "table_schema = %s" if scope is not None else "table_schema = DATABASE()"
+        params = (scope, STATE_TABLE) if scope is not None else (STATE_TABLE,)
+        cur.execute(
+            "SELECT COUNT(*) FROM information_schema.columns "
+            f"WHERE {schema_clause} AND table_name = %s "
+            "AND column_name IN ('scope_spec', 'scope_key')",
+            params,
+        )
+        return bool(cur.fetchone()[0] == 2)
+
+    def _add_state_scope_columns(self, cur: Any, ident: Any) -> None:
+        # MySQL has no ADD COLUMN IF NOT EXISTS; the caller only reaches this
+        # after the probe reported both columns absent.
+        cur.execute(f"ALTER TABLE {ident} ADD COLUMN scope_spec TEXT, ADD COLUMN scope_key TEXT")
 
     def _state_sql(self, template: str, ident: Any) -> Any:
         return template.format(ident)

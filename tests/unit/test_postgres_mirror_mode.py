@@ -894,3 +894,124 @@ class TestResetTrackedState:
                 dest.reset_tracked_state(_config(), "scores_sync")
 
         conn.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# #890 — scope-aware SQL diff
+#
+# The Python scope filter stays authoritative. Everything below is about the
+# SQL predicate being a purely *coarse* pre-filter: it may hand Python more
+# rows than necessary, it may never hand it fewer.
+# ---------------------------------------------------------------------------
+
+
+def _scoped_diff_call(cur: MagicMock) -> Any:
+    """The tracked-mirror diff SELECT (``previous - current``)."""
+    return next(c for c in cur.execute.call_args_list if "SELECT s.key_hash" in str(c.args[0]))
+
+
+def _run_tracked_scoped(dest: Any, cur_conn: MagicMock, load_conn: MagicMock) -> None:
+    opts = _tracked_scoped_options()
+    with patch.object(PostgresDestination, "_connect", return_value=load_conn):
+        dest.load([{"id": "a", "parent_id": 1}], _config(upsert_key=["parent_id", "id"]), opts)
+    with patch.object(PostgresDestination, "_connect", return_value=cur_conn):
+        dest.finalize_sync(_config(upsert_key=["parent_id", "id"]), opts)
+
+
+def test_scoped_diff_is_narrowed_in_sql_when_columns_exist() -> None:
+    dest = PostgresDestination()
+    conn = _state_conn(raw_diff=[], to_insert=[])
+    cur = conn.cursor.return_value
+
+    with patch.object(PostgresDestination, "_state_scope_columns_exist", return_value=True):
+        _run_tracked_scoped(dest, conn, _fake_connection())
+
+    call = _scoped_diff_call(cur)
+    sql, params = str(call.args[0]), call.args[1]
+    assert "s.scope_key IN" in sql
+    # the observed scope travels as a bound parameter, never interpolated
+    assert '[1]' in params
+
+
+def test_scoped_diff_lets_rows_from_another_scope_spec_through() -> None:
+    """The branch that keeps the coarse filter honest.
+
+    A row written while ``mirror.scope`` was something else carries a
+    ``scope_key`` no current observed scope can match. Without the
+    ``scope_spec <>`` escape it would drop out of the diff and stop being a
+    deletion candidate — silently, and for good. Today's code re-derives scope
+    from config every run and has no such failure; this preserves that.
+    """
+    dest = PostgresDestination()
+    conn = _state_conn(raw_diff=[], to_insert=[])
+    cur = conn.cursor.return_value
+
+    with patch.object(PostgresDestination, "_state_scope_columns_exist", return_value=True):
+        _run_tracked_scoped(dest, conn, _fake_connection())
+
+    sql = str(_scoped_diff_call(cur).args[0])
+    assert "s.scope_key IS NULL" in sql
+    assert "s.scope_spec <> %s" in sql
+    # the spec bound is the one this run is configured with
+    assert '["parent_id"]' in _scoped_diff_call(cur).args[1]
+
+
+def test_scoped_diff_falls_back_when_alter_is_refused() -> None:
+    """No ALTER privilege (#695 family) is a supported state, not an error."""
+    dest = PostgresDestination()
+    conn = _state_conn(raw_diff=[], to_insert=[])
+    cur = conn.cursor.return_value
+
+    with (
+        patch.object(PostgresDestination, "_state_scope_columns_exist", return_value=False),
+        patch.object(
+            PostgresDestination,
+            "_add_state_scope_columns",
+            side_effect=Exception("permission denied for table _drt_synced_keys"),
+        ),
+    ):
+        _run_tracked_scoped(dest, conn, _fake_connection())
+
+    sql = str(_scoped_diff_call(cur).args[0])
+    assert "scope_key" not in sql  # ran, just without the optimisation
+    assert any("ROLLBACK TO SAVEPOINT" in str(c.args[0]) for c in cur.execute.call_args_list)
+
+
+def test_unscoped_tracked_never_probes_or_alters_scope_columns() -> None:
+    """An unscoped sync gains nothing here and must not pay a probe, let alone DDL."""
+    dest = PostgresDestination()
+    conn = _state_conn(raw_diff=[], to_insert=[])
+    load_conn = _fake_connection()
+
+    with (
+        patch.object(PostgresDestination, "_state_scope_columns_exist") as probe,
+        patch.object(PostgresDestination, "_add_state_scope_columns") as alter,
+        patch.object(PostgresDestination, "_connect", return_value=load_conn),
+    ):
+        dest.load([{"id": 1}], _config(), _tracked_options())
+        with patch.object(PostgresDestination, "_connect", return_value=conn):
+            dest.finalize_sync(_config(), _tracked_options())
+
+    probe.assert_not_called()
+    alter.assert_not_called()
+
+
+def test_scoped_insert_records_spec_alongside_the_scope_value() -> None:
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    key = (1, "a")
+    dest = PostgresDestination()
+    conn = _state_conn(raw_diff=[], to_insert=[(key_hash(key), key_json(key))])
+    cur = conn.cursor.return_value
+
+    with patch.object(PostgresDestination, "_state_scope_columns_exist", return_value=True):
+        _run_tracked_scoped(dest, conn, _fake_connection())
+
+    # the state-table insert, not the staging one that precedes it
+    insert = next(
+        c
+        for c in cur.executemany.call_args_list
+        if "INSERT INTO" in str(c.args[0]) and "_drt_synced_keys" in str(c.args[0])
+    )
+    assert "scope_spec" in str(insert.args[0])
+    assert insert.args[1][0][3:] == ('["parent_id"]', "[1]")

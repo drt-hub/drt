@@ -60,6 +60,29 @@ def key_hash(key: tuple[Any, ...]) -> str:
     return hashlib.sha256(key_json(key).encode()).hexdigest()
 
 
+def scope_spec_json(scope_cols: list[str]) -> str:
+    """Canonical JSON of the scope *column names* (#890).
+
+    Stored next to ``scope_key`` so a run can tell whether a persisted scope
+    value was computed under the scope definition currently configured.
+    Without it, editing ``mirror.scope`` in YAML would strand every previously
+    written row: its frozen ``scope_key`` matches no observed scope, so it
+    drops out of the diff and is never a deletion candidate again — silently,
+    and forever. Today's code re-derives scope positions from config on every
+    run, so it has no such failure; the spec column is what keeps that true.
+    """
+    return json.dumps(list(scope_cols), separators=(",", ":"))
+
+
+def scope_key_json(key: tuple[Any, ...], scope_positions: list[int]) -> str:
+    """Canonical JSON of the scope *values* pulled out of a key tuple (#890).
+
+    Same encoding as :func:`key_json`, so the value stored in the state table
+    is byte-comparable with the one built from a run's observed scopes.
+    """
+    return key_json(tuple(key[p] for p in scope_positions))
+
+
 def diff_keys(
     previous: dict[str, str], current: list[tuple[Any, ...]]
 ) -> list[tuple[Any, ...]]:
