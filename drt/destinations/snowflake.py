@@ -642,6 +642,8 @@ class SnowflakeDestination:
             decode_key,
             key_hash,
             key_json,
+            scope_key_json,
+            scope_spec_json,
         )
 
         assert isinstance(config, SnowflakeDestinationConfig)
@@ -666,14 +668,52 @@ class SnowflakeDestination:
                 cur.execute(
                     f"SHOW TABLES LIKE '{STATE_TABLE}' IN SCHEMA {config.database}.{config.schema_}"
                 )
-                if not cur.fetchall():
+                fresh_table = not cur.fetchall()
+                if fresh_table:
                     cur.execute(
                         f"CREATE TABLE IF NOT EXISTS {state_fq} ("
                         "sync_name VARCHAR(255) NOT NULL, "
                         "key_hash CHAR(64) NOT NULL, "
                         "key_json VARCHAR NOT NULL, "
+                        "scope_spec VARCHAR, "
+                        "scope_key VARCHAR, "
                         "PRIMARY KEY (sync_name, key_hash))"
                     )
+
+                # #890: scope columns let the diff be narrowed server-side.
+                # Probed only for a scoped run — an unscoped sync gains nothing
+                # and must not pay a probe, let alone DDL, for it.
+                scope_spec = scope_spec_json(list(scope_cols)) if scope_cols else None
+                scope_sql = False
+                if scope_positions is not None:
+                    if fresh_table:
+                        scope_sql = True  # created with the columns
+                    else:
+                        cur.execute(
+                            f"SELECT COUNT(*) FROM {config.database}.information_schema.columns "
+                            "WHERE table_schema = %s AND table_name = %s "
+                            "AND column_name IN ('SCOPE_SPEC', 'SCOPE_KEY')",
+                            [config.schema_.upper(), STATE_TABLE.upper()],
+                        )
+                        row = cur.fetchone()
+                        if row is not None and row[0] == 2:
+                            scope_sql = True
+                        else:
+                            # No SAVEPOINT on the PG/MySQL leg's model: this
+                            # connection autocommits (see the note above), so a
+                            # refused ALTER fails on its own and leaves nothing
+                            # half-applied to roll back. A refusal — no DDL
+                            # privilege, the #695 family — simply keeps the run
+                            # on the Python-only filter, permanently, no error.
+                            try:
+                                cur.execute(
+                                    f"ALTER TABLE {state_fq} ADD COLUMN "
+                                    "scope_spec VARCHAR, scope_key VARCHAR"
+                                )
+                            except Exception:  # noqa: BLE001 — a supported state
+                                pass
+                            else:
+                                scope_sql = True
 
                 # Baseline check: a cheap existence probe, never a full read.
                 cur.execute(
@@ -694,11 +734,28 @@ class SnowflakeDestination:
                         [(key_hash(k), key_json(k)) for k in current],
                     )
 
-                cur.execute(
+                # #890, mirroring the Postgres/MySQL leg. The first two
+                # branches are what keep this a purely *coarse* filter — every
+                # row they let through is re-checked exactly by the Python
+                # filter below, so the predicate can only ever return too many
+                # rows, never too few:
+                #   scope_key IS NULL → written before the columns existed
+                #   scope_spec <> ... → written under a different mirror.scope,
+                #                       so its frozen scope_key means nothing
+                diff_sql = (
                     f"SELECT s.key_hash, s.key_json FROM {state_fq} s WHERE s.sync_name = %s "
-                    f"AND NOT EXISTS (SELECT 1 FROM {diff_table} c WHERE c.key_hash = s.key_hash)",
-                    [sync_name],
+                    f"AND NOT EXISTS (SELECT 1 FROM {diff_table} c WHERE c.key_hash = s.key_hash)"
                 )
+                diff_params: list[Any] = [sync_name]
+                if scope_sql and observed_scopes:
+                    observed_json = sorted(key_json(sc) for sc in observed_scopes)
+                    placeholders = ", ".join(["%s"] * len(observed_json))
+                    diff_sql += (
+                        " AND (s.scope_key IS NULL OR s.scope_spec <> %s "
+                        f"OR s.scope_key IN ({placeholders}))"
+                    )
+                    diff_params = [sync_name, scope_spec, *observed_json]
+                cur.execute(diff_sql, diff_params)
                 raw_diff = cur.fetchall()
 
                 if scope_positions is not None and observed_scopes is not None:
@@ -736,7 +793,25 @@ class SnowflakeDestination:
                     [sync_name],
                 )
                 to_insert = cur.fetchall()
-                if to_insert:
+                if to_insert and scope_sql and scope_positions is not None:
+                    cur.executemany(
+                        f"INSERT INTO {state_fq} "
+                        "(sync_name, key_hash, key_json, scope_spec, scope_key) "
+                        "VALUES (%s, %s, %s, %s, %s)",
+                        [
+                            (
+                                sync_name,
+                                h,
+                                kj,
+                                scope_spec,
+                                scope_key_json(decode_key(kj), scope_positions),
+                            )
+                            for h, kj in to_insert
+                        ],
+                    )
+                elif to_insert:
+                    # Unscoped, or the columns are unavailable — they stay NULL,
+                    # which the predicate above always lets through.
                     cur.executemany(
                         f"INSERT INTO {state_fq} (sync_name, key_hash, key_json) "
                         "VALUES (%s, %s, %s)",
