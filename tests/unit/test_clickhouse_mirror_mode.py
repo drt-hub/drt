@@ -694,3 +694,83 @@ def test_tracked_scoped_genuinely_no_prior_state_still_warns_baseline_clickhouse
         dest.finalize_sync(config, _tracked_scoped_options())
 
     assert any("baselin" in r.message.lower() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# #890 — scope-aware SQL diff (ClickHouse leg; design lives on #904)
+# ---------------------------------------------------------------------------
+
+
+def _scope_columns(client: MagicMock, *, present: bool) -> None:
+    """Answer the #890 ``system.columns`` probe on top of the state-client fake."""
+    inner = client.query.side_effect
+
+    def query(sql: str, *a: Any, **k: Any) -> MagicMock:
+        if "system.columns" in sql:
+            return MagicMock(result_rows=[(2 if present else 0,)])
+        return inner(sql, *a, **k)
+
+    client.query.side_effect = query
+
+
+def _diff_call(client: MagicMock) -> Any:
+    return next(
+        c
+        for c in client.query.call_args_list
+        if c.args and str(c.args[0]).startswith("SELECT key_hash, key_json")
+    )
+
+
+def _run_scoped(finalize_client: MagicMock) -> None:
+    dest = ClickHouseDestination()
+    config = _config(upsert_key=["parent_id", "id"])
+    with patch.object(ClickHouseDestination, "_connect", return_value=_fake_client()):
+        dest.load([{"parent_id": 1, "id": "a"}], config, _tracked_scoped_options())
+    with patch.object(ClickHouseDestination, "_connect", return_value=finalize_client):
+        dest.finalize_sync(config, _tracked_scoped_options())
+
+
+def test_scoped_diff_is_narrowed_in_sql_clickhouse() -> None:
+    client = _state_client(raw_diff=[], new_hashes=[])
+    _scope_columns(client, present=True)
+
+    _run_scoped(client)
+
+    call = _diff_call(client)
+    sql, params = str(call.args[0]), call.kwargs["parameters"]
+    assert "scope_key IN {scope_keys:Array(String)}" in sql
+    # both escape branches — what keeps this a purely coarse filter
+    assert "scope_key IS NULL" in sql
+    assert "scope_spec != {scope_spec:String}" in sql
+    assert params["scope_spec"] == '["parent_id"]'
+    assert params["scope_keys"] == ["[1]"]
+
+
+def test_scoped_diff_falls_back_when_alter_is_refused_clickhouse() -> None:
+    """No ALTER privilege is a supported state, not an error."""
+    client = _state_client(raw_diff=[], new_hashes=[])
+    _scope_columns(client, present=False)
+
+    def command(sql: str, *a: Any, **k: Any) -> MagicMock:
+        if sql.startswith("ALTER TABLE") and "scope_spec" in sql:
+            raise Exception("Not enough privileges to ALTER TABLE _drt_synced_keys")
+        return MagicMock()
+
+    client.command.side_effect = command
+
+    _run_scoped(client)
+
+    assert "scope_key" not in str(_diff_call(client).args[0])
+
+
+def test_unscoped_tracked_never_probes_scope_columns_clickhouse() -> None:
+    client = _state_client(raw_diff=[], new_hashes=[])
+    dest = ClickHouseDestination()
+    with patch.object(ClickHouseDestination, "_connect", return_value=_fake_client()):
+        dest.load([{"id": 1}], _config(), _tracked_options())
+    with patch.object(ClickHouseDestination, "_connect", return_value=client):
+        dest.finalize_sync(_config(), _tracked_options())
+
+    assert not any(
+        "system.columns" in str(c.args[0]) for c in client.query.call_args_list if c.args
+    )

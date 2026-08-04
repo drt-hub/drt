@@ -482,7 +482,14 @@ class ClickHouseDestination:
         """
         import logging
 
-        from drt.destinations._mirror_state import STATE_TABLE, decode_key, key_hash, key_json
+        from drt.destinations._mirror_state import (
+            STATE_TABLE,
+            decode_key,
+            key_hash,
+            key_json,
+            scope_key_json,
+            scope_spec_json,
+        )
 
         assert isinstance(config, ClickHouseDestinationConfig)
         sync_name = sync_options._sync_name or config.table
@@ -504,15 +511,67 @@ class ClickHouseDestination:
             # table is genuinely absent, so a locked-down destination user
             # can run against one an admin created ahead of time.
             exists = client.query(tag_query(f"EXISTS TABLE {state_q}", sync_options))
-            if not exists.result_rows[0][0]:
+            fresh_table = not exists.result_rows[0][0]
+            if fresh_table:
                 client.command(
                     tag_query(
                         f"CREATE TABLE IF NOT EXISTS {state_q} ("
-                        "sync_name String, key_hash String, key_json String"
+                        "sync_name String, key_hash String, key_json String, "
+                        "scope_spec Nullable(String), scope_key Nullable(String)"
                         ") ENGINE = MergeTree ORDER BY (sync_name, key_hash)",
                         sync_options,
                     )
                 )
+
+            # #890: scope columns let the diff be narrowed server-side. Probed
+            # only for a scoped run — an unscoped sync gains nothing and must
+            # not pay a probe, let alone DDL, for it.
+            #
+            # ``Nullable(String)`` rather than plain ``String``: the predicate
+            # below has to tell "written before these columns existed" apart
+            # from "written with an empty scope value", and ClickHouse's default
+            # String has no NULL to carry that difference.
+            #
+            # Asked via ``system.columns`` rather than ``information_schema`` —
+            # the latter exists on modern ClickHouse but is a compatibility
+            # shim, which is also why ``drt/destinations/schema.py`` does not
+            # cover this dialect.
+            scope_spec = scope_spec_json(list(scope_cols)) if scope_cols else None
+            scope_sql = False
+            if scope_positions is not None:
+                if fresh_table:
+                    scope_sql = True  # created with the columns
+                else:
+                    probe = client.query(
+                        tag_query(
+                            "SELECT count() FROM system.columns "
+                            "WHERE database = currentDatabase() AND table = {tbl:String} "
+                            "AND name IN ('scope_spec', 'scope_key')",
+                            sync_options,
+                        ),
+                        parameters={"tbl": STATE_TABLE},
+                    )
+                    if probe.result_rows and probe.result_rows[0][0] == 2:
+                        scope_sql = True
+                    else:
+                        # No SAVEPOINT, as on the Snowflake leg and unlike
+                        # Postgres/MySQL: there is no open transaction here to
+                        # poison, so a refused ALTER fails on its own. A refusal
+                        # keeps the run on the Python-only filter, permanently
+                        # and without an error (#695 family).
+                        try:
+                            client.command(
+                                tag_query(
+                                    f"ALTER TABLE {state_q} "
+                                    "ADD COLUMN scope_spec Nullable(String), "
+                                    "ADD COLUMN scope_key Nullable(String)",
+                                    sync_options,
+                                )
+                            )
+                        except Exception:  # noqa: BLE001 — a supported state
+                            pass
+                        else:
+                            scope_sql = True
 
             # Baseline check: a cheap existence probe, never a full read.
             baseline_probe = client.query(
@@ -524,14 +583,31 @@ class ClickHouseDestination:
             )
             previous_exists = bool(baseline_probe.result_rows)
 
+            # #890, mirroring the other legs. The first two branches are what
+            # keep this a purely *coarse* filter — every row they let through is
+            # re-checked exactly by the Python filter below, so it can only ever
+            # return too many rows, never too few:
+            #   scope_key IS NULL → written before the columns existed
+            #   scope_spec != ... → written under a different mirror.scope, so
+            #                       its frozen scope_key means nothing here
+            diff_sql = (
+                f"SELECT key_hash, key_json FROM {state_q} "
+                "WHERE sync_name = {sync_name:String} "
+                "AND key_hash NOT IN {current_hashes:Array(String)}"
+            )
+            diff_params: dict[str, Any] = {
+                "sync_name": sync_name,
+                "current_hashes": current_hashes,
+            }
+            if scope_sql and observed_scopes:
+                diff_sql += (
+                    " AND (scope_key IS NULL OR scope_spec != {scope_spec:String} "
+                    "OR scope_key IN {scope_keys:Array(String)})"
+                )
+                diff_params["scope_spec"] = scope_spec
+                diff_params["scope_keys"] = sorted(key_json(sc) for sc in observed_scopes)
             diff_result = client.query(
-                tag_query(
-                    f"SELECT key_hash, key_json FROM {state_q} "
-                    "WHERE sync_name = {sync_name:String} "
-                    "AND key_hash NOT IN {current_hashes:Array(String)}",
-                    sync_options,
-                ),
-                parameters={"sync_name": sync_name, "current_hashes": current_hashes},
+                tag_query(diff_sql, sync_options), parameters=diff_params
             )
             raw_diff = diff_result.result_rows
 
@@ -587,12 +663,26 @@ class ClickHouseDestination:
             )
             new_hashes = [row[0] for row in new_hashes_result.result_rows]
             if new_hashes:
-                state_rows = [
-                    [sync_name, h, key_json(current_by_hash[h])] for h in new_hashes
-                ]
-                client.insert(
-                    state_q, state_rows, column_names=["sync_name", "key_hash", "key_json"]
-                )
+                if scope_sql and scope_positions is not None:
+                    state_rows = [
+                        [
+                            sync_name,
+                            h,
+                            key_json(current_by_hash[h]),
+                            scope_spec,
+                            scope_key_json(current_by_hash[h], scope_positions),
+                        ]
+                        for h in new_hashes
+                    ]
+                    columns = ["sync_name", "key_hash", "key_json", "scope_spec", "scope_key"]
+                else:
+                    # Unscoped, or the columns are unavailable — they stay NULL,
+                    # which the predicate above always lets through.
+                    state_rows = [
+                        [sync_name, h, key_json(current_by_hash[h])] for h in new_hashes
+                    ]
+                    columns = ["sync_name", "key_hash", "key_json"]
+                client.insert(state_q, state_rows, column_names=columns)
         finally:
             client.close()
 
