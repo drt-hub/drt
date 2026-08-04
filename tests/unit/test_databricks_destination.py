@@ -910,6 +910,7 @@ def _state_conn(
     to_insert: list[tuple[str, str]] | None = None,
     previous_exists: bool = True,
     exists: bool = True,
+    scope_key_of: dict[str, str | None] | None = None,
 ) -> MagicMock:
     """A fake connection wired for the #694 part 2 read path — ``SHOW
     TABLES``, a baseline existence probe, the SQL-side diff, and the
@@ -919,6 +920,7 @@ def _state_conn(
     server-side; ``to_insert`` is what ``current - previous`` would have."""
     conn = _fake_conn()
     cur = conn._cur
+    scope_key_of = scope_key_of or {}
 
     def fetchone_side_effect() -> Any:
         return (1,) if previous_exists else None
@@ -928,7 +930,12 @@ def _state_conn(
         if sql.startswith("SHOW TABLES"):
             return [("_drt_synced_keys",)] if exists else []
         if sql.startswith("SELECT s.key_hash"):
-            return list(raw_diff or [])
+            # #890: model the projection actually asked for — a scoped run adds
+            # scope_key as a third column so pre-#890 rows can be spotted.
+            rows = list(raw_diff or [])
+            if "s.scope_key" in sql:
+                return [(h, kj, scope_key_of.get(h)) for h, kj in rows]
+            return rows
         if sql.startswith("SELECT c.key_hash"):
             return list(to_insert or [])
         return []
@@ -1227,7 +1234,15 @@ def test_tracked_scoped_deletes_only_stale_keys_within_observed_scope_databricks
     ]
     assert len(state_delete_calls) == 1
     assert state_delete_calls[0].args[1] == ["scores_sync", key_hash((1, "b"))]
-    assert not any(c.args and key_hash((2, "x")) in c.args[1] for c in calls if len(c.args) > 1)
+    # #694 part 2 pinned that an out-of-scope row is never touched at all. #890
+    # narrows that: it may be touched *once*, by the scope backfill, and only
+    # while its scope columns are still NULL. It is still never deleted and
+    # never re-inserted, and once healed it is filtered out in SQL. Asserting
+    # the shape rather than dropping the check.
+    touched = [c for c in calls if len(c.args) > 1 and key_hash((2, "x")) in c.args[1]]
+    assert len(touched) <= 1
+    for call in touched:
+        assert "SET scope_spec" in str(call.args[0])
     assert not any(
         c.args and c.args[0].startswith("INSERT INTO main.default._drt_synced_keys") for c in calls
     )

@@ -835,6 +835,7 @@ class DatabricksDestination:
 
         from drt.destinations._mirror_state import (
             DIFF_STAGING_TABLE,
+            SCOPE_BACKFILL_PER_RUN,
             STATE_TABLE,
             decode_key,
             key_hash,
@@ -945,8 +946,11 @@ class DatabricksDestination:
                 # ever return too many rows, never too few:
                 #   scope_key IS NULL → written before the columns existed
                 #   scope_spec <> ... → written under a different mirror.scope
+                projection = (
+                    "s.key_hash, s.key_json, s.scope_key" if scope_sql else "s.key_hash, s.key_json"
+                )
                 diff_sql = (
-                    f"SELECT s.key_hash, s.key_json FROM {state_fq} s WHERE s.sync_name = ? "
+                    f"SELECT {projection} FROM {state_fq} s WHERE s.sync_name = ? "
                     f"AND NOT EXISTS (SELECT 1 FROM {diff_table} c WHERE c.key_hash = s.key_hash)"
                 )
                 diff_params: list[Any] = [sync_name]
@@ -959,7 +963,9 @@ class DatabricksDestination:
                     )
                     diff_params = [sync_name, scope_spec, *observed_json]
                 cur.execute(diff_sql, diff_params)
-                raw_diff = cur.fetchall()
+                fetched = cur.fetchall()
+                stale_scope = [(h, kj) for h, kj, sk in fetched if sk is None] if scope_sql else []
+                raw_diff = [tuple(row)[:2] for row in fetched]
 
                 if scope_positions is not None and observed_scopes is not None:
                     to_delete = [
@@ -969,6 +975,28 @@ class DatabricksDestination:
                     ]
                 else:
                     to_delete = [decode_key(kj) for _h, kj in raw_diff]
+
+                # #890 backfill — see the Postgres/MySQL leg for why. Delta takes
+                # a plain UPDATE, so the "rows are already in hand" cost argument
+                # holds here as it does on Postgres/MySQL/Snowflake (unlike
+                # ClickHouse, where it would be a part-rewriting mutation).
+                # Capped per run; rows about to be deleted are skipped.
+                if stale_scope and scope_positions is not None:
+                    doomed = {key_hash(k) for k in to_delete}
+                    heal = [(h, kj) for h, kj in stale_scope if h not in doomed][
+                        :SCOPE_BACKFILL_PER_RUN
+                    ]
+                    for h, kj in heal:
+                        cur.execute(
+                            f"UPDATE {state_fq} SET scope_spec = ?, scope_key = ? "
+                            "WHERE sync_name = ? AND key_hash = ?",
+                            [
+                                scope_spec,
+                                scope_key_json(decode_key(kj), scope_positions),
+                                sync_name,
+                                h,
+                            ],
+                        )
 
                 if to_delete:
                     self._delete_via_staged_keys(
