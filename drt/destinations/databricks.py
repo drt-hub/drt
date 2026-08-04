@@ -839,6 +839,8 @@ class DatabricksDestination:
             decode_key,
             key_hash,
             key_json,
+            scope_key_json,
+            scope_spec_json,
         )
 
         assert isinstance(config, DatabricksDestinationConfig)
@@ -873,12 +875,50 @@ class DatabricksDestination:
                 cur.execute(
                     f"SHOW TABLES IN {config.catalog}.{config.schema_} LIKE '{STATE_TABLE}'"
                 )
-                if not cur.fetchall():
+                fresh_table = not cur.fetchall()
+                if fresh_table:
                     cur.execute(
                         f"CREATE TABLE IF NOT EXISTS {state_fq} ("
-                        "sync_name STRING, key_hash STRING, key_json STRING"
+                        "sync_name STRING, key_hash STRING, key_json STRING, "
+                        "scope_spec STRING, scope_key STRING"
                         ") USING DELTA"
                     )
+
+                # #890: scope columns let the diff be narrowed server-side.
+                # Probed only for a scoped run — an unscoped sync gains nothing
+                # and must not pay a probe, let alone DDL, for it.
+                scope_spec = scope_spec_json(list(scope_cols)) if scope_cols else None
+                scope_sql = False
+                if scope_positions is not None:
+                    if fresh_table:
+                        scope_sql = True  # created with the columns
+                    else:
+                        # Unity Catalog exposes information_schema per catalog,
+                        # the same shape drt/destinations/schema.py already uses
+                        # for this dialect.
+                        cur.execute(
+                            f"SELECT COUNT(*) FROM {config.catalog}.information_schema.columns "
+                            "WHERE table_schema = ? AND table_name = ? "
+                            "AND column_name IN ('scope_spec', 'scope_key')",
+                            [config.schema_, STATE_TABLE],
+                        )
+                        row = cur.fetchone()
+                        if row is not None and row[0] == 2:
+                            scope_sql = True
+                        else:
+                            # No SAVEPOINT, as on Snowflake/ClickHouse and
+                            # unlike Postgres/MySQL — nothing here to poison.
+                            # Delta spells this ADD COLUMNS (...), plural and
+                            # parenthesised, unlike every other leg's ADD COLUMN.
+                            try:
+                                cur.execute(
+                                    f"ALTER TABLE {state_fq} "
+                                    "ADD COLUMNS (scope_spec STRING, scope_key STRING)"
+                                )
+                            except Exception:  # noqa: BLE001 — a supported state (#695)
+                                pass
+                            else:
+                                scope_sql = True
 
                 # Baseline check: a cheap existence probe, never a full read.
                 cur.execute(f"SELECT 1 FROM {state_fq} WHERE sync_name = ? LIMIT 1", [sync_name])
@@ -899,11 +939,26 @@ class DatabricksDestination:
                             [v for row in chunk for v in row],
                         )
 
-                cur.execute(
+                # #890, mirroring the other legs. The first two branches keep
+                # this a purely *coarse* filter — every row they let through is
+                # re-checked exactly by the Python filter below, so it can only
+                # ever return too many rows, never too few:
+                #   scope_key IS NULL → written before the columns existed
+                #   scope_spec <> ... → written under a different mirror.scope
+                diff_sql = (
                     f"SELECT s.key_hash, s.key_json FROM {state_fq} s WHERE s.sync_name = ? "
-                    f"AND NOT EXISTS (SELECT 1 FROM {diff_table} c WHERE c.key_hash = s.key_hash)",
-                    [sync_name],
+                    f"AND NOT EXISTS (SELECT 1 FROM {diff_table} c WHERE c.key_hash = s.key_hash)"
                 )
+                diff_params: list[Any] = [sync_name]
+                if scope_sql and observed_scopes:
+                    observed_json = sorted(key_json(sc) for sc in observed_scopes)
+                    placeholders = ", ".join(["?"] * len(observed_json))
+                    diff_sql += (
+                        " AND (s.scope_key IS NULL OR s.scope_spec <> ? "
+                        f"OR s.scope_key IN ({placeholders}))"
+                    )
+                    diff_params = [sync_name, scope_spec, *observed_json]
+                cur.execute(diff_sql, diff_params)
                 raw_diff = cur.fetchall()
 
                 if scope_positions is not None and observed_scopes is not None:
@@ -956,15 +1011,31 @@ class DatabricksDestination:
                 )
                 to_insert = cur.fetchall()
                 if to_insert:
-                    insert_prefix = (
-                        f"INSERT INTO {state_fq} (sync_name, key_hash, key_json) VALUES "
-                    )
-                    rows_per = _rows_per_chunk(3)
-                    state_rows = [[sync_name, h, kj] for h, kj in to_insert]
+                    # Scoped runs record the scope alongside the key; unscoped
+                    # ones (or a state table without the columns) leave them
+                    # NULL, which the predicate above always lets through.
+                    if scope_sql and scope_positions is not None:
+                        cols, width = "sync_name, key_hash, key_json, scope_spec, scope_key", 5
+                        state_rows = [
+                            [
+                                sync_name,
+                                h,
+                                kj,
+                                scope_spec,
+                                scope_key_json(decode_key(kj), scope_positions),
+                            ]
+                            for h, kj in to_insert
+                        ]
+                    else:
+                        cols, width = "sync_name, key_hash, key_json", 3
+                        state_rows = [[sync_name, h, kj] for h, kj in to_insert]
+                    insert_prefix = f"INSERT INTO {state_fq} ({cols}) VALUES "
+                    placeholder = "(" + ", ".join(["?"] * width) + ")"
+                    rows_per = _rows_per_chunk(width)
                     for start in range(0, len(state_rows), rows_per):
                         chunk = state_rows[start : start + rows_per]
                         cur.execute(
-                            insert_prefix + ", ".join(["(?, ?, ?)"] * len(chunk)),
+                            insert_prefix + ", ".join([placeholder] * len(chunk)),
                             [v for row in chunk for v in row],
                         )
 
