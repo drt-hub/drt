@@ -596,3 +596,117 @@ def test_databricks_mirror_composite_upsert_key(tmp_path: Path) -> None:
                 cur.execute(f"DROP TABLE IF EXISTS {fqn}")
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Tracked + scoped mirror (#686 / #687 / #692 / #694) — and the #890 backfill
+# ---------------------------------------------------------------------------
+#
+# Same gap as on the Snowflake side: nothing here covered `strategy: tracked`
+# or `mirror.scope`, so the composition has shipped since v0.7.10 on mock
+# coverage alone. This is also the only place #890's scope-column migration
+# meets a real Delta table — the ALTER spelling in particular (`ADD COLUMNS
+# (...)`, plural and parenthesised, unlike every other dialect), which fails
+# invisibly if wrong: the run just stays on the Python-only filter forever.
+
+
+def test_databricks_tracked_scoped_mirror_and_scope_backfill(tmp_path: Path) -> None:
+    """A pre-#890 state table is migrated, backfilled, and filtered correctly."""
+    from drt.destinations._mirror_state import STATE_TABLE, key_hash, key_json
+
+    creds = require_env(
+        HOST_ENV,
+        HTTP_PATH_ENV,
+        TOKEN_ENV,
+        "DRT_SMOKE_DATABRICKS_CATALOG",
+        "DRT_SMOKE_DATABRICKS_SCHEMA",
+    )
+    catalog = creds["DRT_SMOKE_DATABRICKS_CATALOG"]
+    schema = creds["DRT_SMOKE_DATABRICKS_SCHEMA"]
+    table = unique_table("drt_smoke_tracked_scoped")
+    fqn = f"`{catalog}`.`{schema}`.`{table}`"
+    state_fqn = f"`{catalog}`.`{schema}`.`{STATE_TABLE}`"
+    sync_name = f"tracked_scoped_{table}"
+
+    source, profile = seed_duckdb_children(tmp_path)  # parent 1: a, b
+
+    dest = DatabricksDestinationConfig(
+        type="databricks",
+        host_env=HOST_ENV,
+        http_path_env=HTTP_PATH_ENV,
+        token_env=TOKEN_ENV,
+        catalog=catalog,
+        schema=schema,
+        table=table,
+        mode="merge",
+        upsert_key=["parent_id", "id"],
+    )
+    sync = SyncConfig(
+        name=sync_name,
+        model="ref('children')",
+        destination=dest,
+        sync=SyncOptions(
+            mode="mirror",
+            batch_size=10,
+            mirror={"strategy": "tracked", "scope": ["parent_id"]},
+        ),
+    )
+
+    tracked = [(1, "a"), (1, "stale"), (2, "other")]
+    conn = _connect(creds)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"CREATE TABLE {fqn} (parent_id INT, id STRING, label STRING) USING DELTA"
+            )
+            for p, i in tracked:
+                cur.execute(f"INSERT INTO {fqn} VALUES ({p}, '{i}', 'seeded')")
+            # A state table in its pre-#890 shape — three columns, no scope.
+            cur.execute(f"DROP TABLE IF EXISTS {state_fqn}")
+            cur.execute(
+                f"CREATE TABLE {state_fqn} "
+                "(sync_name STRING, key_hash STRING, key_json STRING) USING DELTA"
+            )
+            for k in tracked:
+                cur.execute(
+                    f"INSERT INTO {state_fqn} VALUES (?, ?, ?)",
+                    [sync_name, key_hash(k), key_json(k)],
+                )
+    finally:
+        conn.close()
+
+    try:
+        result = run_sync(sync, source, DatabricksDestination(), profile, tmp_path)
+        assert result.failed == 0, f"tracked+scoped sync had failures: {result.errors[:3]}"
+
+        conn = _connect(creds)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT parent_id, id FROM {fqn}")
+                rows = {(r[0], r[1]) for r in cur.fetchall()}
+                assert (1, "stale") not in rows, f"stale in-scope row not deleted: {rows}"
+                assert (2, "other") in rows, f"out-of-scope row was deleted: {rows}"
+                assert (1, "a") in rows and (1, "b") in rows, rows
+
+                cur.execute(
+                    f"SELECT scope_spec, scope_key FROM {state_fqn} "
+                    "WHERE sync_name = ? AND key_json = ?",
+                    [sync_name, key_json((2, "other"))],
+                )
+                healed = cur.fetchone()
+                # Proves ADD COLUMNS ran *and* the backfill did. If the Delta
+                # DDL spelling were wrong this would be (None, None) and the
+                # run would otherwise look perfectly healthy.
+                assert tuple(healed) == ('["parent_id"]', "[2]"), (
+                    f"scope backfill did not run: {healed}"
+                )
+        finally:
+            conn.close()
+    finally:
+        conn = _connect(creds)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"DROP TABLE IF EXISTS {fqn}")
+                cur.execute(f"DELETE FROM {state_fqn} WHERE sync_name = ?", [sync_name])
+        finally:
+            conn.close()
