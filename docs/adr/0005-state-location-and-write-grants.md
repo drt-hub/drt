@@ -2,11 +2,11 @@
 
 - **Status:** Accepted 2026-08-03. Both #755 and #756 were written assuming an
   answer — "drt writes managed tables into the source warehouse" — that this ADR
-  finds only half right, and the implementation plan
-  ([docs/plans/2026-07-22-756-remote-state-backend.md](../plans/2026-07-22-756-remote-state-backend.md))
-  had already been drafted on that assumption. That plan has been revised to
-  this ADR's ordering; the issues themselves still need the corrections listed
-  under [Follow-up issues](#follow-up-issues).
+  finds only half right, and an implementation plan for #756 (dated
+  2026-07-22, kept locally under the gitignored `docs/plans/`, not tracked in
+  this repo) had already been drafted on that assumption. That plan has been
+  revised to this ADR's ordering; the issues themselves still need the
+  corrections listed under [Follow-up issues](#follow-up-issues).
 - **Issues:** [#755](https://github.com/drt-hub/drt/issues/755),
   [#756](https://github.com/drt-hub/drt/issues/756)
 - **Relates to:** [ADR 0004](0004-streaming-and-event-triggered-syncs.md) — whose
@@ -181,10 +181,16 @@ The operator-visible payoff of #756 lands at step 2, before any permission
 conversation. Step 1 is a prerequisite regardless of this ADR's outcome: the
 three managers are constructed directly at roughly fourteen call sites with no
 factory, so no backend selection can be honoured until that is centralised.
+*(Half-landed already: #900, merged the day after this ADR was opened,
+extracted the `StateStore` / `HistoryStore` / `DlqBackend` Protocols with
+back-compat aliases and a set-equality drift test against each local
+implementation's public API. The factory half — routing a backend choice to
+a concrete implementation at the roughly fourteen call sites above — is still
+open; `drt/state/manager.py:150` carries the placeholder comment for it.)*
 
-**The Protocol freeze (#304 / v0.10) inherits whatever step 1 produces**, and
-#297's third-party plugin system may put external implementations behind it —
-so the Protocol shape wants review before it lands, not after.
+**The Protocol freeze (#304 / v0.10) inherits whatever step 1 produces.**
+#900's Protocols are what it inherits from; #297's third-party plugin system
+may put external implementations behind them.
 
 ## Falsification condition
 
@@ -192,7 +198,20 @@ This ADR is wrong if object storage cannot carry history and DLQ at realistic
 volume. The specific risk is write amplification: if the backend rewrites a
 whole object per run (the shape `GCSWatermarkStorage` uses today), a project
 with many syncs and frequent runs pays a full read-modify-write per sync per
-run, and concurrent runners will clobber each other with last-write-wins.
+run.
+
+Concurrent runners clobbering each other with last-write-wins is a real,
+currently-shipped bug in that same shape — `GCSWatermarkStorage.save()`
+(`drt/state/watermark.py:111-117`) loads, mutates, and calls
+`upload_from_string()` with no generation precondition, so two saves that
+race lose one silently — but it is not evidence against this ADR. GCS
+supports preconditioned writes (`if_generation_match`) and S3 now has
+conditional writes too, so the fix is a retry-on-precondition-failure loop in
+the client, not a change of tier. If anything this strengthens Decision 2:
+the object-storage tier *can* be made safe for concurrent writers, which is
+what "team-shared" in Decision 1 requires, it just isn't yet. Tracked as
+[#919](https://github.com/drt-hub/drt/issues/919), independent of #756 —
+today's bug, not a #756 design question.
 
 If a prototype shows that per-run cost or contention makes the object-storage
 tier unusable at, say, 50 syncs on a 15-minute cadence, then durability must
