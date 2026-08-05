@@ -32,6 +32,7 @@ from drt.destinations.lookup import (
     build_lookup_map,
     detect_ambiguous_lookup_ordering,
 )
+from drt.engine.computed_fields import apply_computed_fields
 from drt.engine.field_mappings import apply_field_mappings
 from drt.engine.masking import apply_mask
 from drt.engine.observer import NullObserver, SyncObserver
@@ -593,6 +594,23 @@ def _run_sync_body(
                     sync.sync.on_error,
                 )
                 total_result.row_errors.extend(lookup_errors)
+                total_result.skipped += batch_len_before - len(record_batch)
+                if not record_batch:
+                    continue
+
+            # Declarative derived columns (#763). First of the three payload
+            # transforms, so templates read source-side column names (and any
+            # value lookups just resolved), and the rename + mask below then
+            # apply to what it produced. Pure transform; no observer side
+            # effects.
+            if sync.sync.computed_fields:
+                batch_len_before = len(record_batch)
+                record_batch, computed_errors = apply_computed_fields(
+                    record_batch,
+                    sync.sync.computed_fields,
+                    sync.sync.on_error,
+                )
+                total_result.row_errors.extend(computed_errors)
                 total_result.skipped += batch_len_before - len(record_batch)
                 if not record_batch:
                     continue

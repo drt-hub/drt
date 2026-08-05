@@ -55,6 +55,7 @@ from drt.config.destinations_storage import (
     S3DestinationConfig,
 )
 from drt.config.duration import parse_duration
+from drt.templates.renderer import validate_template_syntax
 
 
 class WatermarkConfig(BaseModel):
@@ -211,6 +212,15 @@ class SyncOptions(BaseModel):
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
     retry: RetryConfig = Field(default_factory=RetryConfig)
     on_error: Literal["skip", "fail"] = "fail"
+    # Declarative derived columns (#763): {field_name: jinja_template}.
+    # Runs in the engine *before* field_mappings and mask, so templates
+    # reference source-side column names (and lookup-resolved values) while
+    # field_mappings/mask still see the computed result. Every template is
+    # evaluated against the record as it arrived, so one computed field can
+    # never read another — order-independent, the same guarantee
+    # field_mappings makes. Writing an existing column name is allowed and
+    # replaces it (in-place normalisation, e.g. phone -> E.164).
+    computed_fields: dict[str, str] | None = None
     # Declarative column rename (#415): {source_column: destination_field}.
     # Applied in the engine after extraction + cursor tracking + lookups,
     # immediately before the record reaches the destination — so
@@ -247,6 +257,24 @@ class SyncOptions(BaseModel):
     def _check_incremental_cursor(self) -> SyncOptions:
         if self.mode == "incremental" and not self.cursor_field:
             raise ValueError("cursor_field is required when mode is 'incremental'.")
+        return self
+
+    @model_validator(mode="after")
+    def _check_computed_field_templates(self) -> SyncOptions:
+        """Reject unparseable templates at config time rather than mid-run (#763).
+
+        Only syntax is decidable here — whether ``row.foo`` exists depends on
+        the query, so a missing column stays a run-time error under
+        ``on_error``. An empty field name is rejected too: it would produce a
+        record key of ``""`` that no destination can address.
+        """
+        for name, template in (self.computed_fields or {}).items():
+            if not name.strip():
+                raise ValueError("computed_fields keys must be non-empty field names.")
+            try:
+                validate_template_syntax(template)
+            except ValueError as e:
+                raise ValueError(f"computed_fields['{name}']: {e}") from e
         return self
 
     @model_validator(mode="after")

@@ -4,6 +4,12 @@ All notable changes to the **drt — Reverse ETL** VS Code extension are documen
 here. This extension versions independently of `drt-core`; each release notes the
 drt-core version its bundled schemas were generated from.
 
+## [0.1.12] - Unreleased
+
+- Bundled JSON Schemas regenerated from drt-core: `syncs/*.yml` now validates a
+  `sync.computed_fields` block (`{field_name: jinja_template}`) for declarative
+  derived columns (drt-hub/drt#763).
+
 ## [0.1.11] - Unreleased
 
 - Bundled JSON Schemas regenerated from drt-core: `syncs/*.yml`'s `mirror`

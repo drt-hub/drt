@@ -4184,6 +4184,21 @@
           "title": "On Error",
           "type": "string"
         },
+        "computed_fields": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Computed Fields"
+        },
         "field_mappings": {
           "anyOf": [
             {

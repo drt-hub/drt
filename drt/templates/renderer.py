@@ -31,7 +31,7 @@ from typing import Any
 from uuid import UUID
 
 from jinja2 import BaseLoader, Environment, StrictUndefined, Template, Undefined
-from jinja2.exceptions import UndefinedError
+from jinja2.exceptions import TemplateSyntaxError, UndefinedError
 from jinja2.nativetypes import NativeEnvironment, NativeTemplate
 
 # Compiled templates are cached by source text. Template sources come from
@@ -138,6 +138,20 @@ def _compile_string(template_str: str) -> Template:
 @lru_cache(maxsize=_TEMPLATE_CACHE_SIZE)
 def _compile_value(template_str: str) -> Template:
     return _VALUE_ENV.from_string(template_str)
+
+
+def validate_template_syntax(template_str: str) -> None:
+    """Raise ValueError if ``template_str`` is not parseable Jinja (#763).
+
+    Config-time counterpart to :func:`render_value`. A malformed template is a
+    typo in YAML, not a data problem, so it should stop `drt validate` rather
+    than surface on the first row of a production run. Only *syntax* is
+    checkable here — whether ``row.foo`` exists depends on the query.
+    """
+    try:
+        _VALUE_ENV.parse(template_str)
+    except TemplateSyntaxError as e:
+        raise ValueError(f"Template syntax error: {e.message} (line {e.lineno})") from e
 
 
 def render_template(template_str: str, row: dict[str, Any]) -> str:
