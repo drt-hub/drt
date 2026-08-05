@@ -28,11 +28,17 @@ This is a promise, not an implementation detail (#854):
 
 - **A trigger accepted with `202` will run.** Nothing accepted is silently dropped.
 - **Different syncs run concurrently.** Only same-sync overlap is serialized.
-- **Same-sync triggers coalesce.** While a sync is running, the first new trigger
-  creates one *pending* run; further triggers while it is pending are answered with
-  the **same** run id (`"coalesced": true`). drt syncs are watermark-driven, so the
-  one pending run picks up everything that accumulated — a queue of N would do the
-  same work as a queue of 1.
+- **Same-sync triggers coalesce.** While a sync is running, at most one *pending*
+  run exists per sync. Any trigger that doesn't start a run of its own is answered
+  with that pending run's id and `"coalesced": true`. drt syncs are watermark-driven,
+  so the one pending run picks up everything that accumulated: a queue of N would do
+  the same work as a queue of 1.
+
+  `"coalesced": true` therefore means **"your trigger did not start a run of its
+  own; a pending run covers it"**. It does *not* distinguish "my trigger created the
+  pending run" from "my trigger joined one already there", and clients shouldn't try
+  to infer which happened. Either way the work is covered, and either way the run id
+  you're given is the one to poll.
 - Dry-run and real triggers coalesce **separately** — a real trigger is never folded
   into a dry-run preview.
 
@@ -83,8 +89,14 @@ Optional query parameters:
 
 ### `GET /runs/<id>`
 
+Authenticated, like the `POST` that created the run. The run id is a uuid4, but it
+travels in the URL path, so it reaches every proxy access log in front of drt: it
+identifies a run, it isn't a credential for reading one. The response carries the
+full `SyncResult` and any error text.
+
 ```bash
-curl http://localhost:8080/runs/3f2a9c...
+curl http://localhost:8080/runs/3f2a9c... \
+  -H "Authorization: Bearer $DRT_WEBHOOK_TOKEN"
 ```
 
 ```json
@@ -111,7 +123,7 @@ curl http://localhost:8080/runs/3f2a9c...
 | 200  | `?wait=true` only: sync succeeded / run found |
 | 207  | `?wait=true` only: sync partial or failed (result body has details) |
 | 400  | sync name missing from URL |
-| 401  | auth missing or wrong (when auth enabled) |
+| 401  | auth missing or wrong (when auth enabled); applies to every route except `GET /health` |
 | 404  | sync name not found in project, or unknown run id |
 | 413  | request body over 1 MiB |
 | 500  | unexpected error |
@@ -121,6 +133,10 @@ curl http://localhost:8080/runs/3f2a9c...
 > concurrent trigger now coalesces and is never lost.
 
 ## Auth schemes
+
+`GET /health` is always open, so a load balancer or `docker healthcheck` needs no
+credential. Every other route is authenticated under `bearer` and `hmac`, including
+`GET /runs/<id>`.
 
 ### Bearer token
 
@@ -143,6 +159,19 @@ Verifies an HMAC-SHA256 signature of the raw request body. Accepts GitHub's
 base64 digests — so GitHub and Shopify (`--hmac-header X-Shopify-Hmac-Sha256`)
 work out of the box. Stripe's timestamped `t=...,v1=...` scheme is different
 (replay tolerance) and is not covered.
+
+A `GET` has no body, so `GET /runs/<id>` signs the **empty** body. That makes its
+signature a constant for a given secret, which you can compute once and reuse:
+
+```bash
+SIG="sha256=$(printf '' | openssl dgst -sha256 -hmac "$DRT_WEBHOOK_HMAC_SECRET" | sed 's/^.*= //')"
+curl http://localhost:8080/runs/3f2a9c... -H "X-Hub-Signature-256: $SIG"
+```
+
+It proves knowledge of the secret without putting the secret on the wire, but it is
+a static value, not a per-request signature. If you poll run state from somewhere
+you wouldn't trust with a replayable credential, run `--auth bearer` for that path
+and verify webhook bodies at a proxy instead.
 
 Pub/Sub push authenticates with an **OIDC JWT**, not a body signature — that
 verification path is [#903](https://github.com/drt-hub/drt/issues/903), and until it lands Pub/Sub still needs

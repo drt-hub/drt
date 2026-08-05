@@ -64,8 +64,10 @@ def _request(
         return e.code, json.loads(e.read())
 
 
-def _get(url: str, token: str | None = None) -> tuple[int, dict[str, Any]]:
-    return _request(url) if token is None else _request(url, token=token)
+def _get(
+    url: str, token: str | None = None, headers: dict[str, str] | None = None
+) -> tuple[int, dict[str, Any]]:
+    return _request(url, token=token, headers=headers)
 
 
 def _post(url: str, token: str | None = None, **kwargs: Any) -> tuple[int, dict[str, Any]]:
@@ -241,6 +243,81 @@ def test_hmac_missing_signature_rejected() -> None:
         server.shutdown()
 
 
+def test_get_run_without_auth_when_required_returns_401() -> None:
+    """GET /runs/<id> carries the SyncResult, so it is authenticated like the POST.
+
+    The run id is a uuid4, but it rides in the URL path and lands in every
+    proxy access log, which is not where a bearer credential belongs.
+    """
+    server, _, port = _run_server(auth=AuthConfig(scheme="bearer", token="secret123"))
+    try:
+        _, accepted = _post(f"http://127.0.0.1:{port}/sync/s", token="secret123")
+        status, body = _get(f"http://127.0.0.1:{port}/runs/{accepted['run_id']}")
+        assert status == 401
+        assert "unauthorized" in body["error"]
+    finally:
+        server.shutdown()
+
+
+def test_get_run_with_correct_token_returns_state() -> None:
+    server, _, port = _run_server(auth=AuthConfig(scheme="bearer", token="secret123"))
+    try:
+        _, accepted = _post(f"http://127.0.0.1:{port}/sync/s", token="secret123")
+        status, body = _get(f"http://127.0.0.1:{port}/runs/{accepted['run_id']}", token="secret123")
+        assert status == 200
+        assert body["run_id"] == accepted["run_id"]
+    finally:
+        server.shutdown()
+
+
+def test_unauthenticated_get_does_not_leak_which_run_ids_exist() -> None:
+    """A real id and an invented one answer alike without a credential."""
+    server, _, port = _run_server(auth=AuthConfig(scheme="bearer", token="secret123"))
+    try:
+        _, accepted = _post(f"http://127.0.0.1:{port}/sync/s", token="secret123")
+        real, _ = _get(f"http://127.0.0.1:{port}/runs/{accepted['run_id']}")
+        invented, _ = _get(f"http://127.0.0.1:{port}/runs/deadbeef")
+        assert real == invented == 401
+    finally:
+        server.shutdown()
+
+
+def test_health_stays_open_under_auth() -> None:
+    """A load-balancer probe must not need a credential."""
+    server, _, port = _run_server(auth=AuthConfig(scheme="bearer", token="secret123"))
+    try:
+        status, body = _get(f"http://127.0.0.1:{port}/health")
+        assert status == 200
+        assert body["status"] == "ok"
+    finally:
+        server.shutdown()
+
+
+def test_hmac_get_signs_the_empty_body() -> None:
+    """A GET has no body, so its signature is over b"", constant per secret."""
+    secret = "topsecret"
+    payload = b'{"event": "push"}'
+    post_sig = "sha256=" + hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
+    get_sig = "sha256=" + hmac.new(secret.encode(), b"", hashlib.sha256).hexdigest()
+
+    server, _, port = _run_server(auth=AuthConfig(scheme="hmac", hmac_secret=secret))
+    try:
+        _, accepted = _post(
+            f"http://127.0.0.1:{port}/sync/s",
+            body=payload,
+            headers={"X-Hub-Signature-256": post_sig},
+        )
+        url = f"http://127.0.0.1:{port}/runs/{accepted['run_id']}"
+        assert _get(url)[0] == 401
+        # The POST's signature is over its own body and must not open the GET
+        assert _get(url, headers={"X-Hub-Signature-256": post_sig})[0] == 401
+        status, body = _get(url, headers={"X-Hub-Signature-256": get_sig})
+        assert status == 200
+        assert body["run_id"] == accepted["run_id"]
+    finally:
+        server.shutdown()
+
+
 def test_auth_config_rejects_misconfiguration() -> None:
     with pytest.raises(ValueError, match="requires a token"):
         AuthConfig(scheme="bearer")
@@ -278,6 +355,23 @@ def test_get_unknown_run_returns_404() -> None:
         assert "lifetime" in body["error"]
     finally:
         server.shutdown()
+
+
+def test_finished_runs_evict_on_a_status_outside_the_known_set() -> None:
+    """Eviction keys on finished_at, not on a whitelist of state strings.
+
+    The state string comes from the runner's result contract; a status added
+    there later must not leave runs permanently un-evictable in ``_runs``.
+    """
+    scheduler = SyncScheduler(lambda name, dry: {"status": "quiesced"}, max_finished=2)
+    for i in range(5):
+        run, _ = scheduler.trigger(f"sync_{i}", False)
+        assert run.done.wait(timeout=10)
+        assert run.state == "quiesced"
+
+    # Eviction runs when the next run is created, so the cap is max_finished
+    # plus the run that has not finished being accounted for yet.
+    assert len(scheduler._runs) <= 3
 
 
 def test_runner_exception_surfaces_as_error_state() -> None:

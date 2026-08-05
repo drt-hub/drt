@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from drt.destinations.base import SyncResult
     from drt.state.dlq import DeadLetter, DlqStore
-    from drt.state.manager import StateManager
+    from drt.state.manager import StateStore
     from drt.state.watermark import WatermarkStorage
 
 
@@ -190,7 +190,7 @@ class StatePersistingObserver:
 
     def __init__(
         self,
-        state_manager: StateManager | None,
+        state_manager: StateStore | None,
         watermark_storage: WatermarkStorage | None,
     ) -> None:
         self._state_manager = state_manager

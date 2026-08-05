@@ -40,7 +40,7 @@ from drt.observability import build_status, get_tracer
 from drt.sources.base import IncrementalSource, Source
 from drt.state.dlq import DeadLetter
 from drt.state.history import HistoryEntry, HistoryManager
-from drt.state.manager import StateManager
+from drt.state.manager import StateStore
 from drt.state.watermark import WatermarkStorage
 
 
@@ -233,7 +233,7 @@ def run_sync(
     profile: ProfileConfig,
     project_dir: Path,
     dry_run: bool = False,
-    state_manager: StateManager | None = None,
+    state_manager: StateStore | None = None,
     watermark_storage: WatermarkStorage | None = None,
     cursor_value_override: str | None = None,
     history_manager: HistoryManager | None = None,
@@ -404,7 +404,7 @@ def _run_sync_body(
     profile: ProfileConfig,
     project_dir: Path,
     dry_run: bool,
-    state_manager: StateManager | None,
+    state_manager: StateStore | None,
     watermark_storage: WatermarkStorage | None,
     cursor_value_override: str | None,
     stop_event: threading.Event | None,

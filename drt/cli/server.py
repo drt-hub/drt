@@ -14,11 +14,14 @@ Routes:
 Concurrency contract (#854) — this is a promise, not an implementation detail:
     - **A trigger accepted with 202 will run.** Nothing accepted is dropped.
     - **Different syncs run concurrently.** Only same-sync overlap is serialized.
-    - **Same-sync triggers coalesce to depth 1.** While a sync is running, the
-      first new trigger creates one pending run; further triggers while that
-      run is pending are answered with the *same* run id (``"coalesced": true``).
-      drt syncs are watermark-driven, so one pending run picks up everything
-      that accumulated — a queue of N would do the same work as a queue of 1.
+    - **Same-sync triggers coalesce to depth 1.** While a sync is running, at
+      most one pending run exists per sync. Any trigger that does not start a
+      run of its own is answered with that pending run's id and
+      ``"coalesced": true``, whether it created the pending run or joined one
+      already there. Those two cases are deliberately indistinguishable to the
+      caller: drt syncs are watermark-driven, so the pending run picks up
+      everything that accumulated, and a queue of N would do the same work as
+      a queue of 1.
     - Dry-run and real triggers coalesce **separately**: folding a real trigger
       into a pending dry-run preview would silently discard the write.
 
@@ -33,6 +36,12 @@ Auth (``--auth`` on ``drt serve``):
     hmac    HMAC-SHA256 of the raw request body, GitHub-style
             (``X-Hub-Signature-256: sha256=<hex>``; bare hex and base64 digests
             are also accepted, which covers Shopify's header format)
+
+Every route except ``GET /health`` is authenticated. ``GET /runs/<id>`` returns
+the SyncResult and any error text, so it is not exempt: the run id is a uuid4,
+but it travels in the URL path, which every reverse proxy in front of drt writes
+to an access log. Under ``hmac`` a GET has no body to sign, so the signature is
+over the empty body, making it a constant per secret (see the guide).
 
 Pub/Sub push authenticates with an OIDC JWT instead of a body signature; that
 verification path is a follow-up (#903 — it needs a JWT dependency decision) and until
@@ -62,8 +71,6 @@ from drt import __version__
 _MAX_BODY_BYTES = 1024 * 1024
 # Finished runs kept for GET /runs/<id>; oldest evicted beyond this.
 _MAX_FINISHED_RUNS = 1000
-
-_TERMINAL_STATES = frozenset({"success", "partial", "failed", "error"})
 
 
 def _utcnow() -> str:
@@ -179,6 +186,11 @@ class SyncScheduler:
     def trigger(self, sync_name: str, dry_run: bool) -> tuple[_Run, bool]:
         """Accept a trigger; return ``(run, coalesced)``.
 
+        ``coalesced`` answers "was this trigger denied a run of its own?", not
+        "did it join a pending run that already existed". The trigger that
+        creates the pending run gets ``True`` as well, and a caller cannot tell
+        the two apart.
+
         Idle sync → new run starts immediately (coalesced=False).
         Running sync, no pending of this kind → new pending run (coalesced=True).
         Running sync, pending exists → that same pending run (coalesced=True).
@@ -208,7 +220,11 @@ class SyncScheduler:
         return run
 
     def _evict_locked(self) -> None:
-        finished = [r for r in self._runs.values() if r.state in _TERMINAL_STATES]
+        # "Finished" is ``finished_at``, not a whitelist of state strings: the
+        # state comes from the runner's result contract, and a status added
+        # there later would otherwise make the run permanently un-evictable.
+        # ``finished_at`` is set under this lock for every run that completes.
+        finished = [r for r in self._runs.values() if r.finished_at is not None]
         for run in finished[: max(0, len(finished) - self._max_finished)]:
             del self._runs[run.run_id]
 
@@ -295,8 +311,16 @@ def make_handler(
             return bool(signature) and _verify_hmac(body, signature, auth.hmac_secret)
 
         def do_GET(self) -> None:  # noqa: N802
+            # /health answers before the auth check so a load-balancer probe
+            # needs no credential. Nothing else is exempt: GET /runs/<id>
+            # returns the SyncResult and the error string, and the run id stops
+            # being a secret the moment a proxy logs the URL path. A GET has no
+            # body, so the hmac scheme signs the empty one.
             if self.path == "/health":
                 self._json(200, {"status": "ok", "version": __version__})
+                return
+            if not self._check_auth(b""):
+                self._json(401, {"error": "unauthorized"})
                 return
             if self.path.startswith("/runs/"):
                 run_id = self.path[len("/runs/") :].strip("/")
@@ -403,9 +427,11 @@ def serve(
         hmac_header=hmac_header,
     )
 
-    # One StateManager shared across every run: its thread-safety is an
-    # instance lock, so per-request instances would race load-modify-save
-    # on state.json once different syncs run concurrently.
+    # One state store shared across every run: LocalStateManager's
+    # thread-safety is an instance lock, so per-request instances would race
+    # load-modify-save on state.json once different syncs run concurrently.
+    # run_drt_sync takes the StateStore Protocol (#756), so a remote backend
+    # drops in here without the serve path changing.
     state_manager = StateManager(Path(project_dir))
 
     def runner(sync_name: str, dry_run: bool) -> dict[str, Any]:
