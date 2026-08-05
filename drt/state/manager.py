@@ -1,4 +1,8 @@
-"""StateManager — persists sync state to local JSON.
+"""Run-state persistence — the ``StateStore`` Protocol and its local impl.
+
+``LocalStateManager`` persists to local JSON and is the default. The Protocol
+exists so state can also live somewhere that survives an ephemeral runner
+(#756); ``StateManager`` remains as an alias for it.
 
 Simple by design: no external dependencies, no infrastructure.
 Future: bincode (Rust) for fast binary serialization.
@@ -16,7 +20,7 @@ import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 
 @dataclass
@@ -29,7 +33,36 @@ class SyncState:
     last_cursor_value: str | None = None  # watermark for incremental sync
 
 
-class StateManager:
+@runtime_checkable
+class StateStore(Protocol):
+    """Read and write per-sync run state (#756).
+
+    Extracted so state can live somewhere that survives an ephemeral runner —
+    object storage or a warehouse — rather than only in ``.drt/state.json``.
+    Same optional-backend shape as :class:`~drt.state.watermark.WatermarkStorage`,
+    which already has local, GCS and BigQuery implementations.
+
+    Writes reach this through ``StatePersistingObserver``; the engine never
+    calls it directly (guarded by ``tests/unit/test_engine_observer.py``).
+    """
+
+    def get_last_sync(self, sync_name: str) -> SyncState | None: ...
+    def get_all(self) -> dict[str, SyncState]: ...
+    def save_sync(self, state: SyncState) -> None: ...
+
+    def reset(self, sync_name: str) -> bool:
+        """Drop recorded state for ``sync_name``; return whether anything went.
+
+        Part of the Protocol rather than a local-only extra: ``drt state reset``,
+        ``drt run --full-refresh`` and two MCP tools all call it, so a backend
+        without it is not a usable substitute for the local store.
+        """
+        ...
+
+    def now(self) -> str: ...
+
+
+class LocalStateManager:
     """Read and write sync state from .drt/state.json.
 
     All public methods are thread-safe via ``self._lock``. The lock
@@ -110,3 +143,9 @@ class StateManager:
 
     def now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
+
+
+# Back-compat alias — every existing caller imports ``StateManager``. Kept so
+# this refactor is a pure introduce-interface step; call sites move to the
+# backend factory Part by Part as each remote implementation lands (#756).
+StateManager = LocalStateManager

@@ -78,3 +78,23 @@ def seed_duckdb_users(tmp_path: Path) -> tuple[DuckDBSource, DuckDBProfile]:
 @pytest.fixture
 def duckdb_users(tmp_path: Path) -> Iterator[tuple[DuckDBSource, DuckDBProfile]]:
     yield seed_duckdb_users(tmp_path)
+
+
+def seed_duckdb_children(tmp_path: Path) -> tuple[DuckDBSource, DuckDBProfile]:
+    """Seed a DuckDB ``children`` table with a composite key (#908).
+
+    A 1:N parent/child shape. Only ``parent_id = 1`` is emitted, which is what
+    lets a mirror smoke prove that an unobserved composite key is deleted.
+    """
+    duckdb = pytest.importorskip("duckdb")
+    db_path = str(tmp_path / "smoke_children.duckdb")
+    conn = duckdb.connect(db_path)
+    try:
+        conn.execute("CREATE TABLE children (parent_id INTEGER, id VARCHAR, label VARCHAR)")
+        conn.executemany(
+            "INSERT INTO children VALUES (?, ?, ?)",
+            [(1, "a", "kept"), (1, "b", "kept")],
+        )
+    finally:
+        conn.close()
+    return DuckDBSource(), DuckDBProfile(type="duckdb", database=db_path)

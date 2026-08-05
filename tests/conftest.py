@@ -44,3 +44,24 @@ def fake_source() -> FakeSource:
     import dance (#364).
     """
     return FakeSource()
+
+
+def public_methods(cls: type) -> set[str]:
+    """Public callables on ``cls``, **including inherited ones**.
+
+    Used by the Protocol-coverage tests in ``test_state.py`` / ``test_history.py``
+    / ``test_dlq_store.py`` to assert a Protocol declares exactly what its local
+    implementation exposes.
+
+    Walks the MRO rather than reading ``vars(cls)`` directly: the three state
+    stores have no base class today, but a shared base for the remote backends
+    (#756) is a plausible next step, and an inherited public method must not
+    escape the check — a Protocol that silently stops covering its
+    implementation is the exact failure this guard exists to catch.
+    """
+    names: set[str] = set()
+    for klass in cls.__mro__:
+        if klass is object:
+            continue
+        names |= {name for name in vars(klass) if not name.startswith("_")}
+    return {name for name in names if callable(getattr(cls, name))}

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from drt.state.dlq import DeadLetter, DlqStore
+from tests.conftest import public_methods
 
 
 def _dl(value: int, *, attempts: int = 1) -> DeadLetter:
@@ -114,3 +115,26 @@ def test_all_depths_reports_every_nonempty_queue(tmp_path: Path) -> None:
 
 def test_all_depths_empty_when_no_dir(tmp_path: Path) -> None:
     assert DlqStore(tmp_path).all_depths() == {}
+
+
+# --- DlqBackend Protocol (#756) ----------------------------------------------
+
+_DLQ_BACKEND_METHODS = {"append", "replace", "clear", "read", "depth", "all_depths"}
+
+
+def test_local_dlq_store_satisfies_dlq_backend(tmp_path: Path) -> None:
+    from drt.state.dlq import DlqBackend, LocalDlqStore
+
+    assert isinstance(LocalDlqStore(tmp_path), DlqBackend)
+
+
+def test_dlq_store_alias_preserved() -> None:
+    from drt.state.dlq import DlqStore, LocalDlqStore
+
+    assert DlqStore is LocalDlqStore
+
+
+def test_dlq_backend_protocol_covers_local_public_api() -> None:
+    from drt.state.dlq import LocalDlqStore
+
+    assert public_methods(LocalDlqStore) == _DLQ_BACKEND_METHODS

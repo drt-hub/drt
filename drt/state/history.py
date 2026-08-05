@@ -22,6 +22,7 @@ import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,27 @@ class HistoryEntry:
     dry_run: bool = False  # always False on disk; reserved for future use
 
 
-class HistoryManager:
+@runtime_checkable
+class HistoryStore(Protocol):
+    """Append and read per-sync execution history (#756).
+
+    Extracted so history can outlive the runner that produced it — a fresh CI
+    checkout currently shows nothing, and the docs manifest's ``runs`` data
+    (#698) is blank in any ephemeral container.
+    """
+
+    def append(self, entry: HistoryEntry) -> None: ...
+
+    def read(self, sync_name: str | None = None, limit: int = 20) -> list[HistoryEntry]:
+        """Most recent ``limit`` entries, newest first; all syncs when ``sync_name`` is None."""
+        ...
+
+    def prune(self, sync_name: str, retention_days: int) -> int:
+        """Drop entries older than ``retention_days``; return how many went."""
+        ...
+
+
+class LocalHistoryManager:
     """Append-only per-sync execution history.
 
     Files live under ``<project_dir>/.drt/history/<sync_name>.jsonl``. All
@@ -140,6 +161,10 @@ class HistoryManager:
                     f.write(json.dumps(asdict(entry), default=str) + "\n")
             tmp.replace(path)
             return removed
+
+
+# Back-compat alias — see the note on ``StateManager`` in state/manager.py.
+HistoryManager = LocalHistoryManager
 
 
 def _read_jsonl(path: Path) -> list[HistoryEntry]:

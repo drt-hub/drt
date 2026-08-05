@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from drt.state.manager import StateManager, SyncState
+from tests.conftest import public_methods
 
 
 def test_get_last_sync_missing(tmp_path: Path) -> None:
@@ -109,3 +110,38 @@ class TestReset:
 
     def test_reset_with_no_state_file_is_a_noop(self, tmp_path: Path) -> None:
         StateManager(tmp_path).reset("a")
+
+
+# --- StateStore Protocol (#756) ----------------------------------------------
+
+# The public method set LocalStateManager exposes and StateStore must declare.
+# Kept as a literal so drift fails loudly: `reset` was added by #776 nine days
+# after the #756 plan listed these methods, and the plan's list was never
+# updated — a remote backend written against it would have satisfied the
+# Protocol while silently breaking `drt state reset`.
+_STATE_STORE_METHODS = {"get_last_sync", "get_all", "save_sync", "reset", "now"}
+
+
+def test_local_state_manager_satisfies_state_store(tmp_path: Path) -> None:
+    from drt.state.manager import LocalStateManager, StateStore
+
+    assert isinstance(LocalStateManager(tmp_path), StateStore)
+
+
+def test_state_manager_alias_preserved() -> None:
+    """Existing callers import StateManager — the name must keep working."""
+    from drt.state.manager import LocalStateManager, StateManager
+
+    assert StateManager is LocalStateManager
+
+
+def test_state_store_protocol_covers_local_public_api() -> None:
+    """Every public method on the local impl must be in the Protocol.
+
+    isinstance() against a runtime_checkable Protocol only checks presence,
+    so it would pass even if the Protocol declared fewer methods than callers
+    actually use. This asserts the sets match exactly, in both directions.
+    """
+    from drt.state.manager import LocalStateManager
+
+    assert public_methods(LocalStateManager) == _STATE_STORE_METHODS

@@ -33,7 +33,12 @@ from drt.engine.sync import run_sync
 from drt.sources.databricks import DatabricksSource
 from drt.sources.duckdb import DuckDBSource
 
-from .conftest import require_env, seed_duckdb_users, unique_table
+from .conftest import (
+    require_env,
+    seed_duckdb_children,
+    seed_duckdb_users,
+    unique_table,
+)
 
 pytestmark = pytest.mark.dwh_smoke
 
@@ -516,3 +521,78 @@ def test_databricks_source_abandoned_mid_stream_does_not_hang() -> None:
     gen.close()
 
     assert [r["id"] for r in first] == [0, 1, 2]
+
+
+def test_databricks_mirror_composite_upsert_key(tmp_path: Path) -> None:
+    """Mirror DELETE with a **composite** ``upsert_key`` (#908 regression).
+
+    The single-key smoke above passed for releases while this shape failed on
+    every run: ``(a, b) NOT IN (SELECT a, b FROM staging)`` is rejected by Delta
+    with ``DELTA_UNSUPPORTED_MULTI_COL_IN_PREDICATE``. The unit suite could not
+    catch it — it asserts the SQL drt emits, and a mock cursor accepts any
+    string; the restriction only exists server-side.
+
+    Deliberately plain ``mode: mirror`` rather than tracked/scoped, so this
+    reproduces the bug with the smallest configuration that triggers it.
+    """
+    creds = require_env(
+        HOST_ENV,
+        HTTP_PATH_ENV,
+        TOKEN_ENV,
+        "DRT_SMOKE_DATABRICKS_CATALOG",
+        "DRT_SMOKE_DATABRICKS_SCHEMA",
+    )
+    catalog = creds["DRT_SMOKE_DATABRICKS_CATALOG"]
+    schema = creds["DRT_SMOKE_DATABRICKS_SCHEMA"]
+    table = unique_table("drt_smoke_composite_mirror")
+    fqn = f"`{catalog}`.`{schema}`.`{table}`"
+
+    source, profile = seed_duckdb_children(tmp_path)  # parent 1: a, b
+
+    dest = DatabricksDestinationConfig(
+        type="databricks",
+        host_env=HOST_ENV,
+        http_path_env=HTTP_PATH_ENV,
+        token_env=TOKEN_ENV,
+        catalog=catalog,
+        schema=schema,
+        table=table,
+        mode="merge",
+        upsert_key=["parent_id", "id"],
+    )
+    sync = SyncConfig(
+        name="databricks_composite_mirror_smoke",
+        model="ref('children')",
+        destination=dest,
+        sync=SyncOptions(mode="mirror", batch_size=10),
+    )
+
+    conn = _connect(creds)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"CREATE TABLE {fqn} (parent_id INT, id STRING, label STRING) USING DELTA")
+            # Never emitted by the source -> the mirror DELETE must remove it.
+            cur.execute(f"INSERT INTO {fqn} VALUES (9, 'stale', 'seeded')")
+    finally:
+        conn.close()
+
+    try:
+        result = run_sync(sync, source, DatabricksDestination(), profile, tmp_path)
+        assert result.failed == 0, f"composite-key mirror had failures: {result.errors[:3]}"
+
+        conn = _connect(creds)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT parent_id, id FROM {fqn}")
+                rows = {(r[0], r[1]) for r in cur.fetchall()}
+        finally:
+            conn.close()
+        assert (9, "stale") not in rows, f"unobserved composite key not deleted: {rows}"
+        assert rows == {(1, "a"), (1, "b")}, rows
+    finally:
+        conn = _connect(creds)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"DROP TABLE IF EXISTS {fqn}")
+        finally:
+            conn.close()

@@ -24,7 +24,7 @@ import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 
 @dataclass
@@ -43,7 +43,29 @@ class DeadLetter:
     attempts: int = 1
 
 
-class DlqStore:
+@runtime_checkable
+class DlqBackend(Protocol):
+    """Persist and replay records that failed during load (#756).
+
+    Extracted first among the three stores because it carries the sharpest
+    reported pain: on an ephemeral runner the queue dies with the container,
+    so ``drt retry`` can never see a previous run's failures.
+    """
+
+    def append(
+        self, sync_name: str, entries: list[DeadLetter], *, max_records: int = 10_000
+    ) -> int:
+        """Append ``entries`` and return the resulting depth (FIFO-capped)."""
+        ...
+
+    def replace(self, sync_name: str, entries: list[DeadLetter]) -> None: ...
+    def clear(self, sync_name: str) -> None: ...
+    def read(self, sync_name: str) -> list[DeadLetter]: ...
+    def depth(self, sync_name: str) -> int: ...
+    def all_depths(self) -> dict[str, int]: ...
+
+
+class LocalDlqStore:
     """Append / read / replace dead-letter entries under ``.drt/dlq/``.
 
     One JSONL file per sync (``<sync_name>.jsonl``). All mutating methods run
@@ -146,3 +168,7 @@ class DlqStore:
             if depth:
                 out[path.stem] = depth
         return out
+
+
+# Back-compat alias — see the note on ``StateManager`` in state/manager.py.
+DlqStore = LocalDlqStore
