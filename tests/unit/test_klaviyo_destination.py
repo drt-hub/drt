@@ -93,9 +93,7 @@ class TestKlaviyoLoad:
         )
         client.patch.return_value = _resp(200, {"data": {"id": "P9"}})
         with _patch_client(client):
-            result = KlaviyoDestination().load(
-                [{"email": "a@x.com"}], _config(), _options()
-            )
+            result = KlaviyoDestination().load([{"email": "a@x.com"}], _config(), _options())
         assert result.success == 1
         assert "/profiles/P9/" in client.patch.call_args.args[0]
         assert client.patch.call_args.kwargs["json"]["data"]["id"] == "P9"
@@ -125,8 +123,7 @@ class TestKlaviyoLoad:
             )
         assert result.success == 1
         list_calls = [
-            c for c in client.post.call_args_list
-            if "relationships/profiles" in c.args[0]
+            c for c in client.post.call_args_list if "relationships/profiles" in c.args[0]
         ]
         assert len(list_calls) == 1
         assert "/lists/LIST1/" in list_calls[0].args[0]
@@ -211,9 +208,7 @@ class TestKlaviyoLoad:
         assert result.failed == 1
         client.patch.assert_not_called()
 
-    def test_missing_api_key_at_load(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-    ) -> None:
+    def test_missing_api_key_at_load(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
         monkeypatch.delenv("KLAVIYO_NOPE", raising=False)
         monkeypatch.chdir(tmp_path)
         config = _config(api_key=None, api_key_env="KLAVIYO_NOPE")

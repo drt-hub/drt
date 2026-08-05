@@ -655,9 +655,7 @@ class TestSnowflakeKeyPairConnect:
             encryption_algorithm=serialization.NoEncryption(),
         ).decode()
 
-    def test_private_key_env_wins_and_passes_der(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_private_key_env_wins_and_passes_der(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SF_ACCOUNT", "acct")
         monkeypatch.setenv("SF_USER", "svc_user")
         monkeypatch.setenv("SF_PK", self._pem())
@@ -666,30 +664,22 @@ class TestSnowflakeKeyPairConnect:
         conn = MagicMock()
         fake = MagicMock()
         fake.connector.connect = MagicMock(return_value=conn)
-        with patch.dict(
-            "sys.modules", {"snowflake": fake, "snowflake.connector": fake.connector}
-        ):
+        with patch.dict("sys.modules", {"snowflake": fake, "snowflake.connector": fake.connector}):
             dest = SnowflakeDestination()
-            got = dest._connect(
-                self._config(private_key_env="SF_PK", password_env="SF_PASS")
-            )
+            got = dest._connect(self._config(private_key_env="SF_PK", password_env="SF_PASS"))
 
         assert got is conn
         kwargs = fake.connector.connect.call_args.kwargs
         assert isinstance(kwargs["private_key"], bytes)  # DER bytes
         assert "password" not in kwargs
 
-    def test_password_fallback_when_no_key(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_password_fallback_when_no_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SF_ACCOUNT", "acct")
         monkeypatch.setenv("SF_USER", "user")
         monkeypatch.setenv("SF_PASS", "pw")
 
         fake = MagicMock()
-        with patch.dict(
-            "sys.modules", {"snowflake": fake, "snowflake.connector": fake.connector}
-        ):
+        with patch.dict("sys.modules", {"snowflake": fake, "snowflake.connector": fake.connector}):
             SnowflakeDestination()._connect(self._config(password_env="SF_PASS"))
 
         kwargs = fake.connector.connect.call_args.kwargs

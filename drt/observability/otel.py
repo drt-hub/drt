@@ -212,9 +212,7 @@ def _initialize_if_needed() -> None:
             return
 
         observability_raw = _load_observability_block()
-        endpoint, service_name, headers, span_processor = _resolve_otel_settings(
-            observability_raw
-        )
+        endpoint, service_name, headers, span_processor = _resolve_otel_settings(observability_raw)
         if not endpoint:
             _STATE.tracer, _STATE.meter = _load_noop_tracer_and_meter()
             _STATE.initialized = True

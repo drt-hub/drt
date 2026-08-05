@@ -223,9 +223,7 @@ class DatabricksDestination:
         from drt.destinations.sql_utils import check_mirror_supported
 
         try:
-            check_mirror_supported(
-                config, sync_options, "databricks", supports_tracked_scope=True
-            )
+            check_mirror_supported(config, sync_options, "databricks", supports_tracked_scope=True)
         except ValueError:
             conn.close()
             raise
@@ -354,9 +352,7 @@ class DatabricksDestination:
                         if self._mirror_keys is None:
                             self._mirror_keys = []
                         scope_cols = (
-                            sync_options.mirror.scope
-                            if sync_options.mirror is not None
-                            else None
+                            sync_options.mirror.scope if sync_options.mirror is not None else None
                         )
                         if scope_cols and self._mirror_scopes is None:
                             self._mirror_scopes = set()
@@ -369,9 +365,7 @@ class DatabricksDestination:
                             )
                             if scope_cols:
                                 assert self._mirror_scopes is not None
-                                self._mirror_scopes.add(
-                                    tuple(record.get(c) for c in scope_cols)
-                                )
+                                self._mirror_scopes.add(tuple(record.get(c) for c in scope_cols))
 
                 else:
                     raise ValueError(f"Unsupported mode: {config.mode}")
@@ -665,26 +659,56 @@ class DatabricksDestination:
             )
 
         op = "NOT IN" if negate else "IN"
+
+        # Scope restriction (#692). A *composite* scope cannot be written as
+        # `(a, b) IN ((?, ?), ...)` on Delta — the same multi-column `IN`
+        # restriction that breaks the key predicate below (#908) — so it is
+        # expanded to OR-of-ANDs, which every dialect accepts. The
+        # single-column form is left byte-identical: it works, it ships, and a
+        # patch release is the wrong place to rewrite a working path.
+        def _scope_cond(prefix: str) -> str:
+            """The scope restriction, optionally column-qualified for MERGE."""
+            if len(scope_cols or []) == 1:
+                markers = ", ".join(["?"] * len(scopes or []))
+                return f"{prefix}{(scope_cols or [''])[0]} IN ({markers})"
+            one = "(" + " AND ".join(f"{prefix}{c} = ?" for c in scope_cols or []) + ")"
+            return "(" + " OR ".join([one] * len(scopes or [])) + ")"
+
         scope_clause = ""
         scope_params: list[Any] = []
         if scope_cols and scopes:
-            scope_expr = (
-                scope_cols[0] if len(scope_cols) == 1 else "(" + ", ".join(scope_cols) + ")"
-            )
-            scope_marker = (
-                "?" if len(scope_cols) == 1 else "(" + ", ".join(["?"] * len(scope_cols)) + ")"
-            )
-            scope_clause = f"{scope_expr} IN ({', '.join([scope_marker] * len(scopes))}) AND "
             scope_params = (
-                [s[0] for s in scopes]
-                if len(scope_cols) == 1
-                else [v for s in scopes for v in s]
+                [s[0] for s in scopes] if len(scope_cols) == 1 else [v for s in scopes for v in s]
             )
+            scope_clause = f"{_scope_cond('')} AND "
 
-        delete_sql = (
-            f"DELETE FROM {table_fq} WHERE {scope_clause}{where_cols} "
-            f"{op} (SELECT {key_cols} FROM {keys_table})"
-        )
+        if len(upsert_cols) == 1:
+            delete_sql = (
+                f"DELETE FROM {table_fq} WHERE {scope_clause}{where_cols} "
+                f"{op} (SELECT {key_cols} FROM {keys_table})"
+            )
+        else:
+            # #908: Delta rejects `(a, b) IN (SELECT a, b FROM …)` with
+            # DELTA_UNSUPPORTED_MULTI_COL_IN_PREDICATE, so every mirror with a
+            # composite upsert_key failed at the DELETE — including *every*
+            # tracked+scoped run, since `scope` must be a subset of
+            # `upsert_key` and a scope covering the whole key is degenerate.
+            # MERGE is Delta's supported way to express a multi-column
+            # anti-join delete: WHEN MATCHED for "delete exactly these keys"
+            # (tracked), WHEN NOT MATCHED BY SOURCE for "delete what this run
+            # did not observe" (plain/scoped mirror).
+            #
+            # Only the composite branch moves. The single-column path above is
+            # the one that has been running in production since #707 and its
+            # tests assert it binds no key parameters at all; leaving it
+            # untouched keeps this fix to the shape that is actually broken.
+            on_clause = " AND ".join(f"t.{c} = s.{c}" for c in upsert_cols)
+            clause = "WHEN NOT MATCHED BY SOURCE" if negate else "WHEN MATCHED"
+            extra = f" AND {_scope_cond('t.')}" if scope_cols and scopes else ""
+            delete_sql = (
+                f"MERGE INTO {table_fq} AS t USING {keys_table} AS s "
+                f"ON {on_clause} {clause}{extra} THEN DELETE"
+            )
         # No params arg at all when unscoped — byte-identical to the
         # pre-#692 call shape (existing tests assert the anti-join binds no
         # parameters), not just an empty list.
@@ -745,9 +769,7 @@ class DatabricksDestination:
 
         return SyncResult()
 
-    def _finalize_mirror_tracked(
-        self, config: Any, sync_options: SyncOptions
-    ) -> SyncResult | None:
+    def _finalize_mirror_tracked(self, config: Any, sync_options: SyncOptions) -> SyncResult | None:
         """``mirror.strategy: tracked`` (#692) — delete only rows drt synced.
 
         Same Census-style algorithm as ``BaseSqlDestination._finalize_mirror_tracked``
@@ -859,9 +881,7 @@ class DatabricksDestination:
                     )
 
                 # Baseline check: a cheap existence probe, never a full read.
-                cur.execute(
-                    f"SELECT 1 FROM {state_fq} WHERE sync_name = ? LIMIT 1", [sync_name]
-                )
+                cur.execute(f"SELECT 1 FROM {state_fq} WHERE sync_name = ? LIMIT 1", [sync_name])
                 previous_exists = cur.fetchone() is not None
 
                 cur.execute(
@@ -869,9 +889,7 @@ class DatabricksDestination:
                     "(key_hash STRING, key_json STRING) USING DELTA"
                 )
                 if current:
-                    insert_prefix = (
-                        f"INSERT INTO {diff_table} (key_hash, key_json) VALUES "
-                    )
+                    insert_prefix = f"INSERT INTO {diff_table} (key_hash, key_json) VALUES "
                     rows_per = _rows_per_chunk(2)
                     diff_rows = [[key_hash(k), key_json(k)] for k in current]
                     for start in range(0, len(diff_rows), rows_per):
@@ -899,7 +917,13 @@ class DatabricksDestination:
 
                 if to_delete:
                     self._delete_via_staged_keys(
-                        cur, table_fq, upsert_cols, to_delete, keys_table, None, None,
+                        cur,
+                        table_fq,
+                        upsert_cols,
+                        to_delete,
+                        keys_table,
+                        None,
+                        None,
                         negate=False,
                     )
                 elif not previous_exists:

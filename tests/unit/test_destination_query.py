@@ -41,9 +41,7 @@ def _has_psycopg2() -> bool:
 # Snowflake / ClickHouse cases in this module don't — mark only the Postgres
 # ones rather than skipping the whole file, so a minimal install (the release
 # workflow's verify job) still exercises the rest.
-needs_psycopg2 = pytest.mark.skipif(
-    not _has_psycopg2(), reason="requires drt-core[postgres]"
-)
+needs_psycopg2 = pytest.mark.skipif(not _has_psycopg2(), reason="requires drt-core[postgres]")
 
 
 def test_postgres_is_queryable() -> None:
@@ -126,9 +124,7 @@ def test_execute_test_query_snowflake_returns_int() -> None:
     cursor.fetchone.return_value = (42,)
     conn = _fake_conn(cursor)
 
-    with patch(
-        "drt.destinations.snowflake.SnowflakeDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.snowflake.SnowflakeDestination._connect", return_value=conn):
         result = execute_test_query(_snowflake_config(), "SELECT COUNT(*) FROM t")
 
     assert result == 42
@@ -141,12 +137,8 @@ def test_fetch_rows_snowflake_returns_dicts() -> None:
     cursor.fetchall.return_value = [(1, "alice"), (2, "bob")]
     conn = _fake_conn(cursor)
 
-    with patch(
-        "drt.destinations.snowflake.SnowflakeDestination._connect", return_value=conn
-    ):
-        rows = fetch_rows(
-            _snowflake_config(), "SELECT id, name FROM t", columns=["id", "name"]
-        )
+    with patch("drt.destinations.snowflake.SnowflakeDestination._connect", return_value=conn):
+        rows = fetch_rows(_snowflake_config(), "SELECT id, name FROM t", columns=["id", "name"])
 
     assert rows == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
     conn.close.assert_called_once()
@@ -225,9 +217,7 @@ def test_fetch_rows_by_keys_postgres_parameterized_and_batched() -> None:
     ]
     conn = _plain_conn(cursor)
 
-    with patch(
-        "drt.destinations.postgres.PostgresDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.postgres.PostgresDestination._connect", return_value=conn):
         rows = fetch_rows_by_keys(
             _pg_config(),
             key_cols=["id"],
@@ -263,9 +253,7 @@ def test_fetch_rows_by_keys_postgres_composite_key_placeholders() -> None:
     cursor.fetchall.side_effect = [[(1, "eu", "x")]]
     conn = _plain_conn(cursor)
 
-    with patch(
-        "drt.destinations.postgres.PostgresDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.postgres.PostgresDestination._connect", return_value=conn):
         rows = fetch_rows_by_keys(
             _pg_config(upsert_key=["id", "region"]),
             key_cols=["id", "region"],
@@ -287,9 +275,7 @@ def test_fetch_rows_by_keys_mysql_parameterized() -> None:
     cursor.fetchall.side_effect = [[(1, "alice")]]
     conn = _plain_conn(cursor)
 
-    with patch(
-        "drt.destinations.mysql.MySQLDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.mysql.MySQLDestination._connect", return_value=conn):
         rows = fetch_rows_by_keys(
             _mysql_config(),
             key_cols=["id"],
@@ -309,9 +295,7 @@ def test_fetch_rows_by_keys_snowflake_parameterized() -> None:
     cursor.fetchall.side_effect = [[(1, "alice")]]
     conn = _fake_conn(cursor)
 
-    with patch(
-        "drt.destinations.snowflake.SnowflakeDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.snowflake.SnowflakeDestination._connect", return_value=conn):
         rows = fetch_rows_by_keys(
             _snowflake_config(),
             key_cols=["ID"],
@@ -331,9 +315,7 @@ def test_fetch_rows_by_keys_mysql_composite_key_placeholders() -> None:
     cursor.fetchall.side_effect = [[(1, 5, "alice")]]
     conn = _plain_conn(cursor)
 
-    with patch(
-        "drt.destinations.mysql.MySQLDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.mysql.MySQLDestination._connect", return_value=conn):
         rows = fetch_rows_by_keys(
             _mysql_config(),
             key_cols=["user_id", "company_id"],
@@ -354,9 +336,7 @@ def test_fetch_rows_by_keys_mysql_dict_cursor_rows() -> None:
     cursor.fetchall.side_effect = [[{"id": 1, "name": "alice", "extra": "x"}]]
     conn = _plain_conn(cursor)
 
-    with patch(
-        "drt.destinations.mysql.MySQLDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.mysql.MySQLDestination._connect", return_value=conn):
         rows = fetch_rows_by_keys(
             _mysql_config(),
             key_cols=["id"],
@@ -372,9 +352,7 @@ def test_fetch_rows_by_keys_snowflake_composite_key_placeholders() -> None:
     cursor.fetchall.side_effect = [[(1, 5, "alice")]]
     conn = _fake_conn(cursor)
 
-    with patch(
-        "drt.destinations.snowflake.SnowflakeDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.snowflake.SnowflakeDestination._connect", return_value=conn):
         rows = fetch_rows_by_keys(
             _snowflake_config(),
             key_cols=["USER_ID", "COMPANY_ID"],
@@ -444,9 +422,7 @@ def test_fetch_tracked_state_postgres_selects_only() -> None:
     cursor.fetchall.return_value = [("h1", '["a"]'), ("h2", '["b"]')]
     conn = _plain_conn(cursor)
 
-    with patch(
-        "drt.destinations.postgres.PostgresDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.postgres.PostgresDestination._connect", return_value=conn):
         state = fetch_tracked_state(_pg_config(table="public.users"), "users_sync")
 
     assert state == {"h1": '["a"]', "h2": '["b"]'}
@@ -469,9 +445,7 @@ def test_fetch_tracked_state_postgres_unqualified_table() -> None:
     cursor.fetchall.return_value = []
     conn = _plain_conn(cursor)
 
-    with patch(
-        "drt.destinations.postgres.PostgresDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.postgres.PostgresDestination._connect", return_value=conn):
         state = fetch_tracked_state(_pg_config(table="users"), "s")
 
     assert state == {}
@@ -486,9 +460,7 @@ def test_fetch_tracked_state_postgres_missing_table_returns_empty() -> None:
     cursor.fetchone.return_value = (None,)  # to_regclass -> NULL
     conn = _plain_conn(cursor)
 
-    with patch(
-        "drt.destinations.postgres.PostgresDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.postgres.PostgresDestination._connect", return_value=conn):
         state = fetch_tracked_state(_pg_config(table="public.users"), "s")
 
     assert state == {}
@@ -503,9 +475,7 @@ def test_fetch_tracked_state_mysql_selects_only() -> None:
     cursor.fetchall.return_value = [("h1", '["a"]')]
     conn = _plain_conn(cursor)
 
-    with patch(
-        "drt.destinations.mysql.MySQLDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.mysql.MySQLDestination._connect", return_value=conn):
         state = fetch_tracked_state(_mysql_config(table="mydb.users"), "users_sync")
 
     assert state == {"h1": '["a"]'}
@@ -527,9 +497,7 @@ def test_fetch_tracked_state_mysql_unqualified_uses_current_database() -> None:
     cursor.fetchall.return_value = [{"key_hash": "h1", "key_json": '["a"]'}]
     conn = _plain_conn(cursor)
 
-    with patch(
-        "drt.destinations.mysql.MySQLDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.mysql.MySQLDestination._connect", return_value=conn):
         state = fetch_tracked_state(_mysql_config(table="users"), "s")
 
     # Dict cursors (pymysql DictCursor) are handled too.
@@ -546,9 +514,7 @@ def test_fetch_tracked_state_mysql_missing_table_returns_empty() -> None:
     cursor.fetchone.return_value = (0,)
     conn = _plain_conn(cursor)
 
-    with patch(
-        "drt.destinations.mysql.MySQLDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.mysql.MySQLDestination._connect", return_value=conn):
         state = fetch_tracked_state(_mysql_config(table="mydb.users"), "s")
 
     assert state == {}
@@ -587,14 +553,12 @@ def test_fetch_all_keys_postgres_selects_key_columns_only() -> None:
     cursor.fetchall.return_value = [(1,), (2,), (3,)]
     conn = _plain_conn(cursor)
 
-    with patch(
-        "drt.destinations.postgres.PostgresDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.postgres.PostgresDestination._connect", return_value=conn):
         keys = fetch_all_keys(_pg_config(table="public.users"), ["id"])
 
     assert keys == [(1,), (2,), (3,)]
     _assert_read_only(cursor)
-    stmt, = cursor.execute.call_args_list[0][0][:1]
+    (stmt,) = cursor.execute.call_args_list[0][0][:1]
     rendered = _render_pg(stmt)
     assert rendered == 'SELECT "id" FROM "public"."users"'
     # No scope → no params bound at all.
@@ -608,9 +572,7 @@ def test_fetch_all_keys_postgres_composite_key() -> None:
     cursor.fetchall.return_value = [("c1", "u1"), ("c1", "u2")]
     conn = _plain_conn(cursor)
 
-    with patch(
-        "drt.destinations.postgres.PostgresDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.postgres.PostgresDestination._connect", return_value=conn):
         keys = fetch_all_keys(_pg_config(), ["company_id", "user_id"])
 
     assert keys == [("c1", "u1"), ("c1", "u2")]
@@ -631,9 +593,7 @@ def test_fetch_all_keys_postgres_scope_filters_server_side() -> None:
     cursor.fetchall.return_value = [(1,)]
     conn = _plain_conn(cursor)
 
-    with patch(
-        "drt.destinations.postgres.PostgresDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.postgres.PostgresDestination._connect", return_value=conn):
         keys = fetch_all_keys(
             _pg_config(table="public.users"),
             ["id"],
@@ -656,9 +616,7 @@ def test_fetch_all_keys_postgres_composite_scope() -> None:
     cursor.fetchall.return_value = []
     conn = _plain_conn(cursor)
 
-    with patch(
-        "drt.destinations.postgres.PostgresDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.postgres.PostgresDestination._connect", return_value=conn):
         fetch_all_keys(
             _pg_config(),
             ["id"],
@@ -684,9 +642,7 @@ def test_fetch_all_keys_postgres_empty_scopes_reads_whole_table() -> None:
     cursor.fetchall.return_value = [(1,)]
     conn = _plain_conn(cursor)
 
-    with patch(
-        "drt.destinations.postgres.PostgresDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.postgres.PostgresDestination._connect", return_value=conn):
         fetch_all_keys(_pg_config(), ["id"], scope_cols=["region"], scopes=[])
 
     rendered = _render_pg(cursor.execute.call_args_list[0][0][0])
@@ -792,9 +748,7 @@ def test_fetch_failing_rows_mysql_tuple_rows() -> None:
     cursor.fetchall.return_value = [(1, "a@example.com"), (2, "b@example.com")]
     conn = _plain_conn(cursor)
 
-    with patch(
-        "drt.destinations.mysql.MySQLDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.mysql.MySQLDestination._connect", return_value=conn):
         rows = fetch_failing_rows(_mysql_config(), "SELECT * FROM t", limit=5)
 
     assert rows == [
@@ -816,9 +770,7 @@ def test_fetch_failing_rows_mysql_dict_cursor_rows() -> None:
     cursor.fetchall.return_value = [{"id": 1, "email": "a@example.com"}]
     conn = _plain_conn(cursor)
 
-    with patch(
-        "drt.destinations.mysql.MySQLDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.mysql.MySQLDestination._connect", return_value=conn):
         rows = fetch_failing_rows(_mysql_config(), "SELECT * FROM t", limit=5)
 
     assert rows == [{"id": 1, "email": "a@example.com"}]

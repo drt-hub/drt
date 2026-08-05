@@ -82,9 +82,7 @@ class DiffResult:
     delete_reason: str | None = None
 
     @staticmethod
-    def changed_fields(
-        old: dict[str, Any], new: dict[str, Any]
-    ) -> dict[str, tuple[Any, Any]]:
+    def changed_fields(old: dict[str, Any], new: dict[str, Any]) -> dict[str, tuple[Any, Any]]:
         """Return the columns that differ between *old* and *new* as
         ``{col: (old_value, new_value)}``. Equal columns are omitted.
 
@@ -122,9 +120,7 @@ def _is_destination_mirror(sync_options: SyncOptions) -> bool:
     )
 
 
-def _observed_scopes(
-    records: list[dict[str, Any]], scope_cols: list[str]
-) -> list[tuple[Any, ...]]:
+def _observed_scopes(records: list[dict[str, Any]], scope_cols: list[str]) -> list[tuple[Any, ...]]:
     """The distinct ``mirror.scope`` value tuples these records would produce.
 
     Recomputed from the source records rather than read from
@@ -172,9 +168,7 @@ def _preview_destination_mirror_deletes(
         dest_keys = fetch_all_keys(config, upsert_key, scope_cols, scopes)
     except Exception:
         return []
-    return [
-        dict(zip(upsert_key, key)) for key in dest_keys if key not in source_keys
-    ]
+    return [dict(zip(upsert_key, key)) for key in dest_keys if key not in source_keys]
 
 
 def _preview_tracked_mirror_deletes(
@@ -205,9 +199,7 @@ def _preview_tracked_mirror_deletes(
         return []
     if not previous:
         return []
-    return [
-        dict(zip(upsert_key, key)) for key in diff_keys(previous, list(source_keys))
-    ]
+    return [dict(zip(upsert_key, key)) for key in diff_keys(previous, list(source_keys))]
 
 
 def compute_diff(
@@ -336,9 +328,7 @@ def compute_diff(
     deleted: list[dict[str, Any]] = []
     delete_reason: str | None = None
     if sync_options.mode == "replace":
-        deleted = [
-            row for key, row in dest_by_key.items() if key not in source_keys
-        ]
+        deleted = [row for key, row in dest_by_key.items() if key not in source_keys]
         delete_reason = "replace"
     # ``and records`` on both mirror legs: ``_finalize_mirror`` returns early
     # when no key was observed (``if not self._mirror_keys: return None``), and
@@ -346,9 +336,7 @@ def compute_diff(
     # deletes nothing, on either strategy. Previewing a full wipe would tell the
     # operator the opposite of what the run would do.
     elif _is_tracked_mirror(sync_options) and records:
-        deleted = _preview_tracked_mirror_deletes(
-            config, sync_options, upsert_key, source_keys
-        )
+        deleted = _preview_tracked_mirror_deletes(config, sync_options, upsert_key, source_keys)
         delete_reason = "mirror"
     elif _is_destination_mirror(sync_options) and records:
         deleted = _preview_destination_mirror_deletes(
@@ -356,9 +344,7 @@ def compute_diff(
         )
         delete_reason = "mirror_scan"
 
-    truncated = (
-        len(added) > limit or len(updated) > limit or len(deleted) > limit
-    )
+    truncated = len(added) > limit or len(updated) > limit or len(deleted) > limit
 
     return DiffResult(
         added=added[:limit],

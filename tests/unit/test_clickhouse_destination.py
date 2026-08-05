@@ -267,9 +267,7 @@ class TestClickHouseReplaceMode:
 
 class TestClickHouseReplaceSwap:
     @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
-    def test_swap_creates_shadow_via_create_table_as(
-        self, mock_connect: MagicMock
-    ) -> None:
+    def test_swap_creates_shadow_via_create_table_as(self, mock_connect: MagicMock) -> None:
         client = _fake_client()
         mock_connect.return_value = client
         records = [{"id": 1, "score": 0.95}]
@@ -278,13 +276,8 @@ class TestClickHouseReplaceSwap:
         dest.load(records, _config(), _options(mode="replace", replace_strategy="swap"))
 
         commands = [c[0][0] for c in client.command.call_args_list]
-        assert any(
-            "DROP TABLE IF EXISTS" in s and "__drt_swap" in s for s in commands
-        )
-        assert any(
-            "CREATE TABLE" in s and "__drt_swap" in s and " AS " in s
-            for s in commands
-        )
+        assert any("DROP TABLE IF EXISTS" in s and "__drt_swap" in s for s in commands)
+        assert any("CREATE TABLE" in s and "__drt_swap" in s and " AS " in s for s in commands)
         # Insert goes to shadow, not the original table, backtick-quoted (#512)
         assert client.insert.call_count == 1
         assert client.insert.call_args[0][0] == "`analytics_scores__drt_swap`"
@@ -293,9 +286,7 @@ class TestClickHouseReplaceSwap:
         assert not any("EXCHANGE TABLES" in s for s in commands)
 
     @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
-    def test_swap_finalize_uses_exchange_tables(
-        self, mock_connect: MagicMock
-    ) -> None:
+    def test_swap_finalize_uses_exchange_tables(self, mock_connect: MagicMock) -> None:
         client = _fake_client()
         mock_connect.return_value = client
 
@@ -305,17 +296,11 @@ class TestClickHouseReplaceSwap:
             _config(),
             _options(mode="replace", replace_strategy="swap"),
         )
-        dest.finalize_sync(
-            _config(), _options(mode="replace", replace_strategy="swap")
-        )
+        dest.finalize_sync(_config(), _options(mode="replace", replace_strategy="swap"))
 
         commands = [c[0][0] for c in client.command.call_args_list]
         # EXCHANGE TABLES original AND shadow
-        exchange_sqls = [
-            s
-            for s in commands
-            if "EXCHANGE TABLES" in s and "__drt_swap" in s
-        ]
+        exchange_sqls = [s for s in commands if "EXCHANGE TABLES" in s and "__drt_swap" in s]
         assert len(exchange_sqls) >= 1
         # Drop the (now-old) shadow table after exchange
         drop_after_exchange = [
@@ -326,18 +311,14 @@ class TestClickHouseReplaceSwap:
         assert len(drop_after_exchange) >= 1
 
     @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
-    def test_swap_finalize_noop_when_no_swap_in_progress(
-        self, mock_connect: MagicMock
-    ) -> None:
+    def test_swap_finalize_noop_when_no_swap_in_progress(self, mock_connect: MagicMock) -> None:
         dest = ClickHouseDestination()
         result = dest.finalize_sync(_config(), _options(mode="full"))
         assert result is None
         mock_connect.assert_not_called()
 
     @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
-    def test_swap_creates_shadow_only_once_across_batches(
-        self, mock_connect: MagicMock
-    ) -> None:
+    def test_swap_creates_shadow_only_once_across_batches(self, mock_connect: MagicMock) -> None:
         client = _fake_client()
         mock_connect.return_value = client
 
@@ -355,9 +336,7 @@ class TestClickHouseReplaceSwap:
 
         commands = [c[0][0] for c in client.command.call_args_list]
         create_count = sum(
-            1
-            for s in commands
-            if s.startswith("CREATE TABLE") and "__drt_swap" in s
+            1 for s in commands if s.startswith("CREATE TABLE") and "__drt_swap" in s
         )
         assert create_count == 1
 
@@ -441,10 +420,10 @@ class TestClickHouseConnection:
     def test_test_connection_success(self, mock_connect: MagicMock) -> None:
         client = _fake_client()
         mock_connect.return_value = client
-        
+
         dest = ClickHouseDestination()
         dest.test_connection(_config())
-        
+
         mock_connect.assert_called_once()
         # ClickHouse uses client.command("SELECT 1")
         client.command.assert_called_once_with("SELECT 1")
@@ -463,14 +442,10 @@ class TestClickHouseIdentifierQuoting:
 
     def test_quote_ident_plain_and_qualified(self) -> None:
         assert ClickHouseDestination._quote_ident("scores") == "`scores`"
-        assert (
-            ClickHouseDestination._quote_ident("db.scores") == "`db`.`scores`"
-        )
+        assert ClickHouseDestination._quote_ident("db.scores") == "`db`.`scores`"
 
     @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
-    def test_replace_truncate_quotes_qualified_table(
-        self, mock_connect: MagicMock
-    ) -> None:
+    def test_replace_truncate_quotes_qualified_table(self, mock_connect: MagicMock) -> None:
         client = _fake_client()
         mock_connect.return_value = client
 
@@ -481,14 +456,10 @@ class TestClickHouseIdentifierQuoting:
             _options(mode="replace"),
         )
 
-        client.command.assert_called_once_with(
-            "TRUNCATE TABLE `analytics`.`scores`"
-        )
+        client.command.assert_called_once_with("TRUNCATE TABLE `analytics`.`scores`")
 
     @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
-    def test_swap_quotes_qualified_table_create_and_exchange(
-        self, mock_connect: MagicMock
-    ) -> None:
+    def test_swap_quotes_qualified_table_create_and_exchange(self, mock_connect: MagicMock) -> None:
         client = _fake_client()
         mock_connect.return_value = client
 
@@ -500,26 +471,19 @@ class TestClickHouseIdentifierQuoting:
         commands = [c[0][0] for c in client.command.call_args_list]
         # CREATE clones the qualified live table into a qualified shadow
         assert any(
-            "CREATE TABLE `analytics`.`scores__drt_swap` AS `analytics`.`scores`"
-            == s
+            "CREATE TABLE `analytics`.`scores__drt_swap` AS `analytics`.`scores`" == s
             for s in commands
         )
         # EXCHANGE references both fully-quoted qualified identifiers
         assert any(
-            "EXCHANGE TABLES `analytics`.`scores` AND "
-            "`analytics`.`scores__drt_swap`" == s
+            "EXCHANGE TABLES `analytics`.`scores` AND `analytics`.`scores__drt_swap`" == s
             for s in commands
         )
         # No path leaks an unquoted qualified identifier
-        assert not any(
-            "analytics.scores" in s and "`analytics`.`scores" not in s
-            for s in commands
-        )
+        assert not any("analytics.scores" in s and "`analytics`.`scores" not in s for s in commands)
 
     @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
-    def test_insert_quotes_qualified_table_non_swap(
-        self, mock_connect: MagicMock
-    ) -> None:
+    def test_insert_quotes_qualified_table_non_swap(self, mock_connect: MagicMock) -> None:
         """clickhouse-connect's client.insert interpolates the table arg raw
         into ``INSERT INTO {table} ...`` (see
         clickhouse_connect/driver/insert.py), so the destination must
@@ -538,9 +502,7 @@ class TestClickHouseIdentifierQuoting:
         assert client.insert.call_args[0][0] == "`analytics`.`scores`"
 
     @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
-    def test_insert_quotes_qualified_shadow_under_swap(
-        self, mock_connect: MagicMock
-    ) -> None:
+    def test_insert_quotes_qualified_shadow_under_swap(self, mock_connect: MagicMock) -> None:
         client = _fake_client()
         mock_connect.return_value = client
 
@@ -551,7 +513,4 @@ class TestClickHouseIdentifierQuoting:
             _options(mode="replace", replace_strategy="swap"),
         )
 
-        assert (
-            client.insert.call_args[0][0]
-            == "`analytics`.`scores__drt_swap`"
-        )
+        assert client.insert.call_args[0][0] == "`analytics`.`scores__drt_swap`"

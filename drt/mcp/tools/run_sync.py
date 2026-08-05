@@ -42,9 +42,7 @@ def run_sync(
         # Same exclusion as the CLI: one says "start from nothing", the other
         # "start from here". Picking a winner silently would make a backfill
         # look like it worked.
-        return {
-            "error": "full_refresh and cursor_value are mutually exclusive."
-        }
+        return {"error": "full_refresh and cursor_value are mutually exclusive."}
 
     project = ctx.load_project()
     profile = load_profile(resolve_profile_name(profile_name, project.profile))

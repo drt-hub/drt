@@ -13,9 +13,7 @@ from drt.destinations.sql_base import BaseSqlDestination
 
 
 def _mirror(scope: list[str] | None = None, strategy: str = "destination") -> SimpleNamespace:
-    return SimpleNamespace(
-        mode="mirror", mirror=SimpleNamespace(scope=scope, strategy=strategy)
-    )
+    return SimpleNamespace(mode="mirror", mirror=SimpleNamespace(scope=scope, strategy=strategy))
 
 
 def _cfg(upsert_key: list[str] | None = None) -> SimpleNamespace:
@@ -50,9 +48,7 @@ def test_validate_mirror_scope_raises_on_missing_column() -> None:
 
 def test_validate_mirror_scope_ok_when_present() -> None:
     d = BaseSqlDestination()
-    d._validate_mirror_scope(
-        [{"parent_id": 1, "id": 2}], _cfg(), _mirror(scope=["parent_id"])
-    )
+    d._validate_mirror_scope([{"parent_id": 1, "id": 2}], _cfg(), _mirror(scope=["parent_id"]))
 
 
 def test_validate_mirror_scope_noop_when_not_mirror() -> None:
@@ -113,9 +109,7 @@ def test_accumulate_keys_skips_failed_rows() -> None:
     result.row_errors.append(
         RowError(batch_index=1, record_preview="", http_status=None, error_message="x")
     )
-    d._accumulate_mirror_state(
-        [{"id": 10}, {"id": 20}, {"id": 30}], result, cfg, _mirror()
-    )
+    d._accumulate_mirror_state([{"id": 10}, {"id": 20}, {"id": 30}], result, cfg, _mirror())
     assert d._mirror_keys == [(10,), (30,)]  # index 1 (failed) skipped
     assert d._mirror_scopes is None
 
@@ -243,9 +237,7 @@ def _load_dest(events: list[str], mode: str, replace_strategy: str = "delete") -
 
 
 def _load_options(mode: str, replace_strategy: str = "delete") -> SimpleNamespace:
-    return SimpleNamespace(
-        mode=mode, replace_strategy=replace_strategy, mirror=None
-    )
+    return SimpleNamespace(mode=mode, replace_strategy=replace_strategy, mirror=None)
 
 
 def test_load_empty_records_returns_early() -> None:
@@ -427,9 +419,7 @@ def _finalize_dest(events: list[str]) -> Any:
         def _old_name(self, table: str) -> str:
             return f"{table}__old"
 
-        def _rename_swap(
-            self, conn: Any, cur: Any, table: str, shadow: str, old: str
-        ) -> None:
+        def _rename_swap(self, conn: Any, cur: Any, table: str, shadow: str, old: str) -> None:
             events.append(f"rename:{table}:{shadow}:{old}")
 
         def _finalize_mirror(self, config: Any, sync_options: Any) -> SyncResult:
@@ -522,9 +512,7 @@ def _mirror_dest(events: list[str], tracked_result: Any = None) -> Any:
                 (sorted(keys), scopes),
             )
 
-        def _finalize_mirror_tracked(
-            self, config: Any, sync_options: Any
-        ) -> SyncResult | None:
+        def _finalize_mirror_tracked(self, config: Any, sync_options: Any) -> SyncResult | None:
             events.append("tracked")
             return tracked_result
 
@@ -547,12 +535,8 @@ def test_finalize_mirror_dispatches_tracked_strategy() -> None:
     sentinel = SyncResult()
     d = _mirror_dest(events, tracked_result=sentinel)
     d._mirror_keys = [(1,)]
-    opts = SimpleNamespace(
-        mode="mirror", mirror=SimpleNamespace(scope=None, strategy="tracked")
-    )
-    assert d._finalize_mirror(SimpleNamespace(table="t", upsert_key=["id"]), opts) is (
-        sentinel
-    )
+    opts = SimpleNamespace(mode="mirror", mirror=SimpleNamespace(scope=None, strategy="tracked"))
+    assert d._finalize_mirror(SimpleNamespace(table="t", upsert_key=["id"]), opts) is (sentinel)
     assert events == ["tracked"]
 
 
@@ -741,9 +725,7 @@ def _tracked_dest(
 
 
 def _tracked_opts() -> Any:
-    opts = SimpleNamespace(
-        mode="mirror", mirror=SimpleNamespace(scope=None, strategy="tracked")
-    )
+    opts = SimpleNamespace(mode="mirror", mirror=SimpleNamespace(scope=None, strategy="tracked"))
     opts._sync_name = "s1"
     return opts
 
@@ -759,9 +741,7 @@ def test_tracked_creates_state_table_only_when_absent() -> None:
     events2: list[str] = []
     d2 = _tracked_dest(events2, exists=True)
     d2._mirror_keys = [(1,)]
-    d2._finalize_mirror_tracked(
-        SimpleNamespace(table="t", upsert_key=["id"]), _tracked_opts()
-    )
+    d2._finalize_mirror_tracked(SimpleNamespace(table="t", upsert_key=["id"]), _tracked_opts())
     assert not any(e.startswith("create:") for e in events2)
 
 
@@ -796,9 +776,7 @@ def test_tracked_deletes_previous_minus_current_via_build_hook() -> None:
     events: list[str] = []
     d = _tracked_dest(events, raw_diff=[(key_hash((2,)), key_json((2,)))])
     d._mirror_keys = [(1,)]
-    d._finalize_mirror_tracked(
-        SimpleNamespace(table="t", upsert_key=["id"]), _tracked_opts()
-    )
+    d._finalize_mirror_tracked(SimpleNamespace(table="t", upsert_key=["id"]), _tracked_opts())
     # the stale key (2,) is deleted through the shared builder with negate=False
     assert "execute:DELETE t ['id'] scope=None negate=False:[(2,)]" in events
 
@@ -807,9 +785,7 @@ def test_tracked_no_stale_keys_issues_no_target_delete() -> None:
     events: list[str] = []
     d = _tracked_dest(events, raw_diff=[], to_insert=[])
     d._mirror_keys = [(1,)]
-    d._finalize_mirror_tracked(
-        SimpleNamespace(table="t", upsert_key=["id"]), _tracked_opts()
-    )
+    d._finalize_mirror_tracked(SimpleNamespace(table="t", upsert_key=["id"]), _tracked_opts())
     assert not any("DELETE t" in e for e in events)
 
 
@@ -824,9 +800,7 @@ def test_tracked_stages_current_keys_before_diffing() -> None:
     events: list[str] = []
     d = _tracked_dest(events)
     d._mirror_keys = [(1,), (2,)]
-    d._finalize_mirror_tracked(
-        SimpleNamespace(table="t", upsert_key=["id"]), _tracked_opts()
-    )
+    d._finalize_mirror_tracked(SimpleNamespace(table="t", upsert_key=["id"]), _tracked_opts())
     create_idx = next(
         i for i, e in enumerate(events) if e.startswith("execute:CREATE TEMPORARY TABLE")
     )
@@ -848,9 +822,7 @@ def test_tracked_inserts_only_genuinely_new_keys() -> None:
     events: list[str] = []
     d = _tracked_dest(events, raw_diff=[], to_insert=[(key_hash((2,)), key_json((2,)))])
     d._mirror_keys = [(1,), (2,)]
-    d._finalize_mirror_tracked(
-        SimpleNamespace(table="t", upsert_key=["id"]), _tracked_opts()
-    )
+    d._finalize_mirror_tracked(SimpleNamespace(table="t", upsert_key=["id"]), _tracked_opts())
     insert_calls = [e for e in events if e.startswith("executemany:INSERT INTO STATE")]
     assert len(insert_calls) == 1
     assert "'s1'" in insert_calls[0] and key_hash((2,)) in insert_calls[0]
@@ -867,9 +839,7 @@ def test_tracked_falls_back_to_table_name_when_sync_name_absent() -> None:
         to_insert=[(key_hash((1,)), key_json((1,)))],
     )
     d._mirror_keys = [(1,)]
-    opts = SimpleNamespace(
-        mode="mirror", mirror=SimpleNamespace(scope=None, strategy="tracked")
-    )
+    opts = SimpleNamespace(mode="mirror", mirror=SimpleNamespace(scope=None, strategy="tracked"))
     opts._sync_name = None
     d._finalize_mirror_tracked(SimpleNamespace(table="t", upsert_key=["id"]), opts)
     assert any("executemany:" in e and "'t'" in e for e in events)
@@ -905,7 +875,5 @@ def test_tracked_closes_connection_when_execute_raises() -> None:
     d = _Dest()
     d._mirror_keys = [(1,)]
     with pytest.raises(RuntimeError):
-        d._finalize_mirror_tracked(
-            SimpleNamespace(table="t", upsert_key=["id"]), _tracked_opts()
-        )
+        d._finalize_mirror_tracked(SimpleNamespace(table="t", upsert_key=["id"]), _tracked_opts())
     assert events == ["close"]

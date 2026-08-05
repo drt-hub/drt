@@ -113,33 +113,23 @@ class TestApplyMask:
 
 class TestTruncate:
     def test_keeps_first_n_chars(self) -> None:
-        out = apply_mask(
-            [{"name": "Robert"}], {"name": MaskRule(strategy="truncate", length=2)}
-        )
+        out = apply_mask([{"name": "Robert"}], {"name": MaskRule(strategy="truncate", length=2)})
         assert out == [{"name": "Ro"}]
 
     def test_length_zero_empties(self) -> None:
-        out = apply_mask(
-            [{"name": "Robert"}], {"name": MaskRule(strategy="truncate", length=0)}
-        )
+        out = apply_mask([{"name": "Robert"}], {"name": MaskRule(strategy="truncate", length=0)})
         assert out == [{"name": ""}]
 
     def test_length_longer_than_value_returns_as_is(self) -> None:
-        out = apply_mask(
-            [{"name": "Bob"}], {"name": MaskRule(strategy="truncate", length=10)}
-        )
+        out = apply_mask([{"name": "Bob"}], {"name": MaskRule(strategy="truncate", length=10)})
         assert out == [{"name": "Bob"}]
 
     def test_stringifies_non_string(self) -> None:
-        out = apply_mask(
-            [{"pin": 123456}], {"pin": MaskRule(strategy="truncate", length=3)}
-        )
+        out = apply_mask([{"pin": 123456}], {"pin": MaskRule(strategy="truncate", length=3)})
         assert out == [{"pin": "123"}]
 
     def test_none_passes_through(self) -> None:
-        out = apply_mask(
-            [{"name": None}], {"name": MaskRule(strategy="truncate", length=2)}
-        )
+        out = apply_mask([{"name": None}], {"name": MaskRule(strategy="truncate", length=2)})
         assert out == [{"name": None}]
 
     def test_object_and_flat_forms_together(self) -> None:

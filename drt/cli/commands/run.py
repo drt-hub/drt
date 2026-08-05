@@ -309,9 +309,7 @@ def _run_one(
                 from drt.state.dlq import DlqStore
 
                 dlq_depth = DlqStore(Path(".")).depth(sync.name)
-                tripped = evaluate_conditions(
-                    result, dlq_depth, sync.alerts.on_degraded.conditions
-                )
+                tripped = evaluate_conditions(result, dlq_depth, sync.alerts.on_degraded.conditions)
                 if tripped:
                     entry["conditions_tripped"] = [
                         {

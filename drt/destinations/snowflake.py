@@ -148,11 +148,7 @@ class SnowflakeDestination:
         except ValueError:
             conn.close()
             raise
-        if (
-            is_mirror
-            and sync_options.mirror is not None
-            and sync_options.mirror.scope
-        ):
+        if is_mirror and sync_options.mirror is not None and sync_options.mirror.scope:
             missing = [c for c in sync_options.mirror.scope if c not in records[0]]
             if missing:
                 conn.close()
@@ -280,9 +276,7 @@ class SnowflakeDestination:
                         if self._mirror_keys is None:
                             self._mirror_keys = []
                         scope_cols = (
-                            sync_options.mirror.scope
-                            if sync_options.mirror is not None
-                            else None
+                            sync_options.mirror.scope if sync_options.mirror is not None else None
                         )
                         if scope_cols and self._mirror_scopes is None:
                             self._mirror_scopes = set()
@@ -295,9 +289,7 @@ class SnowflakeDestination:
                             )
                             if scope_cols:
                                 assert self._mirror_scopes is not None
-                                self._mirror_scopes.add(
-                                    tuple(record.get(c) for c in scope_cols)
-                                )
+                                self._mirror_scopes.add(tuple(record.get(c) for c in scope_cols))
 
                 else:
                     raise ValueError(f"Unsupported mode: {config.mode}")
@@ -509,8 +501,7 @@ class SnowflakeDestination:
         if len(upsert_cols) == 1:
             placeholders = ", ".join(["%s"] * len(keys))
             stmt = (
-                f"DELETE FROM {table_fq} WHERE {scope_clause}{upsert_cols[0]} "
-                f"{op} ({placeholders})"
+                f"DELETE FROM {table_fq} WHERE {scope_clause}{upsert_cols[0]} {op} ({placeholders})"
             )
             params = [*scope_params, *(k[0] for k in keys)]
         else:
@@ -576,9 +567,7 @@ class SnowflakeDestination:
         # ran successfully" to the engine without inflating success/failed.
         return SyncResult()
 
-    def _finalize_mirror_tracked(
-        self, config: Any, sync_options: SyncOptions
-    ) -> SyncResult | None:
+    def _finalize_mirror_tracked(self, config: Any, sync_options: SyncOptions) -> SyncResult | None:
         """``mirror.strategy: tracked`` (#692) — delete only rows drt synced.
 
         Snowflake counterpart of ``BaseSqlDestination._finalize_mirror_tracked``
@@ -676,17 +665,14 @@ class SnowflakeDestination:
                     )
 
                 # Baseline check: a cheap existence probe, never a full read.
-                cur.execute(
-                    f"SELECT 1 FROM {state_fq} WHERE sync_name = %s LIMIT 1", [sync_name]
-                )
+                cur.execute(f"SELECT 1 FROM {state_fq} WHERE sync_name = %s LIMIT 1", [sync_name])
                 previous_exists = cur.fetchone() is not None
 
                 # Snowflake has session-scoped TEMPORARY tables, same as
                 # Postgres/MySQL — no manual DROP is strictly required, but
                 # one is issued anyway for clarity.
                 cur.execute(
-                    f"CREATE TEMPORARY TABLE {diff_table} "
-                    "(key_hash VARCHAR(64), key_json VARCHAR)"
+                    f"CREATE TEMPORARY TABLE {diff_table} (key_hash VARCHAR(64), key_json VARCHAR)"
                 )
                 if current:
                     cur.executemany(

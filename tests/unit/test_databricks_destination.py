@@ -488,7 +488,7 @@ class TestDatabricksMirrorMode:
         assert len(delete_call.args) == 1  # no bound key params
         assert any(s.startswith(f"DROP TABLE IF EXISTS {keys_tbl}") for s in sqls)
 
-    def test_mirror_finalize_composite_key_uses_tuple_form(
+    def test_mirror_finalize_composite_key_uses_merge_not_tuple_in(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Composite upsert_key uses ``WHERE (c1, c2) NOT IN ((..., ...))``."""
@@ -508,12 +508,18 @@ class TestDatabricksMirrorMode:
 
         calls = conn._cur.execute.call_args_list
         keys_tbl = "main.default.__drt_mirror_keys_user_scores"
-        delete_call = next(c for c in calls if c.args and c.args[0].startswith("DELETE FROM"))
-        assert (
-            f"WHERE (tenant_id, user_id) NOT IN (SELECT tenant_id, user_id FROM {keys_tbl})"
-            in delete_call.args[0]
+        # the delete MERGE, not the upsert MERGE that load() emits first
+        merge_call = next(
+            c
+            for c in calls
+            if c.args and c.args[0].startswith("MERGE INTO") and "THEN DELETE" in c.args[0]
         )
-        assert len(delete_call.args) == 1  # anti-join binds no key params
+        assert (
+            f"MERGE INTO main.default.user_scores AS t USING {keys_tbl} AS s "
+            "ON t.tenant_id = s.tenant_id AND t.user_id = s.user_id "
+            "WHEN NOT MATCHED BY SOURCE THEN DELETE" in merge_call.args[0]
+        )
+        assert len(merge_call.args) == 1  # anti-join binds no key params
         key_inserts = [
             c.args[1] for c in calls if c.args and c.args[0].startswith(f"INSERT INTO {keys_tbl}")
         ]
@@ -855,9 +861,13 @@ def test_scoped_mirror_deletes_within_observed_parents_only_databricks(
     delete_call = next(
         c
         for c in finalize_conn._cur.execute.call_args_list
-        if c.args and c.args[0].startswith("DELETE FROM")
+        if c.args and c.args[0].startswith("MERGE INTO") and "THEN DELETE" in c.args[0]
     )
-    assert "parent_id IN (?) AND (parent_id, id) NOT IN" in delete_call.args[0]
+    # #908: a composite upsert_key goes through MERGE — Delta rejects
+    # `(a, b) NOT IN (SELECT …)`. The scope restriction rides in the WHEN
+    # clause, column-qualified against the target alias.
+    assert "ON t.parent_id = s.parent_id AND t.id = s.id" in delete_call.args[0]
+    assert "WHEN NOT MATCHED BY SOURCE AND t.parent_id IN (?) THEN DELETE" in delete_call.args[0]
     assert delete_call.args[1] == [1]
 
 
@@ -1036,9 +1046,7 @@ def test_tracked_second_run_deletes_only_stale_tracked_keys_databricks(
     )
     assert key_insert.args[1] == [3]
     delete_call = next(
-        c
-        for c in calls
-        if c.args and c.args[0].startswith("DELETE FROM main.default.user_scores")
+        c for c in calls if c.args and c.args[0].startswith("DELETE FROM main.default.user_scores")
     )
     assert f"id IN (SELECT id FROM {keys_tbl})" in delete_call.args[0]
     assert "NOT IN" not in delete_call.args[0]
@@ -1066,9 +1074,7 @@ def test_tracked_stages_current_keys_before_diffing_databricks(
 
     calls = finalize_conn._cur.execute.call_args_list
     create_sql = f"CREATE OR REPLACE TABLE {diff_tbl}"
-    create_idx = next(
-        i for i, c in enumerate(calls) if c.args and c.args[0].startswith(create_sql)
-    )
+    create_idx = next(i for i, c in enumerate(calls) if c.args and c.args[0].startswith(create_sql))
     diff_idx = next(
         i for i, c in enumerate(calls) if c.args and c.args[0].startswith("SELECT s.key_hash")
     )
@@ -1078,9 +1084,7 @@ def test_tracked_stages_current_keys_before_diffing_databricks(
     stage_insert = next(
         c for c in calls if c.args and c.args[0].startswith(f"INSERT INTO {diff_tbl}")
     )
-    assert stage_insert.args[1] == [
-        key_hash((1,)), key_json((1,)), key_hash((2,)), key_json((2,))
-    ]
+    assert stage_insert.args[1] == [key_hash((1,)), key_json((1,)), key_hash((2,)), key_json((2,))]
 
 
 def test_tracked_diff_staging_table_is_disambiguated_by_target_table(
@@ -1219,17 +1223,13 @@ def test_tracked_scoped_deletes_only_stale_keys_within_observed_scope_databricks
     state_delete_calls = [
         c
         for c in calls
-        if c.args
-        and c.args[0].startswith("DELETE FROM main.default._drt_synced_keys")
+        if c.args and c.args[0].startswith("DELETE FROM main.default._drt_synced_keys")
     ]
     assert len(state_delete_calls) == 1
     assert state_delete_calls[0].args[1] == ["scores_sync", key_hash((1, "b"))]
+    assert not any(c.args and key_hash((2, "x")) in c.args[1] for c in calls if len(c.args) > 1)
     assert not any(
-        c.args and key_hash((2, "x")) in c.args[1] for c in calls if len(c.args) > 1
-    )
-    assert not any(
-        c.args and c.args[0].startswith("INSERT INTO main.default._drt_synced_keys")
-        for c in calls
+        c.args and c.args[0].startswith("INSERT INTO main.default._drt_synced_keys") for c in calls
     )
 
 

@@ -60,9 +60,7 @@ def key_hash(key: tuple[Any, ...]) -> str:
     return hashlib.sha256(key_json(key).encode()).hexdigest()
 
 
-def diff_keys(
-    previous: dict[str, str], current: list[tuple[Any, ...]]
-) -> list[tuple[Any, ...]]:
+def diff_keys(previous: dict[str, str], current: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
     """``previous`` (hash -> key_json) minus ``current`` -> key tuples to delete."""
     current_hashes = {key_hash(k) for k in current}
     return [decode_key(kj) for h, kj in previous.items() if h not in current_hashes]

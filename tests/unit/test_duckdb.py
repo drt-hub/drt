@@ -158,8 +158,9 @@ class TestStreamingExtraction:
             result.description = [("id",), ("name",)]
             result.fetchmany.side_effect = [[(1, "a")], []]
 
-            rows = list(DuckDBSource().extract("SELECT * FROM t", DuckDBProfile(
-                type="duckdb", database=db)))
+            rows = list(
+                DuckDBSource().extract("SELECT * FROM t", DuckDBProfile(type="duckdb", database=db))
+            )
 
         assert rows == [{"id": 1, "name": "a"}]
         result.fetchall.assert_not_called()
@@ -171,8 +172,11 @@ class TestStreamingExtraction:
             result.description = [("id",)]
             result.fetchmany.side_effect = [[(1,)], []]
 
-            list(DuckDBSource().extract("SELECT 1", DuckDBProfile(
-                type="duckdb", database=db, fetch_size=250)))
+            list(
+                DuckDBSource().extract(
+                    "SELECT 1", DuckDBProfile(type="duckdb", database=db, fetch_size=250)
+                )
+            )
 
         assert result.fetchmany.call_args_list[0].args[0] == 250
 
@@ -185,8 +189,9 @@ class TestStreamingExtraction:
             result.description = [("id",)]
             result.fetchmany.side_effect = [[(1,), (2,)], [(3,)], []]
 
-            rows = list(DuckDBSource().extract("SELECT 1", DuckDBProfile(
-                type="duckdb", database=db)))
+            rows = list(
+                DuckDBSource().extract("SELECT 1", DuckDBProfile(type="duckdb", database=db))
+            )
 
         assert [r["id"] for r in rows] == [1, 2, 3]
 
@@ -197,8 +202,10 @@ class TestStreamingExtraction:
             result.description = [("id",)]
             result.fetchmany.side_effect = [[]]
 
-            assert list(DuckDBSource().extract("SELECT 1", DuckDBProfile(
-                type="duckdb", database=db))) == []
+            assert (
+                list(DuckDBSource().extract("SELECT 1", DuckDBProfile(type="duckdb", database=db)))
+                == []
+            )
 
     def test_real_file_roundtrip(self, tmp_path):
         """End to end against a real DuckDB file, spanning several batches."""

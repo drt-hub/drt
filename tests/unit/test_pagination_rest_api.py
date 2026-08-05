@@ -535,9 +535,7 @@ class TestFetchPaginatedErrorHandling:
             # Should return empty list on error
             assert result == []
 
-    def test_fetch_paginated_keyerror_stops(
-        self, rest_api_destination, base_config, sync_options
-    ):
+    def test_fetch_paginated_keyerror_stops(self, rest_api_destination, base_config, sync_options):
         """Stop pagination gracefully on KeyError during response processing."""
         config = RestApiDestinationConfig(
             **{

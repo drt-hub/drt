@@ -113,9 +113,7 @@ def validate(
             error_names = {k for k in error_names if not _fnmatch_token(k, token)}
         result.syncs = selected
         result.errors = {k: v for k, v in result.errors.items() if k in error_names}
-        result.deprecations = {
-            k: v for k, v in result.deprecations.items() if k in selected_names
-        }
+        result.deprecations = {k: v for k, v in result.deprecations.items() if k in selected_names}
         secret_findings = [f for f in secret_findings if f.sync_name in selected_names]
         if not result.syncs and not result.errors:
             print_error("Selection matched no syncs (after --exclude).")

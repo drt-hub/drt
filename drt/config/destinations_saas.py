@@ -150,9 +150,7 @@ class TwilioDestinationConfig(DescribableConfig):
         the sending number. Note ``describe_safe()`` deliberately keeps only a
         country-code prefix (#696); that lossiness is why it cannot be the key.
         """
-        account = self.account_sid_env or (
-            LITERAL_CREDENTIAL_KEY if self.account_sid else "unset"
-        )
+        account = self.account_sid_env or (LITERAL_CREDENTIAL_KEY if self.account_sid else "unset")
         return f"{self.type}:{account}"
 
     @model_validator(mode="after")
@@ -763,9 +761,7 @@ class SalesforceBulkDestinationConfig(BaseModel):
         Contacts and Accounts into one org draws on one budget. The instance is
         identified by its env-var name where given. (``BaseModel``-direct config.)
         """
-        org = self.instance_url_env or (
-            LITERAL_CREDENTIAL_KEY if self.instance_url else "unset"
-        )
+        org = self.instance_url_env or (LITERAL_CREDENTIAL_KEY if self.instance_url else "unset")
         return f"{self.type}:{org}"
 
     @model_validator(mode="after")

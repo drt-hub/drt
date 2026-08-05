@@ -153,9 +153,7 @@ def test_lookups_get_distinct_lanes_and_ports() -> None:
 
 
 def test_empty_project_does_not_crash() -> None:
-    lay = compute_layout(
-        _manifest(sources=[], syncs=[], destinations=[], edges=[])
-    )
+    lay = compute_layout(_manifest(sources=[], syncs=[], destinations=[], edges=[]))
     assert lay.nodes == () and lay.edges == ()
     assert lay.width > 0 and lay.height > 0
 

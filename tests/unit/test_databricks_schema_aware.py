@@ -108,9 +108,7 @@ def test_value_clause_struct_array_use_from_json_with_ddl() -> None:
 
 def test_value_clause_variant_uses_parse_json() -> None:
     # json-category but absent from ddls → VARIANT → parse_json (no DDL).
-    clause, json_cols = _value_clause(
-        ["id", "doc"], {"id": "scalar", "doc": "json"}, {}
-    )
+    clause, json_cols = _value_clause(["id", "doc"], {"id": "scalar", "doc": "json"}, {})
     assert "parse_json(?)" in clause
     assert "from_json" not in clause
     assert json_cols == ["doc"]
@@ -212,17 +210,13 @@ def test_merge_staging_path_wraps() -> None:
         mode="merge",
         upsert_key=["id"],
     )
-    staging = next(
-        s for s, _ in calls if s.startswith("INSERT INTO main.default.__drt_staging")
-    )
+    staging = next(s for s, _ in calls if s.startswith("INSERT INTO main.default.__drt_staging"))
     assert "from_json(?, 'array<string>')" in staging
 
 
 def test_from_json_ddl_single_quotes_are_escaped() -> None:
     """A DDL containing a single quote must be doubled so it can't break the literal (#703)."""
-    clause, _ = _value_clause(
-        ["c"], {"c": "json"}, {"c": "struct<n: string, it's: int>"}
-    )
+    clause, _ = _value_clause(["c"], {"c": "json"}, {"c": "struct<n: string, it's: int>"})
     assert "it''s" in clause
     assert "from_json(?, 'struct<n: string, it''s: int>')" in clause
 

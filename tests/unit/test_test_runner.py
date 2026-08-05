@@ -74,8 +74,7 @@ def test_build_query_wraps_in_count() -> None:
     t = SyncTest(query="SELECT * FROM {{ table }} WHERE total < 0")
     query, check = build_test_query(t, "public.orders")
     assert query == (
-        "SELECT COUNT(*) FROM (SELECT * FROM public.orders WHERE total < 0) "
-        "AS _drt_query_test"
+        "SELECT COUNT(*) FROM (SELECT * FROM public.orders WHERE total < 0) AS _drt_query_test"
     )
     assert check(0) is True  # 0 failing rows = pass
     assert check(1) is False
@@ -127,9 +126,7 @@ def test_failing_rows_row_count_is_none() -> None:
         lambda: SyncTest(not_null=NotNullTest(columns=["id", "email"])),
         lambda: SyncTest(freshness=FreshnessTest(column="updated_at", max_age="7 days")),
         lambda: SyncTest(unique=UniqueTest(columns=["id"])),
-        lambda: SyncTest(
-            accepted_values=AcceptedValuesTest(column="status", values=["active"])
-        ),
+        lambda: SyncTest(accepted_values=AcceptedValuesTest(column="status", values=["active"])),
         lambda: SyncTest(query="SELECT * FROM {{ table }} WHERE total < 0"),
     ],
 )

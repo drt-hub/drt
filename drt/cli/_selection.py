@@ -61,9 +61,9 @@ def matches(sync: SyncConfig, token: str) -> bool:
 
 def _no_match_message(token: str) -> str:
     if token.startswith("tag:"):
-        return f"No syncs with tag '{token[len('tag:'):]}' found."
+        return f"No syncs with tag '{token[len('tag:') :]}' found."
     if token.startswith("destination:"):
-        return f"No syncs with destination '{token[len('destination:'):]}' found."
+        return f"No syncs with destination '{token[len('destination:') :]}' found."
     if is_glob(token):
         return f"No syncs matching '{token}' found."
     return f"No sync named '{token}' found."

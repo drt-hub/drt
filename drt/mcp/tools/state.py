@@ -113,9 +113,7 @@ def state_reset(
             dest = get_destination(syncs[0])
             reset = getattr(dest, "reset_tracked_state", None)
             if reset is None:
-                result["warning"] = (
-                    f"{syncs[0].destination.type} does not support tracked mirror."
-                )
+                result["warning"] = f"{syncs[0].destination.type} does not support tracked mirror."
             else:
                 result["keys_removed"] = int(reset(syncs[0].destination, sync_name))
                 result["warning"] = (

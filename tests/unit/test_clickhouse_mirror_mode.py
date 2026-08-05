@@ -578,9 +578,7 @@ def test_tracked_baseline_logs_warning_clickhouse(caplog: pytest.LogCaptureFixtu
 
     dest = ClickHouseDestination()
     load_client = _fake_client()
-    finalize_client = _state_client(
-        raw_diff=[], new_hashes=[key_hash((1,))], previous_exists=False
-    )
+    finalize_client = _state_client(raw_diff=[], new_hashes=[key_hash((1,))], previous_exists=False)
 
     with patch.object(ClickHouseDestination, "_connect", return_value=load_client):
         dest.load([{"id": 1}], _config(), _tracked_options())

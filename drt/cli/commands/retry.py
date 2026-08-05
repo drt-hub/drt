@@ -189,9 +189,7 @@ def retry(
             f"record(s) for '{sync_name}'.[/cyan]"
         )
         if summary["untouched"]:
-            console.print(
-                f"[dim]{summary['untouched']} record(s) left untouched (--limit).[/dim]"
-            )
+            console.print(f"[dim]{summary['untouched']} record(s) left untouched (--limit).[/dim]")
         return
 
     style = "green" if summary["still_failing"] == 0 else "yellow"

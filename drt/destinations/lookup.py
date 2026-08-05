@@ -200,9 +200,7 @@ def apply_lookups(
         # check_only lookups are filter-only — their target name is just a label,
         # so they neither contribute drops nor block other lookups' drops.
         cols_to_drop: set[str] = set()
-        all_target_cols = {
-            tc for tc, (lk, _) in lookup_maps.items() if not lk.check_only
-        }
+        all_target_cols = {tc for tc, (lk, _) in lookup_maps.items() if not lk.check_only}
         for target_col, (lk_config, _mapping) in lookup_maps.items():
             if lk_config.check_only:
                 continue

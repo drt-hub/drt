@@ -249,8 +249,7 @@ def execute_tests_for_sync(
                     entry["failures_stored"] = {"error": str(store_err)}
                     if show:
                         console.print(
-                            f"    [yellow]⚠ could not store failure sample:"
-                            f" {store_err}[/yellow]"
+                            f"    [yellow]⚠ could not store failure sample: {store_err}[/yellow]"
                         )
                 else:
                     if stored is not None:

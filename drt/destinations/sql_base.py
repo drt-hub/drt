@@ -195,10 +195,7 @@ class BaseSqlDestination:
         # mirror.strategy: tracked (#686) — state-based diff instead of the
         # destination-table diff below. Shares the empty-source guard above,
         # so a transient empty source also keeps the tracked baseline intact.
-        if (
-            sync_options.mirror is not None
-            and sync_options.mirror.strategy == "tracked"
-        ):
+        if sync_options.mirror is not None and sync_options.mirror.strategy == "tracked":
             return self._finalize_mirror_tracked(config, sync_options)
 
         # Dedupe to keep the IN list compact when batches overlap.
@@ -208,9 +205,7 @@ class BaseSqlDestination:
         # mirror.scope (#687) — prepend "scope IN (observed)" so the diff
         # only touches rows under parents this run actually saw. Rows under
         # unobserved parents (other pipelines / the application) stay put.
-        scope_cols = (
-            sync_options.mirror.scope if sync_options.mirror is not None else None
-        )
+        scope_cols = sync_options.mirror.scope if sync_options.mirror is not None else None
         # list(), not sorted() — scope values may include None (unorderable).
         scopes = list(self._mirror_scopes or set()) if scope_cols else None
 
@@ -405,9 +400,7 @@ class BaseSqlDestination:
         Dialect-specific."""
         raise NotImplementedError
 
-    def _rename_swap(
-        self, conn: Any, cur: Any, table: str, shadow: str, old: str
-    ) -> None:
+    def _rename_swap(self, conn: Any, cur: Any, table: str, shadow: str, old: str) -> None:
         """Rename ``shadow`` over ``table`` (moving the original to ``old``) and
         DROP ``old``, committing as today's dialect does: PG issues two
         ``ALTER TABLE ... RENAME TO`` under one commit then a separate DROP+commit;
@@ -528,9 +521,7 @@ class BaseSqlDestination:
         finally:
             conn.close()
 
-    def _finalize_mirror_tracked(
-        self, config: Any, sync_options: SyncOptions
-    ) -> SyncResult | None:
+    def _finalize_mirror_tracked(self, config: Any, sync_options: SyncOptions) -> SyncResult | None:
         """``mirror.strategy: tracked`` (#686) — delete only rows drt synced.
 
         Reads the previously-synced key set for this sync from the drt-managed
@@ -624,9 +615,7 @@ class BaseSqlDestination:
             # (WARN) apart from a run that's simply the first to touch this
             # particular scope (silent — see below).
             cur.execute(
-                self._state_sql(
-                    "SELECT 1 FROM {} WHERE sync_name = %s LIMIT 1", state_ident
-                ),
+                self._state_sql("SELECT 1 FROM {} WHERE sync_name = %s LIMIT 1", state_ident),
                 (sync_name,),
             )
             previous_exists = cur.fetchone() is not None
@@ -640,8 +629,7 @@ class BaseSqlDestination:
             # the way `state_ident` (schema-qualified from `config.table`)
             # does.
             cur.execute(
-                f"CREATE TEMPORARY TABLE {DIFF_STAGING_TABLE} "
-                "(key_hash VARCHAR(64), key_json TEXT)"
+                f"CREATE TEMPORARY TABLE {DIFF_STAGING_TABLE} (key_hash VARCHAR(64), key_json TEXT)"
             )
             if current:
                 cur.executemany(
@@ -733,8 +721,7 @@ class BaseSqlDestination:
             if to_insert:
                 cur.executemany(
                     self._state_sql(
-                        "INSERT INTO {} (sync_name, key_hash, key_json) "
-                        "VALUES (%s, %s, %s)",
+                        "INSERT INTO {} (sync_name, key_hash, key_json) VALUES (%s, %s, %s)",
                         state_ident,
                     ),
                     [(sync_name, h, kj) for h, kj in to_insert],

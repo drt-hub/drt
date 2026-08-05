@@ -191,18 +191,12 @@ class KlaviyoDestination:
         with_retry(_post, retry_config)
 
     @staticmethod
-    def _properties(
-        record: dict[str, Any], config: KlaviyoDestinationConfig
-    ) -> dict[str, Any]:
+    def _properties(record: dict[str, Any], config: KlaviyoDestinationConfig) -> dict[str, Any]:
         if config.properties_template:
             rendered = render_template(config.properties_template, record)
             parsed = json.loads(rendered)
             return parsed if isinstance(parsed, dict) else {}
-        return {
-            k: v
-            for k, v in record.items()
-            if k != config.email_field and v is not None
-        }
+        return {k: v for k, v in record.items() if k != config.email_field and v is not None}
 
     def test_connection(self, config: DestinationConfig) -> None:
         """Test connectivity by listing accounts (a cheap authenticated GET)."""

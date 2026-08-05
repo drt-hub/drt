@@ -217,8 +217,11 @@ def test_error_number_alone_cannot_classify_a_login_failure(
         (18456, b"Login failed for user 'sa'.DB-Lib error message 20018, severity 14")
     )
     refused = mod.OperationalError(
-        (18456, b"DB-Lib error message 20009, severity 9:\nUnable to connect: "
-                b"Adaptive Server is unavailable or does not exist")
+        (
+            18456,
+            b"DB-Lib error message 20009, severity 9:\nUnable to connect: "
+            b"Adaptive Server is unavailable or does not exist",
+        )
     )
 
     assert src._is_transient(auth) is False, "a wrong credential must not be retried"
@@ -229,7 +232,7 @@ def test_error_number_alone_cannot_classify_a_login_failure(
 
 
 def test_is_transient_true_for_non_login_operational_errors(
-    monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The login-failure exclusion must not swallow real connection trouble."""
     mod = _install_fake_pymssql(monkeypatch)
@@ -391,9 +394,7 @@ class TestStreamingExtraction:
 
         assert conn.cursor.return_value.arraysize == 2500
 
-    def test_cursor_is_closed_before_the_connection(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_cursor_is_closed_before_the_connection(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install_fake_pymssql(monkeypatch)
         conn = self._conn([{"id": 1}])
         with patch.object(SQLServerSource, "_connect", return_value=conn):
@@ -425,6 +426,8 @@ class TestStreamingExtraction:
         conn = self._conn([])
         with patch.object(SQLServerSource, "_connect", return_value=conn):
             assert list(SQLServerSource().extract("SELECT 1", _profile())) == []
+
+
 def test_the_fake_exception_hierarchy_matches_the_real_driver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

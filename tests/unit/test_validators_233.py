@@ -81,7 +81,7 @@ class TestFreshnessTest:
         """Freshness test should generate correct SQL."""
         test = SyncTest(freshness=FreshnessTest(column="updated_at", max_age="7 days"))
         query, check_func = build_test_query(test, "users")
-        
+
         assert "SELECT COUNT(*)" in query
         assert "updated_at" in query
         assert "users" in query
@@ -92,7 +92,7 @@ class TestFreshnessTest:
         """Freshness check passes when no stale rows."""
         test = SyncTest(freshness=FreshnessTest(column="updated_at", max_age="7 days"))
         _, check_func = build_test_query(test, "users")
-        
+
         # 0 stale rows = all data is fresh
         assert check_func(0) is True
 
@@ -100,7 +100,7 @@ class TestFreshnessTest:
         """Freshness check fails when stale rows exist."""
         test = SyncTest(freshness=FreshnessTest(column="updated_at", max_age="7 days"))
         _, check_func = build_test_query(test, "users")
-        
+
         # Any stale rows means test fails
         assert check_func(1) is False
         assert check_func(100) is False
@@ -109,7 +109,7 @@ class TestFreshnessTest:
         """Freshness test with hour-based max_age."""
         test = SyncTest(freshness=FreshnessTest(column="created_at", max_age="24 hours"))
         query, _ = build_test_query(test, "events")
-        
+
         assert "created_at" in query
         assert "events" in query
 
@@ -121,7 +121,7 @@ class TestUniqueTest:
         """Unique test with single column."""
         test = SyncTest(unique=UniqueTest(columns=["id"]))
         query, _ = build_test_query(test, "products")
-        
+
         # Should use portable GROUP BY + HAVING pattern
         assert "GROUP BY id" in query
         assert "HAVING COUNT(*) > 1" in query
@@ -131,7 +131,7 @@ class TestUniqueTest:
         """Unique test with multiple columns."""
         test = SyncTest(unique=UniqueTest(columns=["tenant_id", "user_id"]))
         query, _ = build_test_query(test, "subscriptions")
-        
+
         # Should use portable GROUP BY + HAVING pattern
         assert "GROUP BY tenant_id, user_id" in query
         assert "HAVING COUNT(*) > 1" in query
@@ -141,14 +141,14 @@ class TestUniqueTest:
         """Unique check passes when duplicate count is 0."""
         test = SyncTest(unique=UniqueTest(columns=["id"]))
         _, check_func = build_test_query(test, "users")
-        
+
         assert check_func(0) is True
 
     def test_unique_check_fails_on_duplicates(self) -> None:
         """Unique check fails when duplicates exist."""
         test = SyncTest(unique=UniqueTest(columns=["id"]))
         _, check_func = build_test_query(test, "users")
-        
+
         assert check_func(1) is False
         assert check_func(10) is False
 
@@ -160,12 +160,11 @@ class TestAcceptedValuesTest:
         """Accepted values test should generate correct SQL."""
         test = SyncTest(
             accepted_values=AcceptedValuesTest(
-                column="status",
-                values=["active", "inactive", "pending"]
+                column="status", values=["active", "inactive", "pending"]
             )
         )
         query, _ = build_test_query(test, "users")
-        
+
         assert "SELECT COUNT(*)" in query
         assert "status NOT IN" in query
         assert "'active'" in query
@@ -176,37 +175,29 @@ class TestAcceptedValuesTest:
     def test_accepted_values_check_passes_on_no_invalid(self) -> None:
         """Accepted values check passes when no invalid values."""
         test = SyncTest(
-            accepted_values=AcceptedValuesTest(
-                column="status",
-                values=["active", "inactive"]
-            )
+            accepted_values=AcceptedValuesTest(column="status", values=["active", "inactive"])
         )
         _, check_func = build_test_query(test, "users")
-        
+
         # 0 invalid rows = all values are accepted
         assert check_func(0) is True
 
     def test_accepted_values_check_fails_on_invalid(self) -> None:
         """Accepted values check fails when invalid values exist."""
         test = SyncTest(
-            accepted_values=AcceptedValuesTest(
-                column="status",
-                values=["active", "inactive"]
-            )
+            accepted_values=AcceptedValuesTest(column="status", values=["active", "inactive"])
         )
         _, check_func = build_test_query(test, "users")
-        
+
         # Any invalid rows means test fails
         assert check_func(1) is False
         assert check_func(5) is False
 
     def test_accepted_values_with_single_value(self) -> None:
         """Accepted values test with single allowed value."""
-        test = SyncTest(
-            accepted_values=AcceptedValuesTest(column="type", values=["premium"])
-        )
+        test = SyncTest(accepted_values=AcceptedValuesTest(column="type", values=["premium"]))
         query, _ = build_test_query(test, "subscriptions")
-        
+
         assert "'premium'" in query
         assert "NOT IN" in query
 
@@ -239,14 +230,14 @@ class TestInvalidTableNames:
     def test_invalid_table_names_rejected(self) -> None:
         """Invalid characters in table names should raise error."""
         test = SyncTest(row_count={"min": 1})
-        
+
         with pytest.raises(ValueError, match="Invalid character"):
             build_test_query(test, "users; DROP TABLE--")
 
     def test_invalid_column_names_rejected(self) -> None:
         """Invalid characters in column names should raise error."""
         test = SyncTest(freshness=FreshnessTest(column="col; DROP--", max_age="1 day"))
-        
+
         with pytest.raises(ValueError, match="Invalid character"):
             build_test_query(test, "users")
 
@@ -262,17 +253,12 @@ class TestValidationRules:
     def test_accepted_values_cannot_be_empty(self) -> None:
         """AcceptedValuesTest requires at least one value."""
         with pytest.raises(ValueError, match="at least"):
-            SyncTest(
-                accepted_values=AcceptedValuesTest(column="status", values=[])
-            )
+            SyncTest(accepted_values=AcceptedValuesTest(column="status", values=[]))
 
     def test_sync_test_must_have_exactly_one_test(self) -> None:
         """SyncTest requires exactly one test type."""
         with pytest.raises(ValueError, match="Exactly one"):
-            SyncTest(
-                row_count={"min": 1},
-                unique=UniqueTest(columns=["id"])
-            )
+            SyncTest(row_count={"min": 1}, unique=UniqueTest(columns=["id"]))
 
     def test_sync_test_cannot_have_zero_tests(self) -> None:
         """SyncTest cannot have no test types."""
@@ -282,13 +268,10 @@ class TestValidationRules:
     def test_accepted_values_escapes_single_quotes(self) -> None:
         """Accepted values should escape single quotes to prevent SQL injection."""
         test = SyncTest(
-            accepted_values=AcceptedValuesTest(
-                column="name",
-                values=["O'Brien", "O'Connor"]
-            )
+            accepted_values=AcceptedValuesTest(column="name", values=["O'Brien", "O'Connor"])
         )
         query, _ = build_test_query(test, "users")
-        
+
         # Single quotes should be doubled (SQL standard escaping)
         assert "O''Brien" in query
         assert "O''Connor" in query

@@ -246,15 +246,11 @@ class TestRestApiDestinationRetryOverride:
             type="rest_api",
             url="https://api.example.com/x",
             method="POST",
-            retry=RetryConfig(
-                max_attempts=5, initial_backoff=0.0, backoff_multiplier=1.0
-            ),
+            retry=RetryConfig(max_attempts=5, initial_backoff=0.0, backoff_multiplier=1.0),
         )
         options = SyncOptions(
             rate_limit=RateLimitConfig(requests_per_second=1000),
-            retry=RetryConfig(
-                max_attempts=2, initial_backoff=0.0, backoff_multiplier=1.0
-            ),
+            retry=RetryConfig(max_attempts=2, initial_backoff=0.0, backoff_multiplier=1.0),
             on_error="skip",
         )
 
@@ -292,9 +288,7 @@ class TestRestApiOnErrorFail:
         options = SyncOptions(
             batch_size=10,
             rate_limit=RateLimitConfig(requests_per_second=1000),
-            retry=RetryConfig(
-                max_attempts=1, initial_backoff=0.0, backoff_multiplier=1.0
-            ),
+            retry=RetryConfig(max_attempts=1, initial_backoff=0.0, backoff_multiplier=1.0),
             on_error="fail",
         )
 
@@ -363,9 +357,7 @@ class TestSharedRateLimiterBucket:
     def test_both_call_sites_resolve_to_one_limiter(self) -> None:
         from drt.destinations.rate_limiter import resolve_rate_limiter
 
-        config = RestApiDestinationConfig(
-            type="rest_api", url="https://api.example.com/v1/users"
-        )
+        config = RestApiDestinationConfig(type="rest_api", url="https://api.example.com/v1/users")
         options = _sync_options()
 
         first = resolve_rate_limiter(config, options)
