@@ -50,7 +50,7 @@ def _fake_profile() -> Any:
     return profile
 
 
-def _fake_ctx(*, dry_run: bool = False) -> _RunContext:
+def _fake_ctx(*, dry_run: bool = False, run_id: str = "") -> _RunContext:
     return _RunContext(
         source=MagicMock(),
         state_mgr=MagicMock(),
@@ -62,6 +62,7 @@ def _fake_ctx(*, dry_run: bool = False) -> _RunContext:
         quiet=True,
         log_json=False,
         cursor_value=None,
+        run_id=run_id,
     )
 
 
@@ -241,6 +242,56 @@ def test_run_one_entry_includes_watermark_metadata(
     _name, entry, _err = _run_one(_fake_sync(), _ctx(), _fake_profile())
     assert entry["watermark_source"] == "default_value"
     assert entry["cursor_value_used"] == "2026-01-01"
+
+
+def test_run_one_entry_includes_correlation_ids_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+    captured_calls: list[dict[str, Any]],
+) -> None:
+    """#762: ctx.run_id (invocation-level) and result.sync_run_id (per-sync)
+    both surface in the entry dict --output json reads."""
+    _wire_run_sync(
+        monkeypatch,
+        lambda *_a, **_k: SyncResult(
+            rows_extracted=1, success=1, failed=0, sync_run_id="sync-abc"
+        ),
+    )
+    _name, entry, _err = _run_one(_fake_sync(), _ctx(run_id="cli-xyz"), _fake_profile())
+    assert entry["run_id"] == "cli-xyz"
+    assert entry["sync_run_id"] == "sync-abc"
+
+
+def test_run_one_passes_ctx_run_id_into_run_sync(
+    monkeypatch: pytest.MonkeyPatch,
+    captured_calls: list[dict[str, Any]],
+) -> None:
+    """The invocation id has to actually reach run_sync, not just the entry dict."""
+    received: dict[str, Any] = {}
+
+    def fake_run_sync(*_a: Any, **kwargs: Any) -> SyncResult:
+        received["run_id"] = kwargs.get("run_id")
+        return SyncResult(rows_extracted=1, success=1, failed=0)
+
+    _wire_run_sync(monkeypatch, fake_run_sync)
+    _run_one(_fake_sync(), _ctx(run_id="cli-xyz"), _fake_profile())
+    assert received["run_id"] == "cli-xyz"
+
+
+def test_run_one_entry_includes_run_id_on_error(
+    monkeypatch: pytest.MonkeyPatch,
+    captured_calls: list[dict[str, Any]],
+) -> None:
+    """The error path has no SyncResult to read sync_run_id from — run_id is
+    still known at the CLI regardless, so it's still in the entry dict."""
+
+    def boom(*_a: Any, **_k: Any) -> SyncResult:
+        raise RuntimeError("kaboom")
+
+    _wire_run_sync(monkeypatch, boom)
+    _name, entry, err = _run_one(_fake_sync(), _ctx(run_id="cli-xyz"), _fake_profile())
+    assert err is True
+    assert entry["run_id"] == "cli-xyz"
+    assert "sync_run_id" not in entry
 
 
 def test_run_one_rich_output_success(

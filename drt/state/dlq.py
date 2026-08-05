@@ -41,6 +41,10 @@ class DeadLetter:
     http_status: int | None = None
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     attempts: int = 1
+    # Correlation ID (#762) — which sync execution produced this dead letter.
+    # See drt._identifiers. None on entries written before this field existed;
+    # the JSONL reader tolerates the missing key via the dataclass default.
+    sync_run_id: str | None = None
 
 
 @runtime_checkable

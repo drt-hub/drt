@@ -64,6 +64,8 @@ class _FakeResult:
     limit_applied: int | None = None
     duration_seconds: float | None = 0.01
     interrupted = False
+    run_id: str | None = None
+    sync_run_id: str | None = "fake-sync-run-id"
 
 
 def _patch_runtime(monkeypatch: pytest.MonkeyPatch, fake_run_sync: Any) -> None:

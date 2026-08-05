@@ -312,3 +312,58 @@ def test_history_store_protocol_covers_local_public_api() -> None:
     from drt.state.history import LocalHistoryManager
 
     assert public_methods(LocalHistoryManager) == _HISTORY_STORE_METHODS
+
+
+# --- Correlation IDs (#762) ---------------------------------------------------
+
+
+class TestHistoryEntryCorrelationIds:
+    def test_default_to_none(self) -> None:
+        entry = _entry()
+        assert entry.run_id is None
+        assert entry.sync_run_id is None
+
+    def test_round_trip_through_append_and_read(self, tmp_path: Path) -> None:
+        mgr = HistoryManager(tmp_path)
+        entry = HistoryEntry(
+            sync_name="s",
+            started_at="2026-05-01T00:00:00+00:00",
+            completed_at="2026-05-01T00:00:01+00:00",
+            duration_seconds=1.0,
+            status="success",
+            records_synced=1,
+            records_failed=0,
+            run_id="cli-1",
+            sync_run_id="sync-1",
+        )
+        mgr.append(entry)
+
+        [loaded] = mgr.read(sync_name="s")
+        assert loaded.run_id == "cli-1"
+        assert loaded.sync_run_id == "sync-1"
+
+    def test_a_pre_762_jsonl_line_still_loads(self, tmp_path: Path) -> None:
+        """The reader unpacks each line via HistoryEntry(**data); a line
+        written before these fields existed has neither key at all, and must
+        still load — via the dataclass defaults, not a migration."""
+        mgr = HistoryManager(tmp_path)
+        path = tmp_path / ".drt" / "history" / "s.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        old_format = {
+            "sync_name": "s",
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "completed_at": "2026-01-01T00:00:01+00:00",
+            "duration_seconds": 1.0,
+            "status": "success",
+            "records_synced": 1,
+            "records_failed": 0,
+            "errors": [],
+            "cursor_value_used": None,
+            "dry_run": False,
+            # no run_id / sync_run_id key at all
+        }
+        path.write_text(json.dumps(old_format) + "\n")
+
+        [loaded] = mgr.read(sync_name="s")
+        assert loaded.run_id is None
+        assert loaded.sync_run_id is None

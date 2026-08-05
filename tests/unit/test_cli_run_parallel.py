@@ -109,6 +109,8 @@ class _FakeResult:
         self.cursor_value_used: str | None = None
         self.watermark_lag: str | None = None
         self.limit_applied: int | None = None
+        self.run_id: str | None = None
+        self.sync_run_id: str | None = "fake-sync-run-id"
 
 
 @pytest.fixture
@@ -393,6 +395,23 @@ def test_without_fail_fast_all_syncs_still_run(
     assert set(patched_engine["calls"]) == {"sync_a", "sync_b", "sync_c"}
     payload = json.loads(result.output)
     assert payload["skipped"] == 0
+
+
+def test_output_json_envelope_carries_an_invocation_run_id(
+    project: Path, patched_engine: dict[str, Any]
+) -> None:
+    """#762: run() generates one run_id per process (unmocked here — only
+    run_sync and destination/source resolution are patched) and every sync's
+    entry in the envelope echoes the same value back."""
+    import uuid
+
+    result = runner.invoke(app, ["run", "--output", "json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    run_id = payload["run_id"]
+    uuid.UUID(run_id)  # a real UUID, not a placeholder
+    assert {e["run_id"] for e in payload["syncs"]} == {run_id}
 
 
 def test_fail_fast_with_threads_accounts_for_every_sync(

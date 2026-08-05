@@ -36,6 +36,8 @@ def build_context(
         "rows_processed": result.success + result.failed,
         "duration_s": duration_s,
         "started_at": started_at,
+        "run_id": result.run_id,
+        "sync_run_id": result.sync_run_id,
     }
 
 
@@ -71,6 +73,8 @@ def build_degraded_context(
         "rows_processed": result.success + result.failed,
         "duration_s": duration_s,
         "started_at": started_at,
+        "run_id": result.run_id,
+        "sync_run_id": result.sync_run_id,
     }
 
 

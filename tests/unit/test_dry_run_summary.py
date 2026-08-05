@@ -62,6 +62,8 @@ def test_run_dry_run_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
             self.cursor_value_used = None
             self.watermark_lag = None
             self.limit_applied = None
+            self.run_id = None
+            self.sync_run_id = "fake-sync-run-id"
 
     def mock_run_sync(*args, **kwargs):
         return FakeResult()

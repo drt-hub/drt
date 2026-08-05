@@ -42,6 +42,21 @@ class TestBuildContext:
         )
         assert "connection refused" in ctx["error"]
 
+    def test_context_carries_correlation_ids_from_result(self) -> None:
+        """#762: no separate params — read straight off the SyncResult that's
+        already threaded through, since run_sync stamps both onto it."""
+        result = SyncResult(success=1, failed=0, run_id="cli-1", sync_run_id="sync-1")
+        ctx = build_context(sync_name="s", result=result, duration_s=1.0, started_at="t")
+        assert ctx["run_id"] == "cli-1"
+        assert ctx["sync_run_id"] == "sync-1"
+
+    def test_context_correlation_ids_default_to_none(self) -> None:
+        ctx = build_context(
+            sync_name="s", result=SyncResult(success=1, failed=0), duration_s=1.0, started_at="t"
+        )
+        assert ctx["run_id"] is None
+        assert ctx["sync_run_id"] is None
+
 
 class TestSlackSender:
     @patch("urllib.request.urlopen")
@@ -213,6 +228,21 @@ class TestDispatchTargets:
             "row_errors_pct",
             "dlq_depth",
         ]
+
+    def test_build_degraded_context_carries_correlation_ids(self) -> None:
+        from drt.alerts.conditions import TrippedCondition
+        from drt.alerts.dispatcher import build_degraded_context
+        from drt.destinations.base import SyncResult
+
+        ctx = build_degraded_context(
+            sync_name="s",
+            result=SyncResult(success=1, failed=0, run_id="cli-2", sync_run_id="sync-2"),
+            duration_s=1.0,
+            started_at="t",
+            tripped=[TrippedCondition("dlq_depth", "gt", 0.0, 5.0)],
+        )
+        assert ctx["run_id"] == "cli-2"
+        assert ctx["sync_run_id"] == "sync-2"
 
 
 class TestOnDegradedCliSeam:

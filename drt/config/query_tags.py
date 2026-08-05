@@ -30,8 +30,12 @@ _COMMENT_UNSAFE = re.compile(r"\*/|[\r\n]")
 def new_run_id() -> str:
     """A short identifier for one sync's single execution.
 
-    Not the engine-wide ``run_id`` + metadata-columns concept tracked by
-    #762 (unimplemented, targeted after this issue) — this is scoped
+    Not the engine-wide ``run_id`` / ``sync_run_id`` concept #762 shipped
+    (``drt._identifiers.new_run_id``) — kept separate on purpose rather than
+    reconciled, even though both are now generated once per ``run_sync()``
+    call. That first-class id is a full UUID4 string, unconstrained; this one
+    feeds SQL comments and BigQuery job labels, which carry hard length/charset
+    budgets this format was chosen to fit without truncation math. Scoped
     narrowly to "distinguish this query from the last one this sync ran",
     which is all cost attribution needs. Lowercase hex only, so it never
     needs the BigQuery label normalization below.

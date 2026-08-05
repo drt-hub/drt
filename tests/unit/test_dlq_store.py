@@ -138,3 +138,44 @@ def test_dlq_backend_protocol_covers_local_public_api() -> None:
     from drt.state.dlq import LocalDlqStore
 
     assert public_methods(LocalDlqStore) == _DLQ_BACKEND_METHODS
+
+
+# --- Correlation ID (#762) ----------------------------------------------------
+
+
+def test_sync_run_id_defaults_to_none() -> None:
+    assert _dl(1).sync_run_id is None
+
+
+def test_sync_run_id_round_trips_through_append_and_read(tmp_path: Path) -> None:
+    store = DlqStore(tmp_path)
+    entry = DeadLetter(
+        record={"id": 1}, error_message="boom", http_status=500, sync_run_id="sync-1"
+    )
+    store.append("s", [entry])
+
+    [loaded] = store.read("s")
+    assert loaded.sync_run_id == "sync-1"
+
+
+def test_a_pre_762_jsonl_line_still_loads(tmp_path: Path) -> None:
+    """`read()` unpacks each line via DeadLetter(**data); a line written
+    before this field existed has no sync_run_id key at all, and must still
+    load — via the dataclass default, not a migration."""
+    import json
+
+    store = DlqStore(tmp_path)
+    path = tmp_path / ".drt" / "dlq" / "s.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    old_format = {
+        "record": {"id": 1},
+        "error_message": "boom",
+        "http_status": 500,
+        "timestamp": "2026-01-01T00:00:00Z",
+        "attempts": 1,
+        # no sync_run_id key at all
+    }
+    path.write_text(json.dumps(old_format) + "\n")
+
+    [loaded] = store.read("s")
+    assert loaded.sync_run_id is None

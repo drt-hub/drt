@@ -75,6 +75,8 @@ def test_diff_with_dry_run_runs(
         limit_applied: int | None = None
         duration_seconds = 0.01
         interrupted = False
+        run_id: str | None = None
+        sync_run_id: str | None = "fake-sync-run-id"
         diff: Any = diff_mod.DiffResult(
             sample=[{"id": 1, "name": "Alice"}],
             total_source_rows=1,
@@ -135,6 +137,8 @@ def test_diff_json_mode_embeds_diff(
         limit_applied: int | None = None
         duration_seconds = 0.01
         interrupted = False
+        run_id: str | None = None
+        sync_run_id: str | None = "fake-sync-run-id"
         diff: Any = sample_diff
 
     def fake_run_sync(*_args: Any, **_kwargs: Any) -> _FakeResult:

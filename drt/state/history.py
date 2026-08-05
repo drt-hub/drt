@@ -41,6 +41,11 @@ class HistoryEntry:
     errors: list[str] = field(default_factory=list)  # truncated to first 5
     cursor_value_used: str | None = None  # for incremental syncs
     dry_run: bool = False  # always False on disk; reserved for future use
+    # Correlation IDs (#762) — see drt._identifiers. Both None on entries
+    # written before this field existed; the JSONL reader tolerates the
+    # missing key via the dataclass default, so no migration is needed.
+    run_id: str | None = None
+    sync_run_id: str | None = None
 
 
 @runtime_checkable

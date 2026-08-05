@@ -16,6 +16,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any, Literal
 
+from drt._identifiers import new_run_id as new_correlation_id
 from drt.config.base import QueryTaggingConfig
 from drt.config.credentials import ProfileConfig
 from drt.config.duration import parse_duration
@@ -245,6 +246,7 @@ def run_sync(
     extract_limit: int | None = None,
     vars: dict[str, Any] | None = None,
     query_tagging: QueryTaggingConfig | None = None,
+    run_id: str | None = None,
 ) -> SyncResult:
     """Run a single sync: extract from source, load to destination.
 
@@ -278,15 +280,25 @@ def run_sync(
             Library callers compose with ``CompositeObserver``; the CLI
             sets up ``LoggingObserver`` + ``StatePersistingObserver`` by
             default (see ``drt.cli.main._run_one``).
+        run_id: Invocation-level correlation id (#762) — one ``drt run``
+            process's identifier, threaded through every sync it executes.
+            ``None`` for library callers that don't track one; this sync's
+            own ``sync_run_id`` (always generated, regardless of ``run_id``)
+            is what ties its own history/DLQ/alert/span records together
+            either way. See ``drt._identifiers``.
 
     Returns:
-        Aggregated SyncResult across all batches.
+        Aggregated SyncResult across all batches, with ``run_id`` and
+        ``sync_run_id`` stamped on it.
     """
     if observer is None:
         observer = NullObserver()
+    sync_run_id = new_correlation_id()
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.perf_counter()
     total_result = SyncResult()
+    total_result.run_id = run_id
+    total_result.sync_run_id = sync_run_id
     raised: BaseException | None = None
     tracer = get_tracer()
 
@@ -311,6 +323,9 @@ def run_sync(
             run_span.set_attribute("destination.type", sync.destination.type)
             run_span.set_attribute("sync.mode", sync.sync.mode)
             run_span.set_attribute("batch_size", sync.sync.batch_size)
+            run_span.set_attribute("sync.run_id", sync_run_id)
+            if run_id is not None:
+                run_span.set_attribute("run.id", run_id)
             try:
                 result = _run_sync_body(
                     sync=sync,
@@ -389,6 +404,8 @@ def run_sync(
                         records_failed=total_result.failed,
                         errors=error_strs,
                         cursor_value_used=getattr(total_result, "cursor_value_used", None),
+                        run_id=run_id,
+                        sync_run_id=sync_run_id,
                     )
                 )
                 history_manager.prune(sync.name, history_retention_days)
@@ -655,6 +672,7 @@ def _run_sync_body(
                             error_message=err.error_message,
                             http_status=err.http_status,
                             timestamp=err.timestamp,
+                            sync_run_id=total_result.sync_run_id,
                         )
                         for err in result.row_errors
                         if 0 <= err.batch_index < len(record_batch)

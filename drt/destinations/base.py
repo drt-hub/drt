@@ -49,6 +49,13 @@ class SyncResult:
     # Record-level diff (#413) — populated by run_sync when dry_run + diff
     # are both requested. Always None outside that path.
     diff: DiffResult | None = None
+    # Correlation IDs (#762). sync_run_id is always set by run_sync() — every
+    # execution gets one, including library callers that pass no run_id at
+    # all. run_id is the invocation-level id the CLI generates once per
+    # `drt run` process and threads through every sync in it; None for a
+    # library caller that never supplied one. See drt._identifiers.
+    run_id: str | None = None
+    sync_run_id: str | None = None
 
     @property
     def total(self) -> int:

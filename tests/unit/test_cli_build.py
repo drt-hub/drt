@@ -65,6 +65,8 @@ class _FakeResult:
         self.limit_applied: int | None = None
         self.duration_seconds = 0.01
         self.interrupted = False
+        self.run_id: str | None = None
+        self.sync_run_id: str | None = "fake-sync-run-id"
 
 
 @pytest.fixture

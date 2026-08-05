@@ -144,7 +144,11 @@ def test_run_span_attributes_and_ok_status(rec_tracer: _RecTracer, tmp_path: Pat
     )
 
     run = rec_tracer.one("drt.sync.run")
-    assert run.attributes == {
+    # sync.run_id (#762) is a fresh UUID per call — asserted separately below,
+    # in test_run_span_carries_correlation_ids.
+    attrs = dict(run.attributes)
+    attrs.pop("sync.run_id")
+    assert attrs == {
         "sync.name": "test_sync",
         "source.type": "bigquery",
         "destination.type": "rest_api",
@@ -154,6 +158,44 @@ def test_run_span_attributes_and_ok_status(rec_tracer: _RecTracer, tmp_path: Pat
     assert run.status == "OK"
     assert run.exceptions == []
     assert run.ended is True
+
+
+def test_run_span_carries_correlation_ids(rec_tracer: _RecTracer, tmp_path: Path) -> None:
+    """#762: sync.run_id is always set; run.id only when a caller supplies one."""
+    result = run_sync(
+        _make_sync(batch_size=10),
+        FakeSource([{"id": 1}]),
+        FakeDestination(),
+        _make_profile(),
+        tmp_path,
+        observer=None,
+        run_id="invocation-abc",
+    )
+
+    run = rec_tracer.one("drt.sync.run")
+    assert run.attributes["sync.run_id"] == result.sync_run_id
+    assert result.sync_run_id  # non-empty — every execution gets one
+    assert run.attributes["run.id"] == "invocation-abc"
+    assert result.run_id == "invocation-abc"
+
+
+def test_run_span_omits_run_id_attribute_when_none(
+    rec_tracer: _RecTracer, tmp_path: Path
+) -> None:
+    """No invocation run_id was supplied — the span carries no run.id attribute
+    at all (not a null/empty one), so a backend query for `run.id EXISTS`
+    cleanly separates CLI-driven runs from library calls that never set one."""
+    run_sync(
+        _make_sync(batch_size=10),
+        FakeSource([{"id": 1}]),
+        FakeDestination(),
+        _make_profile(),
+        tmp_path,
+        observer=None,
+    )
+
+    run = rec_tracer.one("drt.sync.run")
+    assert "run.id" not in run.attributes
 
 
 def test_extract_span_records_rows_extracted(rec_tracer: _RecTracer, tmp_path: Path) -> None:

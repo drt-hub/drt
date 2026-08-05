@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1393,3 +1394,157 @@ def test_extract_limit_never_advances_watermark(tmp_path: Path) -> None:
     assert state is not None
     # The sampled run must not eat the skipped rows' cursor progress.
     assert state.last_cursor_value is None
+
+
+# ---------------------------------------------------------------------------
+# run_id / sync_run_id correlation (#762)
+# ---------------------------------------------------------------------------
+
+
+class TestRunIdCorrelation:
+    """sync_run_id is always generated; run_id only when a caller supplies one.
+
+    Both ride on the single `total_result` object `_run_sync_body` mutates in
+    place (engine/sync.py's own docstring: "so the outer finally-block can
+    read partial results when an exception propagates") — stamped once, right
+    after construction, before anything that could observe or persist it.
+    """
+
+    def test_sync_run_id_is_always_generated(self, tmp_path: Path) -> None:
+        result = run_sync(
+            _make_sync(), FakeSource([{"id": 1}]), FakeDestination(), _make_profile(), tmp_path
+        )
+        assert result.sync_run_id
+        uuid.UUID(result.sync_run_id)  # a real UUID, not a placeholder string
+
+    def test_sync_run_id_is_fresh_per_call(self, tmp_path: Path) -> None:
+        sync, source, dest, profile = (
+            _make_sync(),
+            FakeSource([{"id": 1}]),
+            FakeDestination(),
+            _make_profile(),
+        )
+        first = run_sync(sync, source, dest, profile, tmp_path)
+        second = run_sync(sync, FakeSource([{"id": 1}]), FakeDestination(), profile, tmp_path)
+        assert first.sync_run_id != second.sync_run_id
+
+    def test_run_id_defaults_to_none_and_passes_through_when_given(self, tmp_path: Path) -> None:
+        no_id = run_sync(
+            _make_sync(), FakeSource([{"id": 1}]), FakeDestination(), _make_profile(), tmp_path
+        )
+        assert no_id.run_id is None
+
+        with_id = run_sync(
+            _make_sync(),
+            FakeSource([{"id": 1}]),
+            FakeDestination(),
+            _make_profile(),
+            tmp_path,
+            run_id="cli-invocation-42",
+        )
+        assert with_id.run_id == "cli-invocation-42"
+
+    def test_history_entry_carries_both_ids(self, tmp_path: Path) -> None:
+        from drt.state.history import HistoryManager
+
+        history_mgr = HistoryManager(tmp_path)
+        result = run_sync(
+            _make_sync(),
+            FakeSource([{"id": 1}]),
+            FakeDestination(),
+            _make_profile(),
+            tmp_path,
+            history_manager=history_mgr,
+            run_id="cli-invocation-1",
+        )
+
+        entries = history_mgr.read(sync_name="test_sync")
+        assert len(entries) == 1
+        assert entries[0].run_id == "cli-invocation-1"
+        assert entries[0].sync_run_id == result.sync_run_id
+
+    def test_history_entry_carries_ids_even_on_a_raised_exception(self, tmp_path: Path) -> None:
+        """The history write happens in the finally-block, before re-raise."""
+        from drt.state.history import HistoryManager
+
+        history_mgr = HistoryManager(tmp_path)
+        dest = _AlertingDestination(raise_exc=RuntimeError("boom"))
+        sync = _make_sync_with_alerts()
+
+        with pytest.raises(RuntimeError):
+            run_sync(
+                sync,
+                FakeSource([{"id": 1}]),
+                dest,
+                _make_profile(),
+                tmp_path,
+                history_manager=history_mgr,
+                run_id="cli-invocation-2",
+            )
+
+        entries = history_mgr.read(sync_name=sync.name)
+        assert len(entries) == 1
+        assert entries[0].run_id == "cli-invocation-2"
+        assert entries[0].sync_run_id  # generated even though the sync failed
+
+    def test_dead_letter_carries_sync_run_id(self, tmp_path: Path) -> None:
+        from drt.destinations.row_errors import RowError
+        from drt.engine.observer import DlqObserver
+        from drt.state.dlq import DlqStore
+
+        class _RowErrorDestination:
+            """Fails one row with a pinpointed RowError — FakeDestination
+            only ever populates `failed`/`errors`, never `row_errors`, so the
+            DLQ's dead-letter path (which reads `row_errors`) never fires
+            against it."""
+
+            def load(
+                self, records: list[dict], config: DestinationConfig, sync_options: SyncOptions
+            ) -> SyncResult:
+                result = SyncResult()
+                result.success = len(records) - 1
+                result.failed = 1
+                result.row_errors = [
+                    RowError(
+                        batch_index=0,
+                        record_preview="{}",
+                        http_status=None,
+                        error_message="boom",
+                    )
+                ]
+                return result
+
+        dlq_store = DlqStore(tmp_path)
+        observer = DlqObserver(dlq_store, max_records=100)
+        sync = _make_sync(batch_size=10, on_error="skip")
+
+        result = run_sync(
+            sync,
+            FakeSource([{"id": 1}]),
+            _RowErrorDestination(),
+            _make_profile(),
+            tmp_path,
+            observer=observer,
+        )
+
+        dead_letters = dlq_store.read(sync.name)
+        assert len(dead_letters) == 1
+        assert dead_letters[0].sync_run_id == result.sync_run_id
+
+    @patch("drt.alerts.dispatch_alerts")
+    def test_failure_alert_context_carries_both_ids(
+        self, mock_dispatch: MagicMock, tmp_path: Path
+    ) -> None:
+        result = SyncResult()
+        result.success = 1
+        result.failed = 2
+        result.errors = ["downstream 500"]
+        dest = _AlertingDestination(result=result)
+        sync = _make_sync_with_alerts()
+
+        run_sync(sync, FakeSource([{"id": 1}]), dest, _make_profile(), tmp_path, run_id="cli-77")
+
+        args, kwargs = mock_dispatch.call_args
+        context = args[2] if len(args) > 2 else kwargs.get("context")
+        assert context["run_id"] == "cli-77"
+        assert context["sync_run_id"]  # generated, and not the placeholder ""

@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from drt.state.manager import StateManager
 
 
+from drt._identifiers import new_run_id
 from drt.cli._app import app
 from drt.cli._helpers import (
     exit_code_for_signal as _exit_code_for_signal,
@@ -120,6 +121,13 @@ class _RunContext:
     # Query tagging (#768) — drt_project.yml's query_tagging: block, passed
     # straight through to run_sync().
     query_tagging: QueryTaggingConfig | None = None
+    # Invocation-level correlation id (#762) — one per `drt run` process,
+    # generated once by run() and threaded through every sync it executes.
+    # Always a real value in production; the "" default only exists because
+    # a dataclass field can't be required once a preceding field (above) has
+    # a default — every real construction site sets it explicitly.
+    # See drt._identifiers.
+    run_id: str = ""
 
 
 def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
@@ -196,6 +204,7 @@ def _run_one(
                 extract_limit=ctx.extract_limit,
                 vars=ctx.vars,
                 query_tagging=ctx.query_tagging,
+                run_id=ctx.run_id,
             )
         except Exception as e:
             from drt.cli.errors import format_error, render_to_console
@@ -216,6 +225,12 @@ def _run_one(
                 "error_type": fe.error_type,
                 "error_stage": fe.stage.value,
                 "error_suggestion": fe.suggestion,
+                # run_id (#762): known at the CLI regardless of what happened
+                # inside run_sync(). sync_run_id has no home here — run_sync
+                # raised instead of returning a SyncResult to read it from —
+                # but the history entry and failure alert it wrote before
+                # re-raising still carry the correct one.
+                "run_id": ctx.run_id,
             }
             if ctx.log_json:
                 logging.error(
@@ -227,6 +242,7 @@ def _run_one(
                         "status": "failed",
                         "error_stage": fe.stage.value,
                         "error_type": fe.error_type,
+                        "run_id": ctx.run_id,
                     },
                 )
             if not ctx.json_mode:
@@ -248,6 +264,8 @@ def _run_one(
             "rows_skipped": result.skipped,
             "duration_seconds": elapsed,
             "dry_run": ctx.dry_run,
+            "run_id": ctx.run_id,
+            "sync_run_id": result.sync_run_id,
         }
         # match_policy no-match skips (#757) — a breakdown of rows_skipped, only
         # emitted when present so healthy runs keep a lean entry.
@@ -269,6 +287,8 @@ def _run_one(
                     "rows": result.success,
                     "duration_ms": round(elapsed * 1000),
                     "status": status_str,
+                    "run_id": ctx.run_id,
+                    "sync_run_id": result.sync_run_id,
                 },
             )
         if not ctx.json_mode and not ctx.quiet:
@@ -771,6 +791,7 @@ def run(
         extract_limit=limit,
         vars=project_vars,
         query_tagging=project.query_tagging,
+        run_id=new_run_id(),
     )
 
     # Execute syncs — parallel if threads > 1, sequential otherwise
@@ -854,6 +875,7 @@ def run(
         print(
             json.dumps(
                 {
+                    "run_id": ctx.run_id,
                     "syncs": json_results,
                     "succeeded": succeeded,
                     "failed": failed,
