@@ -50,18 +50,21 @@ the destination:
    **source** column name.
 3. Destination lookups (`lookups:`) resolve FK values using **source**
    column names.
-4. **`field_mappings` renames keys** — the last transform before load.
-5. The destination, `upsert_key`, and the `--diff` engine all see the
+4. [`computed_fields`](computed-fields.md) derives new columns, also
+   from **source** column names.
+5. **`field_mappings` renames keys** — including any computed field.
+6. [`mask`](pii-masking.md) obscures fields under their **mapped** names.
+7. The destination, `upsert_key`, and the `--diff` engine all see the
    **mapped** (destination) names.
 
 This ordering is deliberate: source-side concerns (`cursor_field`,
-`lookups`) reference the names the query produces, while
-destination-side concerns (`upsert_key`, target columns) reference the
-names after the rename.
+`lookups`, `computed_fields`) reference the names the query produces,
+while destination-side concerns (`upsert_key`, `mask`, target columns)
+reference the names after the rename.
 
 ```
-extract → cursor tracking → lookups → field_mappings → destination.load()
-            (source names)  (source)    (rename here)    (mapped names)
+extract → cursor tracking → lookups → computed_fields → field_mappings → mask → load()
+            (source names)  (source)   (source names)     (rename here)  (mapped names)
 ```
 
 ## Ordering example: remapping the cursor column
@@ -116,16 +119,21 @@ drt run --select users_to_crm --dry-run --diff   # preview the mapped records
 - **Type coercion** — values pass through unchanged. Cast in the source
   SQL or use `tojson_safe` for `datetime` / `Decimal` / `UUID` in
   templated destinations.
-- **Computed / derived fields** — there's no expression evaluation; a
-  mapping target is a plain name, not a formula.
+- **Computed / derived fields** — a mapping target is a plain name, not
+  a formula. Use [`computed_fields`](computed-fields.md), which runs
+  just before the rename.
 - **Nested extraction** — no JSONPath into nested columns.
 
-These are deliberately out of scope (tracked separately) to keep the
-rename predictable and pure.
+Keeping the rename itself pure is deliberate — it is what makes it
+single-pass and order-independent.
 
 ## See also
 
 - [`docs/llm/API_REFERENCE.md`](../llm/API_REFERENCE.md) — full sync
   options reference
+- [Computed Fields](computed-fields.md) — derive new columns (runs
+  *before* `field_mappings`)
+- [PII Masking](pii-masking.md) — obscure fields (runs *after*
+  `field_mappings`)
 - [Destination Lookup](destination-lookup.md) — resolve FK values during
   sync (runs *before* `field_mappings`)

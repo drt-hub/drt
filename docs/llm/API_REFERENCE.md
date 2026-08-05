@@ -205,13 +205,25 @@ sync:                       # optional: all fields have defaults
     lag: "1 hour"           # optional (#759): overlap window — re-read this far behind the stored watermark to catch late-arriving rows. Duration string for timestamp cursors ("1 hour", same grammar as freshness.max_age) or positive int for numeric cursors. Storage-sourced watermarks only (never --cursor-value / default_value); the persisted watermark is never lagged. Overlap rows are RE-SENT each run — destination must tolerate duplicates (upsert_key)
   batch_size: 100           # default: 100 — rows per destination call
   on_error: fail            # "fail" (default) | "skip"
+  computed_fields:          # optional (#763): declarative derived columns {field_name: jinja_template}
+    full_name: "{{ row.first_name }} {{ row.last_name }}"   # reads SOURCE column names, like cursor_field / lookups
+    signup_ms: "{{ (row.signup_ts.timestamp() * 1000) | int }}"
+    source_system: "drt-${ENV}"          # constants and ${VAR} substitution both work
+    # transform order: computed_fields -> field_mappings -> mask. A SINGLE-EXPRESSION template keeps the
+    # Python value's type ({{ row.n * 1000 }} -> 5000, not "5000"); anything with surrounding text renders
+    # as a string. A computed field can never read another (order-independent, like field_mappings).
+    # Writing an existing column name replaces it in place and reads the ORIGINAL value (phone -> E.164).
+    # Same Jinja env / filters / StrictUndefined as body_template. Syntax is validated at config load;
+    # a missing column is a run-time error under on_error (skip = drop the row, fail = stop and name the field).
+    # WARNING: a null passed THROUGH a filter renders as the string "None" (Jinja stringifies before
+    # filtering) — write {{ row.phone or '' | replace('-','') }}. A bare {{ row.phone }} stays null.
   field_mappings:           # optional (#415): declarative column rename {source_column: destination_field}
-    user_id: id             # applied after extraction + cursor tracking + lookups, just before the destination
-    full_name: name         # cursor_field / lookups use SOURCE names; upsert_key / destination columns use MAPPED names
+    user_id: id             # applied after extraction + cursor tracking + lookups + computed_fields
+    full_name: name         # cursor_field / lookups / computed_fields use SOURCE names; upsert_key / destination columns use MAPPED names
   mask:                     # optional (#427/#660): PII masking — obscure fields before they reach the destination
     email: hash             # "hash" (SHA-256 hex) | "redact" ("[REDACTED]"); keys reference the DESTINATION-facing name (post field_mappings)
     name: { strategy: truncate, length: 2 }  # object form for parameterised strategies (truncate keeps the first N chars)
-    # runs as the LAST transform (after field_mappings); nulls pass through; works on every destination; source SQL untouched
+    # runs as the LAST transform (after computed_fields and field_mappings); nulls pass through; works on every destination; source SQL untouched
   dlq:                      # optional (#278): Dead Letter Queue — persist per-record load failures for replay
     enabled: false          # default: false (opt-in) — writes FULL records to .drt/dlq/<sync>.jsonl (a PII decision)
     max_records: 10000      # default: 10000 — cap queue size; oldest entries dropped past this (0 = unbounded)

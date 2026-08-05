@@ -49,11 +49,13 @@ options.
 
 ## How it composes
 
-- **Runs last.** Masking is the final transform before the load —
-  after `lookups` and after [`field_mappings`](field-mappings.md). So
-  `mask` keys reference the field name **as it leaves drt** (the
-  destination-facing name). If you rename `email_address → email` with
-  `field_mappings`, mask the key `email`.
+- **Runs last.** Masking is the final transform before the load — after
+  `lookups`, after [`computed_fields`](computed-fields.md), and after
+  [`field_mappings`](field-mappings.md). So `mask` keys reference the
+  field name **as it leaves drt** (the destination-facing name). If you
+  rename `email_address → email` with `field_mappings`, mask the key
+  `email`. A field derived by `computed_fields` can be masked the same
+  way, under whatever name it has by the time masking runs.
 - **Nulls pass through.** A `null` carries no PII, and masking it would
   only hide that the source value was absent — so `null` stays `null`.
 - **Best-effort per record.** A configured field that a given row doesn't

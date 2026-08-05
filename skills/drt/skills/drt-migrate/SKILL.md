@@ -55,7 +55,7 @@ Help the user migrate from an existing Reverse ETL tool (Census, Hightouch, Poly
 | Sync behavior: Mirror (upsert + delete-removed) | `sync.mode: mirror` (v0.7.7+) + `upsert_key` — supported on postgres / mysql / clickhouse / snowflake / databricks (v0.7.9). Tune deletes via `sync.mirror` (v0.7.10, postgres / mysql only): `strategy: tracked` (#686, delete only rows drt itself synced — safe when the app also writes the table) and `scope: [col]` (#687, restrict deletes to observed parents) |
 | Sync behavior: Replace (overwrite table) | `sync.mode: replace` (TRUNCATE + INSERT, zero-downtime via `replace_strategy: swap` on supported DWHs) |
 | Field mappings (rename columns) | `sync.field_mappings: {source_column: destination_field}` (v0.7.9, #415) — first-class column rename applied just before the destination; use instead of aliasing in SQL |
-| Field mappings (compute / reshape a value) | `body_template` / `properties_template` (Jinja2) |
+| Field mappings (compute / reshape a value) | `sync.computed_fields: {name: "<jinja>"}` (#763) — derived columns for **every** destination, applied before `field_mappings` / `mask`; a single-expression template keeps the value's Python type. `body_template` / `properties_template` remain for shaping the whole payload of the destinations that have them |
 | PII masking on a synced column | `sync.mask: {field: hash \| redact}` or `{field: {strategy: truncate, length: N}}` (v0.7.10, #427/#660) — obscures a field just before the destination without touching the source SQL |
 | Run schedule | `drt run` via cron, CI, Dagster, Airflow, or Prefect |
 | Error notifications | `failure_alerts` (Slack / webhook, v0.7.0+) — fires on sync-level failures |
