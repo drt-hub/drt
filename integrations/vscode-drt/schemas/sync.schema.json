@@ -4547,6 +4547,40 @@
       "title": "UniqueTest",
       "type": "object"
     },
+    "UnitTest": {
+      "description": "Offline transform-pipeline test \u2014 fixture rows in, expected rows out (#780).\n\nUnlike ``SyncTest`` (which queries the *destination* after a real sync),\na ``UnitTest`` never touches a destination or the network: ``given`` rows\nare run through the same ``computed_fields`` -> ``field_mappings`` ->\n``mask`` chain ``run_sync()`` applies in production (via\n``drt.engine.unit_test_runner``), and the result is compared against\n``expect``. dbt unit-tests analog; Census/Hightouch mapper previews.",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "given": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "minItems": 1,
+          "title": "Given",
+          "type": "array"
+        },
+        "expect": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "minItems": 1,
+          "title": "Expect",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "given",
+        "expect"
+      ],
+      "title": "UnitTest",
+      "type": "object"
+    },
     "WatermarkConfig": {
       "description": "Configuration for remote watermark storage.",
       "properties": {
@@ -5022,6 +5056,13 @@
         "$ref": "#/$defs/SyncTest"
       },
       "title": "Tests",
+      "type": "array"
+    },
+    "unit_tests": {
+      "items": {
+        "$ref": "#/$defs/UnitTest"
+      },
+      "title": "Unit Tests",
       "type": "array"
     },
     "alerts": {

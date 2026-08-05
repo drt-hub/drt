@@ -97,6 +97,7 @@ from drt.config.sync_options import (
     SyncOptions,
     SyncTest,
     UniqueTest,
+    UnitTest,
     WatermarkConfig,
     WebhookAlertConfig,
 )
@@ -175,6 +176,7 @@ __all__ = [
     "TeamsDestinationConfig",
     "TwilioDestinationConfig",
     "UniqueTest",
+    "UnitTest",
     "WatermarkConfig",
     "WebhookAlertConfig",
     "ZendeskDestinationConfig",

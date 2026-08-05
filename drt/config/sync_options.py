@@ -6,7 +6,7 @@ the three ``destinations_*`` modules and consumed by :class:`SyncConfig`.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
@@ -374,6 +374,30 @@ class SyncTest(BaseModel):
         return self
 
 
+class UnitTest(BaseModel):
+    """Offline transform-pipeline test — fixture rows in, expected rows out (#780).
+
+    Unlike ``SyncTest`` (which queries the *destination* after a real sync),
+    a ``UnitTest`` never touches a destination or the network: ``given`` rows
+    are run through the same ``computed_fields`` -> ``field_mappings`` ->
+    ``mask`` chain ``run_sync()`` applies in production (via
+    ``drt.engine.unit_test_runner``), and the result is compared against
+    ``expect``. dbt unit-tests analog; Census/Hightouch mapper previews.
+    """
+
+    name: str
+    # At least one row — an empty `given` would make every unit test
+    # vacuously pass, silently, the moment a fixture typo drops its only row.
+    given: list[dict[str, Any]] = Field(min_length=1)
+    # Row count must match `given` exactly (a transform that's supposed to
+    # drop/split rows is exactly the kind of change a unit test exists to
+    # catch) — but each expected row is matched by the *keys it declares*,
+    # not the full record. A sync's source columns grow over time; requiring
+    # every unit test to enumerate every column it doesn't care about would
+    # make each one a maintenance burden against unrelated schema growth.
+    expect: list[dict[str, Any]] = Field(min_length=1)
+
+
 class SlackAlertConfig(BaseModel):
     type: Literal["slack"]
     webhook_url: str | None = None
@@ -546,6 +570,9 @@ class SyncConfig(BaseModel):
     destination: DestinationConfig
     sync: SyncOptions = Field(default_factory=SyncOptions)
     tests: list[SyncTest] = Field(default_factory=list)
+    # Offline transform-pipeline tests (#780) — distinct from `tests:`, which
+    # queries the real destination after a sync has run.
+    unit_tests: list[UnitTest] = Field(default_factory=list)
     alerts: AlertsConfig | None = None
 
     @model_validator(mode="after")
