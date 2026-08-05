@@ -106,7 +106,9 @@ class TestSQLiteStreamingExtraction(unittest.TestCase):
         self.db_path = self.temp_db.name
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("CREATE TABLE big (id INTEGER)")
-            conn.executemany("INSERT INTO big VALUES (?)", [(i,) for i in range(2500)])
+            conn.executemany(
+                "INSERT INTO big VALUES (?)", [(i,) for i in range(2500)]
+            )
             conn.commit()
         self.config = SQLiteProfile(type="sqlite", database=self.db_path)
 

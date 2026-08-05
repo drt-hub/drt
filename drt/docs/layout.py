@@ -103,7 +103,9 @@ def _forward_edges(manifest: Manifest) -> tuple[list[tuple[str, str]], list[tupl
 
 def _lookup_edges(manifest: Manifest) -> list[tuple[str, str]]:
     """Lookup back-edges (producer sync -> consumer sync), stably ordered."""
-    return sorted((e.from_, e.to) for e in manifest.edges if e.kind == "lookup")
+    return sorted(
+        (e.from_, e.to) for e in manifest.edges if e.kind == "lookup"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -196,7 +198,9 @@ def _crossings_between(
     pos_top = {n: i for i, n in enumerate(order_top)}
     pos_bottom = {n: i for i, n in enumerate(order_bottom)}
     placed = sorted(
-        (pos_top[a], pos_bottom[b]) for a, b in edges if a in pos_top and b in pos_bottom
+        (pos_top[a], pos_bottom[b])
+        for a, b in edges
+        if a in pos_top and b in pos_bottom
     )
     return _count_inversions([b for _, b in placed])
 
@@ -278,12 +282,8 @@ def _place_nodes(
         for i, node_id in enumerate(ids):
             y = top + i * cfg.row_h + cfg.node_h / 2
             placed[node_id] = LayoutNode(
-                id=node_id,
-                kind=kinds[node_id],
-                rank=rank,
-                order=i,
-                x=_round(x),
-                y=_round(y),
+                id=node_id, kind=kinds[node_id], rank=rank, order=i,
+                x=_round(x), y=_round(y),
             )
     return placed, content_h
 
@@ -382,7 +382,9 @@ def compute_layout(
     heuristics to A/B). Raises ``ValueError`` for an unknown strategy.
     """
     if strategy not in _STRATEGIES:
-        raise ValueError(f"Unknown strategy {strategy!r}; expected one of {sorted(_STRATEGIES)}.")
+        raise ValueError(
+            f"Unknown strategy {strategy!r}; expected one of {sorted(_STRATEGIES)}."
+        )
     cfg = config or LayoutConfig()
     agg = _STRATEGIES[strategy]
 
@@ -407,9 +409,7 @@ def compute_layout(
         if a in placed and b in placed:
             edges.append(
                 LayoutEdge(
-                    src=a,
-                    dst=b,
-                    kind="forward",
+                    src=a, dst=b, kind="forward",
                     points=_forward_path(placed[a], placed[b], cfg),
                 )
             )
@@ -420,21 +420,14 @@ def compute_layout(
     if lanes_height:
         placed = {
             nid: LayoutNode(
-                id=n.id,
-                kind=n.kind,
-                rank=n.rank,
-                order=n.order,
-                x=n.x,
-                y=_round(n.y + lanes_height),
+                id=n.id, kind=n.kind, rank=n.rank, order=n.order,
+                x=n.x, y=_round(n.y + lanes_height),
             )
             for nid, n in placed.items()
         }
         edges = [
             LayoutEdge(
-                src=e.src,
-                dst=e.dst,
-                kind=e.kind,
-                lane=e.lane,
+                src=e.src, dst=e.dst, kind=e.kind, lane=e.lane,
                 points=tuple((x, _round(y + lanes_height)) for x, y in e.points),
             )
             for e in edges
@@ -443,7 +436,9 @@ def compute_layout(
         # graph-side endpoints, not the lane crossbar — recompute cleanly:
         lookup_edges, _ = _route_lookups(_lookup_edges(manifest), placed, cfg)
 
-    all_nodes = tuple(sorted(placed.values(), key=lambda n: (n.rank, n.order)))
+    all_nodes = tuple(
+        sorted(placed.values(), key=lambda n: (n.rank, n.order))
+    )
     all_edges = tuple(edges) + tuple(lookup_edges)
 
     width = cfg.margin * 2 + (len(ranks) - 1) * cfg.col_w + cfg.node_w

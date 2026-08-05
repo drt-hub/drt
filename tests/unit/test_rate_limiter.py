@@ -166,7 +166,9 @@ class TestBurst:
 
     @patch("drt.destinations.rate_limiter.time.sleep")
     @patch("drt.destinations.rate_limiter.time.monotonic")
-    def test_burst_allows_n_immediate_calls_then_throttles(self, mock_mono, mock_sleep) -> None:
+    def test_burst_allows_n_immediate_calls_then_throttles(
+        self, mock_mono, mock_sleep
+    ) -> None:
         """rps=1, burst=3: three acquires at t=0 don't sleep, the fourth does."""
         mock_mono.return_value = 1000.0
         rl = RateLimiter(requests_per_second=1, burst=3)

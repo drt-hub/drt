@@ -82,7 +82,9 @@ class TestSlackDestination:
         result = SlackDestination().load([{"msg": "hello"}], config, _options())
         assert result.success == 1
 
-    def test_destination_retry_overrides_sync_retry(self, httpserver: HTTPServer) -> None:
+    def test_destination_retry_overrides_sync_retry(
+        self, httpserver: HTTPServer
+    ) -> None:
         """destination.retry > sync.retry (#277)."""
         from werkzeug.wrappers import Response
 
@@ -116,13 +118,14 @@ class TestSlackDestination:
         SlackDestination().load([{"msg": "x"}], config, opts)
         assert call_count["n"] == 4
 
-    def test_on_error_fail_stops_after_first_failure(self, httpserver: HTTPServer) -> None:
+    def test_on_error_fail_stops_after_first_failure(
+        self, httpserver: HTTPServer
+    ) -> None:
         """on_error=fail stops batch processing after first failure (#365)."""
         call_count = {"n": 0}
 
         def handler(_request):  # type: ignore[no-untyped-def]
             from werkzeug.wrappers import Response
-
             call_count["n"] += 1
             return Response("", status=500)
 
@@ -136,7 +139,9 @@ class TestSlackDestination:
             ),
         )
         opts = SyncOptions(on_error="fail")
-        result = SlackDestination().load([{"msg": "a"}, {"msg": "b"}, {"msg": "c"}], config, opts)
+        result = SlackDestination().load(
+            [{"msg": "a"}, {"msg": "b"}, {"msg": "c"}], config, opts
+        )
         assert result.failed == 1
         assert result.success == 0
         assert call_count["n"] == 1  # Second and third rows not attempted
@@ -193,13 +198,14 @@ class TestDiscordDestination:
         )
         assert result.success == 1
 
-    def test_on_error_fail_stops_after_first_failure(self, httpserver: HTTPServer) -> None:
+    def test_on_error_fail_stops_after_first_failure(
+        self, httpserver: HTTPServer
+    ) -> None:
         """on_error=fail stops batch processing after first failure (#365)."""
         call_count = {"n": 0}
 
         def handler(_request):  # type: ignore[no-untyped-def]
             from werkzeug.wrappers import Response
-
             call_count["n"] += 1
             return Response("", status=500)
 
@@ -213,12 +219,16 @@ class TestDiscordDestination:
             ),
         )
         opts = SyncOptions(on_error="fail")
-        result = DiscordDestination().load([{"msg": "a"}, {"msg": "b"}, {"msg": "c"}], config, opts)
+        result = DiscordDestination().load(
+            [{"msg": "a"}, {"msg": "b"}, {"msg": "c"}], config, opts
+        )
         assert result.failed == 1
         assert result.success == 0
         assert call_count["n"] == 1
 
-    def test_destination_retry_overrides_sync_retry(self, httpserver: HTTPServer) -> None:
+    def test_destination_retry_overrides_sync_retry(
+        self, httpserver: HTTPServer
+    ) -> None:
         """destination.retry > sync.retry (#277, #365)."""
         from werkzeug.wrappers import Response
 
@@ -309,7 +319,6 @@ class TestHubSpotDestination:
 
         def handler(_request):  # type: ignore[no-untyped-def]
             from werkzeug.wrappers import Response
-
             call_count["n"] += 1
             return Response('{"error": "rate limited"}', status=429)
 
@@ -442,7 +451,6 @@ class TestGitHubActionsDestination:
 
         def handler(_request):  # type: ignore[no-untyped-def]
             from werkzeug.wrappers import Response
-
             call_count["n"] += 1
             return Response('{"message": "Bad credentials"}', status=401)
 
@@ -592,7 +600,6 @@ class TestNotionDestination:
 
         def handler(_request):  # type: ignore[no-untyped-def]
             from werkzeug.wrappers import Response
-
             call_count["n"] += 1
             return Response("", status=500)
 

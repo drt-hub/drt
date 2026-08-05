@@ -158,7 +158,9 @@ def has_cursor_template(sql: str) -> bool:
     return bool(_CURSOR_TEMPLATE_PATTERN.search(sql))
 
 
-def _render_template(sql: str, cursor_value: str | None, vars: dict[str, Any] | None = None) -> str:
+def _render_template(
+    sql: str, cursor_value: str | None, vars: dict[str, Any] | None = None
+) -> str:
     """Render the SQL template surface: ``cursor_value`` / ``watermark`` plus
     ``var()`` (#783). Deliberately tiny — no control flow or macros."""
     env = var_environment(vars)

@@ -130,7 +130,9 @@ def _fake_connection(rowcount: int = 1) -> MagicMock:
 def test_postgres_declares_match_policy_capability() -> None:
     dest = PostgresDestination()
     assert isinstance(dest, MatchPolicyCapable)
-    assert dest.supported_match_policies() == frozenset({"upsert", "update_only", "create_only"})
+    assert dest.supported_match_policies() == frozenset(
+        {"upsert", "update_only", "create_only"}
+    )
 
 
 def test_create_only_emits_do_nothing_and_counts_existing_as_skipped() -> None:
@@ -139,7 +141,9 @@ def test_create_only_emits_do_nothing_and_counts_existing_as_skipped() -> None:
     opts = SyncOptions(mode="upsert", match_policy="create_only")
 
     with patch.object(PostgresDestination, "_connect", return_value=conn):
-        result = dest.load([{"id": 1, "score": 5}, {"id": 2, "score": 6}], _pg_config(), opts)
+        result = dest.load(
+            [{"id": 1, "score": 5}, {"id": 2, "score": 6}], _pg_config(), opts
+        )
 
     query = str(conn.cursor.return_value.execute.call_args.args[0])
     assert "ON CONFLICT" in query and "DO NOTHING" in query
@@ -166,7 +170,9 @@ def test_update_only_emits_update_where_with_set_then_key_params() -> None:
     opts = SyncOptions(mode="upsert", match_policy="update_only")
 
     with patch.object(PostgresDestination, "_connect", return_value=conn):
-        result = dest.load([{"id": 1, "score": 5, "name": "a"}], _pg_config(), opts)
+        result = dest.load(
+            [{"id": 1, "score": 5, "name": "a"}], _pg_config(), opts
+        )
 
     call = conn.cursor.return_value.execute.call_args
     query = str(call.args[0])  # psycopg2 Composed repr

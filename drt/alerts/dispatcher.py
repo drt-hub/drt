@@ -1,5 +1,4 @@
 """Routes AlertItems to per-type senders. Best-effort: never raises."""
-
 from __future__ import annotations
 
 import logging
@@ -53,7 +52,9 @@ def build_degraded_context(
     default message renders a readable summary; ``conditions_tripped`` carries
     the structured detail for webhook JSON bodies.
     """
-    summary = ", ".join(f"{t.metric} {t.actual} ({t.operator} {t.threshold})" for t in tripped)
+    summary = ", ".join(
+        f"{t.metric} {t.actual} ({t.operator} {t.threshold})" for t in tripped
+    )
     return {
         "sync_name": sync_name,
         "status": "degraded",

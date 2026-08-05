@@ -41,7 +41,9 @@ def run_test(ctx: McpContext, sync_name: str | None = None) -> dict[str, Any]:
 
         if not is_queryable(sync.destination):
             sync_result["skipped"] = True
-            sync_result["reason"] = f"tests not supported for {sync.destination.type} destinations"
+            sync_result["reason"] = (
+                f"tests not supported for {sync.destination.type} destinations"
+            )
             results.append(sync_result)
             continue
 

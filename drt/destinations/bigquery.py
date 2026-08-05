@@ -98,7 +98,9 @@ class BigQueryDestination:
                 result.success += 1
 
         if failed_indices and sync_options.on_error == "fail":
-            raise RuntimeError(f"BigQuery insert failed for {len(failed_indices)} row(s)")
+            raise RuntimeError(
+                f"BigQuery insert failed for {len(failed_indices)} row(s)"
+            )
 
     def _merge(
         self,
@@ -133,7 +135,9 @@ class BigQueryDestination:
             update_set = ", ".join([f"{c} = S.{c}" for c in update_cols])
             insert_cols = ", ".join(columns)
             insert_vals = ", ".join([f"S.{c}" for c in columns])
-            matched = f"WHEN MATCHED THEN UPDATE SET {update_set} " if update_cols else ""
+            matched = (
+                f"WHEN MATCHED THEN UPDATE SET {update_set} " if update_cols else ""
+            )
 
             merge_sql = (
                 f"MERGE `{table_id}` T USING `{tmp_table_id}` S "
@@ -165,7 +169,8 @@ class BigQueryDestination:
         if not query_tags:
             return None
         return {
-            normalize_bigquery_label(k): normalize_bigquery_label(v) for k, v in query_tags.items()
+            normalize_bigquery_label(k): normalize_bigquery_label(v)
+            for k, v in query_tags.items()
         }
 
     def _load_job_config(self, labels: dict[str, str] | None) -> Any:

@@ -216,18 +216,26 @@ class TestSnowflakeSourceKeyPairConnect:
             **auth,
         )
 
-    def test_private_key_env_wins_and_passes_der(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_private_key_env_wins_and_passes_der(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv("SF_PK", self._pem())
         fake = MagicMock()
-        with patch.dict("sys.modules", {"snowflake": fake, "snowflake.connector": fake.connector}):
-            SnowflakeSource()._connect(self._profile(private_key_env="SF_PK", password="ignored"))
+        with patch.dict(
+            "sys.modules", {"snowflake": fake, "snowflake.connector": fake.connector}
+        ):
+            SnowflakeSource()._connect(
+                self._profile(private_key_env="SF_PK", password="ignored")
+            )
         kwargs = fake.connector.connect.call_args.kwargs
         assert isinstance(kwargs["private_key"], bytes)  # DER bytes
         assert "password" not in kwargs
 
     def test_password_fallback_when_no_key(self) -> None:
         fake = MagicMock()
-        with patch.dict("sys.modules", {"snowflake": fake, "snowflake.connector": fake.connector}):
+        with patch.dict(
+            "sys.modules", {"snowflake": fake, "snowflake.connector": fake.connector}
+        ):
             SnowflakeSource()._connect(self._profile(password="pw"))
         kwargs = fake.connector.connect.call_args.kwargs
         assert kwargs["password"] == "pw"
@@ -297,7 +305,9 @@ class TestSnowflakeSourceRetry:
         def connect(_config: Any, **_kwargs: Any) -> MagicMock:
             attempts.append(1)
             if len(attempts) < 3:
-                raise sf_errors.DatabaseError(msg="Authentication token has expired", errno=390114)
+                raise sf_errors.DatabaseError(
+                    msg="Authentication token has expired", errno=390114
+                )
             return _fake_conn(_fake_cursor(["id"], [(1,)]))
 
         with patch.object(SnowflakeSource, "_connect", side_effect=connect):

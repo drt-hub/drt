@@ -341,7 +341,9 @@ def test_extract_does_not_retry_after_first_row() -> None:
     assert len(attempts) == 1
 
 
-@pytest.mark.parametrize("exc_name", ["InvalidPassword", "InvalidAuthorizationSpecification"])
+@pytest.mark.parametrize(
+    "exc_name", ["InvalidPassword", "InvalidAuthorizationSpecification"]
+)
 def test_is_transient_false_for_auth_failures(exc_name: str) -> None:
     """Auth failures live *under* OperationalError in psycopg2 — an
     isinstance check against that base lets them through.

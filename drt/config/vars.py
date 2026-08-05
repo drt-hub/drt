@@ -73,7 +73,9 @@ def parse_cli_vars(raw: str) -> dict[str, Any]:
             f"--vars is not valid YAML: {e}. Expected 'name: value, other: value'."
         ) from e
     if not isinstance(data, dict):
-        raise VarError("--vars must be a mapping, e.g. --vars 'lookback_days: 1, tag: crm'.")
+        raise VarError(
+            "--vars must be a mapping, e.g. --vars 'lookback_days: 1, tag: crm'."
+        )
     return data
 
 

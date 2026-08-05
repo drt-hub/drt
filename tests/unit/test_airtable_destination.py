@@ -142,7 +142,9 @@ class TestAirtableLoad:
         client.request.return_value = _http_error(500, "boom")
         records = [{"i": i} for i in range(15)]  # 2 chunks
         with _patch_client(client):
-            result = AirtableDestination().load(records, _config(), _options(on_error="fail"))
+            result = AirtableDestination().load(
+                records, _config(), _options(on_error="fail")
+            )
         assert result.failed == 10  # first chunk failed
         assert client.request.call_count == 1  # stopped before the second chunk
 
@@ -161,7 +163,9 @@ class TestAirtableLoad:
         client.request.side_effect = httpx.ConnectError("no route")
         records = [{"i": i} for i in range(15)]  # 2 chunks
         with _patch_client(client):
-            result = AirtableDestination().load(records, _config(), _options(on_error="fail"))
+            result = AirtableDestination().load(
+                records, _config(), _options(on_error="fail")
+            )
         assert result.failed == 10
         assert client.request.call_count == 1  # stopped before the second chunk
 

@@ -140,7 +140,11 @@ def print_sync_result(sync_name: str, result: SyncResult, elapsed: float) -> Non
         + (f", {result.failed} failed" if result.failed else "")
         + (
             f", {result.skipped} skipped"
-            + (f" ({result.skipped_no_match} no match)" if result.skipped_no_match else "")
+            + (
+                f" ({result.skipped_no_match} no match)"
+                if result.skipped_no_match
+                else ""
+            )
             if result.skipped
             else ""
         )
@@ -373,7 +377,8 @@ def print_diff_table(diff: object, sync_name: str) -> None:
         n_total = diff.total_source_rows
         more = f" ({n_total - n_shown} more not shown)" if n_total > n_shown else ""
         console.print(
-            f"  [bold]→ {n_total} record(s) would be sent.[/bold] Sample (first {n_shown}{more}):"
+            f"  [bold]→ {n_total} record(s) would be sent.[/bold] "
+            f"Sample (first {n_shown}{more}):"
         )
         for row in diff.sample:
             console.print(f"    {_format_row_keys(row)}")
@@ -426,7 +431,8 @@ def print_diff_table(diff: object, sync_name: str) -> None:
                 else "key columns only"
             )
             console.print(
-                f"\n  [red]- Deleted ({n_deleted}, mirror DELETE):[/red] [dim]({suffix})[/dim]"
+                f"\n  [red]- Deleted ({n_deleted}, mirror DELETE):[/red] "
+                f"[dim]({suffix})[/dim]"
             )
         else:
             console.print(f"\n  [red]- Deleted ({n_deleted}):[/red]")
@@ -440,7 +446,8 @@ def print_diff_table(diff: object, sync_name: str) -> None:
 
     if diff.truncated:
         console.print(
-            "\n  [dim]…some records omitted (limit reached). Use --diff-limit N to see more.[/dim]"
+            "\n  [dim]…some records omitted (limit reached). "
+            "Use --diff-limit N to see more.[/dim]"
         )
 
 

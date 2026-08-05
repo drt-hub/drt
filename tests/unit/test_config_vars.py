@@ -340,7 +340,9 @@ def test_cli_run_vars_is_parsed_and_overrides(
     assert seen["vars"]["pipeline"] == "sandbox", "--vars must override drt_project.yml vars:"
 
 
-def test_cli_run_rejects_malformed_vars(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_run_rejects_malformed_vars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A malformed --vars is a clean CLI error, not a traceback."""
     from drt.cli.main import app
 

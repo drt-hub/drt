@@ -84,7 +84,10 @@ class ClickHouseDestination:
         try:
             columns = list(records[0].keys())
 
-            if sync_options.mode == "replace" and sync_options.replace_strategy == "swap":
+            if (
+                sync_options.mode == "replace"
+                and sync_options.replace_strategy == "swap"
+            ):
                 result = self._load_replace_swap(
                     client,
                     records,
@@ -95,7 +98,9 @@ class ClickHouseDestination:
             else:
                 if sync_options.mode == "replace" and not self._replace_truncated:
                     client.command(
-                        tag_query(f"TRUNCATE TABLE {self._quote_ident(config.table)}", sync_options)
+                        tag_query(
+                            f"TRUNCATE TABLE {self._quote_ident(config.table)}", sync_options
+                        )
                     )
                     self._replace_truncated = True
 
@@ -116,7 +121,9 @@ class ClickHouseDestination:
                     and sync_options.mirror is not None
                     and sync_options.mirror.scope
                 ):
-                    missing = [c for c in sync_options.mirror.scope if c not in records[0]]
+                    missing = [
+                        c for c in sync_options.mirror.scope if c not in records[0]
+                    ]
                     if missing:
                         raise ValueError(
                             "mirror.scope columns missing from the model output: "
@@ -156,18 +163,26 @@ class ClickHouseDestination:
                     if self._mirror_keys is None:
                         self._mirror_keys = []
                     scope_cols = (
-                        sync_options.mirror.scope if sync_options.mirror is not None else None
+                        sync_options.mirror.scope
+                        if sync_options.mirror is not None
+                        else None
                     )
                     if scope_cols and self._mirror_scopes is None:
                         self._mirror_scopes = set()
-                    failed_indices = {re.batch_index for re in result.row_errors}
+                    failed_indices = {
+                        re.batch_index for re in result.row_errors
+                    }
                     for idx, record in enumerate(records):
                         if idx in failed_indices:
                             continue
-                        self._mirror_keys.append(tuple(record.get(k) for k in config.upsert_key))
+                        self._mirror_keys.append(
+                            tuple(record.get(k) for k in config.upsert_key)
+                        )
                         if scope_cols:
                             assert self._mirror_scopes is not None
-                            self._mirror_scopes.add(tuple(record.get(c) for c in scope_cols))
+                            self._mirror_scopes.add(
+                                tuple(record.get(c) for c in scope_cols)
+                            )
         finally:
             client.close()
 
@@ -308,9 +323,13 @@ class ClickHouseDestination:
                 scope_clause = f"{scope_col_q} IN {{scope_keys:Array(String)}} AND "
                 params["scope_keys"] = [str(s[0]) for s in scopes]
             else:
-                scope_col_tuple = "(" + ", ".join(f"toString(`{c}`)" for c in scope_cols) + ")"
+                scope_col_tuple = (
+                    "(" + ", ".join(f"toString(`{c}`)" for c in scope_cols) + ")"
+                )
                 scope_tuple_type = "Tuple(" + ", ".join(["String"] * len(scope_cols)) + ")"
-                scope_clause = f"{scope_col_tuple} IN {{scope_keys:Array({scope_tuple_type})}} AND "
+                scope_clause = (
+                    f"{scope_col_tuple} IN {{scope_keys:Array({scope_tuple_type})}} AND "
+                )
                 params["scope_keys"] = [tuple(str(v) for v in s) for s in scopes]
 
         if len(upsert_cols) == 1:
@@ -390,7 +409,9 @@ class ClickHouseDestination:
         # ran successfully" to the engine without inflating success/failed.
         return SyncResult()
 
-    def _finalize_mirror_tracked(self, config: Any, sync_options: SyncOptions) -> SyncResult | None:
+    def _finalize_mirror_tracked(
+        self, config: Any, sync_options: SyncOptions
+    ) -> SyncResult | None:
         """``mirror.strategy: tracked`` (#692) — delete only rows drt synced.
 
         Same Census-style algorithm as
@@ -566,7 +587,9 @@ class ClickHouseDestination:
             )
             new_hashes = [row[0] for row in new_hashes_result.result_rows]
             if new_hashes:
-                state_rows = [[sync_name, h, key_json(current_by_hash[h])] for h in new_hashes]
+                state_rows = [
+                    [sync_name, h, key_json(current_by_hash[h])] for h in new_hashes
+                ]
                 client.insert(
                     state_q, state_rows, column_names=["sync_name", "key_hash", "key_json"]
                 )
@@ -600,7 +623,9 @@ class ClickHouseDestination:
         assert isinstance(config, ClickHouseDestinationConfig)
         client = self._connect(config)
         try:
-            result = client.query(f"SELECT COUNT(*) FROM {self._quote_ident(config.table)}")
+            result = client.query(
+                f"SELECT COUNT(*) FROM {self._quote_ident(config.table)}"
+            )
             # clickhouse_connect returns a QueryResult object
             # result.result_rows is a list of tuples
             if result.result_rows:

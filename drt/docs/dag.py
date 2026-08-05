@@ -113,7 +113,9 @@ def _edge_svg(edge: LayoutEdge) -> str:
         )
     # Lookup back-edge: orthogonal lane polyline over the top of the graph,
     # dashed, with a port dot where it enters the consumer's top edge.
-    d = f"M{_f(pts[0][0])},{_f(pts[0][1])}" + "".join(f" L{_f(x)},{_f(y)}" for x, y in pts[1:])
+    d = f"M{_f(pts[0][0])},{_f(pts[0][1])}" + "".join(
+        f" L{_f(x)},{_f(y)}" for x, y in pts[1:]
+    )
     end_x, end_y = pts[-1]
     return (
         f'<path d="{d}" fill="none" stroke="var(--edge-lookup)" stroke-width="1.5" '

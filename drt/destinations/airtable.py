@@ -78,7 +78,9 @@ class AirtableDestination:
 
         with httpx.Client(timeout=30.0) as client:
             for chunk in _chunks(list(enumerate(records)), _MAX_BATCH):
-                body: dict[str, Any] = {"records": [{"fields": rec} for _, rec in chunk]}
+                body: dict[str, Any] = {
+                    "records": [{"fields": rec} for _, rec in chunk]
+                }
                 if upsert:
                     body["performUpsert"] = {"fieldsToMergeOn": [config.primary_key]}
 

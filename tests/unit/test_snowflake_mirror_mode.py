@@ -172,7 +172,10 @@ def test_mirror_forces_merge_path_even_when_config_mode_is_insert(
     with patch.dict("sys.modules", modules):
         dest.load([{"id": 1, "score": 100}], config, opts)
 
-    sqls = [(call.args[0] if call.args else "") for call in conn._cur.execute.call_args_list]
+    sqls = [
+        (call.args[0] if call.args else "")
+        for call in conn._cur.execute.call_args_list
+    ]
     assert any("CREATE TEMP TABLE" in s for s in sqls)
     assert any("MERGE INTO ANALYTICS.PUBLIC.USER_SCORES" in s for s in sqls)
 
@@ -617,7 +620,8 @@ def test_tracked_second_run_deletes_only_stale_tracked_keys_snowflake(
     target_deletes = [
         call
         for call in finalize_conn._cur.execute.call_args_list
-        if "DELETE FROM" in (call.args[0] if call.args else "") and "USER_SCORES" in call.args[0]
+        if "DELETE FROM" in (call.args[0] if call.args else "")
+        and "USER_SCORES" in call.args[0]
     ]
     assert len(target_deletes) == 1
     stmt, params = target_deletes[0].args
@@ -644,7 +648,9 @@ def test_tracked_stages_current_keys_before_diffing_snowflake(
         dest.finalize_sync(_config(), _tracked_options())
 
     calls = finalize_conn._cur.execute.call_args_list
-    create_idx = next(i for i, c in enumerate(calls) if "CREATE TEMPORARY TABLE" in c.args[0])
+    create_idx = next(
+        i for i, c in enumerate(calls) if "CREATE TEMPORARY TABLE" in c.args[0]
+    )
     diff_idx = next(i for i, c in enumerate(calls) if c.args[0].startswith("SELECT s.key_hash"))
     drop_idx = next(i for i, c in enumerate(calls) if c.args[0].startswith("DROP TABLE"))
     assert create_idx < diff_idx < drop_idx
@@ -668,7 +674,9 @@ def test_tracked_inserts_only_genuinely_new_keys_snowflake(
     dest = SnowflakeDestination()
     load_conn = _fake_conn()
     finalize_conn = _fake_conn()
-    _configure_state_cur(finalize_conn, raw_diff=[], to_insert=[(key_hash((2,)), key_json((2,)))])
+    _configure_state_cur(
+        finalize_conn, raw_diff=[], to_insert=[(key_hash((2,)), key_json((2,)))]
+    )
 
     with patch.dict("sys.modules", _mocked_snowflake_modules(load_conn)):
         dest.load([{"id": 1}, {"id": 2}], _config(), _tracked_options())
@@ -678,8 +686,7 @@ def test_tracked_inserts_only_genuinely_new_keys_snowflake(
     insert_calls = [
         c
         for c in finalize_conn._cur.executemany.call_args_list
-        if "INSERT INTO" in c.args[0]
-        and "USER_SCORES" not in c.args[0]
+        if "INSERT INTO" in c.args[0] and "USER_SCORES" not in c.args[0]
         and "DIFF_KEYS" not in c.args[0].upper()
     ]
     assert len(insert_calls) == 1
@@ -766,7 +773,8 @@ def test_tracked_scoped_deletes_only_stale_keys_within_observed_scope_snowflake(
     target_deletes = [
         call
         for call in finalize_conn._cur.execute.call_args_list
-        if "DELETE FROM" in (call.args[0] if call.args else "") and "USER_SCORES" in call.args[0]
+        if "DELETE FROM" in (call.args[0] if call.args else "")
+        and "USER_SCORES" in call.args[0]
     ]
     assert len(target_deletes) == 1
     _, params = target_deletes[0].args

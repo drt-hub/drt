@@ -121,7 +121,9 @@ def test_email_smtp_empty_batch_returns_empty_sync_result(
     monkeypatch.setattr("smtplib.SMTP.__init__", _record)
     monkeypatch.setattr("smtplib.SMTP_SSL.__init__", _record)
 
-    result = EmailSmtpDestination().load([], _email_smtp_config(), empty_sync_options)
+    result = EmailSmtpDestination().load(
+        [], _email_smtp_config(), empty_sync_options
+    )
 
     assert isinstance(result, SyncResult)
     assert result.success == 0
@@ -177,7 +179,9 @@ def test_google_sheets_empty_batch_returns_empty_sync_result(
     available. If this test reaches ``_build_sheets_service`` it
     crashes with ``ModuleNotFoundError`` — surfacing the regression.
     """
-    result = GoogleSheetsDestination().load([], _google_sheets_config(), empty_sync_options)
+    result = GoogleSheetsDestination().load(
+        [], _google_sheets_config(), empty_sync_options
+    )
 
     assert isinstance(result, SyncResult)
     assert result.success == 0
@@ -202,9 +206,13 @@ def test_google_sheets_empty_batch_does_not_call_build_service(
         captured.append((args, kwargs))
         return None
 
-    monkeypatch.setattr("drt.destinations.google_sheets._build_sheets_service", _record)
+    monkeypatch.setattr(
+        "drt.destinations.google_sheets._build_sheets_service", _record
+    )
 
-    GoogleSheetsDestination().load([], _google_sheets_config(), empty_sync_options)
+    GoogleSheetsDestination().load(
+        [], _google_sheets_config(), empty_sync_options
+    )
 
     assert len(captured) == 0, (
         f"GoogleSheetsDestination called _build_sheets_service "

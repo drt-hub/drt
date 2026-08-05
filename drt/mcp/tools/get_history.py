@@ -12,7 +12,9 @@ if TYPE_CHECKING:
     from drt.mcp._context import McpContext
 
 
-def get_history(ctx: McpContext, sync_name: str | None = None, limit: int = 20) -> dict[str, Any]:
+def get_history(
+    ctx: McpContext, sync_name: str | None = None, limit: int = 20
+) -> dict[str, Any]:
     from dataclasses import asdict
 
     from drt.state.history import HistoryManager

@@ -86,7 +86,6 @@ class TestConnectorRegistry:
 
     def test_unknown_destination_error_message(self):
         """Error message for unknown destination lists available options."""
-
         # Create a mock config object with unknown type
         class UnknownDestinationConfig:
             type = "unknown_destination"
@@ -103,7 +102,6 @@ class TestConnectorRegistry:
 
     def test_unknown_source_error_message(self):
         """Error message for unknown source lists available options."""
-
         # Create a mock profile object with unknown type
         class UnknownProfile:
             type = "unknown_source"

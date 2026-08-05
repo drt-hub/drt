@@ -150,7 +150,9 @@ class TestPostgresDestinationLoad:
         conn.commit.assert_called_once()
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
-    def test_upsert_uses_schema_qualified_identifier(self, mock_connect: MagicMock) -> None:
+    def test_upsert_uses_schema_qualified_identifier(
+        self, mock_connect: MagicMock
+    ) -> None:
         conn = _fake_connection()
         cur = conn.cursor()
         mock_connect.return_value = conn
@@ -297,16 +299,23 @@ class TestQualifiedIdentifiers:
             _with_relation_suffix("marketing.email_events", "__drt_swap")
             == "marketing.email_events__drt_swap"
         )
-        assert _with_relation_suffix("email_events", "__drt_swap") == "email_events__drt_swap"
+        assert (
+            _with_relation_suffix("email_events", "__drt_swap")
+            == "email_events__drt_swap"
+        )
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
-    def test_get_row_count_uses_schema_qualified_identifier(self, mock_connect: MagicMock) -> None:
+    def test_get_row_count_uses_schema_qualified_identifier(
+        self, mock_connect: MagicMock
+    ) -> None:
         conn = _fake_connection()
         cur = conn.cursor()
         cur.fetchone.return_value = (7,)
         mock_connect.return_value = conn
 
-        count = PostgresDestination().get_row_count(_config(table="marketing.email_events"))
+        count = PostgresDestination().get_row_count(
+            _config(table="marketing.email_events")
+        )
 
         assert count == 7
         query = _query_text(cur.execute.call_args.args[0])
@@ -346,7 +355,7 @@ class TestPostgresReplaceMode:
         dest.load([{"id": 1, "score": 0.5}], _config(), _options(mode="replace"))
         # Second batch — should NOT truncate again
         dest.load([{"id": 2, "score": 0.9}], _config(), _options(mode="replace"))
-        cur = conn.cursor()  # capture cursor once at top of test, then use it
+        cur = conn.cursor()   # capture cursor once at top of test, then use it
         all_sqls = [str(call[0][0]) for call in cur.execute.call_args_list]
         truncate_count = sum(1 for s in all_sqls if "TRUNCATE" in s)
         assert truncate_count == 1
@@ -365,7 +374,9 @@ class TestPostgresReplaceMode:
         assert "INSERT INTO" in insert_sql
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
-    def test_replace_uses_schema_qualified_identifier(self, mock_connect: MagicMock) -> None:
+    def test_replace_uses_schema_qualified_identifier(
+        self, mock_connect: MagicMock
+    ) -> None:
         conn = _fake_connection()
         cur = conn.cursor()
         mock_connect.return_value = conn
@@ -379,16 +390,20 @@ class TestPostgresReplaceMode:
 
         sqls = [_query_text(c[0][0]) for c in cur.execute.call_args_list]
         assert any(
-            "TRUNCATE TABLE" in s and _split_identifier_text("marketing", "email_events") in s
+            "TRUNCATE TABLE" in s
+            and _split_identifier_text("marketing", "email_events") in s
             for s in sqls
         )
         assert any(
-            "INSERT INTO" in s and _split_identifier_text("marketing", "email_events") in s
+            "INSERT INTO" in s
+            and _split_identifier_text("marketing", "email_events") in s
             for s in sqls
         )
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
-    def test_replace_on_error_fail_rolls_back_and_returns(self, mock_connect: MagicMock) -> None:
+    def test_replace_on_error_fail_rolls_back_and_returns(
+        self, mock_connect: MagicMock
+    ) -> None:
         conn = _fake_connection()
         cur = conn.cursor()
         mock_connect.return_value = conn
@@ -435,7 +450,10 @@ class TestPostgresReplaceMode:
         truncate_sqls = [s for s in sqls if "TRUNCATE TABLE" in s]
         assert result.failed == 1
         assert len(truncate_sqls) == 2
-        assert all(_split_identifier_text("marketing", "email_events") in s for s in truncate_sqls)
+        assert all(
+            _split_identifier_text("marketing", "email_events") in s
+            for s in truncate_sqls
+        )
 
     def test_list_passes_through(self) -> None:
         """Non-dict types (including list) must pass through unchanged."""
@@ -489,7 +507,6 @@ class TestPostgresJsonColumns:
         # Should be a Json wrapper when psycopg2 is available, or JSON string fallback
         try:
             from psycopg2.extras import Json
-
             assert isinstance(result, Json)
         except ImportError:
             assert isinstance(result, str)
@@ -516,7 +533,6 @@ class TestPostgresJsonColumns:
         # No config → always wrap with Json() or JSON string
         try:
             from psycopg2.extras import Json
-
             assert isinstance(result, Json)
         except ImportError:
             assert isinstance(result, str)
@@ -556,7 +572,9 @@ class TestPostgresReplaceSwap:
         queries = [c[0][0] for c in cur.execute.call_args_list]
         sqls = [_query_text(q) for q in queries]
         assert any("DROP TABLE IF EXISTS" in s and "__drt_swap" in s for s in sqls)
-        assert any("CREATE TABLE" in s and "(LIKE " in s and "INCLUDING ALL" in s for s in sqls)
+        assert any(
+            "CREATE TABLE" in s and "(LIKE " in s and "INCLUDING ALL" in s for s in sqls
+        )
         assert any("INSERT INTO" in s and "__drt_swap" in s for s in sqls)
         assert not any(isinstance(q, str) and "__drt_swap" in q for q in queries)
         # No swap yet — happens in finalize_sync
@@ -574,7 +592,9 @@ class TestPostgresReplaceSwap:
             _config(),
             _options(mode="replace", replace_strategy="swap"),
         )
-        dest.finalize_sync(_config(), _options(mode="replace", replace_strategy="swap"))
+        dest.finalize_sync(
+            _config(), _options(mode="replace", replace_strategy="swap")
+        )
 
         queries = [c[0][0] for c in cur.execute.call_args_list]
         sqls = [_query_text(q) for q in queries]
@@ -586,7 +606,9 @@ class TestPostgresReplaceSwap:
         assert any("DROP TABLE" in s and "__drt_old" in s for s in sqls)
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
-    def test_swap_uses_schema_qualified_identifiers(self, mock_connect: MagicMock) -> None:
+    def test_swap_uses_schema_qualified_identifiers(
+        self, mock_connect: MagicMock
+    ) -> None:
         conn = _fake_connection()
         cur = conn.cursor()
         mock_connect.return_value = conn
@@ -621,7 +643,9 @@ class TestPostgresReplaceSwap:
         )
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
-    def test_swap_finalize_noop_when_no_swap_in_progress(self, mock_connect: MagicMock) -> None:
+    def test_swap_finalize_noop_when_no_swap_in_progress(
+        self, mock_connect: MagicMock
+    ) -> None:
         conn = _fake_connection()
         mock_connect.return_value = conn
 
@@ -631,7 +655,9 @@ class TestPostgresReplaceSwap:
         assert result is None or result.success == 0
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
-    def test_swap_creates_shadow_only_once_across_batches(self, mock_connect: MagicMock) -> None:
+    def test_swap_creates_shadow_only_once_across_batches(
+        self, mock_connect: MagicMock
+    ) -> None:
         conn = _fake_connection()
         cur = conn.cursor()
         mock_connect.return_value = conn
@@ -649,7 +675,9 @@ class TestPostgresReplaceSwap:
         )
 
         sqls = [_query_text(c[0][0]) for c in cur.execute.call_args_list]
-        create_count = sum(1 for s in sqls if "CREATE TABLE" in s and "INCLUDING ALL" in s)
+        create_count = sum(
+            1 for s in sqls if "CREATE TABLE" in s and "INCLUDING ALL" in s
+        )
         assert create_count == 1
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
@@ -714,7 +742,9 @@ class TestPostgresReplaceSwapJsonColumns:
     """
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
-    def test_swap_wraps_dict_value_in_listed_json_column(self, mock_connect: MagicMock) -> None:
+    def test_swap_wraps_dict_value_in_listed_json_column(
+        self, mock_connect: MagicMock
+    ) -> None:
         conn = _fake_connection()
         cur = conn.cursor()
         mock_connect.return_value = conn
@@ -728,22 +758,23 @@ class TestPostgresReplaceSwapJsonColumns:
 
         # Find the INSERT call against the shadow table
         insert_calls = [
-            c
-            for c in cur.execute.call_args_list
-            if "INSERT INTO" in _query_text(c[0][0]) and "__drt_swap" in _query_text(c[0][0])
+            c for c in cur.execute.call_args_list
+            if "INSERT INTO" in _query_text(c[0][0])
+            and "__drt_swap" in _query_text(c[0][0])
         ]
         assert insert_calls, "expected at least one INSERT into shadow table"
         bound_values = insert_calls[0][0][1]
         # dict value must be wrapped (Json or fallback string), not pass-through
         try:
             from psycopg2.extras import Json
-
             assert isinstance(bound_values[1], Json)
         except ImportError:
             assert isinstance(bound_values[1], str)
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
-    def test_swap_rejects_dict_in_unlisted_column(self, mock_connect: MagicMock) -> None:
+    def test_swap_rejects_dict_in_unlisted_column(
+        self, mock_connect: MagicMock
+    ) -> None:
         """Swap must surface the same fail-fast ValueError as truncate when
         a dict value lands in a column not declared in json_columns."""
         conn = _fake_connection()
@@ -753,9 +784,7 @@ class TestPostgresReplaceSwapJsonColumns:
         config = _config(json_columns=["profile"])  # 'extra' not listed
 
         result = PostgresDestination().load(
-            records,
-            config,
-            _options(mode="replace", replace_strategy="swap"),
+            records, config, _options(mode="replace", replace_strategy="swap"),
         )
 
         assert result.failed == 1
@@ -767,10 +796,10 @@ class TestPostgresConnection:
     def test_test_connection_success(self, mock_connect: MagicMock) -> None:
         conn = _fake_connection()
         mock_connect.return_value = conn
-
+        
         dest = PostgresDestination()
         dest.test_connection(_config())
-
+        
         mock_connect.assert_called_once()
         # Verify SELECT 1 was called
         cur = conn.cursor()
@@ -808,7 +837,9 @@ class TestPostgresSchemaIntrospection:
         desc.assert_called_once()  # introspected once, reused across batches
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
-    def test_introspection_encodes_list_into_jsonb_column(self, mock_connect: MagicMock) -> None:
+    def test_introspection_encodes_list_into_jsonb_column(
+        self, mock_connect: MagicMock
+    ) -> None:
         """THE fix: a list bound for a JSONB column is encoded, not passed
         through to the ARRAY adapter — discovered via introspection, no
         json_columns needed."""

@@ -143,9 +143,13 @@ class MaskRule(BaseModel):
     def _validate_length(self) -> MaskRule:
         if self.strategy == "truncate":
             if self.length is None or self.length < 0:
-                raise ValueError("the 'truncate' strategy requires a non-negative 'length'")
+                raise ValueError(
+                    "the 'truncate' strategy requires a non-negative 'length'"
+                )
         elif self.length is not None:
-            raise ValueError(f"'length' is not valid for the '{self.strategy}' strategy")
+            raise ValueError(
+                f"'length' is not valid for the '{self.strategy}' strategy"
+            )
         return self
 
 

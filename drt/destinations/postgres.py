@@ -153,7 +153,9 @@ class PostgresDestination(BaseSqlDestination):
         conn = self._connect(config)
         try:
             cur = conn.cursor()
-            query = sql.SQL("SELECT COUNT(*) FROM {}").format(_qualified_ident(config.table))
+            query = sql.SQL("SELECT COUNT(*) FROM {}").format(
+                _qualified_ident(config.table)
+            )
             cur.execute(query)
             row = cur.fetchone()
             return row[0] if row else 0
@@ -172,7 +174,6 @@ class PostgresDestination(BaseSqlDestination):
     ) -> SyncResult:
         """TRUNCATE (once) → INSERT within a transaction."""
         from psycopg2 import sql as _pgsql
-
         result = SyncResult()
 
         if not self._replace_truncated:
@@ -198,7 +199,11 @@ class PostgresDestination(BaseSqlDestination):
                 conn.rollback()
                 cur = conn.cursor()
                 if not self._replace_truncated:
-                    cur.execute(_pgsql.SQL("TRUNCATE TABLE {}").format(_qualified_ident(table)))
+                    cur.execute(
+                        _pgsql.SQL("TRUNCATE TABLE {}").format(
+                            _qualified_ident(table)
+                        )
+                    )
                     self._replace_truncated = True
                 continue
 
@@ -217,12 +222,13 @@ class PostgresDestination(BaseSqlDestination):
     ) -> SyncResult:
         """Build a shadow table per sync; atomic rename happens in finalize_sync."""
         from psycopg2 import sql as _pgsql
-
         result = SyncResult()
         shadow = _with_relation_suffix(table, "__drt_swap")
 
         if not self._swap_shadow_created:
-            cur.execute(_pgsql.SQL("DROP TABLE IF EXISTS {}").format(_qualified_ident(shadow)))
+            cur.execute(
+                _pgsql.SQL("DROP TABLE IF EXISTS {}").format(_qualified_ident(shadow))
+            )
             cur.execute(
                 _pgsql.SQL("CREATE TABLE {} (LIKE {} INCLUDING ALL)").format(
                     _qualified_ident(shadow),
@@ -250,7 +256,9 @@ class PostgresDestination(BaseSqlDestination):
                     # Cleanup shadow on hard fail
                     cur = conn.cursor()
                     cur.execute(
-                        _pgsql.SQL("DROP TABLE IF EXISTS {}").format(_qualified_ident(shadow))
+                        _pgsql.SQL("DROP TABLE IF EXISTS {}").format(
+                            _qualified_ident(shadow)
+                        )
                     )
                     conn.commit()
                     self._swap_shadow_created = False
@@ -267,7 +275,9 @@ class PostgresDestination(BaseSqlDestination):
     def _old_name(self, table: str) -> str:
         return _with_relation_suffix(table, "__drt_old")
 
-    def _rename_swap(self, conn: Any, cur: Any, table: str, shadow: str, old: str) -> None:
+    def _rename_swap(
+        self, conn: Any, cur: Any, table: str, shadow: str, old: str
+    ) -> None:
         """PG swap rename: two ``ALTER TABLE ... RENAME TO`` under one commit,
         then a separate DROP+commit for the old table."""
         from psycopg2 import sql as _pgsql
@@ -319,7 +329,9 @@ class PostgresDestination(BaseSqlDestination):
         scope_params: tuple[Any, ...] = ()
         if scope_cols and scopes:
             if len(scope_cols) == 1:
-                scope_clause = _pgsql.SQL("{} IN %s AND ").format(_pgsql.Identifier(scope_cols[0]))
+                scope_clause = _pgsql.SQL("{} IN %s AND ").format(
+                    _pgsql.Identifier(scope_cols[0])
+                )
                 scope_params = (tuple(s[0] for s in scopes),)
             else:
                 scope_tuple = _pgsql.SQL("({})").format(
@@ -412,12 +424,13 @@ class PostgresDestination(BaseSqlDestination):
         assert isinstance(config, PostgresDestinationConfig)
 
         shadow_name = f"{base_table.rsplit('.', 1)[-1]}__drt_swap"
-        schema_name = config.table.rsplit(".", 1)[0] if "." in config.table else None
+        schema_name = config.table.rsplit('.', 1)[0] if "." in config.table else None
 
         if older_than is not None:
             # Best-effort: PostgreSQL doesn't store table creation timestamp
             logging.getLogger(__name__).info(
-                "older_than filter requested but not supported for Postgres; returning all matches"
+                "older_than filter requested but not supported for Postgres; "
+                "returning all matches"
             )
 
         conn = self._connect(config)
@@ -580,7 +593,6 @@ class PostgresDestination(BaseSqlDestination):
     @staticmethod
     def _build_insert_sql(table: str, columns: list[str]) -> Any:
         from psycopg2 import sql as _pgsql
-
         return _pgsql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
             _qualified_ident(table),
             _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in columns),
@@ -595,17 +607,20 @@ class PostgresDestination(BaseSqlDestination):
         update_cols: list[str],
     ) -> Any:
         from psycopg2 import sql as _pgsql
-
         if update_cols:
             set_clause = _pgsql.SQL(", ").join(
-                _pgsql.SQL("{} = EXCLUDED.{}").format(_pgsql.Identifier(c), _pgsql.Identifier(c))
+                _pgsql.SQL("{} = EXCLUDED.{}").format(
+                    _pgsql.Identifier(c), _pgsql.Identifier(c)
+                )
                 for c in update_cols
             )
             conflict_action = _pgsql.SQL("DO UPDATE SET ") + set_clause
         else:
             conflict_action = _pgsql.SQL("DO NOTHING")
 
-        return _pgsql.SQL("INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) {}").format(
+        return _pgsql.SQL(
+            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) {}"
+        ).format(
             _qualified_ident(table),
             _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in columns),
             _pgsql.SQL(", ").join(_pgsql.Placeholder() for _ in columns),
@@ -614,7 +629,9 @@ class PostgresDestination(BaseSqlDestination):
         )
 
     @staticmethod
-    def _build_create_only_sql(table: str, columns: list[str], upsert_key: list[str]) -> Any:
+    def _build_create_only_sql(
+        table: str, columns: list[str], upsert_key: list[str]
+    ) -> Any:
         """``match_policy: create_only`` (#757) — insert only rows not yet present.
 
         ``ON CONFLICT (key) DO NOTHING`` so existing rows are left untouched;
@@ -623,7 +640,9 @@ class PostgresDestination(BaseSqlDestination):
         """
         from psycopg2 import sql as _pgsql
 
-        return _pgsql.SQL("INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO NOTHING").format(
+        return _pgsql.SQL(
+            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO NOTHING"
+        ).format(
             _qualified_ident(table),
             _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in columns),
             _pgsql.SQL(", ").join(_pgsql.Placeholder() for _ in columns),
@@ -631,7 +650,9 @@ class PostgresDestination(BaseSqlDestination):
         )
 
     @staticmethod
-    def _build_update_only_sql(table: str, update_cols: list[str], upsert_key: list[str]) -> Any:
+    def _build_update_only_sql(
+        table: str, update_cols: list[str], upsert_key: list[str]
+    ) -> Any:
         """``match_policy: update_only`` (#757) — update only rows that exist.
 
         A plain ``UPDATE ... SET <cols> WHERE <key>`` never inserts, so rows

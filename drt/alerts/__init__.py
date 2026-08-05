@@ -1,5 +1,4 @@
 """Alert dispatch for sync failures + degraded-sync conditions (#784)."""
-
 from drt.alerts.conditions import TrippedCondition, evaluate_conditions
 from drt.alerts.dispatcher import (
     build_context,

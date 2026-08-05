@@ -222,7 +222,9 @@ class TestRetry:
         conns[1].close.assert_called_once()
 
 
-@pytest.mark.parametrize("exc_name", ["InvalidPassword", "InvalidAuthorizationSpecification"])
+@pytest.mark.parametrize(
+    "exc_name", ["InvalidPassword", "InvalidAuthorizationSpecification"]
+)
 def test_is_transient_false_for_auth_failures(exc_name: str) -> None:
     """Auth failures live *under* OperationalError in psycopg2 — an
     isinstance check against that base lets them through.

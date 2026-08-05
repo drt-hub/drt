@@ -270,7 +270,9 @@ def _categorize_databricks(data_type: str | None) -> str:
 _DESCRIBE_SPECS: dict[str, _DescribeSpec] = {
     "postgres": _DescribeSpec(_connect_postgres, _query_postgres, _categorize_postgres, False),
     "mysql": _DescribeSpec(_connect_mysql, _query_mysql, _categorize_mysql, False),
-    "snowflake": _DescribeSpec(_connect_snowflake, _query_snowflake, _categorize_snowflake, True),
+    "snowflake": _DescribeSpec(
+        _connect_snowflake, _query_snowflake, _categorize_snowflake, True
+    ),
     "databricks": _DescribeSpec(
         _connect_databricks, _query_databricks, _categorize_databricks, True
     ),

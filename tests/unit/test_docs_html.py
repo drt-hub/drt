@@ -422,7 +422,7 @@ def test_inline_default_output_unchanged(tmp_path: Path) -> None:
     idx = (out / "index.html").read_text(encoding="utf-8")
     assert 'href="assets/style.css"' in idx
     assert 'href="sync/customers-to-discord.html"' in idx  # real inter-page link
-    assert '<section class="page' not in idx  # no bundle sections in multi-file
+    assert "<section class=\"page" not in idx  # no bundle sections in multi-file
 
 
 def test_inline_regenerates_over_prior_inline_build(tmp_path: Path) -> None:
@@ -445,8 +445,6 @@ def test_regeneration_is_byte_identical(tmp_path: Path) -> None:
     assert files1 == files2
     for rel in files1:
         assert (out1 / rel).read_bytes() == (out2 / rel).read_bytes(), str(rel)
-
-
 def test_yaml_tab_prefers_raw_text_and_notes_fallback(tmp_path: Path) -> None:
     """With sync_yaml_texts, the YAML tab shows the file as written (incl.
     model SQL); syncs without an entry keep the manifest view plus a note."""
@@ -566,13 +564,8 @@ def test_collect_sync_yaml_texts_redacts_secrets(tmp_path: Path) -> None:
     )
 
     _, text = collect_sync_yaml_texts(tmp_path)["leaky"]
-    for leaked in (
-        "hunter2-SUPERSECRET",
-        "xoxb-REALSLACKTOKEN",
-        "prod-db.internal.acme.com",
-        "oncall@acme.com",
-        "+1-555-123-4567",
-    ):
+    for leaked in ("hunter2-SUPERSECRET", "xoxb-REALSLACKTOKEN", "prod-db.internal.acme.com",
+                   "oncall@acme.com", "+1-555-123-4567"):
         assert leaked not in text, f"{leaked!r} leaked into the raw-YAML tab"
     assert "PG_PASSWORD" in text  # *_env reference preserved
     assert "batch_size: 100" in text  # non-sensitive value preserved
