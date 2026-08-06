@@ -590,6 +590,17 @@ class ClickHouseDestination:
             #   scope_key IS NULL → written before the columns existed
             #   scope_spec != ... → written under a different mirror.scope, so
             #                       its frozen scope_key means nothing here
+            #
+            # Unlike Postgres/MySQL/Snowflake, the first bucket is never healed
+            # here. Those dialects backfill scope_key lazily from the diff —
+            # cheap, since the rows are already fetched and decoded, and the
+            # write is a plain UPDATE. On ClickHouse the equivalent is ALTER
+            # TABLE ... UPDATE, a mutation that rewrites parts rather than a
+            # cheap per-row write, so "already in hand" doesn't make it cheap
+            # here too. Deliberate (#906): keys tracked before this upgrade
+            # keep falling through to the Python filter, permanently, unless
+            # an operator rebaselines. Keys added after the upgrade get the
+            # full SQL-side narrowing.
             diff_sql = (
                 f"SELECT key_hash, key_json FROM {state_q} "
                 "WHERE sync_name = {sync_name:String} "
