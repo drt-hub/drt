@@ -49,6 +49,7 @@ from drt.config.profiles import (
     SQLiteProfile,
     SQLServerProfile,
 )
+from drt.config.secret_providers import resolve_provider_uri
 
 
 class OtelConfig(BaseModel):
@@ -146,14 +147,26 @@ def _lookup_secrets_toml(env_var: str) -> str | None:
 
 
 def resolve_env(value: str | None, env_var: str | None) -> str | None:
-    """Resolve a secret value: explicit value → env var → secrets.toml → None."""
+    """Resolve a secret value: explicit value → env var → secrets.toml →
+    provider URI → None.
+
+    The last step (#782) lets ``env_var`` itself be a ``scheme://...`` secret
+    reference (e.g. ``aws-sm://prod/drt/snowflake#password``) instead of an
+    env var name — it never matches a real env var or a secrets.toml key, so
+    it falls through to here unchanged, where the scheme is detected and
+    dispatched to the matching provider.
+    """
     if value is not None:
         return value
     if env_var is not None:
         env_val = os.environ.get(env_var)
         if env_val is not None:
             return env_val
-        return _lookup_secrets_toml(env_var)
+        from_secrets = _lookup_secrets_toml(env_var)
+        if from_secrets is not None:
+            return from_secrets
+
+        return resolve_provider_uri(env_var)
     return None
 
 
