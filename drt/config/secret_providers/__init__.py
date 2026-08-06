@@ -24,9 +24,11 @@ from drt.config.secret_providers.base import (
     resolve_provider_uri,
 )
 from drt.config.secret_providers.gcp import GcpSecretManagerProvider
+from drt.config.secret_providers.vault import VaultProvider
 
 register("aws-sm", AwsSecretsManagerProvider())
 register("gcp-sm", GcpSecretManagerProvider())
+register("vault", VaultProvider())
 
 __all__ = [
     "SecretProvider",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,8 +19,10 @@ from drt.config.secret_providers.base import (
     parse_secret_uri,
     register,
     resolve_provider_uri,
+    select_field,
 )
 from drt.config.secret_providers.gcp import GcpSecretManagerProvider
+from drt.config.secret_providers.vault import VaultProvider, _split_kv2_path
 
 
 @pytest.fixture(autouse=True)
@@ -102,6 +105,39 @@ class TestExtractKey:
         ref = SecretRef(path="x", key="password")
         with pytest.raises(LookupError, match=r"^vault:"):
             extract_key("plain-string", ref, scheme="vault")
+
+
+# ---------------------------------------------------------------------------
+# select_field — the dict-native half extract_key delegates to; also used
+# directly by providers (Vault) whose payload never needs a JSON-parse step
+# ---------------------------------------------------------------------------
+
+
+class TestSelectField:
+    def test_extracts_field(self) -> None:
+        ref = SecretRef(path="x", key="password")
+        assert select_field({"password": "hunter2", "user": "svc"}, ref, scheme="vault") == (
+            "hunter2"
+        )
+
+    def test_missing_key_raises(self) -> None:
+        ref = SecretRef(path="x", key="password")
+        with pytest.raises(LookupError, match="key 'password' not found"):
+            select_field({"user": "svc"}, ref, scheme="vault")
+
+    def test_null_value_raises_rather_than_stringifying(self) -> None:
+        ref = SecretRef(path="x", key="password")
+        with pytest.raises(LookupError, match="isn't a plain value"):
+            select_field({"password": None}, ref, scheme="vault")
+
+    def test_nested_object_value_raises_rather_than_stringifying(self) -> None:
+        ref = SecretRef(path="x", key="password")
+        with pytest.raises(LookupError, match="isn't a plain value"):
+            select_field({"password": {"nested": "oops"}}, ref, scheme="vault")
+
+    def test_non_string_scalar_is_stringified(self) -> None:
+        ref = SecretRef(path="x", key="port")
+        assert select_field({"port": 5432}, ref, scheme="vault") == "5432"
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +372,123 @@ class TestGcpSecretManagerProvider:
             provider.fetch(SecretRef(path="projects/p/secrets/x/versions/latest", key=None))
             provider.fetch(SecretRef(path="projects/p/secrets/y/versions/latest", key=None))
         modules["google.cloud.secretmanager"].SecretManagerServiceClient.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# _split_kv2_path
+# ---------------------------------------------------------------------------
+
+
+class TestSplitKv2Path:
+    def test_default_mount(self) -> None:
+        assert _split_kv2_path("secret/data/drt/snowflake") == ("secret", "drt/snowflake")
+
+    def test_custom_mount(self) -> None:
+        assert _split_kv2_path("kv2-custom/data/drt/snowflake") == (
+            "kv2-custom",
+            "drt/snowflake",
+        )
+
+    def test_deeply_nested_path(self) -> None:
+        assert _split_kv2_path("secret/data/team/service/creds") == (
+            "secret",
+            "team/service/creds",
+        )
+
+    def test_missing_data_segment_raises(self) -> None:
+        with pytest.raises(LookupError, match="'data' segment"):
+            _split_kv2_path("secret/drt/snowflake")
+
+    def test_too_short_raises(self) -> None:
+        with pytest.raises(LookupError, match="'data' segment"):
+            _split_kv2_path("secret/data")
+
+
+# ---------------------------------------------------------------------------
+# VaultProvider
+# ---------------------------------------------------------------------------
+
+
+class _InvalidPath(Exception):
+    """Stand-in for hvac.exceptions.InvalidPath."""
+
+
+def _fake_hvac_client(data: dict[str, Any] | None = None, *, not_found: bool = False) -> MagicMock:
+    client = MagicMock()
+    if not_found:
+        client.secrets.kv.v2.read_secret_version.side_effect = _InvalidPath("no handler")
+    else:
+        client.secrets.kv.v2.read_secret_version.return_value = {"data": {"data": data or {}}}
+    return client
+
+
+def _mock_hvac_modules(client: MagicMock) -> dict[str, MagicMock]:
+    """Build sys.modules entries that satisfy ``import hvac`` and
+    ``from hvac.exceptions import InvalidPath``."""
+    exceptions_mod = MagicMock()
+    exceptions_mod.InvalidPath = _InvalidPath
+
+    hvac_mod = MagicMock()
+    hvac_mod.Client.return_value = client
+    hvac_mod.exceptions = exceptions_mod
+
+    return {"hvac": hvac_mod, "hvac.exceptions": exceptions_mod}
+
+
+class TestVaultProvider:
+    def test_successful_fetch_extracts_field(self) -> None:
+        client = _fake_hvac_client(data={"password": "hunter2", "user": "svc"})
+        with patch.dict("sys.modules", _mock_hvac_modules(client)):
+            value = VaultProvider().fetch(
+                SecretRef(path="secret/data/drt/snowflake", key="password")
+            )
+        assert value == "hunter2"
+        client.secrets.kv.v2.read_secret_version.assert_called_once_with(
+            path="drt/snowflake", mount_point="secret"
+        )
+
+    def test_custom_mount_point_is_passed_through(self) -> None:
+        client = _fake_hvac_client(data={"password": "hunter2"})
+        with patch.dict("sys.modules", _mock_hvac_modules(client)):
+            VaultProvider().fetch(
+                SecretRef(path="kv2-custom/data/drt/snowflake", key="password")
+            )
+        client.secrets.kv.v2.read_secret_version.assert_called_once_with(
+            path="drt/snowflake", mount_point="kv2-custom"
+        )
+
+    def test_no_key_raises(self) -> None:
+        with pytest.raises(LookupError, match="has no #key"):
+            VaultProvider().fetch(SecretRef(path="secret/data/drt/snowflake", key=None))
+
+    def test_invalid_path_shape_raises_before_any_client_call(self) -> None:
+        with pytest.raises(LookupError, match="'data' segment"):
+            VaultProvider().fetch(SecretRef(path="secret/drt/snowflake", key="password"))
+
+    def test_not_found_raises_lookup_error(self) -> None:
+        client = _fake_hvac_client(not_found=True)
+        with patch.dict("sys.modules", _mock_hvac_modules(client)):
+            with pytest.raises(LookupError, match="no secret found"):
+                VaultProvider().fetch(
+                    SecretRef(path="secret/data/nope", key="password")
+                )
+
+    def test_missing_extra_raises_helpful_import_error(self) -> None:
+        with patch.dict("sys.modules", {"hvac": None}):
+            with pytest.raises(ImportError, match=r"pip install drt-core\[vault\]"):
+                VaultProvider().fetch(SecretRef(path="secret/data/x", key="password"))
+
+    def test_client_is_constructed_fresh_every_fetch(self) -> None:
+        """Unlike AWS/GCP: hvac.Client() doesn't refresh VAULT_TOKEN on its
+        own, so caching it would go stale under a long-lived `drt serve`
+        rather than just serving a possibly-rotated value (#929)."""
+        client = _fake_hvac_client(data={"password": "a"})
+        modules = _mock_hvac_modules(client)
+        provider = VaultProvider()
+        with patch.dict("sys.modules", modules):
+            provider.fetch(SecretRef(path="secret/data/x", key="password"))
+            provider.fetch(SecretRef(path="secret/data/y", key="password"))
+        assert modules["hvac"].Client.call_count == 2
 
 
 # ---------------------------------------------------------------------------

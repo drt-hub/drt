@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 from urllib.parse import urlparse
 
 
@@ -39,27 +39,23 @@ def parse_secret_uri(uri: str) -> SecretRef:
     return SecretRef(path=path, key=parsed.fragment or None)
 
 
-def extract_key(raw: str, ref: SecretRef, *, scheme: str) -> str:
-    """Return ``raw`` unchanged if ``ref.key`` is ``None``, else pull that
-    field out of ``raw`` parsed as a JSON object.
+def select_field(payload: dict[str, Any], ref: SecretRef, *, scheme: str) -> str:
+    """Pull ``ref.key`` out of an already-parsed secret payload.
 
-    Shared by every provider whose secret payload may be a JSON blob holding
-    several related fields under one id (a DB user + password together,
+    Shared by every provider whose secret is (or can be) a field map holding
+    several related values under one id (a DB user + password together,
     say) rather than one id per field — the ``#key`` fragment selects one.
     ``scheme`` (e.g. ``"aws-sm"``) only shapes the error messages, so a
     failure names the provider a user actually configured.
-    """
-    if ref.key is None:
-        return raw
 
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise LookupError(
-            f"{scheme}: '{ref.path}#{ref.key}' requested a key, but the secret "
-            "value isn't JSON"
-        ) from e
-    if not isinstance(payload, dict) or ref.key not in payload:
+    ``ref.key`` must not be ``None`` — callers with a payload that might
+    also just *be* the scalar value (AWS, GCP: the secret string itself,
+    with no wrapping object) branch on that before parsing far enough to
+    have a ``dict`` at all; see :func:`extract_key`. Vault's payload is
+    always a field map, so it requires a key from the start rather than
+    calling this.
+    """
+    if ref.key not in payload:
         raise LookupError(f"{scheme}: key '{ref.key}' not found in secret '{ref.path}'")
     found = payload[ref.key]
     if found is None or isinstance(found, dict | list):
@@ -71,6 +67,29 @@ def extract_key(raw: str, ref: SecretRef, *, scheme: str) -> str:
             f"value (got {type(found).__name__})"
         )
     return str(found)
+
+
+def extract_key(raw: str, ref: SecretRef, *, scheme: str) -> str:
+    """Return ``raw`` unchanged if ``ref.key`` is ``None``, else parse it as
+    a JSON object and pull that field out via :func:`select_field`.
+
+    For providers (AWS, GCP) whose secret is a single string that *may*
+    additionally be a JSON blob — as opposed to Vault, whose secret is
+    always already a field map and so never needs the JSON-parsing step.
+    """
+    if ref.key is None:
+        return raw
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise LookupError(
+            f"{scheme}: '{ref.path}#{ref.key}' requested a key, but the secret "
+            "value isn't JSON"
+        ) from e
+    if not isinstance(payload, dict):
+        raise LookupError(f"{scheme}: key '{ref.key}' not found in secret '{ref.path}'")
+    return select_field(payload, ref, scheme=scheme)
 
 
 class SecretProvider(Protocol):
