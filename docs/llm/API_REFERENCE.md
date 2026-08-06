@@ -323,6 +323,56 @@ no per-row failure concept, so nothing is written for it. Off by default.
 
 ---
 
+## `unit_tests` — offline transform-pipeline tests (#780)
+
+A sibling of `tests:` at the top level of a sync file, not nested under it — `tests:` queries the
+**destination** after a real sync; `unit_tests:` never touches a destination at all.
+
+```yaml
+name: users_to_hubspot
+model: ref('users')
+destination: { type: hubspot, api_key_env: HUBSPOT_KEY, object_type: contacts }
+
+sync:
+  field_mappings: { first: given_name }
+  mask: { email: hash }
+
+unit_tests:                                   # optional: offline transform-pipeline tests
+  - name: masks_email_and_renames             # required: label, shown in output
+    given:                                    # required: fixture rows (>= 1), source column names
+      - { id: 1, email: "alice@example.com", first: "Alice", last: "Doe" }
+    expect:                                   # required: expected rows (>= 1), destination-facing names
+      - { id: 1, given_name: "Alice" }        # subset match — undeclared keys in the real
+                                               # output are ignored (see below)
+```
+
+```bash
+drt test --unit                          # text
+drt test --unit --output json            # json
+drt test --unit --select users_to_hubspot --fail-fast
+```
+
+**What it runs.** `given` rows are pushed through the *real* engine transform chain —
+`field_mappings` → `mask` (and any other stage the engine applies before `destination.load()`) —
+via a fake source and a capturing destination, so `given` uses **source** column names (the same
+names `cursor_field` and `lookups` read) and `expect` uses **destination-facing** names
+(post-rename, post-mask). No network call, no credential, no destination connection.
+
+**`expect` is a subset match per row**, not exact-record equality — only the keys a test declares
+are checked, so a sync's source columns growing later doesn't break every existing unit test. Row
+**count** is still checked exactly: a transform that drops or duplicates a row is exactly what a
+unit test exists to catch.
+
+**Not supported yet:** a sync whose destination has `lookups:` configured — lookups resolve
+against the real destination, and there is no fake for that. `drt test --unit` reports it as a
+failed test (not a crash) naming the reason. Mutually exclusive with `--dry-run` and
+`--store-failures`, which are destination-connected concepts unit tests don't have.
+
+Prior art: dbt unit tests (`given` / `expect` YAML, no live data); Census / Hightouch mapper
+previews with sample records.
+
+---
+
 ## Source-side retry (#766)
 
 The `sync.retry` / `destination.retry` knobs above apply to the **load** side. Since #766 the
