@@ -144,12 +144,14 @@ Two additive features accumulated since v0.7.5 — a new **Amplitude destination
 
 **Scope:**
 - **Docs site (release gate)** — `drt docs` sync catalog & lineage UI (#499 / #500 / #701 / #696 / #697 / #702) — *`generate --format mermaid|json|html` shipped v0.7.5–v0.7.11*
-- **DX pull-ins** *(from the 2026-07-10 dbt/dlt/competitor gap batch, #755–#786)* — `watermark.lag` (#759) · REST API source incremental (#767) · selection v2: glob / union / `--exclude` / `destination:`/`source:` (#771) · `drt run --failed` (#773) · `drt run --limit` (#774) · `--fail-fast` (#775) · `drt build` (#777) · dbt exposures export (#781, starts after #752 lands) · `drt deploy github-actions` (#785)
+- **DX pull-ins** *(from the 2026-07-10 dbt/dlt/competitor gap batch, #755–#786)* — `watermark.lag` (#759) · REST API source incremental (#767) · selection v2: glob / union / `--exclude` / `destination:`/`source:` (#771) · `drt run --failed` (#773) · `drt run --limit` (#774) · `--fail-fast` (#775) · `drt build` (#777) · `drt deploy github-actions` (#785)
 - **Docs / skills debt** — skills freshness sweep (#717) · `sync.mask` documentation (#716)
 - **Growth / README (non-blocking)** — hero section redesign (#281) · "Why OSS Reverse ETL" blog (#284) · production use case doc (#375) · Discord (#378, blocked on the server itself existing — #294) · X account link (#379) — these ride alongside the release and do **not** gate the tag; Reddit/HN launch (#289) stays opportunistic post-v0.8. Growth / GTM issues are **deliberately left without a milestone**: they are date-driven rather than release-gating, and milestoning them would keep a shipped version milestone permanently open. Track them via the `growth` / `gtm` title prefixes, or a dedicated non-version milestone if that ever becomes worth it
 - **Shipped early on the v0.7.x line** — cloud destinations: BigQuery (#165) · Databricks Delta Lake (#167) · S3 (#168) · GCS (#169) · Azure Blob (#170) · Snowflake (#164) — sources: REST API (#422) · Delta Lake (#172) · Iceberg (#173) — reliability/correctness: DLQ (#278) · schema-aware serialization (#317) · `sync.mode: mirror` (#340) — ecosystem: GitHub Action (#292) · VS Code extension (#293) — dev tooling: FakeSource (#364) · `drt_run_test` (#368) · `/drt-troubleshoot` (#369) · `/drt-changelog` (#372) · validate connection test (#367)
 
 **Out of scope:** Enterprise boundary (→ v0.9), Rust engine work (→ v1.x), diff polish (→ v0.8.3), warehouse hardening follow-ups (→ v0.8.4).
+
+*Deferred, moved to v0.9:* dbt exposures export (#781) — the one DX pull-in that didn't ship with the v0.8.x line; re-milestoned 2026-08-06 so v0.8 can close.
 
 **Target:** 2026-07 · **Progress:** [milestone/5](https://github.com/drt-hub/drt/milestone/5)
 
@@ -163,22 +165,39 @@ Released as **v0.8.4** on 2026-08-03. See [CHANGELOG.md](CHANGELOG.md#084---2026
 
 ---
 
+## v0.8.5 — Databricks composite-key mirror fix ✅ Shipped 2026-08-05
+
+Released as **v0.8.5** on 2026-08-05. See [CHANGELOG.md](CHANGELOG.md#085---2026-08-05) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v0.8.5) for the full feature list.
+
+Strict patch release — cherry-pick of the fix for [#908](https://github.com/drt-hub/drt/issues/908) on top of the v0.8.4 line. `sync.mode: mirror` on Databricks failed at finalize whenever `destination.upsert_key` had more than one column (Delta rejects the tuple-`IN` anti-join `#707` had used) — present since v0.7.11 and shipped in every release since, and unconditionally hit by any `tracked` + `scope` configuration on Databricks (`scope` must be a subset of `upsert_key`). Composite keys now go through `MERGE` instead; single-column keys are unchanged. Caught in review, not by the unit suite — a mock cursor can't reject invalid SQL, and the live smoke harness had never exercised a composite key or `tracked`/`scope` on Databricks; both gaps are now closed. No breaking changes — drop-in upgrade from v0.8.4.
+
+---
+
 ## v0.9 — Engine Foundation
 
-**Theme:** the pieces the engine itself has been missing — a real incremental strategy when there's no cursor column, state that survives an ephemeral CI runner, backfills that don't OOM on day one, and the schema/hook surface a managed-table workflow needs. Split out 2026-08-03 from the old "v0.9 — Enterprise Foundation" milestone, which had drifted into bundling this concrete, close-to-shippable cluster together with genuinely separate Enterprise-interface-design work; the latter moved to [v0.10](#v010--enterprise-boundary--ecosystem).
+**Theme:** ADR 0005's state-location foundation — the `StateStore`/`HistoryStore`/`DlqBackend` Protocol boundary (landed) and the remote backend that actually survives an ephemeral CI runner (#756) — plus the write-path, testing-depth, and security work that's ready now. Split out 2026-08-03 from the old "v0.9 — Enterprise Foundation" milestone (Enterprise-interface-design work moved to [v0.10](#v010--enterprise-boundary--ecosystem)); **re-scoped again 2026-08-06** down to what's actually close to shippable one month out — see *Out of scope* below for what moved and why. The original theme's diff-based incremental, windowed backfill, and managed-table/schema surface turned out to depend on an unbuilt warehouse-side primitive (ADR 0005 implementation-ordering step 3) and none of them had a PR in flight; they're parked below rather than padding a release that was never going to ship them in September.
 
 **Scope:**
-- **Incremental & state** — diff-based incremental, warehouse-side snapshot diff with no cursor column required (#755) · remote state backend for run state / history / DLQ, CI-safe and team-shared (#756) · windowed backfill with per-window checkpointing (#758) · scope-aware SQL diff for tracked+scoped mirror, closing the memory-win gap #694 part 2 left open (#890)
-- **Write-path semantics** — `match_policy` remaining destinations (#757 — Postgres + HubSpot legs shipped v0.8.1, issue stays open for the rest) · first-class `run_id` + opt-in metadata columns (#762) · `computed_fields` — declarative derived columns (#763) · pre/post-sync SQL hooks + `on_run_start/end` (#764, needs #762's `run_id` plumbing for the audit-row case)
-- **Schema management** — managed destination tables + `on_schema_change` drift policy (#760) · column contracts — declared columns/types enforced before load (#761), plus deriving them straight from a dbt model's own `columns:` contract instead of hand-maintaining a duplicate (#896)
-- **CI / artifacts** — `state:modified` selector, run only syncs changed vs. a baseline manifest (#772) · versioned `run_results.json` run artifacts (#778)
+- **State foundation (ADR 0005)** — remote state backend for run state / history / DLQ, CI-safe and team-shared (#756 — the Protocol boundary already landed, this issue is the actual GCS/S3 backend implementation, steps 1–2 of ADR 0005) · docs: protect cursor-based incremental as the permanent read-only path and tier reversibility as a design goal, so ADR 0005 stays honest about what it isn't deprecating (#922)
+- **Write-path semantics** — first-class `run_id` + opt-in metadata columns (#762) · `computed_fields` — declarative derived columns (#763)
+- **CI / artifacts** — `state:modified` selector, run only syncs changed vs. a baseline manifest (#772)
 - **Testing depth** — sync unit tests, fixture rows in / expected payload out, zero credentials (#780)
 - **Security** — secret provider URIs: AWS/GCP Secret Manager, Vault (#782)
-- **Older backlog carried forward** *(pre-dates the 2026-07-10 gap batch, never cleanly fit an earlier milestone)* — multi-destination fan-out (#425) · sync dependency graph, `depends_on` between sync files (#426) · built-in scheduler, `drt schedule` (#428) · `Destination.fetch_existing()` Protocol refactor (#469) · automated upstream API change detection in CI (#649) · reconciliation sync pattern doc for fire-and-forget destinations (#825)
+- **Perf close-out** — scope-aware SQL diff for tracked+scoped mirror, closing the memory-win gap #694 part 2 left open (#890)
 
 **Out of scope:** Enterprise-interface design (→ v0.10), Rust migration itself (→ v0.10 perf-prep informs the decision, migration is post-v1.0).
 
-**Unscheduled backlog** *(no milestone — pull in when a release theme fits)*: REST API `body_mode: batch` (#770, good first issue) — fits this milestone's theme but not yet pulled in. Idempotency keys for fire-and-forget destinations (#897) — smaller and destination-count-dependent (needs a per-connector survey first), parked until a duplicate-side-effect report justifies pulling it in.
+*Cut 2026-08-06 — moved to unscheduled backlog:*
+- **#755 diff-based incremental** — the headline feature this milestone was named for, but ADR 0005's own implementation-ordering table puts it at step 5 of 5, and its prerequisite (step 3, "warehouse managed-table primitive, shared by #755 and #760") is unbuilt. Zero PRs in flight. Unparks once step 3 lands — worth filing as its own v0.9-or-later issue rather than leaving implicit.
+- **#760 managed destination tables, #761 column contracts, #896 dbt-derived contracts** — the whole "Schema management" subsection, moved as a unit (#896 depends on #761's contract shape). Same step-3 dependency as #755; zero PRs in flight.
+- **#758 windowed backfill, #764 pre/post-sync SQL hooks, #778 run artifacts** — each individually large with nothing banked; #764 is additionally blocked on #762's `run_id` plumbing landing first.
+- **#425 multi-destination fan-out, #426 `depends_on` sync graph, #428 built-in scheduler, #649 upstream API change detection, #825 reconciliation doc** — the "older backlog carried forward" cluster: none are ADR-0005-foundation work, they just never cleanly fit an earlier milestone either. #428 needs re-litigating against [ADR 0004](docs/adr/0004-streaming-and-event-triggered-syncs.md)'s Tier 1 "no daemon" posture before it gets scheduled anywhere; #649 is still at research-phase and reads more like an epic than a single issue.
+- **#757 `match_policy` remaining destinations** — converted to an open-ended tracking issue, no milestone. Scoped as "the rest of the destinations" it can never reach zero, so it can't sit inside a milestone that's supposed to close; new destination legs land against it directly or split out the way #890 → #904–907 did.
+- **#919 `GCSWatermarkStorage` race (bug)** — live data-loss bug in shipped code, not a feature; flagged as a v0.8.6 patch candidate (same pattern as #908 → v0.8.5) rather than waiting for a September feature release.
+- **#469 `fetch_existing()` Protocol refactor** — moved to v0.10 (Protocol-stability theme), its premise partly overtaken by #900's Protocol refactor already landing.
+- **#781 dbt exposures export** — moved to v0.10 (Ecosystem theme); it only landed in v0.9 by deferral from v0.8 on 2026-08-06, not by thematic fit.
+
+**Unscheduled backlog** *(no milestone — pull in when a release theme fits)*: REST API `body_mode: batch` (#770, good first issue) — fits this milestone's theme but not yet pulled in. Idempotency keys for fire-and-forget destinations (#897) — smaller and destination-count-dependent (needs a per-connector survey first), parked until a duplicate-side-effect report justifies pulling it in. Warehouse-backed state backend for SQL-queryable observability (#920) — deliberately split out of #756 per ADR 0005 (durability vs. observability are different justifications with different costs; this half needs a destination write-grant conversation #756 doesn't), parked until that conversation happens. Plus the cut list above: #755, #758, #760, #761, #764, #778, #896, #425, #426, #428, #649, #825, #757.
 
 *Cleared from this list since it was written:* project `vars` (#783, shipped v0.8.0) · alert conditions (#784, shipped v0.8.3) · custom SQL tests / `severity: warn` / store-failures (#779, shipped v0.8.3) · rate limiting v2 (#769, shipped v0.8.4).
 
@@ -192,10 +211,13 @@ Released as **v0.8.4** on 2026-08-03. See [CHANGELOG.md](CHANGELOG.md#084---2026
 
 **Scope:**
 - **Interfaces** — RBAC interface spec (#298) · audit log hooks (#299) · plugin system for third-party connectors (#297)
-- **Protocol stability** — review and freeze preparation (#300) · config encryption for secrets at rest (#303) — *`drt cloud push` stub (#302) shipped early in v0.7 via PR #409*
+- **Protocol stability** — review and freeze preparation (#300) · config encryption for secrets at rest (#303) · `Destination.fetch_existing()` Protocol refactor, replacing the hardcoded `_QUERYABLE_TYPES` list (#469, moved from v0.9 2026-08-06 — its premise partly overtaken by #900's Protocol refactor already landing) — *`drt cloud push` stub (#302) shipped early in v0.7 via PR #409*
+- **Ecosystem** — dbt exposures export, drt syncs visible in dbt docs lineage (#781, moved from v0.9 2026-08-06 — it only landed there by deferral from v0.8, not thematic fit)
 - **Performance** — benchmark suite (#280) + I/O vs CPU profiling for Rust migration decision (#301)
-- **Event-driven activation** — the streaming / event-triggered syncs ADR ([ADR 0004](docs/adr/0004-streaming-and-event-triggered-syncs.md), accepted) named its Tier 2 and Tier 3 recommendations as sanctioned follow-through — dagster-drt sensors (#855, hard-blocked by [v0.9](#v09--engine-foundation)'s #756 since a sensor and a CI run cannot share a local-disk watermark), a hardened `drt serve` concurrency contract so a dropped trigger isn't silent event loss (#854), and the three-tier user guide (#856)
+- **Event-driven activation** — the streaming / event-triggered syncs ADR ([ADR 0004](docs/adr/0004-streaming-and-event-triggered-syncs.md), accepted) named its Tier 2 and Tier 3 recommendations as sanctioned follow-through — dagster-drt sensors (#855, hard-blocked by [v0.9](#v09--engine-foundation)'s #756 since a sensor and a CI run cannot share a local-disk watermark), cross-process rate-limit coordination for orchestrator-launched sync processes (#921 — a sensor firing N `RunRequest`s each as its own process defeats #769's single-process shared bucket), and the three-tier user guide (#856). The Tier 3 half of this — a hardened `drt serve` concurrency contract so a dropped trigger isn't silent event loss (#854) — **shipped ahead of schedule** (#902); its direct follow-on, OIDC JWT verification for the Pub/Sub push leg (#903), is unscheduled backlog below
 - **Integrations** — dagster-drt: `DrtEventIterator` for chainable post-processing (#182) · `DrtSyncComponent` for declarative YAML (#183) · `@op` context support in `DagsterDrtResource` (#184)
+
+**Unscheduled backlog** *(no milestone — pull in when a release theme fits)*: OIDC JWT verification for `drt serve`'s Pub/Sub push leg (#903) — direct follow-on to #854, belongs alongside #855/#856.
 
 **Out of scope:** Implementing RBAC/audit log in OSS, actual Cloud service backend, Rust migration itself.
 
