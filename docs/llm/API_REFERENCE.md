@@ -142,6 +142,7 @@ api_users:
 Local secret store for development. Gitignored by default.
 
 Resolution order: explicit YAML value > environment variable > secrets.toml
+> provider URI
 
 ```toml
 [destinations.mysql]
@@ -157,6 +158,27 @@ SNOWFLAKE_PASSWORD = "dev-password"
 SNOWFLAKE_PRIVATE_KEY = """-----BEGIN PRIVATE KEY-----
 ..."""
 ```
+
+---
+
+## Secret provider URIs (#782)
+
+Any `*_env` field can be a `scheme://...` URI instead of a plain env var
+name — tried last in the resolution order above, once explicit/env/toml
+have all come back empty:
+
+```yaml
+password_env: "aws-sm://prod/drt/snowflake#password"
+```
+
+| Scheme | Extra | Example |
+|---|---|---|
+| `aws-sm://` | `drt-core[aws-secrets]` | `aws-sm://prod/drt/snowflake#password` |
+| `gcp-sm://` | `drt-core[gcp-secrets]` | `gcp-sm://projects/p/secrets/drt-sf/versions/latest#password` |
+| `vault://` | `drt-core[vault]` | `vault://secret/data/drt/snowflake#password` (`#key` required) |
+
+See [Secret Provider URIs](../guides/secret-provider-uris.md) for IAM/policy
+snippets, the caching behaviour, and `drt serve`-specific caveats.
 
 ---
 
