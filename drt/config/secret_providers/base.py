@@ -59,12 +59,18 @@ class SecretProvider(Protocol):
 
 _registry: dict[str, SecretProvider] = {}
 
-# Process-lifetime cache, keyed by the full URI. A sync run commonly resolves
-# the same credential more than once (validation pass, connection test, the
-# real connection), and unlike an env var or secrets.toml lookup, a provider
-# fetch is a network call — so unlike those two steps, this one is worth not
-# repeating. Rotation within a single run isn't a goal (a run is short-lived
-# by construction); a new process picks up a rotated secret on its next fetch.
+# Process-lifetime cache, keyed by the full URI. A run commonly resolves the
+# same credential more than once (validation pass, connection test, the real
+# connection), and unlike an env var or secrets.toml lookup, a provider fetch
+# is a network call — so unlike those two steps, this one is worth not
+# repeating.
+#
+# Unbounded for the process's life: fine for a `drt run` invocation (exits in
+# seconds to minutes), but `drt serve` is a long-lived process that re-enters
+# this path on every triggered sync — a secret resolved once is held until
+# the server restarts, with no TTL and no re-fetch on rotation. Known gap,
+# not yet addressed; see #782's follow-up issue rather than assuming rotation
+# is picked up here.
 _value_cache: dict[str, str] = {}
 
 

@@ -158,6 +158,18 @@ class TestAwsSecretsManagerProvider:
             with pytest.raises(LookupError, match="isn't JSON"):
                 AwsSecretsManagerProvider().fetch(SecretRef(path="prod/drt/x", key="password"))
 
+    def test_json_secret_null_value_at_key_raises_rather_than_stringifying(self) -> None:
+        client = _fake_client(secret_string=json.dumps({"password": None}))
+        with patch.dict("sys.modules", _mock_boto3(client)):
+            with pytest.raises(LookupError, match="isn't a plain value"):
+                AwsSecretsManagerProvider().fetch(SecretRef(path="prod/drt/x", key="password"))
+
+    def test_json_secret_nested_object_at_key_raises_rather_than_stringifying(self) -> None:
+        client = _fake_client(secret_string=json.dumps({"password": {"nested": "oops"}}))
+        with patch.dict("sys.modules", _mock_boto3(client)):
+            with pytest.raises(LookupError, match="isn't a plain value"):
+                AwsSecretsManagerProvider().fetch(SecretRef(path="prod/drt/x", key="password"))
+
     def test_binary_secret_raises(self) -> None:
         client = _fake_client(secret_string=None)
         with patch.dict("sys.modules", _mock_boto3(client)):

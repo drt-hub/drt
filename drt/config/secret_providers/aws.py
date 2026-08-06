@@ -47,7 +47,16 @@ class AwsSecretsManagerProvider:
             ) from e
         if not isinstance(payload, dict) or ref.key not in payload:
             raise LookupError(f"aws-sm: key '{ref.key}' not found in secret '{ref.path}'")
-        return str(payload[ref.key])
+        found = payload[ref.key]
+        if found is None or isinstance(found, dict | list):
+            # str(None) == "None", str({...}) == a Python repr — both would
+            # silently hand back a plausible-looking but wrong credential
+            # instead of failing.
+            raise LookupError(
+                f"aws-sm: key '{ref.key}' in secret '{ref.path}' isn't a plain "
+                f"value (got {type(found).__name__})"
+            )
+        return str(found)
 
     def _get_client(self) -> Any:
         if self._client is None:
