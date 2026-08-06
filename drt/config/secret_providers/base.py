@@ -10,6 +10,7 @@ level, matching the existing ``s3``/``bigquery`` destination pattern).
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Protocol
 from urllib.parse import urlparse
@@ -36,6 +37,40 @@ def parse_secret_uri(uri: str) -> SecretRef:
     parsed = urlparse(uri)
     path = f"{parsed.netloc}{parsed.path}" if parsed.netloc else parsed.path.lstrip("/")
     return SecretRef(path=path, key=parsed.fragment or None)
+
+
+def extract_key(raw: str, ref: SecretRef, *, scheme: str) -> str:
+    """Return ``raw`` unchanged if ``ref.key`` is ``None``, else pull that
+    field out of ``raw`` parsed as a JSON object.
+
+    Shared by every provider whose secret payload may be a JSON blob holding
+    several related fields under one id (a DB user + password together,
+    say) rather than one id per field — the ``#key`` fragment selects one.
+    ``scheme`` (e.g. ``"aws-sm"``) only shapes the error messages, so a
+    failure names the provider a user actually configured.
+    """
+    if ref.key is None:
+        return raw
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise LookupError(
+            f"{scheme}: '{ref.path}#{ref.key}' requested a key, but the secret "
+            "value isn't JSON"
+        ) from e
+    if not isinstance(payload, dict) or ref.key not in payload:
+        raise LookupError(f"{scheme}: key '{ref.key}' not found in secret '{ref.path}'")
+    found = payload[ref.key]
+    if found is None or isinstance(found, dict | list):
+        # str(None) == "None", str({...}) == a Python repr — both would
+        # silently hand back a plausible-looking but wrong credential
+        # instead of failing.
+        raise LookupError(
+            f"{scheme}: key '{ref.key}' in secret '{ref.path}' isn't a plain "
+            f"value (got {type(found).__name__})"
+        )
+    return str(found)
 
 
 class SecretProvider(Protocol):

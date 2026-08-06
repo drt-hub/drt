@@ -13,10 +13,9 @@ Requires: pip install drt-core[aws-secrets]
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
-from drt.config.secret_providers.base import SecretRef
+from drt.config.secret_providers.base import SecretRef, extract_key
 
 
 class AwsSecretsManagerProvider:
@@ -35,28 +34,7 @@ class AwsSecretsManagerProvider:
             # Binary secrets have no field structure to select a #key from.
             raise LookupError(f"aws-sm: secret '{ref.path}' has no SecretString value")
 
-        if ref.key is None:
-            return str(value)
-
-        try:
-            payload = json.loads(value)
-        except json.JSONDecodeError as e:
-            raise LookupError(
-                f"aws-sm: '{ref.path}#{ref.key}' requested a key, but the secret "
-                "value isn't JSON"
-            ) from e
-        if not isinstance(payload, dict) or ref.key not in payload:
-            raise LookupError(f"aws-sm: key '{ref.key}' not found in secret '{ref.path}'")
-        found = payload[ref.key]
-        if found is None or isinstance(found, dict | list):
-            # str(None) == "None", str({...}) == a Python repr — both would
-            # silently hand back a plausible-looking but wrong credential
-            # instead of failing.
-            raise LookupError(
-                f"aws-sm: key '{ref.key}' in secret '{ref.path}' isn't a plain "
-                f"value (got {type(found).__name__})"
-            )
-        return str(found)
+        return extract_key(str(value), ref, scheme="aws-sm")
 
     def _get_client(self) -> Any:
         if self._client is None:
