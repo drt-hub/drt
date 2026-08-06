@@ -69,8 +69,8 @@ _registry: dict[str, SecretProvider] = {}
 # seconds to minutes), but `drt serve` is a long-lived process that re-enters
 # this path on every triggered sync — a secret resolved once is held until
 # the server restarts, with no TTL and no re-fetch on rotation. Known gap,
-# not yet addressed; see #782's follow-up issue rather than assuming rotation
-# is picked up here.
+# not yet addressed — tracked as #929 — rather than assuming rotation is
+# picked up here.
 _value_cache: dict[str, str] = {}
 
 
