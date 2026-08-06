@@ -144,7 +144,7 @@ def create_server(project_dir: Path | None = None) -> Any:
     # -----------------------------------------------------------------------
 
     @mcp.tool()
-    def drt_run_test(sync_name: str | None = None) -> dict[str, Any]:
+    def drt_run_test(sync_name: str | None = None, unit: bool = False) -> dict[str, Any]:
         """Run post-sync validation tests for one or all syncs.
 
         Mirrors the `drt test` CLI: for each sync with `tests:` defined,
@@ -154,19 +154,30 @@ def create_server(project_dir: Path | None = None) -> Any:
         Args:
             sync_name: Restrict to one sync. If omitted, runs tests for
                 every sync that has tests defined.
+            unit: Run `sync.unit_tests` instead of `sync.tests` (#780) —
+                fixture rows through the transform pipeline, zero
+                credentials, zero network. No destination is touched, so a
+                sync with `destination.lookups` configured reports a failed
+                test rather than running (no fake lookup table yet).
 
         Returns:
             Dict with `status` ("passed" | "failed" | "no_tests" | "no_syncs"),
-            and `results` — a list of per-sync result objects, each with:
-                - `sync`: sync name
-                - `tests`: list of {name, passed, value, severity} or
-                  {name, passed: false, error, severity} — severity is
-                  "warn" | "error" (#779); a "warn" failure is reported here
-                  but never flips the top-level `status` to "failed"
-                - `skipped` (optional): true when destination type isn't queryable
-                - `reason` (optional): why the sync was skipped
+            and `results` — a list of per-sync result objects.
+
+            When `unit` is false, each `tests` entry is
+            {name, passed, value, severity} or
+            {name, passed: false, error, severity} — severity is
+            "warn" | "error" (#779); a "warn" failure is reported here
+            but never flips the top-level `status` to "failed". A sync may
+            also carry `skipped` + `reason` when its destination type isn't
+            queryable.
+
+            When `unit` is true, each `tests` entry is instead
+            {name, passed, mismatches} — `mismatches` is a list of
+            human-readable strings, empty when `passed` is true. There is no
+            `severity` tier and no `skipped` state for unit tests.
         """
-        return _run_test(ctx, sync_name)
+        return _run_test(ctx, sync_name, unit=unit)
 
     # -----------------------------------------------------------------------
     # drt_get_status

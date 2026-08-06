@@ -10,10 +10,54 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from drt.cli.commands.test import _SyncTestResult
+    from drt.config.models import SyncConfig
     from drt.mcp._context import McpContext
 
 
-def run_test(ctx: McpContext, sync_name: str | None = None) -> dict[str, Any]:
+def _run_unit_tests(syncs: list[SyncConfig]) -> dict[str, Any]:
+    """``unit=True`` path — sync.unit_tests (#780), no destination touched.
+
+    Separate from the ``sync.tests:`` loop below for the same reason
+    ``drt test --unit`` keeps its own function: no destination connection,
+    no ``severity`` tier, none of that loop's machinery applies. Delegates
+    to :func:`drt.engine.unit_test_runner.run_unit_test` — the same engine
+    function the CLI calls, so the two surfaces can't drift on what a unit
+    test result means, only on how it's presented.
+    """
+    from drt.engine.unit_test_runner import UnitTestLookupsUnsupportedError, run_unit_test
+
+    syncs_with_unit_tests = [s for s in syncs if s.unit_tests]
+    if not syncs_with_unit_tests:
+        return {"status": "no_tests", "results": []}
+
+    had_failures = False
+    results: list[dict[str, Any]] = []
+
+    for sync in syncs_with_unit_tests:
+        sync_result: dict[str, Any] = {"sync": sync.name, "tests": []}
+        try:
+            for test_def in sync.unit_tests:
+                result = run_unit_test(sync, test_def)
+                sync_result["tests"].append(
+                    {
+                        "name": test_def.name,
+                        "passed": result.passed,
+                        "mismatches": result.mismatches,
+                    }
+                )
+                if not result.passed:
+                    had_failures = True
+        except UnitTestLookupsUnsupportedError as e:
+            sync_result["tests"].append({"name": sync.name, "passed": False, "error": str(e)})
+            had_failures = True
+        results.append(sync_result)
+
+    return {"status": "failed" if had_failures else "passed", "results": results}
+
+
+def run_test(
+    ctx: McpContext, sync_name: str | None = None, unit: bool = False
+) -> dict[str, Any]:
     # #851: the per-test loop (connect, build query, execute, check,
     # severity, error handling) lives in exactly one place —
     # `execute_tests_for_sync`, which `drt test` and `drt build` already
@@ -29,6 +73,9 @@ def run_test(ctx: McpContext, sync_name: str | None = None) -> dict[str, Any]:
         syncs = [s for s in syncs if s.name == sync_name]
         if not syncs:
             return {"error": f"No sync named '{sync_name}' found."}
+
+    if unit:
+        return _run_unit_tests(syncs)
 
     syncs_with_tests = [s for s in syncs if s.tests]
     if not syncs_with_tests:

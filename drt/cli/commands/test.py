@@ -123,6 +123,95 @@ def _store_or_clear_failure_sample(
     return path, len(masked_rows)
 
 
+def execute_unit_tests_for_sync(
+    sync: SyncConfig, *, json_mode: bool, quiet: bool = False
+) -> tuple[_SyncTestResult, bool]:
+    """Run one sync's ``unit_tests:`` and return ``(result_dict, had_failures)``.
+
+    Deliberately separate from :func:`execute_tests_for_sync` rather than a
+    branch inside it: unit tests (#780) never touch a destination — no
+    connection, no ``dry_run`` distinction, no ``severity: warn`` tier, none
+    of the machinery that function exists for. Sharing a function would mean
+    threading a growing set of "well, not for unit tests" exceptions through
+    it instead of two functions that each do one thing.
+    """
+    from drt.engine.unit_test_runner import UnitTestLookupsUnsupportedError, run_unit_test
+
+    show = not json_mode and not quiet
+    if show:
+        print_test_header(sync.name)
+
+    sync_results: _SyncTestResult = {"sync": sync.name, "tests": []}
+    had_failures = False
+
+    try:
+        for test_def in sync.unit_tests:
+            result = run_unit_test(sync, test_def)
+            message = "ok" if result.passed else "; ".join(result.mismatches)
+            if show:
+                print_test_result(test_def.name, result.passed, message)
+            sync_results["tests"].append(
+                {
+                    "name": test_def.name,
+                    "passed": result.passed,
+                    "mismatches": result.mismatches,
+                }
+            )
+            if not result.passed:
+                had_failures = True
+    except UnitTestLookupsUnsupportedError as e:
+        # One config-shape problem, the same for every fixture on this sync —
+        # surfaced once rather than once per unit_tests entry.
+        if show:
+            print_test_result(sync.name, False, str(e))
+        sync_results["tests"].append({"name": sync.name, "passed": False, "error": str(e)})
+        had_failures = True
+
+    return sync_results, had_failures
+
+
+def _run_unit_tests(syncs: Sequence[SyncConfig], *, json_mode: bool, fail_fast: bool) -> None:
+    """``drt test --unit``'s body — separate from the main ``sync.tests:`` loop
+    in :func:`test_syncs` for the same reason :func:`execute_unit_tests_for_sync`
+    is separate from :func:`execute_tests_for_sync`: no destination, no
+    ``dry_run``, no ``severity`` tier, no ``--store-failures``.
+    """
+    syncs_with_unit_tests = [s for s in syncs if s.unit_tests]
+    if not syncs_with_unit_tests:
+        if not json_mode:
+            console.print("[dim]No unit_tests defined in any sync.[/dim]")
+        else:
+            print(json.dumps({"status": "no_tests", "results": []}))
+        return
+
+    results: list[_SyncTestResult] = []
+    had_failures = False
+
+    for i, sync in enumerate(syncs_with_unit_tests):
+        sync_results, sync_failed = execute_unit_tests_for_sync(sync, json_mode=json_mode)
+        results.append(sync_results)
+        if sync_failed:
+            had_failures = True
+
+        if fail_fast and had_failures:
+            remaining = syncs_with_unit_tests[i + 1 :]
+            for skipped_sync in remaining:
+                results.append(
+                    {"sync": skipped_sync.name, "tests": [], "skipped": True, "reason": "fail_fast"}
+                )
+            if remaining and not json_mode:
+                console.print(
+                    f"[yellow]--fail-fast: skipped {len(remaining)} sync(s) "
+                    "after the first failure.[/yellow]"
+                )
+            break
+
+    if json_mode:
+        print(json.dumps({"status": "failed" if had_failures else "passed", "results": results}))
+    if had_failures:
+        raise typer.Exit(1)
+
+
 def execute_tests_for_sync(
     sync: SyncConfig,
     *,
@@ -350,16 +439,31 @@ def test_syncs(
         min=1,
         help="Max rows written per failed test when --store-failures is set.",
     ),
+    unit: bool = typer.Option(
+        False,
+        "--unit",
+        help=(
+            "Run sync.unit_tests instead of sync.tests: fixture rows through "
+            "the transform pipeline, zero credentials, zero network. "
+            "Mutually exclusive with --dry-run and --store-failures, which "
+            "are destination-connected concepts unit tests don't have."
+        ),
+    ),
 ) -> None:
     """Run post-sync validation tests.
 
     With --dry-run, shows what tests would be executed without actually
-    connecting to the destination or running queries.
+    connecting to the destination or running queries. With --unit, runs
+    sync.unit_tests instead — see that flag's help.
     """
     from drt.config.parser import load_syncs
 
     json_mode = output == "json"
     results: list[_SyncTestResult] = []
+
+    if unit and (dry_run or store_failures):
+        print_error("--unit cannot be combined with --dry-run or --store-failures.")
+        raise typer.Exit(2)
 
     syncs = load_syncs(Path("."))
     if not syncs:
@@ -377,6 +481,10 @@ def test_syncs(
     if not syncs:
         print_error("Selection matched no syncs (after --exclude).")
         raise typer.Exit(1)
+
+    if unit:
+        _run_unit_tests(syncs, json_mode=json_mode, fail_fast=fail_fast)
+        return
 
     syncs_with_tests = [s for s in syncs if s.tests]
     if not syncs_with_tests:

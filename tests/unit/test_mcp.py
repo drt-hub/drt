@@ -396,6 +396,129 @@ async def test_run_test_does_not_store_failure_samples(
 
 
 # ---------------------------------------------------------------------------
+# drt_run_test — unit=True (#780)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_test_unit_no_unit_tests_defined(server: FastMCP) -> None:
+    """The default fixture sync has no unit_tests: block. sync.tests: alone
+    (a different sync than this fixture, checked below) must not count."""
+    result = await call(server, "drt_run_test", unit=True)
+    assert result == {"status": "no_tests", "results": []}
+
+
+@pytest.mark.asyncio
+async def test_run_test_unit_ignores_syncs_with_only_quality_tests(tmp_path: Path) -> None:
+    (tmp_path / "drt_project.yml").write_text("name: test\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "notify.yml").write_text(
+        "name: notify\n"
+        "model: ref('users')\n"
+        "destination:\n"
+        "  type: rest_api\n"
+        "  url: https://example.com/hook\n"
+        "tests:\n"
+        "  - row_count: { min: 1 }\n"
+    )
+    srv = create_server(tmp_path)
+    result = await call(srv, "drt_run_test", unit=True)
+    assert result == {"status": "no_tests", "results": []}
+
+
+@pytest.mark.asyncio
+async def test_run_test_unit_pass_and_fail(tmp_path: Path) -> None:
+    (tmp_path / "drt_project.yml").write_text("name: test\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "notify.yml").write_text(
+        "name: notify\n"
+        "model: ref('users')\n"
+        "destination:\n"
+        "  type: rest_api\n"
+        "  url: https://example.com/hook\n"
+        "sync:\n"
+        "  field_mappings: { first: given_name }\n"
+        "unit_tests:\n"
+        "  - name: renames\n"
+        "    given: [{ id: 1, first: Alice }]\n"
+        "    expect: [{ id: 1, given_name: Alice }]\n"
+        "  - name: wrong\n"
+        "    given: [{ id: 1 }]\n"
+        "    expect: [{ id: 999 }]\n"
+    )
+    srv = create_server(tmp_path)
+    result = await call(srv, "drt_run_test", unit=True)
+
+    assert result["status"] == "failed"
+    [sync_result] = result["results"]
+    by_name = {t["name"]: t for t in sync_result["tests"]}
+    assert by_name["renames"]["passed"] is True
+    assert by_name["renames"]["mismatches"] == []
+    assert by_name["wrong"]["passed"] is False
+    assert by_name["wrong"]["mismatches"]
+
+
+@pytest.mark.asyncio
+async def test_run_test_unit_lookups_reported_as_failure(tmp_path: Path) -> None:
+    """No fake lookup table yet (#780's own stated scope) — a sync with
+    destination.lookups fails the unit test rather than silently running
+    without the lookup step."""
+    (tmp_path / "drt_project.yml").write_text("name: test\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "orders.yml").write_text(
+        "name: orders\n"
+        "model: ref('orders')\n"
+        "destination:\n"
+        "  type: postgres\n"
+        "  host_env: H\n"
+        "  dbname_env: D\n"
+        "  user_env: U\n"
+        "  password_env: P\n"
+        "  table: orders\n"
+        "  upsert_key: [id]\n"
+        "  lookups:\n"
+        "    account_id: { table: accounts, match: { email: email }, select: id }\n"
+        "unit_tests:\n"
+        "  - name: cannot_run\n"
+        "    given: [{ id: 1 }]\n"
+        "    expect: [{ id: 1 }]\n"
+    )
+    srv = create_server(tmp_path)
+    result = await call(srv, "drt_run_test", unit=True)
+
+    assert result["status"] == "failed"
+    test_entry = result["results"][0]["tests"][0]
+    assert test_entry["passed"] is False
+    assert "lookups" in test_entry["error"]
+
+
+@pytest.mark.asyncio
+async def test_run_test_unit_sync_name_filters_first(tmp_path: Path) -> None:
+    """unit=True composes with sync_name the same way the tests: path does."""
+    (tmp_path / "drt_project.yml").write_text("name: test\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    for name in ("a", "b"):
+        (syncs_dir / f"{name}.yml").write_text(
+            f"name: {name}\n"
+            "model: ref('t')\n"
+            "destination:\n"
+            "  type: rest_api\n"
+            "  url: https://example.com\n"
+            "unit_tests:\n"
+            "  - name: t\n"
+            "    given: [{ id: 1 }]\n"
+            "    expect: [{ id: 1 }]\n"
+        )
+    srv = create_server(tmp_path)
+    result = await call(srv, "drt_run_test", sync_name="a", unit=True)
+    assert [r["sync"] for r in result["results"]] == ["a"]
+
+
+# ---------------------------------------------------------------------------
 # drt_get_status
 # ---------------------------------------------------------------------------
 
