@@ -21,6 +21,18 @@
   until the OIDC follow-up (#903) lands. The Context section's `serve` citations
   describe the pre-#854 code deliberately — they are the evidence the
   decision was made on.
+- **Amended:** 2026-08-06 — [ADR 0005](0005-state-location-and-write-grants.md)
+  corrects the 2026-07-29 amendment below: the #769 cross-process residual
+  does not close via #756 after all. That amendment was right that a
+  cross-process token bucket needs shared state and wrong about what *kind* —
+  low-latency atomic increment, which neither of #756's backends provide (the
+  object-storage half has no cheap compare-and-swap and pays a round trip per
+  acquire; a warehouse table is worse on both counts). Re-scoped out to its own
+  issue, [#921](https://github.com/drt-hub/drt/issues/921), tracked as
+  unscheduled rather than folded into a gate it cannot close. Net effect on
+  ordering: none — #756 already blocked Tier 2 on durability grounds alone and
+  remains the longer pole; Tier 3 already cleared via #854 above, independent
+  of this correction.
 - **Issue:** [#786](https://github.com/drt-hub/drt/issues/786)
 - **Implementation:** none — this ADR recommends **not** building a native
   watcher. The work it does sanction is listed under
@@ -128,17 +140,22 @@ rather than loudly, which is the worst failure mode a docs deliverable has.
 
 | Gate | Blocks | Status | Why |
 |---|---|---|---|
-| **#756 remote state** | Tier 2 | Open | `.drt/state.json` is local disk (`drt/state/manager.py:43`). A sensor in an orchestrator and a CI run genuinely cannot share a watermark today. A Tier 2 recommendation shipped before this tells users to build a topology whose two halves silently disagree about what has already synced. **Also absorbs the cross-process half of the #769 gate** — see the amendment below. |
-| **#769 rate limiting v2** | Tier 3 | **Cleared** by [#858](https://github.com/drt-hub/drt/pull/858) | Originally written as blocking Tier 2 *and* Tier 3. #858 shipped both named requirements — the **per-destination `rate_limit` override** and the **shared bucket across threads** — which is the whole scope for Tier 3, since `drt serve` is one long-lived process and the registry lives for the life of the server rather than resetting per run. It does not clear Tier 2: a Dagster sensor yields one `RunRequest` per changed sync and Dagster launches each as its own process, so N changed syncs against one endpoint is still N buckets. That residual needs shared state, which is #756 — hence the fold rather than a standing second gate. |
+| **#756 remote state** | Tier 2 | Open | `.drt/state.json` is local disk (`drt/state/manager.py:43`). A sensor in an orchestrator and a CI run genuinely cannot share a watermark today. A Tier 2 recommendation shipped before this tells users to build a topology whose two halves silently disagree about what has already synced. Scoped to the object-storage backend per [ADR 0005](0005-state-location-and-write-grants.md) — no warehouse write required to clear this gate. |
+| **#769 rate limiting v2** | Tier 3 | **Cleared** by [#858](https://github.com/drt-hub/drt/pull/858) | Originally written as blocking Tier 2 *and* Tier 3. #858 shipped both named requirements — the **per-destination `rate_limit` override** and the **shared bucket across threads** — which is the whole scope for Tier 3, since `drt serve` is one long-lived process and the registry lives for the life of the server rather than resetting per run. It does not clear Tier 2: a Dagster sensor yields one `RunRequest` per changed sync and Dagster launches each as its own process, so N changed syncs against one endpoint is still N buckets. That residual does **not** close via #756 — see the 2026-08-06 amendment above — and is tracked separately, unscheduled, as [#921](https://github.com/drt-hub/drt/issues/921). |
 
-**Amendment (2026-07-29), scoping the #769 gate.** As first written, this row's
-rationale ran together two distinct harms: per-destination pacing being
-unavailable at all, and a per-process bucket resetting every run. #858 fixes the
-first completely and the second only within a process. Because a cross-process
-bucket is not achievable without shared state, the residual is not independently
-actionable and has been folded into the #756 row rather than left as a gate that
-cannot be closed on its own terms. Net effect on ordering: none — #756 already
-blocked Tier 2 and remains the longer pole. Tier 3's blocker becomes #854.
+**Amendment (2026-07-29), scoping the #769 gate — corrected 2026-08-06, see the
+Status block above.** As first written, this row's rationale ran together two
+distinct harms: per-destination pacing being unavailable at all, and a
+per-process bucket resetting every run. #858 fixes the first completely and the
+second only within a process. Because a cross-process bucket is not achievable
+without shared state, the residual was folded into the #756 row rather than
+left as a gate that cannot be closed on its own terms. **That fold was itself
+wrong** — #756's state (object storage, and later a warehouse table) is
+durable but not low-latency-atomic, so neither of its backends actually closes
+this residual either. It is now [#921](https://github.com/drt-hub/drt/issues/921),
+unscheduled. Net effect on ordering: none either time — #756 already blocked
+Tier 2 on durability grounds alone and remains the longer pole. Tier 3's
+blocker becomes #854.
 
 One topology this does not cover: several `drt serve` replicas behind a load
 balancer are several processes, so the shared bucket degrades to one per replica.
