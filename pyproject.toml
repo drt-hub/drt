@@ -90,6 +90,7 @@ dev = [
     "ruff>=0.4,<1",
     "types-pyyaml",
     "types-PyMySQL",
+    "testcontainers[postgres]>=4.0",
 ]
 
 [project.scripts]
@@ -133,5 +134,6 @@ disallow_untyped_decorators = false
 testpaths = ["tests"]
 markers = [
     "dwh_smoke: real cloud-warehouse smoke checks (Snowflake/Databricks/BigQuery); skip without DRT_SMOKE_* secrets (#674).",
+    "local_sql_smoke: real Postgres/MySQL via testcontainers-python; skip without Docker (#939).",
 ]
 asyncio_mode = "auto"

@@ -49,6 +49,11 @@ make lint     # ruff + mypy
 make fmt      # ruff format + fix
 ```
 
+`local_sql_smoke` covers real Postgres/MySQL dialect behaviour with ephemeral
+testcontainers and runs in the normal PR test job; it skips when Docker is not
+available. ClickHouse and other local dialects are outside this initial scope.
+Cloud-warehouse tests remain under `dwh_smoke` and require `DRT_SMOKE_*` secrets.
+
 ## Current Status
 
 - **Unreleased (on `main`, since v0.8.4)** — nothing landed yet.
