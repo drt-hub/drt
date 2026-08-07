@@ -62,11 +62,11 @@ class VaultProvider:
         # construction and never refreshes it, and Vault service tokens are
         # conventionally short-TTL — a cached client under a long-lived
         # process (`drt serve`) would go from "may resolve a rotated
-        # secret's stale value" (#929, already a known gap one layer up, in
-        # base._value_cache) to "every fetch fails outright" once the token
-        # expires, which is worse and specific to this leg. Construction
-        # itself is cheap (no network call — it just wraps connection
-        # params), so paying it every call is simpler than adding
+        # secret's stale value for up to DRT_SECRET_CACHE_TTL_SECONDS"
+        # (base._value_cache's TTL, #929) to "every fetch fails outright"
+        # once the token expires, which is worse and specific to this leg.
+        # Construction itself is cheap (no network call — it just wraps
+        # connection params), so paying it every call is simpler than adding
         # token-renewal handling here.
         try:
             import hvac  # type: ignore[import-untyped]

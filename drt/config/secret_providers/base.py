@@ -11,6 +11,8 @@ level, matching the existing ``s3``/``bigquery`` destination pattern).
 from __future__ import annotations
 
 import json
+import os
+import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import urlparse
@@ -113,19 +115,22 @@ class SecretProvider(Protocol):
 
 _registry: dict[str, SecretProvider] = {}
 
-# Process-lifetime cache, keyed by the full URI. A run commonly resolves the
-# same credential more than once (validation pass, connection test, the real
-# connection), and unlike an env var or secrets.toml lookup, a provider fetch
-# is a network call — so unlike those two steps, this one is worth not
-# repeating.
-#
-# Unbounded for the process's life: fine for a `drt run` invocation (exits in
-# seconds to minutes), but `drt serve` is a long-lived process that re-enters
-# this path on every triggered sync — a secret resolved once is held until
-# the server restarts, with no TTL and no re-fetch on rotation. Known gap,
-# not yet addressed — tracked as #929 — rather than assuming rotation is
-# picked up here.
-_value_cache: dict[str, str] = {}
+# Cache provider values by full URI for 300 seconds by default. A run commonly
+# resolves the same credential more than once (validation pass, connection
+# test, the real connection), and unlike an env var or secrets.toml lookup, a
+# provider fetch is a network call. The TTL lets long-lived `drt serve`
+# processes pick up secret rotation without repeating that call on every sync.
+# Set DRT_SECRET_CACHE_TTL_SECONDS to another duration, or to a non-positive
+# value to disable caching. It is read at lookup time so runtime environment
+# changes take effect without restarting the process.
+_value_cache: dict[str, tuple[str, float]] = {}
+
+_DEFAULT_CACHE_TTL_SECONDS = 300.0
+_CACHE_TTL_ENV_VAR = "DRT_SECRET_CACHE_TTL_SECONDS"
+
+
+def _cache_ttl_seconds() -> float:
+    return float(os.environ.get(_CACHE_TTL_ENV_VAR, _DEFAULT_CACHE_TTL_SECONDS))
 
 
 def register(scheme: str, provider: SecretProvider) -> None:
@@ -152,9 +157,21 @@ def resolve_provider_uri(uri: str) -> str | None:
     provider = _registry.get(scheme)
     if provider is None:
         return None
-    if uri not in _value_cache:
-        _value_cache[uri] = provider.fetch(parse_secret_uri(uri))
-    return _value_cache[uri]
+
+    ttl = _cache_ttl_seconds()
+    if ttl <= 0:
+        _value_cache.pop(uri, None)
+        return provider.fetch(parse_secret_uri(uri))
+
+    cached = _value_cache.get(uri)
+    if cached is not None:
+        value, fetched_at = cached
+        if time.monotonic() - fetched_at <= ttl:
+            return value
+
+    value = provider.fetch(parse_secret_uri(uri))
+    _value_cache[uri] = (value, time.monotonic())
+    return value
 
 
 def clear_cache() -> None:

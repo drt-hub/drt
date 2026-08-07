@@ -26,7 +26,8 @@ from drt.config.secret_providers.vault import VaultProvider, _split_kv2_path
 
 
 @pytest.fixture(autouse=True)
-def _clear_provider_cache() -> Iterator[None]:
+def _clear_provider_cache(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.delenv("DRT_SECRET_CACHE_TTL_SECONDS", raising=False)
     clear_cache()
     yield
     clear_cache()
@@ -166,13 +167,44 @@ class TestRegistry:
         assert resolve_provider_uri(f"{scheme}://a/b#c") == "the-secret"
         provider.fetch.assert_called_once_with(SecretRef(path="a/b", key="c"))
 
-    def test_result_is_cached_across_calls(self, _fake_provider: tuple[str, MagicMock]) -> None:
+    def test_result_is_cached_before_ttl_expiry(
+        self, monkeypatch: pytest.MonkeyPatch, _fake_provider: tuple[str, MagicMock]
+    ) -> None:
         scheme, provider = _fake_provider
         provider.fetch.return_value = "cached-value"
+        monotonic = MagicMock(return_value=100.0)
+        monkeypatch.setattr(sp_base.time, "monotonic", monotonic)
+        monkeypatch.setenv("DRT_SECRET_CACHE_TTL_SECONDS", "300")
 
         assert resolve_provider_uri(f"{scheme}://x") == "cached-value"
+        monotonic.return_value = 399.0
         assert resolve_provider_uri(f"{scheme}://x") == "cached-value"
         provider.fetch.assert_called_once()
+
+    def test_result_is_refetched_after_ttl_expiry(
+        self, monkeypatch: pytest.MonkeyPatch, _fake_provider: tuple[str, MagicMock]
+    ) -> None:
+        scheme, provider = _fake_provider
+        provider.fetch.side_effect = ["initial-value", "rotated-value"]
+        monotonic = MagicMock(return_value=100.0)
+        monkeypatch.setattr(sp_base.time, "monotonic", monotonic)
+        monkeypatch.setenv("DRT_SECRET_CACHE_TTL_SECONDS", "300")
+
+        assert resolve_provider_uri(f"{scheme}://x") == "initial-value"
+        monotonic.return_value = 400.1
+        assert resolve_provider_uri(f"{scheme}://x") == "rotated-value"
+        assert provider.fetch.call_count == 2
+
+    def test_non_positive_ttl_disables_caching(
+        self, monkeypatch: pytest.MonkeyPatch, _fake_provider: tuple[str, MagicMock]
+    ) -> None:
+        scheme, provider = _fake_provider
+        provider.fetch.side_effect = ["initial-value", "rotated-value"]
+        monkeypatch.setenv("DRT_SECRET_CACHE_TTL_SECONDS", "0")
+
+        assert resolve_provider_uri(f"{scheme}://x") == "initial-value"
+        assert resolve_provider_uri(f"{scheme}://x") == "rotated-value"
+        assert provider.fetch.call_count == 2
 
     def test_different_uris_are_cached_independently(
         self, _fake_provider: tuple[str, MagicMock]
