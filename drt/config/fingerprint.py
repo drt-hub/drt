@@ -10,17 +10,23 @@ editing the sync.
 
 Two consequences, both deliberate:
 
-*Secrets cannot enter the input.* The file holds ``${API_TOKEN}`` or
-``token_env: NAME``, never a value, so there is no "which fields are secret?"
-classification to maintain or get wrong. That is the same structural choice
-every comparable tool makes — dbt keeps credentials in ``profiles.yml`` outside
-the project (which is why its ``manifest.json`` is documented as safe to share
-as a CI artifact), and Hightouch Git Sync / Census Git-backed Models keep them
-in the vendor workspace, referenced by id. An earlier draft of this hashed the
+*Secrets don't enter the input, given the recommended pattern.* The file
+holds ``${API_TOKEN}`` or ``token_env: NAME``, never a value, so there is no
+"which fields are secret?" classification to maintain or get wrong for a sync
+written that way. That is the same structural choice every comparable tool
+makes — dbt keeps credentials in ``profiles.yml`` outside the project (which
+is why its ``manifest.json`` is documented as safe to share as a CI
+artifact), and Hightouch Git Sync / Census Git-backed Models keep them in the
+vendor workspace, referenced by id. An earlier draft of this hashed the
 *resolved* config and had to decide whether ``upsert_key`` was a secret
 (``config/secrets.py``'s name-suffix heuristic says yes, wrongly, and redacting
 it would have hidden a real change in write semantics). Hashing the file removes
-the question rather than answering it carefully.
+the question rather than answering it carefully — but it's not an absolute
+guarantee: nothing here stops a sync from holding a literal hardcoded value
+instead of ``_env``/``${VAR}`` indirection. ``config/secrets.py``'s scanner
+flags that as a ``drt validate`` warning, but it's advisory, not a block, so a
+misconfigured file's literal secret would still be hashed into the
+fingerprint.
 
 *Environment changes are invisible.* Changing ``API_TOKEN``'s value, or a
 ``DRT_VAR_*``, does not move the fingerprint. dbt has and documents the same
