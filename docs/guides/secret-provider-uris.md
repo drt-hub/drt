@@ -133,31 +133,33 @@ path "secret/data/drt/*" {
 
 ## Caching, and what it means for `drt serve`
 
-A resolved value is cached for the rest of the process's life, keyed by
-the full URI — a run commonly resolves the same credential more than
-once (a validation pass, a connection test, the real connection), and
-unlike an env var or `secrets.toml` read, a provider fetch is a network
-call worth not repeating.
+A resolved value is cached, keyed by the full URI — a run commonly
+resolves the same credential more than once (a validation pass, a
+connection test, the real connection), and unlike an env var or
+`secrets.toml` read, a provider fetch is a network call worth not
+repeating. Each entry expires after a **TTL**, default **300 seconds**
+(configurable via `DRT_SECRET_CACHE_TTL_SECONDS`, read on each lookup —
+changing it takes effect without restarting the process). A lookup past
+the TTL transparently refetches and replaces the cached value.
 
 For a `drt run` / `drt test` / `drt build` invocation — which exits in
 seconds to minutes — this is invisible. For
 [`drt serve`](using-webhook-trigger.md), a long-lived process that
-re-enters credential resolution on every triggered sync, it means a
-secret resolved once is held **until the server restarts** — rotating it
-in the secret store afterward has no effect until then. There is
-currently no TTL or background refresh
-([tracked in #929](https://github.com/drt-hub/drt/issues/929)). If your
-deployment rotates secrets on a schedule and runs `drt serve`
-continuously, restart the server after rotation (or on a cadence shorter
-than your rotation window) until that lands.
+re-enters credential resolution on every triggered sync, the TTL is what
+keeps a rotated secret from being held indefinitely: it's picked up
+within one TTL window, no manual restart needed. Setting
+`DRT_SECRET_CACHE_TTL_SECONDS` to a non-positive value disables caching
+entirely — every lookup refetches — useful if your rotation window is
+tighter than the default and you'd rather pay the network call than wait
+out the TTL.
 
 The Vault leg goes one step further for a related reason: `hvac.Client()`
 captures `VAULT_TOKEN` once at construction and never refreshes it, and
 Vault tokens are conventionally short-TTL — so unlike the AWS/GCP legs,
 the Vault *client* is rebuilt on every fetch rather than cached, avoiding
 a worse failure mode (every fetch failing outright once the token
-expires, rather than merely serving a stale-but-valid value). This is
-already handled; nothing to configure.
+expires, rather than merely serving a value that's stale for at most the
+value-cache's TTL above). This is already handled; nothing to configure.
 
 ## What this isn't
 
@@ -180,5 +182,3 @@ already handled; nothing to configure.
 
 - `docs/llm/API_REFERENCE.md` — the full resolution chain, including
   `.drt/secrets.toml`
-- [#929](https://github.com/drt-hub/drt/issues/929) — the cache-TTL gap
-  under `drt serve`
