@@ -937,6 +937,20 @@ def _run_tracked_scoped(dest: Any, cur_conn: MagicMock, load_conn: MagicMock) ->
         dest.finalize_sync(_config(upsert_key=["parent_id", "id"]), opts)
 
 
+def test_state_scope_columns_probe_resolves_exact_state_table() -> None:
+    dest = PostgresDestination()
+    cur = MagicMock()
+    cur.fetchone.return_value = (2,)
+    raw = "tenant_a._drt_synced_keys"
+
+    assert dest._state_scope_columns_exist(cur, "tenant_a", raw) is True
+
+    sql, params = cur.execute.call_args.args
+    assert "pg_attribute" in sql
+    assert "to_regclass" in sql
+    assert params == (raw,)
+
+
 def test_scoped_diff_is_narrowed_in_sql_when_columns_exist() -> None:
     dest = PostgresDestination()
     conn = _state_conn(raw_diff=[], to_insert=[])

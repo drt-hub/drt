@@ -393,18 +393,15 @@ class PostgresDestination(BaseSqlDestination):
         )
 
     def _state_scope_columns_exist(self, cur: Any, scope: Any, raw: str) -> bool:
-        from drt.destinations._mirror_state import STATE_TABLE
-
-        sql = (
-            "SELECT COUNT(*) FROM information_schema.columns "
-            "WHERE table_name = %s AND column_name IN ('scope_spec', 'scope_key')"
+        cur.execute(
+            "SELECT COUNT(*) FROM pg_attribute "
+            "WHERE attrelid = to_regclass(%s) "
+            "AND attname IN ('scope_spec', 'scope_key') "
+            "AND NOT attisdropped",
+            (raw,),
         )
-        params: tuple[Any, ...] = (STATE_TABLE,)
-        if scope is not None:
-            sql += " AND table_schema = %s"
-            params = (STATE_TABLE, scope)
-        cur.execute(sql, params)
-        return bool(cur.fetchone()[0] == 2)
+        row = cur.fetchone()
+        return bool(row is not None and row[0] == 2)
 
     def _add_state_scope_columns(self, cur: Any, ident: Any) -> None:
         from psycopg2 import sql as _pgsql
