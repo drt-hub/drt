@@ -24,6 +24,8 @@ cd drt
 uv sync --extra dev --extra bigquery
 ```
 
+**Note for Windows contributors:** `AGENTS.md` is a symlink to `CLAUDE.md` (kept in sync for Codex CLI). If `git clone` checks it out as a plain text file containing just `CLAUDE.md` instead of the real file contents, your Git isn't creating real symlinks — run `git config core.symlinks true` (may also require enabling Windows Developer Mode) and re-clone.
+
 ### Pre-commit hooks
 
 You can optionally use [pre-commit](https://pre-commit.com/) to run ruff and mypy before each commit. This is optional — you can also use `make lint` and `make fmt` directly.
