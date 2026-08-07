@@ -937,13 +937,14 @@ def _run_tracked_scoped(dest: Any, cur_conn: MagicMock, load_conn: MagicMock) ->
         dest.finalize_sync(_config(upsert_key=["parent_id", "id"]), opts)
 
 
+# Mock checks unqualified to_regclass parity with existence; two live schemas prove search_path.
 def test_state_scope_columns_probe_resolves_exact_state_table() -> None:
     dest = PostgresDestination()
     cur = MagicMock()
     cur.fetchone.return_value = (2,)
-    raw = "tenant_a._drt_synced_keys"
+    raw = "_drt_synced_keys"
 
-    assert dest._state_scope_columns_exist(cur, "tenant_a", raw) is True
+    assert dest._state_scope_columns_exist(cur, None, raw) is True
 
     sql, params = cur.execute.call_args.args
     assert "pg_attribute" in sql
