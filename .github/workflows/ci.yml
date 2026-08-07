@@ -47,6 +47,8 @@ jobs:
         # snowflake is omitted — its tests use sys.modules injection so the
         # heavy snowflake-connector-python install would only slow CI.
         # bigquery / gcs / parquet remain opt-in for the same reason.
+        # dev supplies testcontainers, so local_sql_smoke runs against the
+        # runner's Docker daemon on every PR without secrets (#939).
         run: uv pip install --system -e ".[dev,mcp,duckdb,postgres,mysql,clickhouse,sqlserver]"
 
       - name: Dependency vulnerability scan (pip-audit)

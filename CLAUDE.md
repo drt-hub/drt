@@ -49,6 +49,11 @@ make lint     # ruff + mypy
 make fmt      # ruff format + fix
 ```
 
+`local_sql_smoke` covers real Postgres/MySQL dialect behaviour with ephemeral
+testcontainers and runs in the normal PR test job; it skips when Docker is not
+available. ClickHouse and other local dialects are outside this initial scope.
+Cloud-warehouse tests remain under `dwh_smoke` and require `DRT_SMOKE_*` secrets.
+
 ## Current Status
 
 - **Unreleased (on `main`, since v0.8.5)** — `drt serve` gets a real delivery contract (#854, closed): coalescing to depth 1, `202` + run id instead of holding the request open (`?wait=true` for the old synchronous behaviour), pluggable `--auth none|bearer|hmac`. ADR 0005 (state location and write grants, #755/#756) accepted and documented. State layer refactored behind `StateStore`/`HistoryStore`/`DlqBackend` Protocols (#756) so `drt serve`'s shared state store isn't the one caller structurally unable to take a remote backend later. The drift audit now also checks that CLI options reach their MCP tool (#871), catching 11 tracked gaps. An accidental repo-wide `make fmt` sweep from #909 was reverted in #910 — do not run `make fmt` (see CLAUDE.md history / project memory).
