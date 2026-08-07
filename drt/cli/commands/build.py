@@ -18,6 +18,7 @@ from pathlib import Path
 
 import typer
 
+from drt._identifiers import new_run_id
 from drt.cli._app import app
 from drt.cli._selection import SelectionError, complete_selector, select_syncs
 from drt.cli.output import console, print_error
@@ -121,6 +122,7 @@ def build(
         quiet=quiet,
         log_json=False,
         cursor_value=None,
+        run_id=new_run_id(),
     )
 
     entries: list[dict[str, object]] = []
