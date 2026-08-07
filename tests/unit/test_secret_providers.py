@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -194,6 +196,33 @@ class TestRegistry:
         monotonic.return_value = 400.1
         assert resolve_provider_uri(f"{scheme}://x") == "rotated-value"
         assert provider.fetch.call_count == 2
+
+    def test_concurrent_cache_misses_fetch_once(
+        self, _fake_provider: tuple[str, MagicMock]
+    ) -> None:
+        scheme, provider = _fake_provider
+        worker_count = 8
+        barrier = threading.Barrier(worker_count)
+        results: list[str | None] = [None] * worker_count
+
+        def slow_fetch(ref: SecretRef) -> str:
+            time.sleep(0.05)
+            return "shared-value"
+
+        def resolve(index: int) -> None:
+            barrier.wait()
+            results[index] = resolve_provider_uri(f"{scheme}://x")
+
+        provider.fetch.side_effect = slow_fetch
+        threads = [threading.Thread(target=resolve, args=(i,)) for i in range(worker_count)]
+
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert results == ["shared-value"] * worker_count
+        provider.fetch.assert_called_once_with(SecretRef(path="x", key=None))
 
     def test_non_positive_ttl_disables_caching(
         self, monkeypatch: pytest.MonkeyPatch, _fake_provider: tuple[str, MagicMock]

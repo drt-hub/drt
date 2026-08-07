@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -124,6 +125,7 @@ _registry: dict[str, SecretProvider] = {}
 # value to disable caching. It is read at lookup time so runtime environment
 # changes take effect without restarting the process.
 _value_cache: dict[str, tuple[str, float]] = {}
+_value_cache_lock = threading.Lock()
 
 _DEFAULT_CACHE_TTL_SECONDS = 300.0
 _CACHE_TTL_ENV_VAR = "DRT_SECRET_CACHE_TTL_SECONDS"
@@ -169,9 +171,16 @@ def resolve_provider_uri(uri: str) -> str | None:
         if time.monotonic() - fetched_at <= ttl:
             return value
 
-    value = provider.fetch(parse_secret_uri(uri))
-    _value_cache[uri] = (value, time.monotonic())
-    return value
+    with _value_cache_lock:
+        cached = _value_cache.get(uri)
+        if cached is not None:
+            value, fetched_at = cached
+            if time.monotonic() - fetched_at <= ttl:
+                return value
+
+        value = provider.fetch(parse_secret_uri(uri))
+        _value_cache[uri] = (value, time.monotonic())
+        return value
 
 
 def clear_cache() -> None:
