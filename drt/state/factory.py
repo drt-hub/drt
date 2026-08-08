@@ -21,7 +21,7 @@ class StateBundle:
     dlq: DlqBackend
 
 
-_CacheKey = tuple[Path, str, str | None, str | None]
+_CacheKey = tuple[Path, str, str | None, str | None, int]
 _bundle_cache: dict[_CacheKey, StateBundle] = {}
 _bundle_lock = threading.Lock()
 
@@ -36,14 +36,15 @@ def build_state_bundle(project: ProjectConfig, project_dir: Path) -> StateBundle
     ``state.json`` once different syncs run concurrently. The same reasoning
     applies to ``drt run --threads N`` and to future shared remote clients.
 
-    Step 1 of #756 supports only the existing local implementations, making
-    this function a pure indirection layer until remote backends land.
+    GCS bundles share one client as well as one instance lock per store. The
+    lock handles threads in this process; generation preconditions handle
+    independent processes.
     """
     backend = project.state.backend
-    if backend != "local":
+    if backend not in {"local", "gcs"}:
         raise NotImplementedError(
-            f"State backend '{backend}' is not implemented; remote backends "
-            "land in follow-up PRs for #756."
+            f"State backend '{backend}' is not implemented; supported backends "
+            "for this stage of #756 are 'local' and 'gcs'."
         )
 
     resolved_dir = project_dir.resolve()
@@ -52,14 +53,37 @@ def build_state_bundle(project: ProjectConfig, project_dir: Path) -> StateBundle
         backend,
         project.state.bucket,
         project.state.prefix,
+        project.history.max_entries,
     )
     with _bundle_lock:
         bundle = _bundle_cache.get(key)
         if bundle is None:
-            bundle = StateBundle(
-                state=LocalStateManager(resolved_dir),
-                history=LocalHistoryManager(resolved_dir),
-                dlq=LocalDlqStore(resolved_dir),
-            )
+            if backend == "local":
+                bundle = StateBundle(
+                    state=LocalStateManager(resolved_dir),
+                    history=LocalHistoryManager(resolved_dir),
+                    dlq=LocalDlqStore(resolved_dir),
+                )
+            else:
+                from drt.state._objectstore import (
+                    ObjectStoreDlqBackend,
+                    ObjectStoreHistoryStore,
+                    ObjectStoreStateStore,
+                )
+                from drt.state.gcs import GCSObjectClient
+
+                # Pydantic's validator guarantees this for real configs. The
+                # assertion also narrows the optional type for strict mypy.
+                assert project.state.bucket is not None
+                client = GCSObjectClient(project.state.bucket)
+                bundle = StateBundle(
+                    state=ObjectStoreStateStore(client, prefix=project.state.prefix),
+                    history=ObjectStoreHistoryStore(
+                        client,
+                        prefix=project.state.prefix,
+                        max_entries=project.history.max_entries,
+                    ),
+                    dlq=ObjectStoreDlqBackend(client, prefix=project.state.prefix),
+                )
             _bundle_cache[key] = bundle
         return bundle

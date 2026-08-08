@@ -1,7 +1,7 @@
 {
   "$defs": {
     "HistoryConfig": {
-      "description": "Sync execution history retention (#276).",
+      "description": "Sync execution history retention (#276).\n\nLocal history keeps every entry inside ``retention_days``. Remote object\nstores additionally retain only the newest ``max_entries`` per sync, which\nbounds the object downloaded and rewritten by each conditional update.",
       "properties": {
         "enabled": {
           "default": true,
@@ -11,6 +11,12 @@
         "retention_days": {
           "default": 30,
           "title": "Retention Days",
+          "type": "integer"
+        },
+        "max_entries": {
+          "default": 500,
+          "minimum": 1,
+          "title": "Max Entries",
           "type": "integer"
         }
       },
@@ -93,11 +99,14 @@
       "type": "object"
     },
     "StateConfig": {
-      "description": "State-backend selection and backend-specific settings (#756).\n\nThis mirrors :class:`~drt.config.sync_options.WatermarkConfig`'s shape:\none discriminating backend field plus optional fields validated against\nthat choice. Step 1 of #756 only centralizes config and construction;\nremote backends widen ``backend`` and use these fields in follow-up PRs.",
+      "description": "State-backend selection and backend-specific settings (#756).\n\nThis mirrors :class:`~drt.config.sync_options.WatermarkConfig`'s shape:\none discriminating backend field plus optional fields validated against\nthat choice. GCS uses ``bucket`` plus an optional object-key ``prefix``;\nlocal state continues to reject both remote-only fields.",
       "properties": {
         "backend": {
-          "const": "local",
           "default": "local",
+          "enum": [
+            "local",
+            "gcs"
+          ],
           "title": "Backend",
           "type": "string"
         },

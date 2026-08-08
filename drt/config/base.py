@@ -169,10 +169,16 @@ class SourceConfig(BaseModel):
 
 
 class HistoryConfig(BaseModel):
-    """Sync execution history retention (#276)."""
+    """Sync execution history retention (#276).
+
+    Local history keeps every entry inside ``retention_days``. Remote object
+    stores additionally retain only the newest ``max_entries`` per sync, which
+    bounds the object downloaded and rewritten by each conditional update.
+    """
 
     enabled: bool = True
     retention_days: int = 30
+    max_entries: int = Field(default=500, ge=1)
 
 
 class StateConfig(BaseModel):
@@ -180,11 +186,11 @@ class StateConfig(BaseModel):
 
     This mirrors :class:`~drt.config.sync_options.WatermarkConfig`'s shape:
     one discriminating backend field plus optional fields validated against
-    that choice. Step 1 of #756 only centralizes config and construction;
-    remote backends widen ``backend`` and use these fields in follow-up PRs.
+    that choice. GCS uses ``bucket`` plus an optional object-key ``prefix``;
+    local state continues to reject both remote-only fields.
     """
 
-    backend: Literal["local"] = "local"
+    backend: Literal["local", "gcs"] = "local"
     bucket: str | None = None
     prefix: str | None = None
 
@@ -194,6 +200,8 @@ class StateConfig(BaseModel):
             raise ValueError(
                 "state.bucket and state.prefix are not valid when backend is 'local'."
             )
+        if self.backend == "gcs" and not self.bucket:
+            raise ValueError("state.bucket is required when backend is 'gcs'.")
         return self
 
 

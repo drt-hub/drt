@@ -350,6 +350,7 @@ def test_dlq_observer_persists_failed_records(tmp_path: Path) -> None:
     obs = DlqObserver(store)
 
     obs.on_records_failed("s", [_dead(1), _dead(2)])
+    obs.on_sync_completed("s", SyncResult(), "ts", None, None)
 
     assert store.depth("s") == 2
     assert [e.record["id"] for e in store.read("s")] == [1, 2]
@@ -365,6 +366,7 @@ def test_dlq_observer_honours_max_records(tmp_path: Path) -> None:
     store = DlqStore(tmp_path)
     obs = DlqObserver(store, max_records=2)
     obs.on_records_failed("s", [_dead(1), _dead(2), _dead(3)])
+    obs.on_sync_completed("s", SyncResult(), "ts", None, None)
     assert [e.record["id"] for e in store.read("s")] == [2, 3]
 
 
@@ -375,13 +377,13 @@ def test_dlq_observer_swallows_store_errors(caplog: pytest.LogCaptureFixture) ->
     obs = DlqObserver(store)
 
     with caplog.at_level(logging.WARNING, logger="drt"):
-        obs.on_records_failed("s", [_dead(1)])  # must not raise
+        obs.on_records_failed("s", [_dead(1)])
+        obs.on_sync_completed("s", SyncResult(), "ts", None, None)  # must not raise
 
     assert any("DLQ persist failure" in r.message for r in caplog.records)
 
 
-def test_dlq_observer_only_reacts_to_records_failed(tmp_path: Path) -> None:
-    """Every other event method is a no-op — DlqObserver writes nothing on them."""
+def test_dlq_observer_flushes_only_buffered_failures_on_completion(tmp_path: Path) -> None:
     store = DlqStore(tmp_path)
     obs = DlqObserver(store)
     obs.on_sync_started("s", "ts")
@@ -390,6 +392,27 @@ def test_dlq_observer_only_reacts_to_records_failed(tmp_path: Path) -> None:
     obs.on_interrupted("s", 1)
     obs.on_sync_completed("s", SyncResult(), "ts", None, None)
     assert store.depth("s") == 0
+
+
+def test_dlq_observer_buffered_flush_matches_per_batch_local_content(
+    tmp_path: Path,
+) -> None:
+    """Batch buffering changes I/O count, never JSONL content or order."""
+    batches = [[_dead(1)], [_dead(2), _dead(3)], [_dead(4)]]
+    old_store = DlqStore(tmp_path / "old")
+    for batch in batches:
+        old_store.append("s", batch)
+
+    new_store = DlqStore(tmp_path / "new")
+    observer = DlqObserver(new_store)
+    for batch in batches:
+        observer.on_records_failed("s", batch)
+    assert new_store.depth("s") == 0, "failures stay buffered until completion"
+    observer.on_sync_completed("s", SyncResult(), "ts", None, None)
+
+    old_file = tmp_path / "old" / ".drt" / "dlq" / "s.jsonl"
+    new_file = tmp_path / "new" / ".drt" / "dlq" / "s.jsonl"
+    assert new_file.read_bytes() == old_file.read_bytes()
 
 
 # ---------------------------------------------------------------------------

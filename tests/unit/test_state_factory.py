@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from drt.config.base import ProjectConfig, StateConfig
+from drt.config.base import HistoryConfig, ProjectConfig, StateConfig
 from drt.state.dlq import LocalDlqStore
 from drt.state.factory import build_state_bundle
 from drt.state.history import LocalHistoryManager
@@ -52,6 +52,37 @@ def test_different_project_dirs_return_different_instances(tmp_path: Path) -> No
 def test_local_backend_rejects_remote_only_fields(field: str) -> None:
     with pytest.raises(ValidationError, match="not valid when backend is 'local'"):
         StateConfig(**{field: "configured"})
+
+
+def test_gcs_backend_requires_bucket() -> None:
+    with pytest.raises(ValidationError, match="bucket is required.*gcs"):
+        StateConfig(backend="gcs")
+
+
+def test_gcs_backend_builds_object_store_bundle(tmp_path: Path) -> None:
+    from drt.state._objectstore import (
+        ObjectStoreDlqBackend,
+        ObjectStoreHistoryStore,
+        ObjectStoreStateStore,
+    )
+
+    project = ProjectConfig(
+        name="test",
+        state=StateConfig(backend="gcs", bucket="state-bucket", prefix="team/drt"),
+        history=HistoryConfig(max_entries=123),
+    )
+    bundle = build_state_bundle(project, tmp_path)
+
+    assert isinstance(bundle.state, ObjectStoreStateStore)
+    assert isinstance(bundle.history, ObjectStoreHistoryStore)
+    assert isinstance(bundle.dlq, ObjectStoreDlqBackend)
+    assert bundle.state._client is bundle.history._client is bundle.dlq._client
+    assert bundle.history._max_entries == 123
+
+
+def test_history_max_entries_must_be_positive() -> None:
+    with pytest.raises(ValidationError, match="greater than or equal to 1"):
+        HistoryConfig(max_entries=0)
 
 
 def test_bypassed_unknown_backend_fails_explicitly(tmp_path: Path) -> None:
