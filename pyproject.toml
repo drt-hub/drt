@@ -138,5 +138,6 @@ testpaths = ["tests"]
 markers = [
     "dwh_smoke: real cloud-warehouse smoke checks (Snowflake/Databricks/BigQuery); skip without DRT_SMOKE_* secrets (#674).",
     "local_sql_smoke: real Postgres/MySQL via testcontainers-python; skip without Docker (#939).",
+    "object_store_smoke: real GCS via testcontainers' fake-gcs-server emulator; skip without Docker (#756).",
 ]
 asyncio_mode = "auto"

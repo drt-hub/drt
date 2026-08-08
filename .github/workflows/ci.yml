@@ -46,9 +46,17 @@ jobs:
         # wheels so it costs no toolchain.
         # snowflake is omitted — its tests use sys.modules injection so the
         # heavy snowflake-connector-python install would only slow CI.
-        # bigquery / gcs / parquet remain opt-in for the same reason.
-        # dev supplies testcontainers, so local_sql_smoke runs against the
-        # runner's Docker daemon on every PR without secrets (#939).
+        # bigquery / gcs / parquet remain opt-in for the same reason — gcs
+        # additionally must stay out of *this* install: tests/unit/test_gcs_destination.py
+        # asserts the no-extras ImportError message, via a sys.modules
+        # injection trick that only isolates a module never really imported
+        # in this process. Once google-cloud-storage is genuinely installed,
+        # `from google.cloud import storage` resolves through the (real,
+        # already-populated) `google.cloud` package's cached attribute
+        # instead of raising, so that test needs gcs to stay absent here.
+        # object_store_smoke installs it separately, after this step (#756).
+        # dev supplies testcontainers, so local_sql_smoke/object_store_smoke
+        # run against the runner's Docker daemon on every PR without secrets.
         run: uv pip install --system -e ".[dev,mcp,duckdb,postgres,mysql,clickhouse,sqlserver]"
 
       - name: Dependency vulnerability scan (pip-audit)
@@ -111,6 +119,18 @@ jobs:
 
       - name: Test (pytest)
         run: pytest --cov=drt --cov-report=xml
+
+      - name: Install gcs extra for object_store_smoke
+        # Installed as its own late step, after the main test run above —
+        # see the "Install dependencies" step's comment for why gcs cannot
+        # be present for that run (it would make test_gcs_destination.py's
+        # no-extras ImportError assertion pass for the wrong reason: import
+        # success, not a mocked failure). Additive install; nothing above
+        # this step needs to change.
+        run: uv pip install --system -e ".[gcs]"
+
+      - name: Test (object_store_smoke, pytest)
+        run: pytest -m object_store_smoke tests/integration/object_store/
 
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.12'
