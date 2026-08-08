@@ -64,7 +64,8 @@ def matches(sync: SyncConfig, token: str, *, state_diff: StateDiff | None = None
             )
         if state_diff is None:
             raise SelectionError(
-                f"Selector '{token}' requires a baseline manifest to compare against."
+                f"Selector '{token}' requires --state "
+                "<path-to-baseline-manifest.json>."
             )
         names = state_diff.new if token == "state:new" else state_diff.modified
         return sync.name in names

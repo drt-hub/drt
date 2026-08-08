@@ -14,6 +14,7 @@ cwd; no profile loading or sync execution involved.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ import yaml
 from typer.testing import CliRunner
 
 from drt.cli.main import app
+from tests.unit._state_cli_helpers import write_state_baseline
 
 runner = CliRunner()
 
@@ -78,3 +80,46 @@ def test_validate_emit_schema_text_mode_writes_files(project_with_sync: Path) ->
     schema_files = list(schemas_dir.glob("*.json"))
     assert len(schema_files) > 0
     assert "Schemas written to" in result.output
+
+
+def test_validate_select_state_modified_reports_only_changed_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "drt_project.yml").write_text("name: demo\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    for name in ("unchanged", "changed"):
+        (syncs_dir / f"{name}.yml").write_text(
+            yaml.dump(
+                {
+                    "name": name,
+                    "model": "SELECT 1 AS id",
+                    "destination": {
+                        "type": "rest_api",
+                        "url": f"https://example.com/{name}",
+                        "method": "POST",
+                    },
+                }
+            )
+        )
+    baseline = write_state_baseline(tmp_path)
+    with (syncs_dir / "changed.yml").open("a", encoding="utf-8") as f:
+        f.write("\n# changed in this branch\n")
+
+    result = runner.invoke(
+        app,
+        [
+            "validate",
+            "--select",
+            "state:modified",
+            "--state",
+            str(baseline),
+            "--output",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert [entry["name"] for entry in payload["results"]] == ["changed"]

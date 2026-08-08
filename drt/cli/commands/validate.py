@@ -57,7 +57,7 @@ def validate(
         "-s",
         help=(
             "Select syncs: name or glob, tag:<pattern>, destination:<type>, "
-            'or "*" / "all". Repeat to union.'
+            'state:modified/state:new, or "*" / "all". Repeat to union.'
         ),
         autocompletion=complete_selector,
     ),
@@ -66,6 +66,14 @@ def validate(
         "--exclude",
         help="Subtract syncs from the selection (same grammar as --select). Repeatable.",
         autocompletion=complete_selector,
+    ),
+    state: Path | None = typer.Option(
+        None,
+        "--state",
+        help=(
+            "Baseline manifest path for state:modified/state:new selectors "
+            "(for example, a prior `drt docs generate --format json` CI artifact)."
+        ),
     ),
     emit_schema: bool = typer.Option(  # noqa: E501
         False, "--emit-schema", help="Write JSON Schemas to .drt/schemas/."
@@ -81,6 +89,7 @@ def validate(
     Examples:
       drt validate
       drt validate --select post_users
+      drt validate --select state:modified --state ci-baseline/manifest.json
       drt validate --emit-schema
       drt validate --strict
     """
@@ -98,7 +107,15 @@ def validate(
         # match error keys directly — `drt validate --select broken_sync`
         # must still surface that sync's errors.
         try:
-            selected = select_syncs(result.syncs, select, exclude)
+            if state is not None:
+                from drt.cli._state_selection import load_state_diff
+
+                state_diff = load_state_diff(state, result.syncs, Path("."))
+                selected = select_syncs(
+                    result.syncs, select, exclude, state_diff=state_diff
+                )
+            else:
+                selected = select_syncs(result.syncs, select, exclude)
         except SelectionError as e:
             error_keys: set[str] = set()
             if select:

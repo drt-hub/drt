@@ -463,7 +463,8 @@ def run(
         "-s",
         help=(
             "Select syncs: name or glob (users_*), tag:<pattern>, "
-            'destination:<type>, or "*" / "all". Repeat to union.'
+            "destination:<type>, state:modified/state:new, "
+            'or "*" / "all". Repeat to union.'
         ),
         autocompletion=complete_selector,
     ),
@@ -472,6 +473,14 @@ def run(
         "--exclude",
         help="Subtract syncs from the selection (same grammar as --select). Repeatable.",
         autocompletion=complete_selector,
+    ),
+    state: Path | None = typer.Option(
+        None,
+        "--state",
+        help=(
+            "Baseline manifest path for state:modified/state:new selectors "
+            "(for example, a prior `drt docs generate --format json` CI artifact)."
+        ),
     ),
     failed_only: bool = typer.Option(
         False,
@@ -569,6 +578,7 @@ def run(
       drt run --select 'users_*' --exclude users_backfill
       drt run --select tag:crm --select tag:ads --threads 4
       drt run --select destination:hubspot
+      drt run --select state:modified --state ci-baseline/manifest.json --dry-run --diff
       drt run --failed
       drt run --dry-run --diff
     """
@@ -632,7 +642,13 @@ def run(
         raise typer.Exit()
 
     try:
-        syncs = select_syncs(syncs, select, exclude)
+        if state is not None:
+            from drt.cli._state_selection import load_state_diff
+
+            state_diff = load_state_diff(state, syncs, Path("."))
+            syncs = select_syncs(syncs, select, exclude, state_diff=state_diff)
+        else:
+            syncs = select_syncs(syncs, select, exclude)
     except SelectionError as e:
         print_error(str(e))
         raise typer.Exit(1)

@@ -21,6 +21,7 @@ from typer.testing import CliRunner
 
 from drt.cli.main import app
 from drt.state.manager import StateManager, SyncState
+from tests.unit._state_cli_helpers import write_state_baseline
 
 runner = CliRunner()
 
@@ -180,6 +181,82 @@ def test_select_by_name_runs_single_sync(project: Path, patched_engine: dict[str
     result = runner.invoke(app, ["run", "--select", "sync_b", "--output", "json"])
     assert result.exit_code == 0
     assert patched_engine["calls"] == ["sync_b"]
+
+
+def test_select_state_modified_runs_only_changed_sync(
+    project: Path, patched_engine: dict[str, Any]
+) -> None:
+    baseline = write_state_baseline(project)
+    with (project / "syncs" / "sync_b.yml").open("a", encoding="utf-8") as f:
+        f.write("\n# changed in this branch\n")
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--select",
+            "state:modified",
+            "--state",
+            str(baseline),
+            "--output",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert patched_engine["calls"] == ["sync_b"]
+
+
+def test_select_state_modified_missing_baseline_runs_every_sync(
+    project: Path,
+    patched_engine: dict[str, Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    missing = project / "missing-manifest.json"
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--select",
+            "state:modified",
+            "--state",
+            str(missing),
+            "--output",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert patched_engine["calls"] == ["sync_a", "sync_b", "sync_c"]
+    assert "treating every current sync as new" in caplog.text
+
+
+def test_select_state_modified_without_state_exits_cleanly(
+    project: Path, patched_engine: dict[str, Any]
+) -> None:
+    result = runner.invoke(app, ["run", "--select", "state:modified"])
+
+    assert result.exit_code == 1
+    assert "requires --state" in result.output
+    assert "Traceback" not in result.output
+    assert patched_engine["calls"] == []
+
+
+def test_select_state_modified_old_baseline_exits_cleanly(
+    project: Path, patched_engine: dict[str, Any]
+) -> None:
+    baseline = write_state_baseline(project, schema_version=2)
+
+    result = runner.invoke(
+        app,
+        ["run", "--select", "state:modified", "--state", str(baseline)],
+    )
+
+    assert result.exit_code == 1
+    assert "schema version 2 predates config_hash" in result.output
+    assert "Traceback" not in result.output
+    assert patched_engine["calls"] == []
 
 
 def test_select_by_tag_filters(project: Path, patched_engine: dict[str, Any]) -> None:

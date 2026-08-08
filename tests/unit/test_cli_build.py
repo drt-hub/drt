@@ -11,6 +11,7 @@ import yaml
 from typer.testing import CliRunner
 
 from drt.cli.main import app
+from tests.unit._state_cli_helpers import write_state_baseline
 
 runner = CliRunner()
 
@@ -124,6 +125,30 @@ def test_build_runs_syncs_and_their_tests(project: Path, patched_runtime: dict[s
     assert by_name["a_with_tests"]["tests"][0]["passed"] is True
     assert by_name["b_plain"]["tests"] == []  # no tests: defined — stable empty shape
     assert payload["succeeded"] == 2
+
+
+def test_build_select_state_modified_runs_only_changed_sync(
+    project: Path, patched_runtime: dict[str, Any]
+) -> None:
+    baseline = write_state_baseline(project)
+    with (project / "syncs" / "b_plain.yml").open("a", encoding="utf-8") as f:
+        f.write("\n# changed in this branch\n")
+
+    result = runner.invoke(
+        app,
+        [
+            "build",
+            "--select",
+            "state:modified",
+            "--state",
+            str(baseline),
+            "--output",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert patched_runtime["run_calls"] == ["b_plain"]
 
 
 def test_build_json_entries_share_a_real_invocation_run_id(

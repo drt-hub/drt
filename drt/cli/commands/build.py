@@ -32,7 +32,7 @@ def build(
         "-s",
         help=(
             "Select syncs: name or glob, tag:<pattern>, destination:<type>, "
-            'or "*" / "all". Repeat to union.'
+            'state:modified/state:new, or "*" / "all". Repeat to union.'
         ),
         autocompletion=complete_selector,
     ),
@@ -41,6 +41,14 @@ def build(
         "--exclude",
         help="Subtract syncs from the selection (same grammar as --select). Repeatable.",
         autocompletion=complete_selector,
+    ),
+    state: Path | None = typer.Option(
+        None,
+        "--state",
+        help=(
+            "Baseline manifest path for state:modified/state:new selectors "
+            "(for example, a prior `drt docs generate --format json` CI artifact)."
+        ),
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Preview runs and list the test plan without executing."
@@ -66,6 +74,7 @@ def build(
     Examples:
       drt build
       drt build --select tag:crm --fail-fast
+      drt build --select state:modified --state ci-baseline/manifest.json --dry-run
       drt build --dry-run
     """
     from drt.cli._helpers import get_source, resolve_profile_name
@@ -97,7 +106,13 @@ def build(
         raise typer.Exit()
 
     try:
-        syncs = select_syncs(syncs, select, exclude)
+        if state is not None:
+            from drt.cli._state_selection import load_state_diff
+
+            state_diff = load_state_diff(state, syncs, Path("."))
+            syncs = select_syncs(syncs, select, exclude, state_diff=state_diff)
+        else:
+            syncs = select_syncs(syncs, select, exclude)
     except SelectionError as e:
         print_error(str(e))
         raise typer.Exit(1)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ import yaml
 from typer.testing import CliRunner
 
 from drt.cli.main import app
+from tests.unit._state_cli_helpers import write_state_baseline
 
 runner = CliRunner()
 
@@ -80,6 +82,51 @@ def test_drt_test_select_not_found(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     )
     result = runner.invoke(app, ["test", "--select", "nonexistent"])
     assert result.exit_code == 1
+
+
+def test_drt_test_select_state_modified_runs_only_changed_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    for name in ("unchanged", "changed"):
+        (syncs_dir / f"{name}.yml").write_text(
+            yaml.dump(
+                {
+                    "name": name,
+                    "model": "SELECT 1",
+                    "destination": {
+                        "type": "postgres",
+                        "connection_string_env": "DB_CONN",
+                        "table": name,
+                        "upsert_key": ["id"],
+                    },
+                    "tests": [{"row_count": {"min": 1}}],
+                }
+            )
+        )
+    baseline = write_state_baseline(tmp_path)
+    with (syncs_dir / "changed.yml").open("a", encoding="utf-8") as f:
+        f.write("\n# changed in this branch\n")
+
+    result = runner.invoke(
+        app,
+        [
+            "test",
+            "--select",
+            "state:modified",
+            "--state",
+            str(baseline),
+            "--dry-run",
+            "--output",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert [entry["sync"] for entry in payload["results"]] == ["changed"]
 
 
 def test_drt_test_dry_run_shows_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

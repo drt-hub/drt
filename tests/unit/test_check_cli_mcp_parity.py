@@ -142,7 +142,15 @@ def test_plain_option_maps_by_the_obvious_transform() -> None:
 
 def test_presentation_and_selection_options_are_never_reported() -> None:
     gaps = dict(mod.find_gaps(mod.collect_cli_options(), mod.collect_mcp_parameters()))
-    for excluded in ("--output", "--verbose", "--quiet", "--log-format", "--select", "--exclude"):
+    for excluded in (
+        "--output",
+        "--verbose",
+        "--quiet",
+        "--log-format",
+        "--select",
+        "--exclude",
+        "--state",
+    ):
         assert f"run:{excluded}" not in gaps
 
 

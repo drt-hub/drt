@@ -112,7 +112,7 @@ def test_unknown_state_selector_has_distinct_error(syncs: list[SyncConfig]) -> N
 def test_state_selector_without_diff_requires_baseline(
     syncs: list[SyncConfig], token: str
 ) -> None:
-    with pytest.raises(SelectionError, match="requires a baseline manifest"):
+    with pytest.raises(SelectionError, match="requires --state"):
         select_syncs(syncs, [token])
 
 
