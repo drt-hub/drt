@@ -48,7 +48,19 @@ def test_different_project_dirs_return_different_instances(tmp_path: Path) -> No
     assert first.dlq is not second.dlq
 
 
-@pytest.mark.parametrize("field", ["bucket", "prefix"])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "bucket",
+        "prefix",
+        "region",
+        "aws_profile",
+        "aws_access_key_id_env",
+        "aws_secret_access_key_env",
+        "aws_session_token_env",
+        "endpoint_url",
+    ],
+)
 def test_local_backend_rejects_remote_only_fields(field: str) -> None:
     with pytest.raises(ValidationError, match="not valid when backend is 'local'"):
         StateConfig(**{field: "configured"})
@@ -57,6 +69,27 @@ def test_local_backend_rejects_remote_only_fields(field: str) -> None:
 def test_gcs_backend_requires_bucket() -> None:
     with pytest.raises(ValidationError, match="bucket is required.*gcs"):
         StateConfig(backend="gcs")
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "region",
+        "aws_profile",
+        "aws_access_key_id_env",
+        "aws_secret_access_key_env",
+        "aws_session_token_env",
+        "endpoint_url",
+    ],
+)
+def test_gcs_backend_rejects_s3_only_fields(field: str) -> None:
+    with pytest.raises(ValidationError, match="only valid when backend is 's3'"):
+        StateConfig(backend="gcs", bucket="state-bucket", **{field: "configured"})
+
+
+def test_s3_backend_requires_bucket() -> None:
+    with pytest.raises(ValidationError, match="bucket is required.*s3"):
+        StateConfig(backend="s3")
 
 
 def test_gcs_backend_builds_object_store_bundle(tmp_path: Path) -> None:
@@ -78,6 +111,49 @@ def test_gcs_backend_builds_object_store_bundle(tmp_path: Path) -> None:
     assert isinstance(bundle.dlq, ObjectStoreDlqBackend)
     assert bundle.state._client is bundle.history._client is bundle.dlq._client
     assert bundle.history._max_entries == 123
+
+
+def test_s3_backend_builds_object_store_bundle_with_client_options(
+    tmp_path: Path,
+) -> None:
+    from drt.state._objectstore import (
+        ObjectStoreDlqBackend,
+        ObjectStoreHistoryStore,
+        ObjectStoreStateStore,
+    )
+    from drt.state.s3 import S3ObjectClient
+
+    project = ProjectConfig(
+        name="test",
+        state=StateConfig(
+            backend="s3",
+            bucket="state-bucket",
+            prefix="team/drt",
+            region="ap-northeast-1",
+            endpoint_url="http://localhost:4566",
+            aws_profile="state",
+            aws_access_key_id_env="STATE_AWS_KEY",
+            aws_secret_access_key_env="STATE_AWS_SECRET",
+            aws_session_token_env="STATE_AWS_TOKEN",
+        ),
+        history=HistoryConfig(max_entries=321),
+    )
+    bundle = build_state_bundle(project, tmp_path)
+
+    assert isinstance(bundle.state, ObjectStoreStateStore)
+    assert isinstance(bundle.history, ObjectStoreHistoryStore)
+    assert isinstance(bundle.dlq, ObjectStoreDlqBackend)
+    assert bundle.state._client is bundle.history._client is bundle.dlq._client
+    assert isinstance(bundle.state._client, S3ObjectClient)
+    assert bundle.state._client._client_options == {
+        "region": "ap-northeast-1",
+        "endpoint_url": "http://localhost:4566",
+        "aws_profile": "state",
+        "aws_access_key_id_env": "STATE_AWS_KEY",
+        "aws_secret_access_key_env": "STATE_AWS_SECRET",
+        "aws_session_token_env": "STATE_AWS_TOKEN",
+    }
+    assert bundle.history._max_entries == 321
 
 
 def test_history_max_entries_must_be_positive() -> None:

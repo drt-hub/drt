@@ -99,13 +99,14 @@
       "type": "object"
     },
     "StateConfig": {
-      "description": "State-backend selection and backend-specific settings (#756).\n\nThis mirrors :class:`~drt.config.sync_options.WatermarkConfig`'s shape:\none discriminating backend field plus optional fields validated against\nthat choice. GCS uses ``bucket`` plus an optional object-key ``prefix``;\nlocal state continues to reject both remote-only fields.",
+      "description": "State-backend selection and backend-specific settings (#756).\n\nThis mirrors :class:`~drt.config.sync_options.WatermarkConfig`'s shape:\none discriminating backend field plus optional fields validated against\nthat choice. GCS and S3 use ``bucket`` plus an optional object-key\n``prefix``. S3's authentication and endpoint fields deliberately match\n:class:`~drt.config.destinations_storage.S3DestinationConfig`, so state\nstorage follows the same boto3 credential chain and override vocabulary.\nLocal state continues to reject every remote-only field.",
       "properties": {
         "backend": {
           "default": "local",
           "enum": [
             "local",
-            "gcs"
+            "gcs",
+            "s3"
           ],
           "title": "Backend",
           "type": "string"
@@ -133,6 +134,78 @@
           ],
           "default": null,
           "title": "Prefix"
+        },
+        "region": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Region"
+        },
+        "aws_profile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Aws Profile"
+        },
+        "aws_access_key_id_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Aws Access Key Id Env"
+        },
+        "aws_secret_access_key_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Aws Secret Access Key Env"
+        },
+        "aws_session_token_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Aws Session Token Env"
+        },
+        "endpoint_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Endpoint Url"
         }
       },
       "title": "StateConfig",
