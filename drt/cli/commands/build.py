@@ -73,8 +73,7 @@ def build(
     from drt.cli.commands.test import execute_tests_for_sync
     from drt.config.credentials import load_profile
     from drt.config.parser import load_project, load_syncs
-    from drt.state.history import HistoryManager
-    from drt.state.manager import StateManager
+    from drt.state.factory import build_state_bundle
 
     json_mode = output == "json"
 
@@ -107,14 +106,15 @@ def build(
         raise typer.Exit(1)
 
     source = get_source(profile)
-    state_mgr = StateManager(Path("."))
+    state_bundle = build_state_bundle(project, Path("."))
     history_cfg = project.history
-    history_mgr = HistoryManager(Path(".")) if history_cfg.enabled else None
+    history_mgr = state_bundle.history if history_cfg.enabled else None
 
     ctx = _RunContext(
         source=source,
-        state_mgr=state_mgr,
+        state_mgr=state_bundle.state,
         history_mgr=history_mgr,
+        dlq_store=state_bundle.dlq,
         history_retention_days=history_cfg.retention_days,
         json_mode=json_mode,
         dry_run=dry_run,

@@ -175,6 +175,28 @@ class HistoryConfig(BaseModel):
     retention_days: int = 30
 
 
+class StateConfig(BaseModel):
+    """State-backend selection and backend-specific settings (#756).
+
+    This mirrors :class:`~drt.config.sync_options.WatermarkConfig`'s shape:
+    one discriminating backend field plus optional fields validated against
+    that choice. Step 1 of #756 only centralizes config and construction;
+    remote backends widen ``backend`` and use these fields in follow-up PRs.
+    """
+
+    backend: Literal["local"] = "local"
+    bucket: str | None = None
+    prefix: str | None = None
+
+    @model_validator(mode="after")
+    def _check_backend_fields(self) -> StateConfig:
+        if self.backend == "local" and (self.bucket is not None or self.prefix is not None):
+            raise ValueError(
+                "state.bucket and state.prefix are not valid when backend is 'local'."
+            )
+        return self
+
+
 class QueryTaggingConfig(BaseModel):
     """Cost-attribution tagging on extract/destination queries (#768).
 
@@ -197,6 +219,7 @@ class ProjectConfig(BaseModel):
     profile: str = "default"
     source: SourceConfig | None = None  # optional; profile is authoritative
     history: HistoryConfig = Field(default_factory=HistoryConfig)
+    state: StateConfig = Field(default_factory=StateConfig)
     # Project vars (#783): reviewed, in-repo defaults for anything
     # project-shaped, referenced as {{ var('name') }} in model SQL and YAML
     # string fields. Overridden by DRT_VAR_* env and `--vars` at run time —

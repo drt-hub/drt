@@ -47,8 +47,9 @@ if TYPE_CHECKING:
     from drt.config.models import SyncConfig
     from drt.destinations.base import Destination  # noqa: F401 — _RunContext field
     from drt.sources.base import Source
-    from drt.state.history import HistoryManager
-    from drt.state.manager import StateManager
+    from drt.state.dlq import DlqBackend
+    from drt.state.history import HistoryStore
+    from drt.state.manager import StateStore
 
 
 from drt._identifiers import new_run_id
@@ -97,8 +98,9 @@ class _RunContext:
     """Shared context for executing a single sync within ``run()``."""
 
     source: Source
-    state_mgr: StateManager
-    history_mgr: HistoryManager | None
+    state_mgr: StateStore
+    history_mgr: HistoryStore | None
+    dlq_store: DlqBackend
     history_retention_days: int
     json_mode: bool
     dry_run: bool
@@ -152,9 +154,9 @@ def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
         StatePersistingObserver(ctx.state_mgr, wm_storage),
     ]
     if not ctx.dry_run and sync.sync.dlq is not None and sync.sync.dlq.enabled:
-        from drt.state.dlq import DlqStore
-
-        observers.append(DlqObserver(DlqStore(Path(".")), max_records=sync.sync.dlq.max_records))
+        observers.append(
+            DlqObserver(ctx.dlq_store, max_records=sync.sync.dlq.max_records)
+        )
     return CompositeObserver(observers)
 
 
@@ -326,9 +328,7 @@ def _run_one(
                     dispatch_targets,
                     evaluate_conditions,
                 )
-                from drt.state.dlq import DlqStore
-
-                dlq_depth = DlqStore(Path(".")).depth(sync.name)
+                dlq_depth = ctx.dlq_store.depth(sync.name)
                 tripped = evaluate_conditions(
                     result, dlq_depth, sync.alerts.on_degraded.conditions
                 )
@@ -402,7 +402,12 @@ def _print_watermark_summary(results: list[dict[str, object]]) -> None:
 
 
 def _reset_watermarks_for(
-    syncs: list[SyncConfig], *, json_mode: bool, quiet: bool, dry_run: bool = False
+    syncs: list[SyncConfig],
+    state_mgr: StateStore,
+    *,
+    json_mode: bool,
+    quiet: bool,
+    dry_run: bool = False,
 ) -> None:
     """Clear stored watermarks for ``syncs`` ahead of a --full-refresh run.
 
@@ -425,10 +430,7 @@ def _reset_watermarks_for(
     dry run stays informative rather than pretending ``--full-refresh``
     wasn't passed.
     """
-    from drt.state.manager import StateManager
-
     project = Path(".")
-    state_mgr = StateManager(project)
     incremental = [s for s in syncs if s.sync.mode == "incremental"]
 
     if not dry_run:
@@ -577,7 +579,7 @@ def run(
 
     from drt.config.credentials import load_profile
     from drt.config.parser import load_project, load_syncs
-    from drt.state.manager import StateManager
+    from drt.state.factory import build_state_bundle
 
     if log_format is LogFormat.JSON:
         _configure_json_logging()
@@ -589,6 +591,8 @@ def run(
     except FileNotFoundError as e:
         print_error(str(e))
         raise typer.Exit(1)
+
+    state_bundle = build_state_bundle(project, Path("."))
 
     resolved = resolve_profile_name(profile_name, project.profile)
     try:
@@ -641,10 +645,8 @@ def run(
     # A clean previous state exits 0 — recovery loops shouldn't page when
     # there is nothing to recover. (Record-level replay is `drt retry`.)
     if failed_only:
-        state_probe = StateManager(Path("."))
-
         def _last_run_failed(sync_cfg: SyncConfig) -> bool:
-            prev = state_probe.get_last_sync(sync_cfg.name)
+            prev = state_bundle.state.get_last_sync(sync_cfg.name)
             return prev is not None and prev.status != "success"
 
         syncs = [s for s in syncs if _last_run_failed(s)]
@@ -698,7 +700,13 @@ def run(
         raise typer.Exit(1)
 
     if full_refresh:
-        _reset_watermarks_for(syncs, json_mode=json_mode, quiet=quiet, dry_run=dry_run)
+        _reset_watermarks_for(
+            syncs,
+            state_bundle.state,
+            json_mode=json_mode,
+            quiet=quiet,
+            dry_run=dry_run,
+        )
 
     if cursor_value is not None:
         incremental = [s for s in syncs if s.sync.mode == "incremental"]
@@ -716,14 +724,8 @@ def run(
             )
 
     source = get_source(profile)
-    state_mgr = StateManager(Path("."))
-
-    # Resolve history config from project file (optional, defaults to enabled).
-    from drt.config.parser import load_project
-    from drt.state.history import HistoryManager
-
-    history_cfg = load_project(Path(".")).history
-    history_mgr = HistoryManager(Path(".")) if history_cfg.enabled else None
+    history_cfg = project.history
+    history_mgr = state_bundle.history if history_cfg.enabled else None
 
     json_results: list[dict[str, object]] = []
     t_total = time.monotonic()
@@ -776,8 +778,9 @@ def run(
 
     ctx = _RunContext(
         source=source,
-        state_mgr=state_mgr,
+        state_mgr=state_bundle.state,
         history_mgr=history_mgr,
+        dlq_store=state_bundle.dlq,
         history_retention_days=history_cfg.retention_days,
         json_mode=json_mode,
         dry_run=dry_run,

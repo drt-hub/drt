@@ -55,6 +55,7 @@ def _fake_ctx(*, dry_run: bool = False, run_id: str = "") -> _RunContext:
         source=MagicMock(),
         state_mgr=MagicMock(),
         history_mgr=None,
+        dlq_store=MagicMock(),
         history_retention_days=30,
         json_mode=True,  # suppress rich output
         dry_run=dry_run,
@@ -159,6 +160,7 @@ def _ctx(**overrides: Any) -> _RunContext:
         "source": MagicMock(),
         "state_mgr": MagicMock(),
         "history_mgr": None,
+        "dlq_store": MagicMock(),
         "history_retention_days": 30,
         "json_mode": True,
         "dry_run": False,

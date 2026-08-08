@@ -33,6 +33,7 @@ from drt.config.base import (
     RetryConfig,
     SourceConfig,
     SslConfig,
+    StateConfig,
 )
 from drt.config.destinations_saas import (
     AirtableDestinationConfig,
@@ -167,6 +168,7 @@ __all__ = [
     "SnowflakeDestinationConfig",
     "SourceConfig",
     "SslConfig",
+    "StateConfig",
     "StagedUploadDestinationConfig",
     "StagedUploadPhaseConfig",
     "StagedUploadPollConfig",

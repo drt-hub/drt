@@ -18,9 +18,9 @@ if TYPE_CHECKING:
 
 
 def state_show(ctx: McpContext, sync_name: str | None = None) -> dict[str, Any]:
-    from drt.state.manager import StateManager
+    from drt.state.factory import build_state_bundle
 
-    states = StateManager(ctx.project_dir).get_all()
+    states = build_state_bundle(ctx.load_project_for_state(), ctx.project_dir).state.get_all()
 
     if sync_name:
         s = states.get(sync_name)
@@ -67,8 +67,6 @@ def state_reset(
     deletion candidates on the next mirror pass (#686). The response says so
     explicitly, since an agent has no help text to read.
     """
-    from drt.state.manager import StateManager
-
     levels = [
         name
         for name, on in (
@@ -103,7 +101,9 @@ def state_reset(
                 storage.delete(sync_name)
 
     if runs:
-        StateManager(ctx.project_dir).reset(sync_name)
+        from drt.state.factory import build_state_bundle
+
+        build_state_bundle(ctx.load_project_for_state(), ctx.project_dir).state.reset(sync_name)
 
     if tracked_mirror:
         from drt.cli._helpers import get_destination

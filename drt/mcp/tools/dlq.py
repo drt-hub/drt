@@ -15,9 +15,9 @@ if TYPE_CHECKING:
 def dlq(ctx: McpContext, sync_name: str | None = None, limit: int = 20) -> dict[str, Any]:
     from dataclasses import asdict
 
-    from drt.state.dlq import DlqStore
+    from drt.state.factory import build_state_bundle
 
-    store = DlqStore(ctx.project_dir)
+    store = build_state_bundle(ctx.load_project_for_state(), ctx.project_dir).dlq
     if sync_name is None:
         return {"depths": store.all_depths()}
 

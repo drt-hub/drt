@@ -41,7 +41,7 @@ from drt.engine.resolver import resolve_model_ref
 from drt.observability import build_status, get_tracer
 from drt.sources.base import IncrementalSource, Source
 from drt.state.dlq import DeadLetter
-from drt.state.history import HistoryEntry, HistoryManager
+from drt.state.history import HistoryEntry, HistoryStore
 from drt.state.manager import StateStore
 from drt.state.watermark import WatermarkStorage
 
@@ -238,7 +238,7 @@ def run_sync(
     state_manager: StateStore | None = None,
     watermark_storage: WatermarkStorage | None = None,
     cursor_value_override: str | None = None,
-    history_manager: HistoryManager | None = None,
+    history_manager: HistoryStore | None = None,
     history_retention_days: int = 30,
     stop_event: threading.Event | None = None,
     compute_diff: bool = False,
