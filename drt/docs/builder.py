@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from drt import __version__
+from drt.config.fingerprint import sync_fingerprints
 from drt.config.models import SyncConfig
 from drt.config.parser import load_project, load_syncs_safe
 from drt.docs.manifest import (
@@ -211,6 +212,7 @@ def build_manifest(
     """
     project = load_project(project_dir)
     syncs_result = load_syncs_safe(project_dir)
+    fingerprints = sync_fingerprints(project_dir)
 
     states: dict[str, SyncState] = {}
     dlq_depths: dict[str, int] = {}
@@ -258,6 +260,7 @@ def build_manifest(
                 else (),
                 fields=_declared_fields(sync_cfg),
                 dlq_depth=dlq_depths.get(sync_cfg.name, 0) if include_state else None,
+                config_hash=fingerprints.get(sync_cfg.name),
             )
         )
 

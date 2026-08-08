@@ -1,4 +1,4 @@
-"""Tests for `drt docs generate --format json` + manifest.json schema v1 (P2 of #499)."""
+"""Tests for `drt docs generate --format json` and its versioned manifest schema."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import yaml
 from typer.testing import CliRunner
 
 from drt.cli.main import app
+from drt.config.fingerprint import sync_fingerprints
 from drt.docs import (
     SCHEMA_VERSION,
     Destination,
@@ -25,6 +26,10 @@ from drt.docs import (
 )
 
 runner = CliRunner()
+
+
+def test_schema_version_is_3() -> None:
+    assert SCHEMA_VERSION == 3
 
 
 def _write_project(project_dir: Path, profile: str = "bq_prod", name: str = "demo") -> None:
@@ -138,6 +143,7 @@ class TestManifestRoundTrip:
                         SyncField(name="phone", source_name="phone", mask="truncate"),
                     ),
                     dlq_depth=3,
+                    config_hash="0123456789abcdef",
                 ),
             ],
             sources=[Source(name="bq_prod", type="bigquery")],
@@ -149,7 +155,48 @@ class TestManifestRoundTrip:
         )
 
         roundtrip = Manifest.from_dict(original.to_dict())
+
         assert roundtrip == original
+        assert roundtrip.syncs[0].config_hash == "0123456789abcdef"
+
+    def test_round_trip_preserves_none_config_hash(self) -> None:
+        original = Manifest(
+            schema_version=SCHEMA_VERSION,
+            drt_version="0.9.0",
+            syncs=[Sync(name="s", source="src", destination="dst", mode="full")],
+        )
+
+        roundtrip = Manifest.from_dict(original.to_dict())
+
+        assert roundtrip.syncs[0].config_hash is None
+        assert roundtrip.to_dict()["syncs"][0]["config_hash"] is None
+
+    @pytest.mark.parametrize("schema_version", [1, 2])
+    def test_old_shape_without_config_hash_loads_as_none(self, schema_version: int) -> None:
+        old_shape = {
+            "schema_version": schema_version,
+            "drt_version": "0.8.5",
+            "generated_at": "2026-08-05T00:00:00Z",
+            "project": {"name": "demo", "profile": "bq_prod"},
+            "syncs": [
+                {
+                    "name": "users",
+                    "source": "bq_prod",
+                    "destination": "dest_postgres",
+                    "mode": "upsert",
+                    "description": "",
+                    "tags": [],
+                }
+            ],
+            "sources": [],
+            "destinations": [],
+            "edges": [],
+        }
+
+        manifest = Manifest.from_dict(old_shape)
+
+        assert manifest.schema_version == schema_version
+        assert manifest.syncs[0].config_hash is None
 
     def test_edge_from_is_serialized_as_from_keyword(self) -> None:
         m = Manifest(
@@ -184,6 +231,28 @@ class TestManifestRoundTrip:
 
 
 class TestBuildManifestWithState:
+    def test_sync_config_hash_matches_fingerprint_module(self, tmp_path: Path) -> None:
+        _write_project(tmp_path)
+        _write_sync(tmp_path, "users.yml", _pg_sync("users", "public.users"))
+
+        manifest = build_manifest(tmp_path)
+
+        assert manifest.syncs[0].config_hash == sync_fingerprints(tmp_path)["users"]
+
+    def test_no_state_still_includes_config_hash(self, tmp_path: Path) -> None:
+        """ADR 0006: config_hash is a repo fact, not run state — --no-state
+        removes the latest-state snapshot, history, and DLQ depth, but a
+        state:modified baseline generated with --no-state must still be
+        usable, so the fingerprint must survive."""
+        _write_project(tmp_path)
+        _write_sync(tmp_path, "users.yml", _pg_sync("users", "public.users"))
+
+        manifest = build_manifest(tmp_path, include_state=False)
+
+        expected = sync_fingerprints(tmp_path)["users"]
+        assert manifest.syncs[0].config_hash == expected
+        assert manifest.to_dict()["syncs"][0]["config_hash"] == expected
+
     def test_include_state_attaches_renamed_fields(self, tmp_path: Path) -> None:
         _write_project(tmp_path)
         _write_sync(tmp_path, "users.yml", _pg_sync("users", "public.users"))
