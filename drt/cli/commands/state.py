@@ -75,9 +75,17 @@ def state_show(
 
     from rich.table import Table
 
-    from drt.state.manager import StateManager
+    from drt.config.base import ProjectConfig
+    from drt.config.parser import load_project
+    from drt.state.factory import build_state_bundle
 
-    states = StateManager(Path(".")).get_all()
+    project_dir = Path(".")
+    project = (
+        load_project(project_dir)
+        if (project_dir / "drt_project.yml").exists()
+        else ProjectConfig(name="drt")
+    )
+    states = build_state_bundle(project, project_dir).state.get_all()
 
     if sync_name:
         s = states.get(sync_name)
@@ -123,7 +131,6 @@ def state_reset(
     from pathlib import Path
 
     from drt.cli._helpers import confirm_destructive, get_watermark_storage
-    from drt.state.manager import StateManager
 
     if not (watermark or runs or tracked_mirror):
         # Never treat "no level" as "all levels" — the whole point of splitting
@@ -159,6 +166,18 @@ def state_reset(
         raise typer.Exit(0)
 
     project = Path(".")
+    state_bundle = None
+    if runs:
+        from drt.config.base import ProjectConfig
+        from drt.config.parser import load_project
+        from drt.state.factory import build_state_bundle
+
+        project_config = (
+            load_project(project)
+            if (project / "drt_project.yml").exists()
+            else ProjectConfig(name="drt")
+        )
+        state_bundle = build_state_bundle(project_config, project)
 
     if watermark:
         cleared = False
@@ -180,7 +199,8 @@ def state_reset(
         )
 
     if runs:
-        removed = StateManager(project).reset(sync_name)
+        assert state_bundle is not None
+        removed = state_bundle.state.reset(sync_name)
         console.print(
             "[green]✓[/green] run state cleared"
             if removed

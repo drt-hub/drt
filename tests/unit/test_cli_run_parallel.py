@@ -126,6 +126,7 @@ def patched_engine(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     calls: list[str] = []
     limits: list[int | None] = []
+    state_managers: list[Any] = []
     lock = threading.Lock()
     threads_seen: set[int] = set()
 
@@ -137,6 +138,7 @@ def patched_engine(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         with lock:
             calls.append(sync.name)
             limits.append(_kwargs.get("extract_limit"))
+            state_managers.append(_args[5])
             threads_seen.add(threading.get_ident())
         return _FakeResult(success=1, failed=0)
 
@@ -161,7 +163,12 @@ def patched_engine(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         lambda *_a, **_kw: object(),
         raising=False,
     )
-    return {"calls": calls, "threads_seen": threads_seen, "limits": limits}
+    return {
+        "calls": calls,
+        "threads_seen": threads_seen,
+        "limits": limits,
+        "state_managers": state_managers,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -546,6 +553,9 @@ def test_threads_flag_actually_parallelises(project: Path, patched_engine: dict[
     # More than one OS thread should have handled the syncs when
     # --threads > 1 and there are multiple syncs.
     assert len(patched_engine["threads_seen"]) > 1
+    state_managers = patched_engine["state_managers"]
+    assert len({id(manager) for manager in state_managers}) == 1
+    assert len({id(manager._lock) for manager in state_managers}) == 1
 
 
 def test_threads_one_runs_sequentially(project: Path, patched_engine: dict[str, Any]) -> None:

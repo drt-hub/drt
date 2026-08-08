@@ -48,7 +48,7 @@ def run_drt_sync(
     from drt.config.credentials import load_profile
     from drt.config.parser import load_project, load_syncs
     from drt.engine.sync import run_sync
-    from drt.state.manager import StateManager
+    from drt.state.factory import build_state_bundle
 
     pdir = Path(project_dir)
     project = load_project(pdir)
@@ -63,7 +63,11 @@ def run_drt_sync(
     sync = matched[0]
     source = _get_source(prof)
     dest = _get_destination(sync)
-    state_mgr = state_manager if state_manager is not None else StateManager(pdir)
+    state_mgr = (
+        state_manager
+        if state_manager is not None
+        else build_state_bundle(project, pdir).state
+    )
 
     result = run_sync(sync, source, dest, prof, pdir, dry_run, state_mgr)
 

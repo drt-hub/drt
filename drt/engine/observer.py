@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from drt.destinations.base import SyncResult
-    from drt.state.dlq import DeadLetter, DlqStore
+    from drt.state.dlq import DeadLetter, DlqBackend
     from drt.state.manager import StateStore
     from drt.state.watermark import WatermarkStorage
 
@@ -307,7 +307,7 @@ class DlqObserver:
     ``on_records_failed``.
     """
 
-    def __init__(self, store: DlqStore, *, max_records: int = 10_000) -> None:
+    def __init__(self, store: DlqBackend, *, max_records: int = 10_000) -> None:
         self._store = store
         self._max_records = max_records
         self._logger = logging.getLogger("drt")

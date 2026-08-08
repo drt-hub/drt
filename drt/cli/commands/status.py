@@ -45,11 +45,19 @@ def status(
         _print_history(sync_name=sync_name, limit=limit, output=output)
         return
 
-    from drt.state.dlq import DlqStore
-    from drt.state.manager import StateManager
+    from drt.config.base import ProjectConfig
+    from drt.config.parser import load_project
+    from drt.state.factory import build_state_bundle
 
-    states = StateManager(Path(".")).get_all()
-    dlq_depths = DlqStore(Path(".")).all_depths()
+    project_dir = Path(".")
+    project = (
+        load_project(project_dir)
+        if (project_dir / "drt_project.yml").exists()
+        else ProjectConfig(name="drt")
+    )
+    state_bundle = build_state_bundle(project, project_dir)
+    states = state_bundle.state.get_all()
+    dlq_depths = state_bundle.dlq.all_depths()
 
     if output == "json":
         print(
@@ -94,9 +102,19 @@ def _print_history(*, sync_name: str | None, limit: int, output: str) -> None:
     """Render ``drt status --history`` output for one or all syncs."""
     from dataclasses import asdict
 
-    from drt.state.history import HistoryManager
+    from drt.config.base import ProjectConfig
+    from drt.config.parser import load_project
+    from drt.state.factory import build_state_bundle
 
-    entries = HistoryManager(Path(".")).read(sync_name=sync_name, limit=limit)
+    project_dir = Path(".")
+    project = (
+        load_project(project_dir)
+        if (project_dir / "drt_project.yml").exists()
+        else ProjectConfig(name="drt")
+    )
+    entries = build_state_bundle(project, project_dir).history.read(
+        sync_name=sync_name, limit=limit
+    )
 
     if output == "json":
         print(

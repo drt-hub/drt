@@ -36,6 +36,19 @@ class McpContext:
 
         return load_project(self.project_dir)
 
+    def load_project_for_state(self) -> ProjectConfig:
+        """Load backend config without making state reads require a project.
+
+        State/history/DLQ tools historically worked against a standalone
+        ``.drt`` directory. A missing project file therefore selects today's
+        local default; a present file still goes through normal validation.
+        """
+        from drt.config.models import ProjectConfig
+
+        if (self.project_dir / "drt_project.yml").exists():
+            return self.load_project()
+        return ProjectConfig(name="drt")
+
     def load_syncs(self) -> list[SyncConfig]:
         from drt.config.parser import load_syncs
 

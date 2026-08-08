@@ -416,7 +416,9 @@ def serve(
     """
     from pathlib import Path
 
-    from drt.state.manager import StateManager
+    from drt.config.base import ProjectConfig
+    from drt.config.parser import load_project
+    from drt.state.factory import build_state_bundle
 
     if auth_scheme == "auto":
         auth_scheme = "bearer" if token else "none"
@@ -427,12 +429,13 @@ def serve(
         hmac_header=hmac_header,
     )
 
-    # One state store shared across every run: LocalStateManager's
-    # thread-safety is an instance lock, so per-request instances would race
-    # load-modify-save on state.json once different syncs run concurrently.
-    # run_drt_sync takes the StateStore Protocol (#756), so a remote backend
-    # drops in here without the serve path changing.
-    state_manager = StateManager(Path(project_dir))
+    project_path = Path(project_dir)
+    project = (
+        load_project(project_path)
+        if (project_path / "drt_project.yml").exists()
+        else ProjectConfig(name="drt")
+    )
+    state_manager = build_state_bundle(project, project_path).state
 
     def runner(sync_name: str, dry_run: bool) -> dict[str, Any]:
         from drt.integrations._runner import run_drt_sync

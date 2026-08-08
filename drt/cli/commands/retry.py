@@ -20,7 +20,7 @@ from drt.cli._app import app
 from drt.cli.output import console, print_error
 
 if TYPE_CHECKING:
-    from drt.config.models import SyncConfig
+    from drt.config.models import ProjectConfig, SyncConfig
     from drt.state.dlq import DeadLetter
 
 
@@ -32,6 +32,7 @@ def _chunks(items: list[DeadLetter], size: int) -> list[list[DeadLetter]]:
 def replay_dead_letters(
     sync: SyncConfig,
     *,
+    project: ProjectConfig | None = None,
     limit: int | None = None,
     dry_run: bool = False,
     clear: bool = False,
@@ -50,9 +51,18 @@ def replay_dead_letters(
         - ``"ok"``       — records replayed; see ``succeeded`` / ``still_failing``
     """
     from drt.cli._helpers import get_destination
-    from drt.state.dlq import DeadLetter, DlqStore
+    from drt.config.base import ProjectConfig
+    from drt.config.parser import load_project
+    from drt.state.dlq import DeadLetter
+    from drt.state.factory import build_state_bundle
 
-    store = DlqStore(project_dir)
+    if project is None:
+        project = (
+            load_project(project_dir)
+            if (project_dir / "drt_project.yml").exists()
+            else ProjectConfig(name="drt")
+        )
+    store = build_state_bundle(project, project_dir).dlq
     entries = store.read(sync.name)
     if not entries:
         return {"sync": sync.name, "queued": 0, "status": "empty"}
@@ -156,8 +166,9 @@ def retry(
       drt retry post_users --dry-run        # preview depth, send nothing
       drt retry post_users --clear          # give up — empty the queue
     """
-    from drt.config.parser import load_syncs
+    from drt.config.parser import load_project, load_syncs
 
+    project = load_project(Path("."))
     syncs = load_syncs(Path("."))
     sync = next((s for s in syncs if s.name == sync_name), None)
     if sync is None:
@@ -169,7 +180,12 @@ def retry(
         raise typer.Exit(1)
 
     summary = replay_dead_letters(
-        sync, limit=limit, dry_run=dry_run, clear=clear, project_dir=Path(".")
+        sync,
+        project=project,
+        limit=limit,
+        dry_run=dry_run,
+        clear=clear,
+        project_dir=Path("."),
     )
     status = summary["status"]
 

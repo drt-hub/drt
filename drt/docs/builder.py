@@ -21,9 +21,9 @@ from drt.docs.manifest import (
     SyncRun,
     SyncStateSnapshot,
 )
-from drt.state.dlq import DlqStore
-from drt.state.history import HistoryEntry, HistoryManager
-from drt.state.manager import StateManager, SyncState
+from drt.state.factory import build_state_bundle
+from drt.state.history import HistoryEntry, HistoryStore
+from drt.state.manager import SyncState
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9_]+")
 
@@ -214,12 +214,13 @@ def build_manifest(
 
     states: dict[str, SyncState] = {}
     dlq_depths: dict[str, int] = {}
-    history: HistoryManager | None = None
+    history: HistoryStore | None = None
     if include_state:
-        states = StateManager(project_dir).get_all()
-        dlq_depths = DlqStore(project_dir).all_depths()
+        state_bundle = build_state_bundle(project, project_dir)
+        states = state_bundle.state.get_all()
+        dlq_depths = state_bundle.dlq.all_depths()
         if history_depth > 0:
-            history = HistoryManager(project_dir)
+            history = state_bundle.history
 
     # Source: project.profile is authoritative; type from inline ProjectConfig.source if present,
     # else "configured" because profiles.yml resolves the concrete type later.

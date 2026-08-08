@@ -91,6 +91,43 @@
       ],
       "title": "SourceConfig",
       "type": "object"
+    },
+    "StateConfig": {
+      "description": "State-backend selection and backend-specific settings (#756).\n\nThis mirrors :class:`~drt.config.sync_options.WatermarkConfig`'s shape:\none discriminating backend field plus optional fields validated against\nthat choice. Step 1 of #756 only centralizes config and construction;\nremote backends widen ``backend`` and use these fields in follow-up PRs.",
+      "properties": {
+        "backend": {
+          "const": "local",
+          "default": "local",
+          "title": "Backend",
+          "type": "string"
+        },
+        "bucket": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bucket"
+        },
+        "prefix": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prefix"
+        }
+      },
+      "title": "StateConfig",
+      "type": "object"
     }
   },
   "properties": {
@@ -121,6 +158,9 @@
     },
     "history": {
       "$ref": "#/$defs/HistoryConfig"
+    },
+    "state": {
+      "$ref": "#/$defs/StateConfig"
     },
     "vars": {
       "additionalProperties": true,

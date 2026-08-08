@@ -17,7 +17,9 @@ def get_history(
 ) -> dict[str, Any]:
     from dataclasses import asdict
 
-    from drt.state.history import HistoryManager
+    from drt.state.factory import build_state_bundle
 
-    entries = HistoryManager(ctx.project_dir).read(sync_name=sync_name, limit=limit)
+    entries = build_state_bundle(ctx.load_project_for_state(), ctx.project_dir).history.read(
+        sync_name=sync_name, limit=limit
+    )
     return {"entries": [asdict(e) for e in entries]}
