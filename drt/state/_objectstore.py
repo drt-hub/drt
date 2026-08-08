@@ -77,7 +77,7 @@ class ObjectStoreStateStore(_ObjectStoreBase):
         if body is None:
             return {}
         try:
-            value = json.loads(body.decode()) or {}
+            value = json.loads(body.decode())
             if not isinstance(value, dict):
                 raise ValueError("state root is not an object")
             return value
