@@ -9,6 +9,9 @@ drt-core version its bundled schemas were generated from.
 - Bundled JSON Schemas regenerated from drt-core: `drt_project.yml` now validates
   the `state` backend block (`backend`, `bucket`, `prefix`) introduced for
   drt-hub/drt#756.
+- Bundled JSON Schemas regenerated from drt-core: `state.backend` now accepts
+  `gcs` in addition to `local`, and `HistoryConfig` gains `max_entries`
+  (drt-hub/drt#756).
 
 ## [0.1.12] - Unreleased
 

@@ -69,8 +69,8 @@ class SyncObserver(Protocol):
         the engine has already correlated ``RowError.batch_index`` back to
         the full record it sent, so no record content is lost here. Fired
         once per batch that had pinpointed per-record failures (never on a
-        clean batch). Observers that maintain a Dead Letter Queue persist
-        here; every other observer no-ops.
+        clean batch). Observers that maintain a Dead Letter Queue buffer here
+        and flush on completion; every other observer no-ops.
         """
         ...
 
@@ -302,15 +302,17 @@ class DlqObserver:
 
     Wired into the run path only for syncs that set ``sync.dlq.enabled``.
     Like every other observer it is fire-and-forget: a DLQ write failure is
-    logged and swallowed so it can never fail an otherwise-OK sync. All
-    other event methods are no-ops — this observer only cares about
-    ``on_records_failed``.
+    logged and swallowed so it can never fail an otherwise-OK sync. Failed
+    batches are buffered and written once at completion. This avoids a
+    remote read-modify-write for every failed batch while preserving record
+    order and identical local JSONL content.
     """
 
     def __init__(self, store: DlqBackend, *, max_records: int = 10_000) -> None:
         self._store = store
         self._max_records = max_records
         self._logger = logging.getLogger("drt")
+        self._buffer: dict[str, list[DeadLetter]] = {}
 
     def on_sync_started(self, sync_name: str, started_at: str) -> None: ...
     def on_watermark_resolved(
@@ -325,12 +327,18 @@ class DlqObserver:
         started_at: str,
         new_cursor_value: str | None,
         cursor_field: str | None,
-    ) -> None: ...
+    ) -> None:
+        dead_letters = self._buffer.pop(sync_name, [])
+        if not dead_letters:
+            return
+        try:
+            self._store.append(
+                sync_name, dead_letters, max_records=self._max_records
+            )
+        except Exception as exc:  # noqa: BLE001 — fire-and-forget contract
+            self._logger.warning("DLQ persist failure for '%s': %s", sync_name, exc)
 
     def on_records_failed(self, sync_name: str, dead_letters: list[DeadLetter]) -> None:
         if not dead_letters:
             return
-        try:
-            self._store.append(sync_name, dead_letters, max_records=self._max_records)
-        except Exception as exc:  # noqa: BLE001 — fire-and-forget contract
-            self._logger.warning("DLQ persist failure for '%s': %s", sync_name, exc)
+        self._buffer.setdefault(sync_name, []).extend(dead_letters)
