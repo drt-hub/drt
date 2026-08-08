@@ -5,12 +5,16 @@ Selector grammar (per token):
 - ``*`` / ``all``            — every sync (explicit sentinel, back-compat)
 - ``tag:<pattern>``          — syncs with a tag matching the pattern
 - ``destination:<pattern>``  — syncs whose destination ``type`` matches
+- ``state:modified`` / ``state:new`` — syncs changed or added since a baseline
 - anything else              — the sync name (glob patterns supported)
 
 Patterns use ``fnmatch`` semantics (``*``, ``?``, ``[seq]``), so exact names
 keep working unchanged. Repeated ``--select`` values union; ``--exclude``
 subtracts with the same grammar. Definition order is preserved and results
 are deduplicated.
+
+State selectors require the caller to supply a pre-computed baseline diff;
+using one without a baseline is an error.
 
 ``source:`` is deliberately **not** a method: syncs share the project
 profile (one source per run), so there is nothing per-sync to select on.
@@ -25,9 +29,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from drt.cli._state_selection import StateDiff
     from drt.config.models import SyncConfig
 
-_METHODS = ("tag", "destination")
+_METHODS = ("tag", "destination", "state")
+_STATE_SELECTORS = ("state:modified", "state:new")
 
 
 class SelectionError(ValueError):
@@ -39,7 +45,7 @@ def is_glob(token: str) -> bool:
     return any(ch in token for ch in "*?[")
 
 
-def matches(sync: SyncConfig, token: str) -> bool:
+def matches(sync: SyncConfig, token: str, *, state_diff: StateDiff | None = None) -> bool:
     """Does one selector token match one sync?"""
     if token in ("*", "all"):
         return True
@@ -49,6 +55,19 @@ def matches(sync: SyncConfig, token: str) -> bool:
     if token.startswith("destination:"):
         pattern = token[len("destination:") :]
         return fnmatchcase(sync.destination.type, pattern)
+    if token.startswith("state:"):
+        if token not in _STATE_SELECTORS:
+            raise SelectionError(
+                f"Unknown state selector '{token}'. Available state selectors: "
+                + ", ".join(_STATE_SELECTORS)
+                + "."
+            )
+        if state_diff is None:
+            raise SelectionError(
+                f"Selector '{token}' requires a baseline manifest to compare against."
+            )
+        names = state_diff.new if token == "state:new" else state_diff.modified
+        return sync.name in names
     if ":" in token:
         method = token.split(":", 1)[0]
         raise SelectionError(
@@ -64,6 +83,10 @@ def _no_match_message(token: str) -> str:
         return f"No syncs with tag '{token[len('tag:'):]}' found."
     if token.startswith("destination:"):
         return f"No syncs with destination '{token[len('destination:'):]}' found."
+    if token == "state:modified":
+        return "No modified syncs found relative to the baseline manifest."
+    if token == "state:new":
+        return "No new syncs found relative to the baseline manifest."
     if is_glob(token):
         return f"No syncs matching '{token}' found."
     return f"No sync named '{token}' found."
@@ -73,6 +96,8 @@ def select_syncs(
     syncs: Sequence[SyncConfig],
     select: Sequence[str] | None,
     exclude: Sequence[str] | None = None,
+    *,
+    state_diff: StateDiff | None = None,
 ) -> list[SyncConfig]:
     """Resolve ``--select`` / ``--exclude`` tokens against the sync list.
 
@@ -84,7 +109,7 @@ def select_syncs(
     if select:
         matched_names: set[str] = set()
         for token in select:
-            hits = [s for s in syncs if matches(s, token)]
+            hits = [s for s in syncs if matches(s, token, state_diff=state_diff)]
             if not hits:
                 raise SelectionError(_no_match_message(token))
             matched_names.update(s.name for s in hits)
@@ -93,16 +118,17 @@ def select_syncs(
         selected = list(syncs)
 
     for token in exclude or ():
-        selected = [s for s in selected if not matches(s, token)]
+        selected = [s for s in selected if not matches(s, token, state_diff=state_diff)]
     return selected
 
 
 def complete_selector(incomplete: str) -> list[str]:
     """Best-effort shell completion for --select/--exclude values.
 
-    Loads the project's syncs from the current directory; any failure
-    (not in a project, YAML error) silently completes nothing — completion
-    must never crash the shell.
+    Loads the project's syncs from the current directory; any failure (such as
+    a YAML error) silently completes nothing — completion must never crash the
+    shell. Literal state selectors remain available when the project has no
+    sync definitions because they do not depend on project contents.
     """
     try:
         from drt.config.parser import load_syncs
@@ -113,4 +139,5 @@ def complete_selector(incomplete: str) -> list[str]:
     values: list[str] = [s.name for s in syncs]
     values += sorted({f"tag:{t}" for s in syncs for t in getattr(s, "tags", [])})
     values += sorted({f"destination:{s.destination.type}" for s in syncs})
+    values += list(_STATE_SELECTORS)
     return [v for v in values if v.startswith(incomplete)]
