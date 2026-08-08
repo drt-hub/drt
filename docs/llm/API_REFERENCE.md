@@ -14,6 +14,9 @@ profile: default          # optional, default: "default" — maps to ~/.drt/prof
 history:                  # optional: sync execution history (#276)
   enabled: true           # default: true — set to false to disable history altogether
   retention_days: 30      # default: 30 — entries older than this are pruned on each append
+  max_entries: 500        # default: 500 — remote backends cap entries per sync; local ignores it
+state:                    # optional: persistence backend (#756); see docs/guides/remote-state.md
+  backend: local          # default: local; gcs and s3 are available
 vars:                     # optional: project vars (#783) — reviewed, in-repo defaults
   lookback_days: 7        # referenced as {{ var('lookback_days') }}
   hubspot_pipeline: default
@@ -23,8 +26,9 @@ query_tagging:            # optional: cost-attribution query tagging (#768)
     team: growth
 ```
 
-History is stored under `.drt/history/<sync_name>.jsonl` (one file per sync, JSONL format).
+With the local backend, history is stored under `.drt/history/<sync_name>.jsonl` (one file per sync, JSONL format).
 Inspect via `drt status --history` or the `drt_get_history` MCP tool.
+State backend selection is documented in `docs/guides/remote-state.md`; it is independent of `sync.watermark.storage`.
 
 ### Query tagging (#768)
 

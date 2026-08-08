@@ -40,6 +40,11 @@ Failed records are written to `.drt/dlq/<sync_name>.jsonl`, one JSON object
 per line, alongside `state.json` and `history/` in your project's `.drt`
 directory.
 
+That path describes the default local state backend. With a remote
+`state.backend`, the DLQ uses the equivalent
+`dlq/<sync_name>.jsonl` object under the configured bucket and prefix instead;
+see [Remote state on GCS or S3](remote-state.md).
+
 > **Pair it with `on_error: skip`.** With the default `on_error: fail`, the
 > sync stops at the first failed batch, so only that batch's failures reach
 > the queue. `skip` lets the whole sync run, routing every per-record
@@ -126,3 +131,4 @@ records what it receives) can't dedupe a replay — there, treat a re-send as
 - [Retry policy](retry.md) — in-run backoff for transient HTTP failures
 - [Field mappings](field-mappings.md) — what "post-mapping record" means
 - [Sync history](sync-history.md) — per-run success/fail history
+- [Remote state on GCS or S3](remote-state.md) — keep the DLQ across ephemeral runs
