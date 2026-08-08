@@ -156,6 +156,26 @@ sync:
 | `--threads N` | Parallel execution for faster pipelines |
 | `--log-format json` | Structured logs for log aggregators |
 
+## Persisting state across ephemeral runs
+
+A GitHub Actions or GitLab CI job starts from a fresh checkout, so it has no
+`.drt/` directory from the previous run. Without remote state, `drt status`
+has no prior runs to show, `drt retry` cannot see the previous DLQ, and DLQ
+inspection is effectively a no-op. Add a project-level GCS or S3 backend to
+`drt_project.yml` so every runner shares the same state:
+
+```yaml
+name: my-project
+profile: default
+state:
+  backend: gcs
+  bucket: my-drt-state
+  prefix: ci/my-project
+```
+
+See [Remote state on GCS or S3](remote-state.md) for installation, credentials,
+IAM, S3 configuration, and migration from an existing `.drt/` directory.
+
 ## Exit codes
 
 | Code | Meaning |
