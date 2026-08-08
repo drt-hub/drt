@@ -150,3 +150,61 @@ def test_list_keys_preserves_full_object_names() -> None:
     storage = FakeStorageClient(FakeBucket())
     client = GCSObjectClient("bucket", client=storage)
     assert client.list_keys("prefix/history/") == ["prefix/history/a.jsonl"]
+
+
+def test_client_is_constructed_lazily_via_gcs_client_when_none_injected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No test above injects a client — every one of them bypasses the
+    lazy-construction path drt/state/factory.py actually uses in production
+    (``GCSObjectClient(bucket)``, no ``client=``). Cover that path directly
+    rather than trusting patch-coverage on the surrounding methods.
+    """
+    sentinel = FakeStorageClient(FakeBucket())
+    calls: list[None] = []
+
+    def _fake_gcs_client() -> Any:
+        calls.append(None)
+        return sentinel
+
+    monkeypatch.setattr("drt.state.gcs._gcs_client", _fake_gcs_client)
+    client = GCSObjectClient("bucket")
+
+    assert client._client() is sentinel
+    assert client._client() is sentinel  # second call reuses it, doesn't reconstruct
+    assert len(calls) == 1
+
+
+def test_gcs_client_missing_sdk_raises_helpful_import_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "google.cloud.storage", None)
+    from drt.state.gcs import _gcs_client
+
+    with pytest.raises(ImportError, match=r"pip install drt-core\[gcs\]"):
+        _gcs_client()
+
+
+def test_read_for_update_raises_after_generation_keeps_changing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every one of the eight pinned-read attempts loses its race — the loop
+    must give up loudly rather than retry forever or fall back to a wrong
+    "absent" token."""
+    _install_google_exceptions(monkeypatch)
+
+    class AlwaysRacingBucket(FakeBucket):
+        def blob(self, key: str, generation: int | None = None) -> FakeBlob:
+            self.calls.append((key, generation))
+            if generation is not None:
+                # Every versioned read arrives to find the generation it
+                # just observed already superseded.
+                self.live_generation += 1
+                self.body = f"generation {self.live_generation}".encode()
+            return FakeBlob(self, generation)
+
+    bucket = AlwaysRacingBucket()
+    client = GCSObjectClient("bucket", client=FakeStorageClient(bucket))
+
+    with pytest.raises(ObjectPreconditionError, match="changed during every pinned"):
+        client.read_for_update("state.json")
