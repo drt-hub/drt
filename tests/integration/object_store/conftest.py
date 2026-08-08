@@ -115,3 +115,101 @@ def gcs_client(
 
     storage_client, bucket_name = fake_gcs
     return GCSObjectClient(bucket_name, client=storage_client)
+
+
+@pytest.fixture(scope="session")
+def localstack_s3() -> Iterator[tuple[Any, str]]:
+    """Start LocalStack's S3 service and return its boto3 client and bucket."""
+    require_docker()
+    pytest.importorskip("boto3")
+    from testcontainers.community.localstack import LocalStackContainer
+
+    container = LocalStackContainer(
+        image="localstack/localstack:4.14.0",
+        region_name="us-east-1",
+    ).with_services("s3")
+    container.start()
+    try:
+        client = container.get_client("s3")
+        deadline = time.monotonic() + 15
+        while True:
+            try:
+                client.list_buckets()
+                break
+            except Exception:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.1)
+        bucket_name = "drt-object-store-smoke"
+        client.create_bucket(Bucket=bucket_name)
+        yield client, bucket_name
+    finally:
+        container.stop()
+
+
+@pytest.fixture(scope="session")
+def s3_preconditions_supported(localstack_s3: tuple[Any, str]) -> bool:
+    """Foundational canary: reject false-green S3 concurrency tests.
+
+    The suite is meaningful only when LocalStack enforces create-only PUT,
+    stale-ETag PUT, and ETag-pinned GET. A merely accepted conditional header
+    is insufficient: silently ignoring one would turn lost updates green.
+    """
+    from botocore.exceptions import ClientError
+
+    from drt.state._objectstore import ObjectPreconditionError
+    from drt.state.s3 import S3ObjectClient
+
+    storage_client, bucket_name = localstack_s3
+    client = S3ObjectClient(bucket_name, client=storage_client)
+    key = "canary/etag.txt"
+    first_etag = client.write_if(key, b"first", None)
+    try:
+        client.write_if(key, b"duplicate create", None)
+    except ObjectPreconditionError:
+        pass
+    else:
+        pytest.skip(
+            "LocalStack does not enforce PutObject IfNoneMatch='*'; "
+            "concurrency results would be false-green"
+        )
+
+    second_etag = client.write_if(key, b"second", first_etag)
+    try:
+        client.write_if(key, b"stale", first_etag)
+    except ObjectPreconditionError:
+        pass
+    else:
+        pytest.skip(
+            "LocalStack does not enforce stale PutObject IfMatch; "
+            "concurrency results would be false-green"
+        )
+
+    try:
+        storage_client.get_object(
+            Bucket=bucket_name,
+            Key=key,
+            IfMatch=str(first_etag),
+        )
+    except ClientError as exc:
+        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        if status != 412:
+            raise
+    else:
+        pytest.skip(
+            "LocalStack does not enforce stale GetObject IfMatch reads; "
+            "pinned-read concurrency results would be false-green"
+        )
+    assert second_etag != first_etag
+    return True
+
+
+@pytest.fixture
+def s3_client(
+    localstack_s3: tuple[Any, str], s3_preconditions_supported: bool
+) -> Any:
+    assert s3_preconditions_supported
+    from drt.state.s3 import S3ObjectClient
+
+    storage_client, bucket_name = localstack_s3
+    return S3ObjectClient(bucket_name, client=storage_client)

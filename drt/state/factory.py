@@ -21,7 +21,19 @@ class StateBundle:
     dlq: DlqBackend
 
 
-_CacheKey = tuple[Path, str, str | None, str | None, int]
+_CacheKey = tuple[
+    Path,
+    str,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    int,
+]
 _bundle_cache: dict[_CacheKey, StateBundle] = {}
 _bundle_lock = threading.Lock()
 
@@ -36,15 +48,15 @@ def build_state_bundle(project: ProjectConfig, project_dir: Path) -> StateBundle
     ``state.json`` once different syncs run concurrently. The same reasoning
     applies to ``drt run --threads N`` and to future shared remote clients.
 
-    GCS bundles share one client as well as one instance lock per store. The
-    lock handles threads in this process; generation preconditions handle
-    independent processes.
+    Remote bundles share one client as well as one instance lock per store.
+    The lock handles threads in this process; generation / ETag preconditions
+    handle independent processes.
     """
     backend = project.state.backend
-    if backend not in {"local", "gcs"}:
+    if backend not in {"local", "gcs", "s3"}:
         raise NotImplementedError(
             f"State backend '{backend}' is not implemented; supported backends "
-            "for this stage of #756 are 'local' and 'gcs'."
+            "for this stage of #756 are 'local', 'gcs', and 's3'."
         )
 
     resolved_dir = project_dir.resolve()
@@ -53,6 +65,12 @@ def build_state_bundle(project: ProjectConfig, project_dir: Path) -> StateBundle
         backend,
         project.state.bucket,
         project.state.prefix,
+        project.state.region,
+        project.state.endpoint_url,
+        project.state.aws_profile,
+        project.state.aws_access_key_id_env,
+        project.state.aws_secret_access_key_env,
+        project.state.aws_session_token_env,
         project.history.max_entries,
     )
     with _bundle_lock:
@@ -66,16 +84,32 @@ def build_state_bundle(project: ProjectConfig, project_dir: Path) -> StateBundle
                 )
             else:
                 from drt.state._objectstore import (
+                    ObjectClient,
                     ObjectStoreDlqBackend,
                     ObjectStoreHistoryStore,
                     ObjectStoreStateStore,
                 )
-                from drt.state.gcs import GCSObjectClient
 
                 # Pydantic's validator guarantees this for real configs. The
                 # assertion also narrows the optional type for strict mypy.
                 assert project.state.bucket is not None
-                client = GCSObjectClient(project.state.bucket)
+                client: ObjectClient
+                if backend == "gcs":
+                    from drt.state.gcs import GCSObjectClient
+
+                    client = GCSObjectClient(project.state.bucket)
+                else:
+                    from drt.state.s3 import S3ObjectClient
+
+                    client = S3ObjectClient(
+                        project.state.bucket,
+                        region=project.state.region,
+                        endpoint_url=project.state.endpoint_url,
+                        aws_profile=project.state.aws_profile,
+                        aws_access_key_id_env=project.state.aws_access_key_id_env,
+                        aws_secret_access_key_env=project.state.aws_secret_access_key_env,
+                        aws_session_token_env=project.state.aws_session_token_env,
+                    )
                 bundle = StateBundle(
                     state=ObjectStoreStateStore(client, prefix=project.state.prefix),
                     history=ObjectStoreHistoryStore(

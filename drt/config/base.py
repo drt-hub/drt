@@ -186,22 +186,51 @@ class StateConfig(BaseModel):
 
     This mirrors :class:`~drt.config.sync_options.WatermarkConfig`'s shape:
     one discriminating backend field plus optional fields validated against
-    that choice. GCS uses ``bucket`` plus an optional object-key ``prefix``;
-    local state continues to reject both remote-only fields.
+    that choice. GCS and S3 use ``bucket`` plus an optional object-key
+    ``prefix``. S3's authentication and endpoint fields deliberately match
+    :class:`~drt.config.destinations_storage.S3DestinationConfig`, so state
+    storage follows the same boto3 credential chain and override vocabulary.
+    Local state continues to reject every remote-only field.
     """
 
-    backend: Literal["local", "gcs"] = "local"
+    backend: Literal["local", "gcs", "s3"] = "local"
     bucket: str | None = None
     prefix: str | None = None
+    region: str | None = None
+    aws_profile: str | None = None
+    aws_access_key_id_env: str | None = None
+    aws_secret_access_key_env: str | None = None
+    aws_session_token_env: str | None = None
+    endpoint_url: str | None = None
 
     @model_validator(mode="after")
     def _check_backend_fields(self) -> StateConfig:
-        if self.backend == "local" and (self.bucket is not None or self.prefix is not None):
+        s3_only_fields = (
+            "region",
+            "aws_profile",
+            "aws_access_key_id_env",
+            "aws_secret_access_key_env",
+            "aws_session_token_env",
+            "endpoint_url",
+        )
+        configured_s3_fields = [
+            field for field in s3_only_fields if getattr(self, field) is not None
+        ]
+        if self.backend == "local" and (
+            self.bucket is not None
+            or self.prefix is not None
+            or configured_s3_fields
+        ):
             raise ValueError(
-                "state.bucket and state.prefix are not valid when backend is 'local'."
+                "Remote state fields are not valid when backend is 'local'."
             )
         if self.backend == "gcs" and not self.bucket:
             raise ValueError("state.bucket is required when backend is 'gcs'.")
+        if self.backend == "gcs" and configured_s3_fields:
+            names = ", ".join(f"state.{field}" for field in configured_s3_fields)
+            raise ValueError(f"{names} are only valid when backend is 's3'.")
+        if self.backend == "s3" and not self.bucket:
+            raise ValueError("state.bucket is required when backend is 's3'.")
         return self
 
 
