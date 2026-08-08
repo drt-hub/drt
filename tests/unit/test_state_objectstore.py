@@ -114,6 +114,39 @@ def test_state_raises_after_bounded_contention_attempts() -> None:
     assert client.writes == store.MAX_WRITE_ATTEMPTS
 
 
+@pytest.mark.parametrize("body", [b"{malformed", b"[]"])
+def test_state_corrupted_json_returns_empty_and_warns(
+    body: bytes, capsys: pytest.CaptureFixture[str]
+) -> None:
+    client = MemoryObjectClient()
+    client.objects["state.json"] = body
+    store = ObjectStoreStateStore(client)
+
+    assert store.get_all() == {}
+    assert capsys.readouterr().err == (
+        "Warning: remote state.json is corrupted and will be reset.\n"
+    )
+
+
+def test_state_reset_raises_after_bounded_contention_attempts() -> None:
+    client = MemoryObjectClient()
+    store = ObjectStoreStateStore(client)
+    store.save_sync(_state())
+    client.always_conflict = True
+    client.writes = 0
+
+    with (
+        patch("drt.state._objectstore.time.sleep"),
+        pytest.raises(
+            StateContentionError,
+            match="state reset for 's' exhausted 8 conditional-write attempts",
+        ),
+    ):
+        store.reset("s")
+
+    assert client.writes == store.MAX_WRITE_ATTEMPTS
+
+
 @pytest.mark.parametrize("kind", ["history", "dlq"])
 def test_best_effort_appends_warn_and_return_after_bounded_contention(
     kind: str, caplog: pytest.LogCaptureFixture
@@ -173,6 +206,54 @@ def test_history_append_then_noop_prune_uses_cached_snapshot() -> None:
     assert client.writes == 1
 
 
+def test_history_append_skips_malformed_line_and_keeps_valid_entries(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = MemoryObjectClient()
+    first = _history(started_at="2026-08-01T00:00:00+00:00")
+    second = _history(started_at="2026-08-02T00:00:00+00:00")
+    third = _history(started_at="2026-08-03T00:00:00+00:00")
+    client.objects["history/s.jsonl"] = (
+        ObjectStoreHistoryStore._encode([first])
+        + b"\n{malformed\n"
+        + ObjectStoreHistoryStore._encode([second])
+    )
+
+    store = ObjectStoreHistoryStore(client)
+    with caplog.at_level(logging.WARNING, logger="drt.state._objectstore"):
+        store.append(third)
+
+    assert [entry.started_at for entry in store.read("s")] == [
+        third.started_at,
+        second.started_at,
+        first.started_at,
+    ]
+    assert any(
+        "history: skipping malformed line 3 in history/s.jsonl" in record.message
+        for record in caplog.records
+    )
+
+
+def test_history_append_non_precondition_error_warns_without_retry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = MemoryObjectClient()
+    store = ObjectStoreHistoryStore(client)
+
+    with (
+        patch.object(client, "write_if", side_effect=RuntimeError("network down")) as write,
+        caplog.at_level(logging.WARNING, logger="drt.state._objectstore"),
+    ):
+        store.append(_history())
+
+    assert write.call_count == 1
+    assert client.reads == 1
+    assert any(
+        "history append failed for sync=s: network down" in record.message
+        for record in caplog.records
+    )
+
+
 def test_remote_history_applies_entry_cap_only_during_prune() -> None:
     client = MemoryObjectClient()
     store = ObjectStoreHistoryStore(client, max_entries=2)
@@ -192,6 +273,28 @@ def test_history_reads_all_syncs_newest_first_and_prunes_old_entries() -> None:
 
     assert [entry.sync_name for entry in store.read()] == ["b", "a"]
     assert store.prune("missing", retention_days=30) == 0
+
+
+def test_history_prune_warns_and_returns_zero_after_bounded_contention(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = MemoryObjectClient()
+    store = ObjectStoreHistoryStore(client)
+    store.append(_history(started_at="2000-01-01T00:00:00+00:00"))
+    client.always_conflict = True
+    client.writes = 0
+
+    with (
+        patch("drt.state._objectstore.time.sleep"),
+        caplog.at_level(logging.WARNING, logger="drt.state._objectstore"),
+    ):
+        assert store.prune("s", retention_days=30) == 0
+
+    assert client.writes == store.MAX_WRITE_ATTEMPTS
+    assert any(
+        "history prune failed for sync=s after 8 contention attempts" in record.message
+        for record in caplog.records
+    )
 
 
 def test_history_jsonl_is_byte_compatible_with_local(tmp_path: Path) -> None:
@@ -217,6 +320,90 @@ def test_dlq_conformance_and_nonempty_depth_listing() -> None:
     assert store.all_depths() == {"alpha": 2}
     store.replace("alpha", [_dead(5)])
     assert [entry.record["id"] for entry in store.read("alpha")] == [5]
+
+
+def test_dlq_decode_silently_skips_malformed_lines(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = MemoryObjectClient()
+    client.objects["dlq/s.jsonl"] = (
+        ObjectStoreDlqBackend._encode([_dead(1)])
+        + b"\n{malformed\n"
+        + ObjectStoreDlqBackend._encode([_dead(2)])
+    )
+    store = ObjectStoreDlqBackend(client)
+
+    with caplog.at_level(logging.WARNING, logger="drt.state._objectstore"):
+        entries = store.read("s")
+
+    assert [entry.record["id"] for entry in entries] == [1, 2]
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize("operation", ["replace", "clear"])
+def test_dlq_replace_operations_raise_after_bounded_contention(
+    operation: str,
+) -> None:
+    client = MemoryObjectClient(always_conflict=True)
+    store = ObjectStoreDlqBackend(client)
+
+    with (
+        patch("drt.state._objectstore.time.sleep"),
+        pytest.raises(
+            ObjectPreconditionError,
+            match="DLQ replace for 's' exhausted 8 attempts",
+        ),
+    ):
+        if operation == "replace":
+            store.replace("s", [_dead(1)])
+        else:
+            store.clear("s")
+
+    assert client.writes == store.MAX_WRITE_ATTEMPTS
+
+
+def test_dlq_append_non_precondition_error_warns_and_returns_existing_depth(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = MemoryObjectClient()
+    store = ObjectStoreDlqBackend(client)
+    assert store.append("s", [_dead(1)]) == 1
+
+    with (
+        patch.object(client, "write_if", side_effect=RuntimeError("network down")) as write,
+        caplog.at_level(logging.WARNING, logger="drt.state._objectstore"),
+    ):
+        depth = store.append("s", [_dead(2)])
+
+    assert depth == 1
+    assert write.call_count == 1
+    assert any(
+        "DLQ append failed for sync=s: network down" in record.message
+        for record in caplog.records
+    )
+
+
+def test_dlq_all_depths_skips_keys_outside_expected_prefix_or_suffix() -> None:
+    client = MemoryObjectClient()
+    client.objects["project/dlq/alpha.jsonl"] = ObjectStoreDlqBackend._encode(
+        [_dead(1)]
+    )
+    client.objects["other/dlq/unrelated.jsonl"] = b"not a DLQ object"
+    client.objects["project/dlq/readme.txt"] = b"not a DLQ object"
+    store = ObjectStoreDlqBackend(client, prefix="project")
+
+    with patch.object(
+        client,
+        "list_keys",
+        return_value=[
+            "other/dlq/unrelated.jsonl",
+            "project/dlq/readme.txt",
+            "project/dlq/alpha.jsonl",
+        ],
+    ):
+        assert store.all_depths() == {"alpha": 1}
+
+    assert client.reads == 1
 
 
 def test_dlq_jsonl_is_byte_compatible_with_local(tmp_path: Path) -> None:
