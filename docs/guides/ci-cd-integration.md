@@ -83,6 +83,107 @@ jobs:
       - run: drt run --dry-run
 ```
 
+### State-aware PR previews
+
+To preview only the syncs a pull request changed, save a JSON manifest after
+each push to `main`, then restore the latest successful artifact in the PR job.
+The manifest carries the per-sync hashes used by `state:modified`.
+
+```yaml
+# .github/workflows/drt-state-baseline.yml
+name: drt state baseline
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install drt-core
+      - run: drt docs generate --format json --output ci-baseline
+      - uses: actions/upload-artifact@v4
+        with:
+          name: drt-state-baseline
+          path: ci-baseline/manifest.json
+```
+
+```yaml
+# .github/workflows/drt-pr-preview.yml
+name: drt PR preview
+on:
+  pull_request:
+    paths:
+      - 'syncs/**'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install drt-core[bigquery]  # add your source extras
+
+      - name: Find latest main-branch baseline
+        id: baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id="$(
+            gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow drt-state-baseline.yml \
+              --branch main \
+              --event push \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId // empty' \
+              2>/dev/null || true
+          )"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download baseline manifest
+        if: steps.baseline.outputs.run_id != ''
+        continue-on-error: true  # an expired artifact uses drt's first-run fallback
+        uses: actions/download-artifact@v4
+        with:
+          name: drt-state-baseline
+          path: ci-baseline
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.baseline.outputs.run_id }}
+
+      - name: Preview changed syncs
+        run: >-
+          drt run
+          --select state:modified
+          --state ci-baseline/manifest.json
+          --dry-run
+          --diff
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ secrets.GCP_SA_KEY_PATH }}
+          HUBSPOT_TOKEN: ${{ secrets.HUBSPOT_TOKEN }}
+```
+
+If there is no baseline artifact yet (or it has expired), the download is
+skipped or allowed to fail; drt then warns, treats every current sync as
+modified, and completes the first preview. See [State-aware
+Selection](state-modified-selector.md) for exact hash semantics, baseline
+compatibility, and the environment/project-wide change caveats.
+
 ### Scheduled sync (cron)
 
 ```yaml
@@ -149,6 +250,9 @@ sync:
 | `--select <name>` | Run a specific sync (globs work: `--select 'users_*'`) |
 | `--select tag:<tag>` | Run syncs by tag (e.g., `tag:hourly`); repeat `--select` to union |
 | `--select destination:<type>` | Run syncs by destination type (e.g., `destination:hubspot`) |
+| `--select state:modified` | Run syncs added or changed since a baseline manifest |
+| `--select state:new` | Run only syncs absent from a baseline manifest |
+| `--state <path>` | Baseline `manifest.json` for `state:modified` / `state:new` |
 | `--exclude <selector>` | Subtract syncs from the selection (same grammar) |
 | `--failed` | Re-run only syncs that failed in the previous invocation (exit 0 when nothing failed) |
 | `--fail-fast` | Stop scheduling after the first failure — one systemic error, one red build, minimal quota burn |
