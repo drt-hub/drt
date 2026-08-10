@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 
 from drt.config.models import (
     OffsetPaginationConfig,
@@ -90,6 +93,464 @@ class TestRestApiDestinationSuccess:
 
         assert isinstance(result, SyncResult)
         assert hasattr(result, "row_errors")
+
+
+class TestRestApiDestinationBatchMode:
+    def test_empty_batch_returns_before_opening_client(self) -> None:
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/batch",
+            body_mode="batch",
+            batch_template="{{ rows | tojson_safe }}",
+        )
+
+        with patch("httpx.Client") as mock_client_cls:
+            result = RestApiDestination().load([], config, _sync_options())
+
+        assert result == SyncResult()
+        mock_client_cls.assert_not_called()
+
+    def test_sends_sub_chunks_and_acquires_once_per_request(self) -> None:
+        records = [{"id": i} for i in range(5)]
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/batch",
+            body_mode="batch",
+            batch_template='{"records": {{ rows | tojson_safe }}}',
+            max_records_per_request=2,
+        )
+        limiter = MagicMock()
+
+        with (
+            patch("httpx.Client") as mock_client_cls,
+            patch(
+                "drt.destinations.rest_api.resolve_rate_limiter",
+                return_value=limiter,
+            ),
+        ):
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.return_value = _make_response(200, "OK")
+
+            result = RestApiDestination().load(records, config, _sync_options())
+
+        assert result.success == 5
+        assert result.failed == 0
+        assert mock_client.request.call_count == 3
+        assert limiter.acquire.call_count == 3
+        payloads = [
+            json.loads(call.kwargs["content"].decode())
+            for call in mock_client.request.call_args_list
+        ]
+        assert payloads == [
+            {"records": records[:2]},
+            {"records": records[2:4]},
+            {"records": records[4:]},
+        ]
+
+    def test_none_max_records_sends_whole_engine_chunk_once(self) -> None:
+        records = [{"id": 1}, {"id": 2}, {"id": 3}]
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/batch",
+            body_mode="batch",
+            batch_template="{{ rows | tojson_safe }}",
+        )
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.return_value = _make_response(200, "OK")
+
+            result = RestApiDestination().load(records, config, _sync_options())
+
+        assert result.success == 3
+        assert mock_client.request.call_count == 1
+        content = mock_client.request.call_args.kwargs["content"]
+        assert json.loads(content.decode()) == records
+
+    def test_http_error_without_error_path_fails_whole_sub_chunk(self) -> None:
+        records = [{"id": 1}, {"id": 2}]
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/batch",
+            body_mode="batch",
+            batch_template="{{ rows | tojson_safe }}",
+        )
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.return_value = _make_response(422, "x" * 600)
+
+            result = RestApiDestination().load(records, config, _sync_options())
+
+        assert result.success == 0
+        assert result.failed == 2
+        assert [error.batch_index for error in result.row_errors] == [0, 1]
+        assert all(error.http_status == 422 for error in result.row_errors)
+        assert all(len(error.error_message) == 500 for error in result.row_errors)
+
+    def test_error_path_maps_second_sub_chunk_to_global_indexes(self) -> None:
+        records = [{"id": i} for i in range(4)]
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/batch",
+            body_mode="batch",
+            batch_template="{{ rows | tojson_safe }}",
+            max_records_per_request=2,
+            error_path="data.results",
+        )
+        failed_response = _make_response(422, '{"data": {"results": []}}')
+        failed_response.json.return_value = {
+            "data": {"results": [None, {"message": "fourth record failed"}]}
+        }
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.side_effect = [
+                _make_response(200, "OK"),
+                failed_response,
+            ]
+
+            result = RestApiDestination().load(records, config, _sync_options())
+
+        assert result.success == 3
+        assert result.failed == 1
+        assert [error.batch_index for error in result.row_errors] == [3]
+        assert result.row_errors[0].record_preview == '{"id": 3}'
+        assert result.row_errors[0].error_message == "fourth record failed"
+
+    def test_mismatched_error_path_fails_whole_chunk_and_warns(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        records = [{"id": 1}, {"id": 2}]
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/batch",
+            body_mode="batch",
+            batch_template="{{ rows | tojson_safe }}",
+            error_path="results",
+        )
+        response = _make_response(422, '{"results": [null]}')
+        response.json.return_value = {"results": [None]}
+
+        with patch("httpx.Client") as mock_client_cls, caplog.at_level(logging.WARNING):
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.return_value = response
+
+            result = RestApiDestination().load(records, config, _sync_options())
+
+        assert result.failed == 2
+        assert [error.batch_index for error in result.row_errors] == [0, 1]
+        assert "error_path 'results' did not match the response shape" in caplog.text
+
+    def test_successful_response_does_not_consult_error_path(self) -> None:
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/batch",
+            body_mode="batch",
+            batch_template="{{ rows | tojson_safe }}",
+            error_path="results",
+        )
+        response = _make_response(200, "not json")
+        response.json.side_effect = AssertionError("response JSON must not be read")
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.return_value = response
+
+            result = RestApiDestination().load([{"id": 1}], config, _sync_options())
+
+        assert result.success == 1
+        response.json.assert_not_called()
+
+    def test_error_path_message_mapping_contract(self) -> None:
+        records = [{"id": i} for i in range(6)]
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/batch",
+            body_mode="batch",
+            batch_template="{{ rows | tojson_safe }}",
+            error_path="results",
+        )
+        response = _make_response(422, "per-item failures")
+        response.json.return_value = {
+            "results": [
+                None,
+                {"error": "first", "message": "not selected"},
+                {"message": "second"},
+                {"error_message": "third"},
+                {"detail": "fallback"},
+                42,
+            ]
+        }
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.return_value = response
+
+            result = RestApiDestination().load(records, config, _sync_options())
+
+        assert result.success == 1
+        assert result.failed == 5
+        assert [error.error_message for error in result.row_errors] == [
+            "first",
+            "second",
+            "third",
+            "{'detail': 'fallback'}",
+            "42",
+        ]
+
+    def test_invalid_json_error_mapping_falls_back_to_whole_chunk(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/batch",
+            body_mode="batch",
+            batch_template="{{ rows | tojson_safe }}",
+            error_path="results",
+        )
+        response = _make_response(422, "not json")
+        response.json.side_effect = json.JSONDecodeError("invalid", "", 0)
+
+        with patch("httpx.Client") as mock_client_cls, caplog.at_level(logging.WARNING):
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.return_value = response
+
+            result = RestApiDestination().load([{"id": 1}], config, _sync_options())
+
+        assert result.failed == 1
+        assert "did not match the response shape" in caplog.text
+
+    def test_missing_error_path_falls_back_to_whole_chunk(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/batch",
+            body_mode="batch",
+            batch_template="{{ rows | tojson_safe }}",
+            error_path="data.results",
+        )
+        response = _make_response(422, '{"data": {}}')
+        response.json.return_value = {"data": {}}
+
+        with patch("httpx.Client") as mock_client_cls, caplog.at_level(logging.WARNING):
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.return_value = response
+
+            result = RestApiDestination().load([{"id": 1}], config, _sync_options())
+
+        assert result.failed == 1
+        assert "did not match the response shape" in caplog.text
+
+    def test_batch_request_retries_as_one_request_unit(self) -> None:
+        records = [{"id": 1}, {"id": 2}]
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/batch",
+            body_mode="batch",
+            batch_template="{{ rows | tojson_safe }}",
+        )
+        limiter = MagicMock()
+
+        with (
+            patch("httpx.Client") as mock_client_cls,
+            patch(
+                "drt.destinations.rest_api.resolve_rate_limiter",
+                return_value=limiter,
+            ),
+        ):
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.side_effect = [
+                _make_response(503, "busy"),
+                _make_response(200, "OK"),
+            ]
+
+            result = RestApiDestination().load(
+                records, config, _sync_options(max_attempts=2)
+            )
+
+        assert result.success == 2
+        assert mock_client.request.call_count == 2
+        assert limiter.acquire.call_count == 1
+
+    def test_non_http_failure_marks_whole_sub_chunk_failed(self) -> None:
+        records = [{"id": 1}, {"id": 2}]
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/batch",
+            body_mode="batch",
+            batch_template="{{ rows | tojson_safe }}",
+        )
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.side_effect = ConnectionError("network unreachable")
+
+            result = RestApiDestination().load(records, config, _sync_options())
+
+        assert result.failed == 2
+        assert [error.batch_index for error in result.row_errors] == [0, 1]
+        assert all("network unreachable" in e.error_message for e in result.row_errors)
+
+    def test_on_error_fail_stops_after_non_http_failure(self) -> None:
+        records = [{"id": i} for i in range(4)]
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/batch",
+            body_mode="batch",
+            batch_template="{{ rows | tojson_safe }}",
+            max_records_per_request=2,
+        )
+        options = _sync_options()
+        options.on_error = "fail"
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.side_effect = ConnectionError("network unreachable")
+
+            result = RestApiDestination().load(records, config, options)
+
+        assert result.failed == 2
+        assert mock_client.request.call_count == 1
+
+    def test_on_error_fail_continues_when_error_path_maps_all_successes(self) -> None:
+        records = [{"id": i} for i in range(4)]
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/batch",
+            body_mode="batch",
+            batch_template="{{ rows | tojson_safe }}",
+            max_records_per_request=2,
+            error_path="results",
+        )
+        mapped_success = _make_response(422, "mapped")
+        mapped_success.json.return_value = {"results": [None, None]}
+        options = _sync_options()
+        options.on_error = "fail"
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.side_effect = [mapped_success, _make_response(200, "OK")]
+
+            result = RestApiDestination().load(records, config, options)
+
+        assert result.success == 4
+        assert result.failed == 0
+        assert mock_client.request.call_count == 2
+
+    def test_on_error_fail_stops_after_first_failing_sub_chunk(self) -> None:
+        records = [{"id": i} for i in range(4)]
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/batch",
+            body_mode="batch",
+            batch_template="{{ rows | tojson_safe }}",
+            max_records_per_request=2,
+            error_path="results",
+        )
+        response = _make_response(422, "partial failure")
+        response.json.return_value = {"results": [None, "bad record"]}
+        options = _sync_options()
+        options.on_error = "fail"
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.return_value = response
+
+            result = RestApiDestination().load(records, config, options)
+
+        assert result.success == 1
+        assert result.failed == 1
+        assert mock_client.request.call_count == 1
+
+    def test_template_error_fails_sub_chunk_without_request(self) -> None:
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/batch",
+            body_mode="batch",
+            batch_template="{{ rows[0].missing }}",
+        )
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+
+            result = RestApiDestination().load([{"id": 1}, {"id": 2}], config, _sync_options())
+
+        assert result.failed == 2
+        assert mock_client.request.call_count == 0
+
+    def test_on_error_fail_stops_after_batch_template_error(self) -> None:
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/batch",
+            body_mode="batch",
+            batch_template="{{ rows[0].missing }}",
+            max_records_per_request=1,
+        )
+        options = _sync_options()
+        options.on_error = "fail"
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+
+            result = RestApiDestination().load([{"id": 1}, {"id": 2}], config, options)
+
+        assert result.failed == 1
+        assert mock_client.request.call_count == 0
+
+
+class TestRestApiDestinationBatchConfig:
+    def test_batch_mode_requires_batch_template(self) -> None:
+        with pytest.raises(ValueError, match="batch_template.*body_mode"):
+            RestApiDestinationConfig(
+                type="rest_api",
+                url="https://api.example.com/batch",
+                body_mode="batch",
+            )
+
+    def test_batch_mode_rejects_body_template(self) -> None:
+        with pytest.raises(ValueError, match="body_template.*batch_template"):
+            RestApiDestinationConfig(
+                type="rest_api",
+                url="https://api.example.com/batch",
+                body_mode="batch",
+                body_template="{{ row }}",
+                batch_template="{{ rows }}",
+            )
+
+    def test_record_mode_rejects_batch_template(self) -> None:
+        with pytest.raises(ValueError, match="batch_template.*body_mode"):
+            RestApiDestinationConfig(
+                type="rest_api",
+                url="https://api.example.com/batch",
+                batch_template="{{ rows }}",
+            )
+
+    @pytest.mark.parametrize("value", [0, -1])
+    def test_max_records_per_request_must_be_positive(self, value: int) -> None:
+        with pytest.raises(ValueError, match="max_records_per_request.*at least 1"):
+            RestApiDestinationConfig(
+                type="rest_api",
+                url="https://api.example.com/batch",
+                max_records_per_request=value,
+            )
 
 
 # ---------------------------------------------------------------------------

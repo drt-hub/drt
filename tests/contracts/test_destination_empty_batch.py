@@ -83,6 +83,17 @@ HTTP_DESTINATIONS: list[Any] = [
         ),
         id="rest_api",
     ),
+    pytest.param(
+        RestApiDestination,
+        lambda hs: RestApiDestinationConfig(
+            type="rest_api",
+            url=hs.url_for("/rest-batch"),
+            method="POST",
+            body_mode="batch",
+            batch_template="{{ rows | tojson_safe }}",
+        ),
+        id="rest_api_batch",
+    ),
 ]
 
 

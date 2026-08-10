@@ -16,6 +16,11 @@ def test_render_simple(sample_row: dict) -> None:
     assert result == '{"text": "Hello Alice"}'
 
 
+def test_render_simple_with_named_row_context(sample_row: dict) -> None:
+    result = render_template('{"text": "Hello {{ row.name }}"}', row=sample_row)
+    assert result == '{"text": "Hello Alice"}'
+
+
 def test_render_missing_variable(sample_row: dict) -> None:
     with pytest.raises(ValueError, match="Template error"):
         render_template("{{ row.missing_field }}", sample_row)
@@ -52,6 +57,14 @@ def test_tojson_safe_nested_row() -> None:
     assert parsed["price"] == "9.99"
     assert parsed["uid"] == "12345678-1234-5678-1234-567812345678"
     assert parsed["note"] is None
+
+
+def test_render_template_accepts_named_rows_context() -> None:
+    rows = [{"id": 1}, {"id": 2}]
+
+    rendered = render_template("{{ rows | tojson_safe }}", rows=rows)
+
+    assert json.loads(rendered) == rows
 
 
 def test_tojson_safe_ensure_ascii_false() -> None:

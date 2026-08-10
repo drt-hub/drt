@@ -3103,6 +3103,51 @@
           "default": null,
           "title": "Body Template"
         },
+        "body_mode": {
+          "default": "record",
+          "enum": [
+            "record",
+            "batch"
+          ],
+          "title": "Body Mode",
+          "type": "string"
+        },
+        "batch_template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Batch Template"
+        },
+        "max_records_per_request": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Records Per Request"
+        },
+        "error_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Path"
+        },
         "auth": {
           "anyOf": [
             {

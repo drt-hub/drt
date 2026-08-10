@@ -154,14 +154,25 @@ def validate_template_syntax(template_str: str) -> None:
         raise ValueError(f"Template syntax error: {e.message} (line {e.lineno})") from e
 
 
-def render_template(template_str: str, row: dict[str, Any]) -> str:
-    """Render a Jinja2 template string with a single row of data.
+_MISSING_CONTEXT_VALUE = object()
 
-    Variables are accessed as {{ row.field_name }}.
+
+def render_template(
+    template_str: str,
+    row: Any = _MISSING_CONTEXT_VALUE,
+    **context: Any,
+) -> str:
+    """Render a Jinja2 template string with caller-provided context.
+
+    Existing record-oriented callers pass ``row`` positionally and access
+    fields as ``{{ row.field_name }}``. Batch-oriented callers can instead
+    provide another named value, such as ``rows=<list>``.
     Raises ValueError on missing variables (strict mode).
     """
+    if row is not _MISSING_CONTEXT_VALUE:
+        context["row"] = row
     try:
-        return _compile_string(template_str).render(row=row)
+        return _compile_string(template_str).render(**context)
     except UndefinedError as e:
         raise ValueError(f"Template error: {e}") from e
 

@@ -11,6 +11,8 @@ Features:
 from __future__ import annotations
 
 import json
+import logging
+from collections.abc import Iterator
 from typing import Any
 
 import httpx
@@ -31,9 +33,43 @@ from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import RowError
 from drt.templates.renderer import render_template
 
+logger = logging.getLogger(__name__)
+
+
+def _resolve_dotted_path(value: Any, path: str) -> Any:
+    """Resolve a dotted-key path through dictionaries only."""
+    current = value
+    for key in path.split("."):
+        if not isinstance(current, dict) or key not in current:
+            raise KeyError(key)
+        current = current[key]
+    return current
+
+
+def _batch_error_message(error: Any) -> str:
+    if isinstance(error, dict):
+        for key in ("error", "message", "error_message"):
+            if key in error:
+                return str(error[key])
+    return str(error)
+
+
+def _chunk_records(
+    records: list[dict[str, Any]], max_records: int | None
+) -> Iterator[tuple[int, list[dict[str, Any]]]]:
+    """Yield destination-local HTTP chunks with offsets into ``records``."""
+    request_size = max_records or len(records)
+    for offset in range(0, len(records), request_size):
+        yield offset, records[offset : offset + request_size]
+
 
 class RestApiDestination:
-    """Send records to any REST API endpoint."""
+    """Send records to any REST API endpoint.
+
+    Batch mode treats every 2xx response as success. Per-item errors embedded
+    in a 2xx body (including HTTP 207-style payloads returned as 2xx) are not
+    inspected.
+    """
 
     def load(
         self,
@@ -43,12 +79,74 @@ class RestApiDestination:
     ) -> SyncResult:
         assert isinstance(config, RestApiDestinationConfig)
         result = SyncResult()
+        if not records:
+            return result
+
         auth_headers = AuthHandler(config.auth).get_headers()
         headers = {**config.headers, **auth_headers}
         rate_limiter = resolve_rate_limiter(config, sync_options, limiter_factory=RateLimiter)
         retry_config = resolve_retry(config.retry, sync_options)
 
         with httpx.Client(timeout=30.0) as client:
+            if config.body_mode == "batch":
+                for offset, sub_chunk in _chunk_records(records, config.max_records_per_request):
+                    rate_limiter.acquire()
+
+                    try:
+                        assert config.batch_template is not None
+                        batch_body = render_template(config.batch_template, rows=sub_chunk)
+                    except ValueError as e:
+                        self._fail_chunk(
+                            result,
+                            sub_chunk,
+                            offset,
+                            http_status=None,
+                            error_message=f"Template error: {e}",
+                        )
+                        if sync_options.on_error == "fail":
+                            return result
+                        continue
+
+                    def do_batch_request(
+                        _body: str = batch_body,
+                        _headers: dict[str, Any] = headers,
+                    ) -> httpx.Response:
+                        response = client.request(
+                            method=config.method,
+                            url=config.url,
+                            headers=_headers,
+                            content=_body.encode(),
+                        )
+                        response.raise_for_status()
+                        return response
+
+                    try:
+                        with_retry(do_batch_request, retry_config)
+                        result.success += len(sub_chunk)
+                    except httpx.HTTPStatusError as e:
+                        failed_before = result.failed
+                        self._handle_batch_http_error(
+                            result,
+                            sub_chunk,
+                            offset,
+                            e.response,
+                            config.error_path,
+                        )
+                        if sync_options.on_error == "fail" and result.failed > failed_before:
+                            return result
+                    except Exception as e:
+                        self._fail_chunk(
+                            result,
+                            sub_chunk,
+                            offset,
+                            http_status=None,
+                            error_message=str(e),
+                        )
+                        if sync_options.on_error == "fail":
+                            return result
+
+                return result
+
             for i, record in enumerate(records):
                 rate_limiter.acquire()
 
@@ -116,6 +214,77 @@ class RestApiDestination:
 
         # Return as SyncResult-compatible object
         return result
+
+    @staticmethod
+    def _fail_chunk(
+        result: SyncResult,
+        records: list[dict[str, Any]],
+        offset: int,
+        *,
+        http_status: int | None,
+        error_message: str,
+    ) -> None:
+        for local_index, record in enumerate(records):
+            result.row_errors.append(
+                RowError(
+                    batch_index=offset + local_index,
+                    record_preview=json.dumps(record, default=str)[:200],
+                    http_status=http_status,
+                    error_message=error_message,
+                )
+            )
+        result.failed += len(records)
+
+    def _handle_batch_http_error(
+        self,
+        result: SyncResult,
+        records: list[dict[str, Any]],
+        offset: int,
+        response: httpx.Response,
+        error_path: str | None,
+    ) -> None:
+        if error_path is None:
+            self._fail_chunk(
+                result,
+                records,
+                offset,
+                http_status=response.status_code,
+                error_message=response.text[:500],
+            )
+            return
+
+        try:
+            errors = _resolve_dotted_path(response.json(), error_path)
+            if not isinstance(errors, list) or len(errors) != len(records):
+                raise ValueError("error list is missing or has the wrong length")
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            logger.warning(
+                "REST API batch error_path %r did not match the response shape; "
+                "marking the whole request chunk as failed",
+                error_path,
+            )
+            self._fail_chunk(
+                result,
+                records,
+                offset,
+                http_status=response.status_code,
+                error_message=response.text[:500],
+            )
+            return
+
+        for local_index, (record, error) in enumerate(zip(records, errors, strict=True)):
+            if error is None:
+                result.success += 1
+                continue
+            result.row_errors.append(
+                RowError(
+                    batch_index=offset + local_index,
+                    record_preview=json.dumps(record, default=str)[:200],
+                    http_status=response.status_code,
+                    error_message=_batch_error_message(error),
+                )
+            )
+            result.failed += 1
 
     def fetch_paginated(
         self,

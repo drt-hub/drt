@@ -74,10 +74,34 @@ class RestApiDestinationConfig(DescribableConfig):
     method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] = "POST"
     headers: dict[str, str] = Field(default_factory=dict)
     body_template: str | None = None
+    body_mode: Literal["record", "batch"] = "record"
+    batch_template: str | None = None
+    max_records_per_request: int | None = None
+    error_path: str | None = None
     auth: AuthConfig | None = None
     pagination: PaginationConfig | None = None
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
+
+    @field_validator("max_records_per_request", mode="after")
+    @classmethod
+    def _check_max_records_per_request(cls, value: int | None) -> int | None:
+        if value is not None and value < 1:
+            raise ValueError("max_records_per_request must be at least 1.")
+        return value
+
+    @model_validator(mode="after")
+    def _check_body_mode_templates(self) -> RestApiDestinationConfig:
+        if self.body_mode == "batch":
+            if self.batch_template is None:
+                raise ValueError("batch_template is required when body_mode is 'batch'.")
+            if self.body_template is not None:
+                raise ValueError(
+                    "body_template cannot be set when body_mode is 'batch'; use batch_template."
+                )
+        elif self.batch_template is not None:
+            raise ValueError("batch_template cannot be set when body_mode is 'record'.")
+        return self
 
     def _describe_detail(self) -> str:
         return f"{self.url}"
