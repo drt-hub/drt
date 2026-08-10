@@ -84,6 +84,23 @@ select the sync. dbt documents and accepts the
 drt makes the same trade-off so a baseline generated in one environment remains
 comparable in another.
 
+This is about the *value* an already-resolvable variable holds, not about
+whether it resolves at all: manifest generation loads every sync file through
+the same strict, error-collecting loader `drt validate` uses, and a sync whose
+`${VAR}`/`var()` substitution fails outright is dropped from the manifest
+entirely — not included with a missing `config_hash`. Whatever generates your
+baseline needs every referenced variable set, or that sync silently never gets
+a baseline entry and shows up as changed on every run. See the CI recipe below
+for where this actually bites.
+
+This does not apply to the `name:` field itself. Comparison is keyed by the
+**resolved** sync name — if `name:` contains `${VAR}`/`var()` and that value
+changes between the baseline environment and the current one, the resolved
+name changes too, and the fingerprint map no longer has an entry under the
+current name: the sync shows up as `state:new`/`state:modified` even though
+its file bytes are byte-identical. Keep `name:` literal (no `${VAR}`/`var()`)
+if you rely on `state:modified` — templating any other field is unaffected.
+
 A change to project-wide inputs such as `drt_project.yml`'s `vars:` or the
 selected profile is also not detected. `state:modified` is a per-sync-file
 change detector, not a whole-project change detector. Do not use it as the sole
@@ -136,6 +153,19 @@ jobs:
 
       - name: Generate baseline manifest
         run: drt docs generate --format json --output ci-baseline
+        env:
+          # Every ${VAR}/DRT_VAR_* a sync file references must resolve here,
+          # even though this step never connects to a destination. Manifest
+          # generation loads every sync file the same way `drt run` does
+          # (drt/docs/builder.py -> load_syncs_safe()); a sync whose
+          # substitution fails is skipped, not included with a placeholder —
+          # it silently drops out of the baseline entirely, not just its
+          # config_hash. Every later PR job then sees that sync as new on
+          # every single run, since it never has a baseline entry to compare
+          # against. Match this to the same secrets the PR-preview job below
+          # sets.
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ secrets.GCP_SA_KEY_PATH }}
+          HUBSPOT_TOKEN: ${{ secrets.HUBSPOT_TOKEN }}
 
       - name: Upload baseline manifest
         uses: actions/upload-artifact@v4
