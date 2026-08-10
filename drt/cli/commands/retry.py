@@ -166,9 +166,8 @@ def retry(
       drt retry post_users --dry-run        # preview depth, send nothing
       drt retry post_users --clear          # give up — empty the queue
     """
-    from drt.config.parser import load_project, load_syncs
+    from drt.config.parser import load_syncs
 
-    project = load_project(Path("."))
     syncs = load_syncs(Path("."))
     sync = next((s for s in syncs if s.name == sync_name), None)
     if sync is None:
@@ -179,9 +178,13 @@ def retry(
         print_error("--limit must be >= 0.")
         raise typer.Exit(1)
 
+    # No project= here: replay_dead_letters() resolves it itself (present
+    # drt_project.yml -> load it; absent -> local-default ProjectConfig), the
+    # same fallback every other state/DLQ surface (MCP's
+    # load_project_for_state()) already gives a directory that only has
+    # syncs/ + .drt/dlq/ with no project file.
     summary = replay_dead_letters(
         sync,
-        project=project,
         limit=limit,
         dry_run=dry_run,
         clear=clear,

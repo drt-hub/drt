@@ -30,7 +30,7 @@ def retry(
 
     return replay_dead_letters(
         sync,
-        project=ctx.load_project(),
+        project=ctx.load_project_for_state(),
         limit=limit,
         dry_run=dry_run,
         clear=clear,
