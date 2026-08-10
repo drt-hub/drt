@@ -20,7 +20,12 @@ import typer
 
 from drt._identifiers import new_run_id
 from drt.cli._app import app
-from drt.cli._selection import SelectionError, complete_selector, select_syncs
+from drt.cli._selection import (
+    SelectionError,
+    complete_selector,
+    is_state_only_select,
+    select_syncs,
+)
 from drt.cli.output import console, print_error
 
 
@@ -117,6 +122,12 @@ def build(
         print_error(str(e))
         raise typer.Exit(1)
     if not syncs:
+        if is_state_only_select(select):
+            if not json_mode:
+                console.print(
+                    "[dim]No syncs changed relative to the baseline — nothing to build.[/dim]"
+                )
+            raise typer.Exit()
         print_error("Selection matched no syncs (after --exclude).")
         raise typer.Exit(1)
 

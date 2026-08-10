@@ -63,7 +63,12 @@ from drt.cli._helpers import (
     get_watermark_storage,
     resolve_profile_name,
 )
-from drt.cli._selection import SelectionError, complete_selector, select_syncs
+from drt.cli._selection import (
+    SelectionError,
+    complete_selector,
+    is_state_only_select,
+    select_syncs,
+)
 from drt.cli.output import (
     console,
     print_dry_run_summary,
@@ -653,6 +658,15 @@ def run(
         print_error(str(e))
         raise typer.Exit(1)
     if not syncs:
+        if is_state_only_select(select):
+            # Nothing changed relative to the baseline — the normal, healthy
+            # outcome for a CI job on a PR that touched no sync definitions,
+            # not an error the way a dud tag:/bare-name selector would be.
+            if not json_mode:
+                console.print(
+                    "[dim]No syncs changed relative to the baseline — nothing to run.[/dim]"
+                )
+            raise typer.Exit()
         print_error("Selection matched no syncs (after --exclude).")
         raise typer.Exit(1)
 

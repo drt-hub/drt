@@ -27,7 +27,12 @@ if TYPE_CHECKING:
     from drt.config.models import SyncConfig, SyncTest
 
 from drt.cli._app import app
-from drt.cli._selection import SelectionError, complete_selector, select_syncs
+from drt.cli._selection import (
+    SelectionError,
+    complete_selector,
+    is_state_only_select,
+    select_syncs,
+)
 from drt.cli.output import (
     console,
     print_error,
@@ -496,6 +501,14 @@ def test_syncs(
         print_error(str(e))
         raise typer.Exit(1)
     if not syncs:
+        if is_state_only_select(select):
+            if not json_mode:
+                console.print(
+                    "[dim]No syncs changed relative to the baseline — nothing to test.[/dim]"
+                )
+            else:
+                print(json.dumps({"status": "no_changes", "results": []}))
+            return
         print_error("Selection matched no syncs (after --exclude).")
         raise typer.Exit(1)
 

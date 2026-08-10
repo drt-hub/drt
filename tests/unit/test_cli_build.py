@@ -151,6 +151,20 @@ def test_build_select_state_modified_runs_only_changed_sync(
     assert patched_runtime["run_calls"] == ["b_plain"]
 
 
+def test_build_select_state_modified_no_changes_is_a_clean_noop(
+    project: Path, patched_runtime: dict[str, Any]
+) -> None:
+    baseline = write_state_baseline(project)
+
+    result = runner.invoke(
+        app,
+        ["build", "--select", "state:modified", "--state", str(baseline)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert patched_runtime["run_calls"] == []
+
+
 def test_build_json_entries_share_a_real_invocation_run_id(
     project: Path, patched_runtime: dict[str, Any]
 ) -> None:

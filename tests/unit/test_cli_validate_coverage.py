@@ -123,3 +123,101 @@ def test_validate_select_state_modified_reports_only_changed_sync(
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert [entry["name"] for entry in payload["results"]] == ["changed"]
+
+
+def test_validate_select_state_modified_no_changes_is_a_clean_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "drt_project.yml").write_text("name: demo\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "unchanged.yml").write_text(
+        yaml.dump(
+            {
+                "name": "unchanged",
+                "model": "SELECT 1 AS id",
+                "destination": {
+                    "type": "rest_api",
+                    "url": "https://example.com/unchanged",
+                    "method": "POST",
+                },
+            }
+        )
+    )
+    baseline = write_state_baseline(tmp_path)
+
+    result = runner.invoke(
+        app, ["validate", "--select", "state:modified", "--state", str(baseline)]
+    )
+
+    assert result.exit_code == 0, result.output
+
+
+def test_validate_select_state_modified_still_reports_a_changed_broken_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broken sync has no SyncConfig, so it can't be matched via state-diff
+    membership the way a valid sync can. That must not let a changed-but-
+    broken sync silently disappear from --select state:modified output just
+    because another, valid sync also changed and got selected."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "drt_project.yml").write_text("name: demo\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "changed_valid.yml").write_text(
+        yaml.dump(
+            {
+                "name": "changed_valid",
+                "model": "SELECT 1 AS id",
+                "destination": {
+                    "type": "rest_api",
+                    "url": "https://example.com/valid",
+                    "method": "POST",
+                },
+            }
+        )
+    )
+    # Starts out valid so write_state_baseline() (which uses the strict
+    # load_syncs()) can include it in the baseline at all.
+    (syncs_dir / "changed_broken.yml").write_text(
+        yaml.dump(
+            {
+                "name": "changed_broken",
+                "model": "SELECT 1 AS id",
+                "destination": {
+                    "type": "rest_api",
+                    "url": "https://example.com/broken",
+                    "method": "POST",
+                },
+            }
+        )
+    )
+    baseline = write_state_baseline(tmp_path)
+    with (syncs_dir / "changed_valid.yml").open("a", encoding="utf-8") as f:
+        f.write("\n# changed in this branch\n")
+    # Now break it: missing the required `destination` key entirely -- fails
+    # SyncConfig validation, so it never gets a SyncConfig and lives only in
+    # result.errors (keyed by file stem, not by its own `name:` field).
+    (syncs_dir / "changed_broken.yml").write_text(
+        yaml.dump({"name": "changed_broken", "model": "SELECT 1"})
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "validate",
+            "--select",
+            "state:modified",
+            "--state",
+            str(baseline),
+            "--output",
+            "json",
+        ],
+    )
+
+    payload = json.loads(result.output)
+    by_name = {entry["name"]: entry for entry in payload["results"]}
+    assert "changed_broken" in by_name, payload
+    assert by_name["changed_broken"]["valid"] is False
+    assert "changed_valid" in by_name

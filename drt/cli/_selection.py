@@ -80,14 +80,12 @@ def matches(sync: SyncConfig, token: str, *, state_diff: StateDiff | None = None
 
 
 def _no_match_message(token: str) -> str:
+    # state: tokens never reach here — select_syncs() exempts them from the
+    # must-match-something check (see its docstring and is_state_only_select).
     if token.startswith("tag:"):
         return f"No syncs with tag '{token[len('tag:'):]}' found."
     if token.startswith("destination:"):
         return f"No syncs with destination '{token[len('destination:'):]}' found."
-    if token == "state:modified":
-        return "No modified syncs found relative to the baseline manifest."
-    if token == "state:new":
-        return "No new syncs found relative to the baseline manifest."
     if is_glob(token):
         return f"No syncs matching '{token}' found."
     return f"No sync named '{token}' found."
@@ -104,14 +102,20 @@ def select_syncs(
 
     Every ``select`` token must match at least one sync (raises
     ``SelectionError`` naming the dud token — a typo should never silently
-    run nothing). ``exclude`` tokens may match nothing. The caller decides
-    what an empty final selection means for its command.
+    run nothing) — **except** ``state:modified``/``state:new``, which are
+    fixed, validated literals rather than user-typable patterns: a typo is
+    already caught by the "unknown state selector" error regardless of match
+    count, and "nothing changed since the baseline" is the normal, common,
+    healthy outcome for a CI job on a PR that touched no sync definitions —
+    not a signal something is wrong the way a dud ``tag:``/bare-name is.
+    ``exclude`` tokens may match nothing. The caller decides what an empty
+    *final* selection means for its command (see ``is_state_only_select``).
     """
     if select:
         matched_names: set[str] = set()
         for token in select:
             hits = [s for s in syncs if matches(s, token, state_diff=state_diff)]
-            if not hits:
+            if not hits and token not in _STATE_SELECTORS:
                 raise SelectionError(_no_match_message(token))
             matched_names.update(s.name for s in hits)
         selected = [s for s in syncs if s.name in matched_names]
@@ -121,6 +125,19 @@ def select_syncs(
     for token in exclude or ():
         selected = [s for s in selected if not matches(s, token, state_diff=state_diff)]
     return selected
+
+
+def is_state_only_select(select: Sequence[str] | None) -> bool:
+    """True when every ``--select`` token is a ``state:`` selector.
+
+    Callers use this to tell "nothing changed since the baseline" (an empty
+    but expected final selection — exit cleanly) apart from "the selection
+    genuinely matched nothing" (an empty selection that should still be
+    reported as an error, e.g. ``--select tag:x --exclude tag:x``).
+    """
+    if not select:
+        return False
+    return all(token in _STATE_SELECTORS for token in select)
 
 
 def complete_selector(incomplete: str) -> list[str]:

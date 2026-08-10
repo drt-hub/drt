@@ -207,6 +207,23 @@ def test_select_state_modified_runs_only_changed_sync(
     assert patched_engine["calls"] == ["sync_b"]
 
 
+def test_select_state_modified_no_changes_is_a_clean_noop(
+    project: Path, patched_engine: dict[str, Any]
+) -> None:
+    """The advertised CI invocation must succeed as a no-op when a PR
+    changes no sync definitions -- not fail the way a dud tag:/bare-name
+    selector correctly would."""
+    baseline = write_state_baseline(project)
+
+    result = runner.invoke(
+        app,
+        ["run", "--select", "state:modified", "--state", str(baseline)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert patched_engine["calls"] == []
+
+
 def test_select_state_modified_missing_baseline_runs_every_sync(
     project: Path,
     patched_engine: dict[str, Any],

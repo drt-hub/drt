@@ -129,6 +129,39 @@ def test_drt_test_select_state_modified_runs_only_changed_sync(
     assert [entry["sync"] for entry in payload["results"]] == ["changed"]
 
 
+def test_drt_test_select_state_modified_no_changes_is_a_clean_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "unchanged.yml").write_text(
+        yaml.dump(
+            {
+                "name": "unchanged",
+                "model": "SELECT 1",
+                "destination": {
+                    "type": "postgres",
+                    "connection_string_env": "DB_CONN",
+                    "table": "unchanged",
+                    "upsert_key": ["id"],
+                },
+                "tests": [{"row_count": {"min": 1}}],
+            }
+        )
+    )
+    baseline = write_state_baseline(tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["test", "--select", "state:modified", "--state", str(baseline), "--output", "json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload == {"status": "no_changes", "results": []}
+
+
 def test_drt_test_dry_run_shows_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that dry-run shows the test plan without executing tests."""
     monkeypatch.chdir(tmp_path)
