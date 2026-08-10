@@ -112,6 +112,25 @@ def test_unparseable_baseline_warns_and_treats_everything_as_new(
     assert "Could not load baseline manifest" in caplog.text
 
 
+@pytest.mark.parametrize("bad_version", ['"3"', "null"])
+def test_malformed_schema_version_warns_and_treats_everything_as_new(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, bad_version: str
+) -> None:
+    """Manifest.from_dict() has no type validation, so a hand-edited or
+    corrupted baseline can carry a non-numeric schema_version. That must not
+    crash with a raw TypeError out of the < comparison."""
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(
+        f'{{"schema_version": {bad_version}, "drt_version": "0.8.4", "syncs": []}}'
+    )
+
+    with caplog.at_level(logging.WARNING, logger="drt.cli._state_selection"):
+        diff = load_state_diff(baseline, [_sync("users")], tmp_path)
+
+    _assert_everything_new(diff, {"users"})
+    assert "malformed schema_version" in caplog.text
+
+
 def test_old_schema_baseline_raises_clear_selection_error(tmp_path: Path) -> None:
     baseline = tmp_path / "baseline.json"
     _write_manifest(baseline, schema_version=2)

@@ -51,6 +51,20 @@ def load_state_diff(
         )
         return StateDiff(new=current_names, modified=current_names)
 
+    # Manifest.from_dict() is a plain dataclass loader with no type
+    # validation -- a hand-edited or corrupted baseline can carry a
+    # non-numeric schema_version (a string, null) that would otherwise raise
+    # a raw, uncaught TypeError from the comparison below. Treat that the
+    # same as any other malformed baseline rather than crashing.
+    if not isinstance(manifest.schema_version, int):
+        logger.warning(
+            "Baseline manifest %s has a malformed schema_version (%r); "
+            "treating every current sync as new.",
+            baseline_path,
+            manifest.schema_version,
+        )
+        return StateDiff(new=current_names, modified=current_names)
+
     if manifest.schema_version < _MIN_SCHEMA_VERSION_WITH_CONFIG_HASH:
         raise SelectionError(
             f"Baseline manifest schema version {manifest.schema_version} predates config_hash "
