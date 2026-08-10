@@ -2,16 +2,27 @@
 
 drt normally keeps run state, execution history, and the dead letter queue
 (DLQ) under the project's local `.drt/` directory. That default is convenient
-on a laptop, but the deployment model drt promotes—ephemeral CI runners, Cloud
-Run Jobs, and Dagster or Airflow workers—destroys that disk after every run.
-The production field report recorded in
+on a laptop, but the deployment model drt promotes—ephemeral CI runners and
+Cloud Run Jobs among them—destroys that disk after every run. The production
+field report recorded in
 [ADR 0005](../adr/0005-state-location-and-write-grants.md) describes the
 consequences: `drt status` is blank in a fresh checkout, `drt retry` cannot see
 yesterday's failures, and a laptop and a runner have separate histories.
 
 Set the project-level `state.backend` to `gcs` or `s3` to put all three
 surfaces in object storage that survives the runner and can be shared by every
-operator using the project.
+operator using the project — **for `drt` CLI invocations** (`run`, `build`,
+`test`, `validate`, `serve`). The `dagster-drt` resource and the Airflow
+integration's `run_drt_sync()` do not currently route through the
+`SyncObserver`-based persistence path this backend depends on
+(`dagster-drt`'s resource constructs a local-only state manager directly;
+the Airflow runner calls the engine with no observer at all, so persistence
+is a no-op there today regardless of backend) — a Dagster- or
+Airflow-triggered run's state, history, and DLQ stay local-only, or absent,
+until those integrations are wired up separately. If you trigger drt from
+Dagster or Airflow today, use the CLI invocation path (a subprocess or shell
+step calling `drt run`) rather than the native resource/runner if you need
+this feature now.
 
 ## Quick start
 
@@ -174,11 +185,25 @@ object. A stale precondition triggers a fresh read and retry with jittered
 backoff, up to eight attempts.
 
 Exhausting those attempts while saving or resetting `state.json` raises
-`drt.state.errors.StateContentionError`: silently losing current run state
-would make recovery decisions incorrect. History and DLQ **appends** remain
-best-effort: they log a warning and continue after contention retries or
-another write error are exhausted, matching the local stores' philosophy that
-telemetry persistence must not fail an otherwise-correct sync.
+`drt.state.errors.StateContentionError` **from the store itself** — this is
+what stops an exhausted retry loop from falling back to an unconditional,
+last-write-wins overwrite. History and DLQ **appends** remain best-effort:
+they log a warning and continue after contention retries or another write
+error are exhausted, matching the local stores' philosophy that telemetry
+persistence must not fail an otherwise-correct sync.
+
+**In a normal `drt run`, that `StateContentionError` does not reach you as a
+command failure.** State persistence flows through
+`StatePersistingObserver`, and every observer callback in this codebase is
+fire-and-forget by design (`AGENTS.md`'s "logging, state persistence, ...
+MUST flow through `SyncObserver`" boundary, and every observer's own
+docstring): the exception is caught, logged as a `WARNING`, and the CLI
+command still exits `0`. This means a `state.json` write that lost every
+contention retry leaves the sync's watermark **silently stale**, with the
+command reporting success. Watch your logs (or a log aggregator) for
+`State persist failure` if you're relying on `--threads N` against a shared
+remote `state.json` under real write pressure — a clean exit code is not, by
+itself, proof the watermark actually advanced.
 
 This whole-object update shape is a deliberate, measured trade-off. The
 design rationale and reversibility constraint live in
@@ -190,20 +215,32 @@ as the threshold to measure rather than assume away.
 ## Migrating between local and remote state
 
 Because remote keys mirror `.drt/`, migration is a byte-for-byte directory
-sync with no schema conversion.
+sync with no schema conversion — **but only for the three paths the remote
+backend actually reads and writes: `state.json`, `history/`, and `dlq/`.**
+`.drt/` also holds files the remote backend has nothing to do with, most
+importantly `.drt/secrets.toml` — a local credential store (see
+[Secret Provider URIs](secret-provider-uris.md)) — plus `.drt/schemas/`
+(`--emit-schema`) and `.drt/test_failures/` (`drt test --store-failures`).
+**Do not sync the whole `.drt/` directory** — a recursive `.drt/` copy
+uploads `secrets.toml` to the state bucket right along with everything else.
+Sync each of the three paths explicitly instead:
 
 Adopt GCS, or return from GCS to local:
 
 ```bash
-gsutil rsync -r .drt/ gs://my-drt-state/production/customer-activation/
-gsutil rsync -r gs://my-drt-state/production/customer-activation/ .drt/
+gsutil cp .drt/state.json gs://my-drt-state/production/customer-activation/state.json
+gsutil rsync -r .drt/history/ gs://my-drt-state/production/customer-activation/history/
+gsutil rsync -r .drt/dlq/ gs://my-drt-state/production/customer-activation/dlq/
+# Reverse each command (swap source and destination) to return to local.
 ```
 
 Adopt S3, or return from S3 to local:
 
 ```bash
-aws s3 sync .drt/ s3://my-drt-state/production/customer-activation/
-aws s3 sync s3://my-drt-state/production/customer-activation/ .drt/
+aws s3 cp .drt/state.json s3://my-drt-state/production/customer-activation/state.json
+aws s3 sync .drt/history/ s3://my-drt-state/production/customer-activation/history/
+aws s3 sync .drt/dlq/ s3://my-drt-state/production/customer-activation/dlq/
+# Reverse each command (swap source and destination) to return to local.
 ```
 
 Stop drt writers while copying so a concurrent run cannot change an object

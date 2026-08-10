@@ -17,6 +17,12 @@ history:                  # optional: sync execution history (#276)
   max_entries: 500        # default: 500 — remote backends cap entries per sync; local ignores it
 state:                    # optional: persistence backend (#756); see docs/guides/remote-state.md
   backend: local          # default: local; gcs and s3 are available
+  # backend: gcs required fields: bucket. optional: prefix.
+  # backend: s3 required fields: bucket. optional: prefix, region, aws_profile,
+  #   aws_access_key_id_env, aws_secret_access_key_env, aws_session_token_env,
+  #   endpoint_url (S3-compatible endpoints — MinIO, R2, etc.).
+  # Every field above is rejected when backend is local; bucket is required
+  # for both gcs and s3, and the six S3-only fields are rejected under gcs.
 vars:                     # optional: project vars (#783) — reviewed, in-repo defaults
   lookback_days: 7        # referenced as {{ var('lookback_days') }}
   hubspot_pipeline: default
