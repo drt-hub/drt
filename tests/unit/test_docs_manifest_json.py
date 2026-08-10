@@ -169,7 +169,9 @@ class TestManifestRoundTrip:
         roundtrip = Manifest.from_dict(original.to_dict())
 
         assert roundtrip.syncs[0].config_hash is None
-        assert roundtrip.to_dict()["syncs"][0]["config_hash"] is None
+        # Matches every other optional v2+ field (state/runs/fields/dlq_depth):
+        # omitted when absent rather than emitted as a null placeholder.
+        assert "config_hash" not in roundtrip.to_dict()["syncs"][0]
 
     @pytest.mark.parametrize("schema_version", [1, 2])
     def test_old_shape_without_config_hash_loads_as_none(self, schema_version: int) -> None:

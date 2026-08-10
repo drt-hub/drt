@@ -22,18 +22,24 @@ later selector work load it through the existing `Manifest.from_dict()` path.
 ### One additive field per sync, one version bump
 
 ```
-sync.config_hash  str | null
+sync.config_hash  str, omitted when absent
 ```
 
 v3 is a **pure superset of v2**: nothing is renamed or removed, every v2
 consumer keeps working unchanged, and `schema_version: 3` signals that the
 field is available. No migration is required. As with v2, the version moves
 because the public shape of `Sync` changed, even though the change is additive.
+Like `state`/`runs`/`fields`/`dlq_depth` before it, `config_hash` is present
+in the serialized dict only when it has a value — never emitted as `null` —
+so a re-serialized v1/v2 manifest never gains a schema-v3-only key its
+declared `schema_version` doesn't actually support.
 
 The builder computes the fingerprint map once per manifest and looks up each
 entry by the resolved sync name. Filesystem-backed syncs are expected to have a
-string value. `null` is defensive for a sync whose source file cannot be found
-or read, or for a future non-file-backed sync source.
+string value; an absent (`None`) in-memory value is defensive for a sync whose
+source file cannot be found or read, or for a future non-file-backed sync
+source — in the serialized JSON, that absence means the key is omitted
+entirely rather than written as `null` (see the omission note above).
 
 ### The fingerprint is repo-derived, not run state
 

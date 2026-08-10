@@ -23,7 +23,13 @@ Schema v3 (#772) is a pure superset of v2 — one addition on each sync,
 nothing renamed or removed, so v2 consumers keep working unchanged:
 
 - ``config_hash``: stable fingerprint of the sync definition for baseline
-  comparison by the ``state:modified`` selector.
+  comparison by the ``state:modified`` selector. Like every other
+  optional v2+ field (``state``, ``runs``, ``fields``, ``dlq_depth``), it
+  is omitted from the serialized dict rather than emitted as ``null`` when
+  absent — this keeps a re-serialized v1/v2 manifest (loaded via
+  :meth:`Manifest.from_dict` with no ``config_hash`` in the source data)
+  free of a schema-v3-only key its declared ``schema_version`` doesn't
+  actually support.
 """
 
 from __future__ import annotations
@@ -186,8 +192,9 @@ def _sync_to_dict(s: Sync) -> dict[str, Any]:
         "mode": s.mode,
         "description": s.description,
         "tags": list(s.tags),
-        "config_hash": s.config_hash,
     }
+    if s.config_hash is not None:
+        d["config_hash"] = s.config_hash
     if s.state is not None:
         d["state"] = {
             "last_sync_at": s.state.last_sync_at,
