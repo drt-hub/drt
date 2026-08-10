@@ -180,6 +180,23 @@ def test_non_snapshot_read_errors_are_not_misreported_as_contention(
         client.read_for_update("state.json")
 
 
+@pytest.mark.parametrize("operation", ["head", "get"])
+def test_missing_bucket_is_not_treated_as_missing_object(
+    monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """A misspelled/deleted/wrong-region bucket must raise, not read as empty
+    state -- both share HTTP 404 with a missing key, but silently returning
+    (None, None) here would make incremental sync think there is no prior
+    watermark and replay the whole dataset every run."""
+    _install_botocore(monkeypatch)
+    storage = FakeS3Client()
+    setattr(storage, f"next_{operation}_error", FakeClientError("NoSuchBucket", 404))
+    client = S3ObjectClient("bucket", client=storage)
+
+    with pytest.raises(FakeClientError, match="NoSuchBucket"):
+        client.read_for_update("state.json")
+
+
 def test_create_only_and_update_paths_use_the_modeled_put_conditions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -130,6 +130,13 @@ class S3ObjectClient:
                 metadata = client.head_object(Bucket=self._bucket_name, Key=key)
             except ClientError as exc:
                 code, status = _error_details(exc)
+                # A missing bucket is not empty state: it's misconfiguration
+                # (wrong name, wrong region, deleted). Both share HTTP 404, so
+                # the code must be checked first — treating "no bucket" as
+                # "no prior state" would silently replay a full incremental
+                # sync every run, with the failed persistence only logged.
+                if code == "NoSuchBucket":
+                    raise
                 if status == 404 or code in {"404", "NoSuchKey", "NotFound"}:
                     # None is S3's create-only token; write_if translates it
                     # to the SDK's modeled IfNoneMatch="*" parameter.
@@ -148,6 +155,8 @@ class S3ObjectClient:
                 )
             except ClientError as exc:
                 code, status = _error_details(exc)
+                if code == "NoSuchBucket":
+                    raise
                 if status in {404, 412} or code in {
                     "404",
                     "NoSuchKey",
