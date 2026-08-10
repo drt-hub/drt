@@ -265,6 +265,25 @@ def test_remote_history_applies_entry_cap_only_during_prune() -> None:
     assert [entry.started_at[9] for entry in store.read("s")] == ["3", "2"]
 
 
+def test_prune_caps_by_started_at_not_append_order() -> None:
+    """Two overlapping runs of the same sync can finish out of start order.
+
+    read() defines "newest" by started_at, and max_entries promises the
+    newest entries survive — the object's on-disk order (append order) must
+    not decide which entries the cap keeps.
+    """
+    client = MemoryObjectClient()
+    store = ObjectStoreHistoryStore(client, max_entries=2)
+    # Appended oldest-started-at last, as if a later-starting run's batch
+    # observer flushed and completed before an earlier-starting run did.
+    store.append(_history(started_at="2026-08-03T00:00:00+00:00"))
+    store.append(_history(started_at="2026-08-01T00:00:00+00:00"))
+    store.append(_history(started_at="2026-08-02T00:00:00+00:00"))
+
+    assert store.prune("s", retention_days=30) == 1
+    assert [entry.started_at[9] for entry in store.read("s")] == ["3", "2"]
+
+
 def test_history_reads_all_syncs_newest_first_and_prunes_old_entries() -> None:
     client = MemoryObjectClient()
     store = ObjectStoreHistoryStore(client)

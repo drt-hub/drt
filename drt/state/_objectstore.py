@@ -260,6 +260,12 @@ class ObjectStoreHistoryStore(_ObjectStoreBase):
                 kept.append(entry)
 
         if len(kept) > self._max_entries:
+            # Cap by recency (started_at), not append/file order: two
+            # overlapping runs of the same sync can complete out of start
+            # order, and read() itself defines "newest" by started_at, not
+            # by position in the object. Sorting ascending first makes the
+            # tail slice below the actual newest max_entries.
+            kept.sort(key=lambda item: item.started_at)
             kept = kept[-self._max_entries :]
         return kept, len(entries) - len(kept)
 
