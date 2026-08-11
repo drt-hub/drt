@@ -70,7 +70,7 @@ class SyncObserver(Protocol):
         the full record it sent, so no record content is lost here. Fired
         once per batch that had pinpointed per-record failures (never on a
         clean batch). Observers that maintain a Dead Letter Queue buffer here
-        and flush on completion; every other observer no-ops.
+        and flush in ``on_sync_ended``; every other observer no-ops.
         """
         ...
 
@@ -91,6 +91,21 @@ class SyncObserver(Protocol):
         Carries everything an observer needs to persist state, emit a
         final span, or render a summary — without the engine reaching
         for storage itself.
+        """
+        ...
+
+    def on_sync_ended(self, sync_name: str) -> None:
+        """Called from ``run_sync``'s outer ``finally``, on every exit path.
+
+        Unlike ``on_sync_completed`` — which only fires on the normal
+        return path inside the ``try`` block — this fires unconditionally,
+        including when ``run_sync`` exits via an unhandled exception or a
+        graceful-shutdown interruption. It exists for state that MUST be
+        durable no matter how the sync ended: observers that buffer
+        writes in memory (e.g. the Dead Letter Queue's per-batch buffer)
+        do their final flush here rather than in ``on_sync_completed``,
+        so a crash mid-sync cannot silently drop already-buffered entries.
+        Every other observer no-ops.
         """
         ...
 
@@ -118,6 +133,7 @@ class NullObserver:
         new_cursor_value: str | None,
         cursor_field: str | None,
     ) -> None: ...
+    def on_sync_ended(self, sync_name: str) -> None: ...
 
 
 class LoggingObserver:
@@ -178,6 +194,9 @@ class LoggingObserver:
         # (the CLI handled it). Keep parity to avoid double-logging.
         pass
 
+    def on_sync_ended(self, sync_name: str) -> None:
+        pass
+
 
 class StatePersistingObserver:
     """Persists state on ``on_sync_completed``.
@@ -204,6 +223,7 @@ class StatePersistingObserver:
     def on_warning(self, sync_name: str, message: str) -> None: ...
     def on_records_failed(self, sync_name: str, dead_letters: list[DeadLetter]) -> None: ...
     def on_interrupted(self, sync_name: str, batches_processed: int) -> None: ...
+    def on_sync_ended(self, sync_name: str) -> None: ...
 
     def on_sync_completed(
         self,
@@ -296,6 +316,9 @@ class CompositeObserver:
             cursor_field,
         )
 
+    def on_sync_ended(self, sync_name: str) -> None:
+        self._broadcast("on_sync_ended", sync_name)
+
 
 class DlqObserver:
     """Persists per-record load failures to the Dead Letter Queue (#278).
@@ -327,7 +350,14 @@ class DlqObserver:
         started_at: str,
         new_cursor_value: str | None,
         cursor_field: str | None,
-    ) -> None:
+    ) -> None: ...
+
+    def on_sync_ended(self, sync_name: str) -> None:
+        # Fires from run_sync's outer `finally` on every exit path (success,
+        # exception, interruption) — unlike on_sync_completed, which only
+        # fires on the normal-return path. The buffer must flush here, not
+        # there, so a mid-sync crash cannot silently drop already-buffered
+        # dead letters.
         dead_letters = self._buffer.pop(sync_name, [])
         if not dead_letters:
             return
@@ -341,4 +371,12 @@ class DlqObserver:
     def on_records_failed(self, sync_name: str, dead_letters: list[DeadLetter]) -> None:
         if not dead_letters:
             return
-        self._buffer.setdefault(sync_name, []).extend(dead_letters)
+        buffer = self._buffer.setdefault(sync_name, [])
+        buffer.extend(dead_letters)
+        # Cap the in-memory buffer as entries arrive, not just at flush —
+        # a long-running sync with far more failures than max_records would
+        # otherwise hold all of them in memory for the whole run. Only the
+        # newest max_records survive `store.append`'s own truncation anyway,
+        # so trimming here produces an identical final object.
+        if self._max_records > 0 and len(buffer) > self._max_records:
+            del buffer[: len(buffer) - self._max_records]

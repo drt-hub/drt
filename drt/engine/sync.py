@@ -413,6 +413,16 @@ def run_sync(
             except Exception as exc:  # noqa: BLE001 — best-effort
                 observer.on_warning(sync.name, f"History append outer failure: {exc}")
 
+        # Guaranteed final flush point — fires on every exit path (success,
+        # exception, interruption), unlike on_sync_completed which only fires
+        # on the normal-return path. Observers that buffer writes in memory
+        # (the DLQ) rely on this to never lose already-buffered entries.
+        if not dry_run:
+            try:
+                observer.on_sync_ended(sync.name)
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                observer.on_warning(sync.name, f"on_sync_ended outer failure: {exc}")
+
 
 def _run_sync_body(
     *,
