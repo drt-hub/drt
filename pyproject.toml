@@ -73,7 +73,7 @@ azure = ["azure-storage-blob>=12.0", "azure-identity>=1.15"]
 sheets = ["google-api-python-client>=2.0", "google-auth>=2.0"]
 mysql = ["pymysql>=1.1"]
 parquet = ["pandas>=2.0", "pyarrow>=12.0"]
-s3 = ["boto3>=1.34"]
+s3 = ["boto3>=1.35.69"]
 aws-secrets = ["boto3>=1.34"]  # aws-sm:// secret provider URIs (#782) — same SDK as [s3], separate extra since the two are unrelated capabilities
 gcp-secrets = ["google-cloud-secret-manager>=2.0"]  # gcp-sm:// secret provider URIs (#782)
 vault = ["hvac>=2.0"]  # vault:// secret provider URIs (#782)
@@ -138,5 +138,6 @@ testpaths = ["tests"]
 markers = [
     "dwh_smoke: real cloud-warehouse smoke checks (Snowflake/Databricks/BigQuery); skip without DRT_SMOKE_* secrets (#674).",
     "local_sql_smoke: real Postgres/MySQL via testcontainers-python; skip without Docker (#939).",
+    "object_store_smoke: real GCS/S3 semantics via Docker emulators; skip without Docker (#756).",
 ]
 asyncio_mode = "auto"

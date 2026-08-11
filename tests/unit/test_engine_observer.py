@@ -47,6 +47,7 @@ def test_null_observer_methods_do_nothing() -> None:
     obs.on_records_failed("s", [])
     obs.on_interrupted("s", 3)
     obs.on_sync_completed("s", SyncResult(), "2026-05-24T00:00:00Z", None, None)
+    obs.on_sync_ended("s")
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +208,7 @@ def test_composite_observer_broadcasts_to_all(tmp_path: Path) -> None:
 
 
 def test_composite_observer_forwards_every_event_method() -> None:
-    """All 6 broadcast methods reach every child — guards future event additions."""
+    """All 7 broadcast methods reach every child — guards future event additions."""
     child = MagicMock(spec=SyncObserver)
     obs = CompositeObserver([child])
 
@@ -217,6 +218,7 @@ def test_composite_observer_forwards_every_event_method() -> None:
     obs.on_records_failed("s", [])
     obs.on_interrupted("s", 4)
     obs.on_sync_completed("s", SyncResult(), "ts", None, None)
+    obs.on_sync_ended("s")
 
     child.on_sync_started.assert_called_once_with("s", "ts")
     child.on_watermark_resolved.assert_called_once_with("s", "cli_override", "v")
@@ -224,6 +226,7 @@ def test_composite_observer_forwards_every_event_method() -> None:
     child.on_records_failed.assert_called_once_with("s", [])
     child.on_interrupted.assert_called_once_with("s", 4)
     child.on_sync_completed.assert_called_once_with("s", SyncResult(), "ts", None, None)
+    child.on_sync_ended.assert_called_once_with("s")
 
 
 def test_logging_observer_on_sync_started_is_silent(
@@ -332,6 +335,68 @@ def test_engine_routes_history_append_failure_through_observer(tmp_path: Path) -
     )
 
 
+def test_engine_calls_on_sync_ended_on_success(tmp_path: Path) -> None:
+    from tests.unit.test_engine import FakeDestination, FakeSource, _make_profile, _make_sync
+
+    obs = MagicMock(spec=SyncObserver)
+    sync = _make_sync()
+
+    from drt.engine.sync import run_sync
+
+    run_sync(
+        sync, FakeSource([{"id": 1}]), FakeDestination(), _make_profile(), tmp_path, observer=obs
+    )
+
+    obs.on_sync_ended.assert_called_once_with(sync.name)
+
+
+def test_engine_calls_on_sync_ended_on_unhandled_exception(tmp_path: Path) -> None:
+    """on_sync_ended fires from the outer `finally`, so it must still run
+    (and see the exception path) even when run_sync propagates an error —
+    this is the guarantee a buffering observer like DlqObserver depends on
+    to never lose already-buffered entries on a mid-sync crash."""
+    from tests.unit.test_engine import _make_profile, _make_sync
+
+    class _RaisingSource:
+        def extract(self, query, config, *, query_tags=None):  # type: ignore[no-untyped-def]
+            raise RuntimeError("source blew up")
+            yield  # pragma: no cover — makes this a generator function
+
+        def test_connection(self, config):  # type: ignore[no-untyped-def]
+            return True
+
+    obs = MagicMock(spec=SyncObserver)
+    sync = _make_sync()
+
+    from drt.engine.sync import run_sync
+
+    with pytest.raises(RuntimeError, match="source blew up"):
+        run_sync(sync, _RaisingSource(), MagicMock(), _make_profile(), tmp_path, observer=obs)
+
+    obs.on_sync_ended.assert_called_once_with(sync.name)
+
+
+def test_engine_skips_on_sync_ended_on_dry_run(tmp_path: Path) -> None:
+    from tests.unit.test_engine import FakeDestination, FakeSource, _make_profile, _make_sync
+
+    obs = MagicMock(spec=SyncObserver)
+    sync = _make_sync()
+
+    from drt.engine.sync import run_sync
+
+    run_sync(
+        sync,
+        FakeSource([{"id": 1}]),
+        FakeDestination(),
+        _make_profile(),
+        tmp_path,
+        dry_run=True,
+        observer=obs,
+    )
+
+    obs.on_sync_ended.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # DlqObserver (#278) — persists per-record load failures
 # ---------------------------------------------------------------------------
@@ -350,6 +415,7 @@ def test_dlq_observer_persists_failed_records(tmp_path: Path) -> None:
     obs = DlqObserver(store)
 
     obs.on_records_failed("s", [_dead(1), _dead(2)])
+    obs.on_sync_ended("s")
 
     assert store.depth("s") == 2
     assert [e.record["id"] for e in store.read("s")] == [1, 2]
@@ -365,7 +431,30 @@ def test_dlq_observer_honours_max_records(tmp_path: Path) -> None:
     store = DlqStore(tmp_path)
     obs = DlqObserver(store, max_records=2)
     obs.on_records_failed("s", [_dead(1), _dead(2), _dead(3)])
+    obs.on_sync_ended("s")
     assert [e.record["id"] for e in store.read("s")] == [2, 3]
+
+
+def test_dlq_observer_trims_buffer_during_accumulation_not_just_at_flush() -> None:
+    """A sync with far more failures than max_records must not hold all of
+    them in memory for the whole run — only the newest max_records ever
+    survive the eventual flush, so the buffer should stay capped as
+    failures arrive, not just get truncated once at the end."""
+    obs = DlqObserver(MagicMock(), max_records=2)
+    obs.on_records_failed("s", [_dead(1)])
+    obs.on_records_failed("s", [_dead(2)])
+    obs.on_records_failed("s", [_dead(3)])
+    assert [d.record["id"] for d in obs._buffer["s"]] == [2, 3]
+
+
+def test_dlq_observer_max_records_zero_is_unbounded() -> None:
+    """max_records=0 means unbounded, matching store.append's own contract
+    (documented in dead-letter-queue.md) — the buffer trim must not
+    misread 0 as "cap at zero" and silently discard everything."""
+    obs = DlqObserver(MagicMock(), max_records=0)
+    for i in range(5):
+        obs.on_records_failed("s", [_dead(i)])
+    assert [d.record["id"] for d in obs._buffer["s"]] == [0, 1, 2, 3, 4]
 
 
 def test_dlq_observer_swallows_store_errors(caplog: pytest.LogCaptureFixture) -> None:
@@ -375,13 +464,13 @@ def test_dlq_observer_swallows_store_errors(caplog: pytest.LogCaptureFixture) ->
     obs = DlqObserver(store)
 
     with caplog.at_level(logging.WARNING, logger="drt"):
-        obs.on_records_failed("s", [_dead(1)])  # must not raise
+        obs.on_records_failed("s", [_dead(1)])
+        obs.on_sync_ended("s")  # must not raise
 
     assert any("DLQ persist failure" in r.message for r in caplog.records)
 
 
-def test_dlq_observer_only_reacts_to_records_failed(tmp_path: Path) -> None:
-    """Every other event method is a no-op — DlqObserver writes nothing on them."""
+def test_dlq_observer_flushes_only_buffered_failures_on_completion(tmp_path: Path) -> None:
     store = DlqStore(tmp_path)
     obs = DlqObserver(store)
     obs.on_sync_started("s", "ts")
@@ -389,7 +478,41 @@ def test_dlq_observer_only_reacts_to_records_failed(tmp_path: Path) -> None:
     obs.on_warning("s", "w")
     obs.on_interrupted("s", 1)
     obs.on_sync_completed("s", SyncResult(), "ts", None, None)
+    obs.on_sync_ended("s")
     assert store.depth("s") == 0
+
+
+def test_dlq_observer_on_sync_completed_alone_does_not_flush(tmp_path: Path) -> None:
+    """The flush moved to on_sync_ended (fires on every exit path); a bare
+    on_sync_completed call — e.g. a caller that forgets on_sync_ended, or a
+    library integration that only wires the old hook — must not leak a
+    write, since that would silently duplicate the real flush."""
+    store = DlqStore(tmp_path)
+    obs = DlqObserver(store)
+    obs.on_records_failed("s", [_dead(1)])
+    obs.on_sync_completed("s", SyncResult(), "ts", None, None)
+    assert store.depth("s") == 0
+
+
+def test_dlq_observer_buffered_flush_matches_per_batch_local_content(
+    tmp_path: Path,
+) -> None:
+    """Batch buffering changes I/O count, never JSONL content or order."""
+    batches = [[_dead(1)], [_dead(2), _dead(3)], [_dead(4)]]
+    old_store = DlqStore(tmp_path / "old")
+    for batch in batches:
+        old_store.append("s", batch)
+
+    new_store = DlqStore(tmp_path / "new")
+    observer = DlqObserver(new_store)
+    for batch in batches:
+        observer.on_records_failed("s", batch)
+    assert new_store.depth("s") == 0, "failures stay buffered until completion"
+    observer.on_sync_ended("s")
+
+    old_file = tmp_path / "old" / ".drt" / "dlq" / "s.jsonl"
+    new_file = tmp_path / "new" / ".drt" / "dlq" / "s.jsonl"
+    assert new_file.read_bytes() == old_file.read_bytes()
 
 
 # ---------------------------------------------------------------------------

@@ -109,8 +109,10 @@ UNMAPPED_COMMANDS: dict[str, str] = {
 # `docs generate`, whose JSON artifact is precisely what drt_get_manifest
 # returns.
 PRESENTATION_OPTIONS = frozenset({"--output", "--log-format", "--verbose", "--quiet", "--format"})
-# Selection — expressed by each tool's `sync_name` argument instead.
-SELECTION_OPTIONS = frozenset({"--select", "--exclude"})
+# Selection — expressed by each tool's `sync_name` argument instead. ``--state``
+# supplies the baseline used by one CLI selector method, so it belongs to the
+# same grammar rather than representing a separately missing MCP capability.
+SELECTION_OPTIONS = frozenset({"--select", "--exclude", "--state"})
 
 # Per-command structural exclusions, with the reason recorded inline.
 COMMAND_EXCLUSIONS: dict[str, dict[str, str]] = {

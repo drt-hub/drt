@@ -46,9 +46,15 @@ jobs:
         # wheels so it costs no toolchain.
         # snowflake is omitted — its tests use sys.modules injection so the
         # heavy snowflake-connector-python install would only slow CI.
-        # bigquery / gcs / parquet remain opt-in for the same reason.
-        # dev supplies testcontainers, so local_sql_smoke runs against the
-        # runner's Docker daemon on every PR without secrets (#939).
+        # bigquery / gcs / s3 / parquet remain opt-in for the same reason. GCS
+        # and S3 additionally must stay out of *this* install: their destination
+        # suites assert the no-extras ImportError messages with sys.modules
+        # injection. Once the real SDK package has been loaded in this process,
+        # those tests no longer isolate the missing-extra path reliably. The
+        # object_store_smoke steps install each SDK separately after this run
+        # and target only that backend's integration module (#756).
+        # dev supplies testcontainers, so local_sql_smoke/object_store_smoke
+        # run against the runner's Docker daemon on every PR without secrets.
         run: uv pip install --system -e ".[dev,mcp,duckdb,postgres,mysql,clickhouse,sqlserver]"
 
       - name: Dependency vulnerability scan (pip-audit)
@@ -111,6 +117,27 @@ jobs:
 
       - name: Test (pytest)
         run: pytest --cov=drt --cov-report=xml
+
+      - name: Install gcs extra for object_store_smoke
+        # Installed as its own late step, after the main test run above —
+        # see the "Install dependencies" step's comment for why gcs cannot
+        # be present for that run (it would make test_gcs_destination.py's
+        # no-extras ImportError assertion pass for the wrong reason: import
+        # success, not a mocked failure). Additive install; nothing above
+        # this step needs to change.
+        run: uv pip install --system -e ".[gcs]"
+
+      - name: Test (object_store_smoke, pytest)
+        run: pytest -m object_store_smoke tests/integration/object_store/test_gcs_backend.py
+
+      - name: Install s3 extra for object_store_smoke
+        # Keep boto3 out of the main test process so the S3 destination's
+        # missing-extra assertion remains meaningful; see the install comment
+        # above. This late additive install mirrors the GCS backend's layout.
+        run: uv pip install --system -e ".[s3]"
+
+      - name: Test (S3 object_store_smoke, pytest)
+        run: pytest -m object_store_smoke tests/integration/object_store/test_s3_backend.py
 
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.12'

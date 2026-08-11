@@ -24,7 +24,12 @@ if TYPE_CHECKING:
 
 
 from drt.cli._app import app
-from drt.cli._selection import SelectionError, complete_selector, select_syncs
+from drt.cli._selection import (
+    SelectionError,
+    complete_selector,
+    is_state_only_select,
+    select_syncs,
+)
 from drt.cli.output import (
     console,
     print_error,
@@ -57,7 +62,7 @@ def validate(
         "-s",
         help=(
             "Select syncs: name or glob, tag:<pattern>, destination:<type>, "
-            'or "*" / "all". Repeat to union.'
+            'state:modified/state:new, or "*" / "all". Repeat to union.'
         ),
         autocompletion=complete_selector,
     ),
@@ -66,6 +71,14 @@ def validate(
         "--exclude",
         help="Subtract syncs from the selection (same grammar as --select). Repeatable.",
         autocompletion=complete_selector,
+    ),
+    state: Path | None = typer.Option(
+        None,
+        "--state",
+        help=(
+            "Baseline manifest path for state:modified/state:new selectors "
+            "(for example, a prior `drt docs generate --format json` CI artifact)."
+        ),
     ),
     emit_schema: bool = typer.Option(  # noqa: E501
         False, "--emit-schema", help="Write JSON Schemas to .drt/schemas/."
@@ -81,6 +94,7 @@ def validate(
     Examples:
       drt validate
       drt validate --select post_users
+      drt validate --select state:modified --state ci-baseline/manifest.json
       drt validate --emit-schema
       drt validate --strict
     """
@@ -98,7 +112,15 @@ def validate(
         # match error keys directly — `drt validate --select broken_sync`
         # must still surface that sync's errors.
         try:
-            selected = select_syncs(result.syncs, select, exclude)
+            if state is not None:
+                from drt.cli._state_selection import load_state_diff
+
+                state_diff = load_state_diff(state, result.syncs, Path("."))
+                selected = select_syncs(
+                    result.syncs, select, exclude, state_diff=state_diff
+                )
+            else:
+                selected = select_syncs(result.syncs, select, exclude)
         except SelectionError as e:
             error_keys: set[str] = set()
             if select:
@@ -108,7 +130,22 @@ def validate(
                 raise typer.Exit(1)
             selected = []
         selected_names = {s.name for s in selected}
-        error_names = _match_error_keys(result.errors, select) if select else set(result.errors)
+        if state is not None:
+            # A broken sync has no SyncConfig, so it was never in the
+            # `current_syncs` passed to load_state_diff() and can't be
+            # matched via state-diff membership; unlike tag:/destination:,
+            # error-dict keys are also file *stems*, a different identifier
+            # space than the fingerprint map's resolved sync names, so there
+            # is no safe way to reconcile "was this broken file part of the
+            # change" by name. Always keep every parse/validation error when
+            # a state: selector is active rather than risk silently dropping
+            # a changed-but-broken sync from a green `drt validate` run —
+            # a false positive here (an unrelated broken sync reported) is
+            # safe; a false negative (a changed broken sync going unreported)
+            # is exactly the failure mode state-aware CI must not have.
+            error_names = set(result.errors)
+        else:
+            error_names = _match_error_keys(result.errors, select) if select else set(result.errors)
         for token in exclude or ():
             error_names = {k for k in error_names if not _fnmatch_token(k, token)}
         result.syncs = selected
@@ -118,6 +155,11 @@ def validate(
         }
         secret_findings = [f for f in secret_findings if f.sync_name in selected_names]
         if not result.syncs and not result.errors:
+            if is_state_only_select(select):
+                console.print(
+                    "[dim]No syncs changed relative to the baseline — nothing to validate.[/dim]"
+                )
+                raise typer.Exit()
             print_error("Selection matched no syncs (after --exclude).")
             raise typer.Exit(1)
 

@@ -13,9 +13,9 @@ if TYPE_CHECKING:
 
 
 def get_status(ctx: McpContext, sync_name: str | None = None) -> dict[str, Any]:
-    from drt.state.manager import StateManager
+    from drt.state.factory import build_state_bundle
 
-    states = StateManager(ctx.project_dir).get_all()
+    states = build_state_bundle(ctx.load_project_for_state(), ctx.project_dir).state.get_all()
 
     if sync_name:
         if sync_name not in states:

@@ -20,7 +20,7 @@ from drt.cli._app import app
 from drt.cli.output import console, print_error
 
 if TYPE_CHECKING:
-    from drt.config.models import SyncConfig
+    from drt.config.models import ProjectConfig, SyncConfig
     from drt.state.dlq import DeadLetter
 
 
@@ -32,6 +32,7 @@ def _chunks(items: list[DeadLetter], size: int) -> list[list[DeadLetter]]:
 def replay_dead_letters(
     sync: SyncConfig,
     *,
+    project: ProjectConfig | None = None,
     limit: int | None = None,
     dry_run: bool = False,
     clear: bool = False,
@@ -50,9 +51,18 @@ def replay_dead_letters(
         - ``"ok"``       — records replayed; see ``succeeded`` / ``still_failing``
     """
     from drt.cli._helpers import get_destination
-    from drt.state.dlq import DeadLetter, DlqStore
+    from drt.config.base import ProjectConfig
+    from drt.config.parser import load_project
+    from drt.state.dlq import DeadLetter
+    from drt.state.factory import build_state_bundle
 
-    store = DlqStore(project_dir)
+    if project is None:
+        project = (
+            load_project(project_dir)
+            if (project_dir / "drt_project.yml").exists()
+            else ProjectConfig(name="drt")
+        )
+    store = build_state_bundle(project, project_dir).dlq
     entries = store.read(sync.name)
     if not entries:
         return {"sync": sync.name, "queued": 0, "status": "empty"}
@@ -168,8 +178,17 @@ def retry(
         print_error("--limit must be >= 0.")
         raise typer.Exit(1)
 
+    # No project= here: replay_dead_letters() resolves it itself (present
+    # drt_project.yml -> load it; absent -> local-default ProjectConfig), the
+    # same fallback every other state/DLQ surface (MCP's
+    # load_project_for_state()) already gives a directory that only has
+    # syncs/ + .drt/dlq/ with no project file.
     summary = replay_dead_letters(
-        sync, limit=limit, dry_run=dry_run, clear=clear, project_dir=Path(".")
+        sync,
+        limit=limit,
+        dry_run=dry_run,
+        clear=clear,
+        project_dir=Path("."),
     )
     status = summary["status"]
 

@@ -76,6 +76,36 @@ def _patch_dest(monkeypatch: pytest.MonkeyPatch, dest: _FakeDestination) -> None
     monkeypatch.setattr(helpers, "get_destination", lambda sync: dest)
 
 
+def test_retry_works_without_drt_project_yml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory with syncs/ + .drt/dlq/ but no drt_project.yml must still
+    work — retry only needs the destination (records replay verbatim), never
+    the project's source/profile. Regression guard: an earlier factory
+    refactor made the CLI command eagerly call load_project() unconditionally,
+    which raises FileNotFoundError before replay_dead_letters()'s own
+    already-correct "no project file -> local default" fallback ever runs."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "syncs").mkdir()
+    (tmp_path / "syncs" / "post_users.yml").write_text(
+        yaml.dump(
+            {
+                "name": "post_users",
+                "model": "ref('users')",
+                "destination": {"type": "rest_api", "url": "https://example.com"},
+                "sync": {"batch_size": 2, "dlq": {"enabled": True}},
+            }
+        )
+    )
+    _seed(tmp_path, [1, 2])
+    _patch_dest(monkeypatch, _FakeDestination(fail_ids=set()))
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    assert "2 succeeded, 0 still failing" in result.output
+
+
 def test_retry_empty_queue_is_friendly(project: Path) -> None:
     result = runner.invoke(app, ["retry", "post_users"])
     assert result.exit_code == 0

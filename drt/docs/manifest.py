@@ -3,7 +3,7 @@
 These describe the catalog of a drt project — syncs, sources, destinations,
 edges, and (optionally) per-sync run state and history. Schema is versioned
 (`SCHEMA_VERSION`) and considered a public surface; see ADR 0001 (#500,
-sub-issue #507) for v1 and ADR 0003 (#698) for v2.
+sub-issue #507) for v1, ADR 0003 (#698) for v2, and ADR 0006 (#772) for v3.
 
 Public field names are stable across drt versions per VERSIONING.md.
 Breaking the JSON shape requires bumping ``SCHEMA_VERSION`` and a migration
@@ -18,6 +18,18 @@ sync, nothing renamed or removed, so v1 consumers keep working unchanged:
 - ``fields``: declared write-side column facts from ``sync.field_mappings``
   and ``sync.mask`` — the column-level lineage source (#808).
 - ``dlq_depth``: current Dead Letter Queue depth for the sync.
+
+Schema v3 (#772) is a pure superset of v2 — one addition on each sync,
+nothing renamed or removed, so v2 consumers keep working unchanged:
+
+- ``config_hash``: stable fingerprint of the sync definition for baseline
+  comparison by the ``state:modified`` selector. Like every other
+  optional v2+ field (``state``, ``runs``, ``fields``, ``dlq_depth``), it
+  is omitted from the serialized dict rather than emitted as ``null`` when
+  absent — this keeps a re-serialized v1/v2 manifest (loaded via
+  :meth:`Manifest.from_dict` with no ``config_hash`` in the source data)
+  free of a schema-v3-only key its declared ``schema_version`` doesn't
+  actually support.
 """
 
 from __future__ import annotations
@@ -25,7 +37,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 EdgeKind = Literal["source_to_sync", "sync_to_destination", "lookup"]
 
@@ -112,6 +124,8 @@ class Sync:
     runs: tuple[SyncRun, ...] = ()  # newest first; empty when state excluded
     fields: tuple[SyncField, ...] = ()  # declared columns only (v2)
     dlq_depth: int | None = None  # None when state excluded
+    # Defensive None: normal filesystem-backed syncs have a fingerprint.
+    config_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -133,7 +147,7 @@ class Manifest:
     edges: list[Edge] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to a JSON-compatible dict matching schema v1."""
+        """Serialize to a JSON-compatible, schema-versioned dict."""
         return {
             "schema_version": self.schema_version,
             "drt_version": self.drt_version,
@@ -153,7 +167,7 @@ class Manifest:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Manifest:
-        """Reconstruct a Manifest from a schema-v1 dict (round-trip safe)."""
+        """Reconstruct a Manifest from a schema-versioned dict (round-trip safe)."""
         project_data = data.get("project")
         project = Project(**project_data) if project_data else None
         return cls(
@@ -179,6 +193,8 @@ def _sync_to_dict(s: Sync) -> dict[str, Any]:
         "description": s.description,
         "tags": list(s.tags),
     }
+    if s.config_hash is not None:
+        d["config_hash"] = s.config_hash
     if s.state is not None:
         d["state"] = {
             "last_sync_at": s.state.last_sync_at,
@@ -226,4 +242,5 @@ def _sync_from_dict(d: dict[str, Any]) -> Sync:
         ),
         fields=tuple(SyncField(**f) for f in d.get("fields", [])),
         dlq_depth=d.get("dlq_depth"),
+        config_hash=d.get("config_hash"),
     )

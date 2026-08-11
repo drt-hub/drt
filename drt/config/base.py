@@ -169,10 +169,69 @@ class SourceConfig(BaseModel):
 
 
 class HistoryConfig(BaseModel):
-    """Sync execution history retention (#276)."""
+    """Sync execution history retention (#276).
+
+    Local history keeps every entry inside ``retention_days``. Remote object
+    stores additionally retain only the newest ``max_entries`` per sync, which
+    bounds the object downloaded and rewritten by each conditional update.
+    """
 
     enabled: bool = True
     retention_days: int = 30
+    max_entries: int = Field(default=500, ge=1)
+
+
+class StateConfig(BaseModel):
+    """State-backend selection and backend-specific settings (#756).
+
+    This mirrors :class:`~drt.config.sync_options.WatermarkConfig`'s shape:
+    one discriminating backend field plus optional fields validated against
+    that choice. GCS and S3 use ``bucket`` plus an optional object-key
+    ``prefix``. S3's authentication and endpoint fields deliberately match
+    :class:`~drt.config.destinations_storage.S3DestinationConfig`, so state
+    storage follows the same boto3 credential chain and override vocabulary.
+    Local state continues to reject every remote-only field.
+    """
+
+    backend: Literal["local", "gcs", "s3"] = "local"
+    bucket: str | None = None
+    prefix: str | None = None
+    region: str | None = None
+    aws_profile: str | None = None
+    aws_access_key_id_env: str | None = None
+    aws_secret_access_key_env: str | None = None
+    aws_session_token_env: str | None = None
+    endpoint_url: str | None = None
+
+    @model_validator(mode="after")
+    def _check_backend_fields(self) -> StateConfig:
+        s3_only_fields = (
+            "region",
+            "aws_profile",
+            "aws_access_key_id_env",
+            "aws_secret_access_key_env",
+            "aws_session_token_env",
+            "endpoint_url",
+        )
+        configured_s3_fields = [
+            field for field in s3_only_fields if getattr(self, field) is not None
+        ]
+        if self.backend == "local" and (
+            self.bucket is not None
+            or self.prefix is not None
+            or configured_s3_fields
+        ):
+            raise ValueError(
+                "Remote state fields are not valid when backend is 'local'."
+            )
+        if self.backend == "gcs" and not self.bucket:
+            raise ValueError("state.bucket is required when backend is 'gcs'.")
+        if self.backend == "gcs" and configured_s3_fields:
+            names = ", ".join(f"state.{field}" for field in configured_s3_fields)
+            raise ValueError(f"{names} are only valid when backend is 's3'.")
+        if self.backend == "s3" and not self.bucket:
+            raise ValueError("state.bucket is required when backend is 's3'.")
+        return self
 
 
 class QueryTaggingConfig(BaseModel):
@@ -197,6 +256,7 @@ class ProjectConfig(BaseModel):
     profile: str = "default"
     source: SourceConfig | None = None  # optional; profile is authoritative
     history: HistoryConfig = Field(default_factory=HistoryConfig)
+    state: StateConfig = Field(default_factory=StateConfig)
     # Project vars (#783): reviewed, in-repo defaults for anything
     # project-shaped, referenced as {{ var('name') }} in model SQL and YAML
     # string fields. Overridden by DRT_VAR_* env and `--vars` at run time —

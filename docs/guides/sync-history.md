@@ -23,6 +23,13 @@ For every non-dry-run sync, drt appends one JSON object to `.drt/history/<sync_n
 
 `status` is one of `success` / `partial` / `failed`. `errors` is truncated to the first 5 messages to bound disk growth on long-failing syncs.
 
+The `.drt/history/` path above describes the default **local** state backend.
+With a remote `state.backend`, the same `history/<sync_name>.jsonl` path lives
+under the configured bucket and prefix. Remote history also applies
+`history.max_entries` (default 500) in addition to `retention_days`, and uses
+conditional object updates instead of local file append. See
+[Remote state on GCS or S3](remote-state.md).
+
 > **Dry-run is skipped.** `drt run --dry-run` does not write to history — it is for previewing, not auditing.
 
 ## Configure retention
@@ -35,6 +42,7 @@ profile: default
 history:
   enabled: true            # default: true
   retention_days: 30       # default: 30
+  max_entries: 500         # default: 500 — remote backends only
 ```
 
 Set `enabled: false` to disable history entirely (the directory will not be created).
@@ -94,12 +102,13 @@ This makes "did the daily user_sync run last night?" a question your AI assistan
 ## Operational tips
 
 - **Disk usage is bounded.** Per-sync JSONL with default retention is typically well under 1 MB even on chatty hourly syncs (~720 entries × 30 days × ~500 B/entry ≈ 11 MB worst case).
-- **Per-sync files are append-safe.** POSIX `O_APPEND` makes individual line writes atomic, so `drt run --threads 8` running multiple syncs in parallel won't corrupt history.
+- **Local per-sync files are append-safe.** With the local backend, POSIX `O_APPEND` makes individual line writes atomic, so `drt run --threads 8` running multiple syncs in parallel won't corrupt history. Remote backends instead use generation/ETag-preconditioned read-modify-write with retry; see [Remote state on GCS or S3](remote-state.md#concurrency-and-failure-behavior).
 - **History never blocks a sync.** Disk-full or permission errors are logged at WARNING and swallowed — sync correctness must not depend on telemetry persistence.
 - **Pair with alerts.** Use [`alerts.on_failure`](alerts.md) for real-time pages and `drt status --history` for the morning review of "what failed overnight".
 
 ## See also
 
 - [API reference: `drt_project.yml` history block](../llm/API_REFERENCE.md)
+- [Remote state on GCS or S3](remote-state.md)
 - [Alerts guide](alerts.md) — the real-time counterpart to history
 - [`drt/state/history.py`](../../drt/state/history.py) — `HistoryEntry` model and `HistoryManager`

@@ -21,6 +21,7 @@ from typer.testing import CliRunner
 
 from drt.cli.main import app
 from drt.state.manager import StateManager, SyncState
+from tests.unit._state_cli_helpers import write_state_baseline
 
 runner = CliRunner()
 
@@ -126,6 +127,7 @@ def patched_engine(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     calls: list[str] = []
     limits: list[int | None] = []
+    state_managers: list[Any] = []
     lock = threading.Lock()
     threads_seen: set[int] = set()
 
@@ -137,6 +139,7 @@ def patched_engine(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         with lock:
             calls.append(sync.name)
             limits.append(_kwargs.get("extract_limit"))
+            state_managers.append(_args[5])
             threads_seen.add(threading.get_ident())
         return _FakeResult(success=1, failed=0)
 
@@ -161,7 +164,12 @@ def patched_engine(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         lambda *_a, **_kw: object(),
         raising=False,
     )
-    return {"calls": calls, "threads_seen": threads_seen, "limits": limits}
+    return {
+        "calls": calls,
+        "threads_seen": threads_seen,
+        "limits": limits,
+        "state_managers": state_managers,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +181,99 @@ def test_select_by_name_runs_single_sync(project: Path, patched_engine: dict[str
     result = runner.invoke(app, ["run", "--select", "sync_b", "--output", "json"])
     assert result.exit_code == 0
     assert patched_engine["calls"] == ["sync_b"]
+
+
+def test_select_state_modified_runs_only_changed_sync(
+    project: Path, patched_engine: dict[str, Any]
+) -> None:
+    baseline = write_state_baseline(project)
+    with (project / "syncs" / "sync_b.yml").open("a", encoding="utf-8") as f:
+        f.write("\n# changed in this branch\n")
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--select",
+            "state:modified",
+            "--state",
+            str(baseline),
+            "--output",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert patched_engine["calls"] == ["sync_b"]
+
+
+def test_select_state_modified_no_changes_is_a_clean_noop(
+    project: Path, patched_engine: dict[str, Any]
+) -> None:
+    """The advertised CI invocation must succeed as a no-op when a PR
+    changes no sync definitions -- not fail the way a dud tag:/bare-name
+    selector correctly would."""
+    baseline = write_state_baseline(project)
+
+    result = runner.invoke(
+        app,
+        ["run", "--select", "state:modified", "--state", str(baseline)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert patched_engine["calls"] == []
+
+
+def test_select_state_modified_missing_baseline_runs_every_sync(
+    project: Path,
+    patched_engine: dict[str, Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    missing = project / "missing-manifest.json"
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--select",
+            "state:modified",
+            "--state",
+            str(missing),
+            "--output",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert patched_engine["calls"] == ["sync_a", "sync_b", "sync_c"]
+    assert "treating every current sync as new" in caplog.text
+
+
+def test_select_state_modified_without_state_exits_cleanly(
+    project: Path, patched_engine: dict[str, Any]
+) -> None:
+    result = runner.invoke(app, ["run", "--select", "state:modified"])
+
+    assert result.exit_code == 1
+    assert "requires --state" in result.output
+    assert "Traceback" not in result.output
+    assert patched_engine["calls"] == []
+
+
+def test_select_state_modified_old_baseline_exits_cleanly(
+    project: Path, patched_engine: dict[str, Any]
+) -> None:
+    baseline = write_state_baseline(project, schema_version=2)
+
+    result = runner.invoke(
+        app,
+        ["run", "--select", "state:modified", "--state", str(baseline)],
+    )
+
+    assert result.exit_code == 1
+    assert "schema version 2 predates config_hash" in result.output
+    assert "Traceback" not in result.output
+    assert patched_engine["calls"] == []
 
 
 def test_select_by_tag_filters(project: Path, patched_engine: dict[str, Any]) -> None:
@@ -546,6 +647,9 @@ def test_threads_flag_actually_parallelises(project: Path, patched_engine: dict[
     # More than one OS thread should have handled the syncs when
     # --threads > 1 and there are multiple syncs.
     assert len(patched_engine["threads_seen"]) > 1
+    state_managers = patched_engine["state_managers"]
+    assert len({id(manager) for manager in state_managers}) == 1
+    assert len({id(manager._lock) for manager in state_managers}) == 1
 
 
 def test_threads_one_runs_sequentially(project: Path, patched_engine: dict[str, Any]) -> None:

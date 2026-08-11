@@ -9,6 +9,16 @@ drt-core version its bundled schemas were generated from.
 - Bundled JSON Schemas regenerated from drt-core: `rest_api` destinations now
   validate `body_mode`, `batch_template`, `max_records_per_request`, and
   `error_path` for batch request bodies (drt-hub/drt#770).
+- Bundled JSON Schemas regenerated from drt-core: `drt_project.yml` now validates
+  the `state` backend block (`backend`, `bucket`, `prefix`) introduced for
+  drt-hub/drt#756.
+- Bundled JSON Schemas regenerated from drt-core: `state.backend` now accepts
+  `gcs` in addition to `local`, and `HistoryConfig` gains `max_entries`
+  (drt-hub/drt#756).
+- Bundled JSON Schemas regenerated from drt-core: `state.backend` now accepts
+  `s3`, with new `region`, `aws_profile`, `aws_access_key_id_env`,
+  `aws_secret_access_key_env`, `aws_session_token_env`, and `endpoint_url`
+  fields (drt-hub/drt#756).
 
 ## [0.1.12] - Unreleased
 

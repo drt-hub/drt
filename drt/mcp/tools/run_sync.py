@@ -30,7 +30,7 @@ def run_sync(
     from drt.cli.main import _get_destination, _get_source
     from drt.config.credentials import load_profile
     from drt.engine.sync import run_sync as engine_run_sync
-    from drt.state.manager import StateManager
+    from drt.state.factory import build_state_bundle
 
     if compute_diff and not dry_run:
         return {
@@ -55,7 +55,7 @@ def run_sync(
 
     source = _get_source(profile)
     dest = _get_destination(sync)
-    state_mgr = StateManager(ctx.project_dir)
+    state_mgr = build_state_bundle(project, ctx.project_dir).state
 
     if full_refresh and not dry_run:
         # Clear both watermark sources, mirroring `drt run --full-refresh`.

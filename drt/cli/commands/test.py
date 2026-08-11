@@ -27,7 +27,12 @@ if TYPE_CHECKING:
     from drt.config.models import SyncConfig, SyncTest
 
 from drt.cli._app import app
-from drt.cli._selection import SelectionError, complete_selector, select_syncs
+from drt.cli._selection import (
+    SelectionError,
+    complete_selector,
+    is_state_only_select,
+    select_syncs,
+)
 from drt.cli.output import (
     console,
     print_error,
@@ -408,7 +413,7 @@ def test_syncs(
         "-s",
         help=(
             "Select syncs: name or glob, tag:<pattern>, destination:<type>, "
-            'or "*" / "all". Repeat to union.'
+            'state:modified/state:new, or "*" / "all". Repeat to union.'
         ),
         autocompletion=complete_selector,
     ),
@@ -417,6 +422,14 @@ def test_syncs(
         "--exclude",
         help="Subtract syncs from the selection (same grammar as --select). Repeatable.",
         autocompletion=complete_selector,
+    ),
+    state: Path | None = typer.Option(
+        None,
+        "--state",
+        help=(
+            "Baseline manifest path for state:modified/state:new selectors "
+            "(for example, a prior `drt docs generate --format json` CI artifact)."
+        ),
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview without running tests."),
     fail_fast: bool = typer.Option(
@@ -455,6 +468,9 @@ def test_syncs(
     With --dry-run, shows what tests would be executed without actually
     connecting to the destination or running queries. With --unit, runs
     sync.unit_tests instead — see that flag's help.
+
+    Examples:
+      drt test --select state:modified --state ci-baseline/manifest.json --dry-run
     """
     from drt.config.parser import load_syncs
 
@@ -474,11 +490,25 @@ def test_syncs(
         return
 
     try:
-        syncs = select_syncs(syncs, select, exclude)
+        if state is not None:
+            from drt.cli._state_selection import load_state_diff
+
+            state_diff = load_state_diff(state, syncs, Path("."))
+            syncs = select_syncs(syncs, select, exclude, state_diff=state_diff)
+        else:
+            syncs = select_syncs(syncs, select, exclude)
     except SelectionError as e:
         print_error(str(e))
         raise typer.Exit(1)
     if not syncs:
+        if is_state_only_select(select):
+            if not json_mode:
+                console.print(
+                    "[dim]No syncs changed relative to the baseline — nothing to test.[/dim]"
+                )
+            else:
+                print(json.dumps({"status": "no_changes", "results": []}))
+            return
         print_error("Selection matched no syncs (after --exclude).")
         raise typer.Exit(1)
 

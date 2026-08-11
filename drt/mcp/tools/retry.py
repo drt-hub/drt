@@ -29,5 +29,10 @@ def retry(
         return {"error": f"No sync named '{sync_name}' found."}
 
     return replay_dead_letters(
-        sync, limit=limit, dry_run=dry_run, clear=clear, project_dir=ctx.project_dir
+        sync,
+        project=ctx.load_project_for_state(),
+        limit=limit,
+        dry_run=dry_run,
+        clear=clear,
+        project_dir=ctx.project_dir,
     )
