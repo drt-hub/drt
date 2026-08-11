@@ -211,3 +211,37 @@ def test_retry_negative_limit_errors(project: Path) -> None:
     result = runner.invoke(app, ["retry", "post_users", "--limit", "-1"])
     assert result.exit_code == 1
     assert "--limit must be >= 0" in result.output
+
+
+def test_retry_survives_concurrent_append(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The literal #955 scenario: a concurrent ``drt run`` appends a new dead
+    letter to the same sync's DLQ while ``drt retry`` is mid-flight — after
+    ``replay_dead_letters()`` has already read the queue but before it
+    writes back. Before the ``reconcile()`` fix, that append was silently
+    lost: ``replace()`` overwrote the whole queue with content computed from
+    ``drt retry``'s stale read, which never saw the new entry.
+    """
+    store = _seed(project, [1, 2])
+
+    class _ConcurrentAppendDestination:
+        def load(self, records, config, sync_options):  # type: ignore[no-untyped-def]
+            # Simulates another process's `drt run` appending a fresh dead
+            # letter mid-retry — after replay_dead_letters()'s own read at
+            # the top of the function, before its write-back at the end.
+            store.append(
+                "post_users", [DeadLetter(record={"id": 99}, error_message="new failure")]
+            )
+            result = SyncResult()
+            result.success = len(records)
+            return result
+
+    _patch_dest(monkeypatch, _ConcurrentAppendDestination())  # type: ignore[arg-type]
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0
+    # The two replayed records succeeded and were removed by id; the
+    # concurrently-appended one was never named in the reconcile call, so it
+    # survives untouched.
+    remaining = store.read("post_users")
+    assert [e.record["id"] for e in remaining] == [99]

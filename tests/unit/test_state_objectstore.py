@@ -402,6 +402,56 @@ def test_dlq_append_non_precondition_error_warns_and_returns_existing_depth(
     )
 
 
+def test_dlq_reconcile_removes_and_updates_by_id_leaves_others_untouched() -> None:
+    store = ObjectStoreDlqBackend(MemoryObjectClient())
+    store.append("s", [_dead(1), _dead(2), _dead(3)])
+    [e1, e2, e3] = store.read("s")
+    bumped = DeadLetter(
+        id=e3.id, record=e3.record, error_message="still failing", attempts=2
+    )
+
+    result = store.reconcile("s", remove_ids={e2.id}, updates={e3.id: bumped})
+
+    by_id = {e.id: e for e in result}
+    assert set(by_id) == {e1.id, e3.id}
+    assert by_id[e3.id].attempts == 2
+    assert by_id[e3.id].error_message == "still failing"
+    assert [e.id for e in store.read("s")] == [e1.id, e3.id]
+
+
+def test_dlq_reconcile_survives_a_racing_writer() -> None:
+    """A write conflict mid-reconcile (another writer's generation landed
+    first) re-reads fresh state and retries — the #955 fix's whole point:
+    ``replace()``'s retry loop retries the *same* stale content on conflict,
+    ``reconcile()`` re-derives it from a fresh read each attempt."""
+    client = MemoryObjectClient(failures=2)  # first 2 write_if calls conflict
+    store = ObjectStoreDlqBackend(client)
+    store.append("s", [_dead(1)])
+    [e1] = store.read("s")
+
+    with patch("drt.state._objectstore.time.sleep"):
+        result = store.reconcile("s", remove_ids={e1.id})
+
+    assert result == []
+    assert store.depth("s") == 0
+
+
+def test_dlq_reconcile_raises_after_bounded_contention() -> None:
+    client = MemoryObjectClient(always_conflict=True)
+    store = ObjectStoreDlqBackend(client)
+
+    with (
+        patch("drt.state._objectstore.time.sleep"),
+        pytest.raises(
+            ObjectPreconditionError,
+            match="DLQ reconcile for 's' exhausted 8 attempts",
+        ),
+    ):
+        store.reconcile("s", remove_ids={"whatever"})
+
+    assert client.writes == store.MAX_WRITE_ATTEMPTS
+
+
 def test_dlq_all_depths_skips_keys_outside_expected_prefix_or_suffix() -> None:
     client = MemoryObjectClient()
     client.objects["project/dlq/alpha.jsonl"] = ObjectStoreDlqBackend._encode(

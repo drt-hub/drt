@@ -119,7 +119,15 @@ def test_all_depths_empty_when_no_dir(tmp_path: Path) -> None:
 
 # --- DlqBackend Protocol (#756) ----------------------------------------------
 
-_DLQ_BACKEND_METHODS = {"append", "replace", "clear", "read", "depth", "all_depths"}
+_DLQ_BACKEND_METHODS = {
+    "append",
+    "replace",
+    "clear",
+    "read",
+    "depth",
+    "all_depths",
+    "reconcile",
+}
 
 
 def test_local_dlq_store_satisfies_dlq_backend(tmp_path: Path) -> None:
@@ -179,3 +187,88 @@ def test_a_pre_762_jsonl_line_still_loads(tmp_path: Path) -> None:
 
     [loaded] = store.read("s")
     assert loaded.sync_run_id is None
+
+
+# --- Stable identity + reconcile() (#955) -------------------------------------
+
+
+def test_dead_letter_id_defaults_are_unique() -> None:
+    assert _dl(1).id != _dl(1).id
+
+
+def test_a_pre_955_jsonl_line_still_loads(tmp_path: Path) -> None:
+    """A line written before ``id`` existed has no ``id`` key at all — the
+    dataclass default assigns a fresh one per read rather than failing to
+    parse. See the field's own comment in ``drt/state/dlq.py`` for why a
+    fresh id per read is an acceptable, self-healing gap for pre-existing
+    entries rather than something that needs a migration."""
+    import json
+
+    store = DlqStore(tmp_path)
+    path = tmp_path / ".drt" / "dlq" / "s.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    old_format = {
+        "record": {"id": 1},
+        "error_message": "boom",
+        "http_status": 500,
+        "timestamp": "2026-01-01T00:00:00Z",
+        "attempts": 1,
+        # no id key at all
+    }
+    path.write_text(json.dumps(old_format) + "\n")
+
+    [loaded] = store.read("s")
+    assert loaded.id  # a value was assigned, not left missing/None
+
+
+def test_reconcile_removes_by_id_leaves_others_untouched(tmp_path: Path) -> None:
+    store = DlqStore(tmp_path)
+    store.append("s", [_dl(1), _dl(2), _dl(3)])
+    [e1, e2, e3] = store.read("s")
+
+    result = store.reconcile("s", remove_ids={e2.id})
+
+    assert [e.record["id"] for e in result] == [1, 3]
+    assert [e.record["id"] for e in store.read("s")] == [1, 3]
+
+
+def test_reconcile_updates_by_id_leaves_others_untouched(tmp_path: Path) -> None:
+    store = DlqStore(tmp_path)
+    store.append("s", [_dl(1), _dl(2)])
+    [e1, e2] = store.read("s")
+    bumped = DeadLetter(
+        id=e2.id, record=e2.record, error_message="still failing", attempts=e2.attempts + 1
+    )
+
+    result = store.reconcile("s", updates={e2.id: bumped})
+
+    by_id = {e.id: e for e in result}
+    assert by_id[e1.id].attempts == 1  # untouched
+    assert by_id[e2.id].attempts == 2
+    assert by_id[e2.id].error_message == "still failing"
+
+
+def test_reconcile_ignores_entries_it_was_never_told_about(tmp_path: Path) -> None:
+    """The core #955 fix: an entry appended after the caller's own read
+    (simulated here by appending directly, bypassing the caller entirely)
+    is not named in remove_ids/updates and must survive reconcile()."""
+    store = DlqStore(tmp_path)
+    store.append("s", [_dl(1)])
+    [e1] = store.read("s")
+
+    store.append("s", [_dl(99)])  # "concurrent" append the caller never saw
+
+    result = store.reconcile("s", remove_ids={e1.id})
+
+    assert [e.record["id"] for e in result] == [99]
+
+
+def test_reconcile_empty_result_removes_the_file(tmp_path: Path) -> None:
+    store = DlqStore(tmp_path)
+    store.append("s", [_dl(1)])
+    [e1] = store.read("s")
+
+    store.reconcile("s", remove_ids={e1.id})
+
+    assert store.depth("s") == 0
+    assert not (tmp_path / ".drt" / "dlq" / "s.jsonl").exists()

@@ -89,7 +89,8 @@ def replay_dead_letters(
         }
 
     dest = get_destination(sync)
-    remaining: list[DeadLetter] = []
+    remove_ids: set[str] = set()
+    updates: dict[str, DeadLetter] = {}
     succeeded = 0
     failed_again = 0
 
@@ -99,6 +100,7 @@ def replay_dead_letters(
 
         if result.failed == 0:
             succeeded += len(chunk)
+            remove_ids.update(e.id for e in chunk)
             continue
 
         # Correlate which records failed again. RowError.batch_index pinpoints
@@ -116,31 +118,42 @@ def replay_dead_letters(
         for i, entry in enumerate(chunk):
             if pinpointed and i not in failed_idx:
                 succeeded += 1
+                remove_ids.add(entry.id)
                 continue
             err = err_by_idx.get(i)
-            remaining.append(
-                DeadLetter(
-                    record=entry.record,
-                    error_message=(
-                        err.error_message
-                        if err is not None
-                        else (result.errors[0] if result.errors else "retry failed")
-                    ),
-                    http_status=err.http_status if err is not None else None,
-                    timestamp=entry.timestamp,  # preserve first-seen time
-                    attempts=entry.attempts + 1,
-                )
+            updates[entry.id] = DeadLetter(
+                id=entry.id,  # same identity — a retried entry is not a new one (#955)
+                record=entry.record,
+                error_message=(
+                    err.error_message
+                    if err is not None
+                    else (result.errors[0] if result.errors else "retry failed")
+                ),
+                http_status=err.http_status if err is not None else None,
+                timestamp=entry.timestamp,  # preserve first-seen time
+                attempts=entry.attempts + 1,
+                # Preserve the *original* failure's run correlation, not this
+                # retry's (there isn't one — retry has no sync_run_id of its
+                # own) — matches metadata_columns' (#762) same call that a
+                # retried row traces back to when it first failed.
+                sync_run_id=entry.sync_run_id,
             )
             failed_again += 1
 
-    store.replace(sync.name, untouched + remaining)
+    # reconcile() (#955) re-reads the queue itself rather than trusting the
+    # `entries` snapshot read at the top of this function — a concurrent
+    # `drt run` append that landed since then survives; only the entries this
+    # retry actually touched (succeeded → removed, failed again → updated)
+    # are named. `untouched` (beyond --limit) was never touched either way,
+    # so it needs no special handling here anymore.
+    final = store.reconcile(sync.name, remove_ids=remove_ids, updates=updates)
     return {
         "sync": sync.name,
         "queued": len(entries),
         "retried": len(to_retry),
         "succeeded": succeeded,
         "still_failing": failed_again,
-        "remaining_depth": store.depth(sync.name),
+        "remaining_depth": len(final),
         "status": "ok",
     }
 
