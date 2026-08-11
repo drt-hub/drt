@@ -241,7 +241,7 @@ sync:                       # optional: all fields have defaults
     full_name: "{{ row.first_name }} {{ row.last_name }}"   # reads SOURCE column names, like cursor_field / lookups
     signup_ms: "{{ (row.signup_ts.timestamp() * 1000) | int }}"
     source_system: "drt-${ENV}"          # constants and ${VAR} substitution both work
-    # transform order: computed_fields -> field_mappings -> mask. A SINGLE-EXPRESSION template keeps the
+    # transform order: computed_fields -> field_mappings -> mask -> metadata_columns. A SINGLE-EXPRESSION template keeps the
     # Python value's type ({{ row.n * 1000 }} -> 5000, not "5000"); anything with surrounding text renders
     # as a string. A computed field can never read another (order-independent, like field_mappings).
     # Writing an existing column name replaces it in place and reads the ORIGINAL value (phone -> E.164).
@@ -255,7 +255,16 @@ sync:                       # optional: all fields have defaults
   mask:                     # optional (#427/#660): PII masking — obscure fields before they reach the destination
     email: hash             # "hash" (SHA-256 hex) | "redact" ("[REDACTED]"); keys reference the DESTINATION-facing name (post field_mappings)
     name: { strategy: truncate, length: 2 }  # object form for parameterised strategies (truncate keeps the first N chars)
-    # runs as the LAST transform (after computed_fields and field_mappings); nulls pass through; works on every destination; source SQL untouched
+    # runs as the last SOURCE-DATA transform (after computed_fields and field_mappings); nulls pass through; works on every destination; source SQL untouched
+  metadata_columns:         # optional (#762): opt-in engine-injected bookkeeping columns {synced_at, run_id, sync_name}
+    synced_at: _drt_synced_at  # UTC run-start timestamp, ISO 8601 — one value per run_sync() call, shared by every row it writes
+    run_id: _drt_run_id        # CLI-invocation-level id; null for library callers of run_sync() that pass none
+    sync_name: _drt_sync_name  # the sync's own name — off by default even when the other two are set
+    # runs LAST of every transform (after mask) — column names here are already destination-facing (chosen
+    # directly, not derived), and values are engine bookkeeping, not source data, so nothing to rename/mask.
+    # Target column must already exist on the destination (dict enrichment, not DDL). Flows to every
+    # destination that takes a list[dict], including file/blob. A DLQ'd record's columns reflect the
+    # ORIGINAL failed attempt — drt retry resends the stored record verbatim, values are not refreshed.
   dlq:                      # optional (#278): Dead Letter Queue — persist per-record load failures for replay
     enabled: false          # default: false (opt-in) — writes FULL records to .drt/dlq/<sync>.jsonl (a PII decision)
     max_records: 10000      # default: 10000 — cap queue size; oldest entries dropped past this (0 = unbounded)

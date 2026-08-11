@@ -190,6 +190,44 @@ class MirrorConfig(BaseModel):
     scope: list[str] | None = Field(default=None, min_length=1)
 
 
+class MetadataColumnsConfig(BaseModel):
+    """``sync.metadata_columns`` — opt-in engine-injected bookkeeping columns (#762).
+
+    Each field is ``None`` (not added) or the destination column name to add
+    it as. Unlike ``computed_fields``, values here are never user templates —
+    they're engine-owned facts about the run itself (dlt's ``_dlt_load_id``
+    is the ecosystem-familiar precedent):
+
+    - ``synced_at`` — the run's UTC start timestamp (one value per
+      ``run_sync()`` call, not per-record or per-batch, so every row a run
+      writes shares it — matching a load-id's "one per load" semantics).
+    - ``run_id`` — the CLI-invocation-level id, ``None`` for library callers
+      that don't pass one to ``run_sync()`` (same nullability as
+      ``SyncResult.run_id``).
+    - ``sync_name`` — the sync's own name, off by default; useful once
+      multiple syncs write into a shared table and rows need to name their
+      owner.
+
+    Requires the target column to already exist on the destination — this
+    is dict enrichment, not DDL. A destination without that column fails the
+    write normally (governed by ``on_error``, like any other column mismatch).
+    """
+
+    synced_at: str | None = None
+    run_id: str | None = None
+    sync_name: str | None = None
+
+    @model_validator(mode="after")
+    def _check_no_duplicate_targets(self) -> MetadataColumnsConfig:
+        targets = [v for v in (self.synced_at, self.run_id, self.sync_name) if v]
+        if len(targets) != len(set(targets)):
+            raise ValueError(
+                "metadata_columns entries must map to distinct column names "
+                f"(got {targets})."
+            )
+        return self
+
+
 class SyncOptions(BaseModel):
     mode: Literal["full", "incremental", "upsert", "replace", "mirror"] = "full"
     replace_strategy: Literal["truncate", "swap"] = "truncate"
@@ -235,6 +273,13 @@ class SyncOptions(BaseModel):
     # "truncate" = the first `length` characters. Null passes through; non-strings
     # are stringified first.
     mask: dict[str, MaskSpec] | None = None
+    # Opt-in engine metadata columns (#762): see MetadataColumnsConfig.
+    # Applied in the engine *last* of the payload transforms — after
+    # computed_fields, field_mappings, and mask — since the column names
+    # here are already destination-facing (chosen directly in this config)
+    # and the values are engine bookkeeping, not source data that field
+    # renames or masking rules should ever touch.
+    metadata_columns: MetadataColumnsConfig | None = None
     # Dead Letter Queue (#278): opt-in persistence of failed records for
     # `drt retry`. None means disabled (same as DLQConfig(enabled=False)).
     dlq: DLQConfig | None = None
@@ -380,9 +425,10 @@ class UnitTest(BaseModel):
     Unlike ``SyncTest`` (which queries the *destination* after a real sync),
     a ``UnitTest`` never touches a destination or the network: ``given`` rows
     are run through the same ``computed_fields`` -> ``field_mappings`` ->
-    ``mask`` chain ``run_sync()`` applies in production (via
-    ``drt.engine.unit_test_runner``), and the result is compared against
-    ``expect``. dbt unit-tests analog; Census/Hightouch mapper previews.
+    ``mask`` -> ``metadata_columns`` chain ``run_sync()`` applies in
+    production (via ``drt.engine.unit_test_runner``), and the result is
+    compared against ``expect``. dbt unit-tests analog; Census/Hightouch
+    mapper previews.
     """
 
     name: str

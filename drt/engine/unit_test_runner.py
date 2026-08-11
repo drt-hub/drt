@@ -1,8 +1,9 @@
 """Offline transform-pipeline test runner (#780).
 
 Runs a sync's ``unit_tests:`` fixtures through the *real* engine pipeline —
-``computed_fields`` -> ``field_mappings`` -> ``mask`` (and anything else
-``run_sync()`` applies) — without a network call or a credential in sight.
+``computed_fields`` -> ``field_mappings`` -> ``mask`` -> ``metadata_columns``
+(and anything else ``run_sync()`` applies) — without a network call or a
+credential in sight.
 
 The trick is that it needs none: :func:`drt.engine.sync.run_sync` already
 accepts any ``Source``/``Destination`` Protocol implementation, and

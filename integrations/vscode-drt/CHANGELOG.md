@@ -19,6 +19,9 @@ drt-core version its bundled schemas were generated from.
   `s3`, with new `region`, `aws_profile`, `aws_access_key_id_env`,
   `aws_secret_access_key_env`, `aws_session_token_env`, and `endpoint_url`
   fields (drt-hub/drt#756).
+- Bundled JSON Schemas regenerated from drt-core: `syncs/*.yml` now validates a
+  `sync.metadata_columns` block (`{synced_at, run_id, sync_name}`) for opt-in
+  engine-injected bookkeeping columns (drt-hub/drt#762).
 
 ## [0.1.12] - Unreleased
 

@@ -36,6 +36,7 @@ from drt.destinations.lookup import (
 from drt.engine.computed_fields import apply_computed_fields
 from drt.engine.field_mappings import apply_field_mappings
 from drt.engine.masking import apply_mask
+from drt.engine.metadata_columns import apply_metadata_columns
 from drt.engine.observer import NullObserver, SyncObserver
 from drt.engine.resolver import resolve_model_ref
 from drt.observability import build_status, get_tracer
@@ -652,6 +653,19 @@ def _run_sync_body(
             # reference the destination-facing (post-rename) field names.
             # Pure transform; no observer side effects.
             record_batch = apply_mask(record_batch, sync.sync.mask)
+
+            # Opt-in engine metadata columns (#762). Applied last — after
+            # field_mappings and mask — since column names are already
+            # destination-facing (chosen directly in metadata_columns
+            # config) and values are engine bookkeeping, not source data
+            # that a rename or masking rule should ever touch.
+            record_batch = apply_metadata_columns(
+                record_batch,
+                sync.sync.metadata_columns,
+                synced_at=started_at,
+                run_id=total_result.run_id,
+                sync_name=sync.name,
+            )
 
             if dry_run:
                 total_result.success += len(record_batch)

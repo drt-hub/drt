@@ -2201,6 +2201,49 @@
       "title": "MaskRule",
       "type": "object"
     },
+    "MetadataColumnsConfig": {
+      "description": "``sync.metadata_columns`` \u2014 opt-in engine-injected bookkeeping columns (#762).\n\nEach field is ``None`` (not added) or the destination column name to add\nit as. Unlike ``computed_fields``, values here are never user templates \u2014\nthey're engine-owned facts about the run itself (dlt's ``_dlt_load_id``\nis the ecosystem-familiar precedent):\n\n- ``synced_at`` \u2014 the run's UTC start timestamp (one value per\n  ``run_sync()`` call, not per-record or per-batch, so every row a run\n  writes shares it \u2014 matching a load-id's \"one per load\" semantics).\n- ``run_id`` \u2014 the CLI-invocation-level id, ``None`` for library callers\n  that don't pass one to ``run_sync()`` (same nullability as\n  ``SyncResult.run_id``).\n- ``sync_name`` \u2014 the sync's own name, off by default; useful once\n  multiple syncs write into a shared table and rows need to name their\n  owner.\n\nRequires the target column to already exist on the destination \u2014 this\nis dict enrichment, not DDL. A destination without that column fails the\nwrite normally (governed by ``on_error``, like any other column mismatch).",
+      "properties": {
+        "synced_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Synced At"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Run Id"
+        },
+        "sync_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sync Name"
+        }
+      },
+      "title": "MetadataColumnsConfig",
+      "type": "object"
+    },
     "MirrorConfig": {
       "description": "``sync.mirror`` \u2014 mirror-mode delete behaviour (#686).\n\n- ``strategy: destination`` (default) \u2014 the original #340 behaviour:\n  DELETE destination rows whose ``upsert_key`` was not observed this\n  run. Correct only when drt exclusively owns the table.\n- ``strategy: tracked`` \u2014 DELETE only rows drt itself previously\n  synced, tracked per sync in a drt-managed ``_drt_synced_keys`` side\n  table in the destination. Safe on tables the application also\n  writes to (Census-style semantics: first run baselines without\n  deleting; lost state re-baselines with a warning).\n- ``scope`` (#687) \u2014 restrict deletes to rows whose scope-column values\n  appeared in this run's source. The fit for 1:N regeneration (parent +\n  child link rows): stale children under observed parents are deleted,\n  rows under unobserved parents are untouched. With ``strategy:\n  destination`` this narrows the whole-table diff; with ``strategy:\n  tracked`` (#694) it additionally prunes the state read/rewrite to\n  the observed scope, so a run touching one parent's children never\n  re-baselines (or loses) tracked state for every other parent.\n\n``scope`` + ``strategy: tracked`` requires ``scope`` to be a subset of\n``destination.upsert_key`` (checked in\n``BaseSqlDestination._validate_mirror_scope``, which also needs\n``upsert_key`` \u2014 not visible from this model alone). Scope values are\nthen derived positionally from the already-tracked key tuple rather\nthan persisted separately, so no state-table schema change (and no\nmigration story for tables created before #694) is needed.",
       "properties": {
@@ -4285,6 +4328,17 @@
           "default": null,
           "title": "Mask"
         },
+        "metadata_columns": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MetadataColumnsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "dlq": {
           "anyOf": [
             {
@@ -4593,7 +4647,7 @@
       "type": "object"
     },
     "UnitTest": {
-      "description": "Offline transform-pipeline test \u2014 fixture rows in, expected rows out (#780).\n\nUnlike ``SyncTest`` (which queries the *destination* after a real sync),\na ``UnitTest`` never touches a destination or the network: ``given`` rows\nare run through the same ``computed_fields`` -> ``field_mappings`` ->\n``mask`` chain ``run_sync()`` applies in production (via\n``drt.engine.unit_test_runner``), and the result is compared against\n``expect``. dbt unit-tests analog; Census/Hightouch mapper previews.",
+      "description": "Offline transform-pipeline test \u2014 fixture rows in, expected rows out (#780).\n\nUnlike ``SyncTest`` (which queries the *destination* after a real sync),\na ``UnitTest`` never touches a destination or the network: ``given`` rows\nare run through the same ``computed_fields`` -> ``field_mappings`` ->\n``mask`` -> ``metadata_columns`` chain ``run_sync()`` applies in\nproduction (via ``drt.engine.unit_test_runner``), and the result is\ncompared against ``expect``. dbt unit-tests analog; Census/Hightouch\nmapper previews.",
       "properties": {
         "name": {
           "title": "Name",

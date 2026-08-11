@@ -69,8 +69,8 @@ out of the rendered text.
 ## Order: computed → renamed → masked
 
 ```
-extract → cursor tracking → lookups → computed_fields → field_mappings → mask → load()
-            (source names)  (source)   (source names)     (rename)      (dest names)
+extract → cursor tracking → lookups → computed_fields → field_mappings → mask → metadata_columns → load()
+            (source names)  (source)   (source names)     (rename)      (dest names)   (engine-injected)
 ```
 
 `computed_fields` runs **first** of the three payload transforms, so:
@@ -173,6 +173,8 @@ only once every template for that row succeeded.
 
 - [Field Mappings](field-mappings.md) — rename columns (runs *after*
   `computed_fields`)
-- [PII Masking](pii-masking.md) — obscure fields (runs *last*)
+- [PII Masking](pii-masking.md) — obscure fields (runs *after* renaming)
+- [Metadata Columns](metadata-columns.md) — engine-injected bookkeeping
+  columns (runs *last*, after masking)
 - [`docs/llm/API_REFERENCE.md`](../llm/API_REFERENCE.md) — full sync
   options reference

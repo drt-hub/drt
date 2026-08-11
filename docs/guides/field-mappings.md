@@ -63,8 +63,8 @@ while destination-side concerns (`upsert_key`, `mask`, target columns)
 reference the names after the rename.
 
 ```
-extract → cursor tracking → lookups → computed_fields → field_mappings → mask → load()
-            (source names)  (source)   (source names)     (rename here)  (mapped names)
+extract → cursor tracking → lookups → computed_fields → field_mappings → mask → metadata_columns → load()
+            (source names)  (source)   (source names)     (rename here)  (mapped names)  (engine-injected)
 ```
 
 ## Ordering example: remapping the cursor column
@@ -135,5 +135,7 @@ single-pass and order-independent.
   *before* `field_mappings`)
 - [PII Masking](pii-masking.md) — obscure fields (runs *after*
   `field_mappings`)
+- [Metadata Columns](metadata-columns.md) — engine-injected bookkeeping
+  columns (runs *last*, after masking)
 - [Destination Lookup](destination-lookup.md) — resolve FK values during
   sync (runs *before* `field_mappings`)
