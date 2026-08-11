@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol, runtime_checkable
 
-from drt.state.dlq import DeadLetter
+from drt.state.dlq import DeadLetter, decode_dead_letter_line
 from drt.state.errors import StateContentionError
 from drt.state.history import HistoryEntry
 from drt.state.manager import SyncState
@@ -318,7 +318,7 @@ class ObjectStoreDlqBackend(_ObjectStoreBase):
             if not raw.strip():
                 continue
             try:
-                entries.append(DeadLetter(**json.loads(raw)))
+                entries.append(decode_dead_letter_line(raw))
             except (json.JSONDecodeError, TypeError):
                 continue
         return entries

@@ -402,6 +402,26 @@ def test_dlq_append_non_precondition_error_warns_and_returns_existing_depth(
     )
 
 
+def test_dlq_legacy_entry_matches_by_id_across_read_then_reconcile() -> None:
+    """Codex review on #962: a legacy line's missing ``id`` must resolve to
+    the same content-hash-derived value on the caller's own ``read()`` and
+    on ``reconcile()``'s independent internal read — otherwise the id a
+    caller decided to remove/update never matches anything and the entry
+    is stuck forever."""
+    client = MemoryObjectClient()
+    client.objects["dlq/s.jsonl"] = (
+        b'{"record": {"id": 1}, "error_message": "boom", "http_status": 500, '
+        b'"timestamp": "2026-01-01T00:00:00Z", "attempts": 1}\n'
+    )
+    store = ObjectStoreDlqBackend(client)
+
+    [entry] = store.read("s")
+    result = store.reconcile("s", remove_ids={entry.id})
+
+    assert result == []
+    assert store.depth("s") == 0
+
+
 def test_dlq_reconcile_removes_and_updates_by_id_leaves_others_untouched() -> None:
     store = ObjectStoreDlqBackend(MemoryObjectClient())
     store.append("s", [_dead(1), _dead(2), _dead(3)])

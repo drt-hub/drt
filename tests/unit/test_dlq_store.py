@@ -196,6 +196,64 @@ def test_dead_letter_id_defaults_are_unique() -> None:
     assert _dl(1).id != _dl(1).id
 
 
+def test_legacy_line_gets_the_same_id_on_repeated_reads(tmp_path: Path) -> None:
+    """Codex review on #962: ``replay_dead_letters()`` reads the queue twice
+    per invocation (once to decide what to retry, again inside
+    ``reconcile()`` to compute the write). Before this, a legacy line's
+    missing ``id`` fell back to the dataclass's random default — a fresh,
+    DIFFERENT id on each of those two reads — so every legacy entry's
+    remove/update silently never matched anything, and it stayed queued
+    forever (a real bug the earlier ``_dl(1).id != _dl(1).id`` uniqueness
+    test above did not catch, since that exercises brand-new construction,
+    not decoding the same JSONL bytes twice). The content-hash fallback in
+    ``decode_dead_letter_line`` must agree across independent reads of the
+    same unchanged line."""
+    import json
+
+    store = DlqStore(tmp_path)
+    path = tmp_path / ".drt" / "dlq" / "s.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    old_format = {
+        "record": {"id": 1},
+        "error_message": "boom",
+        "http_status": 500,
+        "timestamp": "2026-01-01T00:00:00Z",
+        "attempts": 1,
+    }
+    path.write_text(json.dumps(old_format) + "\n")
+
+    [first_read] = store.read("s")
+    [second_read] = store.read("s")
+
+    assert first_read.id == second_read.id
+
+
+def test_reconcile_matches_a_legacy_entry_by_its_content_hash_id(tmp_path: Path) -> None:
+    """End-to-end version of the test above: a caller that reads a legacy
+    queue, decides to remove an entry by the id from that read, and then
+    calls reconcile() must have that id actually match on reconcile's own
+    fresh internal read."""
+    import json
+
+    store = DlqStore(tmp_path)
+    path = tmp_path / ".drt" / "dlq" / "s.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    old_format = {
+        "record": {"id": 1},
+        "error_message": "boom",
+        "http_status": 500,
+        "timestamp": "2026-01-01T00:00:00Z",
+        "attempts": 1,
+    }
+    path.write_text(json.dumps(old_format) + "\n")
+
+    [entry] = store.read("s")  # caller's own read, decides to drop this id
+    result = store.reconcile("s", remove_ids={entry.id})
+
+    assert result == []
+    assert store.depth("s") == 0
+
+
 def test_a_pre_955_jsonl_line_still_loads(tmp_path: Path) -> None:
     """A line written before ``id`` existed has no ``id`` key at all — the
     dataclass default assigns a fresh one per read rather than failing to

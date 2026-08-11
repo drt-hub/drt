@@ -19,6 +19,7 @@ is a privacy decision the operator makes explicitly, not a default.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import uuid
@@ -52,12 +53,43 @@ class DeadLetter:
     # id; only `attempts`/`timestamp`/`error_message` change), so `reconcile()`
     # below can remove/update entries by identity against a *fresh* read
     # instead of overwriting the whole queue from a snapshot that may already
-    # be stale. Entries written before this field existed have no `id` key in
-    # their JSONL line, so the reader falls back to a fresh random one per
-    # read — self-healing the moment that queue is next written (append,
-    # reconcile, or replace all persist whatever id is on the object at that
-    # point), same pattern as `sync_run_id`'s missing-key tolerance above.
+    # be stale.
+    #
+    # This default only fires for a freshly-constructed entry that has never
+    # touched JSON (e.g. `engine/sync.py`'s per-failure `DeadLetter(...)`) —
+    # its id is assigned once, in Python, before the object is ever
+    # serialized. It must NOT fire when *decoding* a legacy JSONL line that
+    # predates this field: `replay_dead_letters()` reads the queue twice per
+    # invocation (once to decide what to retry, again inside `reconcile()`
+    # to compute the write), and two independent `DeadLetter(**json.loads(
+    # line))` calls on the *same unchanged line* would each trigger this
+    # factory fresh — producing two different random ids for one entry, so
+    # every legacy entry's remove/update would silently never match
+    # (caught in review, #955). `decode_dead_letter_line()` below is the
+    # actual JSONL entry point and handles that case with a content hash
+    # instead — deterministic for the same bytes, so two reads of the same
+    # untouched line agree. Bypassing that function and constructing
+    # directly from a legacy dict (as tests occasionally do to simulate a
+    # pre-#955 file) is the only path that still exercises this default on
+    # already-persisted data — a reminder to route JSONL reads through the
+    # decoder, not this constructor default.
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+
+def decode_dead_letter_line(raw_line: str) -> DeadLetter:
+    """Parse one DLQ JSONL line into a ``DeadLetter``.
+
+    Entries written before ``id`` existed get a deterministic id — the
+    SHA-256 of the literal line content — rather than the dataclass
+    default's random one, so repeated reads of the same unchanged line
+    (``replay_dead_letters()`` reads the queue twice per invocation) agree
+    on identity instead of producing entries ``reconcile()`` can never
+    match (#955).
+    """
+    data = json.loads(raw_line)
+    if "id" not in data:
+        data["id"] = hashlib.sha256(raw_line.strip().encode()).hexdigest()
+    return DeadLetter(**data)
 
 
 @runtime_checkable
@@ -193,7 +225,7 @@ class LocalDlqStore:
         out: list[DeadLetter] = []
         for line in self._read_raw(self._path(sync_name)):
             try:
-                out.append(DeadLetter(**json.loads(line)))
+                out.append(decode_dead_letter_line(line))
             except (json.JSONDecodeError, TypeError):
                 # A single malformed line should not abort an entire retry.
                 continue
@@ -214,7 +246,27 @@ class LocalDlqStore:
 
         See the ``DlqBackend`` Protocol docstring for the "why" — the short
         version is this is what ``drt retry`` uses instead of ``replace()``
-        so a concurrent ``drt run`` append isn't silently overwritten.
+        so a concurrent append isn't silently overwritten.
+
+        ``self._lock`` is process-local (same caveat as the class docstring
+        above), and this class has no OS-level file lock or conditional
+        write — unlike ``ObjectStoreDlqBackend.reconcile()``, which is
+        genuinely safe against a concurrent writer because generation/ETag
+        preconditioning catches a stale write and forces a retry against
+        fresh state. Here, a separate ``drt run`` **process** appending
+        between this method's read and its write still loses that append
+        exactly as ``replace()`` did (caught in review, #962) — this class
+        was never cross-process-safe (see the docstring above) and this
+        method does not change that. What it *does* fix, on local too: the
+        legacy bug of computing a result from a stale in-memory snapshot
+        (``untouched + remaining``) rather than from a fresh read, and
+        reconciling by identity rather than position — both matter the
+        moment real file locking lands, since a wholesale-overwrite
+        operation could never be made cross-process-safe no matter how it's
+        locked. Real cross-process safety needs OS-level file locking,
+        which no local state store has today; tracked as a follow-up
+        (#963) covering ``LocalStateManager``/``LocalHistoryManager`` too,
+        not just this class.
         """
         updates = updates or {}
         remove_ids = set(remove_ids)
