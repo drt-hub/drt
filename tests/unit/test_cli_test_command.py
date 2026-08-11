@@ -407,3 +407,41 @@ def test_drt_test_fail_fast_skips_remaining(
     assert by_sync["a_first"]["tests"], "first sync's tests ran"
     assert by_sync["b_second"].get("skipped") is True
     assert by_sync["b_second"].get("reason") == "fail_fast"
+
+
+def test_drt_test_fail_fast_prints_skip_notice_in_text_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same as above, but default (text) output — pins the console message
+    ``run_test_suite`` (#870) prints for the skipped syncs, which the JSON
+    variant above never exercises (``json_mode=True`` suppresses it)."""
+    monkeypatch.chdir(tmp_path)
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    for name in ("a_first", "b_second"):
+        (syncs_dir / f"{name}.yml").write_text(
+            yaml.dump(
+                {
+                    "name": name,
+                    "model": "SELECT 1",
+                    "destination": {
+                        "type": "postgres",
+                        "connection_string_env": "DB_CONN",
+                        "table": "test_table",
+                        "upsert_key": ["id"],
+                    },
+                    "tests": [{"not_null": {"columns": ["id"]}}],
+                }
+            )
+        )
+
+    from drt.destinations import query as query_module
+
+    monkeypatch.setattr(query_module, "is_queryable", lambda d: True)
+    monkeypatch.setattr(query_module, "get_table_name", lambda d: "test_table")
+    monkeypatch.setattr(query_module, "execute_test_query", lambda d, q: 5)
+
+    result = runner.invoke(app, ["test", "--fail-fast"])
+
+    assert result.exit_code == 1
+    assert "--fail-fast: skipped 1 sync(s) after the first failure." in result.output

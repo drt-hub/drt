@@ -621,6 +621,19 @@ async def test_run_test_store_failures_rejects_nonpositive_limit(project_dir: Pa
 
 
 @pytest.mark.asyncio
+async def test_run_test_unit_rejects_dry_run_and_store_failures(server: FastMCP) -> None:
+    """``unit`` is mutually exclusive with ``dry_run``/``store_failures`` —
+    both are destination-connected concepts unit tests don't have (mirrors
+    the CLI's own guard in ``drt/cli/commands/test.py``)."""
+    result = await call(server, "drt_run_test", unit=True, dry_run=True)
+    assert "error" in result
+    assert "unit" in result["error"]
+
+    result = await call(server, "drt_run_test", unit=True, store_failures=True)
+    assert "error" in result
+
+
+@pytest.mark.asyncio
 async def test_run_test_unit_no_unit_tests_defined(server: FastMCP) -> None:
     """The default fixture sync has no unit_tests: block. sync.tests: alone
     (a different sync than this fixture, checked below) must not count."""
