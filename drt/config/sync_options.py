@@ -218,8 +218,24 @@ class MetadataColumnsConfig(BaseModel):
     sync_name: str | None = None
 
     @model_validator(mode="after")
-    def _check_no_duplicate_targets(self) -> MetadataColumnsConfig:
-        targets = [v for v in (self.synced_at, self.run_id, self.sync_name) if v]
+    def _check_no_blank_or_duplicate_targets(self) -> MetadataColumnsConfig:
+        configured = [
+            (name, v)
+            for name, v in (
+                ("synced_at", self.synced_at),
+                ("run_id", self.run_id),
+                ("sync_name", self.sync_name),
+            )
+            if v is not None
+        ]
+        for name, v in configured:
+            if not v.strip():
+                raise ValueError(
+                    f"metadata_columns.{name} must be a non-empty column name "
+                    "(e.g. after ${VAR} substitution resolves empty), not "
+                    f"{v!r}."
+                )
+        targets = [v for _, v in configured]
         if len(targets) != len(set(targets)):
             raise ValueError(
                 "metadata_columns entries must map to distinct column names "

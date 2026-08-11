@@ -127,6 +127,15 @@ class TestMetadataColumnsConfigValidation:
         with pytest.raises(ValidationError, match="distinct column names"):
             MetadataColumnsConfig(synced_at="_drt_meta", run_id="_drt_meta")
 
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_rejects_blank_column_name(self, blank: str) -> None:
+        """An empty/whitespace name (e.g. from a ${VAR} that resolved empty)
+        must fail config validation, not silently disable the column — the
+        engine's own truthy check in apply_metadata_columns would otherwise
+        treat it as "not configured" and skip it without a warning."""
+        with pytest.raises(ValidationError, match="non-empty column name"):
+            MetadataColumnsConfig(synced_at=blank)
+
     def test_distinct_names_are_fine(self) -> None:
         cfg = MetadataColumnsConfig(synced_at="_drt_synced_at", run_id="_drt_run_id")
         assert cfg.synced_at == "_drt_synced_at"
