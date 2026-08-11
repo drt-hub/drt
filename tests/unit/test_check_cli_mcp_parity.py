@@ -154,20 +154,33 @@ def test_presentation_and_selection_options_are_never_reported() -> None:
         assert f"run:{excluded}" not in gaps
 
 
-def test_known_870_gaps_are_detected() -> None:
-    """The flags #870 documents must actually be found, or the check is useless."""
+def test_870_flags_reach_their_mcp_tool() -> None:
+    """#870 closed these — a regression here means a flag silently fell out
+    of parity again, not that the check is broken."""
     gaps = dict(mod.find_gaps(mod.collect_cli_options(), mod.collect_mcp_parameters()))
     for item in (
         "run:--limit",
-        "run:--fail-fast",
-        "run:--failed",
         "run:--vars",
-        "run:--threads",
+        "test:--dry-run",
+        "test:--fail-fast",
+        "test:--store-failures",
+        "test:--store-failures-limit",
         "validate:--check-connection",
         "validate:--strict",
-        "test:--store-failures",
     ):
-        assert item in gaps, f"{item} should be reported until #870 lands"
+        assert item not in gaps, f"{item} regressed — no longer reaches its MCP tool"
+
+
+def test_870_run_exclusions_are_structural_not_gaps() -> None:
+    """``--fail-fast``/``--failed``/``--threads`` on ``run`` are scheduling/
+    selection concepts that don't apply to a single-sync tool (#870) — they
+    must be recorded as deliberate exclusions, not silently absent from both
+    the gap list and COMMAND_EXCLUSIONS."""
+    gaps = dict(mod.find_gaps(mod.collect_cli_options(), mod.collect_mcp_parameters()))
+    for item in ("run:--fail-fast", "run:--failed", "run:--threads"):
+        assert item not in gaps
+    for option in ("--fail-fast", "--failed", "--threads"):
+        assert option in mod.COMMAND_EXCLUSIONS["run"]
 
 
 def test_gaps_are_all_baselined_so_the_audit_is_green() -> None:

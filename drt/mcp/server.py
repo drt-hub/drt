@@ -99,6 +99,8 @@ def create_server(project_dir: Path | None = None) -> Any:
         cursor_value: str | None = None,
         profile_name: str | None = None,
         full_refresh: bool = False,
+        limit: int | None = None,
+        vars: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run a specific drt sync.
 
@@ -122,6 +124,15 @@ def create_server(project_dir: Path | None = None) -> Any:
                 with ``cursor_value``. Does **not** reset tracked-mirror
                 state — use ``drt_state_reset(tracked_mirror=True)`` for that,
                 and read its warning before doing so.
+            limit: Extract at most N rows — a sampled run for safe first
+                sends (mirrors ``drt run --limit``, #774). Watermarks do not
+                advance; rejected for ``mode: mirror``/``replace`` syncs,
+                where a sample would delete or replace real rows.
+            vars: Override project vars for this run, e.g.
+                ``{"lookback_days": 1, "tag": "crm"}`` (mirrors
+                ``drt run --vars``, already parsed — no string form needed
+                here). Takes precedence over ``DRT_VAR_*`` and
+                ``drt_project.yml``'s ``vars:``.
 
         Returns:
             Result summary with success count, failed count, errors, and
@@ -137,6 +148,8 @@ def create_server(project_dir: Path | None = None) -> Any:
             cursor_value=cursor_value,
             profile_name=profile_name,
             full_refresh=full_refresh,
+            limit=limit,
+            vars=vars,
         )
 
     # -----------------------------------------------------------------------
@@ -144,7 +157,14 @@ def create_server(project_dir: Path | None = None) -> Any:
     # -----------------------------------------------------------------------
 
     @mcp.tool()
-    def drt_run_test(sync_name: str | None = None, unit: bool = False) -> dict[str, Any]:
+    def drt_run_test(
+        sync_name: str | None = None,
+        unit: bool = False,
+        dry_run: bool = False,
+        fail_fast: bool = False,
+        store_failures: bool = False,
+        store_failures_limit: int = 10,
+    ) -> dict[str, Any]:
         """Run post-sync validation tests for one or all syncs.
 
         Mirrors the `drt test` CLI: for each sync with `tests:` defined,
@@ -159,6 +179,25 @@ def create_server(project_dir: Path | None = None) -> Any:
                 credentials, zero network. No destination is touched, so a
                 sync with `destination.lookups` configured reports a failed
                 test rather than running (no fake lookup table yet).
+                Mutually exclusive with `dry_run`/`store_failures`.
+            dry_run: Preview which tests would run without connecting to the
+                destination or executing queries (mirrors `drt test
+                --dry-run`). Each `tests` entry becomes
+                {name, dry_run: true, severity} and the response carries
+                `dry_run: true`.
+            fail_fast: Stop after the first sync with a failing test;
+                remaining syncs are appended with {skipped: true,
+                reason: "fail_fast"} rather than run (mirrors `drt test
+                --fail-fast`).
+            store_failures: Write up to `store_failures_limit` failing rows
+                per failed test to `.drt/test_failures/<sync>/<test>.jsonl`
+                (sync.mask applied before write; mirrors `drt test
+                --store-failures`). A stored entry's `failures_stored` field
+                carries the written `path` and `count` — reading the file
+                itself requires separate filesystem access to the project
+                directory, which this tool does not provide.
+            store_failures_limit: Max rows written per failed test when
+                `store_failures` is set (default 10).
 
         Returns:
             Dict with `status` ("passed" | "failed" | "no_tests" | "no_syncs"),
@@ -177,7 +216,15 @@ def create_server(project_dir: Path | None = None) -> Any:
             human-readable strings, empty when `passed` is true. There is no
             `severity` tier and no `skipped` state for unit tests.
         """
-        return _run_test(ctx, sync_name, unit=unit)
+        return _run_test(
+            ctx,
+            sync_name,
+            unit=unit,
+            dry_run=dry_run,
+            fail_fast=fail_fast,
+            store_failures=store_failures,
+            store_failures_limit=store_failures_limit,
+        )
 
     # -----------------------------------------------------------------------
     # drt_get_status
@@ -274,14 +321,29 @@ def create_server(project_dir: Path | None = None) -> Any:
     # -----------------------------------------------------------------------
 
     @mcp.tool()
-    def drt_validate() -> dict[str, Any]:
+    def drt_validate(
+        check_connection: bool = False,
+        strict: bool = False,
+    ) -> dict[str, Any]:
         """Validate all sync YAML configs in the current project.
 
+        Args:
+            check_connection: Also test connectivity to SQL destinations
+                (Postgres, MySQL, ClickHouse, Snowflake). Adds a
+                'connection_tests' dict keyed by sync name.
+            strict: Treat hardcoded-secret warnings as validation errors —
+                a sync with a warning moves from 'valid' into 'errors' and
+                its messages appear there instead of in 'warnings'.
+
         Returns:
-            Dict with 'valid' list of sync names and 'errors' dict of
-            sync_name → list of error messages for any invalid configs.
+            Dict with 'valid' list of sync names, 'errors' dict of
+            sync_name → list of error messages for invalid configs, and
+            'warnings' dict of sync_name → list of hardcoded-secret warning
+            messages (present only when there are any). With
+            check_connection, also 'connection_tests' keyed by sync name,
+            each a dict with success/error/skipped.
         """
-        return _validate(ctx)
+        return _validate(ctx, check_connection=check_connection, strict=strict)
 
     # -----------------------------------------------------------------------
     # drt_get_schema

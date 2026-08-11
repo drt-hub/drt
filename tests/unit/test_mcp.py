@@ -123,6 +123,65 @@ async def test_validate_returns_valid_syncs(server: FastMCP) -> None:
     assert result["errors"] == {}
 
 
+@pytest.mark.asyncio
+async def test_validate_warns_on_hardcoded_secret(tmp_path: Path) -> None:
+    """Matches ``drt validate``'s non-strict behaviour: a hardcoded secret is
+    a warning, not an error — the sync stays valid (#870)."""
+    (tmp_path / "drt_project.yml").write_text("name: test\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "secret.yml").write_text(
+        "name: secret\n"
+        "model: SELECT 1\n"
+        "destination:\n"
+        "  type: rest_api\n"
+        "  url: https://example.com/api\n"
+        "  method: POST\n"
+        "  auth:\n"
+        "    type: bearer\n"
+        f"    token: sk-{'a' * 32}\n"
+    )
+    srv = create_server(tmp_path)
+    result = await call(srv, "drt_validate")
+    assert "secret" in result["valid"]
+    assert result["errors"] == {}
+    assert "hardcoded secret" in result["warnings"]["secret"][0]
+
+
+@pytest.mark.asyncio
+async def test_validate_strict_promotes_secret_warning_to_error(tmp_path: Path) -> None:
+    (tmp_path / "drt_project.yml").write_text("name: test\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "secret.yml").write_text(
+        "name: secret\n"
+        "model: SELECT 1\n"
+        "destination:\n"
+        "  type: rest_api\n"
+        "  url: https://example.com/api\n"
+        "  method: POST\n"
+        "  auth:\n"
+        "    type: bearer\n"
+        f"    token: sk-{'b' * 32}\n"
+    )
+    srv = create_server(tmp_path)
+    result = await call(srv, "drt_validate", strict=True)
+    assert "secret" not in result["valid"]
+    assert "hardcoded secret" in result["errors"]["secret"][0]
+
+
+@pytest.mark.asyncio
+async def test_validate_check_connection_reports_per_sync(
+    project_dir: Path, monkeypatch: Any
+) -> None:
+    """``check_connection=True`` adds a ``connection_tests`` entry per sync
+    (mirrors ``drt validate --check-connection``, #870). ``notify`` is a
+    rest_api destination, which ``_run_connection_test`` skips (SQL-only)."""
+    srv = create_server(project_dir)
+    result = await call(srv, "drt_validate", check_connection=True)
+    assert result["connection_tests"]["notify"]["skipped"] is True
+
+
 # ---------------------------------------------------------------------------
 # drt_run_test
 # ---------------------------------------------------------------------------
@@ -148,6 +207,81 @@ async def test_run_test_no_tests_defined(server: FastMCP) -> None:
     # The default fixture sync has no `tests:` block
     result = await call(server, "drt_run_test")
     assert result == {"status": "no_tests", "results": []}
+
+
+@pytest.mark.asyncio
+async def test_run_test_dry_run_previews_without_executing(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """``dry_run=True`` (#870) lists the test plan without connecting to the
+    destination or running queries (mirrors ``drt test --dry-run``)."""
+    (tmp_path / "drt_project.yml").write_text("name: test\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "orders.yml").write_text(
+        "name: orders\n"
+        "model: ref('orders')\n"
+        "destination:\n"
+        "  type: postgres\n"
+        "  host: localhost\n"
+        "  dbname: test\n"
+        "  table: orders\n"
+        "  upsert_key: [id]\n"
+        "tests:\n"
+        "  - not_null: { columns: [email] }\n"
+    )
+    from drt.destinations import query as query_module
+
+    monkeypatch.setattr(query_module, "is_queryable", lambda d: True)
+
+    def fail_if_called(*_a: Any, **_k: Any) -> int:
+        raise AssertionError("dry_run must not execute a query")
+
+    monkeypatch.setattr(query_module, "execute_test_query", fail_if_called)
+
+    srv = create_server(tmp_path)
+    result = await call(srv, "drt_run_test", dry_run=True)
+
+    assert result["dry_run"] is True
+    assert result["results"][0]["tests"][0]["dry_run"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_test_fail_fast_skips_remaining_syncs(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """``fail_fast=True`` (#870) stops after the first sync with a failing
+    test; remaining syncs are reported skipped, not run (mirrors ``drt test
+    --fail-fast``)."""
+    (tmp_path / "drt_project.yml").write_text("name: test\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    for name in ("first", "second"):
+        (syncs_dir / f"{name}.yml").write_text(
+            f"name: {name}\n"
+            "model: ref('orders')\n"
+            "destination:\n"
+            "  type: postgres\n"
+            "  host: localhost\n"
+            "  dbname: test\n"
+            "  table: orders\n"
+            "  upsert_key: [id]\n"
+            "tests:\n"
+            "  - not_null: { columns: [email] }\n"
+        )
+    from drt.destinations import query as query_module
+
+    monkeypatch.setattr(query_module, "is_queryable", lambda d: True)
+    monkeypatch.setattr(query_module, "get_table_name", lambda d: "orders")
+    monkeypatch.setattr(query_module, "execute_test_query", lambda d, q: 3)  # fails not_null
+
+    srv = create_server(tmp_path)
+    result = await call(srv, "drt_run_test", fail_fast=True)
+
+    assert result["status"] == "failed"
+    assert len(result["results"]) == 2
+    assert result["results"][1]["skipped"] is True
+    assert result["results"][1]["reason"] == "fail_fast"
 
 
 @pytest.mark.asyncio
@@ -353,12 +487,16 @@ async def test_run_test_writes_nothing_to_the_console(
 
 
 @pytest.mark.asyncio
-async def test_run_test_does_not_store_failure_samples(
+async def test_run_test_does_not_store_failure_samples_by_default(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
-    """`--store-failures` (#779) writes .drt/test_failures/… to disk. The MCP
-    tool exposes no way to read a sample back, so it must not write one —
-    a failing test through MCP leaves the filesystem untouched (#851)."""
+    """`--store-failures` (#779) writes .drt/test_failures/… to disk.
+
+    `drt_run_test` defaults `store_failures=False` (#870) — same default as
+    `drt test` — so a failing test through MCP leaves the filesystem
+    untouched unless the caller opts in. Opting in is covered by
+    ``test_run_test_store_failures_writes_sample_and_reports_path`` below;
+    this test only pins the unchanged default."""
     (tmp_path / "drt_project.yml").write_text("name: test\nprofile: default\n")
     syncs_dir = tmp_path / "syncs"
     syncs_dir.mkdir()
@@ -393,6 +531,50 @@ async def test_run_test_does_not_store_failure_samples(
     assert result["status"] == "failed"
     assert not (tmp_path / ".drt" / "test_failures").exists()
     assert "failures_stored" not in result["results"][0]["tests"][0]
+
+
+@pytest.mark.asyncio
+async def test_run_test_store_failures_writes_sample_and_reports_path(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """``store_failures=True`` (#870) is the opt-in twin of the default-off
+    test above — the sample now writes under ``project_dir``, masked, and
+    the entry's ``failures_stored`` carries the path an MCP caller with its
+    own filesystem access (Read/Bash on the same checkout) can open."""
+    (tmp_path / "drt_project.yml").write_text("name: test\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "orders.yml").write_text(
+        "name: orders\n"
+        "model: ref('orders')\n"
+        "destination:\n"
+        "  type: postgres\n"
+        "  host: localhost\n"
+        "  dbname: test\n"
+        "  table: orders\n"
+        "  upsert_key: [id]\n"
+        "tests:\n"
+        "  - not_null: { columns: [email] }\n"
+    )
+    from drt.destinations import query as query_module
+
+    monkeypatch.setattr(query_module, "is_queryable", lambda d: True)
+    monkeypatch.setattr(query_module, "get_table_name", lambda d: "orders")
+    monkeypatch.setattr(query_module, "execute_test_query", lambda d, q: 3)
+    monkeypatch.setattr(
+        query_module,
+        "fetch_failing_rows",
+        lambda dest, query, limit: [{"id": 1, "email": None}],
+    )
+    monkeypatch.chdir(tmp_path)
+
+    srv = create_server(tmp_path)
+    result = await call(srv, "drt_run_test", store_failures=True, store_failures_limit=5)
+
+    assert result["status"] == "failed"
+    stored = result["results"][0]["tests"][0]["failures_stored"]
+    assert stored["count"] == 1
+    assert Path(stored["path"]).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -679,6 +861,83 @@ async def test_run_sync_dry_run_without_compute_diff_omits_diff_field(
     assert "diff" not in result
     assert result["dry_run"] is True
     assert result["success"] == 1
+
+
+# ---------------------------------------------------------------------------
+# drt_run_sync — limit / vars parameters (#870)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_sync_limit_and_vars_reach_the_engine(
+    project_dir: Path, monkeypatch: Any
+) -> None:
+    """``limit``/``vars`` (#870) must actually reach ``engine.sync.run_sync``
+    as ``extract_limit``/``vars`` — not just be accepted and dropped."""
+    from drt.engine.sync import SyncResult
+
+    captured: dict[str, Any] = {}
+
+    def fake_run_sync(*_args: Any, **kwargs: Any) -> SyncResult:
+        captured.update(kwargs)
+        result = SyncResult()
+        result.success = 1
+        result.limit_applied = kwargs.get("extract_limit")
+        return result
+
+    monkeypatch.setattr("drt.engine.sync.run_sync", fake_run_sync)
+    monkeypatch.setattr("drt.cli.main._get_source", lambda _profile: object())
+    monkeypatch.setattr("drt.cli.main._get_destination", lambda _sync: object())
+    monkeypatch.setattr("drt.config.credentials.load_profile", lambda _name: object())
+
+    srv = create_server(project_dir)
+    result = await call(
+        srv,
+        "drt_run_sync",
+        sync_name="notify",
+        limit=5,
+        vars={"lookback_days": 1},
+    )
+
+    assert captured["extract_limit"] == 5
+    assert captured["vars"]["lookback_days"] == 1
+    assert result["limit_applied"] == 5
+
+
+@pytest.mark.asyncio
+async def test_run_sync_limit_rejects_non_positive(project_dir: Path, monkeypatch: Any) -> None:
+    monkeypatch.setattr("drt.config.credentials.load_profile", lambda _name: object())
+    srv = create_server(project_dir)
+    result = await call(srv, "drt_run_sync", sync_name="notify", limit=0)
+    assert "error" in result
+    assert "positive" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_run_sync_limit_rejected_for_mirror_mode(tmp_path: Path, monkeypatch: Any) -> None:
+    """Matches the CLI guard (#774): a sampled mirror would DELETE the
+    destination rows the sample skipped."""
+    (tmp_path / "drt_project.yml").write_text("name: test\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "mirror_sync.yml").write_text(
+        "name: mirror_sync\n"
+        "model: ref('users')\n"
+        "sync:\n"
+        "  mode: mirror\n"
+        "  upsert_key: [id]\n"
+        "destination:\n"
+        "  type: postgres\n"
+        "  host: localhost\n"
+        "  dbname: test\n"
+        "  table: users\n"
+        "  upsert_key: [id]\n"
+    )
+    monkeypatch.setattr("drt.config.credentials.load_profile", lambda _name: object())
+    srv = create_server(tmp_path)
+    result = await call(srv, "drt_run_sync", sync_name="mirror_sync", limit=5)
+    assert "error" in result
+    assert "mirror" in result["error"]
 
 
 # ---------------------------------------------------------------------------

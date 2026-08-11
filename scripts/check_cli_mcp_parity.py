@@ -124,6 +124,22 @@ COMMAND_EXCLUSIONS: dict[str, dict[str, str]] = {
     "validate": {
         "--emit-schema": "writes a schema file to disk; drt_get_schema returns it instead",
     },
+    "run": {
+        "--threads": (
+            "parallelism across syncs in one invocation; drt_run_sync runs "
+            "exactly one, so there is nothing to parallelize (#870)"
+        ),
+        "--fail-fast": (
+            "stops scheduling *remaining* syncs after a failure; with one "
+            "sync per call there is no remainder to stop (#870)"
+        ),
+        "--failed": (
+            "a selector (which syncs had a failing last run), same grammar "
+            "as --select/--exclude in SELECTION_OPTIONS above — an agent "
+            "gets this via drt_get_status() + its own filter, then calls "
+            "drt_run_sync per name (#870)"
+        ),
+    },
     "docs generate": {
         "--inline": "HTML packaging (single-object bundling); MCP returns the manifest",
     },

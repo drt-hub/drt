@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from drt.config.models import ProjectConfig, SyncConfig
@@ -49,19 +49,21 @@ class McpContext:
             return self.load_project()
         return ProjectConfig(name="drt")
 
-    def load_syncs(self) -> list[SyncConfig]:
+    def load_syncs(self, vars: dict[str, Any] | None = None) -> list[SyncConfig]:
         from drt.config.parser import load_syncs
 
-        return load_syncs(self.project_dir)
+        return load_syncs(self.project_dir, vars=vars)
 
     def load_syncs_safe(self) -> SyncLoadResult:
         from drt.config.parser import load_syncs_safe
 
         return load_syncs_safe(self.project_dir)
 
-    def find_sync(self, sync_name: str) -> SyncConfig | None:
-        """First sync named *sync_name* among ``load_syncs()``, or None."""
-        return next((s for s in self.load_syncs() if s.name == sync_name), None)
+    def find_sync(
+        self, sync_name: str, vars: dict[str, Any] | None = None
+    ) -> SyncConfig | None:
+        """First sync named *sync_name* among ``load_syncs(vars=vars)``, or None."""
+        return next((s for s in self.load_syncs(vars=vars) if s.name == sync_name), None)
 
 
 def _load_ctx(project_dir: Path) -> McpContext:

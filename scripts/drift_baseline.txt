@@ -23,30 +23,10 @@
 # ---------------------------------------------------------------------
 # cli-mcp — CLI options that have not reached their MCP tool.
 #
-# These are the gaps check 9 (#871) was written to detect, and they are
-# exactly the backlog tracked in #870. They are recorded here rather
-# than left as failures so the audit reports a true state today: the
-# detection is new, the debt is not.
-#
-# This is the automated form of the release checklist's "or a tracked
-# follow-up issue" escape hatch — skipping parity stays a recorded
-# decision rather than an oversight.
-#
-# DELETE THESE LINES AS #870 LANDS THEM. Every one is a flag an agent
-# driving drt through MCP cannot reach: --limit is the sampled first
-# send, --check-connection is the only way to prove a credential works.
-#
-# Note two entries #870's own table does not list — `test --dry-run`
-# and `test --store-failures-limit` — found by this check rather than
-# by hand, which is the point of automating it.
-cli-mcp:run:--fail-fast
-cli-mcp:run:--failed
-cli-mcp:run:--limit
-cli-mcp:run:--threads
-cli-mcp:run:--vars
-cli-mcp:test:--dry-run
-cli-mcp:test:--fail-fast
-cli-mcp:test:--store-failures
-cli-mcp:test:--store-failures-limit
-cli-mcp:validate:--check-connection
-cli-mcp:validate:--strict
+# #870 closed the backlog check 9 (#871) found: --limit/--vars/--dry-run/
+# --fail-fast/--store-failures/--store-failures-limit/--check-connection/
+# --strict all reach their MCP tool now. --threads/--fail-fast/--failed
+# on `run` stayed out on purpose — see COMMAND_EXCLUSIONS["run"] in
+# check_cli_mcp_parity.py for why each is structurally inapplicable to a
+# single-sync tool rather than a gap. This section is empty; keep it
+# that way — add a line only for an intentional, short-lived gap.

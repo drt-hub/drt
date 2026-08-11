@@ -25,10 +25,13 @@ def run_sync(
     cursor_value: str | None = None,
     profile_name: str | None = None,
     full_refresh: bool = False,
+    limit: int | None = None,
+    vars: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from drt.cli._helpers import resolve_profile_name
     from drt.cli.main import _get_destination, _get_source
     from drt.config.credentials import load_profile
+    from drt.config.parser import project_vars as resolve_project_vars
     from drt.engine.sync import run_sync as engine_run_sync
     from drt.state.factory import build_state_bundle
 
@@ -46,12 +49,30 @@ def run_sync(
             "error": "full_refresh and cursor_value are mutually exclusive."
         }
 
+    if limit is not None and limit < 1:
+        return {"error": "limit must be a positive integer."}
+
     project = ctx.load_project()
     profile = load_profile(resolve_profile_name(profile_name, project.profile))
 
-    sync = ctx.find_sync(sync_name)
+    # vars: `vars:` block < DRT_VAR_* < this call's `vars` (#870/#783) — same
+    # precedence `drt run --vars` resolves, minus the string-parsing step
+    # (an MCP caller passes an already-structured dict, not `'k: v, k2: v2'`).
+    resolved_vars = resolve_project_vars(ctx.project_dir, cli_vars=vars)
+    sync = ctx.find_sync(sync_name, vars=resolved_vars)
     if sync is None:
         return {"error": f"No sync named '{sync_name}' found."}
+
+    if limit is not None and sync.sync.mode in ("mirror", "replace"):
+        # Same guard as `drt run --limit` (#774): a sampled mirror would
+        # DELETE the destination rows the sample skipped; a sampled replace
+        # would truncate to the sample.
+        return {
+            "error": (
+                f"limit is not allowed for mode={sync.sync.mode} syncs "
+                "(a sample would delete or replace real rows)."
+            )
+        }
 
     source = _get_source(profile)
     dest = _get_destination(sync)
@@ -85,6 +106,8 @@ def run_sync(
         cursor_value_override=(cursor_value if sync.sync.mode == "incremental" else None),
         compute_diff=compute_diff,
         diff_limit=diff_limit,
+        extract_limit=limit,
+        vars=resolved_vars,
     )
 
     response: dict[str, Any] = {
@@ -94,6 +117,8 @@ def run_sync(
         "failed": result.failed,
         "errors": result.errors[:10],  # cap at 10 to avoid huge payloads
     }
+    if getattr(result, "limit_applied", None) is not None:
+        response["limit_applied"] = result.limit_applied
     diff_value = getattr(result, "diff", None)
     if compute_diff and diff_value is not None:
         from drt.cli.output import diff_to_dict
