@@ -37,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-11
+
 ### Added
 
 - **REST API batch request bodies** ([#770](https://github.com/drt-hub/drt/issues/770)): `body_mode: batch` sends the engine's already-`sync.batch_size`-bounded record chunk in one HTTP request, or further splits it with `max_records_per_request`, replacing one-request-per-row activation against bulk endpoints without creating a second batching authority in the destination layer. `batch_template` renders with `rows=<post-mapping records>` and the existing `tojson_safe` filter handles the whole list; rate limiting is charged once per outer request, so the configured RPS now buys N records of throughput in batch mode, while retry still wraps the complete request atomically. Non-2xx responses fail the whole request chunk by default; optional dotted `error_path` maps an exactly length-matched, index-aligned JSON list where `null` means success and non-null entries become row errors (message priority `error` → `message` → `error_message`). A malformed mapping logs a warning and safely fails the whole sub-chunk rather than partially pairing the wrong records, and global `RowError.batch_index` offsets remain correct across multiple sub-chunks for DLQ handoff. `on_error: fail` stops after the first sub-chunk containing any failure; empty batches perform no rendering, limiter acquisition, or network I/O. Default `body_mode: record` is unchanged. Docs: `docs/connectors/rest-api.md`.
