@@ -642,6 +642,22 @@ destination:
     token_env: MY_API_TOKEN
 ```
 
+`body_mode` (#770) — send N records per request instead of one-request-per-row, for bulk endpoints:
+
+```yaml
+destination:
+  type: rest_api
+  url: "https://api.example.com/bulk"
+  body_mode: batch                           # default: record (one row per request)
+  max_records_per_request: 100               # optional — splits the engine's sync.batch_size chunk further
+  batch_template: |                          # required when body_mode: batch — rows=<post-mapping records>
+    {"records": {{ rows | tojson_safe }}}
+  error_path: "results"                      # optional dotted path to an index-aligned response list;
+                                              # null = success, non-null = that row's error (skip/fail per on_error)
+```
+Rate limiting is charged once per outer request in batch mode (a request now buys N records of throughput);
+`on_error: fail` stops after the first sub-chunk containing any failure. See `docs/connectors/rest-api.md`.
+
 ### `type: slack`
 
 ```yaml
