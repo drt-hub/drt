@@ -53,12 +53,20 @@ destination:
   type: rest_api
   url: https://api.example.com/v1/users/batch
   method: POST
+  headers:
+    Content-Type: "application/json"
   body_mode: batch
   max_records_per_request: 100
   batch_template: |
     {"records": {{ rows | tojson_safe }}}
   error_path: data.results
 ```
+
+Batch mode sends the rendered body as raw bytes, not through an HTTP client
+helper that infers a content type from the payload shape — unlike some
+JSON-aware client libraries, nothing sets `Content-Type` for you. Set it
+explicitly in `headers` (as in the record-mode example above) or a JSON API
+will commonly reject the request outright.
 
 `batch_template` uses `rows`, a list of the post-mapping records in the
 current HTTP request. It is required in batch mode; `body_template` is only

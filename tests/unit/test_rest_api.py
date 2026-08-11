@@ -495,6 +495,26 @@ class TestRestApiDestinationBatchMode:
         assert result.failed == 2
         assert mock_client.request.call_count == 0
 
+    def test_non_undefined_template_error_still_fails_sub_chunk(self) -> None:
+        """render_template() only normalizes Jinja's UndefinedError to
+        ValueError -- a ZeroDivisionError from row arithmetic must be caught
+        too, or on_error: skip stops being effective for it (#763 precedent)."""
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/batch",
+            body_mode="batch",
+            batch_template="{{ 1 / rows[0].zero }}",
+        )
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+
+            result = RestApiDestination().load([{"zero": 0}], config, _sync_options())
+
+        assert result.failed == 1
+        assert mock_client.request.call_count == 0
+
     def test_on_error_fail_stops_after_batch_template_error(self) -> None:
         config = RestApiDestinationConfig(
             type="rest_api",
@@ -800,6 +820,28 @@ class TestRestApiOnErrorFail:
 
         # Template error on first record should immediately fail-out.
         # Only 1 row attempted — no HTTP since template fails before request.
+        assert result.failed == 1
+        assert result.success == 0
+        assert mock_client.request.call_count == 0
+
+    def test_non_undefined_template_error_is_caught_as_row_error(self) -> None:
+        """Same gap as batch mode's non-UndefinedError template test: a
+        ZeroDivisionError from row arithmetic must respect on_error, not
+        abort load() outright."""
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/webhook",
+            method="POST",
+            body_template="{{ 1 / row.zero }}",
+        )
+        options = _sync_options()
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+
+            result = RestApiDestination().load([{"zero": 0}], config, options)
+
         assert result.failed == 1
         assert result.success == 0
         assert mock_client.request.call_count == 0

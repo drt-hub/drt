@@ -179,7 +179,7 @@ Strict patch release — cherry-pick of the fix for [#908](https://github.com/dr
 
 **Scope:**
 - **State foundation (ADR 0005)** — remote state backend for run state / history / DLQ, CI-safe and team-shared (#756 — the Protocol boundary already landed, this issue is the actual GCS/S3 backend implementation, steps 1–2 of ADR 0005) · docs: protect cursor-based incremental as the permanent read-only path and tier reversibility as a design goal, so ADR 0005 stays honest about what it isn't deprecating (#922)
-- **Write-path semantics** — first-class `run_id` + opt-in metadata columns (#762) · `computed_fields` — declarative derived columns (#763)
+- **Write-path semantics** — first-class `run_id` + opt-in metadata columns (#762) · `computed_fields` — declarative derived columns (#763) · REST API `body_mode: batch` — N records per request instead of one-request-per-row, pulled in from the unscheduled backlog 2026-08-11 (#770)
 - **CI / artifacts** — `state:modified` selector, run only syncs changed vs. a baseline manifest (#772)
 - **Testing depth** — sync unit tests, fixture rows in / expected payload out, zero credentials (#780)
 - **Security** — secret provider URIs: AWS/GCP Secret Manager, Vault (#782)
@@ -197,7 +197,7 @@ Strict patch release — cherry-pick of the fix for [#908](https://github.com/dr
 - **#469 `fetch_existing()` Protocol refactor** — moved to v0.10 (Protocol-stability theme), its premise partly overtaken by #900's Protocol refactor already landing.
 - **#781 dbt exposures export** — moved to v0.10 (Ecosystem theme); it only landed in v0.9 by deferral from v0.8 on 2026-08-06, not by thematic fit.
 
-**Unscheduled backlog** *(no milestone — pull in when a release theme fits)*: REST API `body_mode: batch` (#770, good first issue) — fits this milestone's theme but not yet pulled in. Idempotency keys for fire-and-forget destinations (#897) — smaller and destination-count-dependent (needs a per-connector survey first), parked until a duplicate-side-effect report justifies pulling it in. Warehouse-backed state backend for SQL-queryable observability (#920) — deliberately split out of #756 per ADR 0005 (durability vs. observability are different justifications with different costs; this half needs a destination write-grant conversation #756 doesn't), parked until that conversation happens. Plus the cut list above: #755, #758, #760, #761, #764, #778, #896, #425, #426, #428, #649, #825, #757.
+**Unscheduled backlog** *(no milestone — pull in when a release theme fits)*: Idempotency keys for fire-and-forget destinations (#897) — smaller and destination-count-dependent (needs a per-connector survey first), parked until a duplicate-side-effect report justifies pulling it in. Warehouse-backed state backend for SQL-queryable observability (#920) — deliberately split out of #756 per ADR 0005 (durability vs. observability are different justifications with different costs; this half needs a destination write-grant conversation #756 doesn't), parked until that conversation happens. Plus the cut list above: #755, #758, #760, #761, #764, #778, #896, #425, #426, #428, #649, #825, #757.
 
 *Cleared from this list since it was written:* project `vars` (#783, shipped v0.8.0) · alert conditions (#784, shipped v0.8.3) · custom SQL tests / `severity: warn` / store-failures (#779, shipped v0.8.3) · rate limiting v2 (#769, shipped v0.8.4).
 

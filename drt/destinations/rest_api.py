@@ -95,7 +95,12 @@ class RestApiDestination:
                     try:
                         assert config.batch_template is not None
                         batch_body = render_template(config.batch_template, rows=sub_chunk)
-                    except ValueError as e:
+                    except Exception as e:  # noqa: BLE001 — see the record-mode
+                        # template except clause above: a template can raise
+                        # more than render_template()'s own normalized
+                        # ValueError, and computed_fields (#763) established
+                        # that on_error: skip must stay effective for any of
+                        # them, not just an undefined variable.
                         self._fail_chunk(
                             result,
                             sub_chunk,
@@ -154,7 +159,14 @@ class RestApiDestination:
                 if config.body_template:
                     try:
                         body = render_template(config.body_template, record)
-                    except ValueError as e:
+                    except Exception as e:  # noqa: BLE001 — a template can raise
+                        # more than the UndefinedError render_template()
+                        # itself normalizes to ValueError (a ZeroDivisionError
+                        # from row arithmetic, a TypeError from tojson_safe on
+                        # an unsupported type, ...). computed_fields (#763)
+                        # established the precedent: catch every exception a
+                        # template can raise, or on_error: skip stops being
+                        # effective for exactly the row that needs it.
                         result.row_errors.append(
                             RowError(
                                 batch_index=i,
