@@ -43,7 +43,7 @@ All three are open-source, CLI-first, YAML-configured, and MCP-enabled. Together
 - You work with **AI coding tools** (Claude, Cursor) and want your reverse ETL layer to be accessible via MCP
 - You need **10-30 destinations** rather than 200+ — and the ones you need are covered
 - You prefer to **own your data pipeline** end-to-end
-- You want to grant **read-only access to your source warehouse** — drt's supported incremental strategy (cursor-based, reading a column like `updated_at`) never needs to write into the source. Nothing in your source warehouse is drt-managed, drt-created, or drt-owned.
+- You want to grant **read-only access to your source warehouse** — drt's supported incremental strategy (cursor-based, reading a column like `updated_at`) never needs to write into the source *to read from it*. (One opt-in exception: `sync.watermark.storage: bigquery` — see below.)
 
 **drt is not the right fit when:**
 
@@ -68,15 +68,25 @@ read and write for the same reason. (Not every vendor documents this
 publicly — we only state what we could verify.)
 
 drt's cursor-based incremental sync (`mode: incremental` +
-`cursor_field`) never requires write access to the source — it's the
-permanent, first-class strategy, not a stripped-down fallback waiting to
-be superseded. drt's design deliberately leaves room for a
-warehouse-write-requiring strategy later, as an *opt-in, separately-scoped*
-addition for teams that want it — not a replacement, and not scheduled
-work today. Whenever it lands, switching between the two will stay a
-config change, not a one-way door. See
+`cursor_field`) never requires write access to the source to *read* from
+it — it's the permanent, first-class strategy, not a stripped-down
+fallback waiting to be superseded. drt's design deliberately leaves room
+for a warehouse-write-requiring strategy later, as an *opt-in,
+separately-scoped* addition for teams that want it — not a replacement,
+and not scheduled work today. Whenever it lands, switching between the
+two will stay a config change, not a one-way door. See
 [ADR 0005](../adr/0005-state-location-and-write-grants.md) for the full
 reasoning.
+
+**One existing, unrelated exception worth naming honestly:** the older,
+separately-configured `sync.watermark.storage: bigquery` option (an
+alternative to the default local/GCS/S3 watermark storage, unrelated to
+this ADR) creates and writes a small `_drt_watermarks` tracking table.
+That write only touches your *source* warehouse if you point
+`watermark.project`/`watermark.dataset` at the same project/dataset your
+source reads from — a choice you make, not drt's default. Use `local`,
+`gcs`, or `s3` watermark storage (or a separate BigQuery
+project/dataset) to keep the source warehouse completely untouched.
 
 ---
 
