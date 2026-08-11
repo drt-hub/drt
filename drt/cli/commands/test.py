@@ -175,6 +175,49 @@ def execute_unit_tests_for_sync(
     return sync_results, had_failures
 
 
+def run_unit_test_suite(
+    syncs_with_unit_tests: Sequence[SyncConfig],
+    *,
+    fail_fast: bool = False,
+    json_mode: bool = False,
+    quiet: bool = False,
+) -> tuple[list[_SyncTestResult], bool]:
+    """Run ``sync.unit_tests`` for every sync in *syncs_with_unit_tests*,
+    honouring ``--fail-fast``.
+
+    Shared by ``drt test --unit`` and the ``drt_run_test(unit=True)`` MCP
+    tool (#870) — the same one-loop-not-two principle :func:`run_test_suite`
+    already applies to ``sync.tests``. The MCP tool previously had its own
+    inline copy of this loop with no ``fail_fast`` support at all, silently
+    ignoring the parameter for ``unit=True`` (caught in review).
+    """
+    results: list[_SyncTestResult] = []
+    had_failures = False
+
+    for i, sync in enumerate(syncs_with_unit_tests):
+        sync_results, sync_failed = execute_unit_tests_for_sync(
+            sync, json_mode=json_mode, quiet=quiet
+        )
+        results.append(sync_results)
+        if sync_failed:
+            had_failures = True
+
+        if fail_fast and had_failures:
+            remaining = syncs_with_unit_tests[i + 1 :]
+            for skipped_sync in remaining:
+                results.append(
+                    {"sync": skipped_sync.name, "tests": [], "skipped": True, "reason": "fail_fast"}
+                )
+            if remaining and not json_mode and not quiet:
+                console.print(
+                    f"[yellow]--fail-fast: skipped {len(remaining)} sync(s) "
+                    "after the first failure.[/yellow]"
+                )
+            break
+
+    return results, had_failures
+
+
 def _run_unit_tests(syncs: Sequence[SyncConfig], *, json_mode: bool, fail_fast: bool) -> None:
     """``drt test --unit``'s body — separate from the main ``sync.tests:`` loop
     in :func:`test_syncs` for the same reason :func:`execute_unit_tests_for_sync`
@@ -189,27 +232,9 @@ def _run_unit_tests(syncs: Sequence[SyncConfig], *, json_mode: bool, fail_fast: 
             print(json.dumps({"status": "no_tests", "results": []}))
         return
 
-    results: list[_SyncTestResult] = []
-    had_failures = False
-
-    for i, sync in enumerate(syncs_with_unit_tests):
-        sync_results, sync_failed = execute_unit_tests_for_sync(sync, json_mode=json_mode)
-        results.append(sync_results)
-        if sync_failed:
-            had_failures = True
-
-        if fail_fast and had_failures:
-            remaining = syncs_with_unit_tests[i + 1 :]
-            for skipped_sync in remaining:
-                results.append(
-                    {"sync": skipped_sync.name, "tests": [], "skipped": True, "reason": "fail_fast"}
-                )
-            if remaining and not json_mode:
-                console.print(
-                    f"[yellow]--fail-fast: skipped {len(remaining)} sync(s) "
-                    "after the first failure.[/yellow]"
-                )
-            break
+    results, had_failures = run_unit_test_suite(
+        syncs_with_unit_tests, fail_fast=fail_fast, json_mode=json_mode
+    )
 
     if json_mode:
         print(json.dumps({"status": "failed" if had_failures else "passed", "results": results}))

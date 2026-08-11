@@ -13,44 +13,23 @@ if TYPE_CHECKING:
     from drt.mcp._context import McpContext
 
 
-def _run_unit_tests(syncs: list[SyncConfig]) -> dict[str, Any]:
+def _run_unit_tests(syncs: list[SyncConfig], *, fail_fast: bool = False) -> dict[str, Any]:
     """``unit=True`` path — sync.unit_tests (#780), no destination touched.
 
-    Separate from the ``sync.tests:`` loop below for the same reason
-    ``drt test --unit`` keeps its own function: no destination connection,
-    no ``severity`` tier, none of that loop's machinery applies. Delegates
-    to :func:`drt.engine.unit_test_runner.run_unit_test` — the same engine
-    function the CLI calls, so the two surfaces can't drift on what a unit
-    test result means, only on how it's presented.
+    Delegates to :func:`drt.cli.commands.test.run_unit_test_suite`, shared
+    with ``drt test --unit`` (#870) — this used to be a third inline copy
+    of the per-sync unit-test loop with no ``--fail-fast`` support at all,
+    which is exactly the #400/#851 failure mode one level up.
     """
-    from drt.engine.unit_test_runner import UnitTestLookupsUnsupportedError, run_unit_test
+    from drt.cli.commands.test import run_unit_test_suite
 
     syncs_with_unit_tests = [s for s in syncs if s.unit_tests]
     if not syncs_with_unit_tests:
         return {"status": "no_tests", "results": []}
 
-    had_failures = False
-    results: list[dict[str, Any]] = []
-
-    for sync in syncs_with_unit_tests:
-        sync_result: dict[str, Any] = {"sync": sync.name, "tests": []}
-        try:
-            for test_def in sync.unit_tests:
-                result = run_unit_test(sync, test_def)
-                sync_result["tests"].append(
-                    {
-                        "name": test_def.name,
-                        "passed": result.passed,
-                        "mismatches": result.mismatches,
-                    }
-                )
-                if not result.passed:
-                    had_failures = True
-        except UnitTestLookupsUnsupportedError as e:
-            sync_result["tests"].append({"name": sync.name, "passed": False, "error": str(e)})
-            had_failures = True
-        results.append(sync_result)
-
+    results, had_failures = run_unit_test_suite(
+        syncs_with_unit_tests, fail_fast=fail_fast, json_mode=True, quiet=True
+    )
     return {"status": "failed" if had_failures else "passed", "results": results}
 
 
@@ -75,6 +54,13 @@ def run_test(
     if unit and (dry_run or store_failures):
         return {"error": "unit cannot be combined with dry_run or store_failures."}
 
+    if store_failures and store_failures_limit < 1:
+        # Matches the CLI's `min=1` (#870 review): unvalidated, a
+        # non-positive limit reaches `fetch_failing_rows` as a SQL `LIMIT`
+        # — 0 silently returns no sample, negative is invalid SQL on
+        # several destinations.
+        return {"error": "store_failures_limit must be a positive integer."}
+
     syncs = ctx.load_syncs()
     if not syncs:
         return {"status": "no_syncs", "results": []}
@@ -85,7 +71,7 @@ def run_test(
             return {"error": f"No sync named '{sync_name}' found."}
 
     if unit:
-        return _run_unit_tests(syncs)
+        return _run_unit_tests(syncs, fail_fast=fail_fast)
 
     syncs_with_tests = [s for s in syncs if s.tests]
     if not syncs_with_tests:

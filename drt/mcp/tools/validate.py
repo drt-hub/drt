@@ -43,6 +43,17 @@ def validate(
         else:
             valid.append(s.name)
 
+    # A sync that failed to parse (in `result.errors`, keyed by file stem —
+    # same key `find_hardcoded_secrets` falls back to when the YAML has no
+    # readable `name:`) can still carry a hardcoded-secret finding; the CLI
+    # reports it alongside the parse error rather than dropping it (#870
+    # review). `strict` never touches this branch — the sync is already
+    # invalid, there is nothing left to promote.
+    for name in result.errors:
+        error_warnings = [f.message for f in secret_warnings_by_sync.get(name, [])]
+        if error_warnings:
+            warnings[name] = error_warnings
+
     response: dict[str, Any] = {"valid": valid, "errors": errors}
     if warnings:
         response["warnings"] = warnings

@@ -182,6 +182,31 @@ async def test_validate_check_connection_reports_per_sync(
     assert result["connection_tests"]["notify"]["skipped"] is True
 
 
+@pytest.mark.asyncio
+async def test_validate_reports_secret_warning_for_invalid_sync(tmp_path: Path) -> None:
+    """A sync that fails schema validation (unknown destination type) still
+    gets scanned for hardcoded secrets — ``find_hardcoded_secrets`` reads
+    raw YAML before Pydantic validation runs. The CLI reports the warning
+    alongside the parse error rather than dropping it; the MCP tool had
+    only merged findings for successfully-parsed syncs (#870 review)."""
+    (tmp_path / "drt_project.yml").write_text("name: test\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "broken.yml").write_text(
+        "name: broken\n"
+        "model: SELECT 1\n"
+        "destination:\n"
+        "  type: nonexistent\n"
+        "  auth:\n"
+        "    type: bearer\n"
+        f"    token: sk-{'e' * 32}\n"
+    )
+    srv = create_server(tmp_path)
+    result = await call(srv, "drt_validate")
+    assert "broken" in result["errors"]
+    assert "hardcoded secret" in result["warnings"]["broken"][0]
+
+
 # ---------------------------------------------------------------------------
 # drt_run_test
 # ---------------------------------------------------------------------------
@@ -577,6 +602,19 @@ async def test_run_test_store_failures_writes_sample_and_reports_path(
     assert Path(stored["path"]).exists()
 
 
+@pytest.mark.asyncio
+async def test_run_test_store_failures_rejects_nonpositive_limit(project_dir: Path) -> None:
+    """Unvalidated, a non-positive limit reaches ``fetch_failing_rows`` as a
+    SQL ``LIMIT`` — 0 silently returns no sample, negative is invalid SQL on
+    several destinations. The CLI enforces ``min=1``; MCP must reject before
+    running the suite, matching ``drt_run_sync``'s ``limit`` guard (#870
+    review)."""
+    srv = create_server(project_dir)
+    result = await call(srv, "drt_run_test", store_failures=True, store_failures_limit=0)
+    assert "error" in result
+    assert "positive" in result["error"]
+
+
 # ---------------------------------------------------------------------------
 # drt_run_test — unit=True (#780)
 # ---------------------------------------------------------------------------
@@ -640,6 +678,35 @@ async def test_run_test_unit_pass_and_fail(tmp_path: Path) -> None:
     assert by_name["renames"]["mismatches"] == []
     assert by_name["wrong"]["passed"] is False
     assert by_name["wrong"]["mismatches"]
+
+
+@pytest.mark.asyncio
+async def test_run_test_unit_fail_fast_skips_remaining_syncs(tmp_path: Path) -> None:
+    """``fail_fast`` (#870 review) must also apply to the ``unit=True`` path
+    — it was silently ignored there prior to routing through the shared
+    ``run_unit_test_suite`` (same fix as the non-unit ``sync.tests`` path)."""
+    (tmp_path / "drt_project.yml").write_text("name: test\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    for name in ("first", "second"):
+        (syncs_dir / f"{name}.yml").write_text(
+            f"name: {name}\n"
+            "model: ref('users')\n"
+            "destination:\n"
+            "  type: rest_api\n"
+            "  url: https://example.com/hook\n"
+            "unit_tests:\n"
+            "  - name: wrong\n"
+            "    given: [{ id: 1 }]\n"
+            "    expect: [{ id: 999 }]\n"
+        )
+    srv = create_server(tmp_path)
+    result = await call(srv, "drt_run_test", unit=True, fail_fast=True)
+
+    assert result["status"] == "failed"
+    assert len(result["results"]) == 2
+    assert result["results"][1]["skipped"] is True
+    assert result["results"][1]["reason"] == "fail_fast"
 
 
 @pytest.mark.asyncio
