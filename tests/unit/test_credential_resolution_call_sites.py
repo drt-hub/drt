@@ -12,21 +12,36 @@ import pytest
 
 from drt.config.credentials import PostgresProfile, RedshiftProfile
 from drt.config.models import (
+    BearerAuth,
     DiscordDestinationConfig,
     EmailSmtpDestinationConfig,
     GoogleAdsDestinationConfig,
     GoogleSheetsDestinationConfig,
+    IntercomDestinationConfig,
     JiraDestinationConfig,
+    SalesforceBulkDestinationConfig,
     SlackDestinationConfig,
     SyncOptions,
     TeamsDestinationConfig,
     TwilioDestinationConfig,
 )
-from drt.destinations import discord, email_smtp, google_ads, jira, slack, teams, twilio
+from drt.destinations import (
+    discord,
+    email_smtp,
+    google_ads,
+    intercom,
+    jira,
+    salesforce_bulk,
+    slack,
+    teams,
+    twilio,
+)
 from drt.destinations.discord import DiscordDestination
 from drt.destinations.email_smtp import EmailSmtpDestination
 from drt.destinations.google_ads import GoogleAdsDestination
+from drt.destinations.intercom import IntercomDestination
 from drt.destinations.jira import JiraDestination
+from drt.destinations.salesforce_bulk import SalesforceBulkDestination
 from drt.destinations.slack import SlackDestination
 from drt.destinations.teams import TeamsDestination
 from drt.destinations.twilio import TwilioDestination
@@ -76,6 +91,17 @@ _URI = "aws-sm://prod/drt/credentials#value"
             [call(None, _URI)],
         ),
         (
+            intercom,
+            IntercomDestination(),
+            IntercomDestinationConfig(
+                type="intercom",
+                auth=BearerAuth(type="bearer", token_env=_URI),
+                properties_template='{"email": "test@example.com"}',
+            ),
+            "intercom-token",
+            [call(None, _URI)],
+        ),
+        (
             slack,
             SlackDestination(),
             SlackDestinationConfig(type="slack", webhook_url_env=_URI),
@@ -114,15 +140,15 @@ def test_destination_provider_uris_route_through_resolve_env(
 ) -> None:
     resolver = MagicMock(return_value=resolved)
     client = MagicMock()
-    client.return_value.__enter__.return_value = MagicMock()
+    http_client = client.return_value.__enter__.return_value
+    http_client.post.return_value.json.return_value = {}
 
     with (
         patch.object(module, "resolve_env", resolver),
-        patch.object(module.httpx, "Client", client)
-        if hasattr(module, "httpx")
-        else nullcontext(),
+        patch.object(module.httpx, "Client", client) if hasattr(module, "httpx") else nullcontext(),
+        patch.object(module.smtplib, "SMTP") if hasattr(module, "smtplib") else nullcontext(),
     ):
-        destination.load([], config, SyncOptions())
+        destination.load([{"phone": "+1234567890"}], config, SyncOptions())
 
     assert resolver.call_args_list == expected_calls
 
@@ -148,15 +174,57 @@ def test_jira_provider_uris_route_through_resolve_env() -> None:
         patch.object(jira, "resolve_env", resolver),
         patch.object(jira.httpx, "Client") as client,
     ):
-        client.return_value.__enter__.return_value = MagicMock()
-        JiraDestination().load([], config, SyncOptions())
-        assert jira._base_url(config) == "https://example.atlassian.net"
+        http_client = client.return_value.__enter__.return_value
+        JiraDestination().load([{}, {"issue_id": "ENG-1"}], config, SyncOptions())
 
     assert resolver.call_args_list == [
         call(None, config.base_url_env),
         call(None, config.email_env),
         call(None, config.token_env),
-        call(None, config.base_url_env),
+    ]
+    assert http_client.post.call_args.args[0] == "https://example.atlassian.net/rest/api/3/issue"
+    assert http_client.put.call_args.args[0] == (
+        "https://example.atlassian.net/rest/api/3/issue/ENG-1"
+    )
+
+
+def test_salesforce_bulk_provider_uris_route_through_resolve_env() -> None:
+    config = SalesforceBulkDestinationConfig(
+        type="salesforce_bulk",
+        instance_url_env="aws-sm://prod/drt/salesforce#instance_url",
+        object_name="Contact",
+        client_id_env="aws-sm://prod/drt/salesforce#client_id",
+        client_secret_env="aws-sm://prod/drt/salesforce#client_secret",
+        username_env="aws-sm://prod/drt/salesforce#username",
+        password_env="aws-sm://prod/drt/salesforce#password",
+    )
+    values = {
+        config.instance_url_env: "https://example.my.salesforce.com/",
+        config.client_id_env: "client-id",
+        config.client_secret_env: "client-secret",
+        config.username_env: "user@example.com",
+        config.password_env: "password",
+    }
+    resolver = MagicMock(side_effect=lambda _value, uri: values[uri])
+    auth_response = MagicMock(status_code=401, text="stop after credential resolution")
+    client = MagicMock()
+    client.return_value.__enter__.return_value.post.return_value = auth_response
+    destination = SalesforceBulkDestination()
+    destination.stage([{"Id": "001"}], config, SyncOptions())
+
+    with (
+        patch.object(salesforce_bulk, "resolve_env", resolver),
+        patch.object(salesforce_bulk.httpx, "Client", client),
+        pytest.raises(RuntimeError, match="Salesforce auth failed"),
+    ):
+        destination.finalize(config, SyncOptions())
+
+    assert resolver.call_args_list == [
+        call(None, config.instance_url_env),
+        call(None, config.client_id_env),
+        call(None, config.client_secret_env),
+        call(None, config.username_env),
+        call(None, config.password_env),
     ]
 
 
@@ -170,7 +238,7 @@ def test_google_ads_missing_resolved_token_keeps_existing_error() -> None:
 
     with patch.object(google_ads, "resolve_env", return_value=None):
         with pytest.raises(ValueError, match=_URI):
-            GoogleAdsDestination().load([], config, SyncOptions())
+            GoogleAdsDestination().load([{}], config, SyncOptions())
 
 
 def test_google_sheets_provider_uri_routes_through_resolve_env() -> None:

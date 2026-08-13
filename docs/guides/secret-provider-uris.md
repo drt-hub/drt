@@ -42,6 +42,15 @@ back empty, which is automatic: `aws-sm://prod/drt/snowflake#password`
 doesn't collide with a real env var name or a `secrets.toml` key, so it
 falls through unchanged.
 
+The connector audit for [#965](https://github.com/drt-hub/drt/issues/965)
+fixed direct environment access in the `discord`, `email_smtp`,
+`google_ads`, `google_sheets`, `intercom`, `jira`, `salesforce_bulk`,
+`slack`, `teams`, and `twilio` destinations and the `postgres` and
+`redshift` sources. These now accept provider URIs on their credential
+`*_env` fields just like the connectors that already used `resolve_env()`.
+On an empty destination batch, credential resolution is skipped entirely,
+so a provider URI does not cause a needless Secrets Manager or Vault request.
+
 ## Providers
 
 ### AWS Secrets Manager — `aws-sm://`

@@ -21,12 +21,12 @@ from __future__ import annotations
 
 import csv
 import io
-import os
 import time
 from typing import Any
 
 import httpx
 
+from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, SalesforceBulkDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
@@ -63,10 +63,7 @@ class SalesforceBulkDestination:
             return SyncResult(rows_extracted=0)
 
         # STEP 1 — resolve instance URL
-        if config.instance_url_env:
-            instance_url = os.environ[config.instance_url_env].rstrip("/")
-        else:
-            instance_url = (config.instance_url or "").rstrip("/")
+        instance_url = (resolve_env(config.instance_url, config.instance_url_env) or "").rstrip("/")
 
         with httpx.Client(timeout=30.0) as client:
             # STEP 2 — OAuth2 username-password flow
@@ -74,10 +71,10 @@ class SalesforceBulkDestination:
                 f"{instance_url}/services/oauth2/token",
                 data={
                     "grant_type": "password",
-                    "client_id": os.environ[config.client_id_env],
-                    "client_secret": os.environ[config.client_secret_env],
-                    "username": os.environ[config.username_env],
-                    "password": os.environ[config.password_env],
+                    "client_id": resolve_env(None, config.client_id_env),
+                    "client_secret": resolve_env(None, config.client_secret_env),
+                    "username": resolve_env(None, config.username_env),
+                    "password": resolve_env(None, config.password_env),
                 },
             )
             if auth_resp.status_code != 200:

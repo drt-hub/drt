@@ -59,6 +59,9 @@ class TeamsDestination:
         sync_options: SyncOptions,
     ) -> SyncResult:
         assert isinstance(config, TeamsDestinationConfig)
+        if not records:
+            return SyncResult()
+
         webhook_url = resolve_env(config.webhook_url, config.webhook_url_env)
         if not webhook_url:
             raise ValueError("Teams destination: provide 'webhook_url' or set 'webhook_url_env'.")

@@ -49,6 +49,8 @@ class EmailSmtpDestination:
         sync_options: SyncOptions,
     ) -> SyncResult:
         assert isinstance(config, EmailSmtpDestinationConfig)
+        if not records:
+            return SyncResult()
 
         username = resolve_env(config.username, config.username_env)
         password = resolve_env(config.password, config.password_env)

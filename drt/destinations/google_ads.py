@@ -58,6 +58,9 @@ class GoogleAdsDestination:
         sync_options: SyncOptions,
     ) -> SyncResult:
         assert isinstance(config, GoogleAdsDestinationConfig)
+        if not records:
+            return SyncResult()
+
         result = SyncResult()
         rate_limiter = resolve_rate_limiter(config, sync_options, limiter_factory=RateLimiter)
         retry_config = resolve_retry(config.retry, sync_options)

@@ -29,11 +29,11 @@ Example sync YAML:
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
 import httpx
 
+from drt.config.credentials import resolve_env
 from drt.config.models import (
     DestinationConfig,
     IntercomDestinationConfig,
@@ -58,13 +58,13 @@ class IntercomDestination:
         sync_options: SyncOptions,
     ) -> SyncResult:
         assert isinstance(config, IntercomDestinationConfig)
+        if not records:
+            return SyncResult()
 
         from drt.config.models import BearerAuth
 
         assert isinstance(config.auth, BearerAuth)
-        token = config.auth.token or (
-            os.environ.get(config.auth.token_env) if config.auth.token_env else None
-        )
+        token = resolve_env(config.auth.token, config.auth.token_env)
 
         if not token:
             raise ValueError(

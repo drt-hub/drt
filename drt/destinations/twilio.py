@@ -56,6 +56,8 @@ class TwilioDestination:
         sync_options: SyncOptions,
     ) -> SyncResult:
         assert isinstance(config, TwilioDestinationConfig)
+        if not records:
+            return SyncResult()
 
         account_sid = resolve_env(config.account_sid, config.account_sid_env)
         auth_token = resolve_env(config.auth_token, config.auth_token_env)
