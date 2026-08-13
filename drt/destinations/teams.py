@@ -36,11 +36,11 @@ Adaptive Card example:
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
 import httpx
 
+from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, SyncOptions, TeamsDestinationConfig
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
@@ -59,9 +59,7 @@ class TeamsDestination:
         sync_options: SyncOptions,
     ) -> SyncResult:
         assert isinstance(config, TeamsDestinationConfig)
-        webhook_url = config.webhook_url or (
-            os.environ.get(config.webhook_url_env) if config.webhook_url_env else None
-        )
+        webhook_url = resolve_env(config.webhook_url, config.webhook_url_env)
         if not webhook_url:
             raise ValueError("Teams destination: provide 'webhook_url' or set 'webhook_url_env'.")
 

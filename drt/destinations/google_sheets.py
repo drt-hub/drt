@@ -13,9 +13,9 @@ Example sync YAML:
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
+from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, GoogleSheetsDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 
@@ -25,9 +25,7 @@ def _build_sheets_service(config: GoogleSheetsDestinationConfig) -> Any:
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
 
-    keyfile = config.credentials_path or (
-        os.environ.get(config.credentials_env) if config.credentials_env else None
-    )
+    keyfile = resolve_env(config.credentials_path, config.credentials_env)
 
     if keyfile:
         creds = service_account.Credentials.from_service_account_file(  # type: ignore[no-untyped-call]

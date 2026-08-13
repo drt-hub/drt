@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Provider URIs (`aws-sm://`, `gcp-sm://`, `vault://`) silently failed on 10 credential fields** ([#965](https://github.com/drt-hub/drt/issues/965)): the `discord`, `email_smtp`, `google_ads`, `google_sheets`, `jira`, `slack`, `teams`, and `twilio` destinations, plus the `postgres` and `redshift` sources, read their `*_env` fields via a plain `os.environ.get(...)` instead of `resolve_env()` (`drt/config/credentials.py`) — so a provider URI passed to one of them was treated as a literal environment-variable name, found nothing, and the connector failed auth as if the credential were unset. All ten now route through `resolve_env()`, matching every other connector's existing pattern. `docs/guides/secret-provider-uris.md` no longer carries the "not every connector" caveat.
+
 ## [0.9.0] - 2026-08-11
 
 ### Added

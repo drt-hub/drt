@@ -26,12 +26,12 @@ via ``smtplib.SMTP_SSL`` — or keep the default STARTTLS behaviour (port 587).
 from __future__ import annotations
 
 import json
-import os
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any
 
+from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, EmailSmtpDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
@@ -50,12 +50,8 @@ class EmailSmtpDestination:
     ) -> SyncResult:
         assert isinstance(config, EmailSmtpDestinationConfig)
 
-        username = config.username or (
-            os.environ.get(config.username_env) if config.username_env else None
-        )
-        password = config.password or (
-            os.environ.get(config.password_env) if config.password_env else None
-        )
+        username = resolve_env(config.username, config.username_env)
+        password = resolve_env(config.password, config.password_env)
         if not username or not password:
             raise ValueError(
                 "email_smtp destination: provide 'username'/'username_env' and "

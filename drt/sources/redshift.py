@@ -18,11 +18,10 @@ Example ~/.drt/profiles.yml:
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator
 from typing import Any
 
-from drt.config.credentials import ProfileConfig, RedshiftProfile
+from drt.config.credentials import ProfileConfig, RedshiftProfile, resolve_env
 from drt.config.models import RetryConfig
 from drt.destinations.retry import with_retry
 
@@ -168,9 +167,7 @@ class RedshiftSource:
         except ImportError as e:
             raise ImportError("Redshift support requires: pip install drt-core[redshift]") from e
 
-        password = config.password or (
-            os.environ.get(config.password_env) if config.password_env else None
-        )
+        password = resolve_env(config.password, config.password_env)
         return psycopg2.connect(
             host=config.host,
             port=config.port,

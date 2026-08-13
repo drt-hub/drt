@@ -28,11 +28,11 @@ Example sync YAML:
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
 import httpx
 
+from drt.config.credentials import resolve_env
 from drt.config.models import (
     DestinationConfig,
     GoogleAdsDestinationConfig,
@@ -62,7 +62,7 @@ class GoogleAdsDestination:
         rate_limiter = resolve_rate_limiter(config, sync_options, limiter_factory=RateLimiter)
         retry_config = resolve_retry(config.retry, sync_options)
 
-        developer_token = os.environ.get(config.developer_token_env, "")
+        developer_token = resolve_env(None, config.developer_token_env) or ""
         if not developer_token:
             raise ValueError(f"Google Ads: env var '{config.developer_token_env}' is not set.")
 

@@ -9,11 +9,11 @@ For each record:
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 import httpx
 
+from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, JiraDestinationConfig, RetryConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
@@ -98,9 +98,9 @@ class JiraDestination:
     ) -> SyncResult:
         assert isinstance(config, JiraDestinationConfig)
 
-        base_url = os.environ.get(config.base_url_env)
-        email = os.environ.get(config.email_env)
-        token = os.environ.get(config.token_env)
+        base_url = resolve_env(None, config.base_url_env)
+        email = resolve_env(None, config.email_env)
+        token = resolve_env(None, config.token_env)
         if not base_url:
             raise ValueError(f"Jira destination: env var '{config.base_url_env}' is required.")
         if not email:
@@ -169,8 +169,7 @@ class JiraDestination:
 
 
 def _base_url(config: JiraDestinationConfig) -> str:
-    base_url = os.environ[config.base_url_env].rstrip("/")
-    return base_url
+    return (resolve_env(None, config.base_url_env) or "").rstrip("/")
 
 
 def _to_adf(text: str) -> dict[str, Any]:
@@ -185,5 +184,4 @@ def _to_adf(text: str) -> dict[str, Any]:
             }
         ],
     }
-
 
