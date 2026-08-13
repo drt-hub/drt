@@ -128,11 +128,14 @@ conversion.
 This is plain Jinja behaviour, shared with `body_template`, and drt
 deliberately does not special-case it: two different templating
 semantics in one tool would be worse than one documented sharp edge.
-Give the value an explicit default:
+Give the value an explicit default — parenthesize it, since Jinja's `|`
+binds tighter than `or` and `row.phone or '' | replace(...)` would apply
+the filter to `''` instead of to `row.phone`, leaving a non-null value's
+dashes untouched:
 
 ```yaml
 computed_fields:
-  p: "{{ row.phone or '' | replace('-', '') }}"
+  p: "{{ (row.phone or '') | replace('-', '') }}"
 ```
 
 ## Errors

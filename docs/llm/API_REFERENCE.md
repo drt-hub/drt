@@ -248,7 +248,9 @@ sync:                       # optional: all fields have defaults
     # Same Jinja env / filters / StrictUndefined as body_template. Syntax is validated at config load;
     # a missing column is a run-time error under on_error (skip = drop the row, fail = stop and name the field).
     # WARNING: a null passed THROUGH a filter renders as the string "None" (Jinja stringifies before
-    # filtering) — write {{ row.phone or '' | replace('-','') }}. A bare {{ row.phone }} stays null.
+    # filtering) — write {{ (row.phone or '') | replace('-','') }} (parens matter: | binds tighter than
+    # or, so an unparenthesized fallback only applies the filter to '', not to a non-null row.phone).
+    # A bare {{ row.phone }} stays null.
   field_mappings:           # optional (#415): declarative column rename {source_column: destination_field}
     user_id: id             # applied after extraction + cursor tracking + lookups + computed_fields
     full_name: name         # cursor_field / lookups / computed_fields use SOURCE names; upsert_key / destination columns use MAPPED names

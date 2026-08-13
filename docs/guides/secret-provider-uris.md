@@ -8,10 +8,23 @@ YAML, Airflow connections, cron wrappers) duplicates secret-distribution
 logic per orchestrator and breaks rotation the moment it's exported: the
 env snapshot goes stale even though the store itself rotated cleanly.
 
-Any `*_env` field in a profile or destination config can be a
-`scheme://...` URI instead of a plain env var name. drt resolves it from
-the matching provider at connection time — no wrapper script, no
-re-export step.
+A `*_env` field in a profile or destination config can be a
+`scheme://...` URI instead of a plain env var name, on connectors that
+route credential resolution through `resolve_env()`
+(`drt/config/credentials.py`). drt resolves it from the matching
+provider at connection time — no wrapper script, no re-export step.
+
+Not every connector has been wired up to `resolve_env()` yet — as of
+this writing, `discord`, `email_smtp`, `google_ads`, `google_sheets`,
+`jira`, `slack`, `teams`, and `twilio` destinations, plus the `postgres`
+and `redshift` sources, still read their `*_env` fields with a plain
+`os.environ.get(...)` lookup. Passing a provider URI to one of those
+fields doesn't raise an error — drt looks up an environment variable
+literally named `aws-sm://...` (or `gcp-sm://...`, `vault://...`), finds
+nothing, and the connector fails auth as if the credential were unset.
+If you hit that, check whether the connector's source file calls
+`resolve_env(` before relying on a provider URI there; see
+[#965](https://github.com/drt-hub/drt/issues/965) for tracking.
 
 ## Quick Start
 
