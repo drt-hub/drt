@@ -145,7 +145,7 @@ class TestBuildDrtChangeSensor:
             result = sensor_def(ctx)
 
         assert isinstance(result, RunRequest)
-        assert result.run_key == "1"
+        assert result.run_key == "None->1"
         assert ctx.cursor == "1"
 
     def test_no_change_skips(self, tmp_path: Path) -> None:
@@ -168,8 +168,35 @@ class TestBuildDrtChangeSensor:
             result = sensor_def(ctx)
 
         assert isinstance(result, RunRequest)
-        assert result.run_key == "4"
+        assert result.run_key == "3->4"
         assert ctx.cursor == "4"
+
+    def test_run_key_stays_unique_across_a_rollback(self, tmp_path: Path) -> None:
+        """Regression test: Dagster dedupes run_key globally across every
+        past evaluation of a sensor, not just consecutive ones. A run_key
+        keyed on the bare destination value would collide the moment a
+        signal revisits an old value — a source table rollback (A -> B -> A)
+        or a recreated Delta table restarting its version counter both do
+        exactly that, and the second "A" would silently never launch a run
+        even though the cursor correctly reports it as changed."""
+        from dagster_drt.sensors import build_drt_change_sensor
+
+        sensor_def = build_drt_change_sensor(project_dir=tmp_path, job=_dummy_job)
+        ctx = build_sensor_context(cursor=None)
+
+        with patch(_P_CURRENT_SIGNAL, return_value="A"):
+            first = sensor_def(ctx)
+        with patch(_P_CURRENT_SIGNAL, return_value="B"):
+            second = sensor_def(ctx)
+        with patch(_P_CURRENT_SIGNAL, return_value="A"):  # rollback B -> A
+            third = sensor_def(ctx)
+
+        assert isinstance(first, RunRequest)
+        assert isinstance(second, RunRequest)
+        assert isinstance(third, RunRequest)
+        run_keys = {first.run_key, second.run_key, third.run_key}
+        assert len(run_keys) == 3, f"run_keys collided: {run_keys}"
+        assert third.run_key == "B->A"
 
     def test_transient_error_skips_without_raising(self, tmp_path: Path) -> None:
         """A network blip / catalog hiccup must not crash the sensor daemon —

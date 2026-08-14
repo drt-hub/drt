@@ -31,8 +31,11 @@ same metadata-only-read shape and need their own design pass.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from dagster import (
+    AssetKey,
+    AssetSelection,
     DefaultSensorStatus,
     JobDefinition,
     RunRequest,
@@ -41,6 +44,13 @@ from dagster import (
     SkipReason,
     sensor,
 )
+
+if TYPE_CHECKING:
+    # dagster's own CoercibleToAssetSelection type alias isn't exported from
+    # the top-level dagster package — spelled out inline below instead.
+    # Safe as a bare annotation (never evaluated at runtime) thanks to
+    # `from __future__ import annotations` above.
+    from dagster import AssetsDefinition, SourceAsset
 
 
 def _current_signal(project_dir: Path) -> str:
@@ -97,18 +107,28 @@ def build_drt_change_sensor(
     name: str | None = None,
     minimum_interval_seconds: int | None = None,
     job: JobDefinition | None = None,
-    jobs: list[JobDefinition] | None = None,
-    asset_selection: object | None = None,
-    target: object | None = None,
+    asset_selection: str
+    | list[str]
+    | list[AssetKey]
+    | list[AssetsDefinition | SourceAsset]
+    | AssetSelection
+    | None = None,
     default_status: DefaultSensorStatus = DefaultSensorStatus.STOPPED,
 ) -> SensorDefinition:
     """Build a Dagster sensor that fires when a drt project's source table changes.
 
-    Exactly one ``RunRequest`` (keyed by the new signal value, so Dagster
-    dedupes re-evaluation) is emitted per detected change — never one per
-    sync. What gets materialized is entirely up to the ``job`` / ``jobs`` /
-    ``asset_selection`` / ``target`` passed here, matching every other
-    Dagster sensor: this function decides *when* to fire, not *what* runs.
+    Exactly one ``RunRequest`` is emitted per detected change — never one
+    per sync. What gets materialized is entirely up to ``job`` /
+    ``asset_selection`` passed here, matching every other Dagster sensor:
+    this function decides *when* to fire, not *what* runs.
+
+    Only ``job=`` and ``asset_selection=`` are exposed, not dagster's newer
+    ``target=`` or multi-job ``jobs=``: ``target=`` doesn't exist before
+    Dagster 1.8 (`dagster-drt` still declares ``dagster>=1.6``, and this
+    sensor must actually construct on that floor), and ``jobs=`` requires
+    each returned ``RunRequest`` to set ``job_name`` to disambiguate, which
+    this sensor — one signal, no way to know which job a generic "the
+    source changed" event belongs to — has no principled way to choose.
 
     On the very first evaluation (no prior sensor cursor), this always
     fires once — the same "no watermark yet, so do a full pass" bootstrap
@@ -121,11 +141,12 @@ def build_drt_change_sensor(
         @drt_assets(project_dir=".")
         def my_syncs(context, drt): ...
 
-        # target=, not job=: my_syncs is an AssetsDefinition (a @drt_assets
-        # multi_asset), and dagster's job= only accepts a JobDefinition /
-        # GraphDefinition / UnresolvedAssetJobDefinition — target= is the
-        # parameter that accepts an AssetsDefinition directly.
-        change_sensor = build_drt_change_sensor(project_dir=".", target=my_syncs)
+        # asset_selection=, not job=: my_syncs is an AssetsDefinition (a
+        # @drt_assets multi_asset), and dagster's job= only accepts a
+        # JobDefinition / GraphDefinition / UnresolvedAssetJobDefinition.
+        change_sensor = build_drt_change_sensor(
+            project_dir=".", asset_selection=[my_syncs]
+        )
 
     Args:
         project_dir: Path to the drt project root.
@@ -133,15 +154,11 @@ def build_drt_change_sensor(
         minimum_interval_seconds: Minimum seconds between evaluations.
         job: A JobDefinition/GraphDefinition/UnresolvedAssetJobDefinition
             this sensor triggers. For a plain @drt_assets multi_asset, use
-            target= instead (see Usage above).
-        jobs: Multiple jobs this sensor can trigger (requires job_name on
-            each RunRequest — not done here; use one sensor per job instead
-            if you need per-job cursors).
-        asset_selection: Dagster asset selection this sensor triggers.
-        target: Dagster's unified job/asset-selection target argument —
-            accepts a JobDefinition, an UnresolvedAssetJobDefinition, an
-            AssetsDefinition (e.g. a @drt_assets multi_asset), or a
-            CoercibleToAssetSelection. The usual choice for this sensor.
+            asset_selection= instead (see Usage above).
+        asset_selection: Dagster asset selection this sensor triggers —
+            accepts a sequence containing an AssetsDefinition (e.g. a
+            @drt_assets multi_asset), a sequence of AssetKey, or an
+            AssetSelection.
         default_status: Whether the sensor starts running or stopped when
             first deployed. Defaults to STOPPED — same reasoning as
             drt_serve's auth defaults: an orchestrator-launched sync
@@ -160,12 +177,12 @@ def build_drt_change_sensor(
         name=name,
         minimum_interval_seconds=minimum_interval_seconds,
         job=job,
-        jobs=jobs,
-        asset_selection=asset_selection,  # type: ignore[arg-type]
-        target=target,  # type: ignore[arg-type]
+        asset_selection=asset_selection,
         default_status=default_status,
     )
     def _drt_change_sensor(context: SensorEvaluationContext) -> RunRequest | SkipReason:
+        previous_signal = context.cursor
+
         try:
             current_signal = _current_signal(project_path)
         except NotImplementedError:
@@ -177,10 +194,16 @@ def build_drt_change_sensor(
             # permanent config error and is not caught here on purpose.
             return SkipReason(f"Could not read change signal: {exc}")
 
-        if context.cursor == current_signal:
+        if previous_signal == current_signal:
             return SkipReason(f"No change since last check (signal={current_signal})")
 
         context.update_cursor(current_signal)
-        return RunRequest(run_key=current_signal)
+        # Keyed on the transition, not just the destination value: Dagster
+        # dedupes run_key globally across every past evaluation of this
+        # sensor, not just consecutive ones. A bare current_signal would
+        # silently drop the run if the signal ever revisits an old value —
+        # a table rollback (A -> B -> A) or a recreated Delta table
+        # restarting its version counter from 0 both do exactly that.
+        return RunRequest(run_key=f"{previous_signal}->{current_signal}")
 
     return _drt_change_sensor
