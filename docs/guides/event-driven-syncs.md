@@ -11,10 +11,15 @@ answers that with three tiers, in the order to reach for them:
 | **2. Dagster sensors** | `dagster-drt`'s `build_drt_change_sensor()` polling a cheap change signal | Teams already running Dagster | Ships today — **Delta Lake and Iceberg only** |
 | **3. Hardened `drt serve`** | A push source (webhook, Snowflake Alert, Pub/Sub) hitting drt's HTTP endpoint | Genuine push sources, sub-minute | Ships today |
 
-None of these is a daemon drt runs for you — each is drt starting, syncing,
-and exiting, invoked by something else. See ADR 0004's
+None of these is a *drt-owned* watcher process — drt itself never runs as a
+long-lived daemon polling for changes. Tiers 1 and 2 are exactly "drt starts,
+syncs, and exits, invoked by something else." **Tier 3 is different**: `drt
+serve` must stay running as a resident process to receive requests — it's
+hardened precisely because it's the one path where something drt operates
+needs to be up continuously. See ADR 0004's
 [Decision](../adr/0004-streaming-and-event-triggered-syncs.md#decision)
-section for why a drt-owned watcher was rejected, and the
+section for why a drt-owned *watcher* (something that itself detects change,
+as opposed to a listener that's told about it) was rejected, and the
 [trigger matrix](../research/warehouse-trigger-matrix.md) for the
 per-source research behind every recommendation below.
 
@@ -27,15 +32,29 @@ interval. This is the default for every source drt supports and needs no new
 infrastructure — see [`docs/guides/ci-cd-integration.md`](ci-cd-integration.md)
 for the CI-runner shape of this pattern.
 
-**This is also the recommended path for Snowflake and SQL Server today.**
-Both have a purpose-built change signal — Snowflake `STREAM` +
-`SYSTEM$STREAM_HAS_DATA()`, SQL Server Change Tracking — designed to be
-checked cheaply from *inside* the warehouse's own scheduler: a Snowflake
-`TASK`'s `WHEN SYSTEM$STREAM_HAS_DATA(...)` clause only runs the task body
-(which can invoke `drt run` via an external function or orchestrator webhook)
-when the stream actually has unconsumed rows, and the task's own execution is
-what consumes the stream. That consumption is exactly what an
-externally-polling Tier 2 sensor cannot get for free — see below.
+**This is also the recommended path for Snowflake and SQL Server today** —
+with one requirement that's easy to get wrong. Both have a purpose-built
+change signal — Snowflake `STREAM` + `SYSTEM$STREAM_HAS_DATA()`, SQL Server
+Change Tracking — designed to be checked cheaply from *inside* the
+warehouse's own scheduler: a Snowflake `TASK`'s `WHEN
+SYSTEM$STREAM_HAS_DATA(...)` clause only runs the task body when the stream
+actually has unconsumed rows.
+
+**The task body must itself consume the stream via DML, or this doesn't
+work at all.** A stream's offset only advances when it's read inside a DML
+statement — plain querying never advances it (see the
+[trigger matrix](../research/warehouse-trigger-matrix.md#snowflake)). If the
+task body only invokes `drt run` via an external function or webhook and
+never touches the stream with DML, nothing consumes it: `SYSTEM$STREAM_HAS_DATA()`
+stays `TRUE` forever after the first real change, and the task keeps firing
+— and its warehouse keeps spinning — indefinitely, whether or not anything
+new has actually changed since the last run. This is the exact same trap
+that blocks Tier 2 (see below), and it applies here just as much: give the
+task body an explicit DML consumer, e.g. `INSERT INTO
+<a_tracking_table> SELECT * FROM <stream>` alongside (or instead of) the
+`drt run` invocation, so the stream's offset actually advances. A task that
+only ever reads the stream through `WHEN`/`SYSTEM$STREAM_HAS_DATA()` without
+a DML consumer is not a working trigger, regardless of tier.
 
 ## Tier 2 — Dagster sensors
 
@@ -68,10 +87,16 @@ defs = Definitions(
 
 ### Supported sources: Delta Lake and Iceberg only
 
-`build_drt_change_sensor()` supports **`deltalake`** (`DeltaTable.version()`)
-and **`iceberg`** (`current_snapshot().snapshot_id`) profiles. Both are
-monotonic integers that a cursor-diff sensor can poll and compare against
-Dagster's own sensor cursor with no side effects.
+`build_drt_change_sensor()` supports **`deltalake`** (`DeltaTable.version()`,
+a monotonically increasing integer) and **`iceberg`** (`current_snapshot().snapshot_id`)
+profiles. The sensor only ever compares the two most recent values for
+*equality*, never for ordering, so it works with either shape: Delta's
+version number is genuinely monotonic, while Iceberg's `snapshot_id` is an
+opaque, generated identifier — unique per snapshot but not ordered (Iceberg's
+own monotonic field is `sequence_number`; `snapshot_id` can also move to an
+*older* snapshot on a table rollback). Either way, "did the value I see now
+differ from the value I saw last time" is the only property the sensor
+relies on, with no side effects on the read.
 
 **Snowflake and SQL Server are not supported here**, and this isn't a gap
 waiting on a follow-up PR to close the same way — building it surfaced a
@@ -105,10 +130,16 @@ uses — which reads `~/.drt/profiles.yml` (or the equivalent secret-provider
 URIs, see [`secret-provider-uris.md`](secret-provider-uris.md)) on whatever
 host evaluates the sensor. A Dagster sensor runs inside the **Dagster
 daemon**, not inside a job run's own container — so the daemon's host needs
-the same source credentials available that a `drt run` invocation would.
-If your job runs execute in a different container or host than the daemon
-(common with containerized Dagster deployments), the daemon host is the one
-that needs the profile, not the job's execution environment.
+the same source credentials available that a `drt run` invocation would,
+**in addition to, not instead of**, the job run's own environment: when a
+`RunRequest` fires, `DagsterDrtResource.run()` calls `load_profile()`
+independently inside the job's own container. If your job runs execute in a
+different container or host than the daemon (common with containerized
+Dagster deployments), both need the source profile — the daemon to evaluate
+the sensor, the job to actually run the sync. Missing it on the daemon side
+only shows up as a sensor tick failure; missing it on the job side shows up
+as a successful sensor tick followed by a failed sync run, which is easy to
+misdiagnose as unrelated.
 
 ### State and remote backends
 
@@ -132,10 +163,15 @@ endpoint reference.
 
 **Snowflake's recommended Tier 3 path**: a Snowflake Alert with a `STREAM`
 condition, configured to hit `drt serve`'s `/sync/<name>` endpoint via
-`WEBHOOK`. This is a real push signal — the alert only fires when the stream
-actually has data — without the polling-sensor consumption problem Tier 2
-runs into, since the alert's own evaluation (inside Snowflake) is what checks
-`SYSTEM$STREAM_HAS_DATA()`, not an external poller.
+`WEBHOOK`. It's still Snowflake-side scheduled compute evaluating the
+condition — the trigger matrix is explicit that this "wraps a poll" rather
+than creating genuinely new push capability — and the **same DML-consumption
+requirement from Tier 1 applies here too**: an Alert's condition check is
+read-only, exactly like a `TASK`'s `WHEN` clause, so something still needs to
+consume the stream via DML or the alert keeps firing on a stream that never
+resets. What this path buys over Tier 1 is delivery shape (a webhook hit,
+landing on drt serve's `202` + coalescing contract) — not an exemption from
+the consumption requirement.
 
 ## Choosing a tier
 
@@ -151,6 +187,9 @@ runs into, since the alert's own evaluation (inside Snowflake) is what checks
 - **A push source with no orchestrator in the picture** (GitHub webhook, dbt
   Cloud job completion, a vendor's own webhook)? Tier 3.
 
-None of these require a drt daemon, and none of them lock you in — Tier 1
-and Tier 3 need no new infrastructure at all, and Tier 2 is additive on top
-of an orchestrator you're already running.
+None of these require a drt-owned *watcher*, and none of them lock you in.
+Tier 1 needs no new infrastructure — the warehouse's own scheduler already
+exists. Tier 2 is additive on top of an orchestrator you're already running.
+Tier 3 does need something new to operate: `drt serve` as a resident process
+that stays up to receive requests — lightweight and hardened, but not
+zero-runtime the way Tiers 1 and 2 are.

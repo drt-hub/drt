@@ -110,7 +110,9 @@ defs = Definitions(
 ```
 
 **Supported today: `deltalake` and `iceberg` profiles only** (`DeltaTable.version()`
-/ `current_snapshot().snapshot_id` — both monotonic, side-effect-free reads).
+/ `current_snapshot().snapshot_id` — both side-effect-free reads; only Delta's
+`version()` is monotonic, Iceberg's `snapshot_id` is an opaque unique token
+the sensor compares for equality only, never for ordering).
 Snowflake `STREAM` and SQL Server Change Tracking are **not** wired up here —
 `SYSTEM$STREAM_HAS_DATA()` only resets on DML consumption, which a read-only
 polling sensor never provides, so a cursor-diff sensor built the same way
