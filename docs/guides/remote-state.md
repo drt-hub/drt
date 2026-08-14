@@ -9,20 +9,36 @@ field report recorded in
 consequences: `drt status` is blank in a fresh checkout, `drt retry` cannot see
 yesterday's failures, and a laptop and a runner have separate histories.
 
-Set the project-level `state.backend` to `gcs` or `s3` to put all three
-surfaces in object storage that survives the runner and can be shared by every
-operator using the project — **for `drt` CLI invocations** (`run`, `build`,
-`test`, `validate`, `serve`). The `dagster-drt` resource and the Airflow
-integration's `run_drt_sync()` do not currently route through the
-`SyncObserver`-based persistence path this backend depends on
-(`dagster-drt`'s resource constructs a local-only state manager directly;
-the Airflow runner calls the engine with no observer at all, so persistence
-is a no-op there today regardless of backend) — a Dagster- or
-Airflow-triggered run's state, history, and DLQ stay local-only, or absent,
-until those integrations are wired up separately. If you trigger drt from
-Dagster or Airflow today, use the CLI invocation path (a subprocess or shell
-step calling `drt run`) rather than the native resource/runner if you need
-this feature now.
+Set the project-level `state.backend` to `gcs` or `s3` to put run state and
+the DLQ in object storage that survives the runner and can be shared by every
+operator using the project — for `drt` CLI invocations (`run`, `build`,
+`test`, `validate`, `serve`), the `dagster-drt` resource, and the
+Airflow/Prefect `run_drt_sync()` helper alike. All four now route state and
+watermark persistence through the same `SyncObserver`-based path this backend
+depends on.
+
+That wasn't always true, and the two gaps broke differently — worth knowing
+if you're on a version before the fix landed. `dagster-drt`'s resource
+constructed a local-only state manager directly, so a project configured
+with `state.backend: gcs`/`s3` still wrote to local disk when run through
+Dagster (fixed in dagster-drt's `Unreleased` entry, see its
+[CHANGELOG](https://github.com/drt-hub/drt/blob/main/CHANGELOG.md#unreleased-dagster-drt)).
+The Airflow/Prefect runner's bug was the opposite and easier to miss: it
+*did* resolve the correct backend via `build_state_bundle()`, but never
+wired that store into an observer — `run_sync()` defaults to a silent
+no-op observer whenever one isn't passed — so nothing was ever persisted
+through it, local backend included, not just remote. If your Airflow or
+Prefect state history looks thinner than expected from before this fix,
+that's why; nothing needs migrating, saves just resume from the next run.
+
+**Execution history is a separate mechanism** — `run_sync()`'s
+`history_manager`/`history_retention_days` parameters, appended directly
+inside the engine rather than through an observer — and is currently wired
+correctly only for `drt` CLI invocations and the Airflow/Prefect runner.
+`dagster-drt`'s resource does not pass `history_manager=` yet, so a
+Dagster-triggered run's history stays empty regardless of `state.backend`;
+`drt status`/`drt retry` (state and DLQ) are unaffected, only the `runs`
+history a sync accumulates over time.
 
 ## Quick start
 
