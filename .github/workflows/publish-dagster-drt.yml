@@ -9,8 +9,16 @@ jobs:
   verify:
     # Re-run lint/type/tests against the tagged commit before publishing,
     # so a tag pushed off a stale local can never ship without verification.
-    # Mirrors the .github/workflows/ci.yml `test` job for the primary
-    # Python version; the full matrix runs on PR / push@main / nightly.
+    #
+    # This job's install/lint/test steps below run drt-core's OWN suite
+    # (root pyproject.toml's `testpaths = ["tests"]`) — that's what actually
+    # gets published as a dependency, so it's worth pinning here too, but it
+    # is NOT dagster-drt's own tests. Until this fix, that meant every
+    # dagster-drt release shipped without dagster_drt/ itself ever being
+    # linted, type-checked, or tested by this workflow — ci.yml's
+    # `dagster-drt-test` job (added alongside this fix) now covers that on
+    # every PR; the dedicated step below re-runs it at tag time too, on the
+    # same "verify the exact tagged commit" principle as the drt-core steps.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -34,6 +42,19 @@ jobs:
 
       - name: Test (pytest)
         run: pytest
+
+      - name: Install dagster-drt (editable)
+        run: uv pip install --system -e ./integrations/dagster-drt
+
+      - name: Lint dagster-drt (ruff)
+        run: ruff check integrations/dagster-drt
+
+      - name: Type check dagster-drt (mypy)
+        run: mypy integrations/dagster-drt/dagster_drt
+
+      - name: Test dagster-drt (pytest)
+        working-directory: integrations/dagster-drt
+        run: pytest tests/ -q
 
   publish:
     needs: verify
