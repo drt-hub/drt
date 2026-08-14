@@ -167,11 +167,10 @@ jobs:
       - name: Install uv
         run: pip install uv
 
-      - name: Install drt-core (editable) + dagster-drt
+      - name: Install drt-core (editable, dev extra for ruff/mypy/pytest) + dagster-drt
         run: |
-          uv pip install --system -e .
+          uv pip install --system -e ".[dev]"
           uv pip install --system -e ./integrations/dagster-drt
-          uv pip install --system pytest
 
       - name: Lint (ruff)
         run: ruff check integrations/dagster-drt
