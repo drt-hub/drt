@@ -7,7 +7,58 @@ from pathlib import Path
 import pytest
 import yaml
 
+from drt.config.sync_options import SyncConfig, WatermarkConfig
+from drt.integrations._runner import _watermark_storage
 from drt.integrations.airflow import DrtRunOperator, run_drt_sync
+
+
+def _make_sync(watermark: WatermarkConfig | None) -> SyncConfig:
+    return SyncConfig.model_validate(
+        {
+            "name": "users",
+            "model": "SELECT 1 AS id",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {
+                "mode": "incremental",
+                "cursor_field": "id",
+                "watermark": watermark,
+            },
+        }
+    )
+
+
+class TestWatermarkStorage:
+    """_watermark_storage() branch coverage (#976) — mirrors
+    drt.cli._helpers.get_watermark_storage, duplicated rather than shared
+    per the module's no-typer-import-graph rule."""
+
+    def test_no_watermark_configured_returns_none(self) -> None:
+        assert _watermark_storage(_make_sync(None), Path(".")) is None
+
+    def test_local_storage(self, tmp_path: Path) -> None:
+        from drt.state.watermark import LocalWatermarkStorage
+
+        sync = _make_sync(WatermarkConfig(storage="local"))
+        storage = _watermark_storage(sync, tmp_path)
+        assert isinstance(storage, LocalWatermarkStorage)
+
+    def test_gcs_storage(self) -> None:
+        from drt.state.watermark import GCSWatermarkStorage
+
+        sync = _make_sync(WatermarkConfig(storage="gcs", bucket="b", key="k"))
+        storage = _watermark_storage(sync, Path("."))
+        assert isinstance(storage, GCSWatermarkStorage)
+        assert storage._bucket_name == "b"
+        assert storage._key == "k"
+
+    def test_bigquery_storage(self) -> None:
+        from drt.state.watermark import BigQueryWatermarkStorage
+
+        sync = _make_sync(WatermarkConfig(storage="bigquery", project="p", dataset="d"))
+        storage = _watermark_storage(sync, Path("."))
+        assert isinstance(storage, BigQueryWatermarkStorage)
+        assert storage._project == "p"
+        assert storage._dataset == "d"
 
 
 def test_run_drt_sync_not_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -90,6 +141,56 @@ def test_run_drt_sync_persists_state(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert state is not None, "run_drt_sync() ran the sync but never saved state"
     assert state.status == "success"
     assert state.last_cursor_value == "1"
+
+
+def test_run_drt_sync_wires_dlq_observer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sync with dlq.enabled must get a DlqObserver, not just StatePersistingObserver."""
+    monkeypatch.chdir(tmp_path)
+    creds = tmp_path / "drt_home"
+    creds.mkdir()
+    (creds / "profiles.yml").write_text(
+        yaml.dump({"default": {"type": "duckdb", "database": ":memory:"}})
+    )
+    monkeypatch.setattr(
+        "drt.config.credentials._config_dir",
+        lambda override=None: override or creds,
+    )
+    (tmp_path / "syncs").mkdir()
+    (tmp_path / "drt_project.yml").write_text(
+        yaml.dump({"name": "p", "profile": "default", "version": "1"})
+    )
+    (tmp_path / "syncs" / "users.yml").write_text(
+        yaml.dump(
+            {
+                "name": "users",
+                "model": "SELECT 1 AS id",
+                "destination": {
+                    "type": "file",
+                    "format": "csv",
+                    "path": str(tmp_path / "out.csv"),
+                },
+                "sync": {
+                    "mode": "incremental",
+                    "cursor_field": "id",
+                    "dlq": {"enabled": True},
+                },
+            }
+        )
+    )
+
+    from unittest.mock import patch
+
+    from drt.engine.observer import DlqObserver
+
+    with patch("drt.engine.sync.run_sync") as mock_run_sync:
+        from drt.destinations.base import SyncResult
+
+        mock_run_sync.return_value = SyncResult()
+        run_drt_sync("users", project_dir=str(tmp_path))
+
+    observer = mock_run_sync.call_args.kwargs["observer"]
+    dlq_observers = [o for o in observer._observers if isinstance(o, DlqObserver)]
+    assert len(dlq_observers) == 1
 
 
 def test_drt_run_operator_requires_airflow() -> None:
