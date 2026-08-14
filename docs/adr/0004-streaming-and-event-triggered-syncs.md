@@ -33,6 +33,13 @@
   ordering: none — #756 already blocked Tier 2 on durability grounds alone and
   remains the longer pole; Tier 3 already cleared via #854 above, independent
   of this correction.
+- **Amended:** 2026-08-14 — [#756](https://github.com/drt-hub/drt/issues/756)
+  shipped in [v0.9.0](https://github.com/drt-hub/drt/releases/tag/v0.9.0)
+  (2026-08-11): `state.backend: gcs | s3`, generation/ETag-preconditioned. The
+  Tier 2 gate clears — a sensor process and a CI-launched `drt run` can now
+  share a durable watermark. Tier 2 guidance may be promoted; the #921
+  cross-process rate-limit residual (2026-08-06 amendment above) is unrelated
+  to this gate and remains separately unscheduled.
 - **Issue:** [#786](https://github.com/drt-hub/drt/issues/786)
 - **Implementation:** none — this ADR recommends **not** building a native
   watcher. The work it does sanction is listed under
@@ -140,7 +147,7 @@ rather than loudly, which is the worst failure mode a docs deliverable has.
 
 | Gate | Blocks | Status | Why |
 |---|---|---|---|
-| **#756 remote state** | Tier 2 | Open | `.drt/state.json` is local disk (`drt/state/manager.py:43`). A sensor in an orchestrator and a CI run genuinely cannot share a watermark today. A Tier 2 recommendation shipped before this tells users to build a topology whose two halves silently disagree about what has already synced. Scoped to the object-storage backend per [ADR 0005](0005-state-location-and-write-grants.md) — no warehouse write required to clear this gate. |
+| **#756 remote state** | Tier 2 | **Cleared** by [v0.9.0](https://github.com/drt-hub/drt/releases/tag/v0.9.0) (2026-08-11) | `.drt/state.json` was local disk (`drt/state/manager.py:43`), so a sensor in an orchestrator and a CI run genuinely could not share a watermark. `state.backend: gcs \| s3` now exists, generation/ETag-preconditioned per [ADR 0005](0005-state-location-and-write-grants.md) — no warehouse write required, matching the original gate scope. |
 | **#769 rate limiting v2** | Tier 3 | **Cleared** by [#858](https://github.com/drt-hub/drt/pull/858) | Originally written as blocking Tier 2 *and* Tier 3. #858 shipped both named requirements — the **per-destination `rate_limit` override** and the **shared bucket across threads** — which is the whole scope for Tier 3, since `drt serve` is one long-lived process and the registry lives for the life of the server rather than resetting per run. It does not clear Tier 2: a Dagster sensor yields one `RunRequest` per changed sync and Dagster launches each as its own process, so N changed syncs against one endpoint is still N buckets. That residual does **not** close via #756 — see the 2026-08-06 amendment above — and is tracked separately, unscheduled, as [#921](https://github.com/drt-hub/drt/issues/921). |
 
 **Amendment (2026-07-29), scoping the #769 gate — corrected 2026-08-06, see the
