@@ -115,6 +115,8 @@ def run_drt_sync(
         state_mgr,
         watermark_storage=wm_storage,
         observer=CompositeObserver(observers),
+        history_manager=bundle.history,
+        history_retention_days=project.history.retention_days,
     )
 
     status = "success" if result.failed == 0 else "partial" if result.success > 0 else "failed"

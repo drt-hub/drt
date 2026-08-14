@@ -135,12 +135,20 @@ def test_run_drt_sync_persists_state(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
     assert result["status"] == "success"
 
+    from drt.state.history import LocalHistoryManager
     from drt.state.manager import StateManager
 
     state = StateManager(tmp_path).get_last_sync("users")
     assert state is not None, "run_drt_sync() ran the sync but never saved state"
     assert state.status == "success"
     assert state.last_cursor_value == "1"
+
+    history = LocalHistoryManager(tmp_path).read("users")
+    assert len(history) == 1, (
+        "run_drt_sync() never passed history_manager= to run_sync(), "
+        "so execution history stayed empty (Codex review, #976)"
+    )
+    assert history[0].status == "success"
 
 
 def test_run_drt_sync_wires_dlq_observer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -9,12 +9,13 @@ field report recorded in
 consequences: `drt status` is blank in a fresh checkout, `drt retry` cannot see
 yesterday's failures, and a laptop and a runner have separate histories.
 
-Set the project-level `state.backend` to `gcs` or `s3` to put all three
-surfaces in object storage that survives the runner and can be shared by every
+Set the project-level `state.backend` to `gcs` or `s3` to put run state and
+the DLQ in object storage that survives the runner and can be shared by every
 operator using the project — for `drt` CLI invocations (`run`, `build`,
 `test`, `validate`, `serve`), the `dagster-drt` resource, and the
-Airflow/Prefect `run_drt_sync()` helper alike. All four now route through the
-same `SyncObserver`-based persistence path this backend depends on.
+Airflow/Prefect `run_drt_sync()` helper alike. All four now route state and
+watermark persistence through the same `SyncObserver`-based path this backend
+depends on.
 
 That wasn't always true, and the two gaps broke differently — worth knowing
 if you're on a version before the fix landed. `dagster-drt`'s resource
@@ -29,6 +30,15 @@ no-op observer whenever one isn't passed — so nothing was ever persisted
 through it, local backend included, not just remote. If your Airflow or
 Prefect state history looks thinner than expected from before this fix,
 that's why; nothing needs migrating, saves just resume from the next run.
+
+**Execution history is a separate mechanism** — `run_sync()`'s
+`history_manager`/`history_retention_days` parameters, appended directly
+inside the engine rather than through an observer — and is currently wired
+correctly only for `drt` CLI invocations and the Airflow/Prefect runner.
+`dagster-drt`'s resource does not pass `history_manager=` yet, so a
+Dagster-triggered run's history stays empty regardless of `state.backend`;
+`drt status`/`drt retry` (state and DLQ) are unaffected, only the `runs`
+history a sync accumulates over time.
 
 ## Quick start
 
