@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > `dagster-drt` is published as a separate PyPI package with its own version.
 
+### Unreleased (dagster-drt)
+
+- **Fixed: `DagsterDrtResource.run()` and the legacy `drt_assets_legacy()` path ignored `state.backend`.** Both constructed `StateManager(project_path)` directly instead of going through [#756](https://github.com/drt-hub/drt/issues/756)'s `build_state_bundle()` factory — a project configured with `state.backend: gcs` or `s3` still wrote run state to local disk when executed through dagster-drt, silently defeating the whole point of a remote backend for orchestrator-launched runs. Found while researching [#855](https://github.com/drt-hub/drt/issues/855) (dagster-drt sensors): the sensor's premise — a sensor process and a CI-launched `drt run` sharing durable state — doesn't hold if the execution path itself never picks up the remote backend. Also: `integrations/dagster-drt/tests/` (36 tests) had never run in CI (separate fix, `ci.yml` + `publish-dagster-drt.yml`, no version bump).
+
 ### [0.2.0] - 2026-04-04 (dagster-drt)
 
 - **API alignment with dagster-dbt / dagster-dlt patterns** (#176, #177, #178, #179)

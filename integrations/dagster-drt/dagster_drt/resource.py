@@ -79,7 +79,7 @@ class DagsterDrtResource(ConfigurableResource["DagsterDrtResource"]):
         from drt.config.credentials import load_profile
         from drt.config.parser import load_project, load_syncs
         from drt.engine.sync import run_sync
-        from drt.state.manager import StateManager
+        from drt.state.factory import build_state_bundle
 
         effective_dry_run = dry_run if dry_run is not None else self.dry_run
         project_path = self._resolve_project_dir(context)
@@ -87,7 +87,7 @@ class DagsterDrtResource(ConfigurableResource["DagsterDrtResource"]):
         project = load_project(project_path)
         profile = load_profile(project.profile)
         source = _get_source(profile)
-        state_mgr = StateManager(project_path)
+        state_mgr = build_state_bundle(project, project_path).state
 
         # Build a mapping from sync_name -> SyncConfig.
         all_syncs = {s.name: s for s in load_syncs(project_path)}

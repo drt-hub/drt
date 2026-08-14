@@ -464,7 +464,7 @@ _P_LOAD_PROFILE = "drt.config.credentials.load_profile"
 _P_GET_SOURCE = "drt.cli.main._get_source"
 _P_GET_DEST = "drt.cli.main._get_destination"
 _P_RUN_SYNC = "drt.engine.sync.run_sync"
-_P_STATE_MGR = "drt.state.manager.StateManager"
+_P_BUILD_STATE_BUNDLE = "drt.state.factory.build_state_bundle"
 _P_LOAD_SYNCS = "drt.config.parser.load_syncs"
 
 
@@ -488,7 +488,7 @@ class TestDagsterDrtResourceRun:
             patch(_P_GET_SOURCE),
             patch(_P_GET_DEST),
             patch(_P_RUN_SYNC) as mock_run,
-            patch(_P_STATE_MGR),
+            patch(_P_BUILD_STATE_BUNDLE),
             patch(_P_LOAD_SYNCS) as mock_load_syncs,
         ):
             mock_proj.return_value = MagicMock(profile="local")
@@ -524,7 +524,7 @@ class TestDagsterDrtResourceRun:
             patch(_P_GET_SOURCE),
             patch(_P_GET_DEST),
             patch(_P_RUN_SYNC) as mock_run,
-            patch(_P_STATE_MGR),
+            patch(_P_BUILD_STATE_BUNDLE),
             patch(_P_LOAD_SYNCS) as mock_load_syncs,
         ):
             mock_proj.return_value = MagicMock(profile="local")
@@ -561,7 +561,7 @@ class TestDagsterDrtResourceRun:
             patch(_P_GET_SOURCE),
             patch(_P_GET_DEST),
             patch(_P_RUN_SYNC) as mock_run,
-            patch(_P_STATE_MGR),
+            patch(_P_BUILD_STATE_BUNDLE),
             patch(_P_LOAD_SYNCS) as mock_load_syncs,
         ):
             mock_proj.return_value = MagicMock(profile="local")
@@ -593,7 +593,7 @@ class TestDagsterDrtResourceRun:
             patch(_P_LOAD_PROJECT) as mock_proj,
             patch(_P_LOAD_PROFILE),
             patch(_P_GET_SOURCE),
-            patch(_P_STATE_MGR),
+            patch(_P_BUILD_STATE_BUNDLE),
             patch(_P_LOAD_SYNCS) as mock_load_syncs,
         ):
             mock_proj.return_value = MagicMock(profile="local")
@@ -625,7 +625,7 @@ class TestDagsterDrtResourceRun:
             patch(_P_GET_SOURCE),
             patch(_P_GET_DEST),
             patch(_P_RUN_SYNC) as mock_run,
-            patch(_P_STATE_MGR),
+            patch(_P_BUILD_STATE_BUNDLE),
             patch(_P_LOAD_SYNCS) as mock_load_syncs,
         ):
             mock_proj.return_value = MagicMock(profile="local")
@@ -671,7 +671,7 @@ class TestDagsterDrtResourceRun:
             patch(_P_GET_SOURCE),
             patch(_P_GET_DEST),
             patch(_P_RUN_SYNC) as mock_run,
-            patch(_P_STATE_MGR),
+            patch(_P_BUILD_STATE_BUNDLE),
             patch(_P_LOAD_SYNCS) as mock_load_syncs,
         ):
             mock_proj.return_value = MagicMock(profile="local")
@@ -707,7 +707,7 @@ class TestDagsterDrtResourceRun:
             patch(_P_GET_SOURCE),
             patch(_P_GET_DEST),
             patch(_P_RUN_SYNC) as mock_run,
-            patch(_P_STATE_MGR),
+            patch(_P_BUILD_STATE_BUNDLE),
             patch(_P_LOAD_SYNCS) as mock_load_syncs,
             patch("drt.cli.main._get_watermark_storage") as mock_wm,
         ):

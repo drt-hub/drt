@@ -192,7 +192,7 @@ def drt_assets_legacy(
                 from drt.config.credentials import load_profile
                 from drt.config.parser import load_project
                 from drt.engine.sync import run_sync
-                from drt.state.manager import StateManager
+                from drt.state.factory import build_state_bundle
 
                 effective_dry_run = config.dry_run or _default_dry_run
 
@@ -200,7 +200,7 @@ def drt_assets_legacy(
                 profile = load_profile(project.profile)
                 source = _get_source(profile)
                 destination = _get_destination(_sync_cfg)
-                state_mgr = StateManager(project_path)
+                state_mgr = build_state_bundle(project, project_path).state
 
                 result = run_sync(
                     _sync_cfg,
