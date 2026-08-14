@@ -78,6 +78,12 @@ class DagsterDrtResource(ConfigurableResource["DagsterDrtResource"]):
         from drt.cli.main import _get_destination, _get_source, _get_watermark_storage
         from drt.config.credentials import load_profile
         from drt.config.parser import load_project, load_syncs
+        from drt.engine.observer import (
+            CompositeObserver,
+            DlqObserver,
+            StatePersistingObserver,
+            SyncObserver,
+        )
         from drt.engine.sync import run_sync
         from drt.state.factory import build_state_bundle
 
@@ -87,7 +93,8 @@ class DagsterDrtResource(ConfigurableResource["DagsterDrtResource"]):
         project = load_project(project_path)
         profile = load_profile(project.profile)
         source = _get_source(profile)
-        state_mgr = build_state_bundle(project, project_path).state
+        bundle = build_state_bundle(project, project_path)
+        state_mgr = bundle.state
 
         # Build a mapping from sync_name -> SyncConfig.
         all_syncs = {s.name: s for s in load_syncs(project_path)}
@@ -109,6 +116,22 @@ class DagsterDrtResource(ConfigurableResource["DagsterDrtResource"]):
             destination = _get_destination(sync_config)
             wm_storage = _get_watermark_storage(sync_config, project_path)
 
+            # The engine only persists state/watermark/DLQ through an
+            # observer (AGENTS.md: "state persistence... MUST flow through
+            # SyncObserver") — passing state_manager= alone gets cursor
+            # *reads* but no post-run save, matching drt/cli/commands/run.py's
+            # _build_observer(). No LoggingObserver here: context.log already
+            # gives Dagster-native structured logging for this run.
+            observers: list[SyncObserver] = [StatePersistingObserver(state_mgr, wm_storage)]
+            if (
+                not effective_dry_run
+                and sync_config.sync.dlq is not None
+                and sync_config.sync.dlq.enabled
+            ):
+                observers.append(
+                    DlqObserver(bundle.dlq, max_records=sync_config.sync.dlq.max_records)
+                )
+
             result = run_sync(
                 sync_config,
                 source,
@@ -118,6 +141,7 @@ class DagsterDrtResource(ConfigurableResource["DagsterDrtResource"]):
                 dry_run=effective_dry_run,
                 state_manager=state_mgr,
                 watermark_storage=wm_storage,
+                observer=CompositeObserver(observers),
             )
 
             context.log.info(

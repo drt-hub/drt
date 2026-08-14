@@ -289,6 +289,42 @@ class TestLegacyDrtAssets:
             assets = drt_assets_legacy(project_dir=project, sync_names=["a"])
         assert len(assets) == 1
 
+    def test_execution_wires_state_persisting_observer(self, tmp_path: Path) -> None:
+        """Regression test (legacy execution path, direct asset invocation):
+        the underlying _asset_fn must pass an observer to run_sync(), not
+        just state_manager= — see the equivalent test on
+        TestDagsterDrtResourceRun for why. This path had zero execution
+        coverage before this test (only spec-generation was tested)."""
+        from dagster import build_asset_context
+
+        from drt.engine.observer import StatePersistingObserver
+
+        project = _setup_project(tmp_path)
+        from dagster_drt.assets import DrtConfig, drt_assets_legacy
+
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            assets = drt_assets_legacy(project_dir=project)
+
+        with (
+            patch(_P_LOAD_PROJECT) as mock_proj,
+            patch(_P_LOAD_PROFILE),
+            patch(_P_GET_SOURCE),
+            patch(_P_GET_DEST),
+            patch(_P_RUN_SYNC) as mock_run,
+            patch(_P_BUILD_STATE_BUNDLE) as mock_bundle,
+        ):
+            mock_proj.return_value = MagicMock(profile="local")
+            mock_run.return_value = _FakeSyncResult(success=1)
+            fake_state_store = mock_bundle.return_value.state
+
+            ctx = build_asset_context()
+            assets[0](context=ctx, config=DrtConfig(dry_run=True))
+
+        observer = mock_run.call_args.kwargs["observer"]
+        assert isinstance(observer, StatePersistingObserver)
+        assert observer._state_manager is fake_state_store
+
 
 # ===================================================================
 # DrtConfig
@@ -494,6 +530,7 @@ class TestDagsterDrtResourceRun:
             mock_proj.return_value = MagicMock(profile="local")
             mock_sync = MagicMock()
             mock_sync.name = "test_sync"
+            mock_sync.sync.dlq = None
             mock_load_syncs.return_value = [mock_sync]
             mock_run.return_value = _FakeSyncResult(success=42, failed=1)
 
@@ -503,6 +540,51 @@ class TestDagsterDrtResourceRun:
         assert isinstance(results[0], MaterializeResult)
         assert results[0].metadata["rows_synced"].value == 42
         assert results[0].metadata["rows_failed"].value == 1
+
+    def test_run_wires_state_persisting_observer(self, tmp_path: Path) -> None:
+        """Regression test: run_sync() must receive an observer that actually
+        persists state — passing state_manager= alone gets cursor reads but
+        no post-run save (engine/sync.py defaults to NullObserver otherwise).
+        Caught in review: build_state_bundle() picked the right backend, but
+        nothing wired it into an observer, so nothing was ever saved through
+        either backend."""
+        from drt.engine.observer import CompositeObserver, StatePersistingObserver
+
+        project = _setup_project(tmp_path)
+        from dagster_drt.assets import drt_assets
+        from dagster_drt.resource import DagsterDrtResource
+
+        @drt_assets(project_dir=project)
+        def my_syncs(context, drt: DagsterDrtResource):
+            yield from drt.run(context=context)
+
+        ctx = _make_mock_context(my_syncs)
+        resource = DagsterDrtResource(project_dir=str(project))
+
+        with (
+            patch(_P_LOAD_PROJECT) as mock_proj,
+            patch(_P_LOAD_PROFILE),
+            patch(_P_GET_SOURCE),
+            patch(_P_GET_DEST),
+            patch(_P_RUN_SYNC) as mock_run,
+            patch(_P_BUILD_STATE_BUNDLE) as mock_bundle,
+            patch(_P_LOAD_SYNCS) as mock_load_syncs,
+        ):
+            mock_proj.return_value = MagicMock(profile="local")
+            mock_sync = MagicMock()
+            mock_sync.name = "test_sync"
+            mock_sync.sync.dlq = None
+            mock_load_syncs.return_value = [mock_sync]
+            mock_run.return_value = _FakeSyncResult(success=1)
+            fake_state_store = mock_bundle.return_value.state
+
+            list(resource.run(context=ctx))
+
+        observer = mock_run.call_args.kwargs["observer"]
+        assert isinstance(observer, CompositeObserver)
+        state_observers = [o for o in observer._observers if isinstance(o, StatePersistingObserver)]
+        assert len(state_observers) == 1
+        assert state_observers[0]._state_manager is fake_state_store
 
     def test_run_subset_execution(self, tmp_path: Path) -> None:
         """Resource.run() should only execute syncs for selected asset keys."""
@@ -530,8 +612,10 @@ class TestDagsterDrtResourceRun:
             mock_proj.return_value = MagicMock(profile="local")
             mock_a = MagicMock()
             mock_a.name = "a"
+            mock_a.sync.dlq = None
             mock_b = MagicMock()
             mock_b.name = "b"
+            mock_b.sync.dlq = None
             mock_load_syncs.return_value = [mock_a, mock_b]
             mock_run.return_value = _FakeSyncResult()
 
@@ -567,6 +651,7 @@ class TestDagsterDrtResourceRun:
             mock_proj.return_value = MagicMock(profile="local")
             mock_sync = MagicMock()
             mock_sync.name = "test_sync"
+            mock_sync.sync.dlq = None
             mock_load_syncs.return_value = [mock_sync]
             mock_run.return_value = _FakeSyncResult()
 
@@ -631,6 +716,7 @@ class TestDagsterDrtResourceRun:
             mock_proj.return_value = MagicMock(profile="local")
             mock_sync = MagicMock()
             mock_sync.name = "test_sync"
+            mock_sync.sync.dlq = None
             mock_load_syncs.return_value = [mock_sync]
             mock_run.return_value = _FakeSyncResult()
 
@@ -677,6 +763,7 @@ class TestDagsterDrtResourceRun:
             mock_proj.return_value = MagicMock(profile="local")
             mock_sync = MagicMock()
             mock_sync.name = "test_sync"
+            mock_sync.sync.dlq = None
             mock_load_syncs.return_value = [mock_sync]
             mock_run.return_value = _FakeSyncResult(
                 rows_extracted=100, success=95, failed=5,
@@ -714,6 +801,7 @@ class TestDagsterDrtResourceRun:
             mock_proj.return_value = MagicMock(profile="local")
             mock_sync = MagicMock()
             mock_sync.name = "test_sync"
+            mock_sync.sync.dlq = None
             mock_load_syncs.return_value = [mock_sync]
             mock_run.return_value = _FakeSyncResult()
             mock_wm.return_value = MagicMock()

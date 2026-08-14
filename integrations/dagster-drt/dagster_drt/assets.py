@@ -191,6 +191,7 @@ def drt_assets_legacy(
                 from drt.cli.main import _get_destination, _get_source
                 from drt.config.credentials import load_profile
                 from drt.config.parser import load_project
+                from drt.engine.observer import StatePersistingObserver
                 from drt.engine.sync import run_sync
                 from drt.state.factory import build_state_bundle
 
@@ -202,6 +203,13 @@ def drt_assets_legacy(
                 destination = _get_destination(_sync_cfg)
                 state_mgr = build_state_bundle(project, project_path).state
 
+                # The engine only persists state through an observer
+                # (AGENTS.md: "state persistence... MUST flow through
+                # SyncObserver") — state_manager= alone gets cursor *reads*
+                # but no post-run save. This legacy path has never resolved
+                # a per-sync watermark_storage override (pre-existing, not
+                # part of this fix), so it's None here, matching run_sync()'s
+                # own fallback to state_manager.get_last_sync().
                 result = run_sync(
                     _sync_cfg,
                     source,
@@ -210,6 +218,7 @@ def drt_assets_legacy(
                     project_path,
                     dry_run=effective_dry_run,
                     state_manager=state_mgr,
+                    observer=StatePersistingObserver(state_mgr, None),
                 )
 
                 context.log.info(
