@@ -37,6 +37,7 @@ defs = Definitions(
 | `build_drt_asset_specs()` | Spec-only generation (for Pipes / custom execution) |
 | `DagsterDrtResource` | Execution resource with `.run()` |
 | `DagsterDrtTranslator` | Customise how syncs map to assets |
+| `build_drt_change_sensor()` | Fire a run when the project's source table changes (Delta/Iceberg) |
 | `DrtConfig` | Per-run config (dry-run) from Dagster UI |
 
 ## Features
@@ -84,6 +85,46 @@ DagsterDrtResource(
 - Auto-resolves `project_dir` from `@drt_assets` metadata
 - Filters to `context.selected_asset_keys` for subset execution
 - Supports `dry_run` override per-run: `drt.run(context=ctx, dry_run=True)`
+
+### build_drt_change_sensor (event-driven activation)
+
+Fires a `RunRequest` when the project's source table changes — Tier 2 of
+[ADR 0004](https://github.com/drt-hub/drt/blob/main/docs/adr/0004-streaming-and-event-triggered-syncs.md).
+Polls a cheap, metadata-only change signal and compares it against Dagster's
+own sensor cursor, so no drt-side state is involved in the decision to fire.
+
+```python
+from dagster_drt import build_drt_change_sensor
+
+change_sensor = build_drt_change_sensor(
+    project_dir=".",
+    asset_selection=[my_syncs],   # or job=my_job
+    minimum_interval_seconds=60,
+)
+
+defs = Definitions(
+    assets=[my_syncs],
+    sensors=[change_sensor],
+    resources={"drt": DagsterDrtResource(project_dir=".")},
+)
+```
+
+**Supported today: `deltalake` and `iceberg` profiles only** (`DeltaTable.version()`
+/ `current_snapshot().snapshot_id` — both monotonic, side-effect-free reads).
+Snowflake `STREAM` and SQL Server Change Tracking are **not** wired up here —
+`SYSTEM$STREAM_HAS_DATA()` only resets on DML consumption, which a read-only
+polling sensor never provides, so a cursor-diff sensor built the same way
+would fire once and then latch permanently silent. Use Snowflake's native
+`TASK` scheduling or a `drt serve` webhook behind a Snowflake Alert instead —
+see [`docs/guides/event-driven-syncs.md`](https://github.com/drt-hub/drt/blob/main/docs/guides/event-driven-syncs.md)
+and [#975](https://github.com/drt-hub/drt/issues/975) for the full picture.
+Any other profile type raises `NotImplementedError` at evaluation time — a
+failed sensor tick, not a silent permanent skip.
+
+**Deployment note:** the sensor evaluates inside the Dagster **daemon**
+process, not inside a job run's own container, so the daemon's host needs
+the source profile credentials available (same `~/.drt/profiles.yml` /
+secret-provider-URI lookup `drt run` uses).
 
 ### DagsterDrtTranslator
 

@@ -40,6 +40,30 @@
   share a durable watermark. Tier 2 guidance may be promoted; the #921
   cross-process rate-limit residual (2026-08-06 amendment above) is unrelated
   to this gate and remains separately unscheduled.
+- **Amended:** 2026-08-14 — #855 shipped Delta and Iceberg sensor variants
+  ([#974](https://github.com/drt-hub/drt/pull/974)), **not** the Snowflake
+  `STREAM` variant this ADR's Follow-up issues section originally described.
+  Building it surfaced a fit problem the trigger matrix's "purpose-built
+  signals are designed to be polled cheaply" line (Trigger matrix section
+  above) understated: `SYSTEM$STREAM_HAS_DATA()` is a boolean that only
+  resets when the stream is *consumed* via DML, and a cursor-diff sensor
+  (the shape Delta/Iceberg use, and the only shape #855 built) polling a
+  value nothing in drt's read-only Snowflake extraction path ever consumes
+  would fire once on the first real change and then latch permanently silent
+  — the opposite of event-driven. Making it work would mean either the
+  sensor performing its own throwaway DML purely to reset the flag (a
+  write-grant escalation on a source connection this ADR never scoped, and
+  an [ADR 0005](0005-state-location-and-write-grants.md)-shaped decision on
+  its own), or substituting an unverified alternative signal. Tracked as
+  [#975](https://github.com/drt-hub/drt/issues/975) rather than solved here.
+  Net effect: **Tier 2 promotion is scoped to the sources with a shipped
+  sensor (Delta, Iceberg)** — Snowflake's change-detection story continues to
+  route through Tier 1 (native `TASK` + `WHEN SYSTEM$STREAM_HAS_DATA()`,
+  where DML consumption is a natural side effect of the task's own body) and
+  Tier 3 (`drt serve` behind Snowflake Alerts + `WEBHOOK`, already shipped
+  via #854), both unaffected by this gap. SQL Server Change Tracking was
+  never built and is folded into the same #975 follow-up rather than
+  assumed simpler by default.
 - **Issue:** [#786](https://github.com/drt-hub/drt/issues/786)
 - **Implementation:** none — this ADR recommends **not** building a native
   watcher. The work it does sanction is listed under
@@ -287,14 +311,19 @@ the work it authorised:
    run id instead of holding the request open, and add HMAC signature
    verification alongside the bearer token.
 2. **[#855](https://github.com/drt-hub/drt/issues/855) — `dagster-drt` sensors**
-   (the Tier 2 path). A generic cheap-signal sensor plus Delta/Iceberg version
-   and Snowflake `STREAM` variants, yielding one `RunRequest` per changed sync.
-   The two lakehouse signals are the cheapest first sensors to write: Delta's
-   `version()` is already called in shipped code (`drt/sources/deltalake.py:91`)
-   and Iceberg's snapshot id is reachable from a table drt already loads
-   (`drt/sources/iceberg.py:51-52`). **Blocked by #756.**
+   (the Tier 2 path). **Closed** on the Delta and Iceberg variants
+   ([#974](https://github.com/drt-hub/drt/pull/974)) — a generic cheap-signal
+   sensor (`build_drt_change_sensor()`) plus both lakehouse signals, yielding
+   one `RunRequest` per changed sync. Delta's `version()` is already called in
+   shipped code (`drt/sources/deltalake.py:91`) and Iceberg's snapshot id is
+   reachable from a table drt already loads (`drt/sources/iceberg.py:51-52`).
+   The Snowflake `STREAM` variant this item originally described did not ship
+   — see the 2026-08-14 amendment above — and continues as
+   [#975](https://github.com/drt-hub/drt/issues/975), along with SQL Server
+   Change Tracking, never attempted here.
 3. **[#856](https://github.com/drt-hub/drt/issues/856) — "event-driven syncs"
    guide** covering all three tiers. Tier 1 is documentable now; **Tier 2 is
-   gated on #756**, and **Tier 3 becomes publishable once #854 lands** — its
-   #769 gate cleared with [#858](https://github.com/drt-hub/drt/pull/858), per
-   the amendment above.
+   publishable for Delta/Iceberg** (#855 above), **and for Snowflake/SQL
+   Server routes to Tier 1/Tier 3 instead pending #975**; **Tier 3 is
+   publishable** — #854 landed, its #769 gate cleared with
+   [#858](https://github.com/drt-hub/drt/pull/858), per the amendment above.
