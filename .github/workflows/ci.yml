@@ -145,3 +145,40 @@ jobs:
         with:
           files: coverage.xml
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  dagster-drt-test:
+    # integrations/dagster-drt/tests/ has never run in any CI job: the main
+    # `test` job's `testpaths = ["tests"]` (root pyproject.toml) doesn't reach
+    # it, and publish-dagster-drt.yml's `verify` job runs a bare `pytest` from
+    # the repo root too — it re-runs drt-core's own suite, not this package's.
+    # Found while touching dagster_drt/resource.py (v0.10, #855 prep). No
+    # `paths:` filter on purpose — same reasoning as the top-of-file note on
+    # `pull_request:` having no `branches:` filter (#801): a job that only
+    # sometimes runs is how a real bug hides through five PRs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install drt-core (editable) + dagster-drt
+        run: |
+          uv pip install --system -e .
+          uv pip install --system -e ./integrations/dagster-drt
+          uv pip install --system pytest
+
+      - name: Lint (ruff)
+        run: ruff check integrations/dagster-drt
+
+      - name: Type check (mypy)
+        run: mypy integrations/dagster-drt/dagster_drt
+
+      - name: Test (pytest)
+        working-directory: integrations/dagster-drt
+        run: pytest tests/ -q

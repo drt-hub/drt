@@ -183,11 +183,11 @@ def drt_assets_legacy(
             asset_kwargs["metadata"] = static_metadata
 
         def _make_asset_fn(_sync_cfg: Any, _default_dry_run: bool) -> AssetsDefinition:
-            @asset(**asset_kwargs)
+            @asset(**asset_kwargs)  # type: ignore[untyped-decorator]  # dagster's @asset overloads don't resolve against a dynamically-built dict[str, Any] kwargs unpack
             def _asset_fn(
                 context: AssetExecutionContext,
                 config: DrtConfig,
-            ) -> MaterializeResult:
+            ) -> MaterializeResult[None]:
                 from drt.cli.main import _get_destination, _get_source
                 from drt.config.credentials import load_profile
                 from drt.config.parser import load_project
@@ -232,7 +232,7 @@ def drt_assets_legacy(
                     }
                 )
 
-            return _asset_fn
+            return _asset_fn  # type: ignore[no-any-return]  # same cause as the decorator ignore above
 
         assets_list.append(_make_asset_fn(sync_config, dry_run))
 

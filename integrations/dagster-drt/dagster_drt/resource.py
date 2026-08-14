@@ -20,7 +20,7 @@ from dagster import (
 from dagster_drt.specs import META_KEY_PROJECT_DIR, META_KEY_SYNC_NAME
 
 
-class DagsterDrtResource(ConfigurableResource):
+class DagsterDrtResource(ConfigurableResource["DagsterDrtResource"]):
     """Dagster resource that executes drt syncs.
 
     Usage::
@@ -64,7 +64,7 @@ class DagsterDrtResource(ConfigurableResource):
         self,
         context: AssetExecutionContext,
         dry_run: bool | None = None,
-    ) -> Iterator[MaterializeResult]:
+    ) -> Iterator[MaterializeResult[None]]:
         """Execute drt syncs and yield ``MaterializeResult`` per sync.
 
         Automatically filters to ``context.selected_asset_keys`` when
