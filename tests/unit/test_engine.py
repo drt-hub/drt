@@ -182,6 +182,49 @@ def test_run_sync_saves_state(tmp_path: Path) -> None:
     assert state.records_synced == 1
 
 
+def test_run_sync_dry_run_does_not_persist_state(tmp_path: Path) -> None:
+    """Regression test (#978): drt run --dry-run was writing an advanced
+    cursor + a fake "records_synced" count to state.json even though
+    nothing was sent to the destination — the next real run would then
+    treat previewed-only rows as already synced. Reproduced empirically
+    against the real CLI before this fix; verified here at the engine
+    level via the observer's now-threaded dry_run flag."""
+    from drt.state.manager import StateManager
+
+    sync = SyncConfig.model_validate(
+        {
+            "name": "test_sync",
+            "model": "ref('table')",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {
+                "batch_size": 10,
+                "on_error": "fail",
+                "mode": "incremental",
+                "cursor_field": "id",
+            },
+        }
+    )
+    rows = [{"id": 1}]
+    source = FakeSource(rows)
+    dest = FakeDestination()
+    state_mgr = StateManager(tmp_path)
+
+    result = run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        dry_run=True,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
+
+    assert result.success == 1  # rows were extracted/previewed
+    assert dest.calls == []  # but never sent
+    assert state_mgr.get_last_sync("test_sync") is None  # and nothing persisted
+
+
 # ---------------------------------------------------------------------------
 # incremental sync
 # ---------------------------------------------------------------------------

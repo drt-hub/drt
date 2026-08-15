@@ -122,6 +122,26 @@ def test_state_persisting_observer_writes_state_on_sync_completed(tmp_path: Path
     assert saved.records_synced == 10
 
 
+def test_state_persisting_observer_skips_dry_run(tmp_path: Path) -> None:
+    """Regression test (#978): dry_run=True must skip state AND watermark
+    persistence entirely, not just the cursor value. A dry run extracts (so
+    new_cursor_value reflects rows seen) but never calls destination.load(),
+    so persisting last_run_at/records_synced/cursor here would record a run
+    that never actually happened — the next real run would then see a
+    misleadingly "already synced" state or skip real data via the cursor."""
+    state_mgr = StateManager(tmp_path)
+    wm = MagicMock()
+    obs = StatePersistingObserver(state_mgr, wm)
+    result = SyncResult(success=10, failed=0)
+
+    obs.on_sync_completed(
+        "test_sync", result, "2026-05-24T00:00:00Z", "5", "id", dry_run=True
+    )
+
+    assert state_mgr.get_last_sync("test_sync") is None
+    wm.save.assert_not_called()
+
+
 def test_state_persisting_observer_marks_partial(tmp_path: Path) -> None:
     state_mgr = StateManager(tmp_path)
     obs = StatePersistingObserver(state_mgr, None)
@@ -225,7 +245,9 @@ def test_composite_observer_forwards_every_event_method() -> None:
     child.on_warning.assert_called_once_with("s", "msg")
     child.on_records_failed.assert_called_once_with("s", [])
     child.on_interrupted.assert_called_once_with("s", 4)
-    child.on_sync_completed.assert_called_once_with("s", SyncResult(), "ts", None, None)
+    child.on_sync_completed.assert_called_once_with(
+        "s", SyncResult(), "ts", None, None, dry_run=False
+    )
     child.on_sync_ended.assert_called_once_with("s")
 
 
