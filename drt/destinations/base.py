@@ -46,13 +46,6 @@ class SyncResult:
     # Graceful shutdown (#279) — True if the sync stopped early due to a
     # cooperative cancellation signal (SIGTERM/SIGINT) between batches.
     interrupted: bool = False
-    # True when this run extracted but never called destination.load() (#978).
-    # Populated by run_sync() so a persisting SyncObserver can tell "rows
-    # were seen" (rows_extracted/success still reflect the preview) apart
-    # from "rows were sent" without a SyncObserver Protocol signature change
-    # — every existing/custom SyncObserver implementation keeps working
-    # unmodified; only observers that read this field need to care.
-    dry_run: bool = False
     # Record-level diff (#413) — populated by run_sync when dry_run + diff
     # are both requested. Always None outside that path.
     diff: DiffResult | None = None
@@ -63,6 +56,16 @@ class SyncResult:
     # library caller that never supplied one. See drt._identifiers.
     run_id: str | None = None
     sync_run_id: str | None = None
+    # True when this run extracted but never called destination.load() (#978).
+    # Populated by run_sync() so a persisting SyncObserver can tell "rows
+    # were seen" (rows_extracted/success still reflect the preview) apart
+    # from "rows were sent" without a SyncObserver Protocol signature change
+    # — every existing/custom SyncObserver implementation keeps working
+    # unmodified; only observers that read this field need to care.
+    # Appended after every pre-existing field (not inserted earlier) so a
+    # positional SyncResult(...) construction reaching sync_run_id keeps
+    # every existing positional slot's meaning unchanged (Codex review).
+    dry_run: bool = False
 
     @property
     def total(self) -> int:
