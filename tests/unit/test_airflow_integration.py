@@ -151,6 +151,62 @@ def test_run_drt_sync_persists_state(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert history[0].status == "success"
 
 
+def test_run_drt_sync_honors_history_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: history: {enabled: false} in drt_project.yml must
+    actually suppress history persistence. Caught in Codex review on #981
+    (the identical fix for dagster-drt): this fix passed
+    history_manager=bundle.history unconditionally here too, ignoring the
+    documented opt-out — run_sync() appends history for every non-dry run
+    whenever the manager is non-None. Matches the CLI's own
+    history_mgr = state_bundle.history if history_cfg.enabled else None
+    (drt/cli/commands/run.py:758)."""
+    monkeypatch.chdir(tmp_path)
+    creds = tmp_path / "drt_home"
+    creds.mkdir()
+    (creds / "profiles.yml").write_text(
+        yaml.dump({"default": {"type": "duckdb", "database": ":memory:"}})
+    )
+    monkeypatch.setattr(
+        "drt.config.credentials._config_dir",
+        lambda override=None: override or creds,
+    )
+    (tmp_path / "syncs").mkdir()
+    (tmp_path / "drt_project.yml").write_text(
+        yaml.dump(
+            {
+                "name": "p",
+                "profile": "default",
+                "version": "1",
+                "history": {"enabled": False},
+            }
+        )
+    )
+    (tmp_path / "syncs" / "users.yml").write_text(
+        yaml.dump(
+            {
+                "name": "users",
+                "model": "SELECT 1 AS id",
+                "destination": {
+                    "type": "file",
+                    "format": "csv",
+                    "path": str(tmp_path / "out.csv"),
+                },
+                "sync": {"mode": "incremental", "cursor_field": "id"},
+            }
+        )
+    )
+
+    result = run_drt_sync("users", project_dir=str(tmp_path))
+    assert result["status"] == "success"
+
+    from drt.state.history import LocalHistoryManager
+
+    history = LocalHistoryManager(tmp_path).read("users")
+    assert history == [], "history.enabled: false did not suppress history persistence"
+
+
 def test_run_drt_sync_wires_dlq_observer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A sync with dlq.enabled must get a DlqObserver, not just StatePersistingObserver."""
     monkeypatch.chdir(tmp_path)
