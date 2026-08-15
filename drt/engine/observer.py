@@ -85,8 +85,6 @@ class SyncObserver(Protocol):
         started_at: str,
         new_cursor_value: str | None,
         cursor_field: str | None,
-        *,
-        dry_run: bool = False,
     ) -> None:
         """Called once at the end of ``run_sync`` regardless of success.
 
@@ -94,12 +92,18 @@ class SyncObserver(Protocol):
         final span, or render a summary — without the engine reaching
         for storage itself.
 
-        ``dry_run`` is ``True`` when nothing was actually written to the
-        destination — ``new_cursor_value`` still reflects rows *seen*
+        ``result.dry_run`` is ``True`` when nothing was actually written to
+        the destination — ``new_cursor_value`` still reflects rows *seen*
         during extraction (dry-run previews still extract), not rows
         *sent*. Observers that persist durable state (cursors, run
-        counts, watermarks) MUST no-op when ``dry_run`` is set; observers
-        that only log or render a summary may use it as they see fit.
+        counts, watermarks) MUST no-op when ``result.dry_run`` is set;
+        observers that only log or render a summary may use it as they
+        see fit. Deliberately carried on ``result`` rather than as a
+        separate parameter — every existing/custom ``SyncObserver``
+        implementation keeps working unmodified (#978's original fix
+        added a Protocol parameter; Codex review flagged that as a
+        breaking change for any direct, non-``CompositeObserver`` caller,
+        so this reads from ``result`` instead).
         """
         ...
 
@@ -141,8 +145,6 @@ class NullObserver:
         started_at: str,
         new_cursor_value: str | None,
         cursor_field: str | None,
-        *,
-        dry_run: bool = False,
     ) -> None: ...
     def on_sync_ended(self, sync_name: str) -> None: ...
 
@@ -200,8 +202,6 @@ class LoggingObserver:
         started_at: str,
         new_cursor_value: str | None,
         cursor_field: str | None,
-        *,
-        dry_run: bool = False,
     ) -> None:
         # Pre-refactor engine did not log a "sync done" line at this level
         # (the CLI handled it). Keep parity to avoid double-logging.
@@ -245,14 +245,12 @@ class StatePersistingObserver:
         started_at: str,
         new_cursor_value: str | None,
         cursor_field: str | None,
-        *,
-        dry_run: bool = False,
     ) -> None:
         # A dry run extracts (so new_cursor_value reflects rows *seen*) but
         # never calls destination.load() — persisting here would record a
         # cursor/run/count for data that was only previewed, never sent,
         # and the next real run would then skip it (#978).
-        if dry_run:
+        if result.dry_run:
             return
 
         from drt.state.manager import SyncState
@@ -328,8 +326,6 @@ class CompositeObserver:
         started_at: str,
         new_cursor_value: str | None,
         cursor_field: str | None,
-        *,
-        dry_run: bool = False,
     ) -> None:
         self._broadcast(
             "on_sync_completed",
@@ -338,7 +334,6 @@ class CompositeObserver:
             started_at,
             new_cursor_value,
             cursor_field,
-            dry_run=dry_run,
         )
 
     def on_sync_ended(self, sync_name: str) -> None:
@@ -375,8 +370,6 @@ class DlqObserver:
         started_at: str,
         new_cursor_value: str | None,
         cursor_field: str | None,
-        *,
-        dry_run: bool = False,
     ) -> None: ...
 
     def on_sync_ended(self, sync_name: str) -> None:

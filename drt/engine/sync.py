@@ -301,6 +301,7 @@ def run_sync(
     total_result = SyncResult()
     total_result.run_id = run_id
     total_result.sync_run_id = sync_run_id
+    total_result.dry_run = dry_run
     raised: BaseException | None = None
     tracer = get_tracer()
 
@@ -779,18 +780,13 @@ def _run_sync_body(
 
     # State + watermark persistence is the observer's responsibility (#548).
     # The CLI composes ``LoggingObserver`` + ``StatePersistingObserver`` so
-    # default user-facing behaviour is unchanged. dry_run is threaded through
-    # so a persisting observer can refuse to record a cursor/run for data
-    # that was only previewed, never sent (#978) — new_cursor_value above
-    # reflects rows *seen* during extraction regardless of dry_run, since
-    # extraction itself is not skipped; only destination.load() is.
+    # default user-facing behaviour is unchanged. total_result.dry_run (set
+    # above) lets a persisting observer refuse to record a cursor/run for
+    # data that was only previewed, never sent (#978) — new_cursor_value
+    # above reflects rows *seen* during extraction regardless of dry_run,
+    # since extraction itself is not skipped; only destination.load() is.
     observer.on_sync_completed(
-        sync.name,
-        total_result,
-        started_at,
-        new_cursor_value,
-        cursor_field,
-        dry_run=dry_run,
+        sync.name, total_result, started_at, new_cursor_value, cursor_field
     )
 
     return total_result
