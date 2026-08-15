@@ -33,10 +33,10 @@ that's why; nothing needs migrating, saves just resume from the next run.
 
 **Execution history is a separate mechanism** — `run_sync()`'s
 `history_manager`/`history_retention_days` parameters, appended directly
-inside the engine rather than through an observer — and is currently wired
-correctly only for `drt` CLI invocations and the Airflow/Prefect runner.
-`dagster-drt`'s resource does not pass `history_manager=` yet, so a
-Dagster-triggered run's history stays empty regardless of `state.backend`;
+inside the engine rather than through an observer. All three call paths
+(`drt` CLI invocations, the Airflow/Prefect runner, and `dagster-drt`'s
+resource, fixed in [#980](https://github.com/drt-hub/drt/issues/980)) now
+wire it correctly;
 `drt status`/`drt retry` (state and DLQ) are unaffected, only the `runs`
 history a sync accumulates over time.
 

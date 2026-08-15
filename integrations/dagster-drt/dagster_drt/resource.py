@@ -142,6 +142,8 @@ class DagsterDrtResource(ConfigurableResource["DagsterDrtResource"]):
                 state_manager=state_mgr,
                 watermark_storage=wm_storage,
                 observer=CompositeObserver(observers),
+                history_manager=bundle.history,
+                history_retention_days=project.history.retention_days,
             )
 
             context.log.info(
