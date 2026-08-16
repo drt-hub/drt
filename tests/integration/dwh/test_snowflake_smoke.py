@@ -523,6 +523,103 @@ def test_snowflake_source_empty_result_yields_nothing() -> None:
     assert list(SnowflakeSource().extract("SELECT 1 AS ID WHERE 1 = 0", profile)) == []
 
 
+def test_snowflake_last_change_commit_time_no_change_tracking_required(tmp_path: Path) -> None:
+    """#975 research probe: does SYSTEM$LAST_CHANGE_COMMIT_TIME need
+    CHANGE_TRACKING enabled, and does its value actually increase across a
+    DML op, on a real account?
+
+    The table below deliberately leaves CHANGE_TRACKING at Snowflake's
+    default (off) -- #975 speculated this might be a prerequisite for a
+    dagster-drt Tier-2 sensor signal candidate; this is the direct check.
+    Not a regression test of shipped drt behaviour -- nothing in drt calls
+    this function yet.
+    """
+    creds = _require_creds()
+    table = unique_table("DRT_SMOKE_LCC")
+    fq = f"{creds['DRT_SMOKE_SNOWFLAKE_DATABASE']}.{creds['DRT_SMOKE_SNOWFLAKE_SCHEMA']}.{table}"
+
+    conn = _connect(creds)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"CREATE TABLE {table} (id INTEGER)")
+            cur.execute(f"SELECT SYSTEM$LAST_CHANGE_COMMIT_TIME('{fq}')")
+            before = cur.fetchone()[0]
+            cur.execute(f"INSERT INTO {table} VALUES (1)")
+            cur.execute(f"SELECT SYSTEM$LAST_CHANGE_COMMIT_TIME('{fq}')")
+            after = cur.fetchone()[0]
+    finally:
+        _drop_table(creds, table)
+        conn.close()
+
+    assert before is not None, (
+        "#975: SYSTEM$LAST_CHANGE_COMMIT_TIME returned NULL without CHANGE_TRACKING "
+        "enabled -- it IS a prerequisite after all, contrary to the docs page's silence"
+    )
+    assert after is not None and after > before, (
+        f"#975: value did not increase after an INSERT (before={before}, after={after}) "
+        "-- not usable as a cursor-diff sensor signal"
+    )
+
+
+def test_snowflake_last_change_commit_time_warehouse_requirement(tmp_path: Path) -> None:
+    """#975 research probe: does calling SYSTEM$LAST_CHANGE_COMMIT_TIME require
+    an active virtual warehouse? This is the whole premise for a Tier-2 sensor
+    being "cheap to poll" over Tier 1/Tier 3.
+
+    Opens a session with no ``warehouse=`` specified. If the smoke user has no
+    account-level default, ``CURRENT_WAREHOUSE()`` comes back NULL and the
+    call's success/failure directly answers the question. Skips (does not
+    fail) if this account's smoke user does have a default warehouse --
+    isolating the question then would mean suspending the shared smoke
+    warehouse mid-suite, which is worse than an inconclusive result.
+    """
+    creds = _require_creds()
+    table = unique_table("DRT_SMOKE_LCC_WH")
+    fq = f"{creds['DRT_SMOKE_SNOWFLAKE_DATABASE']}.{creds['DRT_SMOKE_SNOWFLAKE_SCHEMA']}.{table}"
+
+    setup_conn = _connect(creds)
+    try:
+        with setup_conn.cursor() as cur:
+            cur.execute(f"CREATE TABLE {table} (id INTEGER)")
+    finally:
+        setup_conn.close()
+
+    try:
+        auth: dict[str, object] = {}
+        if os.environ.get(KEY_ENV):
+            from drt.config.credentials import load_snowflake_private_key
+
+            auth["private_key"] = load_snowflake_private_key(os.environ[KEY_ENV])
+        else:
+            auth["password"] = os.environ[PASSWORD_ENV]
+        no_wh_conn = snowflake_connector.connect(
+            account=creds[ACCOUNT_ENV],
+            user=creds[USER_ENV],
+            database=creds["DRT_SMOKE_SNOWFLAKE_DATABASE"],
+            schema=creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"],
+            **auth,
+        )
+        try:
+            with no_wh_conn.cursor() as cur:
+                cur.execute("SELECT CURRENT_WAREHOUSE()")
+                active_wh = cur.fetchone()[0]
+                if active_wh is not None:
+                    pytest.skip(
+                        f"#975: smoke user has a default warehouse ({active_wh}) -- "
+                        "cannot isolate the no-warehouse case without suspending "
+                        "shared smoke infra; inconclusive from this account."
+                    )
+                cur.execute(f"SELECT SYSTEM$LAST_CHANGE_COMMIT_TIME('{fq}')")
+                val = cur.fetchone()[0]
+                assert val is not None, (
+                    "#975: call with no active warehouse returned NULL/failed silently"
+                )
+        finally:
+            no_wh_conn.close()
+    finally:
+        _drop_table(creds, table)
+
+
 def test_snowflake_source_abandoned_mid_stream_does_not_hang() -> None:
     """`--limit` / `--fail-fast` stop consuming mid-stream (#775/#774).
 
