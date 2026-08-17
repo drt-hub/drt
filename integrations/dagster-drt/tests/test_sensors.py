@@ -127,6 +127,163 @@ class TestCurrentSignal:
             with pytest.raises(NotImplementedError, match="rest_api"):
                 _current_signal(tmp_path)
 
+    def _mock_snowflake_module(
+        self, monkeypatch: pytest.MonkeyPatch, fetchone_value: object
+    ) -> MagicMock:
+        cursor = MagicMock()
+        cursor.__enter__.return_value = cursor
+        cursor.fetchone.return_value = (fetchone_value,) if fetchone_value is not None else None
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+        connector_mod = MagicMock()
+        connector_mod.connect.return_value = conn
+        snowflake_mod = MagicMock()
+        snowflake_mod.connector = connector_mod
+        monkeypatch.setitem(sys.modules, "snowflake", snowflake_mod)
+        monkeypatch.setitem(sys.modules, "snowflake.connector", connector_mod)
+        return connector_mod
+
+    def test_snowflake_returns_last_change_commit_time(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from dagster_drt.sensors import _current_signal
+
+        from drt.config.credentials import SnowflakeProfile
+
+        connector_mod = self._mock_snowflake_module(monkeypatch, 1723766400123456700)
+
+        with (
+            patch(_P_LOAD_PROJECT) as mock_proj,
+            patch(_P_LOAD_PROFILE) as mock_profile,
+        ):
+            mock_proj.return_value = MagicMock(profile="sf")
+            mock_profile.return_value = SnowflakeProfile(
+                type="snowflake", account="acct", user="u", database="D", schema="S"
+            )
+
+            signal = _current_signal(
+                tmp_path, watch_table="D.S.T", minimum_interval_seconds=60
+            )
+
+        assert signal == "1723766400123456700"
+        connector_mod.connect.assert_called_once()
+
+    def test_snowflake_requires_watch_table(self, tmp_path: Path) -> None:
+        from dagster_drt.sensors import _current_signal
+
+        from drt.config.credentials import SnowflakeProfile
+
+        with (
+            patch(_P_LOAD_PROJECT) as mock_proj,
+            patch(_P_LOAD_PROFILE) as mock_profile,
+        ):
+            mock_proj.return_value = MagicMock(profile="sf")
+            mock_profile.return_value = SnowflakeProfile(type="snowflake", account="acct", user="u")
+
+            with pytest.raises(ValueError, match="watch_table"):
+                _current_signal(tmp_path, minimum_interval_seconds=60)
+
+    def test_snowflake_requires_minimum_interval_seconds(self, tmp_path: Path) -> None:
+        """#975: an unbounded poll cadence on a Snowflake profile pins its
+        warehouse continuously resumed (AUTO_RESUME billing) — this must be
+        an explicit choice, not a silent default."""
+        from dagster_drt.sensors import _current_signal
+
+        from drt.config.credentials import SnowflakeProfile
+
+        with (
+            patch(_P_LOAD_PROJECT) as mock_proj,
+            patch(_P_LOAD_PROFILE) as mock_profile,
+        ):
+            mock_proj.return_value = MagicMock(profile="sf")
+            mock_profile.return_value = SnowflakeProfile(type="snowflake", account="acct", user="u")
+
+            with pytest.raises(ValueError, match="minimum_interval_seconds"):
+                _current_signal(tmp_path, watch_table="D.S.T")
+
+    def test_snowflake_null_signal_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A NULL from SYSTEM$LAST_CHANGE_COMMIT_TIME must not coalesce to a
+        fake baseline — that would repeat the STREAM_HAS_DATA failure mode
+        #855 was filed to avoid: fire once, then go permanently silent."""
+        from dagster_drt.sensors import _current_signal
+
+        from drt.config.credentials import SnowflakeProfile
+
+        self._mock_snowflake_module(monkeypatch, None)
+
+        with (
+            patch(_P_LOAD_PROJECT) as mock_proj,
+            patch(_P_LOAD_PROFILE) as mock_profile,
+        ):
+            mock_proj.return_value = MagicMock(profile="sf")
+            mock_profile.return_value = SnowflakeProfile(
+                type="snowflake", account="acct", user="u", database="D", schema="S"
+            )
+
+            with pytest.raises(ValueError, match="NULL"):
+                _current_signal(tmp_path, watch_table="D.S.T", minimum_interval_seconds=60)
+
+    def _mock_pymssql_module(
+        self, monkeypatch: pytest.MonkeyPatch, fetchone_value: object
+    ) -> MagicMock:
+        cursor = MagicMock()
+        cursor.__enter__.return_value = cursor
+        cursor.fetchone.return_value = (fetchone_value,) if fetchone_value is not None else None
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+        pymssql_mod = MagicMock()
+        pymssql_mod.connect.return_value = conn
+        monkeypatch.setitem(sys.modules, "pymssql", pymssql_mod)
+        return pymssql_mod
+
+    def test_sqlserver_returns_current_version(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from dagster_drt.sensors import _current_signal
+
+        from drt.config.credentials import SQLServerProfile
+
+        pymssql_mod = self._mock_pymssql_module(monkeypatch, 42)
+
+        with (
+            patch(_P_LOAD_PROJECT) as mock_proj,
+            patch(_P_LOAD_PROFILE) as mock_profile,
+        ):
+            mock_proj.return_value = MagicMock(profile="mssql")
+            mock_profile.return_value = SQLServerProfile(
+                type="sqlserver", host="h", database="D", user="u"
+            )
+
+            signal = _current_signal(tmp_path)
+
+        assert signal == "42"
+        pymssql_mod.connect.assert_called_once()
+
+    def test_sqlserver_null_signal_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """NULL means change tracking isn't enabled on the database — a
+        permanent config error, not something to coalesce and poll forever."""
+        from dagster_drt.sensors import _current_signal
+
+        from drt.config.credentials import SQLServerProfile
+
+        self._mock_pymssql_module(monkeypatch, None)
+
+        with (
+            patch(_P_LOAD_PROJECT) as mock_proj,
+            patch(_P_LOAD_PROFILE) as mock_profile,
+        ):
+            mock_proj.return_value = MagicMock(profile="mssql")
+            mock_profile.return_value = SQLServerProfile(
+                type="sqlserver", host="h", database="D", user="u"
+            )
+
+            with pytest.raises(ValueError, match="NULL"):
+                _current_signal(tmp_path)
+
 
 # ===================================================================
 # build_drt_change_sensor() — evaluation behaviour
@@ -224,3 +381,37 @@ class TestBuildDrtChangeSensor:
 
             with pytest.raises(NotImplementedError, match="nope"):
                 sensor_def(ctx)
+
+    def test_value_error_propagates(self, tmp_path: Path) -> None:
+        """A ValueError (missing watch_table=, missing
+        minimum_interval_seconds=, or a NULL signal) is a permanent config
+        error just like NotImplementedError — must fail the tick, not
+        silently skip forever (#975)."""
+        from dagster_drt.sensors import build_drt_change_sensor
+
+        with patch(_P_CURRENT_SIGNAL, side_effect=ValueError("bad config")):
+            sensor_def = build_drt_change_sensor(project_dir=tmp_path, job=_dummy_job)
+            ctx = build_sensor_context(cursor="3")
+
+            with pytest.raises(ValueError, match="bad config"):
+                sensor_def(ctx)
+
+    def test_watch_table_and_interval_forwarded_to_current_signal(self, tmp_path: Path) -> None:
+        """build_drt_change_sensor's watch_table= and minimum_interval_seconds=
+        must actually reach _current_signal — otherwise the Snowflake
+        required-args checks can never be satisfied through the public API."""
+        from dagster_drt.sensors import build_drt_change_sensor
+
+        with patch(_P_CURRENT_SIGNAL, return_value="1") as mock_signal:
+            sensor_def = build_drt_change_sensor(
+                project_dir=tmp_path,
+                job=_dummy_job,
+                watch_table="D.S.T",
+                minimum_interval_seconds=60,
+            )
+            ctx = build_sensor_context(cursor=None)
+            sensor_def(ctx)
+
+        mock_signal.assert_called_once_with(
+            tmp_path, watch_table="D.S.T", minimum_interval_seconds=60
+        )

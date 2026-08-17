@@ -176,6 +176,27 @@ fixed ceiling).
 [alerts](https://docs.snowflake.com/en/user-guide/alerts) ·
 [Snowpipe Streaming](https://docs.snowflake.com/en/user-guide/snowpipe-streaming/data-load-snowpipe-streaming-overview)*
 
+**2026-08-17 addendum (#975):** the above analysis is about `STREAM` +
+`SYSTEM$STREAM_HAS_DATA()`, and its conclusion stands unchanged for Tier 1
+(the `TASK` `WHEN`-clause pattern) — that's still the right signal there.
+It's *not*, however, the signal `dagster-drt`'s Tier 2 sensor
+(`build_drt_change_sensor()`) ended up using for Snowflake. A stream's
+`HAS_DATA` flag only resets via DML consumption, which a read-only polling
+sensor structurally can't provide (see #855/#856's findings, and the ADR
+0004 amendment) — that part of this section was and remains correct, and is
+exactly why Tier 2 needed a different function rather than reusing this one.
+`SYSTEM$LAST_CHANGE_COMMIT_TIME('<table>')` is that different function:
+verified against a real account to be monotonic, side-effect-free, with no
+`CHANGE_TRACKING`-style prerequisite and no consumption semantics at all —
+a plain read, closer in shape to Delta's `version()` than to this section's
+`STREAM`. Its own cost caveat is real but different from the one above: it
+reuses the calling profile's `warehouse=` like an ordinary query, so an
+`AUTO_RESUME=TRUE` warehouse (the default) is billed to resume it on a poll
+exactly like any other query — whether the *specific* query this function
+issues requires an already-active warehouse (as opposed to triggering that
+auto-resume) was not conclusively verified; see #975 for the residual gap.
+*Source: [SYSTEM$LAST_CHANGE_COMMIT_TIME](https://docs.snowflake.com/en/sql-reference/functions/system_last_change_commit_time)*
+
 ### BigQuery
 
 **Preferred: poll the `APPENDS()` table-valued function, cursored on

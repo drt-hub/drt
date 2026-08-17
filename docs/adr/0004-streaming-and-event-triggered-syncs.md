@@ -64,6 +64,25 @@
   via #854), both unaffected by this gap. SQL Server Change Tracking was
   never built and is folded into the same #975 follow-up rather than
   assumed simpler by default.
+- **Amended:** 2026-08-17 — #975 closed the gap the amendment above
+  describes, **without retracting its finding**: `STREAM` +
+  `SYSTEM$STREAM_HAS_DATA()` remains the wrong signal for Tier 2, for
+  exactly the consumption-semantics reason given above. What #975 found
+  instead is a *different* function neither this ADR nor the trigger matrix
+  had considered: `SYSTEM$LAST_CHANGE_COMMIT_TIME('<table>')`, verified
+  against a real account to be monotonic and side-effect-free with no
+  stream, no consumption trap, and no `CHANGE_TRACKING`-style prerequisite.
+  SQL Server's `CHANGE_TRACKING_CURRENT_VERSION()` — already this ADR's
+  Tier 1 recommendation, per the trigger matrix's SQL Server section — was
+  verified to fit the same cursor-diff shape directly, no substitution
+  needed. Both now ship in `build_drt_change_sensor()`
+  ([#983](https://github.com/drt-hub/drt/pull/983) and the sensor PR that
+  followed it). **Tier 2 promotion now covers all four sources this ADR
+  named as candidates** (Delta, Iceberg, Snowflake, SQL Server) — Snowflake
+  carries a real, ongoing compute-cost caveat the other three don't (its
+  signal query bills the profile's `warehouse=` like any other query), so
+  Tier 1/Tier 3 remain the better default for it; SQL Server has no such
+  caveat and is a straightforward Tier 2 addition.
 - **Issue:** [#786](https://github.com/drt-hub/drt/issues/786)
 - **Implementation:** none — this ADR recommends **not** building a native
   watcher. The work it does sanction is listed under
@@ -318,12 +337,13 @@ the work it authorised:
    shipped code (`drt/sources/deltalake.py:91`) and Iceberg's snapshot id is
    reachable from a table drt already loads (`drt/sources/iceberg.py:51-52`).
    The Snowflake `STREAM` variant this item originally described did not ship
-   — see the 2026-08-14 amendment above — and continues as
-   [#975](https://github.com/drt-hub/drt/issues/975), along with SQL Server
-   Change Tracking, never attempted here.
+   — see the 2026-08-14 amendment above — and its replacement, plus SQL
+   Server, shipped instead via #975 and the 2026-08-17 amendment above
+   (`SYSTEM$LAST_CHANGE_COMMIT_TIME` / `CHANGE_TRACKING_CURRENT_VERSION()`).
 3. **[#856](https://github.com/drt-hub/drt/issues/856) — "event-driven syncs"
    guide** covering all three tiers. Tier 1 is documentable now; **Tier 2 is
-   publishable for Delta/Iceberg** (#855 above), **and for Snowflake/SQL
-   Server routes to Tier 1/Tier 3 instead pending #975**; **Tier 3 is
+   publishable for all four sources** (Delta/Iceberg via #855, Snowflake/SQL
+   Server via #975 and the 2026-08-17 amendment above — Snowflake's
+   compute-cost caveat is documented, not a reason to omit it); **Tier 3 is
    publishable** — #854 landed, its #769 gate cleared with
    [#858](https://github.com/drt-hub/drt/pull/858), per the amendment above.

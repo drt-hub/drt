@@ -8,7 +8,7 @@ answers that with three tiers, in the order to reach for them:
 | Tier | What triggers drt | Best for | Status |
 |---|---|---|---|
 | **1. Warehouse-native scheduling** | The warehouse's own scheduler (a cron job, a `TASK`) calling `drt run` or [`drt-action`](https://github.com/drt-hub/drt-action) | 1–15 minute freshness, zero drt-side runtime | Ships today, every source |
-| **2. Dagster sensors** | `dagster-drt`'s `build_drt_change_sensor()` polling a cheap change signal | Teams already running Dagster | Ships today — **Delta Lake and Iceberg only** |
+| **2. Dagster sensors** | `dagster-drt`'s `build_drt_change_sensor()` polling a cheap change signal | Teams already running Dagster | Ships today — Delta Lake, Iceberg, Snowflake, SQL Server |
 | **3. Hardened `drt serve`** | A push source (webhook, Snowflake Alert, Pub/Sub) hitting drt's HTTP endpoint | Genuine push sources, sub-minute | Ships today |
 
 None of these is a *drt-owned* watcher process — drt itself never runs as a
@@ -48,9 +48,11 @@ task body only invokes `drt run` via an external function or webhook and
 never touches the stream with DML, nothing consumes it: `SYSTEM$STREAM_HAS_DATA()`
 stays `TRUE` forever after the first real change, and the task keeps firing
 — and its warehouse keeps spinning — indefinitely, whether or not anything
-new has actually changed since the last run. This is the exact same trap
-that blocks Tier 2 (see below), and it applies here just as much: give the
-task body an explicit DML consumer, e.g. `INSERT INTO
+new has actually changed since the last run. This is the same
+`STREAM_HAS_DATA()` consumption trap that ruled `STREAM` out as Tier 2's
+Snowflake signal (see below — Tier 2 uses a different function that doesn't
+have this problem), and it applies here just as much: give the task body an
+explicit DML consumer, e.g. `INSERT INTO
 <a_tracking_table> SELECT * FROM <stream>` alongside (or instead of) the
 `drt run` invocation, so the stream's offset actually advances. A task that
 only ever reads the stream through `WHEN`/`SYSTEM$STREAM_HAS_DATA()` without
@@ -85,42 +87,75 @@ defs = Definitions(
 )
 ```
 
-### Supported sources: Delta Lake and Iceberg only
+For a Snowflake profile, `watch_table=` and `minimum_interval_seconds=` are
+both required (see the cost note below):
 
-`build_drt_change_sensor()` supports **`deltalake`** (`DeltaTable.version()`,
-a monotonically increasing integer) and **`iceberg`** (`current_snapshot().snapshot_id`)
-profiles. The sensor only ever compares the two most recent values for
-*equality*, never for ordering, so it works with either shape: Delta's
-version number is genuinely monotonic, while Iceberg's `snapshot_id` is an
-opaque, generated identifier — unique per snapshot but not ordered (Iceberg's
-own monotonic field is `sequence_number`; `snapshot_id` can also move to an
-*older* snapshot on a table rollback). Either way, "did the value I see now
-differ from the value I saw last time" is the only property the sensor
-relies on, with no side effects on the read.
+```python
+change_sensor = build_drt_change_sensor(
+    project_dir=".",
+    asset_selection=[my_syncs],
+    watch_table="MY_DB.MY_SCHEMA.MY_TABLE",
+    minimum_interval_seconds=300,  # a deliberate choice, not a default
+)
+```
 
-**Snowflake and SQL Server are not supported here**, and this isn't a gap
-waiting on a follow-up PR to close the same way — building it surfaced a
-real mismatch. Snowflake's `SYSTEM$STREAM_HAS_DATA()` is a boolean that only
-resets when the underlying stream is *consumed* via a DML transaction; plain
-querying never advances it. drt's Snowflake extraction is read-only SELECT,
-so nothing in a Tier 2 sensor's poll loop would ever consume the stream —
-the boolean would flip `false → true` on the first real change and then
-**latch permanently `true`**, so a cursor-diff sensor built the same way as
-Delta/Iceberg would fire exactly once, ever, and then go silently quiet even
-as real changes kept accumulating. Making the sensor consume the stream
-itself (a throwaway DML statement purely to reset the flag) would mean
-granting a normally read-only source connection write access — a decision
-this ADR never scoped and one [ADR 0005](../adr/0005-state-location-and-write-grants.md)
-would need to weigh in on first. SQL Server Change Tracking has its own
-retention/versioning semantics that weren't verified against the same
-cursor-diff shape either. Both are tracked in
-[#975](https://github.com/drt-hub/drt/issues/975) rather than assumed away.
-**Use Tier 1 or Tier 3 for Snowflake and SQL Server today.**
+### Supported sources: Delta Lake, Iceberg, Snowflake, SQL Server
+
+`build_drt_change_sensor()` supports four profile types, each reading a
+cheap, metadata-only signal and comparing the two most recent values for
+*equality* only — never ordering, so an opaque-but-unique identifier works
+exactly as well as a genuinely monotonic counter:
+
+- **`deltalake`** — `DeltaTable.version()`, a monotonically increasing integer.
+- **`iceberg`** — `current_snapshot().snapshot_id`, an opaque, generated
+  identifier — unique per snapshot but not ordered (Iceberg's own monotonic
+  field is `sequence_number`; `snapshot_id` can move to an *older* snapshot
+  on a table rollback).
+- **`snowflake`** — `SYSTEM$LAST_CHANGE_COMMIT_TIME('<table>')`. Requires
+  `watch_table=` (fully-qualified table name) **and**
+  `minimum_interval_seconds=` on `build_drt_change_sensor()` — see the cost
+  note below.
+- **`sqlserver`** — `CHANGE_TRACKING_CURRENT_VERSION()`. Database-scoped, so
+  it fires on *any* tracked table's change, not only the one a given sync
+  targets — coarser than the other three, but not unsafe: an extra
+  sensor-triggered run just finds nothing new to sync. Requires
+  `CHANGE_TRACKING` enabled on the database (raises `ValueError` at
+  evaluation time otherwise, naming the likely cause rather than silently
+  returning a dead signal).
+
+Snowflake and SQL Server were originally ruled out here (see the ADR 0004
+amendment) because the trigger matrix's *recommended* signals for
+both — `STREAM` + `SYSTEM$STREAM_HAS_DATA()`, and an earlier unverified
+assumption about SQL Server's retention semantics — turned out not to fit a
+cursor-diff sensor: a stream's `HAS_DATA` boolean only resets when
+*consumed* via DML, which drt's read-only extraction never does, so it would
+flip `false → true` once and then latch permanently `true` — the sensor
+would fire exactly once, ever, and then go silently quiet even as real
+changes kept accumulating. `SYSTEM$LAST_CHANGE_COMMIT_TIME` and
+`CHANGE_TRACKING_CURRENT_VERSION()` are different functions with no such
+consumption semantics — verified against real accounts in
+[#975](https://github.com/drt-hub/drt/issues/975), which is why they're
+supported here instead.
+
+**Snowflake's poll has a real, ongoing compute cost that the other three
+don't.** The signal query reuses the profile's `warehouse=` exactly like an
+ordinary sync, and Snowflake auto-resumes a suspended warehouse for *any*
+query when `AUTO_RESUME=TRUE` (the default), billing at least one minimum
+increment. Without a deliberate poll interval, Dagster's default tick
+cadence would keep the warehouse continuously resumed — `minimum_interval_seconds=`
+is a required argument for a Snowflake profile precisely so this is a choice
+you make, not a default you inherit. Weigh it against Tier 1 (`TASK`,
+warehouse-native and already scheduled) and Tier 3 (`drt serve`, no
+per-poll compute) before reaching for Tier 2 here. Whether the query itself
+requires an *active* warehouse (versus a suspended one that auto-resumes) is
+still unconfirmed — see #975's open items — so budget for the cautious case.
 
 Calling `build_drt_change_sensor()` against any other profile type raises
 `NotImplementedError` at evaluation time — a failed sensor tick in the
 Dagster UI, not a silent permanent skip, so a misconfiguration is visible
-rather than quietly inert.
+rather than quietly inert. A supported profile missing a required argument
+(Snowflake's `watch_table=`/`minimum_interval_seconds=`) or returning an
+unusable signal (`NULL`) raises `ValueError` the same way.
 
 ### Deployment note: the sensor process needs the source profile
 
@@ -178,12 +213,14 @@ the consumption requirement.
 - **Already fresh enough with a schedule?** Stay on Tier 1. It's zero
   drt-side runtime and covers most "fresh enough" requirements (1–15
   minutes).
-- **Running Dagster, and the source is Delta Lake or Iceberg?** Tier 2 —
-  `build_drt_change_sensor()` gives genuine event-driven activation for
-  free, reusing plumbing you already have.
-- **Running Dagster, but the source is Snowflake or SQL Server?** Tier 1
-  (native `TASK`) or Tier 3 (Alert + webhook) — not Tier 2. See
-  [#975](https://github.com/drt-hub/drt/issues/975) if this changes.
+- **Running Dagster, and the source is Delta Lake, Iceberg, or SQL Server?**
+  Tier 2 — `build_drt_change_sensor()` gives genuine event-driven activation
+  for free (no per-poll compute cost), reusing plumbing you already have.
+- **Running Dagster, and the source is Snowflake?** Tier 2 works
+  (`watch_table=` + `minimum_interval_seconds=` required), but it has a real
+  per-poll compute cost the others don't — compare against Tier 1 (native
+  `TASK`, already warehouse-scheduled) and Tier 3 (Alert + webhook, no
+  per-poll cost) before choosing it.
 - **A push source with no orchestrator in the picture** (GitHub webhook, dbt
   Cloud job completion, a vendor's own webhook)? Tier 3.
 

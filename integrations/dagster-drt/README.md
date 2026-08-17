@@ -37,7 +37,7 @@ defs = Definitions(
 | `build_drt_asset_specs()` | Spec-only generation (for Pipes / custom execution) |
 | `DagsterDrtResource` | Execution resource with `.run()` |
 | `DagsterDrtTranslator` | Customise how syncs map to assets |
-| `build_drt_change_sensor()` | Fire a run when the project's source table changes (Delta/Iceberg) |
+| `build_drt_change_sensor()` | Fire a run when the project's source table changes (Delta/Iceberg/Snowflake/SQL Server) |
 | `DrtConfig` | Per-run config (dry-run) from Dagster UI |
 
 ## Features
@@ -109,19 +109,42 @@ defs = Definitions(
 )
 ```
 
-**Supported today: `deltalake` and `iceberg` profiles only** (`DeltaTable.version()`
-/ `current_snapshot().snapshot_id` — both side-effect-free reads; only Delta's
-`version()` is monotonic, Iceberg's `snapshot_id` is an opaque unique token
-the sensor compares for equality only, never for ordering).
-Snowflake `STREAM` and SQL Server Change Tracking are **not** wired up here —
-`SYSTEM$STREAM_HAS_DATA()` only resets on DML consumption, which a read-only
-polling sensor never provides, so a cursor-diff sensor built the same way
-would fire once and then latch permanently silent. Use Snowflake's native
-`TASK` scheduling or a `drt serve` webhook behind a Snowflake Alert instead —
-see [`docs/guides/event-driven-syncs.md`](https://github.com/drt-hub/drt/blob/main/docs/guides/event-driven-syncs.md)
-and [#975](https://github.com/drt-hub/drt/issues/975) for the full picture.
-Any other profile type raises `NotImplementedError` at evaluation time — a
-failed sensor tick, not a silent permanent skip.
+**Supported: `deltalake`, `iceberg`, `snowflake`, `sqlserver` profiles**
+(`DeltaTable.version()` / `current_snapshot().snapshot_id` /
+`SYSTEM$LAST_CHANGE_COMMIT_TIME('<table>')` / `CHANGE_TRACKING_CURRENT_VERSION()`
+— all side-effect-free reads compared for equality only, never ordering, so
+an opaque unique token works as well as a genuinely monotonic counter).
+`STREAM` + `SYSTEM$STREAM_HAS_DATA()` was Snowflake's originally-proposed
+signal and is **not** what's used here — it only resets on DML consumption,
+which a read-only polling sensor never provides, so a cursor-diff sensor
+built around it would fire once and then latch permanently silent.
+`SYSTEM$LAST_CHANGE_COMMIT_TIME` doesn't have that problem (verified against
+a real account, [#975](https://github.com/drt-hub/drt/issues/975)), which is
+why it's the one wired up instead — but it does carry a real, ongoing
+compute cost the other three don't (it reuses the profile's `warehouse=`,
+and Snowflake auto-resumes a suspended warehouse for any query by default).
+A Snowflake profile requires two extra arguments: `watch_table=` (a
+`SnowflakeProfile` has no single table of its own, unlike Delta/Iceberg) and
+`minimum_interval_seconds=` (a deliberate poll-cadence choice rather than
+inheriting Dagster's default, given the compute cost above):
+
+```python
+change_sensor = build_drt_change_sensor(
+    project_dir=".",
+    asset_selection=[my_syncs],
+    watch_table="MY_DB.MY_SCHEMA.MY_TABLE",
+    minimum_interval_seconds=300,
+)
+```
+
+SQL Server's signal is database-scoped, not table-scoped, so it fires on any
+tracked table's change — coarser than the other three but not unsafe (an
+extra triggered run just finds nothing new). See
+[`docs/guides/event-driven-syncs.md`](https://github.com/drt-hub/drt/blob/main/docs/guides/event-driven-syncs.md)
+for the full picture. Any other profile type raises `NotImplementedError` at
+evaluation time; a supported profile missing a required argument or
+returning a `NULL` signal raises `ValueError` — both are failed sensor
+ticks, not a silent permanent skip.
 
 **Deployment note:** the sensor evaluates inside the Dagster **daemon**
 process, not inside a job run's own container, so the daemon's host needs
