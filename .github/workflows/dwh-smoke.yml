@@ -65,7 +65,7 @@ jobs:
         run: uv pip install --system -e ".[dev,duckdb,snowflake]"
       - name: Run Snowflake smoke
         if: steps.creds.outputs.has_creds == 'true'
-        run: pytest -m dwh_smoke tests/integration/dwh/test_snowflake_smoke.py -v
+        run: pytest -m dwh_smoke tests/integration/dwh/test_snowflake_smoke.py -v -rs
 
   databricks:
     name: Databricks smoke
