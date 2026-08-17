@@ -156,7 +156,13 @@ you make, not a default you inherit. Weigh it against Tier 1 (`TASK`,
 warehouse-native and already scheduled) and Tier 3 (`drt serve`, no
 per-poll compute) before reaching for Tier 2 here. Whether the query itself
 requires an *active* warehouse (versus a suspended one that auto-resumes) is
-still unconfirmed — see #975's open items — so budget for the cautious case.
+deliberately left unconfirmed rather than assumed: a live test exists
+(`tests/integration/dwh/test_snowflake_smoke.py::test_snowflake_last_change_commit_time_warehouse_requirement`)
+that suspends the smoke warehouse and checks whether the call resumes it,
+but the smoke role lacks `OPERATE` privilege on the warehouse to run it —
+that's a standing, deliberate limit on what the CI credential can touch,
+not an oversight. The conservative assumption (budget for the cautious
+case) stands on purpose rather than by omission.
 
 Calling `build_drt_change_sensor()` against any other profile type raises
 `NotImplementedError` at evaluation time — a failed sensor tick in the

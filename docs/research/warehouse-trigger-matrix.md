@@ -194,7 +194,13 @@ reuses the calling profile's `warehouse=` like an ordinary query, so an
 `AUTO_RESUME=TRUE` warehouse (the default) is billed to resume it on a poll
 exactly like any other query — whether the *specific* query this function
 issues requires an already-active warehouse (as opposed to triggering that
-auto-resume) was not conclusively verified; see #975 for the residual gap.
+auto-resume) remains unconfirmed by design, not by omission: a live test
+(`tests/integration/dwh/test_snowflake_smoke.py::test_snowflake_last_change_commit_time_warehouse_requirement`)
+exists to answer it by deliberately suspending the smoke warehouse, but the
+smoke role lacks `OPERATE` privilege to do so — widening that credential's
+capability from data access to infrastructure control for this one data
+point wasn't judged worth it, since the answer doesn't change the
+documented posture (budget for the cautious case) either way.
 *Source: [SYSTEM$LAST_CHANGE_COMMIT_TIME](https://docs.snowflake.com/en/sql-reference/functions/system_last_change_commit_time)*
 
 ### BigQuery
