@@ -616,18 +616,35 @@ def test_snowflake_last_change_commit_time_warehouse_requirement(tmp_path: Path)
             # undo it (Codex review round 2, #985). A net-zero round trip
             # (toggle and toggle back) proves the capability both ways
             # without any lasting side effect, before the real probe runs.
+            toggled, toggled_back = (
+                ("RESUME", "SUSPEND") if original_state == "SUSPENDED" else ("SUSPEND", "RESUME")
+            )
+            first_op_done = False
             try:
-                if original_state == "SUSPENDED":
-                    cur.execute(f"ALTER WAREHOUSE {wh} RESUME")
-                    cur.execute(f"ALTER WAREHOUSE {wh} SUSPEND")
-                else:
-                    cur.execute(f"ALTER WAREHOUSE {wh} SUSPEND")
-                    cur.execute(f"ALTER WAREHOUSE {wh} RESUME")
+                cur.execute(f"ALTER WAREHOUSE {wh} {toggled}")
+                first_op_done = True
+                cur.execute(f"ALTER WAREHOUSE {wh} {toggled_back}")
             except Exception as exc:
+                restore_note = ""
+                # The first toggle succeeded but the second (undoing it)
+                # didn't -- warehouse is now opposite original_state.
+                # Best-effort restore before skipping (Codex review round
+                # 3, #985); if this ALSO fails, that's surfaced in the skip
+                # message rather than silently swallowed, since we're
+                # already reporting a failure and a second exception here
+                # would just mask the first with a confusing traceback.
+                if first_op_done:
+                    try:
+                        cur.execute(f"ALTER WAREHOUSE {wh} {toggled_back}")
+                    except Exception as restore_exc:
+                        restore_note = (
+                            f" (restore attempt ALSO failed: {restore_exc} -- "
+                            f"MANUAL CHECK NEEDED for warehouse {wh})"
+                        )
                 pytest.skip(
-                    f"#975: smoke role lacks OPERATE on warehouse {wh} ({exc}) -- "
-                    "verified via a net-zero round trip before running the probe; "
-                    "inconclusive from this account."
+                    f"#975: smoke role lacks OPERATE on warehouse {wh} ({exc})"
+                    f"{restore_note} -- verified via a net-zero round trip before "
+                    "running the probe; inconclusive from this account."
                 )
 
             def _restore_original_state() -> None:
@@ -654,15 +671,16 @@ def test_snowflake_last_change_commit_time_warehouse_requirement(tmp_path: Path)
                 cur.execute(f"ALTER WAREHOUSE {wh} SUSPEND")
 
             try:
-                try:
-                    cur.execute(f"SELECT SYSTEM$LAST_CHANGE_COMMIT_TIME('{fq}')")
-                except Exception as exc:
-                    pytest.skip(
-                        f"#975 FINDING: SYSTEM$LAST_CHANGE_COMMIT_TIME raised while "
-                        f"the warehouse was SUSPENDED ({exc}) -- the call DOES "
-                        "require an active warehouse, and AUTO_RESUME did not (or "
-                        "could not) bring it up transparently. Confirmed live."
-                    )
+                # Deliberately not caught here: an exception at this specific
+                # call *would* be a real finding ("requires an active
+                # warehouse and AUTO_RESUME couldn't/didn't help"), but
+                # without a verified Snowflake error signature to match on,
+                # blanket-catching this risks misclassifying an unrelated
+                # failure (a network blip, an auth hiccup, a genuinely
+                # invalid object) as a confirmed research conclusion (Codex
+                # review round 3, #985) -- better to fail loudly with the
+                # real error than manufacture an unverified finding.
+                cur.execute(f"SELECT SYSTEM$LAST_CHANGE_COMMIT_TIME('{fq}')")
                 val = cur.fetchone()[0]
                 assert val is not None, (
                     "#975: call while warehouse was suspended returned NULL"

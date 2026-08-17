@@ -33,6 +33,16 @@ jobs:
     name: Snowflake smoke
     runs-on: ubuntu-latest
     if: github.repository == 'drt-hub/drt'
+    # Serializes overlapping runs (nightly cron + manual workflow_dispatch)
+    # against the shared smoke warehouse -- the warehouse-requirement probe
+    # in test_snowflake_smoke.py deliberately SUSPENDs/RESUMEs it, and a
+    # concurrent run's queries could race with that state manipulation,
+    # producing a false finding or clobbering the other run's restore
+    # (Codex review, #985). cancel-in-progress: false queues rather than
+    # kills an in-flight run, which is safer than cancelling mid-ALTER.
+    concurrency:
+      group: dwh-smoke-snowflake
+      cancel-in-progress: false
     env:
       DRT_SMOKE_SNOWFLAKE_ACCOUNT: ${{ secrets.SMOKE_SNOWFLAKE_ACCOUNT }}
       DRT_SMOKE_SNOWFLAKE_USER: ${{ secrets.SMOKE_SNOWFLAKE_USER }}
