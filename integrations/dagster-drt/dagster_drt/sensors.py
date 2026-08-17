@@ -197,11 +197,18 @@ def _current_signal(
         sf_conn = snowflake.connector.connect(**connect_args)
         try:
             with sf_conn.cursor() as cur:
-                # Literal interpolation, not a bind parameter: watch_table is
-                # sensor-construction config the developer wrote in their own
-                # Python, never external/user input — and this is the exact
-                # form verified live against a real account (#975).
-                cur.execute(f"SELECT SYSTEM$LAST_CHANGE_COMMIT_TIME('{watch_table}')")
+                # Quote-escaped literal, not a bind parameter: SYSTEM$ calls
+                # take a literal string argument, and this exact
+                # single-quoted-literal shape is what was verified live
+                # against a real account (#975). Doubling an embedded `'` is
+                # standard SQL string-literal escaping — without it, a valid
+                # quoted Snowflake identifier containing an apostrophe (legal
+                # in a quoted identifier) would break the query outright, and
+                # Codex review flagged the unescaped form as an injection
+                # risk too (#984) even though watch_table is developer-
+                # supplied config, not external input.
+                escaped_table = watch_table.replace("'", "''")
+                cur.execute(f"SELECT SYSTEM$LAST_CHANGE_COMMIT_TIME('{escaped_table}')")
                 sf_row = cur.fetchone()
                 sf_value = sf_row[0] if sf_row is not None else None
         finally:

@@ -168,6 +168,39 @@ class TestCurrentSignal:
         assert signal == "1723766400123456700"
         connector_mod.connect.assert_called_once()
 
+    def test_snowflake_watch_table_apostrophe_is_escaped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex review (#984): a quoted Snowflake identifier can legally
+        contain an apostrophe (e.g. "My Db"."My Schema"."O'Brien"). Unescaped
+        literal interpolation would break the query string outright — this
+        checks the executed SQL actually doubles the embedded quote rather
+        than passing it through raw."""
+        from dagster_drt.sensors import _current_signal
+
+        from drt.config.credentials import SnowflakeProfile
+
+        connector_mod = self._mock_snowflake_module(monkeypatch, 1)
+
+        with (
+            patch(_P_LOAD_PROJECT) as mock_proj,
+            patch(_P_LOAD_PROFILE) as mock_profile,
+        ):
+            mock_proj.return_value = MagicMock(profile="sf")
+            mock_profile.return_value = SnowflakeProfile(
+                type="snowflake", account="acct", user="u", database="D", schema="S"
+            )
+
+            _current_signal(
+                tmp_path, watch_table="D.S.\"O'Brien\"", minimum_interval_seconds=60
+            )
+
+        cursor = connector_mod.connect.return_value.cursor.return_value
+        executed_sql = cursor.execute.call_args[0][0]
+        assert executed_sql == (
+            "SELECT SYSTEM$LAST_CHANGE_COMMIT_TIME('D.S.\"O''Brien\"')"
+        )
+
     def test_snowflake_requires_watch_table(self, tmp_path: Path) -> None:
         from dagster_drt.sensors import _current_signal
 
