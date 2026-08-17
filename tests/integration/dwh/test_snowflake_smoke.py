@@ -594,81 +594,68 @@ def test_snowflake_last_change_commit_time_warehouse_requirement(tmp_path: Path)
     table = unique_table("DRT_SMOKE_LCC_WH")
     fq = f"{creds['DRT_SMOKE_SNOWFLAKE_DATABASE']}.{creds['DRT_SMOKE_SNOWFLAKE_SCHEMA']}.{table}"
 
-    def _warehouse_state(cur: Any) -> str:
+    def _is_suspended(cur: Any) -> bool:
         cur.execute(f"SHOW WAREHOUSES LIKE '{wh}'")  # noqa: S608 -- test-only, fixed LIKE pattern from env config
         columns = [d[0] for d in cur.description]
         row = dict(zip(columns, cur.fetchone(), strict=True))
-        return str(row["state"])
+        return str(row["state"]) == "SUSPENDED"
+
+    def _ensure_suspended(cur: Any, should_be_suspended: bool) -> None:
+        """Idempotent: query the *actual* current state and only issue an
+        ALTER if it doesn't already match. Never trust in-memory bookkeeping
+        about which ALTER calls the client thinks succeeded -- Snowflake can
+        apply a statement server-side even if the client-side acknowledgment
+        is lost to a timeout, so "my execute() raised" does not reliably
+        mean "nothing changed" (Codex review round 4, #985). Re-checking the
+        real state before every state-changing decision makes this correct
+        regardless of that ambiguity. Boolean rather than a state-string
+        comparison on purpose: "SUSPENDED" is the only literal this file
+        verifies against a real account -- the non-suspended state's exact
+        string (STARTED? RUNNING?) was never confirmed, so branching on
+        equality against a guessed value would be exactly the kind of
+        unverified assumption this investigation exists to avoid.
+        """
+        if _is_suspended(cur) == should_be_suspended:
+            return
+        cur.execute(f"ALTER WAREHOUSE {wh} {'SUSPEND' if should_be_suspended else 'RESUME'}")
 
     conn = _connect(creds)
     try:
         with conn.cursor() as cur:
             cur.execute(f"CREATE TABLE {table} (id INTEGER)")
 
-            original_state = _warehouse_state(cur)
+            was_suspended = _is_suspended(cur)
 
             # Verify OPERATE *before* doing anything state-changing, and do
-            # it regardless of original_state -- checking only when the
-            # warehouse starts RUNNING (the old version of this test) missed
-            # the normal nightly case: a warehouse that starts SUSPENDED
-            # never gets this check at all, so if the probe below triggers
-            # an auto-resume, a role without OPERATE would have no way to
-            # undo it (Codex review round 2, #985). A net-zero round trip
-            # (toggle and toggle back) proves the capability both ways
+            # it regardless of the starting state -- checking only when the
+            # warehouse starts RUNNING (an earlier version of this test)
+            # missed the normal nightly case: a warehouse that starts
+            # SUSPENDED never gets this check at all, so if the probe below
+            # triggers an auto-resume, a role without OPERATE would have no
+            # way to undo it (Codex review round 2, #985). A net-zero round
+            # trip (toggle and toggle back) proves the capability both ways
             # without any lasting side effect, before the real probe runs.
-            toggled, toggled_back = (
-                ("RESUME", "SUSPEND") if original_state == "SUSPENDED" else ("SUSPEND", "RESUME")
-            )
-            first_op_done = False
+            # _ensure_suspended re-checks real state before and after every
+            # call, so a lost acknowledgment can't leave this ambiguous.
             try:
-                cur.execute(f"ALTER WAREHOUSE {wh} {toggled}")
-                first_op_done = True
-                cur.execute(f"ALTER WAREHOUSE {wh} {toggled_back}")
+                _ensure_suspended(cur, not was_suspended)
+                _ensure_suspended(cur, was_suspended)
             except Exception as exc:
                 restore_note = ""
-                # The first toggle succeeded but the second (undoing it)
-                # didn't -- warehouse is now opposite original_state.
-                # Best-effort restore before skipping (Codex review round
-                # 3, #985); if this ALSO fails, that's surfaced in the skip
-                # message rather than silently swallowed, since we're
-                # already reporting a failure and a second exception here
-                # would just mask the first with a confusing traceback.
-                if first_op_done:
-                    try:
-                        cur.execute(f"ALTER WAREHOUSE {wh} {toggled_back}")
-                    except Exception as restore_exc:
-                        restore_note = (
-                            f" (restore attempt ALSO failed: {restore_exc} -- "
-                            f"MANUAL CHECK NEEDED for warehouse {wh})"
-                        )
+                try:
+                    _ensure_suspended(cur, was_suspended)
+                except Exception as restore_exc:
+                    restore_note = (
+                        f" (restore attempt ALSO failed: {restore_exc} -- "
+                        f"MANUAL CHECK NEEDED for warehouse {wh})"
+                    )
                 pytest.skip(
                     f"#975: smoke role lacks OPERATE on warehouse {wh} ({exc})"
                     f"{restore_note} -- verified via a net-zero round trip before "
                     "running the probe; inconclusive from this account."
                 )
 
-            def _restore_original_state() -> None:
-                # Symmetric restore, not just "undo a SUSPEND I issued": the
-                # SYSTEM$ call itself might auto-resume a warehouse that
-                # started SUSPENDED (the exact "costly" outcome under test),
-                # and that must be re-suspended too, not just left running
-                # and billing until Snowflake's own auto-suspend eventually
-                # kicks in. Not swallowed on failure (unlike an earlier
-                # version of this fix) -- the round trip above already
-                # confirmed OPERATE works both ways, so a failure here now
-                # is a genuine surprise worth a loud test failure demanding
-                # manual intervention, not a silent pass leaving shared
-                # compute running and billing (Codex review round 2, #985).
-                current = _warehouse_state(cur)
-                if current == original_state:
-                    return
-                if original_state == "SUSPENDED":
-                    cur.execute(f"ALTER WAREHOUSE {wh} SUSPEND")
-                else:
-                    cur.execute(f"ALTER WAREHOUSE {wh} RESUME")
-
-            if original_state != "SUSPENDED":
-                cur.execute(f"ALTER WAREHOUSE {wh} SUSPEND")
+            _ensure_suspended(cur, True)
 
             try:
                 # Deliberately not caught here: an exception at this specific
@@ -686,8 +673,7 @@ def test_snowflake_last_change_commit_time_warehouse_requirement(tmp_path: Path)
                     "#975: call while warehouse was suspended returned NULL"
                 )
 
-                after_state = _warehouse_state(cur)
-                if after_state == "SUSPENDED":
+                if _is_suspended(cur):
                     pytest.skip(
                         "#975 FINDING: warehouse stayed SUSPENDED after "
                         "SYSTEM$LAST_CHANGE_COMMIT_TIME -- the call is metadata-only "
@@ -695,13 +681,18 @@ def test_snowflake_last_change_commit_time_warehouse_requirement(tmp_path: Path)
                     )
                 else:
                     pytest.skip(
-                        f"#975 FINDING: warehouse state became {after_state!r} after "
-                        "SYSTEM$LAST_CHANGE_COMMIT_TIME (was SUSPENDED before the "
+                        "#975 FINDING: warehouse is no longer SUSPENDED after "
+                        "SYSTEM$LAST_CHANGE_COMMIT_TIME (it was SUSPENDED before the "
                         "call) -- Snowflake auto-resumed it, so the call has the "
                         "same compute cost as an ordinary query. Confirmed live."
                     )
             finally:
-                _restore_original_state()
+                # Not swallowed on failure -- the round trip above already
+                # confirmed OPERATE works both ways, so a failure here now
+                # is a genuine surprise worth a loud test failure demanding
+                # manual intervention, not a silent pass leaving shared
+                # compute running and billing (Codex review round 2, #985).
+                _ensure_suspended(cur, was_suspended)
     finally:
         conn.close()
         _drop_table(creds, table)
