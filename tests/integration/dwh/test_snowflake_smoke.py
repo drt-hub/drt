@@ -575,11 +575,19 @@ def test_snowflake_last_change_commit_time_warehouse_requirement(tmp_path: Path)
     metadata-only and never touched warehouse compute (like ``SHOW
     STREAMS``, confirmed in the trigger matrix research to not need one);
     if Snowflake auto-resumed it, the call has the same compute cost as an
-    ordinary query. Explicitly resumes the warehouse back to its prior state
-    afterward regardless of outcome -- this is shared smoke infrastructure.
-    Skips (does not fail) if this account's smoke role lacks OPERATE
-    privilege on the warehouse, since suspending it is then not possible at
-    all rather than merely inconclusive.
+    ordinary query.
+
+    OPERATE is verified up front via a net-zero round trip (toggle the
+    warehouse's state and immediately toggle it back) regardless of which
+    state it starts in -- not just when it starts RUNNING, which would miss
+    the normal nightly case (a warehouse that's SUSPENDED between smoke
+    runs) and could otherwise leave an auto-resumed warehouse stuck running,
+    with no way to undo it, for a role that never had permission to fix it.
+    Skips (does not fail) if that round trip fails. Once past it, restoring
+    the warehouse to its original state after the real probe is expected to
+    succeed and is *not* swallowed on failure -- a failure there despite the
+    upfront check passing is a genuine surprise worth a loud test failure
+    over a shared resource silently left running and billing.
     """
     creds = _require_creds()
     wh = creds["DRT_SMOKE_SNOWFLAKE_WAREHOUSE"]
@@ -599,33 +607,51 @@ def test_snowflake_last_change_commit_time_warehouse_requirement(tmp_path: Path)
 
             original_state = _warehouse_state(cur)
 
+            # Verify OPERATE *before* doing anything state-changing, and do
+            # it regardless of original_state -- checking only when the
+            # warehouse starts RUNNING (the old version of this test) missed
+            # the normal nightly case: a warehouse that starts SUSPENDED
+            # never gets this check at all, so if the probe below triggers
+            # an auto-resume, a role without OPERATE would have no way to
+            # undo it (Codex review round 2, #985). A net-zero round trip
+            # (toggle and toggle back) proves the capability both ways
+            # without any lasting side effect, before the real probe runs.
+            try:
+                if original_state == "SUSPENDED":
+                    cur.execute(f"ALTER WAREHOUSE {wh} RESUME")
+                    cur.execute(f"ALTER WAREHOUSE {wh} SUSPEND")
+                else:
+                    cur.execute(f"ALTER WAREHOUSE {wh} SUSPEND")
+                    cur.execute(f"ALTER WAREHOUSE {wh} RESUME")
+            except Exception as exc:
+                pytest.skip(
+                    f"#975: smoke role lacks OPERATE on warehouse {wh} ({exc}) -- "
+                    "verified via a net-zero round trip before running the probe; "
+                    "inconclusive from this account."
+                )
+
             def _restore_original_state() -> None:
                 # Symmetric restore, not just "undo a SUSPEND I issued": the
                 # SYSTEM$ call itself might auto-resume a warehouse that
                 # started SUSPENDED (the exact "costly" outcome under test),
                 # and that must be re-suspended too, not just left running
                 # and billing until Snowflake's own auto-suspend eventually
-                # kicks in (Codex review, #985).
+                # kicks in. Not swallowed on failure (unlike an earlier
+                # version of this fix) -- the round trip above already
+                # confirmed OPERATE works both ways, so a failure here now
+                # is a genuine surprise worth a loud test failure demanding
+                # manual intervention, not a silent pass leaving shared
+                # compute running and billing (Codex review round 2, #985).
                 current = _warehouse_state(cur)
                 if current == original_state:
                     return
-                try:
-                    if original_state == "SUSPENDED":
-                        cur.execute(f"ALTER WAREHOUSE {wh} SUSPEND")
-                    else:
-                        cur.execute(f"ALTER WAREHOUSE {wh} RESUME")
-                except Exception:
-                    pass  # best-effort restore; never mask the test's own outcome
+                if original_state == "SUSPENDED":
+                    cur.execute(f"ALTER WAREHOUSE {wh} SUSPEND")
+                else:
+                    cur.execute(f"ALTER WAREHOUSE {wh} RESUME")
 
             if original_state != "SUSPENDED":
-                try:
-                    cur.execute(f"ALTER WAREHOUSE {wh} SUSPEND")
-                except Exception as exc:
-                    pytest.skip(
-                        f"#975: cannot SUSPEND warehouse {wh} ({exc}) -- likely "
-                        "missing OPERATE privilege on this smoke role; inconclusive "
-                        "from this account."
-                    )
+                cur.execute(f"ALTER WAREHOUSE {wh} SUSPEND")
 
             try:
                 try:
