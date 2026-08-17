@@ -598,11 +598,28 @@ def test_snowflake_last_change_commit_time_warehouse_requirement(tmp_path: Path)
             cur.execute(f"CREATE TABLE {table} (id INTEGER)")
 
             original_state = _warehouse_state(cur)
-            suspended_by_this_test = False
+
+            def _restore_original_state() -> None:
+                # Symmetric restore, not just "undo a SUSPEND I issued": the
+                # SYSTEM$ call itself might auto-resume a warehouse that
+                # started SUSPENDED (the exact "costly" outcome under test),
+                # and that must be re-suspended too, not just left running
+                # and billing until Snowflake's own auto-suspend eventually
+                # kicks in (Codex review, #985).
+                current = _warehouse_state(cur)
+                if current == original_state:
+                    return
+                try:
+                    if original_state == "SUSPENDED":
+                        cur.execute(f"ALTER WAREHOUSE {wh} SUSPEND")
+                    else:
+                        cur.execute(f"ALTER WAREHOUSE {wh} RESUME")
+                except Exception:
+                    pass  # best-effort restore; never mask the test's own outcome
+
             if original_state != "SUSPENDED":
                 try:
                     cur.execute(f"ALTER WAREHOUSE {wh} SUSPEND")
-                    suspended_by_this_test = True
                 except Exception as exc:
                     pytest.skip(
                         f"#975: cannot SUSPEND warehouse {wh} ({exc}) -- likely "
@@ -640,9 +657,9 @@ def test_snowflake_last_change_commit_time_warehouse_requirement(tmp_path: Path)
                         "same compute cost as an ordinary query. Confirmed live."
                     )
             finally:
-                if suspended_by_this_test:
-                    cur.execute(f"ALTER WAREHOUSE {wh} RESUME")
+                _restore_original_state()
     finally:
+        conn.close()
         _drop_table(creds, table)
 
 
