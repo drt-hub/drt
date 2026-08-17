@@ -226,11 +226,22 @@ class TestCurrentSignal:
                 _current_signal(tmp_path, watch_table="D.S.T", minimum_interval_seconds=60)
 
     def _mock_pymssql_module(
-        self, monkeypatch: pytest.MonkeyPatch, fetchone_value: object
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        min_valid_version: object = 1,
+        current_version: object = 42,
     ) -> MagicMock:
+        """min_valid_version is CHANGE_TRACKING_MIN_VALID_VERSION's result
+        (checked first, per-table); current_version is
+        CHANGE_TRACKING_CURRENT_VERSION's result (checked second, database-
+        wide) — the two queries the sqlserver branch issues, in order."""
         cursor = MagicMock()
         cursor.__enter__.return_value = cursor
-        cursor.fetchone.return_value = (fetchone_value,) if fetchone_value is not None else None
+        cursor.fetchone.side_effect = [
+            (min_valid_version,) if min_valid_version is not None else None,
+            (current_version,) if current_version is not None else None,
+        ]
         conn = MagicMock()
         conn.cursor.return_value = cursor
         pymssql_mod = MagicMock()
@@ -245,7 +256,7 @@ class TestCurrentSignal:
 
         from drt.config.credentials import SQLServerProfile
 
-        pymssql_mod = self._mock_pymssql_module(monkeypatch, 42)
+        pymssql_mod = self._mock_pymssql_module(monkeypatch, current_version=42)
 
         with (
             patch(_P_LOAD_PROJECT) as mock_proj,
@@ -256,21 +267,68 @@ class TestCurrentSignal:
                 type="sqlserver", host="h", database="D", user="u"
             )
 
-            signal = _current_signal(tmp_path)
+            signal = _current_signal(tmp_path, watch_table="dbo.T")
 
         assert signal == "42"
         pymssql_mod.connect.assert_called_once()
 
-    def test_sqlserver_null_signal_raises(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """NULL means change tracking isn't enabled on the database — a
-        permanent config error, not something to coalesce and poll forever."""
+    def test_sqlserver_requires_watch_table(self, tmp_path: Path) -> None:
+        """Codex review (#984): CHANGE_TRACKING_CURRENT_VERSION() alone can't
+        tell whether the specific table a sync reads is tracked — a database-
+        level-only enablement would otherwise silently never advance for that
+        table. watch_table= is what lets that be validated."""
         from dagster_drt.sensors import _current_signal
 
         from drt.config.credentials import SQLServerProfile
 
-        self._mock_pymssql_module(monkeypatch, None)
+        with (
+            patch(_P_LOAD_PROJECT) as mock_proj,
+            patch(_P_LOAD_PROFILE) as mock_profile,
+        ):
+            mock_proj.return_value = MagicMock(profile="mssql")
+            mock_profile.return_value = SQLServerProfile(
+                type="sqlserver", host="h", database="D", user="u"
+            )
+
+            with pytest.raises(ValueError, match="watch_table"):
+                _current_signal(tmp_path)
+
+    def test_sqlserver_watch_table_not_tracked_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A NULL from CHANGE_TRACKING_MIN_VALID_VERSION means watch_table
+        itself was never table-level enabled, even if the database has
+        Change Tracking on overall — must raise, not silently poll a signal
+        that will never reflect this table's changes (Codex review, #984)."""
+        from dagster_drt.sensors import _current_signal
+
+        from drt.config.credentials import SQLServerProfile
+
+        self._mock_pymssql_module(monkeypatch, min_valid_version=None)
+
+        with (
+            patch(_P_LOAD_PROJECT) as mock_proj,
+            patch(_P_LOAD_PROFILE) as mock_profile,
+        ):
+            mock_proj.return_value = MagicMock(profile="mssql")
+            mock_profile.return_value = SQLServerProfile(
+                type="sqlserver", host="h", database="D", user="u"
+            )
+
+            with pytest.raises(ValueError, match="CHANGE_TRACKING_MIN_VALID_VERSION"):
+                _current_signal(tmp_path, watch_table="dbo.T")
+
+    def test_sqlserver_null_signal_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """NULL from CHANGE_TRACKING_CURRENT_VERSION means change tracking
+        isn't enabled on the database at all — a permanent config error, not
+        something to coalesce and poll forever."""
+        from dagster_drt.sensors import _current_signal
+
+        from drt.config.credentials import SQLServerProfile
+
+        self._mock_pymssql_module(monkeypatch, current_version=None)
 
         with (
             patch(_P_LOAD_PROJECT) as mock_proj,
@@ -282,7 +340,7 @@ class TestCurrentSignal:
             )
 
             with pytest.raises(ValueError, match="NULL"):
-                _current_signal(tmp_path)
+                _current_signal(tmp_path, watch_table="dbo.T")
 
 
 # ===================================================================
@@ -380,6 +438,21 @@ class TestBuildDrtChangeSensor:
             ctx = build_sensor_context(cursor="3")
 
             with pytest.raises(NotImplementedError, match="nope"):
+                sensor_def(ctx)
+
+    def test_import_error_propagates(self, tmp_path: Path) -> None:
+        """A missing optional driver (deltalake/pyiceberg/snowflake-connector
+        -python/pymssql) is a permanent deploy-config error, not something a
+        later tick would fix — catching it as transient would leave the
+        sensor skipping forever, indistinguishable from a working sensor
+        that just hasn't seen a change yet (Codex review, #984)."""
+        from dagster_drt.sensors import build_drt_change_sensor
+
+        with patch(_P_CURRENT_SIGNAL, side_effect=ModuleNotFoundError("no snowflake")):
+            sensor_def = build_drt_change_sensor(project_dir=tmp_path, job=_dummy_job)
+            ctx = build_sensor_context(cursor="3")
+
+            with pytest.raises(ImportError, match="no snowflake"):
                 sensor_def(ctx)
 
     def test_value_error_propagates(self, tmp_path: Path) -> None:

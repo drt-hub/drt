@@ -115,13 +115,21 @@ exactly as well as a genuinely monotonic counter:
   `watch_table=` (fully-qualified table name) **and**
   `minimum_interval_seconds=` on `build_drt_change_sensor()` — see the cost
   note below.
-- **`sqlserver`** — `CHANGE_TRACKING_CURRENT_VERSION()`. Database-scoped, so
-  it fires on *any* tracked table's change, not only the one a given sync
-  targets — coarser than the other three, but not unsafe: an extra
-  sensor-triggered run just finds nothing new to sync. Requires
-  `CHANGE_TRACKING` enabled on the database (raises `ValueError` at
-  evaluation time otherwise, naming the likely cause rather than silently
-  returning a dead signal).
+- **`sqlserver`** — `CHANGE_TRACKING_CURRENT_VERSION()`. The polled signal
+  itself is database-scoped, so it fires on *any* tracked table's change,
+  not only the one a given sync targets — coarser than the other three, but
+  not unsafe: an extra sensor-triggered run just finds nothing new to sync.
+  Also requires `watch_table=`, used only to *validate* that the specific
+  table is itself change-tracked (`CHANGE_TRACKING_MIN_VALID_VERSION`) —
+  without it, a database with `CHANGE_TRACKING` enabled overall but the
+  target table never separately enabled (`ALTER TABLE ... ENABLE
+  CHANGE_TRACKING` is its own opt-in on top of the database-level one) would
+  silently never see that table's changes, since the database-wide version
+  keeps advancing from *other* tracked tables regardless. Caught in Codex
+  review before this shipped. Raises `ValueError` at evaluation time for
+  either failure mode — an untracked `watch_table` or `CHANGE_TRACKING` not
+  enabled at all — naming the likely cause rather than silently returning a
+  dead signal.
 
 Snowflake and SQL Server were originally ruled out here (see the ADR 0004
 amendment) because the trigger matrix's *recommended* signals for
@@ -154,8 +162,12 @@ Calling `build_drt_change_sensor()` against any other profile type raises
 `NotImplementedError` at evaluation time — a failed sensor tick in the
 Dagster UI, not a silent permanent skip, so a misconfiguration is visible
 rather than quietly inert. A supported profile missing a required argument
-(Snowflake's `watch_table=`/`minimum_interval_seconds=`) or returning an
-unusable signal (`NULL`) raises `ValueError` the same way.
+(`watch_table=` for Snowflake/SQL Server, plus `minimum_interval_seconds=`
+for Snowflake) or returning an unusable signal (`NULL`) raises `ValueError`
+the same way. A missing optional driver (`snowflake-connector-python`,
+`pymssql`, `deltalake`, `pyiceberg` — none of them are in dagster-drt's base
+install) raises `ImportError`, also propagated rather than treated as a
+transient, retry-worthy skip.
 
 ### Deployment note: the sensor process needs the source profile
 

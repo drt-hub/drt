@@ -25,22 +25,34 @@ Supported profile types today (see
   account/database/schema/warehouse-scoped) and
   ``minimum_interval_seconds=`` (see the cost note below).
 - ``sqlserver`` — ``CHANGE_TRACKING_CURRENT_VERSION()``, also verified in
-  #975: monotonic, database-scoped (no table to name), no consumption
-  trap, no known compute-cost analogue to Snowflake's warehouse.
+  #975: monotonic, no consumption trap, no known compute-cost analogue to
+  Snowflake's warehouse. Requires ``watch_table=`` too, but only to
+  *validate* — the database-scoped version function itself takes no table
+  argument, but stays non-NULL as soon as *any* table in the database has
+  Change Tracking enabled, saying nothing about whether the one a sync
+  actually reads is separately enabled (`ALTER TABLE ... ENABLE
+  CHANGE_TRACKING` is a per-table opt-in on top of the per-database one).
+  Caught in Codex review (#984): without validating ``watch_table``
+  against ``CHANGE_TRACKING_MIN_VALID_VERSION``, a table that was never
+  individually enabled would silently never advance the signal, and the
+  sensor would look like it's working while never actually seeing that
+  table's changes.
 
-Delta and Iceberg are project-wide signals because a ``DeltaLakeProfile``
-/ ``IcebergProfile`` each map to exactly one physical table
+Both ``deltalake``/``iceberg`` and ``snowflake``/``sqlserver`` require a
+project-wide or explicit table because a ``DeltaLakeProfile`` /
+``IcebergProfile`` each map to exactly one physical table
 (``drt/config/profiles.py``) and a project has exactly one profile
 (``project.profile``, resolved once) — every sync in such a project
-shares the same table and the same signal. SQL Server is project-wide for
-a different reason: ``CHANGE_TRACKING_CURRENT_VERSION()`` is scoped to
-the whole database, not a table, so it fires on *any* tracked table's
-change, not just the one a given sync targets — coarser than Delta/
-Iceberg, but not unsafe (an extra sensor-triggered run just finds nothing
-new). Snowflake is the only one that's per-table (``watch_table=``), and
-the only one with a real polling cost: its signal query reuses the
-profile's ``warehouse=`` exactly like an ordinary sync, and Snowflake
-auto-resumes a suspended warehouse for any query when
+shares the same table and the same signal — while ``snowflake``/
+``sqlserver`` profiles are account/database-scoped with no single table
+of their own, so ``watch_table=`` supplies what the profile can't. Even
+with ``watch_table=`` validated, SQL Server's actual *polled* signal
+(``CHANGE_TRACKING_CURRENT_VERSION()``) stays database-wide — it fires on
+any tracked table's change, not only the validated one — coarser than
+Delta/Iceberg, but not unsafe (an extra sensor-triggered run just finds
+nothing new). Snowflake is the only one with a real polling cost: its
+signal query reuses the profile's ``warehouse=`` exactly like an ordinary
+sync, and Snowflake auto-resumes a suspended warehouse for any query when
 ``AUTO_RESUME=TRUE`` (the default) — see ``minimum_interval_seconds=``'s
 required-for-Snowflake check below before assuming this is as free as the
 other three.
@@ -128,8 +140,11 @@ def _current_signal(
         return str(snapshot.snapshot_id) if snapshot is not None else "0"
 
     if isinstance(profile, SnowflakeProfile):
-        import snowflake.connector
-
+        # Validate before importing the (optional, driver-requiring) connector
+        # — a missing watch_table=/minimum_interval_seconds= is a config
+        # error independent of whether snowflake-connector-python is even
+        # installed, and should fail with that ValueError rather than a
+        # ModuleNotFoundError masking it.
         if not watch_table:
             raise ValueError(
                 "build_drt_change_sensor() requires watch_table= for a "
@@ -154,6 +169,8 @@ def _current_signal(
                 "free Tier 1 (warehouse-native TASK) / Tier 3 (drt serve) "
                 "paths (#975)."
             )
+
+        import snowflake.connector
 
         connect_args: dict[str, object] = {
             "account": profile.account,
@@ -198,6 +215,25 @@ def _current_signal(
         return str(sf_value)
 
     if isinstance(profile, SQLServerProfile):
+        # Validate before importing the (optional, driver-requiring) connector
+        # — same reasoning as the Snowflake branch above.
+        if not watch_table:
+            raise ValueError(
+                "build_drt_change_sensor() requires watch_table= for a SQL "
+                "Server profile. CHANGE_TRACKING_CURRENT_VERSION() is "
+                "database-scoped and stays non-NULL as soon as *any* table in "
+                "the database has Change Tracking enabled — it says nothing "
+                "about whether the specific table a sync reads is actually "
+                "tracked. A database can have Change Tracking enabled overall "
+                "(`ALTER DATABASE ... SET CHANGE_TRACKING = ON`) while the "
+                "table you care about was never separately enabled "
+                "(`ALTER TABLE ... ENABLE CHANGE_TRACKING`) — without "
+                "watch_table= to validate against, that silently produces a "
+                "sensor that looks like it's working but never reports a "
+                "change for that table (Codex review, #975/#984). Pass the "
+                "table name CHANGETABLE would use, e.g. 'dbo.MyTable'."
+            )
+
         import pymssql
 
         password = resolve_env(profile.password, profile.password_env) or ""
@@ -210,6 +246,26 @@ def _current_signal(
         )
         try:
             with mssql_conn.cursor() as cur:
+                # CHANGE_TRACKING_MIN_VALID_VERSION(OBJECT_ID(...)) is NULL
+                # unless watch_table itself has table-level Change Tracking
+                # enabled — the per-table check CHANGE_TRACKING_CURRENT_VERSION()
+                # alone can't provide, since it's database-scoped.
+                cur.execute(
+                    "SELECT CHANGE_TRACKING_MIN_VALID_VERSION(OBJECT_ID(%s))",
+                    (watch_table,),
+                )
+                min_valid_row = cur.fetchone()
+                min_valid = min_valid_row[0] if min_valid_row is not None else None
+                if min_valid is None:
+                    raise ValueError(
+                        f"CHANGE_TRACKING_MIN_VALID_VERSION(OBJECT_ID({watch_table!r})) "
+                        "returned NULL — this table doesn't have Change Tracking "
+                        "enabled (or doesn't exist/resolve). Run `ALTER TABLE "
+                        f"{watch_table} ENABLE CHANGE_TRACKING` even if the "
+                        "database itself already has Change Tracking on "
+                        "(Codex review, #975/#984)."
+                    )
+
                 cur.execute("SELECT CHANGE_TRACKING_CURRENT_VERSION()")
                 mssql_row = cur.fetchone()
                 mssql_value = mssql_row[0] if mssql_row is not None else None
@@ -295,23 +351,35 @@ def build_drt_change_sensor(
             drt_serve's auth defaults: an orchestrator-launched sync
             hitting real destinations should be an opt-in, not a surprise
             on deploy.
-        watch_table: Required, Snowflake profiles only. Fully-qualified
-            table name (e.g. ``"MY_DB.MY_SCHEMA.MY_TABLE"``) to poll via
-            ``SYSTEM$LAST_CHANGE_COMMIT_TIME`` — a ``SnowflakeProfile`` has
-            no single table of its own, unlike Delta/Iceberg. Ignored for
-            every other profile type.
+        watch_table: Required, Snowflake and SQL Server profiles only.
+            Fully-qualified table name (e.g. ``"MY_DB.MY_SCHEMA.MY_TABLE"``
+            for Snowflake, ``"dbo.MyTable"`` for SQL Server). For Snowflake
+            it's the table ``SYSTEM$LAST_CHANGE_COMMIT_TIME`` polls
+            directly — a ``SnowflakeProfile`` has no single table of its
+            own, unlike Delta/Iceberg. For SQL Server it's used only to
+            *validate* that this specific table has Change Tracking
+            enabled (via ``CHANGE_TRACKING_MIN_VALID_VERSION``) — the
+            actual polled signal, ``CHANGE_TRACKING_CURRENT_VERSION()``,
+            stays database-wide regardless. Ignored for deltalake/iceberg.
 
     Raises:
         NotImplementedError: at evaluation time, if the project's source
             profile isn't deltalake, iceberg, snowflake, or sqlserver —
             surfaces as a failed sensor tick in the Dagster UI rather than
             a silent, permanent skip.
-        ValueError: at evaluation time, if the profile is snowflake and
-            either ``watch_table=`` or ``minimum_interval_seconds=`` was
-            not given, or if the signal query itself comes back NULL
-            (change tracking not enabled, or an unresolvable
-            ``watch_table``) — same propagate-don't-skip treatment as
-            ``NotImplementedError`` above.
+        ValueError: at evaluation time, if the profile is snowflake or
+            sqlserver and ``watch_table=`` (and, for snowflake,
+            ``minimum_interval_seconds=`` too) was not given, if the
+            signal query itself comes back NULL (change tracking not
+            enabled, or an unresolvable ``watch_table``), or — sqlserver
+            only — if ``watch_table`` resolves but doesn't itself have
+            Change Tracking enabled. Same propagate-don't-skip treatment
+            as ``NotImplementedError`` above.
+        ImportError: at evaluation time, if the profile's optional driver
+            (``deltalake``, ``pyiceberg``, ``snowflake-connector-python``,
+            ``pymssql``) isn't installed — a permanent deploy-config error,
+            not something a later tick would fix, so it also propagates
+            rather than repeating forever as a skipped tick.
     """
     project_path = Path(project_dir)
 
@@ -331,13 +399,23 @@ def build_drt_change_sensor(
                 watch_table=watch_table,
                 minimum_interval_seconds=minimum_interval_seconds,
             )
-        except (NotImplementedError, ValueError):
+        except (NotImplementedError, ValueError, ImportError):
+            # ImportError (including ModuleNotFoundError) means the profile's
+            # optional driver — deltalake/pyiceberg/snowflake-connector-python
+            # /pymssql — isn't installed. Left uncaught here on purpose
+            # (Codex review, #984): dagster-drt's base install pulls in none
+            # of them, and this is a permanent deploy-config error, not
+            # something a retry on the next tick would ever fix. Catching it
+            # below as "transient" would leave the sensor skipping forever,
+            # indistinguishable in the Dagster UI from a working sensor that
+            # just hasn't seen a change yet.
             raise
         except Exception as exc:
             # Transient I/O (network, auth, a catalog hiccup) skips this
             # tick rather than failing the sensor outright — the next
-            # evaluation tries again. A NotImplementedError above is a
-            # permanent config error and is not caught here on purpose.
+            # evaluation tries again. NotImplementedError/ValueError/
+            # ImportError above are permanent config errors and are not
+            # caught here on purpose.
             return SkipReason(f"Could not read change signal: {exc}")
 
         if previous_signal == current_signal:

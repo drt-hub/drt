@@ -137,13 +137,22 @@ change_sensor = build_drt_change_sensor(
 )
 ```
 
-SQL Server's signal is database-scoped, not table-scoped, so it fires on any
-tracked table's change — coarser than the other three but not unsafe (an
-extra triggered run just finds nothing new). See
+SQL Server also requires `watch_table=` — not because the polled signal
+needs a table (`CHANGE_TRACKING_CURRENT_VERSION()` is database-scoped, so it
+fires on any tracked table's change, coarser than the other three but not
+unsafe), but to *validate* that the specific table is itself change-tracked.
+`ALTER TABLE ... ENABLE CHANGE_TRACKING` is a separate opt-in on top of the
+database-level `ALTER DATABASE ... SET CHANGE_TRACKING = ON` — without
+checking `watch_table` against `CHANGE_TRACKING_MIN_VALID_VERSION`, a table
+that was never individually enabled would silently never advance the
+signal, even while the database-wide version keeps moving from *other*
+tracked tables (caught in Codex review). See
 [`docs/guides/event-driven-syncs.md`](https://github.com/drt-hub/drt/blob/main/docs/guides/event-driven-syncs.md)
 for the full picture. Any other profile type raises `NotImplementedError` at
 evaluation time; a supported profile missing a required argument or
-returning a `NULL` signal raises `ValueError` — both are failed sensor
+returning a `NULL` signal raises `ValueError`; a missing optional driver
+(none of `snowflake-connector-python`/`pymssql`/`deltalake`/`pyiceberg` are
+in the base install) raises `ImportError` — all three are failed sensor
 ticks, not a silent permanent skip.
 
 **Deployment note:** the sensor evaluates inside the Dagster **daemon**
