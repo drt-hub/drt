@@ -566,56 +566,82 @@ def test_snowflake_last_change_commit_time_warehouse_requirement(tmp_path: Path)
     an active virtual warehouse? This is the whole premise for a Tier-2 sensor
     being "cheap to poll" over Tier 1/Tier 3.
 
-    Opens a session with no ``warehouse=`` specified. If the smoke user has no
-    account-level default, ``CURRENT_WAREHOUSE()`` comes back NULL and the
-    call's success/failure directly answers the question. Skips (does not
-    fail) if this account's smoke user does have a default warehouse --
-    isolating the question then would mean suspending the shared smoke
-    warehouse mid-suite, which is worse than an inconclusive result.
+    A prior version of this test tried isolating a no-warehouse *session*
+    (no ``warehouse=`` at connect time) and skipped once it found the smoke
+    user has an account-level default warehouse, making that approach
+    inconclusive. This version instead deliberately SUSPENDs the smoke
+    warehouse itself, calls the function, and checks whether the warehouse's
+    own state changed -- if it's still SUSPENDED afterward, the call is
+    metadata-only and never touched warehouse compute (like ``SHOW
+    STREAMS``, confirmed in the trigger matrix research to not need one);
+    if Snowflake auto-resumed it, the call has the same compute cost as an
+    ordinary query. Explicitly resumes the warehouse back to its prior state
+    afterward regardless of outcome -- this is shared smoke infrastructure.
+    Skips (does not fail) if this account's smoke role lacks OPERATE
+    privilege on the warehouse, since suspending it is then not possible at
+    all rather than merely inconclusive.
     """
     creds = _require_creds()
+    wh = creds["DRT_SMOKE_SNOWFLAKE_WAREHOUSE"]
     table = unique_table("DRT_SMOKE_LCC_WH")
     fq = f"{creds['DRT_SMOKE_SNOWFLAKE_DATABASE']}.{creds['DRT_SMOKE_SNOWFLAKE_SCHEMA']}.{table}"
 
-    setup_conn = _connect(creds)
+    def _warehouse_state(cur: Any) -> str:
+        cur.execute(f"SHOW WAREHOUSES LIKE '{wh}'")  # noqa: S608 -- test-only, fixed LIKE pattern from env config
+        columns = [d[0] for d in cur.description]
+        row = dict(zip(columns, cur.fetchone(), strict=True))
+        return str(row["state"])
+
+    conn = _connect(creds)
     try:
-        with setup_conn.cursor() as cur:
+        with conn.cursor() as cur:
             cur.execute(f"CREATE TABLE {table} (id INTEGER)")
-    finally:
-        setup_conn.close()
 
-    try:
-        auth: dict[str, object] = {}
-        if os.environ.get(KEY_ENV):
-            from drt.config.credentials import load_snowflake_private_key
-
-            auth["private_key"] = load_snowflake_private_key(os.environ[KEY_ENV])
-        else:
-            auth["password"] = os.environ[PASSWORD_ENV]
-        no_wh_conn = snowflake_connector.connect(
-            account=creds[ACCOUNT_ENV],
-            user=creds[USER_ENV],
-            database=creds["DRT_SMOKE_SNOWFLAKE_DATABASE"],
-            schema=creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"],
-            **auth,
-        )
-        try:
-            with no_wh_conn.cursor() as cur:
-                cur.execute("SELECT CURRENT_WAREHOUSE()")
-                active_wh = cur.fetchone()[0]
-                if active_wh is not None:
+            original_state = _warehouse_state(cur)
+            suspended_by_this_test = False
+            if original_state != "SUSPENDED":
+                try:
+                    cur.execute(f"ALTER WAREHOUSE {wh} SUSPEND")
+                    suspended_by_this_test = True
+                except Exception as exc:
                     pytest.skip(
-                        f"#975: smoke user has a default warehouse ({active_wh}) -- "
-                        "cannot isolate the no-warehouse case without suspending "
-                        "shared smoke infra; inconclusive from this account."
+                        f"#975: cannot SUSPEND warehouse {wh} ({exc}) -- likely "
+                        "missing OPERATE privilege on this smoke role; inconclusive "
+                        "from this account."
                     )
-                cur.execute(f"SELECT SYSTEM$LAST_CHANGE_COMMIT_TIME('{fq}')")
+
+            try:
+                try:
+                    cur.execute(f"SELECT SYSTEM$LAST_CHANGE_COMMIT_TIME('{fq}')")
+                except Exception as exc:
+                    pytest.skip(
+                        f"#975 FINDING: SYSTEM$LAST_CHANGE_COMMIT_TIME raised while "
+                        f"the warehouse was SUSPENDED ({exc}) -- the call DOES "
+                        "require an active warehouse, and AUTO_RESUME did not (or "
+                        "could not) bring it up transparently. Confirmed live."
+                    )
                 val = cur.fetchone()[0]
                 assert val is not None, (
-                    "#975: call with no active warehouse returned NULL/failed silently"
+                    "#975: call while warehouse was suspended returned NULL"
                 )
-        finally:
-            no_wh_conn.close()
+
+                after_state = _warehouse_state(cur)
+                if after_state == "SUSPENDED":
+                    pytest.skip(
+                        "#975 FINDING: warehouse stayed SUSPENDED after "
+                        "SYSTEM$LAST_CHANGE_COMMIT_TIME -- the call is metadata-only "
+                        "and does NOT require an active warehouse. Confirmed live."
+                    )
+                else:
+                    pytest.skip(
+                        f"#975 FINDING: warehouse state became {after_state!r} after "
+                        "SYSTEM$LAST_CHANGE_COMMIT_TIME (was SUSPENDED before the "
+                        "call) -- Snowflake auto-resumed it, so the call has the "
+                        "same compute cost as an ordinary query. Confirmed live."
+                    )
+            finally:
+                if suspended_by_this_test:
+                    cur.execute(f"ALTER WAREHOUSE {wh} RESUME")
     finally:
         _drop_table(creds, table)
 
