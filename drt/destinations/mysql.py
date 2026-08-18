@@ -102,6 +102,28 @@ class MySQLDestination(BaseSqlDestination):
         finally:
             conn.close()
 
+    def get_table_name(self, config: DestinationConfig) -> str:
+        """Implements ``QueryableDestination`` (#469)."""
+        assert isinstance(config, MySQLDestinationConfig)
+        return config.table
+
+    def execute_test_query(self, config: DestinationConfig, query: str) -> int:
+        """Implements ``QueryableDestination`` (#469).
+
+        Raises:
+            Exception: If connection or query fails.
+        """
+        assert isinstance(config, MySQLDestinationConfig)
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            cur.execute(query)
+            row = cur.fetchone()
+            val: Any = row[0] if isinstance(row, tuple) else list(row.values())[0]
+            return int(val)
+        finally:
+            conn.close()
+
     @staticmethod
     def _quote_ident(table: str) -> str:
         """Backtick-quote a (possibly schema-qualified) identifier.

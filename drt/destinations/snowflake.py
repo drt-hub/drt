@@ -969,6 +969,32 @@ class SnowflakeDestination:
         finally:
             conn.close()
 
+    def get_table_name(self, config: DestinationConfig) -> str:
+        """Implements ``QueryableDestination`` (#469).
+
+        Fully-qualified — the connection sets the database/schema context,
+        but the FQN matches how this destination writes and is unambiguous
+        for test / diff queries.
+        """
+        assert isinstance(config, SnowflakeDestinationConfig)
+        return f"{config.database}.{config.schema_}.{config.table}"
+
+    def execute_test_query(self, config: DestinationConfig, query: str) -> int:
+        """Implements ``QueryableDestination`` (#469).
+
+        Raises:
+            Exception: If connection or query fails.
+        """
+        assert isinstance(config, SnowflakeDestinationConfig)
+        conn = self._connect(config)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(query)
+                result: Any = cur.fetchone()[0]
+                return int(result)
+        finally:
+            conn.close()
+
     def list_orphan_swap_tables(
         self,
         config: DestinationConfig,

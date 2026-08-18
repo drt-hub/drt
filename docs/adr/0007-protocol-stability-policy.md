@@ -205,10 +205,17 @@ already establishes, not as additions to the 4 already-frozen core Protocols.
 
 ## Consequences
 
-- **#469** (`Destination.fetch_existing()` Protocol refactor, ROADMAP v0.10)
-  should land before v1.0 lands the freeze — it's a shape change to a
-  frozen-scope Protocol area, cheaper to make now than as a v2.0-only
-  breaking change later. ROADMAP.md already orders it this way.
+- **#469** (originally scoped as a `Destination.fetch_existing()` refactor,
+  ROADMAP v0.10) landed as a new, separate `QueryableDestination` Protocol
+  in `drt/destinations/base.py` instead — the issue's original design
+  predates this ADR's extension mechanism, and `Destination.load()` itself
+  was never touched. This is the mechanism working as intended: new
+  capability (`get_table_name` / `execute_test_query`, replacing the old
+  `_QUERYABLE_TYPES` config-class isinstance tuple in
+  `drt/destinations/query.py`) shipped without changing any already-shipped
+  Protocol's method set, so it carried no breaking-change risk and needed no
+  freeze-timing urgency the way an actual `Destination` shape change would
+  have.
 - **#992**, the mechanical PR1 half of #300, is a prerequisite this ADR
   assumes is merged: it makes `@runtime_checkable` consistent across all 17
   Protocols (required for the extension mechanism above to work uniformly)

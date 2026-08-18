@@ -735,6 +735,26 @@ class ClickHouseDestination:
         finally:
             client.close()
 
+    def get_table_name(self, config: DestinationConfig) -> str:
+        """Implements ``QueryableDestination`` (#469)."""
+        assert isinstance(config, ClickHouseDestinationConfig)
+        return config.table
+
+    def execute_test_query(self, config: DestinationConfig, query: str) -> int:
+        """Implements ``QueryableDestination`` (#469).
+
+        Raises:
+            Exception: If connection or query fails.
+        """
+        assert isinstance(config, ClickHouseDestinationConfig)
+        client = self._connect(config)
+        try:
+            result = client.query(query)
+            val: Any = result.result_rows[0][0]
+            return int(val)
+        finally:
+            client.close()
+
     def test_connection(self, config: DestinationConfig) -> None:
         """Test connectivity by establishing a connection and running SELECT 1."""
         assert isinstance(config, ClickHouseDestinationConfig)

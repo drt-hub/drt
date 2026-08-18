@@ -162,6 +162,27 @@ class PostgresDestination(BaseSqlDestination):
         finally:
             conn.close()
 
+    def get_table_name(self, config: DestinationConfig) -> str:
+        """Implements ``QueryableDestination`` (#469)."""
+        assert isinstance(config, PostgresDestinationConfig)
+        return config.table
+
+    def execute_test_query(self, config: DestinationConfig, query: str) -> int:
+        """Implements ``QueryableDestination`` (#469).
+
+        Raises:
+            Exception: If connection or query fails.
+        """
+        assert isinstance(config, PostgresDestinationConfig)
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            cur.execute(query)
+            result: Any = cur.fetchone()[0]
+            return int(result)
+        finally:
+            conn.close()
+
     def _load_replace(
         self,
         conn: Any,

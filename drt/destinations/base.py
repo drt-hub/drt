@@ -241,3 +241,34 @@ class OrphanCleanup(Protocol):
                 drops at all.
         """
         ...
+
+
+@runtime_checkable
+class QueryableDestination(Protocol):
+    """Optional destination capability for ad-hoc validation queries (#469).
+
+    Backs ``drt test`` (per-sync severity checks) and ``drt run --dry-run
+    --diff``'s true-diff path (``drt/engine/diff.py``). A new, separate
+    Protocol rather than an addition to ``Destination`` itself — per
+    ADR 0007, adding a required method to an already-shipped Protocol
+    breaks every existing implementer, so new capability goes here instead.
+
+    Replaces the old ``_QUERYABLE_TYPES`` config-class isinstance tuple in
+    ``drt/destinations/query.py``: a new SQL destination becomes queryable
+    by implementing these two methods, with no edit to ``query.py`` needed.
+    """
+
+    def get_table_name(self, config: DestinationConfig) -> str:
+        """Return the fully-qualified table name to run tests/diffs against.
+
+        Pure formatting of ``config`` — no I/O, never raises.
+        """
+        ...
+
+    def execute_test_query(self, config: DestinationConfig, query: str) -> int:
+        """Run ``query`` against the destination and return a single int.
+
+        Raises:
+            Exception: connection or query failure.
+        """
+        ...

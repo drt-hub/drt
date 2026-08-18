@@ -26,6 +26,70 @@ from drt.destinations.query import (
     is_queryable,
 )
 
+# ---------------------------------------------------------------------------
+# QueryableDestination — capability discovery (#469)
+#
+# is_queryable/get_table_name/execute_test_query dispatch on the destination
+# *instance* via QueryableDestination (isinstance check), not on the config
+# class via a hardcoded tuple. These tests exercise that dispatch directly on
+# the Protocol, separate from the config-based tests above/below which cover
+# the same functions through their public, unchanged signatures.
+# ---------------------------------------------------------------------------
+
+
+def test_queryable_destination_isinstance_all_four_sql_dialects() -> None:
+    from drt.destinations.base import QueryableDestination
+    from drt.destinations.clickhouse import ClickHouseDestination
+    from drt.destinations.mysql import MySQLDestination
+    from drt.destinations.postgres import PostgresDestination
+    from drt.destinations.snowflake import SnowflakeDestination
+
+    assert isinstance(PostgresDestination(), QueryableDestination)
+    assert isinstance(MySQLDestination(), QueryableDestination)
+    assert isinstance(ClickHouseDestination(), QueryableDestination)
+    assert isinstance(SnowflakeDestination(), QueryableDestination)
+
+
+def test_queryable_destination_isinstance_false_for_non_sql_destination() -> None:
+    from drt.destinations.base import QueryableDestination
+    from drt.destinations.slack import SlackDestination
+
+    assert not isinstance(SlackDestination(), QueryableDestination)
+
+
+def test_new_destination_becomes_queryable_without_touching_query_py() -> None:
+    """The architectural point of #469: implementing the two Protocol
+    methods is sufficient for is_queryable/get_table_name/execute_test_query
+    to pick a destination up — no change to query.py's dispatch code, unlike
+    the old ``_QUERYABLE_TYPES`` config-class tuple it replaced.
+    """
+    from drt.destinations.base import QueryableDestination
+
+    class _FakeQueryableDestination:
+        def get_table_name(self, config: Any) -> str:
+            return "fake_table"
+
+        def execute_test_query(self, config: Any, query: str) -> int:
+            return 7
+
+    dest = _FakeQueryableDestination()
+    assert isinstance(dest, QueryableDestination)
+    assert dest.get_table_name(None) == "fake_table"
+    assert dest.execute_test_query(None, "SELECT 1") == 7
+
+
+def test_queryable_destination_requires_both_methods() -> None:
+    """Structural typing: implementing only one of the two methods does not
+    satisfy the Protocol — a half-implemented destination is correctly
+    treated as not queryable rather than crashing on the missing method."""
+    from drt.destinations.base import QueryableDestination
+
+    class _OnlyGetTableName:
+        def get_table_name(self, config: Any) -> str:
+            return "t"
+
+    assert not isinstance(_OnlyGetTableName(), QueryableDestination)
+
 
 def _has_psycopg2() -> bool:
     try:
