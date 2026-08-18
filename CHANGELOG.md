@@ -45,7 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## drt-core
 
-## [Unreleased]
+## [0.9.1] - 2026-08-18
+
+**Patch release for [#986](https://github.com/drt-hub/drt/issues/986) — tracked mirror on least-privilege MySQL users, plus the state-diff privilege reduction on Snowflake, and three other fixes accumulated since v0.9.0.**
 
 ### Fixed
 
