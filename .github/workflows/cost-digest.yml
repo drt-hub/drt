@@ -31,6 +31,14 @@ jobs:
   digest:
     runs-on: ubuntu-latest
     if: github.repository == 'drt-hub/drt'
+    # Shared with dwh-smoke.yml's snowflake job: this digest deliberately
+    # piggybacks on the same still-warm warehouse right after that job runs
+    # (see the comment above), and its usage-view query would auto-resume a
+    # warehouse dwh-smoke's probe test just suspended -- producing a false
+    # regression there, or getting interrupted itself (Codex review, #985).
+    concurrency:
+      group: dwh-smoke-snowflake
+      cancel-in-progress: false
     env:
       DRT_COST_SNOWFLAKE_ACCOUNT: ${{ secrets.COST_SNOWFLAKE_ACCOUNT }}
       DRT_COST_SNOWFLAKE_USER: ${{ secrets.COST_SNOWFLAKE_USER }}
