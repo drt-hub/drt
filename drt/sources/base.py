@@ -41,13 +41,21 @@ class Source(Protocol):
         ...
 
     def test_connection(self, config: ProfileConfig) -> bool:
-        """Return True if the source is reachable, False otherwise — never raises.
+        """Return True if the source is reachable, False otherwise.
 
         Deliberately the opposite contract from
         ``destinations.base.ConnectionTestable.test_connection`` (which
         raises rather than returns a bool). The two never meet at a shared
         call site (sources vs. destinations), so this asymmetry is frozen
         as-is rather than unified — see ADR 0007.
+
+        Every implementation catches connection/query failures and returns
+        False for them. It is NOT guaranteed to never raise: several
+        implementations (MySQL, Databricks, Snowflake, SQL Server) close
+        the connection in a ``finally`` block outside the surrounding
+        ``except``, so a failure during that cleanup step still propagates.
+        Callers (``drt profile test``, the MCP test-profile tool) already
+        catch exceptions from this method defensively for that reason.
         """
         ...
 

@@ -84,15 +84,22 @@ class Destination(Protocol):
     ) -> SyncResult:
         """Send a batch of records to the destination.
 
-        Row-level failures are reported via ``SyncResult.errors`` /
-        ``row_errors``, not raised — the engine has no per-row recovery for
-        an exception, so a batch that raises loses per-row error
-        attribution entirely.
+        Row-level failures are recorded in ``SyncResult.errors`` /
+        ``row_errors`` — implementations MUST populate these rather than
+        raise per-row, or the engine loses per-row error attribution
+        entirely.
 
         Raises:
             Exception: an unrecoverable, batch-level failure (connection
-                lost, auth rejected, API outage). The engine does not catch
-                this; it propagates and aborts the sync.
+                lost, auth rejected, API outage) — never caught by the
+                engine; propagates and aborts the sync. Also raised, by
+                convention (26 of the current SQL/API destinations do this;
+                see ``bigquery.py``'s ``_insert`` for the reference shape),
+                when ``sync_options.on_error == "fail"`` and at least one
+                row failed: the batch's ``row_errors`` are still populated
+                first, then the destination raises to abort the sync rather
+                than silently continuing past a failure the operator asked
+                to be fatal.
         """
         ...
 
@@ -159,11 +166,24 @@ class StagedDestination(Protocol):
     ) -> SyncResult:
         """Upload staged file, trigger job, poll for completion.
 
+        Job-level failure handling is not uniform across shipped
+        implementations, and this Protocol does not mandate one — check
+        the concrete destination's own docs/tests before assuming either
+        shape:
+
+        - The generic ``type: staged_upload`` destination
+          (``staged_upload.py``) catches any exception raised during
+          upload/trigger/poll and returns it as a failed ``SyncResult``
+          (``failed=<count>``, ``errors=[...]``) rather than raising.
+        - ``SalesforceBulkDestination`` (``salesforce_bulk.py``) raises
+          ``RuntimeError`` directly on auth failure, job-creation failure,
+          upload failure, or job-close failure — none of those become a
+          ``SyncResult``.
+
         Raises:
-            Exception: an unrecoverable, job-level failure (upload
-                rejected, job errored out before producing per-row
-                results). Row-level failures the job itself reports are
-                returned via ``SyncResult.errors`` / ``row_errors`` instead.
+            Exception: see above — some implementations raise on
+                job-level failure, others convert it to a failed
+                ``SyncResult`` instead.
         """
         ...
 
