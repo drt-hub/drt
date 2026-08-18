@@ -151,6 +151,38 @@ def test_suggest_falls_through_to_generic_when_no_keyword_matches() -> None:
     assert "source profile" in hint or "query/table" in hint
 
 
+@pytest.mark.parametrize(
+    "exc",
+    [
+        RuntimeError(1044, "Access denied for user to database 'analytics'"),
+        RuntimeError(1142, "CREATE command denied for table 'scores'"),
+    ],
+)
+def test_suggest_identifies_mysql_grant_errors(exc: BaseException) -> None:
+    assert suggest(Stage.DESTINATION, exc) == (
+        "Check the destination database GRANTs for the sync user"
+    )
+
+
+@pytest.mark.parametrize("attribute", ["pgcode", "sqlstate"])
+def test_suggest_identifies_insufficient_privilege_sqlstate(attribute: str) -> None:
+    exc = RuntimeError("insufficient privilege")
+    setattr(exc, attribute, "42501")
+
+    assert suggest(Stage.DESTINATION, exc) == (
+        "Check the destination database GRANTs for the sync user"
+    )
+
+
+def test_suggest_identifies_snowflake_insufficient_privilege_errno() -> None:
+    exc = RuntimeError("SQL access control error: insufficient privileges")
+    setattr(exc, "errno", 3001)
+
+    assert suggest(Stage.DESTINATION, exc) == (
+        "Check the destination database GRANTs for the sync user"
+    )
+
+
 # ---------------------------------------------------------------------------
 # format_error (integration of the pieces)
 # ---------------------------------------------------------------------------

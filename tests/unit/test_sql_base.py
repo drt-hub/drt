@@ -651,8 +651,11 @@ def _tracked_dest(
     events: list[str],
     raw_diff: list[tuple[str, str]] | None = None,
     to_insert: list[tuple[str, str]] | None = None,
+    previous: list[tuple[str, str]] | None = None,
     previous_exists: bool = True,
     exists: bool = True,
+    staging_error: Exception | None = None,
+    staging_insert_error: Exception | None = None,
 ) -> Any:
     """A BaseSqlDestination subclass recording the tracked-state hook calls.
 
@@ -679,9 +682,13 @@ def _tracked_dest(
         def execute(self, stmt: Any, params: Any = None) -> None:
             events.append(f"execute:{stmt}:{params}")
             self._last_sql = str(stmt)
+            if self._last_sql.startswith("CREATE TEMPORARY TABLE") and staging_error:
+                raise staging_error
 
         def executemany(self, stmt: Any, rows: Any) -> None:
             events.append(f"executemany:{stmt}:{rows}")
+            if str(stmt).startswith("INSERT INTO __drt") and staging_insert_error:
+                raise staging_insert_error
 
         def fetchone(self) -> Any:
             if "LIMIT 1" in self._last_sql:
@@ -693,6 +700,8 @@ def _tracked_dest(
                 return list(raw_diff or [])
             if self._last_sql.startswith("SELECT c.key_hash"):
                 return list(to_insert or [])
+            if self._last_sql.startswith("SELECT key_hash"):
+                return list(previous or [])
             return []
 
     class _Conn:
@@ -854,6 +863,52 @@ def test_tracked_inserts_only_genuinely_new_keys() -> None:
     insert_calls = [e for e in events if e.startswith("executemany:INSERT INTO STATE")]
     assert len(insert_calls) == 1
     assert "'s1'" in insert_calls[0] and key_hash((2,)) in insert_calls[0]
+    assert key_hash((1,)) not in insert_calls[0]
+
+
+@pytest.mark.parametrize("failure_site", ["create", "insert"])
+def test_tracked_falls_back_to_client_diff_when_staging_is_unavailable(
+    failure_site: str,
+) -> None:
+    """The fallback computes both previous-current and current-previous.
+
+    The savepoint rollback is part of the contract: without it Postgres would
+    remain in ``InFailedSqlTransaction`` after a denied CREATE.
+    """
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    events: list[str] = []
+    d = _tracked_dest(
+        events,
+        previous=[
+            (key_hash((1,)), key_json((1,))),
+            (key_hash((3,)), key_json((3,))),
+        ],
+        staging_error=(
+            RuntimeError("temporary-table privilege denied")
+            if failure_site == "create"
+            else None
+        ),
+        staging_insert_error=(
+            RuntimeError("temporary-table population failed")
+            if failure_site == "insert"
+            else None
+        ),
+    )
+    d._mirror_keys = [(1,), (2,)]
+
+    d._finalize_mirror_tracked(
+        SimpleNamespace(table="t", upsert_key=["id"]), _tracked_opts()
+    )
+
+    assert any(e.startswith("execute:SAVEPOINT drt_diff_keys") for e in events)
+    assert any(e.startswith("execute:ROLLBACK TO SAVEPOINT drt_diff_keys") for e in events)
+    assert not any(e.startswith("execute:DROP TABLE") for e in events)
+    assert not any(e.startswith("execute:SELECT c.key_hash") for e in events)
+    assert "execute:DELETE t ['id'] scope=None negate=False:[(3,)]" in events
+    insert_calls = [e for e in events if e.startswith("executemany:INSERT INTO STATE")]
+    assert len(insert_calls) == 1
+    assert key_hash((2,)) in insert_calls[0]
     assert key_hash((1,)) not in insert_calls[0]
 
 

@@ -125,6 +125,11 @@ def suggest(stage: Stage, exc: BaseException) -> str | None:
         return "Check the source profile and the query/table reference"
 
     if stage is Stage.DESTINATION:
+        mysql_errno = exc.args[0] if exc.args and isinstance(exc.args[0], int) else None
+        errno = getattr(exc, "errno", mysql_errno)
+        sqlstate = getattr(exc, "sqlstate", None) or getattr(exc, "pgcode", None)
+        if errno in {1044, 1142, 3001} or sqlstate == "42501":
+            return "Check the destination database GRANTs for the sync user"
         if any(k in msg for k in ("401", "403", "unauthorized", "forbidden")):
             return "Check the destination's auth env vars (token / api key)"
         if any(k in msg for k in ("rate", "429", "too many requests")):

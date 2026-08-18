@@ -73,6 +73,7 @@ def _configure_state_cur(
     conn: MagicMock,
     raw_diff: list[tuple[str, str]] | None = None,
     to_insert: list[tuple[str, str]] | None = None,
+    previous: list[tuple[Any, ...]] | None = None,
     previous_exists: bool = True,
     table_exists: bool = True,
     scope_key_of: dict[str, str | None] | None = None,
@@ -91,7 +92,7 @@ def _configure_state_cur(
             return (1,) if previous_exists else None
         return None
 
-    def fetchall_side_effect() -> list[tuple[str, str]]:
+    def fetchall_side_effect() -> list[tuple[Any, ...]]:
         sql = cur.execute.call_args.args[0] if cur.execute.call_args.args else ""
         if "SHOW TABLES" in sql:
             return [("_DRT_SYNCED_KEYS",)] if table_exists else []
@@ -104,6 +105,8 @@ def _configure_state_cur(
             return rows
         if "SELECT c.key_hash" in sql:
             return list(to_insert or [])
+        if sql.startswith("SELECT key_hash"):
+            return list(previous or [])
         return []
 
     cur.fetchone.side_effect = fetchone_side_effect
@@ -701,6 +704,57 @@ def test_tracked_inserts_only_genuinely_new_keys_snowflake(
     assert rows == [("scores_sync", key_hash((2,)), key_json((2,)))]
 
 
+@pytest.mark.parametrize("failure_site", ["create", "insert"])
+def test_tracked_falls_back_when_staging_is_unavailable_snowflake(
+    monkeypatch: pytest.MonkeyPatch, failure_site: str
+) -> None:
+    """No schema CREATE privilege uses the full-state client-side diff."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    _set_creds(monkeypatch)
+    dest = SnowflakeDestination()
+    load_conn = _fake_conn()
+    finalize_conn = _fake_conn()
+    _configure_state_cur(
+        finalize_conn,
+        previous=[
+            (key_hash((1,)), key_json((1,))),
+            (key_hash((3,)), key_json((3,))),
+        ],
+    )
+
+    def execute(sql: str, *_args: Any, **_kwargs: Any) -> None:
+        if failure_site == "create" and sql.startswith("CREATE TEMPORARY TABLE"):
+            raise Exception("insufficient privileges to create temporary table")
+
+    def executemany(sql: str, *_args: Any, **_kwargs: Any) -> None:
+        if failure_site == "insert" and "DIFF_KEYS" in sql.upper():
+            raise Exception("temporary-table population failed")
+
+    finalize_conn._cur.execute.side_effect = execute
+    finalize_conn._cur.executemany.side_effect = executemany
+
+    with patch.dict("sys.modules", _mocked_snowflake_modules(load_conn)):
+        dest.load([{"id": 1}, {"id": 2}], _config(), _tracked_options())
+    with patch.dict("sys.modules", _mocked_snowflake_modules(finalize_conn)):
+        dest.finalize_sync(_config(), _tracked_options())
+
+    calls = finalize_conn._cur.execute.call_args_list
+    assert not any(c.args[0].startswith("DROP TABLE") for c in calls)
+    assert not any(c.args[0].startswith("SELECT c.key_hash") for c in calls)
+    assert any(c.args[0].startswith("SELECT key_hash") for c in calls)
+    target_delete = next(c for c in calls if c.args[0].startswith("DELETE FROM"))
+    assert target_delete.args[1] == [3]
+    state_insert = next(
+        c
+        for c in finalize_conn._cur.executemany.call_args_list
+        if "_drt_synced_keys" in c.args[0]
+        and "DIFF_KEYS" not in c.args[0].upper()
+        and c.args[0].startswith("INSERT INTO")
+    )
+    assert state_insert.args[1] == [("scores_sync", key_hash((2,)), key_json((2,)))]
+
+
 def test_tracked_empty_source_is_noop_snowflake(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_creds(monkeypatch)
     dest = SnowflakeDestination()
@@ -906,6 +960,49 @@ def _run_scoped(monkeypatch: pytest.MonkeyPatch, finalize_conn: MagicMock) -> No
         dest.load([{"parent_id": 1, "id": "a"}], config, _tracked_scoped_options())
     with patch.dict("sys.modules", _mocked_snowflake_modules(finalize_conn)):
         dest.finalize_sync(config, _tracked_scoped_options())
+
+
+def test_scoped_client_fallback_preserves_projection_shape_snowflake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fallback includes scope_key and keeps out-of-scope state untouched."""
+    from drt.destinations._mirror_state import key_hash, key_json
+
+    current = (1, "a")
+    stale = (1, "b")
+    other_scope = (2, "x")
+    conn = _fake_conn()
+    _configure_state_cur(
+        conn,
+        previous=[
+            (key_hash(current), key_json(current), "[1]"),
+            (key_hash(stale), key_json(stale), "[1]"),
+            (key_hash(other_scope), key_json(other_scope), "[2]"),
+        ],
+    )
+    _scope_columns(conn, present=True)
+
+    def execute(sql: str, *_args: Any, **_kwargs: Any) -> None:
+        if sql.startswith("CREATE TEMPORARY TABLE"):
+            raise Exception("insufficient privileges to create temporary table")
+
+    conn._cur.execute.side_effect = execute
+
+    _run_scoped(monkeypatch, conn)
+
+    fallback = next(
+        c
+        for c in conn._cur.execute.call_args_list
+        if c.args and c.args[0].startswith("SELECT key_hash")
+    )
+    assert "key_hash, key_json, scope_key" in fallback.args[0]
+    target_delete = next(
+        c
+        for c in conn._cur.execute.call_args_list
+        if c.args and c.args[0].startswith("DELETE FROM")
+    )
+    assert target_delete.args[1] == [1, "b"]
+    assert key_hash(other_scope) not in str(conn._cur.executemany.call_args_list)
 
 
 def test_scoped_diff_is_narrowed_in_sql_snowflake(monkeypatch: pytest.MonkeyPatch) -> None:

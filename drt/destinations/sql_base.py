@@ -659,6 +659,9 @@ class BaseSqlDestination:
                     # guaranteed (#695) — so this is attempted inside a
                     # savepoint and a refusal simply leaves the run on the
                     # Python-only filter, permanently and without an error.
+                    # The savepoint clears Postgres's failed-transaction state;
+                    # on MySQL the same rollback is a correctly harmless no-op.
+                    # The temp-table optimisation below uses the same guard.
                     cur.execute("SAVEPOINT drt_scope_cols")
                     try:
                         self._add_state_scope_columns(cur, state_ident)
@@ -689,15 +692,27 @@ class BaseSqlDestination:
             # never user-configured, so it needs no Composable-safe quoting
             # the way `state_ident` (schema-qualified from `config.table`)
             # does.
-            cur.execute(
-                f"CREATE TEMPORARY TABLE {DIFF_STAGING_TABLE} "
-                "(key_hash VARCHAR(64), key_json TEXT)"
-            )
-            if current:
-                cur.executemany(
-                    f"INSERT INTO {DIFF_STAGING_TABLE} (key_hash, key_json) VALUES (%s, %s)",
-                    [(key_hash(k), key_json(k)) for k in current],
+            staging_available = False
+            existing_key_hashes: set[str] = set()
+            cur.execute("SAVEPOINT drt_diff_keys")
+            try:
+                cur.execute(
+                    f"CREATE TEMPORARY TABLE {DIFF_STAGING_TABLE} "
+                    "(key_hash VARCHAR(64), key_json TEXT)"
                 )
+                if current:
+                    cur.executemany(
+                        f"INSERT INTO {DIFF_STAGING_TABLE} (key_hash, key_json) VALUES (%s, %s)",
+                        [(key_hash(k), key_json(k)) for k in current],
+                    )
+            except Exception:  # noqa: BLE001 — no temporary-table privilege is supported
+                # A failed statement poisons a Postgres transaction until the
+                # savepoint is rolled back. MySQL does not poison it, but the
+                # same rollback is harmless and keeps the shared path correct.
+                cur.execute("ROLLBACK TO SAVEPOINT drt_diff_keys")
+            else:
+                cur.execute("RELEASE SAVEPOINT drt_diff_keys")
+                staging_available = True
 
             # #890: narrow `previous` to the observed scopes *in SQL* when the
             # columns are available. Three branches, and the first two are what
@@ -710,28 +725,40 @@ class BaseSqlDestination:
             # every previously written row: no observed scope matches its stale
             # scope_key, so it drops out of the diff and stops being a deletion
             # candidate silently and forever.
-            projection = (
-                "s.key_hash, s.key_json, s.scope_key" if scope_sql else "s.key_hash, s.key_json"
-            )
-            diff_sql = (
-                f"SELECT {projection} FROM {{}} s WHERE s.sync_name = %s "
-                f"AND NOT EXISTS (SELECT 1 FROM {DIFF_STAGING_TABLE} c "
-                "WHERE c.key_hash = s.key_hash)"
-            )
-            diff_params: tuple[Any, ...] = (sync_name,)
-            if scope_sql and observed_scopes:
-                observed_json = sorted(key_json(sc) for sc in observed_scopes)
-                placeholders = ", ".join(["%s"] * len(observed_json))
-                diff_sql += (
-                    " AND (s.scope_key IS NULL OR s.scope_spec <> %s "
-                    f"OR s.scope_key IN ({placeholders}))"
+            if staging_available:
+                projection = (
+                    "s.key_hash, s.key_json, s.scope_key" if scope_sql else "s.key_hash, s.key_json"
                 )
-                diff_params = (sync_name, scope_spec, *observed_json)
-            cur.execute(self._state_sql(diff_sql, state_ident), diff_params)
-            fetched = cur.fetchall()
-            stale_scope = (
-                [(h, kj) for h, kj, sk in fetched if sk is None] if scope_sql else []
-            )
+                diff_sql = (
+                    f"SELECT {projection} FROM {{}} s WHERE s.sync_name = %s "
+                    f"AND NOT EXISTS (SELECT 1 FROM {DIFF_STAGING_TABLE} c "
+                    "WHERE c.key_hash = s.key_hash)"
+                )
+                diff_params: tuple[Any, ...] = (sync_name,)
+                if scope_sql and observed_scopes:
+                    observed_json = sorted(key_json(sc) for sc in observed_scopes)
+                    placeholders = ", ".join(["%s"] * len(observed_json))
+                    diff_sql += (
+                        " AND (s.scope_key IS NULL OR s.scope_spec <> %s "
+                        f"OR s.scope_key IN ({placeholders}))"
+                    )
+                    diff_params = (sync_name, scope_spec, *observed_json)
+                cur.execute(self._state_sql(diff_sql, state_ident), diff_params)
+                fetched = cur.fetchall()
+            else:
+                projection = "key_hash, key_json, scope_key" if scope_sql else "key_hash, key_json"
+                cur.execute(
+                    self._state_sql(
+                        f"SELECT {projection} FROM {{}} WHERE sync_name = %s",
+                        state_ident,
+                    ),
+                    (sync_name,),
+                )
+                previous = cur.fetchall()
+                existing_key_hashes = {row[0] for row in previous}
+                current_key_hashes = {key_hash(k) for k in current}
+                fetched = [row for row in previous if row[0] not in current_key_hashes]
+            stale_scope = [(h, kj) for h, kj, sk in fetched if sk is None] if scope_sql else []
             raw_diff = [row[:2] for row in fetched]
 
             # Scope-filtering the (small) diff after the SQL-side subtraction
@@ -833,16 +860,24 @@ class BaseSqlDestination:
                     ),
                     [(sync_name, key_hash(k)) for k in to_delete],
                 )
-            cur.execute(
-                self._state_sql(
-                    "SELECT c.key_hash, c.key_json FROM "
-                    f"{DIFF_STAGING_TABLE} c WHERE NOT EXISTS "
-                    "(SELECT 1 FROM {} s WHERE s.sync_name = %s AND s.key_hash = c.key_hash)",
-                    state_ident,
-                ),
-                (sync_name,),
-            )
-            to_insert = cur.fetchall()
+            if staging_available:
+                cur.execute(
+                    self._state_sql(
+                        "SELECT c.key_hash, c.key_json FROM "
+                        f"{DIFF_STAGING_TABLE} c WHERE NOT EXISTS "
+                        "(SELECT 1 FROM {} s WHERE s.sync_name = %s "
+                        "AND s.key_hash = c.key_hash)",
+                        state_ident,
+                    ),
+                    (sync_name,),
+                )
+                to_insert = cur.fetchall()
+            else:
+                to_insert = [
+                    (key_hash(k), key_json(k))
+                    for k in current
+                    if key_hash(k) not in existing_key_hashes
+                ]
             if to_insert and scope_sql and scope_positions is not None:
                 cur.executemany(
                     self._state_sql(
@@ -872,7 +907,8 @@ class BaseSqlDestination:
                     ),
                     [(sync_name, h, kj) for h, kj in to_insert],
                 )
-            cur.execute(f"DROP TABLE {DIFF_STAGING_TABLE}")
+            if staging_available:
+                cur.execute(f"DROP TABLE {DIFF_STAGING_TABLE}")
             conn.commit()
         finally:
             conn.close()
