@@ -561,21 +561,31 @@ def test_snowflake_last_change_commit_time_no_change_tracking_required(tmp_path:
     )
 
 
-def test_snowflake_last_change_commit_time_warehouse_requirement(tmp_path: Path) -> None:
-    """#975 research probe: does calling SYSTEM$LAST_CHANGE_COMMIT_TIME require
-    an active virtual warehouse? This is the whole premise for a Tier-2 sensor
-    being "cheap to poll" over Tier 1/Tier 3.
+def test_snowflake_last_change_commit_time_does_not_require_active_warehouse(
+    tmp_path: Path,
+) -> None:
+    """#975 CONFIRMED FINDING, verified live 2026-08-18 against the drt smoke
+    account: ``SYSTEM$LAST_CHANGE_COMMIT_TIME`` is metadata-only and does NOT
+    require an active virtual warehouse. This is a hard assertion, not an
+    informational skip, because the premise it protects -- a Tier-2 sensor
+    being "cheap to poll" -- depends on this staying true. If Snowflake ever
+    changes this function's behaviour, this test must fail loudly, not skip
+    silently (a skip-based version of this test previously reported the
+    finding via ``pytest.skip`` and needed a manual ``-rs`` flag to even be
+    seen -- see #985).
+
+    Scope note: this is a claim about this one function on this one account,
+    not a general "SYSTEM$ functions are metadata-only" rule (``SHOW
+    STREAMS`` was checked separately, in the trigger matrix research, and
+    happens to also not need one -- that is supporting context, not proof of
+    a class-wide guarantee).
 
     A prior version of this test tried isolating a no-warehouse *session*
     (no ``warehouse=`` at connect time) and skipped once it found the smoke
     user has an account-level default warehouse, making that approach
     inconclusive. This version instead deliberately SUSPENDs the smoke
-    warehouse itself, calls the function, and checks whether the warehouse's
-    own state changed -- if it's still SUSPENDED afterward, the call is
-    metadata-only and never touched warehouse compute (like ``SHOW
-    STREAMS``, confirmed in the trigger matrix research to not need one);
-    if Snowflake auto-resumed it, the call has the same compute cost as an
-    ordinary query.
+    warehouse itself, calls the function, and asserts the warehouse's own
+    state did not change.
 
     OPERATE is verified up front via a net-zero round trip (toggle the
     warehouse's state and immediately toggle it back) regardless of which
@@ -583,11 +593,14 @@ def test_snowflake_last_change_commit_time_warehouse_requirement(tmp_path: Path)
     the normal nightly case (a warehouse that's SUSPENDED between smoke
     runs) and could otherwise leave an auto-resumed warehouse stuck running,
     with no way to undo it, for a role that never had permission to fix it.
-    Skips (does not fail) if that round trip fails. Once past it, restoring
-    the warehouse to its original state after the real probe is expected to
-    succeed and is *not* swallowed on failure -- a failure there despite the
-    upfront check passing is a genuine surprise worth a loud test failure
-    over a shared resource silently left running and billing.
+    Skips (does not fail) if that round trip fails -- OPERATE is not always
+    granted (it was granted specifically to run this verification once; see
+    #985), and its absence says nothing about the finding itself. Once past
+    it, restoring the warehouse to its original state after the real probe
+    is expected to succeed and is *not* swallowed on failure -- a failure
+    there despite the upfront check passing is a genuine surprise worth a
+    loud test failure over a shared resource silently left running and
+    billing.
     """
     creds = _require_creds()
     wh = creds["DRT_SMOKE_SNOWFLAKE_WAREHOUSE"]
@@ -673,19 +686,13 @@ def test_snowflake_last_change_commit_time_warehouse_requirement(tmp_path: Path)
                     "#975: call while warehouse was suspended returned NULL"
                 )
 
-                if _is_suspended(cur):
-                    pytest.skip(
-                        "#975 FINDING: warehouse stayed SUSPENDED after "
-                        "SYSTEM$LAST_CHANGE_COMMIT_TIME -- the call is metadata-only "
-                        "and does NOT require an active warehouse. Confirmed live."
-                    )
-                else:
-                    pytest.skip(
-                        "#975 FINDING: warehouse is no longer SUSPENDED after "
-                        "SYSTEM$LAST_CHANGE_COMMIT_TIME (it was SUSPENDED before the "
-                        "call) -- Snowflake auto-resumed it, so the call has the "
-                        "same compute cost as an ordinary query. Confirmed live."
-                    )
+                assert _is_suspended(cur), (
+                    "#975 REGRESSION: warehouse is no longer SUSPENDED after "
+                    "SYSTEM$LAST_CHANGE_COMMIT_TIME (it was SUSPENDED before the "
+                    "call) -- Snowflake auto-resumed it, contradicting the "
+                    "2026-08-18 finding that this call is metadata-only. The "
+                    "Tier-2 sensor's cost model needs re-verifying if this fails."
+                )
             finally:
                 # Not swallowed on failure -- the round trip above already
                 # confirmed OPERATE works both ways, so a failure here now
