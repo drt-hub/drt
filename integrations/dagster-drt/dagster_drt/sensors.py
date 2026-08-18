@@ -20,10 +20,13 @@ Supported profile types today (see
   against a real account in #975: monotonic, no ``CHANGE_TRACKING``
   prerequisite, no stream-style consumption trap (unlike ``STREAM`` /
   ``SYSTEM$STREAM_HAS_DATA()``, which #855 ruled out for exactly that
-  reason — see the ADR 0004 amendment). Requires ``watch_table=`` (a
-  ``SnowflakeProfile`` has no single table of its own — it's
-  account/database/schema/warehouse-scoped) and
-  ``minimum_interval_seconds=`` (see the cost note below).
+  reason — see the ADR 0004 amendment), and — also verified live, #985 —
+  metadata-only: it does not touch or require an active virtual warehouse
+  (the smoke warehouse stayed ``SUSPENDED`` through the call). Requires
+  ``watch_table=`` (a ``SnowflakeProfile`` has no single table of its own —
+  it's account/database/schema/warehouse-scoped) and
+  ``minimum_interval_seconds=`` (see the cost note below — the reason is
+  connection overhead, not warehouse compute).
 - ``sqlserver`` — ``CHANGE_TRACKING_CURRENT_VERSION()``, also verified in
   #975: monotonic, no consumption trap, no known compute-cost analogue to
   Snowflake's warehouse. Requires ``watch_table=`` too, but only to
@@ -50,12 +53,17 @@ with ``watch_table=`` validated, SQL Server's actual *polled* signal
 (``CHANGE_TRACKING_CURRENT_VERSION()``) stays database-wide — it fires on
 any tracked table's change, not only the validated one — coarser than
 Delta/Iceberg, but not unsafe (an extra sensor-triggered run just finds
-nothing new). Snowflake is the only one with a real polling cost: its
-signal query reuses the profile's ``warehouse=`` exactly like an ordinary
-sync, and Snowflake auto-resumes a suspended warehouse for any query when
-``AUTO_RESUME=TRUE`` (the default) — see ``minimum_interval_seconds=``'s
-required-for-Snowflake check below before assuming this is as free as the
-other three.
+nothing new). Snowflake's poll is *not* a warehouse-compute cost — #985
+confirmed live that the signal call leaves a ``SUSPENDED`` warehouse
+suspended — but ``snowflake.connector.connect()`` still does a full
+per-tick auth handshake (private-key decrypt included, when
+``private_key_env`` is set), unlike Delta/Iceberg's object-storage
+metadata reads. That connection cost is why ``minimum_interval_seconds=``
+stays required for Snowflake — see its check below. SQL Server's
+``pymssql.connect()`` opens a fresh connection per tick too and isn't
+free either; it just isn't gated the same way here yet, which is a real
+asymmetry in this module (not something #975/#985 investigated) rather
+than a claim that SQL Server's cost is lower.
 """
 
 from __future__ import annotations
@@ -157,17 +165,19 @@ def _current_signal(
         if minimum_interval_seconds is None:
             raise ValueError(
                 "build_drt_change_sensor() requires minimum_interval_seconds= "
-                "for a Snowflake profile. The signal query reuses this "
-                "profile's warehouse= exactly like an ordinary sync "
-                "(drt/sources/snowflake.py), and Snowflake auto-resumes a "
-                "suspended warehouse for any query when AUTO_RESUME=TRUE "
-                "(the default), billing at least one minimum increment — "
-                "without an explicit poll interval, Dagster's default tick "
-                "cadence would keep the warehouse continuously resumed. "
-                "Delta/Iceberg sensors have no such cost; this one does — "
-                "pick an interval that reflects what that's worth versus the "
-                "free Tier 1 (warehouse-native TASK) / Tier 3 (drt serve) "
-                "paths (#975)."
+                "for a Snowflake profile. The signal call itself is "
+                "metadata-only and does not touch warehouse compute "
+                "(verified live against a real account, #985 — a suspended "
+                "warehouse stays suspended through the call), but each poll "
+                "still opens a fresh snowflake.connector.connect() session — "
+                "a full auth handshake (private-key decrypt included, when "
+                "private_key_env is set) — unlike Delta/Iceberg's "
+                "object-storage metadata reads. Without an explicit poll "
+                "interval, Dagster's default tick cadence would repeat that "
+                "handshake far more often than any real source needs. Pick "
+                "an interval that reflects what that connection overhead is "
+                "worth versus the free Tier 1 (warehouse-native TASK) / "
+                "Tier 3 (drt serve) paths (#975)."
             )
 
         import snowflake.connector

@@ -78,11 +78,14 @@
   needed. Both now ship in `build_drt_change_sensor()`
   ([#983](https://github.com/drt-hub/drt/pull/983) and the sensor PR that
   followed it). **Tier 2 promotion now covers all four sources this ADR
-  named as candidates** (Delta, Iceberg, Snowflake, SQL Server) — Snowflake
-  carries a real, ongoing compute-cost caveat the other three don't (its
-  signal query bills the profile's `warehouse=` like any other query), so
-  Tier 1/Tier 3 remain the better default for it; SQL Server has no such
-  caveat and is a straightforward Tier 2 addition.
+  named as candidates** (Delta, Iceberg, Snowflake, SQL Server). Snowflake's
+  signal call was later confirmed live ([#985](https://github.com/drt-hub/drt/issues/985))
+  to be metadata-only — it does **not** bill the profile's `warehouse=` or
+  trigger `AUTO_RESUME` — but it does open a fresh authenticated connection
+  on every poll, a real cost the object-storage signals don't have, which is
+  why `minimum_interval_seconds=` stays a required argument for it. SQL
+  Server has that same per-poll connection cost but isn't gated by an
+  equivalent required argument today.
 - **Issue:** [#786](https://github.com/drt-hub/drt/issues/786)
 - **Implementation:** none — this ADR recommends **not** building a native
   watcher. The work it does sanction is listed under

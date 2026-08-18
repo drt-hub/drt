@@ -120,13 +120,17 @@ which a read-only polling sensor never provides, so a cursor-diff sensor
 built around it would fire once and then latch permanently silent.
 `SYSTEM$LAST_CHANGE_COMMIT_TIME` doesn't have that problem (verified against
 a real account, [#975](https://github.com/drt-hub/drt/issues/975)), which is
-why it's the one wired up instead — but it does carry a real, ongoing
-compute cost the other three don't (it reuses the profile's `warehouse=`,
-and Snowflake auto-resumes a suspended warehouse for any query by default).
-A Snowflake profile requires two extra arguments: `watch_table=` (a
+why it's the one wired up instead. It also does **not** carry a
+warehouse-compute cost — verified live
+([#985](https://github.com/drt-hub/drt/issues/985)): deliberately suspending
+the smoke warehouse and calling the function left it `SUSPENDED`, rather
+than `AUTO_RESUME`-ing it the way an ordinary query would. What it does
+carry, like every profile here, is a real per-poll connection cost —
+`snowflake.connector.connect()` runs a full auth handshake on every tick. A
+Snowflake profile requires two extra arguments: `watch_table=` (a
 `SnowflakeProfile` has no single table of its own, unlike Delta/Iceberg) and
 `minimum_interval_seconds=` (a deliberate poll-cadence choice rather than
-inheriting Dagster's default, given the compute cost above):
+inheriting Dagster's default, given the connection cost above):
 
 ```python
 change_sensor = build_drt_change_sensor(

@@ -143,26 +143,28 @@ changes kept accumulating. `SYSTEM$LAST_CHANGE_COMMIT_TIME` and
 `CHANGE_TRACKING_CURRENT_VERSION()` are different functions with no such
 consumption semantics — verified against real accounts in
 [#975](https://github.com/drt-hub/drt/issues/975), which is why they're
-supported here instead.
+supported here instead. `SYSTEM$LAST_CHANGE_COMMIT_TIME`'s
+warehouse-independence is further verified in
+[#985](https://github.com/drt-hub/drt/issues/985)
+(`tests/integration/dwh/test_snowflake_smoke.py::test_snowflake_last_change_commit_time_does_not_require_active_warehouse`).
 
-**Snowflake's poll has a real, ongoing compute cost that the other three
-don't.** The signal query reuses the profile's `warehouse=` exactly like an
-ordinary sync, and Snowflake auto-resumes a suspended warehouse for *any*
-query when `AUTO_RESUME=TRUE` (the default), billing at least one minimum
-increment. Without a deliberate poll interval, Dagster's default tick
-cadence would keep the warehouse continuously resumed — `minimum_interval_seconds=`
-is a required argument for a Snowflake profile precisely so this is a choice
-you make, not a default you inherit. Weigh it against Tier 1 (`TASK`,
-warehouse-native and already scheduled) and Tier 3 (`drt serve`, no
-per-poll compute) before reaching for Tier 2 here. Whether the query itself
-requires an *active* warehouse (versus a suspended one that auto-resumes) is
-deliberately left unconfirmed rather than assumed: a live test exists
-(`tests/integration/dwh/test_snowflake_smoke.py::test_snowflake_last_change_commit_time_warehouse_requirement`)
-that suspends the smoke warehouse and checks whether the call resumes it,
-but the smoke role lacks `OPERATE` privilege on the warehouse to run it —
-that's a standing, deliberate limit on what the CI credential can touch,
-not an oversight. The conservative assumption (budget for the cautious
-case) stands on purpose rather than by omission.
+**Snowflake's poll does *not* have a warehouse-compute cost** — verified
+live against a real account
+([#985](https://github.com/drt-hub/drt/issues/985)): deliberately
+suspending the smoke warehouse, calling `SYSTEM$LAST_CHANGE_COMMIT_TIME`,
+and confirming the warehouse stayed `SUSPENDED` afterward, rather than
+`AUTO_RESUME`-ing the way an ordinary data query would. The signal call is
+metadata-only. What it does have — like every profile type here — is a
+real per-poll connection cost: `snowflake.connector.connect()` runs a full
+auth handshake (private-key decrypt included, when `private_key_env` is
+set) on every tick. Without a deliberate poll interval, Dagster's default
+tick cadence would repeat that handshake far more often than any real
+source needs — `minimum_interval_seconds=` is a required argument for a
+Snowflake profile precisely so this is a choice you make, not a default
+you inherit. (SQL Server's `pymssql.connect()` opens a fresh connection
+per tick too and isn't free either; it's just not gated the same way here
+yet — that's an asymmetry in this module, not evidence Snowflake is
+uniquely costly.)
 
 Calling `build_drt_change_sensor()` against any other profile type raises
 `NotImplementedError` at evaluation time — a failed sensor tick in the
@@ -233,12 +235,15 @@ the consumption requirement.
   minutes).
 - **Running Dagster, and the source is Delta Lake, Iceberg, or SQL Server?**
   Tier 2 — `build_drt_change_sensor()` gives genuine event-driven activation
-  for free (no per-poll compute cost), reusing plumbing you already have.
+  for free (no per-poll warehouse-compute cost), reusing plumbing you
+  already have.
 - **Running Dagster, and the source is Snowflake?** Tier 2 works
-  (`watch_table=` + `minimum_interval_seconds=` required), but it has a real
-  per-poll compute cost the others don't — compare against Tier 1 (native
-  `TASK`, already warehouse-scheduled) and Tier 3 (Alert + webhook, no
-  per-poll cost) before choosing it.
+  (`watch_table=` + `minimum_interval_seconds=` required). The poll itself
+  has no warehouse-compute cost (verified live, #985), but every tick opens
+  a fresh authenticated connection — set `minimum_interval_seconds=` to
+  something that reflects what that connection overhead is worth versus
+  Tier 1 (native `TASK`, already warehouse-scheduled) and Tier 3 (Alert +
+  webhook, no polling at all).
 - **A push source with no orchestrator in the picture** (GitHub webhook, dbt
   Cloud job completion, a vendor's own webhook)? Tier 3.
 
