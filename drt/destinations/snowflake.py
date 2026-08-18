@@ -75,6 +75,78 @@ def _bind_row(row: dict[str, Any], columns: list[str], json_columns: list[str]) 
     return [json.dumps(row.get(c), default=str) if c in js else row.get(c) for c in columns]
 
 
+# #988: a MERGE ... USING (VALUES ...) statement replaces the old CREATE TEMP
+# TABLE staging step, so `sync.mode: mirror` no longer needs schema-level
+# CREATE TABLE on Snowflake at all (staging via a physical temp table was the
+# one remaining DDL requirement after #987 fixed the finalize-side diff).
+# Verified live against a real account: 1000 rows x 3 columns (3000 scalar
+# bind params) executed in well under a second with no degradation across
+# 10/25/50/100/250/500/1000-row checkpoints; an unbounded single statement
+# (tried up to 32000 rows in an earlier, cruder probe) became impractically
+# slow. This budget stays comfortably under the verified-safe ceiling while
+# scaling down automatically for wide tables, the same shape as
+# databricks.py's `_rows_per_chunk` (driven by a different, driver-imposed
+# limit there — Snowflake's own ceiling isn't documented, see #988).
+_MERGE_PARAM_BUDGET = 2000
+
+
+def _rows_per_merge_chunk(n_cols: int) -> int:
+    """How many rows fit in one VALUES-sourced MERGE under the verified budget."""
+    return max(1, _MERGE_PARAM_BUDGET // max(1, n_cols))
+
+
+def _merge_using_subquery(
+    columns: list[str], schema_map: dict[str, str] | None, n_rows: int
+) -> str:
+    """Build the ``(SELECT ... FROM (VALUES ...) AS t(...))`` subquery that
+    sources a MERGE's ``USING`` clause from ``n_rows`` worth of scalar-bound
+    values, instead of a physical staging table.
+
+    PARSE_JSON wraps JSON-category columns in the outer SELECT rather than
+    inside the VALUES clause itself — Snowflake disallows functions inside
+    ``VALUES()`` (the same reason ``_value_clause`` switches a plain INSERT
+    to ``SELECT`` form for #317's Layer 3 JSON columns; applying PARSE_JSON
+    to the *projection* of a literal VALUES table hits neither restriction).
+    Generic ``v0..vN`` aliases on the VALUES table (rather than the real
+    column names) sidestep any edge case where a column name collides with a
+    SQL keyword when used as a bare alias.
+    """
+    folded = {str(k).lower(): v for k, v in schema_map.items()} if schema_map is not None else None
+    alias_names = [f"v{i}" for i in range(len(columns))]
+    select_parts = [
+        f"PARSE_JSON({alias_names[i]}) AS {col}"
+        if folded is not None and folded.get(str(col).lower()) == "json"
+        else f"{alias_names[i]} AS {col}"
+        for i, col in enumerate(columns)
+    ]
+    row_placeholder = "(" + ", ".join(["%s"] * len(columns)) + ")"
+    values_sql = ", ".join([row_placeholder] * n_rows)
+    return (
+        f"SELECT {', '.join(select_parts)} FROM (VALUES {values_sql}) "
+        f"AS t({', '.join(alias_names)})"
+    )
+
+
+def _build_merge_sql(
+    table_fq: str, columns: list[str], upsert_key: list[str], using_subquery: str
+) -> str:
+    """Build the full ``MERGE INTO ... USING (<subquery>) AS source`` statement."""
+    key_clause = " AND ".join([f"target.{k} = source.{k}" for k in upsert_key])
+    update_cols = [c for c in columns if c not in upsert_key]
+    update_clause = ", ".join([f"{c} = source.{c}" for c in update_cols])
+    insert_cols = ", ".join(columns)
+    insert_vals = ", ".join([f"source.{c}" for c in columns])
+    matched_clause = f"WHEN MATCHED THEN UPDATE SET {update_clause}" if update_cols else ""
+    return f"""
+        MERGE INTO {table_fq} target
+        USING ({using_subquery}) AS source
+        ON {key_clause}
+        {matched_clause}
+        WHEN NOT MATCHED THEN INSERT ({insert_cols})
+        VALUES ({insert_vals})
+    """
+
+
 class SnowflakeDestination:
     """Write records into Snowflake tables."""
 
@@ -218,57 +290,56 @@ class SnowflakeDestination:
                     if not config.upsert_key:
                         raise ValueError("upsert_key is required for merge mode")
 
-                    key_clause = " AND ".join(
-                        [f"target.{k} = source.{k}" for k in config.upsert_key]
-                    )
-
-                    update_cols = [c for c in columns if c not in config.upsert_key]
-                    update_clause = ", ".join([f"{c} = source.{c}" for c in update_cols])
-
-                    insert_cols = col_list
-                    insert_vals = ", ".join([f"source.{c}" for c in columns])
-
-                    staging_table = f"TMP_{config.table.upper()}"
-
-                    cur.execute(f"CREATE TEMP TABLE {staging_table} LIKE {table_fq}")
-
-                    for i, row in enumerate(records):
+                    # #988: chunked MERGE ... USING (VALUES ...) replaces the
+                    # old CREATE TEMP TABLE staging step — no DDL privilege
+                    # needed at all now. The common case is one bulk MERGE per
+                    # chunk; a chunk-level failure falls back to a MERGE per
+                    # individual row within that chunk, so a single bad row
+                    # (a genuine SQL-level rejection — type coercion, a NOT
+                    # NULL violation, etc., same class of error the old
+                    # per-row staging INSERT used to isolate) doesn't take
+                    # down every other row sharing its chunk. This is a
+                    # deliberate design choice, not an incidental one: see
+                    # #988's PR description for why the fallback exists.
+                    chunk_size = _rows_per_merge_chunk(len(columns))
+                    for chunk_start in range(0, len(records), chunk_size):
+                        chunk = records[chunk_start : chunk_start + chunk_size]
                         try:
-                            cur.execute(
-                                f"""
-                                INSERT INTO {staging_table} ({col_list})
-                                {value_clause}
-                                """,
-                                _bind_row(row, columns, json_cols),
+                            using_sql = _merge_using_subquery(columns, schema_map, len(chunk))
+                            merge_sql = _build_merge_sql(
+                                table_fq, columns, config.upsert_key, using_sql
                             )
-                        except Exception as e:
-                            result.failed += 1
-                            result.row_errors.append(
-                                RowError(
-                                    batch_index=i,
-                                    record_preview=str(row)[:200],
-                                    http_status=None,
-                                    error_message=str(e),
-                                )
-                            )
-                            if sync_options.on_error == "fail":
-                                raise
-
-                    matched_clause = (
-                        f"WHEN MATCHED THEN UPDATE SET {update_clause}" if update_cols else ""
-                    )
-
-                    merge_sql = f"""
-                        MERGE INTO {table_fq} target
-                        USING {staging_table} source
-                        ON {key_clause}
-                        {matched_clause}
-                        WHEN NOT MATCHED THEN INSERT ({insert_cols})
-                        VALUES ({insert_vals})
-                    """
-
-                    cur.execute(merge_sql)
-                    result.success += len(records) - result.failed
+                            flat_params: list[Any] = [
+                                v
+                                for row in chunk
+                                for v in _bind_row(row, columns, json_cols)
+                            ]
+                            cur.execute(merge_sql, flat_params)
+                            result.success += len(chunk)
+                        except Exception:
+                            for offset, row in enumerate(chunk):
+                                idx = chunk_start + offset
+                                try:
+                                    using_sql = _merge_using_subquery(columns, schema_map, 1)
+                                    merge_sql = _build_merge_sql(
+                                        table_fq, columns, config.upsert_key, using_sql
+                                    )
+                                    cur.execute(
+                                        merge_sql, _bind_row(row, columns, json_cols)
+                                    )
+                                    result.success += 1
+                                except Exception as e:
+                                    result.failed += 1
+                                    result.row_errors.append(
+                                        RowError(
+                                            batch_index=idx,
+                                            record_preview=str(row)[:200],
+                                            http_status=None,
+                                            error_message=str(e),
+                                        )
+                                    )
+                                    if sync_options.on_error == "fail":
+                                        raise
 
                     # sync.mode: mirror (#340 Step 4) — accumulate upsert_key
                     # tuples for the finalize_sync DELETE pass. Only keys from

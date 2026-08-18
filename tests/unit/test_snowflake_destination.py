@@ -13,7 +13,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from drt.config.models import SnowflakeDestinationConfig, SyncOptions
-from drt.destinations.snowflake import SnowflakeDestination, _bind_row
+from drt.destinations.snowflake import (
+    SnowflakeDestination,
+    _bind_row,
+    _rows_per_merge_chunk,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -236,7 +240,8 @@ class TestSnowflakeDestinationLoad:
 
         assert result.success == 2
         sqls = [(call.args[0] if call.args else "") for call in conn._cur.execute.call_args_list]
-        assert any("CREATE TEMP TABLE" in s for s in sqls)
+        # #988: no staging table — the MERGE sources from a VALUES subquery.
+        assert not any("CREATE" in s for s in sqls)
         assert any("MERGE INTO ANALYTICS.PUBLIC.USER_SCORES" in s for s in sqls)
         assert any("WHEN MATCHED THEN UPDATE" in s for s in sqls)
 
@@ -266,17 +271,22 @@ class TestSnowflakeDestinationLoad:
         assert "type mismatch" in result.row_errors[0].error_message
 
     def test_merge_insert_partial_fail_on_error_skip(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """#988: a bulk chunk MERGE failure falls back to one MERGE per row,
+        isolating exactly which row(s) actually fail rather than losing the
+        whole chunk."""
         _set_creds(monkeypatch)
         conn = _fake_conn()
         cur = conn._cur
 
-        insert_call_count = {"n": 0}
+        call_count = {"n": 0}
 
         def execute_side_effect(sql: str, *args: Any) -> None:
-            if "INSERT INTO TMP_" in sql:
-                insert_call_count["n"] += 1
-                if insert_call_count["n"] == 1:
-                    raise Exception("type mismatch")
+            call_count["n"] += 1
+            # call 1: bulk MERGE for the 2-row chunk — fail, forcing fallback.
+            # call 2: per-row MERGE for record idx 0 — fail (the real error).
+            # call 3: per-row MERGE for record idx 1 — succeed.
+            if call_count["n"] in (1, 2):
+                raise Exception("type mismatch")
             return None
 
         cur.execute.side_effect = execute_side_effect
@@ -293,9 +303,11 @@ class TestSnowflakeDestinationLoad:
         assert result.failed == 1
         assert result.success == 1
         assert len(result.row_errors) == 1
+        assert result.row_errors[0].batch_index == 0
 
         sqls = [(call.args[0] if call.args else "") for call in cur.execute.call_args_list]
         assert any("MERGE INTO ANALYTICS.PUBLIC.USER_SCORES" in s for s in sqls)
+        assert not any("CREATE" in s for s in sqls)
 
     def test_merge_all_columns_are_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
@@ -311,6 +323,46 @@ class TestSnowflakeDestinationLoad:
         merge_sql = next(s for s in sqls if "MERGE INTO" in s)
         assert "WHEN NOT MATCHED THEN INSERT" in merge_sql
         assert "WHEN MATCHED THEN UPDATE" not in merge_sql
+
+    def test_rows_per_merge_chunk_scales_with_column_count(self) -> None:
+        """#988: chunk size is a param-budget / column-count derivation, the
+        same shape as databricks.py's _rows_per_chunk — not a fixed row
+        count, so a wide table automatically gets smaller chunks."""
+        assert _rows_per_merge_chunk(2) == 1000  # budget 2000 // 2 cols
+        assert _rows_per_merge_chunk(20) == 100
+        assert _rows_per_merge_chunk(2000) == 1
+        assert _rows_per_merge_chunk(10_000) == 1  # never below 1
+
+    def test_merge_chunks_records_into_multiple_bulk_statements(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """N records over the per-chunk budget emit multiple bulk MERGE
+        statements, each sized to its own chunk — not one unbounded
+        statement, and not one statement per row either."""
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        modules = _mocked_snowflake_modules(conn)
+
+        # Force a tiny chunk size (2 rows) without needing thousands of
+        # records to exercise the boundary.
+        monkeypatch.setattr("drt.destinations.snowflake._MERGE_PARAM_BUDGET", 4)
+
+        records = [{"id": i, "score": float(i)} for i in range(5)]  # 2 cols -> chunk=2
+        config = _config(mode="merge", upsert_key=["id"])
+        with patch.dict("sys.modules", modules):
+            result = SnowflakeDestination().load(records, config, _options())
+
+        assert result.success == 5
+        assert result.failed == 0
+
+        sqls = [(call.args[0] if call.args else "") for call in conn._cur.execute.call_args_list]
+        merge_sqls = [s for s in sqls if "MERGE INTO" in s]
+        # 5 rows / chunk size 2 -> chunks of 2, 2, 1 -> 3 bulk MERGE statements.
+        assert len(merge_sqls) == 3
+        # Each statement's USING subquery has exactly as many VALUES rows as
+        # its chunk — verified by counting the row placeholder groups.
+        row_counts = [s.count("(%s, %s)") for s in merge_sqls]
+        assert row_counts == [2, 2, 1]
 
 
 class TestSnowflakeConnection:
@@ -606,6 +658,36 @@ class TestSnowflakeSchemaIntrospection:
         assert "VALUES (%s, %s)" in sql
         assert "PARSE_JSON" not in sql
         assert bound == [1, 0.5]
+
+    def test_merge_variant_column_wraps_parse_json_outside_values(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#988: a JSON/VARIANT column in MERGE mode gets PARSE_JSON applied
+        in the outer SELECT that projects the VALUES table, not inside the
+        VALUES() clause itself -- Snowflake disallows functions there (same
+        constraint _value_clause already works around for INSERT)."""
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        with (
+            patch.dict("sys.modules", _mocked_snowflake_modules(conn)),
+            patch(
+                "drt.destinations.schema.describe_columns",
+                return_value={"id": "scalar", "payload": "json"},
+            ),
+        ):
+            result = SnowflakeDestination().load(
+                [{"id": 1, "payload": {"a": 1}}],
+                _config(introspect_schema=True, mode="merge", upsert_key=["id"]),
+                _options(),
+            )
+        assert result.success == 1
+        merge_sql, bound = conn._cur.execute.call_args_list[0][0]
+        assert "MERGE INTO" in merge_sql
+        assert "FROM (VALUES (%s, %s)) AS t(v0, v1)" in merge_sql
+        assert "PARSE_JSON(v1) AS payload" in merge_sql
+        # PARSE_JSON is outside VALUES(), not inside it.
+        assert "VALUES (%s, PARSE_JSON(%s))" not in merge_sql
+        assert bound == [1, '{"a": 1}']
 
 
 def test_bind_row_orders_by_columns_regardless_of_row_key_order() -> None:

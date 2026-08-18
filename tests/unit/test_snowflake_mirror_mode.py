@@ -169,8 +169,9 @@ def test_mirror_forces_merge_path_even_when_config_mode_is_insert(
     """``sync.mode: mirror`` overrides ``config.mode: insert`` — MERGE runs.
 
     Mirror mode semantically requires upsert; users shouldn't have to
-    also set ``config.mode: merge``. Verify the MERGE branch ran (CREATE
-    TEMP TABLE + MERGE INTO).
+    also set ``config.mode: merge``. Verify the MERGE branch ran, sourced
+    from a VALUES subquery (#988) rather than a physical staging table —
+    no CREATE of any kind, which is the whole point of #988's fix.
     """
     _set_creds(monkeypatch)
     dest = SnowflakeDestination()
@@ -186,7 +187,8 @@ def test_mirror_forces_merge_path_even_when_config_mode_is_insert(
         (call.args[0] if call.args else "")
         for call in conn._cur.execute.call_args_list
     ]
-    assert any("CREATE TEMP TABLE" in s for s in sqls)
+    assert any("MERGE INTO" in s and "USING" in s for s in sqls)
+    assert not any("CREATE" in s for s in sqls)
     assert any("MERGE INTO ANALYTICS.PUBLIC.USER_SCORES" in s for s in sqls)
 
 
@@ -395,9 +397,12 @@ def test_mirror_excludes_failed_record_keys_from_accumulation(
 ) -> None:
     """Records whose batch_index appears in row_errors are skipped from ``_mirror_keys``.
 
-    Only successfully-staged keys count as "source state" — same shape as
-    Postgres / MySQL / ClickHouse Step 1-3. The Snowflake merge path
-    records row_errors for failures during the staging INSERT loop.
+    Only successfully-merged keys count as "source state" — same shape as
+    Postgres / MySQL / ClickHouse Step 1-3. Since #988, the Snowflake merge
+    path runs one bulk MERGE per chunk and falls back to a MERGE per
+    individual row only when the bulk statement fails — this forces that
+    fallback (a whole-chunk failure) and then fails one of the per-row
+    retries, so both layers of the new fallback logic are exercised.
     """
     _set_creds(monkeypatch)
     dest = SnowflakeDestination()
@@ -405,23 +410,19 @@ def test_mirror_excludes_failed_record_keys_from_accumulation(
     config = _config()
     opts = _options(on_error="skip")
 
-    # Force the SECOND INSERT into the staging table to fail. The first
-    # cur.execute is CREATE TEMP TABLE — let that succeed. Then alternate
-    # success / fail / success on the INSERTs.
     call_counter = {"n": 0}
 
-    def _execute_with_one_insert_failure(*args: Any, **_kwargs: Any) -> None:
+    def _execute_with_bulk_then_one_row_failure(*args: Any, **_kwargs: Any) -> None:
         call_counter["n"] += 1
-        sql = args[0] if args else ""
-        # CREATE TEMP TABLE = call 1 — succeed
-        # INSERT INTO TMP_... call 2 (record idx 0) — succeed
-        # INSERT INTO TMP_... call 3 (record idx 1) — fail
-        # INSERT INTO TMP_... call 4 (record idx 2) — succeed
-        # MERGE INTO ...        call 5 — succeed
-        if call_counter["n"] == 3 and "INSERT INTO TMP_" in sql:
+        # call 1: bulk MERGE for the 3-row chunk — force it to fail, so the
+        #   per-row fallback engages.
+        # call 2: per-row MERGE for record idx 0 (id=1) — succeed
+        # call 3: per-row MERGE for record idx 1 (id=2) — fail
+        # call 4: per-row MERGE for record idx 2 (id=3) — succeed
+        if call_counter["n"] in (1, 3):
             raise RuntimeError("forced for test")
 
-    conn._cur.execute.side_effect = _execute_with_one_insert_failure
+    conn._cur.execute.side_effect = _execute_with_bulk_then_one_row_failure
 
     with patch.dict("sys.modules", _mocked_snowflake_modules(conn)):
         dest.load(
@@ -436,6 +437,7 @@ def test_mirror_excludes_failed_record_keys_from_accumulation(
 
     # id=2 was the failed record; mirror_keys must contain only 1 and 3.
     assert dest._mirror_keys == [(1,), (3,)]
+    assert call_counter["n"] == 4
 
 
 def test_finalize_sync_returns_none_for_non_mirror_mode(

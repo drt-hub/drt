@@ -45,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## drt-core
 
+## [Unreleased]
+
+### Fixed
+
+- **`sync.mode: mirror` on Snowflake required schema-level `CREATE TABLE` even for a least-privilege role, the gap v0.9.1's #986 fix explicitly left open** ([#988](https://github.com/drt-hub/drt/issues/988)). The write path unconditionally staged every mirror write through `CREATE TEMP TABLE` before `MERGE`ing it in — independent of, and unaffected by, #986/#987's state-diff fix, which only touched the read side. Replaced with `MERGE INTO ... USING (SELECT ... FROM (VALUES ...) AS t(...))`: the batch's rows source the `MERGE` directly, chunked to stay under a bind-parameter budget verified live against a real account (1000 rows / 3 columns / 3000 params completed in under a second with no degradation across 10/25/50/100/250/500/1000-row checkpoints; an earlier, cruder probe found a single unbounded statement in the thousands-of-rows range became impractically slow, confirming chunking is required, not optional). A chunk that fails outright falls back to one `MERGE` per row within it, preserving the same per-row `on_error` isolation the old per-row staging INSERT provided — a bulk chunk failure no longer takes every row in it down together. JSON/VARIANT columns get `PARSE_JSON` applied in the outer `SELECT` that projects the `VALUES` table rather than inside `VALUES()` itself, since Snowflake disallows functions there (the same constraint plain `INSERT` already works around for #317's Layer 3). `sync.mode: mirror` — tracked or not — is now genuinely no-DDL end to end on Snowflake for a role with only `INSERT`/`UPDATE`/`MERGE`/`DELETE` on the target and pre-provisioned state tables. Docs: `docs/connectors/snowflake.md`.
+
 ## [0.9.1] - 2026-08-18
 
 **Patch release for [#986](https://github.com/drt-hub/drt/issues/986) — tracked mirror on least-privilege MySQL users, plus the state-diff privilege reduction on Snowflake, and three other fixes accumulated since v0.9.0.**

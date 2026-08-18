@@ -21,6 +21,8 @@ Covers the #671 verification set (Priority 1 under epic #654):
 - ``test_snowflake_mirror_deletes_unobserved_keys`` — ``sync.mode: mirror``
   end-of-sync DELETE (#340 Snowflake leg): a pre-seeded row the source never
   emits is removed because its key wasn't observed.
+- ``test_snowflake_merge_mode_chunks_large_batch_without_temp_table`` — #988's
+  VALUES-sourced MERGE write path (no CREATE TEMP TABLE) at multi-chunk scale.
 
 Runs only when the ``DRT_SMOKE_SNOWFLAKE_*`` secrets are present (injected by the
 dwh-smoke workflow). Otherwise it skips — safe no-op for forks / local runs.
@@ -439,6 +441,72 @@ def test_snowflake_mirror_deletes_unobserved_keys(tmp_path: Path) -> None:
         # Source rows upserted; the unobserved stale row removed by the mirror DELETE.
         assert names == {"Alice", "Bob", "Carol"}
         assert count == 3, f"stale row not deleted — expected 3 rows, got {count}"
+    finally:
+        _drop_table(creds, table)
+
+
+def test_snowflake_merge_mode_chunks_large_batch_without_temp_table(tmp_path: Path) -> None:
+    """#988: ``sync.mode: mirror``'s write path no longer needs schema-level
+    CREATE TABLE at all — the old CREATE TEMP TABLE staging step is replaced
+    by a ``MERGE INTO ... USING (VALUES ...)`` statement, chunked to stay
+    under a verified-safe bind-param budget (live-probed: 1000 rows / 3
+    columns / 3000 params completed in well under a second with no
+    degradation across 10/25/50/100/250/500/1000-row checkpoints).
+
+    1500 rows forces more than one chunk at the default budget (~666
+    rows/chunk for this 3-column table), against a real account — proving
+    the multi-statement path is correct at scale, not just that the emitted
+    SQL text looks right (a mock cursor accepts any string; see #908's
+    postmortem). Calls ``load()``/``finalize_sync()`` directly rather than
+    through a DuckDB-seeded ``run_sync()``, since seeding 1500 rows through
+    the full source pipeline adds nothing this test needs to prove.
+    """
+    creds = _require_creds()
+    table = unique_table("DRT_SMOKE_988_CHUNKED")
+
+    dest_config = SnowflakeDestinationConfig(
+        type="snowflake",
+        account_env=ACCOUNT_ENV,
+        user_env=USER_ENV,
+        **_auth_config_kwargs(),
+        database=creds["DRT_SMOKE_SNOWFLAKE_DATABASE"],
+        schema=creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"],
+        table=table,
+        warehouse=creds["DRT_SMOKE_SNOWFLAKE_WAREHOUSE"],
+        mode="merge",
+        upsert_key=["id"],
+    )
+    sync_options = SyncOptions(mode="mirror", batch_size=1500)
+
+    n = 1500
+    records = [
+        {"id": i, "name": f"name{i}", "email": f"n{i}@x.com"} for i in range(n)
+    ]
+
+    dest = SnowflakeDestination()
+    try:
+        _create_table(creds, table)
+        # A stale row outside the batch — proves the finalize DELETE still
+        # runs correctly after a multi-chunk write, not just a single-chunk one.
+        conn = _connect(creds)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"INSERT INTO {table} (id, name, email) "
+                    "VALUES (-1, 'Stale', 'stale@example.com')"
+                )
+        finally:
+            conn.close()
+
+        result = dest.load(records, dest_config, sync_options)
+        assert result.failed == 0, f"chunked merge had failures: {result.row_errors[:3]}"
+        assert result.success == n
+
+        dest.finalize_sync(dest_config, sync_options)
+
+        count, names = _readback_count_and_names(creds, table)
+        assert count == n, f"expected {n} rows after chunked write + delete, got {count}"
+        assert "Stale" not in names, "stale row survived the finalize DELETE"
     finally:
         _drop_table(creds, table)
 
