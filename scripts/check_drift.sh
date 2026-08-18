@@ -140,8 +140,8 @@ readme_dest_section=$(awk '/^### Destinations/,/^## /' README.md)
 for dest in $destinations; do
     term="$(fuzzy_term "$dest")"
     alias="$(display_alias "$dest")"
-    if ! echo "$readme_dest_section" | grep -qi -- "$term"; then
-        if [ -z "$alias" ] || ! echo "$readme_dest_section" | grep -qi -- "$alias"; then
+    if ! grep -qi -- "$term" <<< "$readme_dest_section"; then
+        if [ -z "$alias" ] || ! grep -qi -- "$alias" <<< "$readme_dest_section"; then
             report "dest-readme" "$dest" "no row in README.md Destinations table"
         fi
     fi
@@ -153,7 +153,7 @@ done
 readme_src_section=$(awk '/^### Sources/,/^### Destinations/' README.md)
 for src in $sources; do
     term="$(fuzzy_term "$src")"
-    if ! echo "$readme_src_section" | grep -qi -- "$term"; then
+    if ! grep -qi -- "$term" <<< "$readme_src_section"; then
         report "src-readme" "$src" "no row in README.md Sources table"
     fi
 done
@@ -172,7 +172,7 @@ done
 # ---------------------------------------------------------------------------
 docstring=$(head -30 "$MCP_SERVER")
 for tool in $mcp_tools; do
-    if ! echo "$docstring" | grep -q "$tool"; then
+    if ! grep -q "$tool" <<< "$docstring"; then
         report "mcp-docstring" "$tool" "not listed in drt/mcp/server.py module docstring"
     fi
 done
