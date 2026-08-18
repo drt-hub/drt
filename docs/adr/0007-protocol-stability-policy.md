@@ -6,8 +6,11 @@
   [#304](https://github.com/drt-hub/drt/issues/304) (the v1.0 freeze itself).
 - **Relates to:** [#992](https://github.com/drt-hub/drt/pull/992) (the
   mechanical half of #300 — `@runtime_checkable` consistency and `Raises:`
-  documentation across all 17 Protocols, merged ahead of this ADR so it
-  describes a surface that's already consistent).
+  documentation across all 17 Protocols). **This ADR assumes #992 is merged
+  first** — until then, `SecretProvider`, `LimiterFactory`, and
+  `WatermarkStorage` still lack `@runtime_checkable`, and this ADR's
+  "16 public/frozen Protocols all `@runtime_checkable`" premise does not yet
+  hold. Land #992 before (or in the same merge window as) this ADR.
 - **Implementation:** none directly. This ADR sets the policy #304 enforces
   and the freeze-scope call each of the 17 Protocols below needs.
 
@@ -40,19 +43,36 @@ required method, every one of drt's own connectors and every third-party one
 built against it fails `isinstance()` checks and (if constructed directly)
 type-checks under mypy.
 
-Concretely, for any of the 17 Protocols:
+A signature change also has to be judged from **both** sides of the
+Protocol, not just the caller's: a `Protocol` has callers (drt's engine,
+mostly) who need the old contract to keep holding, *and* structural
+implementers (every connector, drt's own and third-party) who wrote their
+method bodies against the old contract. A change that's safe for one side is
+routinely unsafe for the other — e.g. widening a parameter's accepted type
+(`x: int` → `x: int | str`) is safe for existing *callers* (anyone already
+passing an `int` still works) but breaks every existing *implementer*,
+because the engine may now actually call their method with a `str` their
+method body was never written to handle — that's a real `AttributeError` at
+runtime, not just a type-checker complaint. Narrowing a return type has the
+mirror problem on the implementer side (an implementation returning the
+wider original type is no longer conformant). Given that, this ADR does not
+attempt a change-by-change compatibility table — the earlier draft of this
+document had one, and Codex review correctly flagged two of its rows as
+unsafe once implementers are accounted for, not just callers.
+
+**The rule instead: treat any change to an already-shipped Protocol
+method's signature — parameters or return type, narrowing or widening — as
+breaking.** For any of the 17 Protocols:
 
 | Change | Breaking? |
 |---|---|
-| Add a required method | **Yes — no default-method escape hatch exists** |
+| Add a required method to an existing Protocol | **Yes — no default-method escape hatch exists** |
 | Add an optional method (with `...` body but callers use `getattr`/`hasattr`) | Yes in practice — nothing in Python enforces "optional" on a `Protocol` method the way a `@property` with a default would on a class |
 | Remove or rename a method | Yes |
-| Narrow a parameter's accepted type | Yes (existing callers passing the old wider type now fail) |
-| Widen a parameter's accepted type | No — existing implementations already handle the narrower case |
-| Narrow a return type | No — existing callers handle the wider type already |
-| Widen a return type | Yes (existing callers may pattern-match / narrow on the old type) |
-| Add a new, optional-capability Protocol (`FooCapable`) checked via `isinstance()` | **No** — this is the sanctioned extension path, see below |
-| Change documented `Raises:` behavior (e.g. a method that never raised starts raising) | Yes — treat it the same as a signature change |
+| Any change to an existing method's parameter types or return type (narrowing or widening, in either direction) | **Yes — default assumption; see reasoning above.** Don't try to reason out a case-by-case exception without checking both the caller side (`drt/engine/`) and every current implementer |
+| Change documented `Raises:` behavior (e.g. a method that never raised starts raising, or vice versa) | Yes — treat it the same as a signature change |
+| Add a new, `@runtime_checkable`, optional-capability Protocol (`FooCapable`) checked via `isinstance()`, never touching an existing Protocol's method set | **No** — this is the sanctioned extension path, see below |
+| Docstring-only changes that don't alter documented behavior (clarifying wording, adding examples) | No |
 
 ## The sanctioned extension mechanism
 
@@ -71,34 +91,59 @@ addition to `Destination`/`Source`/`StateStore` directly. This is also why
 [#992](https://github.com/drt-hub/drt/pull/992)'s `@runtime_checkable`
 consistency fix matters as a prerequisite: an optional-capability Protocol
 that isn't `@runtime_checkable` can't be `isinstance()`-checked, so it isn't
-usable as an extension point at all. All 17 Protocols now have it.
+usable as an extension point at all. Once #992 merges, all 17 Protocols have
+it.
 
 ## Deprecation workflow
 
-Codifying what the codebase already does three times, rather than inventing
-something new: `StateManager = LocalStateManager`
-(`drt/state/manager.py:165`), `HistoryManager = LocalHistoryManager`
-(`drt/state/history.py:180`), `DlqStore = LocalDlqStore`
-(`drt/state/dlq.py:311`) are all back-compat aliases kept so a rename or
-refactor doesn't break existing imports.
+Two different mechanisms are needed here, and conflating them was an error
+in an earlier draft of this ADR (caught in Codex review): a **concrete class
+alias** and a **Protocol method deprecation** are not interchangeable.
 
-For a Protocol method deprecation (post-v1.0, to honor #304's "2 minor
-versions" promise):
+**Concrete class/name aliases already have working precedent** —
+`StateManager = LocalStateManager` (`drt/state/manager.py:165`),
+`HistoryManager = LocalHistoryManager` (`drt/state/history.py:180`),
+`DlqStore = LocalDlqStore` (`drt/state/dlq.py:311`). These are real
+assignments to a concrete, instantiable class; the alias works because
+`LocalStateManager` has actual method bodies that run. Keep using this
+pattern for renaming concrete classes.
 
-1. The new shape ships alongside the old one. If it's a method rename, the
-   old name becomes a thin alias/wrapper calling the new one; if it's a
-   whole-Protocol replacement, the old Protocol is kept as-is and the new one
-   is introduced separately (as `FooV2` or similarly named — never silently
-   redefining `Foo`).
-2. The old path's docstring gets a `Deprecated since vX.Y — use ... instead.
-   Will be removed no earlier than vX.(Y+2).` line, and a `DeprecationWarning`
-   is raised at call time (not just documented) so it surfaces in CI for any
-   downstream user running with warnings-as-errors.
-3. CHANGELOG entry under `## [Unreleased]` naming the deprecation and the
-   removal-eligible version.
-4. The old path is removed no earlier than 2 minor versions after the
-   deprecation shipped — matching #304's stated promise exactly, not a
-   different number invented here.
+**This does not transfer to Protocol methods, and must not be imitated
+there.** A `Protocol` method's body (even a non-`...` one) never executes
+for a structural implementer — implementers provide their own bodies
+entirely. Adding a wrapper method to a `Protocol` that calls another
+`Protocol` method does nothing for existing implementers, who don't have
+either method's logic inherited from anywhere. And adding the *new* method
+name to the *same* `Protocol` immediately requires every existing
+implementer to define it too (see the breaking-change table above) — there
+is no gradual-adoption path within a single Protocol.
+
+For a Protocol-level rename or signature change (post-v1.0, following
+`VERSIONING.md`'s deprecation cycle, which #304 also points back to):
+
+1. The old Protocol is left completely unchanged. The new shape ships as a
+   **separate, new, `@runtime_checkable` Protocol** (`FooV2`, or better, a
+   named optional-capability Protocol describing what's actually new) —
+   the same extension mechanism as any other new capability, not a special
+   case for deprecations.
+2. Callers structurally check for the new Protocol first
+   (`isinstance(x, FooV2)`), falling back to the old required one — this
+   adapter logic lives on the caller side (`drt/engine/`), not on either
+   Protocol.
+3. The old Protocol's docstring gets a `Deprecated since vX.Y — use FooV2
+   instead.` line. CHANGELOG entry under `## [Unreleased]` with a
+   `[DEPRECATED]` tag, per `VERSIONING.md`'s existing Step 1.
+4. **Removal requires both conditions VERSIONING.md already sets, not just
+   one:** the deprecated Protocol must have been announced for at least 2
+   minor releases (`VERSIONING.md`'s existing minimum floor), **and**
+   removing it only actually happens at the next MAJOR version once v1.0's
+   freeze is in effect — `VERSIONING.md`'s pre-1.0 notice explicitly stops
+   applying its "can remove after 2 minor releases in a MINOR bump" language
+   to Protocols the moment v1.0 ships. A method deprecated in v1.1 is not
+   removal-eligible in v1.3; it's removal-eligible at v2.0, provided v1.3 or
+   later has already passed. This corrects an earlier draft of this ADR,
+   which stated only the 2-minor-version floor and left the MAJOR-bump
+   requirement implicit.
 
 ## Freeze-scope table
 
@@ -127,9 +172,11 @@ One is explicitly internal:
 
 ## Known asymmetry, frozen as-is
 
-`Source.test_connection(config) -> bool` (never raises, caller checks the
-return) and `ConnectionTestable.test_connection(config) -> None` (raises on
-failure) share a method name but have opposite error-handling contracts.
+`Source.test_connection(config) -> bool` (caller checks the return; connection
+failures are caught and reported as `False`, though a cleanup-step failure in
+some implementations can still propagate — see the Protocol docstring) and
+`ConnectionTestable.test_connection(config) -> None` (raises on failure) share
+a method name but have differently-shaped error-handling contracts.
 Verified (2026-08-18) that the two never meet at a shared call site — sources
 are checked via `drt/cli/commands/profile.py:166` and
 `drt/mcp/tools/test_profile.py:24`, destinations via
