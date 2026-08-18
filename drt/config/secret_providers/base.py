@@ -15,7 +15,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlparse
 
 
@@ -95,6 +95,7 @@ def extract_key(raw: str, ref: SecretRef, *, scheme: str) -> str:
     return select_field(payload, ref, scheme=scheme)
 
 
+@runtime_checkable
 class SecretProvider(Protocol):
     """Resolves a parsed provider URI to a secret value.
 

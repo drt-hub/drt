@@ -32,11 +32,23 @@ class Source(Protocol):
         session tags) can ignore the parameter entirely and still be tagged.
         Keyword-only and default-``None`` so every existing implementation
         and test caller keeps working unchanged.
+
+        Raises:
+            Exception: connection or query failure. Not caught by the
+                engine (``yield from source.extract(...)``); propagates and
+                aborts the sync.
         """
         ...
 
     def test_connection(self, config: ProfileConfig) -> bool:
-        """Return True if the source is reachable."""
+        """Return True if the source is reachable, False otherwise — never raises.
+
+        Deliberately the opposite contract from
+        ``destinations.base.ConnectionTestable.test_connection`` (which
+        raises rather than returns a bool). The two never meet at a shared
+        call site (sources vs. destinations), so this asymmetry is frozen
+        as-is rather than unified — see ADR 0007.
+        """
         ...
 
 
@@ -64,5 +76,9 @@ class IncrementalSource(Protocol):
         """Yield records, filtering server-side from ``cursor_value`` when possible.
 
         ``query_tags`` — see :meth:`Source.extract`.
+
+        Raises:
+            Exception: see :meth:`Source.extract` — same propagation
+                contract.
         """
         ...

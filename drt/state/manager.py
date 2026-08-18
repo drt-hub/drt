@@ -48,7 +48,18 @@ class StateStore(Protocol):
 
     def get_last_sync(self, sync_name: str) -> SyncState | None: ...
     def get_all(self) -> dict[str, SyncState]: ...
-    def save_sync(self, state: SyncState) -> None: ...
+
+    def save_sync(self, state: SyncState) -> None:
+        """Persist ``state`` as the sync's latest recorded run.
+
+        Raises:
+            StateContentionError: a conditional (read-modify-write) backend
+                kept losing its race against concurrent writers and
+                exhausted its retry budget. Unlike ``HistoryStore.append``/
+                ``DlqBackend.append``, this must not be silently swallowed —
+                lost sync state is the failure class #919 exists to prevent.
+        """
+        ...
 
     def reset(self, sync_name: str) -> bool:
         """Drop recorded state for ``sync_name``; return whether anything went.
@@ -56,6 +67,9 @@ class StateStore(Protocol):
         Part of the Protocol rather than a local-only extra: ``drt state reset``,
         ``drt run --full-refresh`` and two MCP tools all call it, so a backend
         without it is not a usable substitute for the local store.
+
+        Raises:
+            StateContentionError: see ``save_sync``.
         """
         ...
 

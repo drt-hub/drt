@@ -35,7 +35,16 @@ class RowCountable(Protocol):
     ``get_row_count`` is picked up automatically.
     """
 
-    def get_row_count(self, config: Any) -> int: ...
+    def get_row_count(self, config: Any) -> int:
+        """Return the destination table's current row count.
+
+        Raises:
+            Exception: connection or query failure. Not caught by
+                ``get_row_count_for_destination``; the caller of that
+                helper is expected to catch it rather than let it abort
+                the wider operation.
+        """
+        ...
 
 
 def get_row_count_for_destination(

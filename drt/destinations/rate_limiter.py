@@ -175,6 +175,7 @@ def _reset_limiter_registry() -> None:
         _limiter_registry.clear()
 
 
+@runtime_checkable
 class LimiterFactory(Protocol):
     """Constructs a :class:`RateLimiter`. See ``resolve_rate_limiter``."""
 

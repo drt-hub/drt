@@ -104,7 +104,15 @@ class DlqBackend(Protocol):
     def append(
         self, sync_name: str, entries: list[DeadLetter], *, max_records: int = 10_000
     ) -> int:
-        """Append ``entries`` and return the resulting depth (FIFO-capped)."""
+        """Append ``entries`` and return the resulting depth (FIFO-capped).
+
+        Object-store-backed implementations treat this as best-effort, like
+        ``HistoryStore.append`` — a failure is logged at WARNING and
+        swallowed rather than raised, so a DLQ persistence problem never
+        fails the sync whose records it's recording. ``LocalDlqStore`` does
+        not catch local I/O errors (disk full, permission denied); those
+        still propagate.
+        """
         ...
 
     def replace(self, sync_name: str, entries: list[DeadLetter]) -> None: ...

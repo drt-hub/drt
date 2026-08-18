@@ -82,7 +82,18 @@ class Destination(Protocol):
         config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult:
-        """Send a batch of records to the destination."""
+        """Send a batch of records to the destination.
+
+        Row-level failures are reported via ``SyncResult.errors`` /
+        ``row_errors``, not raised — the engine has no per-row recovery for
+        an exception, so a batch that raises loses per-row error
+        attribution entirely.
+
+        Raises:
+            Exception: an unrecoverable, batch-level failure (connection
+                lost, auth rejected, API outage). The engine does not catch
+                this; it propagates and aborts the sync.
+        """
         ...
 
 
@@ -132,7 +143,13 @@ class StagedDestination(Protocol):
         config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> None:
-        """Accumulate records for later upload."""
+        """Accumulate records for later upload.
+
+        Raises:
+            Exception: staging itself failed (e.g. local buffer/disk error).
+                Row-level outcomes aren't known yet at this point — they
+                surface later from ``finalize()``.
+        """
         ...
 
     def finalize(
@@ -140,7 +157,14 @@ class StagedDestination(Protocol):
         config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult:
-        """Upload staged file, trigger job, poll for completion."""
+        """Upload staged file, trigger job, poll for completion.
+
+        Raises:
+            Exception: an unrecoverable, job-level failure (upload
+                rejected, job errored out before producing per-row
+                results). Row-level failures the job itself reports are
+                returned via ``SyncResult.errors`` / ``row_errors`` instead.
+        """
         ...
 
 
@@ -187,6 +211,13 @@ class OrphanCleanup(Protocol):
 
         Returns a tuple of `(dropped, failed)` where each is a list of
         schema-qualified table names. Implementations MUST only drop
-        tables that are known safe (e.g. end with "__drt_swap").
+        tables that are known safe (e.g. end with "__drt_swap"). A single
+        table's drop failure goes into `failed`, not raised — like
+        `list_orphan_swap_tables`, only a catalog/connection-level failure
+        that prevents attempting any drop at all should raise.
+
+        Raises:
+            Exception: If the destination cannot connect to attempt the
+                drops at all.
         """
         ...

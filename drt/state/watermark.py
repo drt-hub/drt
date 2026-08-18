@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 # How many times a conditional watermark write may lose its race before giving
 # up. Contention here is two syncs finishing at the same moment, not sustained
@@ -29,11 +29,27 @@ class WatermarkContentionError(RuntimeError):
     """
 
 
+@runtime_checkable
 class WatermarkStorage(Protocol):
     """Read and write watermark values for incremental syncs."""
 
-    def get(self, sync_name: str) -> str | None: ...
-    def save(self, sync_name: str, value: str) -> None: ...
+    def get(self, sync_name: str) -> str | None:
+        """Return the stored watermark for ``sync_name``, or ``None`` if unset.
+
+        Never raises for an unknown sync — an absent watermark is a normal
+        first-run state, not an error.
+        """
+        ...
+
+    def save(self, sync_name: str, value: str) -> None:
+        """Persist ``value`` as the new watermark for ``sync_name``.
+
+        Raises:
+            WatermarkContentionError: a conditional write kept losing its
+                race against concurrent writers past ``_MAX_WRITE_ATTEMPTS``
+                (#919). Never silently drops the write.
+        """
+        ...
 
     def delete(self, sync_name: str) -> None:
         """Clear the stored watermark for ``sync_name`` (#776).

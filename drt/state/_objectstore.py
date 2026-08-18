@@ -36,10 +36,30 @@ class ObjectPreconditionError(RuntimeError):
 
 @runtime_checkable
 class ObjectClient(Protocol):
-    """Minimal conditional object API needed by all remote state stores."""
+    """Minimal conditional object API needed by all remote state stores.
 
-    def read_for_update(self, key: str) -> tuple[bytes | None, Token]: ...
-    def write_if(self, key: str, body: bytes, token: Token) -> Token: ...
+    Internal — not a public extension point. GCS/S3 are the only expected
+    implementations; see ``_ObjectStoreBase`` for the retry/backoff loop
+    built on top of it.
+    """
+
+    def read_for_update(self, key: str) -> tuple[bytes | None, Token]:
+        """Return the object's current bytes (``None`` if absent) and a
+        version token to pin a subsequent ``write_if`` against.
+        """
+        ...
+
+    def write_if(self, key: str, body: bytes, token: Token) -> Token:
+        """Write ``body`` only if the object is still at ``token``; return
+        the new token on success.
+
+        Raises:
+            ObjectPreconditionError: ``token`` is stale — the object
+                changed since it was read. Callers retry with a fresh
+                ``read_for_update`` (see ``_ObjectStoreBase._backoff``).
+        """
+        ...
+
     def list_keys(self, prefix: str) -> list[str]: ...
 
 

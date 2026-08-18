@@ -57,7 +57,15 @@ class HistoryStore(Protocol):
     (#698) is blank in any ephemeral container.
     """
 
-    def append(self, entry: HistoryEntry) -> None: ...
+    def append(self, entry: HistoryEntry) -> None:
+        """Append one entry.
+
+        Best-effort: a failure to persist must never fail the sync it's
+        recording, so implementations log at WARNING and swallow the error
+        rather than raise. Unlike ``StateStore.save_sync``, there is no
+        contention error a caller needs to catch here.
+        """
+        ...
 
     def read(self, sync_name: str | None = None, limit: int = 20) -> list[HistoryEntry]:
         """Most recent ``limit`` entries, newest first; all syncs when ``sync_name`` is None."""
