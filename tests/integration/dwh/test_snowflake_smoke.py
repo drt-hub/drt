@@ -63,6 +63,13 @@ PASSWORD_ENV = "DRT_SMOKE_SNOWFLAKE_PASSWORD"
 # password users, so the smoke user is a TYPE = SERVICE user with an RSA key.
 KEY_ENV = "DRT_SMOKE_SNOWFLAKE_PRIVATE_KEY"
 
+# Snowflake's SQL access-control error (surfaces as "003001 (42501): ...
+# insufficient privileges..."), confirmed against this exact account when the
+# smoke role lacked OPERATE on the warehouse (#975/#985). Used to distinguish
+# a genuine missing-grant from any other failure in the warehouse-requirement
+# probe below.
+_SNOWFLAKE_INSUFFICIENT_PRIVILEGES = 3001
+
 
 def _require_creds() -> dict[str, str]:
     """Gate on the non-auth vars + at least one auth secret (key preferred)."""
@@ -654,6 +661,19 @@ def test_snowflake_last_change_commit_time_does_not_require_active_warehouse(
                 _ensure_suspended(cur, not was_suspended)
                 _ensure_suspended(cur, was_suspended)
             except Exception as exc:
+                # Only a *verified* insufficient-privilege error means "OPERATE
+                # isn't granted" -- errno 3001 is Snowflake's SQL access-control
+                # error, confirmed against this exact account's denial
+                # ("003001 (42501)") when OPERATE was absent. A blanket except
+                # here would misclassify a transient failure (network blip,
+                # timeout) as a missing grant and report a green skip -- worse,
+                # if the first ALTER above already applied, a timeout on the
+                # second one could leave the shared warehouse in the wrong
+                # state while this reports "OPERATE missing" instead of the
+                # real problem (Codex review, second pass, #985). Anything
+                # that isn't the confirmed privilege error propagates.
+                if getattr(exc, "errno", None) != _SNOWFLAKE_INSUFFICIENT_PRIVILEGES:
+                    raise
                 restore_note = ""
                 try:
                     _ensure_suspended(cur, was_suspended)
@@ -665,7 +685,13 @@ def test_snowflake_last_change_commit_time_does_not_require_active_warehouse(
                 pytest.skip(
                     f"#975: smoke role lacks OPERATE on warehouse {wh} ({exc})"
                     f"{restore_note} -- verified via a net-zero round trip before "
-                    "running the probe; inconclusive from this account."
+                    "running the probe; inconclusive from this account. This is "
+                    "expected and intentional -- OPERATE is deliberately not part "
+                    "of the standard smoke provisioning (see "
+                    "tests/integration/dwh/provisioning/snowflake.sql and "
+                    "docs/research/warehouse-trigger-matrix.md's 2026-08-18 "
+                    "addendum), granted only once to produce the finding this "
+                    "test now asserts when it happens to be present."
                 )
 
             _ensure_suspended(cur, True)

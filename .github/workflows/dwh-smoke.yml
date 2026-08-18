@@ -40,6 +40,12 @@ jobs:
     # producing a false finding or clobbering the other run's restore
     # (Codex review, #985). cancel-in-progress: false queues rather than
     # kills an in-flight run, which is safer than cancelling mid-ALTER.
+    # Shared with cost-digest.yml's digest job: that workflow deliberately
+    # piggybacks on this same warehouse right after this job (see its own
+    # comment), and its usage-view query would auto-resume a warehouse this
+    # job just suspended for the probe test -- producing a false regression
+    # (or getting interrupted itself). Same group name, same reasoning
+    # (Codex review, #985).
     concurrency:
       group: dwh-smoke-snowflake
       cancel-in-progress: false

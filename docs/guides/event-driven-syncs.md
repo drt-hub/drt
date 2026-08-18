@@ -243,7 +243,8 @@ the consumption requirement.
   a fresh authenticated connection — set `minimum_interval_seconds=` to
   something that reflects what that connection overhead is worth versus
   Tier 1 (native `TASK`, already warehouse-scheduled) and Tier 3 (Alert +
-  webhook, no polling at all).
+  webhook — no drt-side polling, though the Alert's own condition check
+  still "wraps a poll" on the warehouse side, as noted below).
 - **A push source with no orchestrator in the picture** (GitHub webhook, dbt
   Cloud job completion, a vendor's own webhook)? Tier 3.
 
