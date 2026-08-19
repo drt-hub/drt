@@ -141,6 +141,94 @@ def test_get_table_name_postgres() -> None:
     assert get_table_name(config) == "public.users"
 
 
+def test_execute_test_query_postgres_returns_int() -> None:
+    cursor = MagicMock()
+    cursor.fetchone.return_value = (42,)
+    conn = _plain_conn(cursor)
+
+    config = PostgresDestinationConfig(
+        type="postgres",
+        host="localhost",
+        dbname="test",
+        table="public.users",
+        upsert_key=["id"],
+    )
+    with patch(
+        "drt.destinations.postgres.PostgresDestination._connect", return_value=conn
+    ):
+        result = execute_test_query(config, "SELECT COUNT(*) FROM t")
+
+    assert result == 42
+    cursor.execute.assert_called_once_with("SELECT COUNT(*) FROM t")
+    conn.close.assert_called_once()
+
+
+def test_mysql_is_queryable_and_table_name() -> None:
+    config = MySQLDestinationConfig(
+        type="mysql", host="localhost", dbname="test", table="users", upsert_key=["id"]
+    )
+    assert is_queryable(config) is True
+    assert get_table_name(config) == "users"
+
+
+def test_execute_test_query_mysql_tuple_row() -> None:
+    cursor = MagicMock()
+    cursor.fetchone.return_value = (7,)
+    conn = _plain_conn(cursor)
+
+    config = MySQLDestinationConfig(
+        type="mysql", host="localhost", dbname="test", table="users", upsert_key=["id"]
+    )
+    with patch("drt.destinations.mysql.MySQLDestination._connect", return_value=conn):
+        result = execute_test_query(config, "SELECT COUNT(*) FROM t")
+
+    assert result == 7
+    cursor.execute.assert_called_once_with("SELECT COUNT(*) FROM t")
+    conn.close.assert_called_once()
+
+
+def test_execute_test_query_mysql_dict_cursor_row() -> None:
+    """pymysql's DictCursor yields a mapping, not a positional tuple."""
+    cursor = MagicMock()
+    cursor.fetchone.return_value = {"COUNT(*)": 9}
+    conn = _plain_conn(cursor)
+
+    config = MySQLDestinationConfig(
+        type="mysql", host="localhost", dbname="test", table="users", upsert_key=["id"]
+    )
+    with patch("drt.destinations.mysql.MySQLDestination._connect", return_value=conn):
+        result = execute_test_query(config, "SELECT COUNT(*) FROM t")
+
+    assert result == 9
+
+
+def test_clickhouse_is_queryable_and_table_name() -> None:
+    config = ClickHouseDestinationConfig(
+        type="clickhouse", host="localhost", database="test", table="users", upsert_key=["id"]
+    )
+    assert is_queryable(config) is True
+    assert get_table_name(config) == "users"
+
+
+def test_execute_test_query_clickhouse_returns_int() -> None:
+    client = MagicMock()
+    result_obj = MagicMock()
+    result_obj.result_rows = [(3,)]
+    client.query.return_value = result_obj
+
+    config = ClickHouseDestinationConfig(
+        type="clickhouse", host="localhost", database="test", table="users", upsert_key=["id"]
+    )
+    with patch(
+        "drt.destinations.clickhouse.ClickHouseDestination._connect", return_value=client
+    ):
+        result = execute_test_query(config, "SELECT COUNT(*) FROM t")
+
+    assert result == 3
+    client.query.assert_called_once_with("SELECT COUNT(*) FROM t")
+    client.close.assert_called_once()
+
+
 # ---------------------------------------------------------------------------
 # Snowflake queryable integration (#468)
 # ---------------------------------------------------------------------------

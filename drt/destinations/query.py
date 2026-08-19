@@ -11,24 +11,30 @@ from drt.config.models import (
     PostgresDestinationConfig,
     SnowflakeDestinationConfig,
 )
+from drt.connectors.registry import get_destination
+from drt.destinations.base import QueryableDestination
 
 
-def _queryable_destination(config: DestinationConfig) -> Any:
+def _queryable_destination(config: DestinationConfig) -> QueryableDestination | None:
     """Return the destination instance for ``config`` if it implements
     ``QueryableDestination`` (#469), else ``None``.
 
     Dispatches structurally on the destination class via
     ``QueryableDestination`` — an ``isinstance()`` capability check on a
     Protocol, not a hardcoded config-class tuple. A new SQL destination
-    becomes queryable by implementing ``get_table_name`` /
-    ``execute_test_query`` on itself; this file needs no edit for it.
+    gains ``drt test``'s validation-query capability by implementing
+    ``get_table_name`` / ``execute_test_query`` on itself; this file needs
+    no edit for that. This does **not** by itself make the destination
+    fully "queryable" in every sense the name might suggest — see
+    ``QueryableDestination``'s docstring for what it does and doesn't cover
+    (``compute_diff()``'s true-diff path and ``--store-failures`` need
+    ``fetch_rows``/``fetch_rows_by_keys``/``fetch_failing_rows`` below,
+    which are separate, still config-class-dispatched capabilities that
+    both already degrade gracefully — not crash — for an unsupported type).
     Instantiation (``get_destination``) is a cheap, side-effect-free no-arg
     constructor for every current destination — no connection is opened
     here.
     """
-    from drt.connectors.registry import get_destination
-    from drt.destinations.base import QueryableDestination
-
     dest = get_destination(config)
     return dest if isinstance(dest, QueryableDestination) else None
 
@@ -43,7 +49,7 @@ def get_table_name(config: DestinationConfig) -> str:
     dest = _queryable_destination(config)
     if dest is None:
         raise TypeError(f"Cannot get table name from {type(config).__name__}")
-    return dest.get_table_name(config)  # type: ignore[no-any-return]
+    return dest.get_table_name(config)
 
 
 def execute_test_query(config: DestinationConfig, query: str) -> int:
@@ -51,7 +57,7 @@ def execute_test_query(config: DestinationConfig, query: str) -> int:
     dest = _queryable_destination(config)
     if dest is None:
         raise TypeError(f"Cannot query {type(config).__name__}")
-    return dest.execute_test_query(config, query)  # type: ignore[no-any-return]
+    return dest.execute_test_query(config, query)
 
 
 # ---------------------------------------------------------------------------
