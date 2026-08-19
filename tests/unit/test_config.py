@@ -111,6 +111,77 @@ def test_load_project_missing(tmp_path: Path) -> None:
         load_project(tmp_path)
 
 
+def test_load_project_fires_config_changed_audit_event(tmp_path: Path) -> None:
+    """#299 / ADR 0008, Codex-review fix: direct load_project() callers
+    (e.g. `drt status`, which never calls load_syncs) get the event too,
+    not just the load_syncs path."""
+    from drt.observability.audit import (
+        AuditEvent,
+        _reset_audit_logger,
+        register_audit_logger,
+    )
+
+    captured: list[AuditEvent] = []
+
+    class _Capturing:
+        def log_event(self, event: AuditEvent) -> None:
+            captured.append(event)
+
+    register_audit_logger(_Capturing())
+    try:
+        config_file = tmp_path / "drt_project.yml"
+        config_file.write_text("name: my-project\nprofile: dev\n")
+        load_project(tmp_path)
+
+        assert len(captured) == 1
+        assert captured[0].event_type == "config_changed"
+        assert captured[0].details["source"] == "load_project"
+    finally:
+        _reset_audit_logger()
+
+
+def test_load_project_missing_does_not_fire_audit_event(tmp_path: Path) -> None:
+    """A failed load isn't a config read — no event on FileNotFoundError."""
+    from drt.observability.audit import (
+        AuditEvent,
+        _reset_audit_logger,
+        register_audit_logger,
+    )
+
+    captured: list[AuditEvent] = []
+
+    class _Capturing:
+        def log_event(self, event: AuditEvent) -> None:
+            captured.append(event)
+
+    register_audit_logger(_Capturing())
+    try:
+        with pytest.raises(FileNotFoundError):
+            load_project(tmp_path)
+        assert captured == []
+    finally:
+        _reset_audit_logger()
+
+
+def test_config_changed_audit_failure_does_not_break_load_project(tmp_path: Path) -> None:
+    """Regression for the Codex-review fire-and-forget fix: a raising
+    AuditLogger must not turn a successful config load into a CLI failure."""
+    from drt.observability.audit import _reset_audit_logger, register_audit_logger
+
+    class _BrokenSink:
+        def log_event(self, event: object) -> None:
+            raise RuntimeError("sink unreachable")
+
+    register_audit_logger(_BrokenSink())
+    try:
+        config_file = tmp_path / "drt_project.yml"
+        config_file.write_text("name: my-project\nprofile: dev\n")
+        project = load_project(tmp_path)
+        assert project.name == "my-project"
+    finally:
+        _reset_audit_logger()
+
+
 # ---------------------------------------------------------------------------
 # Parser — load_syncs
 # ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -90,6 +91,33 @@ def _check_deprecated_keys(data: dict[str, Any]) -> list[dict[str, str]]:
     return warnings
 
 
+def _emit_config_changed(*, source: str, project_dir: Path, **details: Any) -> None:
+    """Emit a ``config_changed`` audit event (#299, ADR 0008) — no-op under
+    the OSS default (``NoOpAuditLogger``).
+
+    Wrapped in a broad try/except: a logging failure — an unreachable
+    audit sink, say — must never turn successful config loading into a
+    CLI failure. This catch is the enforcement of ``AuditLogger.log_event``'s
+    documented best-effort contract (caught in Codex review on this PR: the
+    unguarded call previously let an audit-sink error break the operation
+    being audited).
+    """
+    from datetime import datetime, timezone
+
+    from drt.observability.audit import AuditEvent, get_audit_logger
+
+    try:
+        get_audit_logger().log_event(
+            AuditEvent(
+                event_type="config_changed",
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                details={"source": source, "project_dir": str(project_dir), **details},
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 — fire-and-forget contract
+        logging.getLogger(__name__).warning("audit log_event failed: %s", exc)
+
+
 def load_project(project_dir: Path = Path(".")) -> ProjectConfig:
     """Load and validate drt_project.yml."""
     config_path = project_dir / "drt_project.yml"
@@ -99,7 +127,17 @@ def load_project(project_dir: Path = Path(".")) -> ProjectConfig:
         )
     with config_path.open() as f:
         data = yaml.safe_load(f)
-    return ProjectConfig.model_validate(data)
+    project = ProjectConfig.model_validate(data)
+
+    # Enterprise audit extension point (#299, ADR 0008) — ADR 0008 names
+    # both load_syncs and load_project as config_changed's trigger points;
+    # this is the load_project half, covering direct callers that never go
+    # through load_syncs (e.g. `drt status`'s own load_project() call,
+    # caught missing in Codex review on this PR). Also fires from
+    # project_vars()'s best-effort call below — a config read is a config
+    # read, regardless of how many CLI paths lead to it.
+    _emit_config_changed(source="load_project", project_dir=project_dir)
+    return project
 
 
 def expand_sync_vars(data: Any, variables: dict[str, Any]) -> Any:
@@ -158,22 +196,12 @@ def load_syncs(
         data = expand_sync_vars(data, resolved)
         syncs.append(SyncConfig.model_validate(data))
 
-    # Enterprise audit extension point (#299, ADR 0008) — no-op under the
-    # OSS default (NoOpAuditLogger). Fires once per successful load, not
-    # per file, and not from project_vars's best-effort load_project()
-    # call (that one tolerates a missing/invalid file and would fire on
-    # every CLI invocation regardless of whether config actually loaded).
-    from datetime import datetime, timezone
-
-    from drt.observability.audit import AuditEvent, get_audit_logger
-
-    get_audit_logger().log_event(
-        AuditEvent(
-            event_type="config_changed",
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            details={"sync_count": len(syncs), "project_dir": str(project_dir)},
-        )
-    )
+    # Enterprise audit extension point (#299, ADR 0008) — fires once per
+    # successful load, not per file. project_vars(project_dir)'s own
+    # best-effort load_project() call above may have already fired a
+    # separate "load_project" event if drt_project.yml exists; this one is
+    # the "load_syncs" half, distinguished by `source` in details.
+    _emit_config_changed(source="load_syncs", project_dir=project_dir, sync_count=len(syncs))
     return syncs
 
 

@@ -198,6 +198,88 @@ class TestRegistry:
         assert captured[0].details == {"scheme": scheme, "path": "a/b"}
         assert "the-secret" not in captured[0].details.values()
 
+    def test_audit_logger_resolving_its_own_secret_does_not_deadlock(
+        self, monkeypatch: pytest.MonkeyPatch, _fake_provider: tuple[str, MagicMock]
+    ) -> None:
+        """Regression for the P1 Codex review finding on this PR: an
+        Enterprise AuditLogger.log_event() that itself calls
+        resolve_provider_uri() (e.g. to fetch its sink's credentials) must
+        not deadlock on _value_cache_lock — the audit call now fires after
+        that lock is released. Run on a background thread with a bounded
+        join so a regression fails the test instead of hanging the suite.
+        """
+        import threading
+
+        from drt.observability.audit import (
+            AuditEvent,
+            _reset_audit_logger,
+            register_audit_logger,
+        )
+
+        scheme, provider = _fake_provider
+        provider.fetch.return_value = "the-secret"
+        # Cache enabled with a real TTL — this is the branch that held
+        # _value_cache_lock around the fetch before the fix.
+        monkeypatch.delenv("DRT_SECRET_CACHE_TTL_SECONDS", raising=False)
+
+        class _NestedFetchAuditLogger:
+            def log_event(self, event: AuditEvent) -> None:
+                # Deliberately re-enters resolve_provider_uri from inside
+                # the audit callback, on a different (uncached) URI so it
+                # forces a second, nested lock acquisition attempt.
+                resolve_provider_uri(f"{scheme}://sink-credential")
+
+        register_audit_logger(_NestedFetchAuditLogger())
+        result: list[str | None] = [None]
+        exc: list[BaseException] = []
+
+        def run() -> None:
+            try:
+                result[0] = resolve_provider_uri(f"{scheme}://a/b#c")
+            except BaseException as e:  # noqa: BLE001 — captured for the assertion below
+                exc.append(e)
+
+        try:
+            thread = threading.Thread(target=run, daemon=True)
+            thread.start()
+            thread.join(timeout=5)
+            assert not thread.is_alive(), (
+                "resolve_provider_uri deadlocked — the audit callback's nested "
+                "call is still holding/waiting on _value_cache_lock"
+            )
+        finally:
+            _reset_audit_logger()
+
+        assert exc == []
+        assert result[0] == "the-secret"
+
+    def test_secret_resolution_survives_audit_logger_failure(
+        self, monkeypatch: pytest.MonkeyPatch, _fake_provider: tuple[str, MagicMock]
+    ) -> None:
+        """Regression for the other P1 Codex review finding: a raising
+        AuditLogger must not fail the secret fetch it's auditing —
+        AuditLogger.log_event's best-effort contract is enforced at the
+        call site, not left to every future implementation."""
+        from drt.observability.audit import AuditEvent, register_audit_logger
+
+        scheme, provider = _fake_provider
+        provider.fetch.return_value = "the-secret"
+        monkeypatch.setenv("DRT_SECRET_CACHE_TTL_SECONDS", "0")
+
+        class _BrokenSink:
+            def log_event(self, event: AuditEvent) -> None:
+                raise RuntimeError("sink unreachable")
+
+        register_audit_logger(_BrokenSink())
+        try:
+            result = resolve_provider_uri(f"{scheme}://a/b#c")
+        finally:
+            from drt.observability.audit import _reset_audit_logger
+
+            _reset_audit_logger()
+
+        assert result == "the-secret"
+
     def test_result_is_cached_before_ttl_expiry(
         self, monkeypatch: pytest.MonkeyPatch, _fake_provider: tuple[str, MagicMock]
     ) -> None:

@@ -11,6 +11,7 @@ level, matching the existing ``s3``/``bigquery`` destination pattern).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -148,29 +149,39 @@ def register(scheme: str, provider: SecretProvider) -> None:
     _registry[scheme] = provider
 
 
-def _fetch_and_audit(provider: SecretProvider, ref: SecretRef, *, scheme: str) -> str:
-    """Call ``provider.fetch(ref)`` and emit a ``secret_accessed`` audit
-    event (#299, ADR 0008) — no-op under the OSS default (NoOpAuditLogger).
+def _emit_secret_accessed(*, scheme: str, path: str) -> None:
+    """Emit a ``secret_accessed`` audit event (#299, ADR 0008) — no-op
+    under the OSS default (``NoOpAuditLogger``).
 
-    Fires on an actual provider fetch only, not on a cache hit in
-    :func:`resolve_provider_uri` — whether a cache hit should also count as
-    an "access" for compliance purposes is a follow-up decision (ADR 0008),
-    not fixed here. Never logs the resolved value, only the scheme/path
-    that identifies which secret was read.
+    Called *after* ``provider.fetch`` returns and, critically, after
+    ``resolve_provider_uri`` has released ``_value_cache_lock`` — an
+    Enterprise ``AuditLogger.log_event`` implementation may itself need to
+    resolve a secret (e.g. sink credentials) via ``resolve_provider_uri``,
+    and that non-reentrant lock would deadlock if this ran while still
+    held (caught in Codex review on this PR). Wrapped in a broad
+    try/except: a logging failure — an unreachable audit sink, say — must
+    never fail the secret resolution it's auditing, matching
+    ``AuditLogger.log_event``'s documented best-effort contract. This
+    catch is the enforcement of that contract; it cannot be left to every
+    future ``AuditLogger`` implementation to get right on its own.
+
+    Never logs the resolved value, only the scheme/path that identifies
+    which secret was read.
     """
     from datetime import datetime, timezone
 
     from drt.observability.audit import AuditEvent, get_audit_logger
 
-    value = provider.fetch(ref)
-    get_audit_logger().log_event(
-        AuditEvent(
-            event_type="secret_accessed",
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            details={"scheme": scheme, "path": ref.path},
+    try:
+        get_audit_logger().log_event(
+            AuditEvent(
+                event_type="secret_accessed",
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                details={"scheme": scheme, "path": path},
+            )
         )
-    )
-    return value
+    except Exception as exc:  # noqa: BLE001 — fire-and-forget contract
+        logging.getLogger(__name__).warning("audit log_event failed: %s", exc)
 
 
 def resolve_provider_uri(uri: str) -> str | None:
@@ -186,10 +197,13 @@ def resolve_provider_uri(uri: str) -> str | None:
     if provider is None:
         return None
 
+    ref = parse_secret_uri(uri)
     ttl = _cache_ttl_seconds()
     if ttl <= 0:
         _value_cache.pop(uri, None)
-        return _fetch_and_audit(provider, parse_secret_uri(uri), scheme=scheme)
+        value = provider.fetch(ref)
+        _emit_secret_accessed(scheme=scheme, path=ref.path)
+        return value
 
     cached = _value_cache.get(uri)
     if cached is not None:
@@ -197,6 +211,7 @@ def resolve_provider_uri(uri: str) -> str | None:
         if time.monotonic() - fetched_at <= ttl:
             return value
 
+    fetched = False
     with _value_cache_lock:
         cached = _value_cache.get(uri)
         if cached is not None:
@@ -204,9 +219,17 @@ def resolve_provider_uri(uri: str) -> str | None:
             if time.monotonic() - fetched_at <= ttl:
                 return value
 
-        value = _fetch_and_audit(provider, parse_secret_uri(uri), scheme=scheme)
+        value = provider.fetch(ref)
         _value_cache[uri] = (value, time.monotonic())
-        return value
+        fetched = True
+
+    # Audit emission happens after the lock is released (see
+    # _emit_secret_accessed's docstring for why — an Enterprise AuditLogger
+    # resolving its own credentials via this same function would otherwise
+    # deadlock on this non-reentrant lock).
+    if fetched:
+        _emit_secret_accessed(scheme=scheme, path=ref.path)
+    return value
 
 
 def clear_cache() -> None:
