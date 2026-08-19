@@ -24,6 +24,9 @@ from drt.engine.observer import (
     NullObserver,
     StatePersistingObserver,
     SyncObserver,
+    _reset_extra_observers,
+    register_extra_observer,
+    registered_extra_observers,
 )
 from drt.state.dlq import DeadLetter, DlqStore
 from drt.state.manager import StateManager
@@ -645,3 +648,50 @@ def test_engine_sync_module_does_not_call_state_manager_save_sync() -> None:
         "engine/sync.py must not call watermark_storage.save directly — "
         "wire StatePersistingObserver via the `observer=` parameter."
     )
+
+
+# ---------------------------------------------------------------------------
+# register_extra_observer / registered_extra_observers (#299, ADR 0008)
+# ---------------------------------------------------------------------------
+
+
+def test_extra_observers_empty_by_default() -> None:
+    _reset_extra_observers()
+    assert registered_extra_observers() == []
+
+
+def test_register_extra_observer_is_cumulative_not_replace() -> None:
+    """Unlike register_permission_checker/register_audit_logger's single
+    active policy, multiple extra observers may coexist — matching how
+    CompositeObserver already fans out to several built-in observers."""
+    _reset_extra_observers()
+    first = NullObserver()
+    second = NullObserver()
+    register_extra_observer(first)
+    register_extra_observer(second)
+
+    result = registered_extra_observers()
+
+    assert result == [first, second]
+    _reset_extra_observers()
+
+
+def test_registered_extra_observer_receives_sync_events_via_composite() -> None:
+    """The architectural point of ADR 0008 Decision 1: an Enterprise audit
+    observer is just a SyncObserver, fanned out to by CompositeObserver
+    alongside the built-in observers — no new Protocol needed."""
+    calls: list[tuple[str, str]] = []
+
+    class _AuditObserver(NullObserver):
+        def on_sync_started(self, sync_name: str, started_at: str) -> None:
+            calls.append(("started", sync_name))
+
+    _reset_extra_observers()
+    audit_observer = _AuditObserver()
+    register_extra_observer(audit_observer)
+
+    composite = CompositeObserver([LoggingObserver(), *registered_extra_observers()])
+    composite.on_sync_started("my_sync", "2026-08-19T00:00:00Z")
+
+    assert calls == [("started", "my_sync")]
+    _reset_extra_observers()

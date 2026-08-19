@@ -32,6 +32,7 @@ sync.
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -400,3 +401,43 @@ class DlqObserver:
         # so trimming here produces an identical final object.
         if self._max_records > 0 and len(buffer) > self._max_records:
             del buffer[: len(buffer) - self._max_records]
+
+
+# ---------------------------------------------------------------------------
+# Extra-observer registry (#299, ADR 0008) — lets an Enterprise audit
+# implementation observe sync_started/sync_completed without OSS code
+# knowing anything about audit logging. No new Protocol: an Enterprise
+# audit observer is just a SyncObserver, appended to the same
+# CompositeObserver every built-in observer already goes through
+# (drt/cli/commands/run.py's _build_observer). Same register()-not-error,
+# replace-on-duplicate shape as drt.security.register_permission_checker.
+# ---------------------------------------------------------------------------
+
+_extra_observers_lock = threading.Lock()
+_extra_observers: list[SyncObserver] = []
+
+
+def register_extra_observer(observer: SyncObserver) -> None:
+    """Add `observer` to the observers every sync run also notifies.
+
+    Cumulative, not replace-on-duplicate — unlike the single-active-policy
+    shape of `register_permission_checker`/`register_audit_logger`,
+    multiple extra observers (an audit logger, a metrics exporter) may
+    coexist, matching how `CompositeObserver` already fans out to several
+    built-in observers.
+    """
+    with _extra_observers_lock:
+        _extra_observers.append(observer)
+
+
+def registered_extra_observers() -> list[SyncObserver]:
+    """Return the currently registered extra observers, in registration order."""
+    with _extra_observers_lock:
+        return list(_extra_observers)
+
+
+def _reset_extra_observers() -> None:
+    """Drop every registered extra observer. Test hook only — not called
+    by production code, matching rate_limiter.py's _reset_limiter_registry."""
+    with _extra_observers_lock:
+        _extra_observers.clear()

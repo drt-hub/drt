@@ -152,6 +152,7 @@ def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
         DlqObserver,
         LoggingObserver,
         StatePersistingObserver,
+        registered_extra_observers,
     )
 
     observers: list[Any] = [
@@ -162,6 +163,11 @@ def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
         observers.append(
             DlqObserver(ctx.dlq_store, max_records=sync.sync.dlq.max_records)
         )
+    # Enterprise extension point (#299, ADR 0008) — an audit-log observer
+    # registered via drt.engine.observer.register_extra_observer sees
+    # every sync_started/sync_completed this run fires, same as the
+    # built-in observers above. Empty by default (no OSS behavior change).
+    observers.extend(registered_extra_observers())
     return CompositeObserver(observers)
 
 
@@ -173,6 +179,12 @@ def _run_one(
     """Execute a single sync and return (name, result_dict, had_error)."""
     from drt import telemetry
     from drt.engine.sync import run_sync
+    from drt.security import PermissionAction, get_permission_checker
+
+    # Enterprise extension point (#298, ADR 0008) — no-op under the OSS
+    # default (AllowAllPermissionChecker); raises PermissionDeniedError if
+    # an Enterprise checker is registered and denies this sync.
+    get_permission_checker().check(PermissionAction.RUN, sync.name)
 
     dest = get_destination(sync)
     wm_storage = get_watermark_storage(sync, Path("."))

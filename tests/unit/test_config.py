@@ -141,6 +141,36 @@ def test_load_syncs(tmp_path: Path) -> None:
     assert [s.name for s in syncs] == ["alpha", "beta"]
 
 
+def test_load_syncs_fires_config_changed_audit_event(tmp_path: Path) -> None:
+    """#299 / ADR 0008: load_syncs is config_changed's trigger point — a
+    successful load emits it exactly once, not per file."""
+    from drt.observability.audit import (
+        AuditEvent,
+        _reset_audit_logger,
+        register_audit_logger,
+    )
+
+    captured: list[AuditEvent] = []
+
+    class _Capturing:
+        def log_event(self, event: AuditEvent) -> None:
+            captured.append(event)
+
+    register_audit_logger(_Capturing())
+    try:
+        syncs_dir = tmp_path / "syncs"
+        _write_sync(syncs_dir, "alpha")
+        _write_sync(syncs_dir, "beta")
+
+        load_syncs(tmp_path)
+
+        assert len(captured) == 1
+        assert captured[0].event_type == "config_changed"
+        assert captured[0].details["sync_count"] == 2
+    finally:
+        _reset_audit_logger()
+
+
 # ---------------------------------------------------------------------------
 # expand_env_vars — generic ${VAR} expansion in YAML data
 # ---------------------------------------------------------------------------

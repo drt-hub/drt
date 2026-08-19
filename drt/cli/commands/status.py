@@ -40,6 +40,13 @@ def status(
     limit: int = typer.Option(20, "--limit", help="Max entries to show in --history mode."),
 ) -> None:
     """Show the status of the most recent sync runs."""
+    from drt.security import PermissionAction, get_permission_checker
+
+    # Enterprise extension point (#298, ADR 0008) — no-op under the OSS
+    # default; a registered Enterprise checker may deny status reads.
+    # sync_name=None here — this checks project-wide view access; a
+    # per-sync check would additionally apply once --sync narrows the read.
+    get_permission_checker().check(PermissionAction.VIEW, None)
 
     if history:
         _print_history(sync_name=sync_name, limit=limit, output=output)

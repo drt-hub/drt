@@ -131,6 +131,11 @@ def state_reset(
     from pathlib import Path
 
     from drt.cli._helpers import confirm_destructive, get_watermark_storage
+    from drt.security import PermissionAction, get_permission_checker
+
+    # Enterprise extension point (#298, ADR 0008) — no-op under the OSS
+    # default; a registered Enterprise checker may deny state resets.
+    get_permission_checker().check(PermissionAction.EDIT, sync_name)
 
     if not (watermark or runs or tracked_mirror):
         # Never treat "no level" as "all levels" — the whole point of splitting

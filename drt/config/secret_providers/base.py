@@ -148,6 +148,31 @@ def register(scheme: str, provider: SecretProvider) -> None:
     _registry[scheme] = provider
 
 
+def _fetch_and_audit(provider: SecretProvider, ref: SecretRef, *, scheme: str) -> str:
+    """Call ``provider.fetch(ref)`` and emit a ``secret_accessed`` audit
+    event (#299, ADR 0008) — no-op under the OSS default (NoOpAuditLogger).
+
+    Fires on an actual provider fetch only, not on a cache hit in
+    :func:`resolve_provider_uri` — whether a cache hit should also count as
+    an "access" for compliance purposes is a follow-up decision (ADR 0008),
+    not fixed here. Never logs the resolved value, only the scheme/path
+    that identifies which secret was read.
+    """
+    from datetime import datetime, timezone
+
+    from drt.observability.audit import AuditEvent, get_audit_logger
+
+    value = provider.fetch(ref)
+    get_audit_logger().log_event(
+        AuditEvent(
+            event_type="secret_accessed",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            details={"scheme": scheme, "path": ref.path},
+        )
+    )
+    return value
+
+
 def resolve_provider_uri(uri: str) -> str | None:
     """Resolve a ``scheme://...`` secret reference.
 
@@ -164,7 +189,7 @@ def resolve_provider_uri(uri: str) -> str | None:
     ttl = _cache_ttl_seconds()
     if ttl <= 0:
         _value_cache.pop(uri, None)
-        return provider.fetch(parse_secret_uri(uri))
+        return _fetch_and_audit(provider, parse_secret_uri(uri), scheme=scheme)
 
     cached = _value_cache.get(uri)
     if cached is not None:
@@ -179,7 +204,7 @@ def resolve_provider_uri(uri: str) -> str | None:
             if time.monotonic() - fetched_at <= ttl:
                 return value
 
-        value = provider.fetch(parse_secret_uri(uri))
+        value = _fetch_and_audit(provider, parse_secret_uri(uri), scheme=scheme)
         _value_cache[uri] = (value, time.monotonic())
         return value
 

@@ -169,6 +169,35 @@ class TestRegistry:
         assert resolve_provider_uri(f"{scheme}://a/b#c") == "the-secret"
         provider.fetch.assert_called_once_with(SecretRef(path="a/b", key="c"))
 
+    def test_resolve_provider_uri_fires_secret_accessed_audit_event(
+        self, monkeypatch: pytest.MonkeyPatch, _fake_provider: tuple[str, MagicMock]
+    ) -> None:
+        """#299 / ADR 0008: fires on an actual provider fetch, never with
+        the resolved value in the event details."""
+        from drt.observability.audit import AuditEvent, register_audit_logger
+
+        scheme, provider = _fake_provider
+        provider.fetch.return_value = "the-secret"
+        monkeypatch.setenv("DRT_SECRET_CACHE_TTL_SECONDS", "0")
+        captured: list[AuditEvent] = []
+
+        class _Capturing:
+            def log_event(self, event: AuditEvent) -> None:
+                captured.append(event)
+
+        register_audit_logger(_Capturing())
+        try:
+            resolve_provider_uri(f"{scheme}://a/b#c")
+        finally:
+            from drt.observability.audit import _reset_audit_logger
+
+            _reset_audit_logger()
+
+        assert len(captured) == 1
+        assert captured[0].event_type == "secret_accessed"
+        assert captured[0].details == {"scheme": scheme, "path": "a/b"}
+        assert "the-secret" not in captured[0].details.values()
+
     def test_result_is_cached_before_ttl_expiry(
         self, monkeypatch: pytest.MonkeyPatch, _fake_provider: tuple[str, MagicMock]
     ) -> None:

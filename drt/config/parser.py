@@ -157,6 +157,23 @@ def load_syncs(
         data = expand_env_vars(data)
         data = expand_sync_vars(data, resolved)
         syncs.append(SyncConfig.model_validate(data))
+
+    # Enterprise audit extension point (#299, ADR 0008) — no-op under the
+    # OSS default (NoOpAuditLogger). Fires once per successful load, not
+    # per file, and not from project_vars's best-effort load_project()
+    # call (that one tolerates a missing/invalid file and would fire on
+    # every CLI invocation regardless of whether config actually loaded).
+    from datetime import datetime, timezone
+
+    from drt.observability.audit import AuditEvent, get_audit_logger
+
+    get_audit_logger().log_event(
+        AuditEvent(
+            event_type="config_changed",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            details={"sync_count": len(syncs), "project_dir": str(project_dir)},
+        )
+    )
     return syncs
 
 
