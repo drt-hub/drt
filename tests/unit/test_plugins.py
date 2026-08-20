@@ -236,3 +236,106 @@ def test_cli_plugins_list_json_marks_non_connector_entries_usable(
     assert result.exit_code == 0
     payload = _json.loads(result.stdout)
     assert payload["plugins"][0]["usable_in_sync_yaml"] is True
+
+
+def test_cli_plugins_list_table_shows_connector_and_error_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Covers the table-render branches — JSON tests above only exercise the
+    dict-construction branches, not this separate Rich-table code path."""
+    from typer.testing import CliRunner
+
+    from drt.cli.main import app
+
+    # Rich wraps status text across lines at its default (narrow, non-tty)
+    # width, which would fragment the substrings this test asserts on.
+    monkeypatch.setenv("COLUMNS", "200")
+
+    connector = EntryPoint(
+        name="salesforce_premium", value=f"{__name__}:_register_ok", group="drt.destinations"
+    )
+    broken = EntryPoint(
+        name="broken", value=f"{__name__}:_register_broken", group="drt.audit_loggers"
+    )
+    _fake_entry_points(
+        monkeypatch, {"drt.destinations": [connector], "drt.audit_loggers": [broken]}
+    )
+
+    result = CliRunner().invoke(app, ["plugins", "list"])
+
+    assert result.exit_code == 0
+    assert "not yet usable in sync YAML" in result.stdout
+    assert "error: sink unreachable" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Author metadata extraction (a real installed dist populates `ep.dist`;
+# constructing a bare EntryPoint() never does, per importlib.metadata)
+# ---------------------------------------------------------------------------
+
+
+class _FakeMetadata:
+    def __init__(self, values: dict[str, str]) -> None:
+        self._values = values
+
+    def get(self, key: str, default: str | None = None) -> str | None:
+        return self._values.get(key, default)
+
+
+class _FakeDist:
+    def __init__(self, *, name: str, version: str, metadata: dict[str, str]) -> None:
+        self.name = name
+        self.version = version
+        self.metadata = _FakeMetadata(metadata)
+
+
+class _FakeEntryPoint:
+    def __init__(self, *, name: str, value: str, group: str, dist: _FakeDist | None) -> None:
+        self.name = name
+        self.value = value
+        self.group = group
+        self.dist = dist
+
+    def load(self) -> object:
+        import importlib
+
+        module_name, _, attr = self.value.partition(":")
+        return getattr(importlib.import_module(module_name), attr)
+
+
+def test_discover_plugins_reads_author_from_dist_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ep = _FakeEntryPoint(
+        name="my_logger",
+        value=f"{__name__}:_register_ok",
+        group="drt.audit_loggers",
+        dist=_FakeDist(name="my-package", version="0.1.0", metadata={"Author": "Jane Doe"}),
+    )
+    monkeypatch.setattr(
+        "drt.plugins.entry_points", lambda *, group: [ep] if group == "drt.audit_loggers" else []
+    )
+
+    result = discover_plugins()[0]
+
+    assert result.dist_name == "my-package"
+    assert result.dist_version == "0.1.0"
+    assert result.author == "Jane Doe"
+
+
+def test_discover_plugins_falls_back_to_author_email(monkeypatch: pytest.MonkeyPatch) -> None:
+    ep = _FakeEntryPoint(
+        name="my_logger",
+        value=f"{__name__}:_register_ok",
+        group="drt.audit_loggers",
+        dist=_FakeDist(
+            name="my-package", version="0.1.0", metadata={"Author-email": "Jane <jane@x.com>"}
+        ),
+    )
+    monkeypatch.setattr(
+        "drt.plugins.entry_points", lambda *, group: [ep] if group == "drt.audit_loggers" else []
+    )
+
+    result = discover_plugins()[0]
+
+    assert result.author == "Jane <jane@x.com>"
