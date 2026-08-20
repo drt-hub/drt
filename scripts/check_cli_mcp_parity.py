@@ -95,6 +95,12 @@ UNMAPPED_COMMANDS: dict[str, str] = {
     "profile add": "interactive prompt flow; writes credentials to disk",
     "profile remove": "destructive credential edit",
     "profile show": "prints a stored credential (masked) — deliberately not agent-reachable",
+    # #297
+    "plugins list": (
+        "entry-point discovery diagnostic for plugin authors/operators, not an "
+        "agent-orchestration primitive; connector entries it reports are not yet "
+        "usable in sync YAML (ADR 0009), so there is nothing for an agent to act on"
+    ),
 }
 
 # --- Structural exclusions -------------------------------------------------

@@ -67,7 +67,9 @@ def main(
         False, "--version", "-v", callback=version_callback, is_eager=True, help="Show version."
     ),
 ) -> None:
-    pass
+    from drt.plugins import load_plugins
+
+    load_plugins()
 
 
 # `drt init` lives in drt/cli/commands/init.py (#546 Phase 2)

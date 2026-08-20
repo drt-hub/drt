@@ -1,6 +1,8 @@
 # Building a Destination Connector
 
-This guide walks through adding a new destination connector to drt, step by step. By the end you will have a working connector with config validation, error handling, and tests.
+This guide walks through adding a new destination connector *in-tree* (contributed directly to drt-core), step by step. By the end you will have a working connector with config validation, error handling, and tests.
+
+Packaging a connector separately for out-of-tree, `pip install`-based distribution instead? See [Third-Party Plugins](plugins.md) — note that today an out-of-tree destination registers successfully but cannot yet be named in a sync YAML (see that guide, and [ADR 0009](../adr/0009-plugin-config-union-blocker.md)).
 
 We will build a fictional **Webhook** destination as our running example -- a generic HTTP POST sender that pushes each row as JSON to a URL. The same pattern applies to databases, SaaS APIs, and message queues.
 
