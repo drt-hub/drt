@@ -107,15 +107,22 @@ def _verify_bearer(header_value: str, token: str) -> bool:
     return secrets.compare_digest(header_value.encode(), f"Bearer {token}".encode())
 
 
-def _verify_hmac(body: bytes, header_value: str, secret: str) -> bool:
+def _verify_hmac(body: bytes, header_value: str, secret: str, path: str = "") -> bool:
     """Check an HMAC-SHA256 body signature in any of the common encodings.
 
     GitHub sends ``sha256=<hex>``, Shopify sends base64, and a hand-rolled
     sender may send bare hex — all three are digests of the same bytes, so
     accepting each costs nothing. Stripe's timestamped ``t=...,v1=...`` scheme
     is genuinely different (replay tolerance) and is not covered here.
+
+    For GET requests (empty body), include the request path in the signed
+    payload to prevent replay attacks. The path is prepended to the body
+    with a null-byte separator.
     """
-    digest = hmac.new(secret.encode(), body, hashlib.sha256)
+    signed_body = body
+    if not body and path:
+        signed_body = path.encode() + b"\x00"
+    digest = hmac.new(secret.encode(), signed_body, hashlib.sha256)
     accepted = (
         f"sha256={digest.hexdigest()}",
         digest.hexdigest(),
@@ -308,7 +315,7 @@ def make_handler(
                 return _verify_bearer(self.headers.get("Authorization", ""), auth.token)
             assert auth.hmac_secret is not None
             signature = self.headers.get(auth.hmac_header, "")
-            return bool(signature) and _verify_hmac(body, signature, auth.hmac_secret)
+            return bool(signature) and _verify_hmac(body, signature, auth.hmac_secret, self.path)
 
         def do_GET(self) -> None:  # noqa: N802
             # /health answers before the auth check so a load-balancer probe
