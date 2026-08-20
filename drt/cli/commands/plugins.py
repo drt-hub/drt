@@ -32,7 +32,13 @@ def list_plugins(
     ),
 ) -> None:
     """List plugins discovered via drt.* entry points, and whether they loaded."""
-    entries = load_plugins(force=True)
+    # No force=True: the root callback already ran load_plugins() once for
+    # this process. Re-invoking would call every registration callable a
+    # second time — secret-provider and connector registrars reject
+    # duplicate registration (a legitimately loaded plugin would report as
+    # an error), and register_extra_observer() is cumulative (an observer
+    # would fire twice per event). Reuse the cached result instead.
+    entries = load_plugins()
 
     if output == "json":
         import json as _json

@@ -192,6 +192,33 @@ def test_cli_plugins_list_json_marks_connector_entries_not_yet_usable(
     assert payload["plugins"][0]["usable_in_sync_yaml"] is False
 
 
+def test_cli_plugins_list_reuses_the_startup_callback_cache_not_a_second_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for a Codex-caught bug on PR #996.
+
+    ``drt plugins list`` used to call ``load_plugins(force=True)``, which
+    re-invoked every registration callable a *second* time on top of the one
+    the root ``@app.callback()`` already did. Registries that reject
+    duplicate registration (SecretProvider, the connector registry) would
+    then falsely report a legitimately loaded plugin as errored, and
+    cumulative registries (``register_extra_observer``) would double-register
+    it. Assert the callable fires exactly once for one CLI invocation.
+    """
+    from typer.testing import CliRunner
+
+    from drt.cli.main import app
+
+    ep = EntryPoint(name="my_logger", value=f"{__name__}:_register_ok", group="drt.audit_loggers")
+    _fake_entry_points(monkeypatch, {"drt.audit_loggers": [ep]})
+
+    result = CliRunner().invoke(app, ["plugins", "list"])
+
+    assert result.exit_code == 0
+    assert _CALLS == ["ok"]
+    assert "error" not in result.stdout.lower()
+
+
 def test_cli_plugins_list_json_marks_non_connector_entries_usable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
