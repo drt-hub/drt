@@ -101,7 +101,7 @@ review) separate from #297's entry-point mechanics.
    was discovered per entry-point group, and connector entry points
    (`drt.sources` / `drt.destinations`) are surfaced as **registered, not
    yet usable in sync YAML** rather than presented as fully working.
-3. **Defer the config-union question to a follow-up issue.** Candidate
+3. **Defer the config-union question to a follow-up issue, [#997](https://github.com/drt-hub/drt/issues/997).** Candidate
    directions, none chosen here:
    - Two-pass validation: parse `type: str` + `config: dict[str, Any]`
      loosely first, resolve the concrete config class via the (by-then
@@ -131,9 +131,9 @@ review) separate from #297's entry-point mechanics.
   import" gap, and this closes it for all four.
 - Third-party **connector** packages (the `pip install
   drt-salesforce-premium` scenario in #297's original issue text) remain
-  blocked until the follow-up issue's design is chosen and implemented.
+  blocked until [#997](https://github.com/drt-hub/drt/issues/997)'s design is chosen and implemented.
   `drt plugins list` must not imply otherwise.
-- The follow-up issue inherits this ADR's three candidate directions as a
+- [#997](https://github.com/drt-hub/drt/issues/997) inherits this ADR's three candidate directions as a
   starting point, not a decision — the choice affects error-message quality,
   mypy narrowing, and validation performance, and deserves its own review
   cycle rather than being folded into #297's PR.
