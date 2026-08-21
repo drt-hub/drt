@@ -78,9 +78,15 @@ def test_cli_emits_valid_ref_only_dbt_exposures_and_skip_note(
         model="SELECT * FROM analytics.accounts",
         destination_type="postgres",
     )
-    docs_page = tmp_path / "target" / "docs" / "sync" / "users-to-hubspot.html"
-    docs_page.parent.mkdir(parents=True)
-    docs_page.write_text("generated docs")
+    _write_sync(
+        tmp_path,
+        "m_override.yml",
+        name="overridden_users",
+        model="ref('overridden_model')",
+    )
+    models_dir = tmp_path / "syncs" / "models"
+    models_dir.mkdir()
+    (models_dir / "overridden_model.sql").write_text("SELECT * FROM unrelated_local_table")
 
     result = runner.invoke(app, ["docs", "generate", "--format", "dbt-exposures"])
 
@@ -97,7 +103,7 @@ def test_cli_emits_valid_ref_only_dbt_exposures_and_skip_note(
                 "description": (
                     "drt sync users_to_hubspot -> hubspot (upsert). Managed by drt."
                 ),
-                "url": "target/docs/sync/users-to-hubspot.html",
+                "url": "docs/sync/users-to-hubspot.html",
                 "meta": {
                     "drt": {
                         "sync": "users_to_hubspot",
@@ -112,7 +118,37 @@ def test_cli_emits_valid_ref_only_dbt_exposures_and_skip_note(
         '# Skipped sync "raw_accounts": model is not ref(...); '
         "raw-SQL lineage parsing is out of scope."
     ) in result.output
+    assert (
+        '# Skipped sync "overridden_users": local SQL override takes precedence over ref(...); '
+        "dbt lineage would be inaccurate."
+    ) in result.output
     assert "analytics.accounts" not in result.output
+    assert "overridden_model" not in result.output
+    assert "unrelated_local_table" not in result.output
+
+
+def test_output_is_identical_before_and_after_html_docs_generation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_project(tmp_path)
+    _write_sync(
+        tmp_path,
+        "users.yml",
+        name="users_to_hubspot",
+        model="ref('mart_users')",
+    )
+
+    before = runner.invoke(app, ["docs", "generate", "--format", "dbt-exposures"])
+    html = runner.invoke(app, ["docs", "generate", "--format", "html", "--no-state"])
+    after = runner.invoke(app, ["docs", "generate", "--format", "dbt-exposures"])
+
+    assert before.exit_code == html.exit_code == after.exit_code == 0
+    assert (tmp_path / "target" / "docs" / "sync" / "users-to-hubspot.html").is_file()
+    assert before.output == after.output
+    assert yaml.safe_load(before.output)["exposures"][0]["url"] == (
+        "docs/sync/users-to-hubspot.html"
+    )
 
 
 def test_output_is_sorted_by_sync_name_and_byte_identical(
@@ -164,3 +200,49 @@ def test_empty_ref_set_is_valid_yaml_with_sorted_skip_notes(
     assert result.exit_code == 0
     assert yaml.safe_load(result.output) == {"exposures": []}
     assert '# Skipped sync "raw_only"' in result.output
+
+
+def test_exposure_name_is_a_valid_dbt_identifier_and_meta_keeps_original(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_project(tmp_path)
+    original_name = "123 Users.to HubSpot!"
+    _write_sync(
+        tmp_path,
+        "punctuation.yml",
+        name=original_name,
+        model="ref('mart_users')",
+    )
+
+    result = runner.invoke(app, ["docs", "generate", "--format", "dbt-exposures"])
+
+    assert result.exit_code == 0
+    exposure = yaml.safe_load(result.output)["exposures"][0]
+    assert exposure["name"] == "drt_123_users_to_hubspot"
+    assert exposure["meta"]["drt"]["sync"] == original_name
+
+
+def test_page_slug_collisions_omit_only_affected_urls(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_project(tmp_path)
+    _write_sync(tmp_path, "dash.yml", name="a-b", model="ref('dash_model')")
+    _write_sync(tmp_path, "underscore.yml", name="a_b", model="ref('underscore_model')")
+    _write_sync(tmp_path, "unique.yml", name="unique", model="ref('unique_model')")
+
+    result = runner.invoke(app, ["docs", "generate", "--format", "dbt-exposures"])
+
+    assert result.exit_code == 0
+    exposures = {
+        exposure["meta"]["drt"]["sync"]: exposure
+        for exposure in yaml.safe_load(result.output)["exposures"]
+    }
+    assert "url" not in exposures["a-b"]
+    assert "url" not in exposures["a_b"]
+    assert exposures["unique"]["url"] == "docs/sync/unique.html"
+    assert {exposures["a-b"]["name"], exposures["a_b"]["name"]} == {
+        "drt_a_b",
+        "drt_a_b_2",
+    }

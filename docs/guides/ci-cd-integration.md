@@ -200,9 +200,13 @@ stale:
 ```
 
 Run this from the drt project root. The exporter includes only exact `ref(...)`
-models, sorts exposures by sync name, and leaves raw-SQL syncs out with YAML
-comments explaining why. It never writes into the dbt project on its own and
-does not call the dbt Cloud API.
+models that are not shadowed by `syncs/models/<name>.sql`, sorts exposures by
+sync name, and leaves raw-SQL and locally overridden syncs out with YAML
+comments explaining why. HTML page URLs are computed relative to dbt's served
+`target/` root without checking whether `target/docs` happens to exist, so a
+clean checkout and a workspace with generated HTML produce the same exposure
+file. The exporter never writes into the dbt project on its own and does not
+call the dbt Cloud API.
 
 ### Scheduled sync (cron)
 

@@ -55,11 +55,17 @@ drt docs generate --format dbt-exposures \
 ```
 
 Each exposure depends on the referenced dbt model and records the drt sync,
-destination type, and sync mode under `meta.drt`. If the matching HTML sync
-page already exists under `--output` (default: `target/docs`), the exposure
-also links to it. Raw-SQL models are omitted and named in YAML comments because
-drt deliberately does not guess lineage by parsing SQL. The command only
-writes to stdout; you choose and commit the destination file yourself.
+destination type, and sync mode under `meta.drt`. Its URL is computed
+deterministically for the matching HTML sync page under `--output` (default:
+`target/docs`) and is relative to the `target/` root served by `dbt docs serve`,
+so the default URL starts with `docs/sync/` whether or not HTML docs have been
+generated yet. Raw-SQL models are omitted and named in YAML comments because
+drt deliberately does not guess lineage by parsing SQL. A `ref(...)` with a
+matching `syncs/models/<name>.sql` override is omitted too: that local SQL takes
+precedence at runtime, so publishing the dbt ref would claim false lineage.
+If `--output` points outside `target/`, the HTML page is not reachable through
+`dbt docs serve`, so the exporter omits the URL. The command only writes to
+stdout; you choose and commit the destination file yourself.
 
 The output is sorted by sync name and byte-identical for an unchanged project,
 so it can be regenerated and checked for drift in CI. See [CI/CD

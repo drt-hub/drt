@@ -35,12 +35,13 @@ class DbtExposureInputs:
     """The model facts the dbt-exposures renderer needs but the public
     docs manifest deliberately does not carry.
 
-    Only parsed ``ref()`` names cross this boundary. Raw model SQL stays out
-    of both the manifest and the generated exposure artifact.
+    Only parsed ``ref()`` names cross this boundary. Raw model SQL and local
+    SQL overrides stay out of both the manifest and the generated exposure
+    artifact.
     """
 
     model_refs: dict[str, str]
-    skipped_syncs: tuple[str, ...]
+    skipped_syncs: dict[str, str]
 
 
 def _slug(value: str) -> str:
@@ -212,15 +213,21 @@ def collect_dbt_exposure_inputs(project_dir: Path = Path(".")) -> DbtExposureInp
     from drt.engine.resolver import parse_ref
 
     model_refs: dict[str, str] = {}
-    skipped: list[str] = []
+    skipped: dict[str, str] = {}
     result = load_syncs_safe(project_dir)
     for sync in sorted(result.syncs, key=lambda item: item.name):
         model_ref = parse_ref(sync.model)
         if model_ref is None:
-            skipped.append(sync.name)
+            skipped[sync.name] = "raw_sql"
+        # Keep this check aligned with resolve_model_ref(): a hand-written
+        # syncs/models/<ref>.sql file is resolution step 1 and therefore wins
+        # over the dbt manifest. Publishing the ref here would claim lineage
+        # for a dbt model that drt never executes.
+        elif (project_dir / "syncs" / "models" / f"{model_ref}.sql").exists():
+            skipped[sync.name] = "local_override"
         else:
             model_refs[sync.name] = model_ref
-    return DbtExposureInputs(model_refs=model_refs, skipped_syncs=tuple(skipped))
+    return DbtExposureInputs(model_refs=model_refs, skipped_syncs=skipped)
 
 
 def build_manifest(
