@@ -154,6 +154,11 @@ Local secret store for development. Gitignored by default.
 Resolution order: explicit YAML value > environment variable > secrets.toml
 > provider URI
 
+`secrets.toml` can be stored as `secrets.toml.enc` using age encryption. When
+the encrypted file exists, drt decrypts it in memory with `DRT_SECRETS_KEY` and
+gives it precedence over plaintext. See
+[`docs/guides/secrets-encryption.md`](../guides/secrets-encryption.md).
+
 ```toml
 [destinations.mysql]
 MYSQL_PASSWORD = "local-dev-password"

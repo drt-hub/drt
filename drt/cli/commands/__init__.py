@@ -23,6 +23,7 @@ from drt.cli.commands import (
     deploy,  # noqa: F401 — registers `drt deploy` sub-app (github-actions)
     docs,  # noqa: F401
     doctor,  # noqa: F401
+    encryption,  # noqa: F401 — registers `drt encrypt` + `drt decrypt` (#303)
     init,  # noqa: F401
     list_syncs,  # noqa: F401
     mcp,  # noqa: F401

@@ -176,10 +176,10 @@ value-cache's TTL above). This is already handled; nothing to configure.
 - **Not secret writing or rotation management.** drt only reads. Rotate
   secrets through the provider's own tooling; drt picks up the new value
   on its next fetch (subject to the caching note above).
-- **Not encryption of local files.** `.drt/secrets.toml` and
-  `~/.drt/profiles.yml` are unrelated to this feature — see
-  [`.drt/secrets.toml`](../llm/API_REFERENCE.md) for that mechanism's own
-  scope.
+- **Not encryption of local files.** Provider URIs and local file encryption
+  are separate mechanisms. See [Encrypt Local Secrets at Rest with
+  age](secrets-encryption.md) when you deliberately use `.drt/secrets.toml`
+  instead of an external store.
 - **Not OAuth token brokering.** A provider URI resolves to a static
   secret value (a password, an API key) each time it's fetched — it does
   not manage an OAuth token lifecycle.

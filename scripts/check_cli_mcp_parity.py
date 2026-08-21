@@ -81,6 +81,8 @@ COMMAND_TO_TOOLS: dict[str, tuple[str, ...]] = {
 # level up. See _unclassified_commands().
 UNMAPPED_COMMANDS: dict[str, str] = {
     "init": "scaffolds files on disk; an agent should not silently create a project",
+    "encrypt": "writes local encrypted credential material; requires operator-held age key",
+    "decrypt": "writes plaintext credentials to disk; deliberately not agent-reachable",
     "serve": "runs a long-lived HTTP daemon — not a request/response tool",
     "mcp run": "starts the MCP server itself",
     "clean": "deletes local artifacts",

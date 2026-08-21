@@ -77,6 +77,10 @@ s3 = ["boto3>=1.35.69"]
 aws-secrets = ["boto3>=1.34"]  # aws-sm:// secret provider URIs (#782) — same SDK as [s3], separate extra since the two are unrelated capabilities
 gcp-secrets = ["google-cloud-secret-manager>=2.0"]  # gcp-sm:// secret provider URIs (#782)
 vault = ["hvac>=2.0"]  # vault:// secret provider URIs (#782)
+encryption = [
+    "pyrage>=1.3,<2",  # age X25519 encryption for .drt/secrets.toml (#303)
+    "tomli>=1.1; python_version < '3.11'",  # encrypted TOML parsing on supported Python 3.10
+]
 docs = ["pygments>=2.17"]  # build-time YAML highlighting for `drt docs generate --format html`
 mcp = ["fastmcp>=2.0"]
 otel = [
@@ -84,6 +88,7 @@ otel = [
     "opentelemetry-exporter-otlp-proto-grpc>=1.20.0",
 ]
 dev = [
+    "pyrage>=1.3,<2",
     "pygments>=2.17",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

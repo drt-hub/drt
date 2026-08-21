@@ -107,12 +107,17 @@ def _config_dir(override: Path | None = None) -> Path:
 
 
 def _load_secrets(project_dir: Path | None = None) -> dict[str, Any]:
-    """Load .drt/secrets.toml if it exists.
+    """Load .drt/secrets.toml or decrypt .drt/secrets.toml.enc in memory.
 
+    The encrypted file takes precedence when both exist. This lets
+    ``drt encrypt`` preserve the plaintext for safety while a user verifies
+    that normal commands can read the encrypted copy before deleting it.
     Returns a nested dict matching the TOML structure.
     """
-    secrets_path = (project_dir or Path(".")) / ".drt" / "secrets.toml"
-    if not secrets_path.exists():
+    secrets_dir = (project_dir or Path(".")) / ".drt"
+    secrets_path = secrets_dir / "secrets.toml"
+    encrypted_path = secrets_dir / "secrets.toml.enc"
+    if not secrets_path.exists() and not encrypted_path.exists():
         return {}
     try:
         import tomllib
@@ -121,8 +126,17 @@ def _load_secrets(project_dir: Path | None = None) -> dict[str, Any]:
             import tomli as tomllib  # type: ignore[no-redef]
         except ModuleNotFoundError:
             return {}
+    if encrypted_path.exists():
+        from io import BytesIO
+
+        from drt.config.encryption import decrypt_secrets
+
+        plaintext = decrypt_secrets(encrypted_path.read_bytes())
+        data: dict[str, Any] = tomllib.load(BytesIO(plaintext))
+        return data
+
     with secrets_path.open("rb") as f:
-        data: dict[str, Any] = tomllib.load(f)
+        data = tomllib.load(f)
     return data
 
 
