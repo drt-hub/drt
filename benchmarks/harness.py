@@ -8,6 +8,7 @@ profiler without reproducing source, destination, and sync setup.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -16,18 +17,25 @@ import tracemalloc
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from drt.config.credentials import SQLiteProfile
-from drt.config.models import DestinationConfig, SyncConfig, SyncOptions
+from drt.config.models import (
+    DestinationConfig,
+    FileDestinationConfig,
+    SyncConfig,
+    SyncOptions,
+)
 from drt.destinations.base import SyncResult
-from drt.destinations.file import FileDestination
 from drt.engine.sync import run_sync
+from drt.observability import otel
 from drt.sources.sqlite import SQLiteSource
 
 SCHEMA_VERSION = 1
 _SCENARIO_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _FULL_GIT_HASH = re.compile(r"^[0-9a-f]{40}$")
+_BENCHMARK_NOOP_TRACER = otel._FallbackNoOpTracer()
+_BENCHMARK_NOOP_METER = otel._FallbackNoOpMeter()
 
 
 @dataclass(frozen=True)
@@ -101,11 +109,11 @@ class BenchmarkArtifact:
 
 
 class CountingFileDestination:
-    """Count real ``FileDestination.load`` calls as an API-call proxy."""
+    """Persist JSONL batches and count load calls as an API-call proxy."""
 
     def __init__(self) -> None:
         self.call_count = 0
-        self._destination = FileDestination()
+        self._has_written = False
 
     def load(
         self,
@@ -113,8 +121,69 @@ class CountingFileDestination:
         config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult:
+        assert isinstance(config, FileDestinationConfig)
         self.call_count += 1
-        return self._destination.load(records, config, sync_options)
+        if not records:
+            return SyncResult()
+        if config.format != "jsonl":
+            raise ValueError("benchmark destination only supports JSONL output")
+
+        result = SyncResult()
+        try:
+            os.makedirs(os.path.dirname(config.path) or ".", exist_ok=True)
+            mode = "a" if self._has_written else "w"
+            with open(config.path, mode, encoding="utf-8") as output:
+                for record in records:
+                    output.write(json.dumps(record, default=str) + "\n")
+            self._has_written = True
+            result.success = len(records)
+        except Exception as exc:
+            result.failed = len(records)
+            result.errors.append(str(exc))
+        return result
+
+
+def _force_noop_telemetry() -> None:
+    """Pin this process to the fallback no-op providers for benchmark runs."""
+    if (
+        otel._STATE.initialized
+        and cast(object, otel._STATE.tracer) is _BENCHMARK_NOOP_TRACER
+        and cast(object, otel._STATE.meter) is _BENCHMARK_NOOP_METER
+    ):
+        return
+
+    otel.shutdown_telemetry()
+    otel._STATE.initialized = True
+    otel._STATE.tracer = cast(Any, _BENCHMARK_NOOP_TRACER)
+    otel._STATE.meter = cast(Any, _BENCHMARK_NOOP_METER)
+    otel._STATE.warned = False
+    otel._STATE.trace_provider = None
+    otel._STATE.meter_provider = None
+    # run_sync() builds a final span status even on the fallback path. Resolve
+    # that optional API module before timing so the first scenario does not pay
+    # a one-time import cost that later scenarios avoid.
+    otel.build_status(ok=True)
+
+
+def _verify_persisted_row_count(
+    destination_path: Path,
+    *,
+    scenario_name: str,
+    expected_rows: int,
+) -> None:
+    try:
+        with destination_path.open(encoding="utf-8") as persisted:
+            actual_rows = sum(1 for _line in persisted)
+    except OSError as exc:
+        raise RuntimeError(
+            f"benchmark scenario {scenario_name!r} could not verify persisted JSONL: {exc}"
+        ) from exc
+
+    if actual_rows != expected_rows:
+        raise RuntimeError(
+            f"benchmark scenario {scenario_name!r} persisted {actual_rows} JSONL rows; "
+            f"expected {expected_rows}"
+        )
 
 
 def synthetic_query(row_count: int) -> str:
@@ -140,6 +209,7 @@ def execute_scenario(scenario: BenchmarkScenario, work_dir: Path) -> ScenarioOut
     This function intentionally performs no timing, memory measurement, result
     serialization, or git inspection. Profiling tools can call it directly.
     """
+    _force_noop_telemetry()
     work_dir.mkdir(parents=True, exist_ok=True)
     destination_path = work_dir / f"{scenario.name}.jsonl"
     sync = SyncConfig.model_validate(
@@ -189,6 +259,7 @@ def measure_scenario(
     timestamp: datetime | None = None,
 ) -> BenchmarkResult:
     """Measure one scenario with a monotonic clock and ``tracemalloc``."""
+    _force_noop_telemetry()
     if tracemalloc.is_tracing():
         raise RuntimeError("tracemalloc is already active; cannot isolate benchmark peak memory")
     if not (_FULL_GIT_HASH.fullmatch(git_commit) or git_commit == "unknown"):
@@ -206,6 +277,12 @@ def measure_scenario(
         _, peak_memory_bytes = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
+
+    _verify_persisted_row_count(
+        work_dir / f"{scenario.name}.jsonl",
+        scenario_name=scenario.name,
+        expected_rows=scenario.row_count,
+    )
 
     return BenchmarkResult(
         schema_version=SCHEMA_VERSION,
@@ -255,6 +332,7 @@ def run_benchmarks(
     git_commit: str | None = None,
 ) -> list[BenchmarkArtifact]:
     """Measure and persist each selected scenario as its own JSON artifact."""
+    _force_noop_telemetry()
     commit = git_commit or get_git_commit(repo_root)
     artifacts: list[BenchmarkArtifact] = []
     with tempfile.TemporaryDirectory(prefix="drt-benchmark-") as temporary_dir:

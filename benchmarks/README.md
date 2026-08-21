@@ -2,8 +2,9 @@
 
 This local harness measures drt's real extract → batch → load path without network access or
 credentials. A recursive query generates deterministic rows through the built-in SQLite source;
-the engine streams them into the real JSONL file destination. The only benchmark-specific wrapper
-counts `Destination.load()` calls as an API-call proxy.
+the engine streams them into a benchmark JSONL destination that persists every batch and counts
+`Destination.load()` calls as an API-call proxy. OpenTelemetry is pinned to its fallback no-op
+providers before measurement, regardless of the operator's environment or profile configuration.
 
 It is maintainer tooling, not a shipped `drt` command, and deliberately does not run in CI. Compare
 results only when the machine, Python version, drt dependencies, and scenario configuration are
@@ -54,12 +55,13 @@ has this shape:
 ```
 
 - `duration_seconds` is total wall-clock time around `execute_scenario()`, including SQLite
-  extraction, engine transforms/batching, and destination serialization/writes.
+  extraction, engine transforms/batching, and destination serialization/writes. The persisted-row
+  verification happens afterward and is excluded from timing and peak-memory measurement.
 - `rows_per_second` is extracted rows divided by that duration.
 - `peak_memory_bytes` is peak Python allocation tracked by `tracemalloc` during the scenario. It
   does not include native SQLite allocations, allocator fragmentation, or operating-system caches.
-- `destination_call_count` is the number of real `FileDestination.load()` calls. It represents the
-  batch/API-call shape, not a network latency estimate.
+- `destination_call_count` is the number of benchmark destination `load()` calls. It represents
+  the batch/API-call shape, not a network latency estimate.
 
 The commit is `unknown` only when the harness is run outside a Git checkout. Timestamps are UTC.
 Result files are measurements, not fixtures: do not commit them or assert exact performance values
