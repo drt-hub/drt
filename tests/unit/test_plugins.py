@@ -27,6 +27,12 @@ def _register_broken() -> None:
     raise RuntimeError("sink unreachable")
 
 
+# Not a function — a plain module-level value, so `ep.load()` returns
+# something non-callable. Covers the case where a plugin's entry point
+# points at the wrong kind of target.
+_NOT_CALLABLE = object()
+
+
 @pytest.fixture(autouse=True)
 def _reset() -> Iterator[None]:
     _CALLS.clear()
@@ -137,6 +143,24 @@ def test_load_plugins_force_reruns() -> None:
     load_plugins(force=True)
     # No assertion on _CALLS here (real entry points may be empty in CI) —
     # this only proves force=True doesn't raise on repeated invocation.
+
+
+def test_load_plugins_reports_a_non_callable_target_as_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-blocking nit from Pawansingh3889's review on PR #996: a
+    non-callable entry-point target used to be silently marked loaded=True
+    (nothing was invoked, but the entry looked fine)."""
+    ep = EntryPoint(
+        name="not_callable", value=f"{__name__}:_NOT_CALLABLE", group="drt.audit_loggers"
+    )
+    _fake_entry_points(monkeypatch, {"drt.audit_loggers": [ep]})
+
+    results = load_plugins()
+
+    assert results[0].loaded is False
+    assert results[0].error is not None
+    assert "not callable" in results[0].error
 
 
 def test_connector_entry_point_is_discovered_but_flagged_not_yet_usable(

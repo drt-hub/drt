@@ -131,8 +131,13 @@ def load_plugins(
                 entry = _describe(group, ep)
                 try:
                     target = ep.load()
-                    if callable(target):
-                        target()
+                    if not callable(target):
+                        raise TypeError(
+                            f"entry point target {entry.value!r} is not callable "
+                            f"(got {type(target).__name__}); the contract requires a "
+                            f"zero-argument callable that performs its own registration"
+                        )
+                    target()
                     entry = replace(entry, loaded=True)
                 except Exception as exc:  # noqa: BLE001 — isolate one broken plugin from the rest
                     _log.warning(
