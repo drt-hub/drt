@@ -101,17 +101,17 @@ def _validate_encrypted_path(path: Path) -> None:
         )
 
 
-def _write_private_bytes(path: Path, data: bytes) -> None:
-    """Write sensitive config owner-only from creation on POSIX."""
-    if os.name != "posix":
-        path.write_bytes(data)
-        return
-    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+def _write_private_bytes(path: Path, data: bytes, *, force: bool = False) -> None:
+    """Write sensitive config, atomically refusing overwrite unless forced."""
+    flags = os.O_CREAT | os.O_WRONLY
+    flags |= os.O_TRUNC if force else os.O_EXCL
+    fd = os.open(path, flags, 0o600)
     try:
-        try:
-            os.chmod(fd, 0o600)
-        except OSError:
-            pass
+        if os.name == "posix":
+            try:
+                os.chmod(fd, 0o600)
+            except OSError:
+                pass
         with os.fdopen(fd, "wb") as file_obj:
             fd = -1
             file_obj.write(data)
@@ -126,11 +126,13 @@ def encrypt_secrets_file(path: Path, *, force: bool = False) -> Path:
     if not path.is_file():
         raise FileNotFoundError(f"Plaintext secrets file not found: {path}")
     output = path.with_name(ENCRYPTED_SECRETS_FILENAME)
-    if output.exists() and not force:
+    encrypted = encrypt_secrets(path.read_bytes())
+    try:
+        _write_private_bytes(output, encrypted, force=force)
+    except FileExistsError as exc:
         raise FileExistsError(
             f"Encrypted secrets file already exists: {output}. Use --force to replace it."
-        )
-    _write_private_bytes(output, encrypt_secrets(path.read_bytes()))
+        ) from exc
     return output
 
 
@@ -140,9 +142,11 @@ def decrypt_secrets_file(path: Path, *, force: bool = False) -> Path:
     if not path.is_file():
         raise FileNotFoundError(f"Encrypted secrets file not found: {path}")
     output = path.with_name(SECRETS_FILENAME)
-    if output.exists() and not force:
+    plaintext = decrypt_secrets(path.read_bytes())
+    try:
+        _write_private_bytes(output, plaintext, force=force)
+    except FileExistsError as exc:
         raise FileExistsError(
             f"Plaintext secrets file already exists: {output}. Use --force to replace it."
-        )
-    _write_private_bytes(output, decrypt_secrets(path.read_bytes()))
+        ) from exc
     return output

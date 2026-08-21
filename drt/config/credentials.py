@@ -124,7 +124,12 @@ def _load_secrets(project_dir: Path | None = None) -> dict[str, Any]:
     except ModuleNotFoundError:  # Python 3.10
         try:
             import tomli as tomllib  # type: ignore[no-redef]
-        except ModuleNotFoundError:
+        except ModuleNotFoundError as exc:
+            if encrypted_path.exists():
+                raise ImportError(
+                    "Encrypted secrets require the optional encryption extra. "
+                    "Install it with: pip install 'drt-core[encryption]'"
+                ) from exc
             return {}
     if encrypted_path.exists():
         from io import BytesIO
