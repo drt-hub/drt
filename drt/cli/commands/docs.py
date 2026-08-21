@@ -22,7 +22,10 @@ app.add_typer(docs_app)
 def docs_generate(
     output: Path = typer.Option(Path("target/docs"), "--output", "-o", help="Output directory."),
     format: str = typer.Option(
-        "html", "--format", "-f", help="Output format: html | mermaid | json."
+        "html",
+        "--format",
+        "-f",
+        help="Output format: html | mermaid | json | dbt-exposures.",
     ),
     no_state: bool = typer.Option(
         False,
@@ -60,12 +63,31 @@ def docs_generate(
         ),
     ),
 ) -> None:
-    """Generate the project's sync catalog (P1 mermaid + P2 json)."""
+    """Generate the project's sync catalog or an integration artifact."""
     from drt.docs.builder import build_manifest
     from drt.docs.mermaid import render_mermaid
 
     fmt = format.lower()
     include_state = not no_state
+
+    if fmt == "dbt-exposures":
+        from drt.docs.builder import collect_dbt_exposure_inputs
+        from drt.docs.dbt_exposures import render_dbt_exposures
+
+        # Exposures are a repo-derived artifact. Run state and full destination
+        # labels are neither needed nor safe to copy into a dbt project.
+        manifest = build_manifest(Path("."), include_state=False, history_depth=0)
+        inputs = collect_dbt_exposure_inputs(Path("."))
+        typer.echo(
+            render_dbt_exposures(
+                manifest,
+                inputs.model_refs,
+                inputs.skipped_syncs,
+                docs_output_dir=output,
+            ),
+            nl=False,
+        )
+        return
 
     if fmt == "mermaid":
         manifest = build_manifest(
@@ -124,7 +146,8 @@ def docs_generate(
         return
 
     raise typer.BadParameter(
-        f"Unknown --format value: {format!r}. Expected: html | mermaid | json."
+        f"Unknown --format value: {format!r}. "
+        "Expected: html | mermaid | json | dbt-exposures."
     )
 
 

@@ -184,6 +184,26 @@ modified, and completes the first preview. See [State-aware
 Selection](state-modified-selector.md) for exact hash semantics, baseline
 compatibility, and the environment/project-wide change caveats.
 
+### Fail on dbt exposure drift
+
+Commit the generated exposures file to the dbt project, then regenerate it on
+pull requests and let `git diff --exit-code` fail when a sync's dbt lineage is
+stale:
+
+```yaml
+- name: Check drt dbt exposures
+  run: |
+    mkdir -p models/exposures
+    drt docs generate --format dbt-exposures \
+      > models/exposures/drt_exposures.yml
+    git diff --exit-code -- models/exposures/drt_exposures.yml
+```
+
+Run this from the drt project root. The exporter includes only exact `ref(...)`
+models, sorts exposures by sync name, and leaves raw-SQL syncs out with YAML
+comments explaining why. It never writes into the dbt project on its own and
+does not call the dbt Cloud API.
+
 ### Scheduled sync (cron)
 
 ```yaml

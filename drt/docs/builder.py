@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,6 +28,19 @@ from drt.state.history import HistoryEntry, HistoryStore
 from drt.state.manager import SyncState
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9_]+")
+
+
+@dataclass(frozen=True)
+class DbtExposureInputs:
+    """The model facts the dbt-exposures renderer needs but the public
+    docs manifest deliberately does not carry.
+
+    Only parsed ``ref()`` names cross this boundary. Raw model SQL stays out
+    of both the manifest and the generated exposure artifact.
+    """
+
+    model_refs: dict[str, str]
+    skipped_syncs: tuple[str, ...]
 
 
 def _slug(value: str) -> str:
@@ -184,6 +198,29 @@ def _declared_fields(sync_cfg: SyncConfig) -> tuple[SyncField, ...]:
             mask=strategy,
         )
     return tuple(sorted(by_name.values(), key=lambda f: f.name))
+
+
+def collect_dbt_exposure_inputs(project_dir: Path = Path(".")) -> DbtExposureInputs:
+    """Collect deterministic, ref-only inputs for dbt exposure generation.
+
+    ``Sync.model`` is intentionally absent from the public docs manifest: raw
+    SQL may contain values that should not be copied into a hosted artifact.
+    The dbt exporter needs only the model name inside an exact ``ref()``. Keep
+    that narrow fact in the builder layer so the renderer remains independent
+    of config parsing, matching the other docs formats' architecture.
+    """
+    from drt.engine.resolver import parse_ref
+
+    model_refs: dict[str, str] = {}
+    skipped: list[str] = []
+    result = load_syncs_safe(project_dir)
+    for sync in sorted(result.syncs, key=lambda item: item.name):
+        model_ref = parse_ref(sync.model)
+        if model_ref is None:
+            skipped.append(sync.name)
+        else:
+            model_refs[sync.name] = model_ref
+    return DbtExposureInputs(model_refs=model_refs, skipped_syncs=tuple(skipped))
 
 
 def build_manifest(

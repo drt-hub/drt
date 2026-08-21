@@ -11,8 +11,8 @@ No extra installation needed. Just run `dbt run` before `drt run` so that `targe
 When drt encounters `ref('my_model')` in a sync definition, it:
 
 1. Checks `syncs/models/my_model.sql` for a custom query
-2. Falls back to `SELECT * FROM <dataset>.my_model`
-3. (Future) Reads `target/manifest.json` for dbt-resolved table names
+2. Reads `target/manifest.json` for dbt's fully-qualified relation name
+3. Falls back to `SELECT * FROM <dataset>.my_model`
 
 ## Example workflow
 
@@ -43,3 +43,24 @@ defs = Definitions(
     assets=[*dbt_assets, *drt_assets("path/to/project")],
 )
 ```
+
+## Publish drt syncs in dbt lineage
+
+Generate dbt exposures for every drt sync whose `model` is an exact `ref(...)`:
+
+```bash
+mkdir -p models/exposures
+drt docs generate --format dbt-exposures \
+  > models/exposures/drt_exposures.yml
+```
+
+Each exposure depends on the referenced dbt model and records the drt sync,
+destination type, and sync mode under `meta.drt`. If the matching HTML sync
+page already exists under `--output` (default: `target/docs`), the exposure
+also links to it. Raw-SQL models are omitted and named in YAML comments because
+drt deliberately does not guess lineage by parsing SQL. The command only
+writes to stdout; you choose and commit the destination file yourself.
+
+The output is sorted by sync name and byte-identical for an unchanged project,
+so it can be regenerated and checked for drift in CI. See [CI/CD
+Integration](ci-cd-integration.md#fail-on-dbt-exposure-drift).

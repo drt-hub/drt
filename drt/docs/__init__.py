@@ -2,6 +2,7 @@
 
 from drt.docs.builder import build_manifest
 from drt.docs.dag import render_dag_svg
+from drt.docs.dbt_exposures import render_dbt_exposures
 from drt.docs.html import render_html
 from drt.docs.manifest import (
     SCHEMA_VERSION,
@@ -30,6 +31,7 @@ __all__ = [
     "SyncStateSnapshot",
     "build_manifest",
     "render_dag_svg",
+    "render_dbt_exposures",
     "render_html",
     "render_mermaid",
 ]
