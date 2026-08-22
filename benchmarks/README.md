@@ -67,17 +67,38 @@ The commit is `unknown` only when the harness is run outside a Git checkout. Tim
 Result files are measurements, not fixtures: do not commit them or assert exact performance values
 in tests.
 
-## Reuse for profiling
+## Profile I/O vs CPU
 
-The unmeasured runner is intentionally importable so issue #301 can profile the exact same setup:
+Issue #301's profiler wraps the unmeasured runner directly, so it uses the exact same source,
+destination, engine path, row payload, batch size, and three scenario sizes:
 
-```python
-from pathlib import Path
-
-from benchmarks.harness import SCENARIOS, execute_scenario
-
-execute_scenario(SCENARIOS[-1], Path("/tmp/drt-profile"))
+```bash
+make profile
 ```
 
-Wrap `execute_scenario()` with cProfile, py-spy, or another profiler. Measurement and JSON-writing
-helpers live outside it, so profiling does not require duplicating scenario construction.
+Run a subset with the script directly:
+
+```bash
+python3 scripts/run_profiling.py --scenario medium --scenario large
+```
+
+Each scenario produces one ignored, schema-versioned JSON artifact under `benchmarks/profiles/`;
+[`profile-result-schema.json`](profile-result-schema.json) documents the machine-readable shape.
+The three non-overlapping wall-time buckets are attributed from cProfile's call graph:
+
+- **Source extraction (CPU-bound):** cumulative time beneath `SQLiteSource.extract`, including
+  SQLite execution/iteration and construction of each source record. This harness uses SQLite
+  `:memory:`, so that work is in-process computation rather than disk or network waiting.
+- **Transformation/serialization (CPU-bound):** the remaining Python/engine time, including batch
+  construction, fixed scenario setup, and `json.dumps`/JSON encoder calls. The JSON artifact also
+  records JSON serialization's inclusive cumulative time as a component.
+- **Destination I/O (I/O-bound):** time in the destination's repeated `os.makedirs` filesystem
+  operations plus self time in `_io.open`, `TextIOWrapper.write`, and the file context's
+  close/flush path.
+
+The buckets sum to 100%; the component timings are inclusive call-tree diagnostics and should not
+be added together. cProfile adds deterministic call instrumentation, and both SQLite `:memory:` and
+the local buffered JSONL destination are much lower-latency than a remote warehouse or SaaS API.
+Use these results to locate CPU work in this workload, not as a universal model of production
+network latency. Like `make benchmark`, profiling is manual maintainer tooling and does not run in
+CI.

@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/drt-hub/drt/blob/main/benchmarks/profile-result-schema.json",
+  "title": "drt sync profiling result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profiler",
+    "scenario",
+    "row_count",
+    "git_commit",
+    "timestamp",
+    "measurements"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "profiler": { "const": "cProfile" },
+    "scenario": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*$"
+    },
+    "row_count": { "type": "integer", "minimum": 1 },
+    "git_commit": {
+      "type": "string",
+      "pattern": "^([0-9a-f]{40}|unknown)$"
+    },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "measurements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "duration_seconds",
+        "function_calls",
+        "primitive_calls",
+        "buckets",
+        "components"
+      ],
+      "properties": {
+        "duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "function_calls": { "type": "integer", "minimum": 1 },
+        "primitive_calls": { "type": "integer", "minimum": 1 },
+        "buckets": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_extraction",
+            "transformation_serialization",
+            "destination_io"
+          ],
+          "properties": {
+            "source_extraction": { "$ref": "#/$defs/cpuBucket" },
+            "transformation_serialization": { "$ref": "#/$defs/cpuBucket" },
+            "destination_io": { "$ref": "#/$defs/ioBucket" }
+          }
+        },
+        "components": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sqlite_extraction_seconds",
+            "json_serialization_seconds",
+            "destination_load_seconds"
+          ],
+          "properties": {
+            "sqlite_extraction_seconds": { "type": "number", "minimum": 0 },
+            "json_serialization_seconds": { "type": "number", "minimum": 0 },
+            "destination_load_seconds": { "type": "number", "minimum": 0 }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "bucketBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seconds", "percentage", "classification"],
+      "properties": {
+        "seconds": { "type": "number", "minimum": 0 },
+        "percentage": { "type": "number", "minimum": 0, "maximum": 100 },
+        "classification": { "type": "string" }
+      }
+    },
+    "ioBucket": {
+      "allOf": [
+        { "$ref": "#/$defs/bucketBase" },
+        { "properties": { "classification": { "const": "io_bound" } } }
+      ]
+    },
+    "cpuBucket": {
+      "allOf": [
+        { "$ref": "#/$defs/bucketBase" },
+        { "properties": { "classification": { "const": "cpu_bound" } } }
+      ]
+    }
+  }
+}
