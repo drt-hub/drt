@@ -12,7 +12,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from benchmarks.harness import SCENARIOS, BenchmarkScenario  # noqa: E402
-from benchmarks.profile_scenarios import run_profiles  # noqa: E402
+from benchmarks.profile_scenarios import ProfileBucket, run_profiles  # noqa: E402
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -43,22 +43,33 @@ def main(argv: list[str] | None = None) -> int:
         args.profiles_dir,
         repo_root=_REPO_ROOT,
     )
+    def _label(name: str, bucket: ProfileBucket) -> str:
+        # Derived from the bucket's own classification rather than a
+        # hardcoded string, so the printed label can never drift from the
+        # JSON artifact's "classification" field (it did once: #301's
+        # Codex review caught the extraction bucket's classification being
+        # corrected in code and schema but left stale as "I/O-bound" here).
+        kind = {"cpu_bound": "CPU-bound", "io_bound": "I/O-bound"}.get(
+            bucket.classification, bucket.classification
+        )
+        return f"{name} ({kind})"
+
     for artifact in artifacts:
         result = artifact.result
         buckets = result.measurements.buckets
         print(f"{result.scenario}: {result.measurements.duration_seconds:.6f}s cProfile wall time")
         print(
-            "  SQLite extraction (I/O-bound): "
+            f"  {_label('SQLite extraction', buckets.source_extraction)}: "
             f"{buckets.source_extraction.seconds:.6f}s "
             f"({buckets.source_extraction.percentage:.2f}%)"
         )
         print(
-            "  transformation/serialization (CPU-bound): "
+            f"  {_label('transformation/serialization', buckets.transformation_serialization)}: "
             f"{buckets.transformation_serialization.seconds:.6f}s "
             f"({buckets.transformation_serialization.percentage:.2f}%)"
         )
         print(
-            "  destination file I/O (I/O-bound): "
+            f"  {_label('destination file I/O', buckets.destination_io)}: "
             f"{buckets.destination_io.seconds:.6f}s "
             f"({buckets.destination_io.percentage:.2f}%)"
         )

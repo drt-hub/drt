@@ -5,12 +5,19 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from jsonschema import validate
 
 from benchmarks.harness import SCENARIOS, BenchmarkScenario
-from benchmarks.profile_scenarios import profile_scenario, run_profiles
+from benchmarks.profile_scenarios import (
+    _destination_file_io_seconds,
+    _ProfileStats,
+    profile_scenario,
+    run_profiles,
+)
 
 _COMMIT = "a" * 40
 _SCHEMA_PATH = (
@@ -36,12 +43,38 @@ def test_standard_scenario_produces_complete_profile(
     assert result.profiler == "cProfile"
     assert result.measurements.function_calls >= result.measurements.primitive_calls
     buckets = result.measurements.buckets
+    assert buckets.source_extraction.classification == "cpu_bound"
+    assert buckets.transformation_serialization.classification == "cpu_bound"
+    assert buckets.destination_io.classification == "io_bound"
     assert round(
         buckets.source_extraction.percentage
         + buckets.transformation_serialization.percentage
         + buckets.destination_io.percentage,
         2,
     ) == 100.0
+
+
+def test_destination_file_io_includes_complete_makedirs_subtree_once() -> None:
+    load_key = ("/benchmarks/harness.py", 118, "load")
+    makedirs_key = ("<frozen os>", 200, "makedirs")
+    stat_key = ("~", 0, "<built-in method posix.stat>")
+    open_key = ("~", 0, "<built-in method _io.open>")
+    stats = cast(
+        _ProfileStats,
+        SimpleNamespace(
+            stats={
+                load_key: (1, 1, 0.0, 1.0, {}),
+                makedirs_key: (1, 1, 0.01, 0.5, {load_key: (1, 1, 0.01, 0.5)}),
+                stat_key: (1, 1, 0.4, 0.4, {makedirs_key: (1, 1, 0.4, 0.4)}),
+                open_key: (1, 1, 0.1, 0.2, {load_key: (1, 1, 0.1, 0.2)}),
+            },
+            total_tt=1.0,
+            total_calls=4,
+            prim_calls=4,
+        ),
+    )
+
+    assert _destination_file_io_seconds(stats, load_key) == pytest.approx(0.6)
 
 
 def test_written_profile_matches_schema(tmp_path: Path) -> None:

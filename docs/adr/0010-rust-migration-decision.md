@@ -7,7 +7,7 @@
   reproducible benchmark scenarios and unmeasured `execute_scenario()` seam are
   reused unchanged.
 - **Profile date:** 2026-08-22, commit
-  `d4d32f0d4c618ce8f6816141ab2867b2a2bbe2b4`, Python 3.12.12, Darwin 25.5.0
+  `dc4ad41abcc1e0ee01b5b593fcc0eb7522097a52`, Python 3.12.12, Darwin 25.5.0
   arm64.
 
 ## Question
@@ -42,12 +42,15 @@ profile and outside the measured call.
 cProfile's call graph is attributed into three non-overlapping wall-time
 buckets:
 
-1. **Source extraction — I/O-bound:** cumulative time beneath
+1. **Source extraction — CPU-bound:** cumulative time beneath
    `SQLiteSource.extract`, including SQLite query execution/iteration and the
    `dict(zip(columns, row))` construction that occurs at that source boundary.
-2. **Destination I/O — I/O-bound:** self time in `_io.open`,
-   `TextIOWrapper.write`, and the close/flush context exit called directly by
-   `CountingFileDestination.load`.
+   Because this harness always uses SQLite `:memory:`, this is in-process
+   SQLite VM and Python work, not disk or network wait.
+2. **Destination I/O — I/O-bound:** cumulative time in each directly called
+   `os.makedirs` (including its `mkdir`/`stat` subtree), plus self time in
+   `_io.open`, `TextIOWrapper.write`, and the close/flush context exit called
+   directly by `CountingFileDestination.load`.
 3. **Transformation/serialization — CPU-bound:** remaining profiled time,
    including engine batching and record handling, fixed scenario setup, the
    destination's Python loop, and `json.dumps`/JSON encoder work.
@@ -64,16 +67,17 @@ and each local run writes ignored artifacts under `benchmarks/profiles/`.
 These are the actual `make profile` results from the environment identified
 above, not projections:
 
-| Scenario | Total | SQLite extraction (I/O) | Transform + serialization (CPU) | Destination file I/O | Combined I/O |
+| Scenario | Total | SQLite extraction (CPU) | Transform + serialization (CPU) | Destination file I/O | Combined CPU |
 |---|---:|---:|---:|---:|---:|
-| Small (100) | 0.002690 s | 0.000581 s (21.61%) | 0.001734 s (64.45%) | 0.000375 s (13.94%) | 0.000956 s (35.55%) |
-| Medium (10,000) | 0.052322 s | 0.015026 s (28.72%) | 0.030324 s (57.95%) | 0.006972 s (13.33%) | 0.021998 s (42.05%) |
-| Large (100,000) | 0.419169 s | 0.121406 s (28.96%) | 0.243418 s (58.08%) | 0.054345 s (12.96%) | 0.175751 s (41.92%) |
+| Small (100) | 0.003122 s | 0.000658 s (21.08%) | 0.002210 s (70.80%) | 0.000253 s (8.12%) | 0.002868 s (91.88%) |
+| Medium (10,000) | 0.051703 s | 0.014715 s (28.46%) | 0.029960 s (57.95%) | 0.007028 s (13.59%) | 0.044675 s (86.41%) |
+| Large (100,000) | 0.447126 s | 0.125501 s (28.07%) | 0.252146 s (56.39%) | 0.069479 s (15.54%) | 0.377647 s (84.46%) |
 
 For this workload, the claim that the bottleneck is I/O rather than CPU is
-**refuted**. CPU-classified work is the largest bucket in every scenario,
-ranging from 57.95% to 64.45%; the two I/O buckets together account for
-35.55% to 42.05%.
+**refuted**. CPU-classified work accounts for 84.46% to 91.88%; the only
+I/O-classified bucket, local destination filesystem work, accounts for 8.12%
+to 15.54%. This strong local CPU majority follows in part from the benchmark
+shape: its source deliberately performs no genuine storage or network I/O.
 
 ### Where the CPU time is
 
@@ -81,22 +85,27 @@ The clearest scalable CPU hotspot is JSON serialization:
 
 | Scenario | Inclusive `json.dumps` time | Share of total |
 |---|---:|---:|
-| Small | 0.000426 s | 15.84% |
-| Medium | 0.019604 s | 37.47% |
-| Large | 0.163497 s | 39.00% |
+| Small | 0.000363 s | 11.63% |
+| Medium | 0.020620 s | 39.88% |
+| Large | 0.174138 s | 38.95% |
 
-At 100,000 rows, JSON serialization alone is roughly two-thirds of the entire
-CPU-classified bucket (0.163497 of 0.243418 seconds). The remainder is 0.079921
-seconds (19.07% of total) across engine batching/record handling,
-destination-loop work, and fixed setup. Source-record construction is charged
-to the extraction bucket because cProfile cannot separate it from SQLite
-cursor stepping inside the same generator function. It is therefore not valid
-to treat the 19.07% remainder—or the mixed extraction bucket—as an
-`engine/sync.py` rewrite opportunity.
+At 100,000 rows, JSON serialization is the largest identified CPU component:
+0.174138 seconds (38.95% of total), or 69.06% of the
+transformation/serialization bucket. SQLite extraction contributes another
+0.125501 seconds (28.07% of total). It belongs to the CPU classification in
+this `:memory:` workload, but remains source implementation work outside
+`engine/sync.py`; cProfile cannot further separate SQLite VM stepping from the
+Python record construction in the same generator.
 
-The full destination `load` call tree takes 0.252180 seconds (60.16% of the
-large run), but it contains both the 0.163497-second JSON CPU component and the
-0.054345-second file-I/O component. A Rust rewrite limited to
+After subtracting JSON from the transformation/serialization bucket, 0.078008
+seconds (17.45% of total) remains across engine batching/record handling,
+destination-loop work, and fixed setup. That residual includes the proposed
+Rust boundary, but is not exclusive to it. The engine-only opportunity is
+therefore smaller than 17.45%, not the full 84.46% CPU-classified share.
+
+The full destination `load` call tree takes 0.270963 seconds (60.60% of the
+large run), but it contains both the 0.174138-second JSON CPU component and the
+0.069479-second file-I/O component. A Rust rewrite limited to
 `engine/sync.py` would leave both stdlib JSON serialization in the benchmark
 destination and the physical write outside the Rust boundary. Moving records
 through PyO3 can also introduce conversion/copy overhead, so the theoretical
@@ -105,7 +114,14 @@ engine-only share is an upper bound, not an expected speedup.
 ## What the profile does not establish
 
 This is intentionally a reproducible local workload, not a production traffic
-model. SQLite is in-memory and the JSONL destination is a local buffered file.
+model. The in-memory database performs no storage or network wait; the only
+I/O-classified work is a small local buffered file write plus its repeated
+directory metadata operations. The resulting CPU percentage is an accurate
+description of this synthetic compute-to-file path, but it cannot settle
+whether production drt traffic is CPU- or I/O-bound. In particular, it should
+not be read as stronger evidence for a Rust migration merely because correcting
+the source classification made the reported CPU share larger.
+
 Real warehouse extraction and SaaS/API destinations add network latency,
 server scheduling, rate limiting, retries, and remote commit time; all make a
 production sync more I/O-heavy and reduce the end-to-end fraction a local CPU
@@ -125,12 +141,13 @@ and invariants rather than performance values.
 
 **Do not use this profile as justification for a broad Rust rewrite of
 `engine/sync.py`.** The local workload is CPU-majority, so it refutes the bare
-“I/O, not CPU” assumption, but the largest measured CPU component is
-destination-side JSON serialization—not the engine module proposed for PyO3.
-The engine-only opportunity is smaller than the 19.07% non-JSON remainder in
-the large run and would be subject to Python/Rust boundary costs. For remote
-warehouse/API workloads, the achievable end-to-end benefit is likely smaller
-still.
+“I/O, not CPU” assumption only for this deliberately I/O-light shape. Its two
+largest measured CPU components are destination-side JSON serialization and
+in-memory source extraction—neither is the engine module proposed for PyO3.
+The engine-only opportunity is smaller than the 17.45% non-JSON
+transformation residual in the large run and would be subject to Python/Rust
+boundary costs. For remote warehouse/API workloads, the achievable end-to-end
+benefit is likely smaller still.
 
 If performance becomes a roadmap priority, the next evidence should be profiles
 of representative remote destinations and CPU-heavy transforms using real

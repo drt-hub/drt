@@ -4,9 +4,9 @@ The profiler deliberately wraps :func:`benchmarks.harness.execute_scenario`
 instead of rebuilding its source, destination, or sync configuration.  Bucket
 times are non-overlapping:
 
-* source extraction is cumulative time below ``SQLiteSource.extract``;
-* destination I/O is self time in the actual ``_io`` open/write/close calls
-  made directly by ``CountingFileDestination.load``;
+* source extraction is cumulative CPU time below ``SQLiteSource.extract``;
+* destination I/O is time in the filesystem directory setup and actual
+  ``_io`` open/write/close calls made by ``CountingFileDestination.load``;
 * transformation/serialization is the remaining profiled wall time, including
   engine record handling, JSON encoding, and fixed scenario setup.
 
@@ -133,8 +133,17 @@ def _find_function(
     return matches[0]
 
 
-def _direct_file_io_seconds(stats: _ProfileStats, load_key: _FunctionKey) -> float:
-    """Return file-I/O self time attributed directly to benchmark ``load``."""
+def _destination_file_io_seconds(
+    stats: _ProfileStats,
+    load_key: _FunctionKey,
+) -> float:
+    """Return filesystem time attributed to benchmark ``load``.
+
+    Direct open/write/close entries contribute self time. ``os.makedirs``
+    contributes cumulative time so its Python frame and complete filesystem
+    subtree (including the repeated ``mkdir`` and ``stat`` calls made by
+    ``exist_ok=True``) are included exactly once.
+    """
     io_functions = {
         "<built-in method _io.open>",
         "<method 'write' of '_io.TextIOWrapper' objects>",
@@ -142,10 +151,13 @@ def _direct_file_io_seconds(stats: _ProfileStats, load_key: _FunctionKey) -> flo
     }
     seconds = 0.0
     for key, (_cc, _nc, _self_time, _cumulative_time, callers) in stats.stats.items():
-        if key[2] not in io_functions or load_key not in callers:
+        if load_key not in callers:
             continue
         # Caller tuples are (primitive calls, total calls, self, cumulative).
-        seconds += callers[load_key][2]
+        if key[2] in io_functions:
+            seconds += callers[load_key][2]
+        elif key[2] == "makedirs":
+            seconds += callers[load_key][3]
     return seconds
 
 
@@ -239,7 +251,7 @@ def profile_scenario(
         filename_suffix="/benchmarks/harness.py",
         function_name="load",
     )
-    destination_io_seconds = _direct_file_io_seconds(stats, load_key)
+    destination_io_seconds = _destination_file_io_seconds(stats, load_key)
     transformation_seconds = max(
         0.0,
         duration_seconds - extraction_seconds - destination_io_seconds,
@@ -272,7 +284,10 @@ def profile_scenario(
                 source_extraction=_bucket(
                     extraction_seconds,
                     duration_seconds,
-                    "io_bound",
+                    # This harness always uses SQLite ``:memory:``. The bucket
+                    # therefore measures in-process SQLite VM execution and
+                    # Python row construction, not disk or network waiting.
+                    "cpu_bound",
                     percentage=extraction_percentage,
                 ),
                 transformation_serialization=_bucket(

@@ -86,13 +86,15 @@ Each scenario produces one ignored, schema-versioned JSON artifact under `benchm
 [`profile-result-schema.json`](profile-result-schema.json) documents the machine-readable shape.
 The three non-overlapping wall-time buckets are attributed from cProfile's call graph:
 
-- **Source extraction (I/O-bound):** cumulative time beneath `SQLiteSource.extract`, including
-  SQLite execution/iteration and construction of each source record.
+- **Source extraction (CPU-bound):** cumulative time beneath `SQLiteSource.extract`, including
+  SQLite execution/iteration and construction of each source record. This harness uses SQLite
+  `:memory:`, so that work is in-process computation rather than disk or network waiting.
 - **Transformation/serialization (CPU-bound):** the remaining Python/engine time, including batch
   construction, fixed scenario setup, and `json.dumps`/JSON encoder calls. The JSON artifact also
   records JSON serialization's inclusive cumulative time as a component.
-- **Destination I/O (I/O-bound):** self time in `_io.open`, `TextIOWrapper.write`, and the file
-  context's close/flush path when called directly by the benchmark destination.
+- **Destination I/O (I/O-bound):** time in the destination's repeated `os.makedirs` filesystem
+  operations plus self time in `_io.open`, `TextIOWrapper.write`, and the file context's
+  close/flush path.
 
 The buckets sum to 100%; the component timings are inclusive call-tree diagnostics and should not
 be added together. cProfile adds deterministic call instrumentation, and both SQLite `:memory:` and
