@@ -1,4 +1,4 @@
-.PHONY: install dev lint fmt test benchmark clean sync-skills check-skills check-changelog check-drift sync-version release-check topics sync-labels
+.PHONY: install dev lint fmt test benchmark profile clean sync-skills check-skills check-changelog check-drift sync-version release-check topics sync-labels
 
 # ── Development ────────────────────────────────────────────────────────────────
 
@@ -21,6 +21,9 @@ test:
 
 benchmark:  ## Run local sync-performance scenarios; writes benchmarks/results/*.json
 	python3 scripts/run_benchmarks.py
+
+profile:  ## Profile local sync scenarios; writes benchmarks/profiles/*.json
+	python3 scripts/run_profiling.py
 
 clean:
 	rm -rf dist build .eggs *.egg-info
