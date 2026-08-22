@@ -294,11 +294,10 @@ def test_health_stays_open_under_auth() -> None:
 
 
 def test_hmac_get_signs_the_empty_body() -> None:
-    """A GET has no body, so its signature is over b"", constant per secret."""
+    """A GET has no body, so its signature includes the request path."""
     secret = "topsecret"
     payload = b'{"event": "push"}'
     post_sig = "sha256=" + hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
-    get_sig = "sha256=" + hmac.new(secret.encode(), b"", hashlib.sha256).hexdigest()
 
     server, _, port = _run_server(auth=AuthConfig(scheme="hmac", hmac_secret=secret))
     try:
@@ -311,6 +310,9 @@ def test_hmac_get_signs_the_empty_body() -> None:
         assert _get(url)[0] == 401
         # The POST's signature is over its own body and must not open the GET
         assert _get(url, headers={"X-Hub-Signature-256": post_sig})[0] == 401
+        # GET signature now includes the path (/runs/<id>)
+        path = f"/runs/{accepted['run_id']}\x00"
+        get_sig = "sha256=" + hmac.new(secret.encode(), path.encode(), hashlib.sha256).hexdigest()
         status, body = _get(url, headers={"X-Hub-Signature-256": get_sig})
         assert status == 200
         assert body["run_id"] == accepted["run_id"]
