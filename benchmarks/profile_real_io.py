@@ -1,17 +1,19 @@
 """Manual cProfile experiments with real local network I/O (#1008).
 
 This module deliberately lives outside pytest discovery. The Postgres leg
-requires Docker and testcontainers; the REST leg starts pytest-httpserver and
-adds a fixed delay in its server thread. Neither belongs in the default test
-suite.
+requires Docker and testcontainers; the REST leg starts a separate Python
+process serving HTTP responses after a fixed delay. Neither belongs in the
+default test suite.
 
 The attribution follows :mod:`benchmarks.profile_scenarios`: buckets are
 non-overlapping portions of cProfile wall time and therefore sum to 100%.
 Postgres's C driver does not expose its socket calls separately to cProfile,
 so its source boundary is explicitly an I/O-bearing aggregate of database
 wait, TCP wait, driver conversion, and Python record construction. The
-pure-Python HTTP stack does expose socket primitives; the REST leg separates
-their self time from the remaining destination call tree.
+REST client profiling cannot reliably separate transport wait from CPU work
+inside ``httpx``. The REST leg therefore reports the artificial server delay,
+which is known by construction, separately from the mixed remainder of the
+destination call tree.
 """
 
 from __future__ import annotations
@@ -19,19 +21,25 @@ from __future__ import annotations
 import cProfile
 import json
 import math
+import multiprocessing
 import pstats
 import time
-from dataclasses import asdict, dataclass
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Any, cast
+
+from jsonschema import Draft202012Validator
 
 from benchmarks.harness import SCENARIOS, BenchmarkScenario, get_git_commit
 from benchmarks.profile_scenarios import (
     ProfileBucket,
     _bucket,
     _cumulative_seconds,
-    _find_function,
     _format_timestamp,
     _ProfileStats,
 )
@@ -47,18 +55,10 @@ from drt.destinations.rest_api import RestApiDestination
 from drt.sources.postgres import PostgresSource
 
 SCHEMA_VERSION = 1
-DEFAULT_LATENCIES_MS: tuple[int, ...] = (10, 50, 200)
-
-_SOCKET_IO_FUNCTIONS = {
-    "<built-in method _socket.getaddrinfo>",
-    "<built-in method select.select>",
-    "<method 'connect' of '_socket.socket' objects>",
-    "<method 'recv' of '_socket.socket' objects>",
-    "<method 'recv_into' of '_socket.socket' objects>",
-    "<method 'send' of '_socket.socket' objects>",
-    "<method 'sendall' of '_socket.socket' objects>",
-    "<method 'poll' of 'select.poll' objects>",
-}
+DEFAULT_LATENCIES_MS: tuple[int, ...] = (0, 10, 50, 200)
+_RESULT_SCHEMA_PATH = Path(__file__).with_name("real-io-profile-result-schema.json")
+_SERVER_STARTUP_TIMEOUT_SECONDS = 10.0
+_SERVER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -96,6 +96,34 @@ class RealIOProfileResult:
 class RealIOProfileArtifact:
     result: RealIOProfileResult
     path: Path
+
+
+@dataclass(frozen=True)
+class _RestBucketSeconds:
+    """Non-overlapping REST timings derived from controlled inputs and cProfile."""
+
+    load: float
+    known_network_wait: float
+    load_overhead: float
+    harness_cpu: float
+
+
+@dataclass(frozen=True)
+class _DelayedRestServer:
+    """Parent-process handle for the isolated controlled-latency server."""
+
+    url: str
+    process: Any
+    request_counter: Any
+
+    def received_requests(self) -> int:
+        if not self.process.is_alive() and self.process.exitcode != 0:
+            raise RuntimeError(
+                "controlled-latency REST server exited unexpectedly "
+                f"with code {self.process.exitcode}"
+            )
+        with self.request_counter.get_lock():
+            return int(self.request_counter.value)
 
 
 def _percentages(duration_seconds: float, seconds: tuple[float, ...]) -> tuple[float, ...]:
@@ -187,6 +215,7 @@ def profile_postgres_scenario(
     timestamp: datetime | None = None,
 ) -> RealIOProfileResult:
     """Profile ``PostgresSource.extract`` over the container's TCP socket."""
+    profile = replace(profile, fetch_size=scenario.batch_size)
     source = PostgresSource()
     if not source.test_connection(profile):
         raise RuntimeError("Postgres profile preflight failed")
@@ -262,18 +291,65 @@ def profile_postgres_scenario(
     )
 
 
-def _socket_io_seconds(stats: _ProfileStats) -> float:
-    """Sum self time in blocking socket/select primitives in the profiled thread."""
-    return sum(
-        self_time
-        for (_filename, _line, function_name), (
-            _cc,
-            _nc,
-            self_time,
-            _cumulative_time,
-            _callers,
-        ) in stats.stats.items()
-        if function_name in _SOCKET_IO_FUNCTIONS
+def _rest_bucket_seconds(
+    stats: _ProfileStats,
+    *,
+    controlled_latency_ms: int,
+    request_count: int,
+) -> _RestBucketSeconds:
+    """Split REST time using the artificial wait known by construction.
+
+    ``httpx`` nests the blocking transport call below ``load()``, and cProfile
+    cannot reliably distinguish that wait from CPU work via socket-function
+    self time. The configured sleep duration times the observed request count
+    is unambiguously network wait. Everything else inside ``load()`` remains
+    an honest mixed I/O/CPU aggregate.
+    """
+    load_seconds = _cumulative_seconds(
+        stats,
+        filename_suffix="/drt/destinations/rest_api.py",
+        function_name="load",
+    )
+    known_network_wait_seconds = controlled_latency_ms / 1000 * request_count
+    load_overhead_seconds = load_seconds - known_network_wait_seconds
+    harness_cpu_seconds = stats.total_tt - load_seconds
+    # cProfile's own instrumentation overhead means a function's reported
+    # cumulative time can overshoot the run's total by a few tens of
+    # microseconds even with a clean process boundary and no thread
+    # contention -- this is measurement noise, not a methodology failure.
+    # The multi-thread contention bug this replaces overshot by whole
+    # seconds/minutes, so a millisecond-scale tolerance still catches a
+    # genuine regression while absorbing this kind of jitter.
+    _NOISE_TOLERANCE_SECONDS = 0.001
+    if (
+        load_overhead_seconds < -_NOISE_TOLERANCE_SECONDS
+        or harness_cpu_seconds < -_NOISE_TOLERANCE_SECONDS
+    ):
+        raise RuntimeError(
+            "invalid REST cProfile timing after process isolation: "
+            f"total={stats.total_tt:.9f}s, load={load_seconds:.9f}s, "
+            f"known_injected_wait={known_network_wait_seconds:.9f}s, "
+            f"load_overhead={load_overhead_seconds:.9f}s, "
+            f"harness_cpu={harness_cpu_seconds:.9f}s"
+        )
+    # Clamping harness_cpu up to 0 and load_overhead independently would
+    # make the three seconds sum to more than `total_tt` whenever noise
+    # pushed harness_cpu slightly negative (load_overhead still carries the
+    # full `load_seconds - known_network_wait_seconds`, which itself already
+    # embeds that same overshoot via `load_seconds > total_tt`). That extra
+    # mass is exactly what pushes `_percentages()`'s 100%-sum residual for
+    # the last bucket negative downstream. So: clamp harness_cpu first, then
+    # subtract whatever the clamp added from load_overhead, keeping the two
+    # buckets summing to the same total either way.
+    clamped_harness_cpu_seconds = max(0.0, harness_cpu_seconds)
+    clamp_delta_seconds = clamped_harness_cpu_seconds - harness_cpu_seconds
+    harness_cpu_seconds = clamped_harness_cpu_seconds
+    load_overhead_seconds = max(0.0, load_overhead_seconds - clamp_delta_seconds)
+    return _RestBucketSeconds(
+        load=load_seconds,
+        known_network_wait=known_network_wait_seconds,
+        load_overhead=load_overhead_seconds,
+        harness_cpu=harness_cpu_seconds,
     )
 
 
@@ -350,18 +426,18 @@ def profile_rest_scenario(
         profiler,
         f"REST scenario {scenario.name!r} at {controlled_latency_ms} ms",
     )
-    load_key = _find_function(
+    timings = _rest_bucket_seconds(
         stats,
-        filename_suffix="/drt/destinations/rest_api.py",
-        function_name="load",
+        controlled_latency_ms=controlled_latency_ms,
+        request_count=request_count,
     )
-    load_seconds = stats.stats[load_key][3]
-    socket_seconds = min(_socket_io_seconds(stats), load_seconds)
-    destination_cpu_seconds = max(0.0, load_seconds - socket_seconds)
-    harness_cpu_seconds = max(0.0, stats.total_tt - load_seconds)
     percentages = _percentages(
         stats.total_tt,
-        (socket_seconds, destination_cpu_seconds, harness_cpu_seconds),
+        (
+            timings.known_network_wait,
+            timings.load_overhead,
+            timings.harness_cpu,
+        ),
     )
 
     started_at = timestamp or datetime.now(timezone.utc)
@@ -383,33 +459,66 @@ def profile_rest_scenario(
             function_calls=stats.total_calls,
             primitive_calls=stats.prim_calls,
             buckets={
-                "socket_io": _bucket(
-                    socket_seconds,
+                "known_network_wait": _bucket(
+                    timings.known_network_wait,
                     stats.total_tt,
                     "io_bound",
                     percentage=percentages[0],
                 ),
-                "destination_cpu": _bucket(
-                    destination_cpu_seconds,
+                "load_overhead": _bucket(
+                    timings.load_overhead,
                     stats.total_tt,
-                    "cpu_bound",
+                    "mixed_io_cpu",
                     percentage=percentages[1],
                 ),
                 "harness_cpu": _bucket(
-                    harness_cpu_seconds,
+                    timings.harness_cpu,
                     stats.total_tt,
                     "cpu_bound",
                     percentage=percentages[2],
                 ),
             },
             components={
-                "rest_destination_load_seconds": round(load_seconds, 6),
+                "rest_destination_load_seconds": round(timings.load, 6),
             },
         ),
     )
 
 
+def _validate_result_for_write(result: RealIOProfileResult) -> None:
+    """Reject invalid measurements before creating an artifact on disk."""
+    payload = result.to_dict()
+    finite_errors: list[str] = []
+    duration = result.measurements.duration_seconds
+    if not math.isfinite(duration):
+        finite_errors.append("measurements.duration_seconds must be finite")
+    for name, bucket in result.measurements.buckets.items():
+        if not math.isfinite(bucket.seconds):
+            finite_errors.append(f"measurements.buckets.{name}.seconds must be finite")
+        if not math.isfinite(bucket.percentage):
+            finite_errors.append(f"measurements.buckets.{name}.percentage must be finite")
+    for name, value in result.measurements.components.items():
+        if not math.isfinite(value):
+            finite_errors.append(f"measurements.components.{name} must be finite")
+
+    schema = json.loads(_RESULT_SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema_errors = sorted(
+        Draft202012Validator(schema).iter_errors(payload),
+        key=lambda error: tuple(str(part) for part in error.absolute_path),
+    )
+    validation_errors = finite_errors + [
+        f"{'.'.join(str(part) for part in error.absolute_path) or '<root>'}: {error.message}"
+        for error in schema_errors
+    ]
+    if validation_errors:
+        raise RuntimeError(
+            "refusing to write schema-invalid real-I/O profile artifact: "
+            + "; ".join(validation_errors)
+        )
+
+
 def _write_result(result: RealIOProfileResult, profiles_dir: Path) -> Path:
+    _validate_result_for_write(result)
     profiles_dir.mkdir(parents=True, exist_ok=True)
     timestamp_slug = result.timestamp.replace("-", "").replace(":", "").replace(".", "")
     latency_slug = (
@@ -450,6 +559,127 @@ def run_postgres_profiles(
     return artifacts
 
 
+def _delayed_rest_server_worker(
+    latency_ms: int,
+    ready_connection: Connection,
+    request_counter: Any,
+    stop_event: Any,
+) -> None:
+    """Serve fixed-delay responses in a spawned process, outside cProfile."""
+
+    class DelayedResponseHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 — stdlib handler API
+            content_length = int(self.headers.get("Content-Length", "0"))
+            self.rfile.read(content_length)
+            time.sleep(latency_ms / 1000)
+            with request_counter.get_lock():
+                request_counter.value += 1
+            body = b"{}"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *args: Any) -> None:
+            del args
+
+    announced = False
+    try:
+        with HTTPServer(("127.0.0.1", 0), DelayedResponseHandler) as server:
+            server.timeout = 0.1
+            port = int(server.server_address[1])
+            ready_connection.send(("ready", port))
+            announced = True
+            ready_connection.close()
+            while not stop_event.is_set():
+                server.handle_request()
+    except BaseException as exc:
+        if not announced:
+            ready_connection.send(("error", repr(exc)))
+            ready_connection.close()
+        raise
+
+
+@contextmanager
+def _start_delayed_rest_server(latency_ms: int) -> Iterator[_DelayedRestServer]:
+    """Start a controlled-latency HTTP server behind a process boundary."""
+    context = multiprocessing.get_context("spawn")
+    parent_connection, child_connection = context.Pipe(duplex=False)
+    request_counter = context.Value("Q", 0)
+    stop_event = context.Event()
+    process = context.Process(
+        target=_delayed_rest_server_worker,
+        args=(latency_ms, child_connection, request_counter, stop_event),
+        name=f"drt-profile-rest-{latency_ms}ms",
+    )
+    process.start()
+    child_connection.close()
+    try:
+        if not parent_connection.poll(_SERVER_STARTUP_TIMEOUT_SECONDS):
+            raise RuntimeError(
+                "controlled-latency REST server did not start within "
+                f"{_SERVER_STARTUP_TIMEOUT_SECONDS:.0f} seconds"
+            )
+        status, detail = parent_connection.recv()
+        if status != "ready":
+            raise RuntimeError(f"controlled-latency REST server failed to start: {detail}")
+        server = _DelayedRestServer(
+            url=f"http://127.0.0.1:{int(detail)}/records",
+            process=process,
+            request_counter=request_counter,
+        )
+        yield server
+    finally:
+        parent_connection.close()
+        stop_event.set()
+        process.join(_SERVER_SHUTDOWN_TIMEOUT_SECONDS)
+        if process.is_alive():
+            process.terminate()
+            process.join(_SERVER_SHUTDOWN_TIMEOUT_SECONDS)
+        if process.is_alive():
+            raise RuntimeError("controlled-latency REST server process did not stop")
+
+
+_WARMUP_SCENARIO = BenchmarkScenario(name="warmup", row_count=1, batch_size=1)
+
+
+def _warm_up_rest_client() -> None:
+    """Absorb first-call cost (imports, Jinja compile, first socket) outside profiling.
+
+    Without this, whichever scenario runs first pays for httpx/Jinja
+    initialization on top of its own request cost -- inflating its
+    ``load_overhead`` bucket in a way that has nothing to do with the
+    scenario itself (observed: a lone small/10ms request measured at 45ms
+    versus ~14ms once warm).
+    """
+    _reset_limiter_registry()
+    with _start_delayed_rest_server(0) as server:
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url=server.url,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+            body_mode="batch",
+            batch_template="{{ rows | tojson_safe }}",
+            max_records_per_request=_WARMUP_SCENARIO.batch_size,
+            retry=RetryConfig(max_attempts=1),
+            rate_limit=RateLimitConfig(requests_per_second=0),
+        )
+        sync_options = SyncOptions(
+            batch_size=_WARMUP_SCENARIO.batch_size,
+            on_error="fail",
+            retry=RetryConfig(max_attempts=1),
+            rate_limit=RateLimitConfig(requests_per_second=0),
+        )
+        _load_rest_batches(
+            _synthetic_records(_WARMUP_SCENARIO.row_count),
+            _WARMUP_SCENARIO,
+            config,
+            sync_options,
+        )
+
+
 def run_rest_profiles(
     scenarios: tuple[BenchmarkScenario, ...] = SCENARIOS,
     latencies_ms: tuple[int, ...] = DEFAULT_LATENCIES_MS,
@@ -457,38 +687,23 @@ def run_rest_profiles(
     profiles_dir: Path,
     repo_root: Path,
 ) -> list[RealIOProfileArtifact]:
-    """Profile REST scenarios against fixed-delay pytest-httpserver instances."""
-    from pytest_httpserver import HTTPServer
-    from werkzeug.wrappers import Response
-
+    """Profile REST scenarios against a process-isolated fixed-delay server."""
     commit = get_git_commit(repo_root)
     artifacts: list[RealIOProfileArtifact] = []
+    _warm_up_rest_client()
     for latency_ms in latencies_ms:
         if latency_ms < 0:
             raise ValueError("latency values cannot be negative")
-        received_requests = 0
-
-        def delayed_response(_request: Any) -> Response:
-            nonlocal received_requests
-            time.sleep(latency_ms / 1000)
-            received_requests += 1
-            return Response("{}", status=200, content_type="application/json")
-
-        server = HTTPServer(host="127.0.0.1", port=0, threaded=True)
-        server.expect_request("/records", method="POST").respond_with_handler(
-            delayed_response
-        )
-        server.start()
-        try:
+        with _start_delayed_rest_server(latency_ms) as server:
             for scenario in scenarios:
-                before = received_requests
+                before = server.received_requests()
                 result = profile_rest_scenario(
                     scenario,
-                    server.url_for("/records"),
+                    server.url,
                     controlled_latency_ms=latency_ms,
                     git_commit=commit,
                 )
-                observed_requests = received_requests - before
+                observed_requests = server.received_requests() - before
                 if observed_requests != result.request_count:
                     raise RuntimeError(
                         f"REST scenario {scenario.name!r} made {observed_requests} requests; "
@@ -497,9 +712,6 @@ def run_rest_profiles(
                 artifacts.append(
                     RealIOProfileArtifact(result, _write_result(result, profiles_dir))
                 )
-            server.check_assertions()
-        finally:
-            server.stop()
     return artifacts
 
 

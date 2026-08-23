@@ -171,9 +171,15 @@ traffic is CPU- or I/O-bound. This section reports two follow-up experiments
 run against that gap directly. Neither commits to a Rust migration; both
 exist to replace assumption with measurement before that decision is made.
 
-**Run date:** 2026-08-23, commit `af183b5` (worktree
+**Run date:** 2026-08-23, commit `ab9d27c7` (worktree
 `feat/1008-adr0010-followup-profiling`), Python 3.12.12, Darwin 25.5.0 arm64,
-Docker Desktop, `postgres:16-alpine` via `testcontainers`.
+Docker Desktop, `postgres:16-alpine` via `testcontainers`. This section was
+rewritten once after its first draft: the first pass mislabeled controlled
+network latency as CPU time and, separately, a same-process threaded HTTP
+test server produced schema-invalid measurements at two data points. Both
+are fixed below (a three-way split anchored on the known injected latency,
+and a process-isolated server); the numbers and conclusions in this section
+supersede that draft.
 
 ### Experiment 1a — real warehouse source (Postgres, real TCP + real query)
 
@@ -188,86 +194,101 @@ and Python record construction, not a further-separable I/O/CPU split:
 
 | Scenario | Total | Connection + query setup (mixed) | Row streaming + conversion (mixed) | Consumer CPU |
 |---|---:|---:|---:|---:|
-| Small (100) | 0.005408 s | 0.004608 s (85.21%) | 0.000760 s (14.05%) | 0.000040 s (0.74%) |
-| Medium (10,000) | 0.013707 s | 0.004760 s (34.73%) | 0.007786 s (56.80%) | 0.001161 s (8.47%) |
-| Large (100,000) | 0.072050 s | 0.005109 s (7.09%) | 0.059340 s (82.36%) | 0.007600 s (10.55%) |
+| Small (100) | 0.010920 s | 0.009237 s (84.59%) | 0.001423 s (13.03%) | 0.000259 s (2.38%) |
+| Medium (10,000) | 0.026981 s | 0.006535 s (24.22%) | 0.019685 s (72.96%) | 0.000761 s (2.82%) |
+| Large (100,000) | 0.177117 s | 0.004036 s (2.28%) | 0.166423 s (93.96%) | 0.006658 s (3.76%) |
 
-Two things stand out. First, `consumer_cpu` — the pure-Python code *outside*
-the source boundary, the closest analogue to what a `run_sync()` engine loop
-would do with each row — never exceeds 10.55% of total time at any scenario
-size. The overwhelming majority of time is inside the source boundary itself
-(connection setup, the real round trip, and driver-level row materialization),
-which is exactly the I/O-and-driver-dominated shape ADR 0010's original
-recommendation predicted a real warehouse source would have, in sharp
-contrast to the `:memory:` SQLite benchmark. Second, this is a *local Docker*
-container on the same machine (sub-millisecond network hop) — a real cloud
-warehouse (Snowflake, BigQuery, a managed Postgres) adds real network transit,
-auth, and server queueing on top of this, which would only push the
-I/O-dominated share higher, not lower.
+Read this narrowly. `consumer_cpu` is only the row-counting loop *outside*
+`extract()` in the test harness — it is not drt's own conversion work, which
+happens inside `extract()` itself and is folded into `row_streaming_and_conversion`,
+an aggregate this method cannot split further. So this table does not isolate
+what fraction of extraction is CPU versus network wait; it only shows that
+the overwhelming majority of time is inside the source boundary (connection
+setup, the real round trip, and driver-level row materialization) rather than
+in code a Rust rewrite of `engine/sync.py` would touch. That much is real and
+matches ADR 0010's original prediction that a genuine warehouse source would
+look I/O-and-driver-dominated, in contrast to the `:memory:` SQLite benchmark.
+It is also a *local Docker* container on the same machine (sub-millisecond
+network hop) — a real cloud warehouse (Snowflake, BigQuery, a managed
+Postgres) adds real network transit, auth, and server queueing on top of
+this, which would only shrink the harness-owned share further, not grow it.
 
 ### Experiment 1b — real REST destination under controlled latency
 
 `benchmarks/profile_real_io.py::profile_rest_scenario` profiles
 `RestApiDestination.load()` sending real HTTP POST requests over a real
-loopback TCP socket to a local `pytest-httpserver` instance, whose handler
-adds a real, controlled `time.sleep()` delay before responding (10 / 50 / 200
-ms, bracketing "fast internal API" through "typical public SaaS API" — chosen
-values, not measured from a live vendor). `socket_io` sums self time in the
-actual blocking socket primitives (`recv`, `send`, `connect`, `select`);
-`destination_cpu` is the remainder of `RestApiDestination.load()`'s own
-cumulative time; `harness_cpu` is everything outside `load()` (batch
-iteration, scenario setup):
+loopback TCP socket to a controlled-latency server running in a genuinely
+separate OS process (`multiprocessing`, spawned), whose handler adds a real
+`time.sleep()` delay before responding — 0 / 10 / 50 / 200 ms, where 0 ms is
+an added baseline (see below) and 10/50/200 ms bracket "fast internal API"
+through "typical public SaaS API" (chosen values, not measured from a live
+vendor). The client process runs one untimed warm-up request before any
+profiled scenario, so import and first-connection cost lands there instead
+of contaminating whichever scenario happens to run first.
 
-| Scenario | Latency | Total | Socket I/O | Destination CPU | Harness CPU |
+The split is built from what's known by construction rather than from
+cProfile trying to separate CPU from a blocking socket call inside one
+function's frame (the first draft's mistake): `known_network_wait` is
+`controlled_latency_ms × request_count` — an exact lower bound on wall time
+spent waiting on the injected delay. `load_overhead` is everything else
+inside `RestApiDestination.load()`'s cumulative time: httpx, the Jinja
+`{{ rows | tojson_safe }}` render, JSON encoding, header construction, *and*
+any real local-transport wait (loopback round trip, handler read/write) not
+covered by the injected sleep. `harness_cpu` is everything outside `load()`
+(the batching loop) — structurally tiny by construction, since almost all
+per-request work happens inside `load()`; a small `harness_cpu` says nothing
+about the CPU/IO split of the leg as a whole, it only confirms the batching
+loop itself is thin.
+
+| Scenario | Latency | Total | known_network_wait | load_overhead | harness_cpu |
 |---|---:|---:|---:|---:|---:|
-| Small (100) | 10 ms | 0.059 s | 0.36% | 23.91% | 75.73% |
-| Medium (10,000) | 10 ms | 2.013 s | 1.40% | 73.53% | 25.07% |
-| Large (100,000) | 10 ms | 20.329 s | 1.12% | 73.63% | 25.25% |
-| Small (100) | 50 ms | 0.066 s | 0.60% | 84.98% | 14.42% |
-| Medium (10,000) | 50 ms | 6.797 s | 0.61% | 86.74% | 12.65% |
-| Small (100) | 200 ms | 0.213 s | 0.17% | 95.58% | 4.25% |
-| Medium (10,000) | 200 ms | 22.000 s | 0.22% | 95.40% | 4.38% |
+| Small (100) | 0 ms | 0.005 s | 0.00% | 99.48% | 0.52% |
+| Medium (10,000) | 0 ms | 0.438 s | 0.00% | 99.91% | 0.09% |
+| Large (100,000) | 0 ms | 3.617 s | 0.00% | 99.94% | 0.06% |
+| Small (100) | 10 ms | 0.020 s | 49.67% | 50.23% | 0.10% |
+| Medium (10,000) | 10 ms | 2.060 s | 48.55% | 51.43% | 0.02% |
+| Large (100,000) | 10 ms | 20.597 s | 48.55% | 51.40% | 0.05% |
+| Small (100) | 50 ms | 0.065 s | 77.07% | 22.89% | 0.04% |
+| Medium (10,000) | 50 ms | 6.896 s | 72.51% | 27.47% | 0.02% |
+| Large (100,000) | 50 ms | 68.609 s | 72.88% | 27.05% | 0.07% |
+| Small (100) | 200 ms | 0.213 s | 93.70% | 6.27% | 0.03% |
+| Medium (10,000) | 200 ms | 21.850 s | 91.53% | 8.46% | 0.01% |
+| Large (100,000) | 200 ms | 219.887 s | 90.96% | 9.02% | 0.02% |
 
-**The large-scenario rows at 50 ms and 200 ms are omitted above, not
-rounded away.** Both runs completed and wrote result artifacts, but their
-bucket math is internally inconsistent — the 50 ms run reports
-`destination_cpu` at 163.80% of total with `harness_cpu` at -64.37%; the 200
-ms run reports 155.38% and -55.57%. Percentages exceeding 100%, or going
-negative, mean the measurement itself broke down at that combination, not
-that destination CPU work genuinely tripled. The likely cause: `HTTPServer`
-runs its handler (including the `time.sleep()` delay) in a second thread of
-the *same process* being profiled; at large row counts the "large" scenario
-issues ~1,000 sequential requests, so 50/200 ms latency means the server
-thread holds the GIL and real wall-clock time for minutes at a stretch
-concurrently with the profiled client thread. `cProfile`'s per-call timing
-is not designed for sustained multi-thread contention of that duration, and
-the client-side `load()` cumulative time it reports for the run — summed
-across all ~1,000 calls to that one function — ends up larger than the
-profiler's own total wall-clock accounting for the run. The Postgres leg
-above does not have this problem because the "server" is a genuinely separate
-OS process (a container), the same kind of clean boundary a production
-`drt run` process has against any real destination; a same-process threaded
-test server is not.
+All twelve scenarios completed and passed schema validation this run — the
+process-isolated server removed the same-process multi-thread contention
+that broke the large/50ms and large/200ms measurements in the first draft.
 
-This is itself a real, useful finding, not just an experimental miss: a
-same-process threaded HTTP test server is not a trustworthy profiling harness
-once latency × request count pushes a run into sustained multi-minute
-multi-thread contention. Fixing it (moving the server to a genuinely separate
-process, matching the Postgres leg's boundary) is a real, buildable follow-up
-if this evidence base needs to grow further — not done here, to keep this
-issue's scope to the two experiments it was opened for.
+**`load_overhead` is not a CPU measurement, and this method cannot cleanly
+split it into CPU versus local-transport wait.** The discriminating check is
+per-request cost, which a pure-CPU bucket should hold flat across latency
+settings — it does not. Using the large scenario's 1,000 requests:
 
-Where the numbers are trustworthy (every row above), the pattern is
-unambiguous: `socket_io`'s directly-measured self time is small (never above
-1.4%) because a blocking `recv()` mostly is not caught mid-flight by
-cProfile's own sampling of the call it's already inside — but `destination_cpu`
-climbs from 73.63% (10 ms) to 95.58%/95.40% (200 ms) as latency rises, because
-that bucket's cumulative time is dominated by the same blocked call, which
-cProfile *does* attribute to `RestApiDestination.load()`'s frame. Read
-together with Experiment 1a: **the more a destination resembles a real
-network call — even a fast, local one — the smaller the CPU-classified
-share becomes and the larger the load-bound-on-the-network share becomes**,
-exactly inverting the #280/#301 SQLite-to-local-file benchmark's shape.
+| Latency | load_overhead / request |
+|---:|---:|
+| 0 ms | 3.61 ms |
+| 10 ms | 10.59 ms |
+| 50 ms | 18.56 ms |
+| 200 ms | 19.84 ms |
+
+(medium agrees: 4.38 / 10.59 / 18.94 / 18.48 ms/request at the same four
+latencies.) Per-request cost climbs with the injected latency instead of
+staying flat, so `load_overhead` demonstrably contains latency-correlated
+wait — most likely the handler's `rfile.read()`/response write sitting
+outside the measured `time.sleep()`, plus scheduling delay from the server's
+single-threaded, `timeout=0.1`-polling accept loop. That rules out reading
+`load_overhead` as either "it's all CPU" or "it's all network wait." The 0 ms
+row is the one defensible number here: with no injected delay,
+`load_overhead` is CPU plus bare loopback transit, which puts an **upper
+bound of roughly 3.6–4.8 ms per request** on the REST leg's true CPU cost at
+this record shape (small/medium/large agree: 4.77 / 4.38 / 3.61 ms/request).
+This is a limitation of the measurement, stated plainly rather than
+resolved: neither Experiment 1a nor 1b isolates a clean CPU/IO percentage
+split for a real destination or source, and this ADR does not lean on either
+table for that number. What both experiments do establish is where the time
+is *not*: not in code outside the source/destination boundary, and (for REST)
+not more than ~5ms/request even at the boundary once network wait is
+subtracted out.
 
 ### Experiment 2 — scoped PyO3 prototype of the confirmed JSON hotspot
 
@@ -304,26 +325,31 @@ close in the first place.
 
 ### Does this change the recommendation?
 
-**No — if anything, it sharpens it.** Experiment 1 shows the original
-recommendation's central caveat was not hypothetical: real network I/O
-(even a fast local container, even a local loopback socket with imposed
-delay) measurably shrinks the CPU-classified share and grows the
-I/O/network-bound share, exactly opposite of what correcting the SQLite
-extraction bucket did to the original local benchmark. Experiment 2 shows
-the one concrete "port this to Rust" candidate the original profile
-identified does not deliver a reliable win once the realistic PyO3 boundary
-cost is included — it is a real but modest win at small scale and
-noise-level at the 100,000-row scale where a win would matter most for
-throughput-sensitive syncs.
+**No.** The primary evidence for that answer is Experiment 2, not Experiment
+1: Experiment 1 confirms real sources and destinations are dominated by
+connection/driver/network work rather than by code a Rust rewrite of
+`engine/sync.py` would touch, but — as stated above — it does not isolate a
+CPU/IO percentage for either leg, so it cannot by itself prove or disprove
+that a rewrite would help. Experiment 2 is the one experiment in this ADR
+that measures a concrete "port this to Rust" candidate end-to-end, including
+the realistic PyO3 call-boundary cost, and it does not deliver a reliable
+win: a real but modest 1.2–1.6× at small batches, and statistical noise
+around parity (0.95×–1.09× across three runs) at 100,000 records — the scale
+where a win would matter most for throughput-sensitive syncs.
 
-Both results point the same direction as the original recommendation: **do
-not use this profiling work, before or after this follow-up, as
-justification for a broad `engine/sync.py` Rust rewrite.** The evidence
-gathered so far identifies no workload shape in drt's actual codebase where
-a native rewrite has been shown to deliver a measured, boundary-cost-inclusive
-win. If a future workload shape is a better candidate — very large batches
-of a genuinely CPU-heavy, allocation-light transform, profiled with the same
-rigor applied here — that would be new evidence, not an extension of what
-this ADR already covers. The repository owner's final call remains
+That result stands on its own regardless of how Experiment 1's CPU/IO
+question eventually resolves: even the one hotspot this ADR's original
+profile identified as a plausible Rust candidate did not clear the bar once
+measured honestly. **Do not use this profiling work, before or after this
+follow-up, as justification for a broad `engine/sync.py` Rust rewrite.** The
+evidence gathered so far identifies no workload shape in drt's actual
+codebase where a native rewrite has been shown to deliver a measured,
+boundary-cost-inclusive win. If a future workload shape is a better
+candidate — very large batches of a genuinely CPU-heavy, allocation-light
+transform, profiled with the same rigor applied here — that would be new
+evidence, not an extension of what this ADR already covers. Whether it is
+worth building a cleaner CPU/IO split for a real destination or source (the
+gap this section leaves open) is itself a candidate for a future, separate
+ADR follow-up, not assumed here. The repository owner's final call remains
 unchanged and undecided by this ADR.
 

@@ -115,10 +115,16 @@ make profile-real-io
 - The source leg starts an ephemeral `postgres:16-alpine` container, seeds the largest scenario
   once, and profiles the real `PostgresSource.extract()` server-side cursor over TCP. Its source
   boundary includes database and TCP wait *and* psycopg2/Python row conversion because cProfile
-  cannot split those operations inside the driver.
-- The destination leg starts `pytest-httpserver`, sleeps in the server thread for a controlled
-  10, 50, or 200 ms before every response, and profiles the real `RestApiDestination.load()` in
-  batch mode. This produces real socket wait, but the delay is a chosen fixed input—not a measured
+  cannot split those operations inside the driver. The scenario batch size is also the driver's
+  server-side cursor fetch size.
+- The destination leg starts a minimal HTTP server in a separate spawned process, sleeps there for
+  a controlled 0, 10, 50, or 200 ms before every response, and profiles the real
+  `RestApiDestination.load()` in batch mode. One untimed warm-up request runs before any profiled
+  scenario so import/first-connection cost doesn't land on whichever scenario happens to run
+  first. The known delay is reported as network wait; the rest of `load()` is a mixed I/O/CPU
+  aggregate because cProfile cannot split `httpx` transport wait from serialization and
+  destination CPU work — the 0 ms run is the closest this gets to an upper bound on CPU-only cost,
+  since it has no injected wait to separate out. The delay is a chosen fixed input—not a measured
   vendor RTT and not a model of jitter, retries, rate limits, or remote service variance.
 
 The full run requires Docker and takes several minutes because the large 200 ms REST scenario
@@ -129,8 +135,9 @@ CI. Select smaller portions with `--leg`, `--scenario`, and `--latency-ms`, for 
 python3 scripts/run_real_io_profiling.py --leg rest --scenario small --latency-ms 10
 ```
 
-Artifacts are ignored JSON files under `benchmarks/profiles/`; their version-1 shape is documented
-by [`real-io-profile-result-schema.json`](real-io-profile-result-schema.json). Buckets are
-non-overlapping and sum to 100%. The Postgres I/O buckets are I/O-bearing connector boundaries,
-not pure syscall time; the REST socket bucket is self time in the profiled thread's blocking
-socket/select primitives.
+`make profile-real-io` installs the `postgres` extra needed by the seeding and source code before
+running the experiment. Artifacts are ignored JSON files under `benchmarks/profiles/`; their
+version-1 shape is documented by
+[`real-io-profile-result-schema.json`](real-io-profile-result-schema.json). Every artifact is
+validated before it is written. Buckets are non-overlapping and sum to 100%; the Postgres and REST
+mixed buckets are deliberately I/O-bearing connector aggregates, not pure syscall time.
