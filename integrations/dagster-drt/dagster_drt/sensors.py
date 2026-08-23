@@ -326,13 +326,14 @@ def build_drt_change_sensor(
     ``asset_selection`` passed here, matching every other Dagster sensor:
     this function decides *when* to fire, not *what* runs.
 
-    Only ``job=`` and ``asset_selection=`` are exposed, not dagster's newer
-    ``target=`` or multi-job ``jobs=``: ``target=`` doesn't exist before
-    Dagster 1.8 (`dagster-drt` still declares ``dagster>=1.6``, and this
-    sensor must actually construct on that floor), and ``jobs=`` requires
-    each returned ``RunRequest`` to set ``job_name`` to disambiguate, which
-    this sensor — one signal, no way to know which job a generic "the
-    source changed" event belongs to — has no principled way to choose.
+    Only ``job=`` and ``asset_selection=`` are exposed, not ``target=`` or
+    multi-job ``jobs=``. ``target=`` was unavailable on the package's
+    original Dagster floor when this sensor shipped; the floor is now 1.10.18
+    for Components support, but this established surface remains sufficient.
+    ``jobs=`` requires each returned ``RunRequest`` to set ``job_name`` to
+    disambiguate, which this sensor — one signal, no way to know which job a
+    generic "the source changed" event belongs to — has no principled way to
+    choose.
 
     On the very first evaluation (no prior sensor cursor), this always
     fires once — the same "no watermark yet, so do a full pass" bootstrap

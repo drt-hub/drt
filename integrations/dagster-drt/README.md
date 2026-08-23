@@ -36,6 +36,8 @@ defs = Definitions(
 | `@drt_assets` | Decorator — creates `@multi_asset` from drt syncs |
 | `build_drt_asset_specs()` | Spec-only generation (for Pipes / custom execution) |
 | `DagsterDrtResource` | Execution resource with `.run()` |
+| `DrtEventIterator` | Chainable event post-processing such as source row counts |
+| `DrtSyncComponent` | Declarative `defs.yaml` component for drt sync assets |
 | `DagsterDrtTranslator` | Customise how syncs map to assets |
 | `build_drt_change_sensor()` | Fire a run when the project's source table changes (Delta/Iceberg/Snowflake/SQL Server) |
 | `DrtConfig` | Per-run config (dry-run) from Dagster UI |
@@ -85,6 +87,39 @@ DagsterDrtResource(
 - Auto-resolves `project_dir` from `@drt_assets` metadata
 - Filters to `context.selected_asset_keys` for subset execution
 - Supports `dry_run` override per-run: `drt.run(context=ctx, dry_run=True)`
+- Returns a chainable `DrtEventIterator`; independently verify source rows with
+  `drt.run(context=ctx).fetch_row_count()`
+
+The resource also works in a plain `@op`. Because an op has no `@drt_assets`
+metadata, both `project_dir` and the sync selection must be explicit; this path
+emits `AssetMaterialization` events:
+
+```python
+from dagster import OpExecutionContext, op
+
+@op
+def run_drt_sync(context: OpExecutionContext, drt: DagsterDrtResource):
+    yield from drt.run(context=context, sync_names=["my_sync"])
+```
+
+### DrtSyncComponent
+
+Dagster 1.10.18+ projects can declare the same assets without a Python
+definition function:
+
+```yaml
+# defs.yaml
+type: dagster_drt.DrtSyncComponent
+attributes:
+  project_dir: path/to/drt-project
+  sync_names: [my_sync]
+  translation:
+    group_name: reverse_etl
+```
+
+Scaffold one with `dg scaffold defs dagster_drt.DrtSyncComponent <defs-path>`.
+Subclass `DrtSyncComponent` and override `get_asset_spec()` or `execute()` for
+Python-level customization beyond the declarative `group_name` translation.
 
 ### build_drt_change_sensor (event-driven activation)
 

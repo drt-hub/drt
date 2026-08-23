@@ -10,7 +10,7 @@ readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
 dependencies = [
-    "dagster>=1.6",
+    "dagster>=1.10.18",  # current defs.yaml Components API + per-project dg CLI contract
     "drt-core>=0.9.0",  # drt.state.factory.build_state_bundle() first shipped in 0.9.0
 ]
 classifiers = [

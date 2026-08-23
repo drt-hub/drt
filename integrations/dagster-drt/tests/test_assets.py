@@ -5,12 +5,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from dagster import (
+    AssetExecutionContext,
     AssetKey,
+    AssetMaterialization,
     AssetsDefinition,
     AssetSpec,
     BackfillPolicy,
     DailyPartitionsDefinition,
     MaterializeResult,
+    build_op_context,
 )
 
 SYNC_YAML = "name: test_sync\nmodel: ref('users')\ndestination:\n  type: rest_api\n  url: http://example.com\n"
@@ -487,7 +490,7 @@ def _make_mock_context(
     selected_keys: set[AssetKey] | None = None,
 ) -> MagicMock:
     """Create a mock AssetExecutionContext for resource tests."""
-    ctx = MagicMock(spec=["assets_def", "selected_asset_keys", "log"])
+    ctx = MagicMock(spec=AssetExecutionContext)
     ctx.assets_def = assets_def
     ctx.selected_asset_keys = selected_keys or assets_def.keys
     ctx.log = MagicMock()
@@ -534,8 +537,12 @@ class TestDagsterDrtResourceRun:
             mock_load_syncs.return_value = [mock_sync]
             mock_run.return_value = _FakeSyncResult(success=42, failed=1)
 
-            results = list(resource.run(context=ctx))
+            iterator = resource.run(context=ctx)
+            results = list(iterator)
 
+        from dagster_drt.event_iterator import DrtEventIterator
+
+        assert isinstance(iterator, DrtEventIterator)
         assert len(results) == 1
         assert isinstance(results[0], MaterializeResult)
         assert results[0].metadata["rows_synced"].value == 42
@@ -896,6 +903,112 @@ class TestDagsterDrtResourceRun:
         call_kwargs = mock_run.call_args
         assert "watermark_storage" in call_kwargs.kwargs
 
+    def test_fetch_row_count_requeries_source_for_asset_context(
+        self, tmp_path: Path
+    ) -> None:
+        """fetch_row_count() must independently re-run the source model."""
+        project = _setup_project(tmp_path)
+        from dagster_drt.assets import drt_assets
+        from dagster_drt.resource import DagsterDrtResource
+
+        @drt_assets(project_dir=project)
+        def my_syncs(context, drt: DagsterDrtResource):
+            yield from drt.run(context=context).fetch_row_count()
+
+        ctx = _make_mock_context(my_syncs)
+        resource = DagsterDrtResource(project_dir=str(project))
+
+        with (
+            patch(_P_LOAD_PROJECT) as mock_proj,
+            patch(_P_LOAD_PROFILE),
+            patch(_P_GET_SOURCE) as mock_get_source,
+            patch(_P_GET_DEST),
+            patch(_P_RUN_SYNC) as mock_run,
+            patch(_P_BUILD_STATE_BUNDLE),
+            patch(_P_LOAD_SYNCS) as mock_load_syncs,
+        ):
+            mock_proj.return_value = MagicMock(profile="local")
+            mock_sync = MagicMock()
+            mock_sync.name = "test_sync"
+            mock_sync.model = "SELECT * FROM source_users"
+            mock_sync.sync.dlq = None
+            mock_load_syncs.return_value = [mock_sync]
+            mock_run.return_value = _FakeSyncResult(success=99)
+            mock_get_source.return_value.extract.return_value = iter(
+                [{"id": 1}, {"id": 2}, {"id": 3}]
+            )
+
+            results = list(resource.run(context=ctx).fetch_row_count())
+
+        assert results[0].metadata["dagster/row_count"] == 3
+        assert results[0].metadata["rows_synced"].value == 99
+        mock_get_source.return_value.extract.assert_called_once_with(
+            "SELECT * FROM source_users",
+            mock_get_source.call_args.args[0],
+        )
+
+    def test_run_from_op_context_yields_asset_materialization(
+        self, tmp_path: Path
+    ) -> None:
+        project = _setup_project(tmp_path)
+        from dagster_drt.resource import DagsterDrtResource
+
+        context = build_op_context()
+        resource = DagsterDrtResource(project_dir=str(project))
+
+        with (
+            patch(_P_LOAD_PROJECT) as mock_proj,
+            patch(_P_LOAD_PROFILE),
+            patch(_P_GET_SOURCE) as mock_get_source,
+            patch(_P_GET_DEST),
+            patch(_P_RUN_SYNC) as mock_run,
+            patch(_P_BUILD_STATE_BUNDLE),
+            patch(_P_LOAD_SYNCS) as mock_load_syncs,
+        ):
+            mock_proj.return_value = MagicMock(profile="local")
+            mock_sync = MagicMock()
+            mock_sync.name = "test_sync"
+            mock_sync.model = "SELECT * FROM source_users"
+            mock_sync.description = ""
+            mock_sync.destination.type = "rest_api"
+            mock_sync.sync.dlq = None
+            mock_load_syncs.return_value = [mock_sync]
+            mock_run.return_value = _FakeSyncResult(success=50)
+            mock_get_source.return_value.extract.return_value = iter(
+                [{"id": 1}, {"id": 2}]
+            )
+
+            results = list(
+                resource.run(
+                    context=context,
+                    sync_names=["test_sync"],
+                ).fetch_row_count()
+            )
+
+        assert len(results) == 1
+        assert isinstance(results[0], AssetMaterialization)
+        assert results[0].asset_key == AssetKey("drt_test_sync")
+        assert results[0].metadata["dagster/row_count"] == 2
+        assert results[0].metadata["rows_synced"].value == 50
+
+    def test_run_from_op_context_requires_sync_names(self, tmp_path: Path) -> None:
+        project = _setup_project(tmp_path)
+        from dagster_drt.resource import DagsterDrtResource
+
+        context = build_op_context()
+        resource = DagsterDrtResource(project_dir=str(project))
+
+        with (
+            patch(_P_LOAD_PROJECT) as mock_proj,
+            patch(_P_LOAD_PROFILE),
+            patch(_P_GET_SOURCE),
+            patch(_P_BUILD_STATE_BUNDLE),
+            patch(_P_LOAD_SYNCS, return_value=[]),
+        ):
+            mock_proj.return_value = MagicMock(profile="local")
+            with pytest.raises(ValueError, match="sync_names is required"):
+                list(resource.run(context=context))
+
 
 # ===================================================================
 # Public exports
@@ -908,6 +1021,8 @@ def test_public_exports() -> None:
     assert hasattr(dagster_drt, "drt_assets")
     assert hasattr(dagster_drt, "drt_assets_legacy")
     assert hasattr(dagster_drt, "DrtConfig")
+    assert hasattr(dagster_drt, "DrtEventIterator")
+    assert hasattr(dagster_drt, "DrtSyncComponent")
     assert hasattr(dagster_drt, "DagsterDrtTranslator")
     assert hasattr(dagster_drt, "DrtTranslatorData")
     assert hasattr(dagster_drt, "DagsterDrtResource")
