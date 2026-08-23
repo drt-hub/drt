@@ -7,13 +7,17 @@ from __future__ import annotations
 
 import csv
 import json
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from drt.config.models import FileDestinationConfig, SyncOptions
+from drt.config.credentials import BigQueryProfile, ProfileConfig
+from drt.config.models import FileDestinationConfig, SyncConfig, SyncOptions
+from drt.connectors import get_destination
 from drt.destinations.file import FileDestination
+from drt.engine.sync import run_sync
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -32,6 +36,63 @@ def _config(tmp_path: Path, **overrides: Any) -> FileDestinationConfig:
     }
     defaults.update(overrides)
     return FileDestinationConfig(**defaults)
+
+
+class _RowsSource:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+
+    def extract(
+        self,
+        query: str,
+        config: ProfileConfig,
+        *,
+        query_tags: dict[str, str] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        yield from self._rows
+
+    def test_connection(self, config: ProfileConfig) -> bool:
+        return True
+
+
+def _profile() -> BigQueryProfile:
+    return BigQueryProfile(type="bigquery", project="p", dataset="d")
+
+
+def _sync(
+    path: Path,
+    file_format: str,
+    *,
+    batch_size: int = 100,
+    on_error: str = "fail",
+    name: str = "file_sync",
+) -> SyncConfig:
+    return SyncConfig.model_validate(
+        {
+            "name": name,
+            "model": "ref('rows')",
+            "destination": {
+                "type": "file",
+                "path": str(path),
+                "format": file_format,
+            },
+            "sync": {"batch_size": batch_size, "on_error": on_error},
+        }
+    )
+
+
+def _read_records(path: Path, file_format: str) -> list[dict[str, Any]]:
+    if file_format == "csv":
+        with path.open(newline="", encoding="utf-8") as f:
+            return [
+                {"id": int(row["id"]), "name": row["name"]}
+                for row in csv.DictReader(f)
+            ]
+    if file_format == "json":
+        with path.open(encoding="utf-8") as f:
+            return json.load(f)
+    with path.open(encoding="utf-8") as f:
+        return [json.loads(line) for line in f]
 
 
 # ---------------------------------------------------------------------------
@@ -165,3 +226,96 @@ class TestFileDestinationEdgeCases:
 
         assert result.failed == 1
         assert len(result.errors) > 0
+
+
+# ---------------------------------------------------------------------------
+# Engine batching regressions (#1002)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("file_format", ["csv", "json", "jsonl"])
+def test_engine_sync_accumulates_all_batches(
+    tmp_path: Path, file_format: str
+) -> None:
+    records = [{"id": i, "name": f"user-{i}"} for i in range(250)]
+    output_path = tmp_path / f"output.{file_format}"
+    sync = _sync(output_path, file_format, batch_size=100)
+
+    result = run_sync(
+        sync,
+        _RowsSource(records),
+        FileDestination(),
+        _profile(),
+        tmp_path,
+    )
+
+    assert result.success == 250
+    assert result.failed == 0
+    assert result.rows_extracted == 250
+    assert _read_records(output_path, file_format) == records
+    if file_format == "csv":
+        assert output_path.read_text(encoding="utf-8").splitlines().count("id,name") == 1
+
+
+def test_separate_destination_instances_do_not_share_write_state(tmp_path: Path) -> None:
+    first_records = [{"id": i, "name": f"first-{i}"} for i in range(150)]
+    second_records = [{"id": i, "name": f"second-{i}"} for i in range(175)]
+    first_path = tmp_path / "first.jsonl"
+    second_path = tmp_path / "second.jsonl"
+    first_path.write_text("stale first run\n", encoding="utf-8")
+    second_path.write_text("stale second run\n", encoding="utf-8")
+    first_sync = _sync(first_path, "jsonl", name="first_file_sync")
+    second_sync = _sync(second_path, "jsonl", name="second_file_sync")
+    first_destination = get_destination(first_sync.destination)
+    second_destination = get_destination(second_sync.destination)
+
+    assert isinstance(first_destination, FileDestination)
+    assert isinstance(second_destination, FileDestination)
+    assert first_destination is not second_destination
+
+    first_result = run_sync(
+        first_sync,
+        _RowsSource(first_records),
+        first_destination,
+        _profile(),
+        tmp_path,
+    )
+    second_result = run_sync(
+        second_sync,
+        _RowsSource(second_records),
+        second_destination,
+        _profile(),
+        tmp_path,
+    )
+
+    assert first_result.success == 150
+    assert second_result.success == 175
+    assert _read_records(first_path, "jsonl") == first_records
+    assert _read_records(second_path, "jsonl") == second_records
+
+
+def test_csv_column_mismatch_fails_batch_and_on_error_fail_stops(
+    tmp_path: Path,
+) -> None:
+    first_batch = [{"id": i, "name": f"user-{i}"} for i in range(100)]
+    mismatched_batch = [{"id": i, "email": f"user-{i}@example.com"} for i in range(100, 200)]
+    unconsumed_batch = [{"id": i, "name": f"user-{i}"} for i in range(200, 250)]
+    output_path = tmp_path / "mismatch.csv"
+    sync = _sync(output_path, "csv", batch_size=100, on_error="fail")
+
+    result = run_sync(
+        sync,
+        _RowsSource([*first_batch, *mismatched_batch, *unconsumed_batch]),
+        FileDestination(),
+        _profile(),
+        tmp_path,
+    )
+
+    assert result.success == 100
+    assert result.failed == 100
+    assert result.rows_extracted == 200
+    assert len(result.errors) == 1
+    assert "CSV column mismatch" in result.errors[0]
+    assert "missing ['name']" in result.errors[0]
+    assert "unexpected ['email']" in result.errors[0]
+    assert _read_records(output_path, "csv") == first_batch
