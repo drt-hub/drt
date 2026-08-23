@@ -26,7 +26,7 @@ profile:  ## Profile local sync scenarios; writes benchmarks/profiles/*.json
 	python3 scripts/run_profiling.py
 
 profile-real-io:  ## Profile real local Postgres/REST I/O; requires Docker
-	uv pip install -e ".[postgres]"
+	uv pip install -e ".[dev,postgres]"
 	python3 scripts/run_real_io_profiling.py
 
 clean:

@@ -135,8 +135,10 @@ CI. Select smaller portions with `--leg`, `--scenario`, and `--latency-ms`, for 
 python3 scripts/run_real_io_profiling.py --leg rest --scenario small --latency-ms 10
 ```
 
-`make profile-real-io` installs the `postgres` extra needed by the seeding and source code before
-running the experiment. Artifacts are ignored JSON files under `benchmarks/profiles/`; their
+`make profile-real-io` installs the `dev` and `postgres` extras before running the experiment —
+`dev` for `testcontainers[postgres]` (the ephemeral container), `postgres` for `psycopg2-binary`
+(the driver) — so it works on a fresh checkout without a prior `make dev`. Artifacts are ignored
+JSON files under `benchmarks/profiles/`; their
 version-1 shape is documented by
 [`real-io-profile-result-schema.json`](real-io-profile-result-schema.json). Every artifact is
 validated before it is written. Buckets are non-overlapping and sum to 100%; the Postgres and REST
