@@ -33,6 +33,8 @@ class _SourceRowCountInput:
     profile: Any
     sync_config: Any
     project_path: Path
+    query_tagging: Any
+    cursor_value_used: str | None
 
 
 class DagsterDrtResource(ConfigurableResource["DagsterDrtResource"]):
@@ -105,18 +107,41 @@ class DagsterDrtResource(ConfigurableResource["DagsterDrtResource"]):
             if asset_key is None:
                 raise ValueError("A drt MaterializeResult must include an asset_key.")
             row_count_input = row_count_inputs[asset_key]
+            from drt.config.query_tags import (
+                build_query_tags,
+                new_run_id,
+                render_comment_header,
+            )
             from drt.engine.resolver import resolve_model_ref
 
             query = resolve_model_ref(
                 row_count_input.sync_config.model,
                 row_count_input.project_path,
                 row_count_input.profile,
+                last_cursor_value=row_count_input.cursor_value_used,
             )
+            query_tags: dict[str, str] | None = None
+            if (
+                row_count_input.query_tagging is None
+                or row_count_input.query_tagging.enabled
+            ):
+                extra = (
+                    row_count_input.query_tagging.extra
+                    if row_count_input.query_tagging
+                    else {}
+                )
+                query_tags = build_query_tags(
+                    row_count_input.sync_config.name,
+                    new_run_id(),
+                    extra,
+                )
+                query = f"{render_comment_header(query_tags)}\n{query}"
             return sum(
                 1
                 for _ in row_count_input.source.extract(
                     query,
                     row_count_input.profile,
+                    query_tags=query_tags,
                 )
             )
 
@@ -239,6 +264,7 @@ class DagsterDrtResource(ConfigurableResource["DagsterDrtResource"]):
                 observer=CompositeObserver(observers),
                 history_manager=bundle.history if project.history.enabled else None,
                 history_retention_days=project.history.retention_days,
+                query_tagging=project.query_tagging,
             )
 
             context.log.info(
@@ -267,6 +293,8 @@ class DagsterDrtResource(ConfigurableResource["DagsterDrtResource"]):
                 profile=profile,
                 sync_config=sync_config,
                 project_path=project_path,
+                query_tagging=project.query_tagging,
+                cursor_value_used=result.cursor_value_used,
             )
             if is_asset_context:
                 yield MaterializeResult(asset_key=key, metadata=metadata)

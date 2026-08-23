@@ -479,6 +479,7 @@ class _FakeSyncResult:
     errors: list[str] = field(default_factory=list)
     row_errors: list = field(default_factory=list)
     duration_seconds: float | None = 1.23
+    cursor_value_used: str | None = None
 
     @property
     def total(self) -> int:
@@ -926,8 +927,14 @@ class TestDagsterDrtResourceRun:
             patch(_P_RUN_SYNC) as mock_run,
             patch(_P_BUILD_STATE_BUNDLE),
             patch(_P_LOAD_SYNCS) as mock_load_syncs,
+            patch("drt.config.query_tags.new_run_id", return_value="rowcount123"),
         ):
-            mock_proj.return_value = MagicMock(profile="local")
+            from drt.config.base import QueryTaggingConfig
+
+            mock_proj.return_value = MagicMock(
+                profile="local",
+                query_tagging=QueryTaggingConfig(extra={"team": "growth"}),
+            )
             mock_sync = MagicMock()
             mock_sync.name = "test_sync"
             mock_sync.model = "SELECT * FROM source_users"
@@ -943,9 +950,61 @@ class TestDagsterDrtResourceRun:
         assert results[0].metadata["dagster/row_count"] == 3
         assert results[0].metadata["rows_synced"].value == 99
         mock_get_source.return_value.extract.assert_called_once_with(
+            "/* drt app=drt sync=test_sync run_id=rowcount123 team=growth */\n"
             "SELECT * FROM source_users",
             mock_get_source.call_args.args[0],
+            query_tags={
+                "app": "drt",
+                "sync": "test_sync",
+                "run_id": "rowcount123",
+                "team": "growth",
+            },
         )
+
+    def test_fetch_row_count_uses_sync_cursor_for_incremental_model(
+        self, tmp_path: Path
+    ) -> None:
+        project = _setup_project(tmp_path)
+        from dagster_drt.assets import drt_assets
+        from dagster_drt.resource import DagsterDrtResource
+
+        @drt_assets(project_dir=project)
+        def my_syncs(context, drt: DagsterDrtResource):
+            yield from drt.run(context=context).fetch_row_count()
+
+        ctx = _make_mock_context(my_syncs)
+        resource = DagsterDrtResource(project_dir=str(project))
+
+        with (
+            patch(_P_LOAD_PROJECT) as mock_proj,
+            patch(_P_LOAD_PROFILE),
+            patch(_P_GET_SOURCE) as mock_get_source,
+            patch(_P_GET_DEST),
+            patch(_P_RUN_SYNC) as mock_run,
+            patch(_P_BUILD_STATE_BUNDLE),
+            patch(_P_LOAD_SYNCS) as mock_load_syncs,
+        ):
+            mock_proj.return_value = MagicMock(profile="local")
+            mock_sync = MagicMock()
+            mock_sync.name = "test_sync"
+            mock_sync.model = (
+                "SELECT * FROM source_users "
+                "WHERE updated_at > '{{ cursor_value }}'"
+            )
+            mock_sync.sync.dlq = None
+            mock_load_syncs.return_value = [mock_sync]
+            mock_run.return_value = _FakeSyncResult(
+                cursor_value_used="2026-08-01T00:00:00Z"
+            )
+            mock_get_source.return_value.extract.return_value = iter(
+                [{"id": 1}, {"id": 2}]
+            )
+
+            results = list(resource.run(context=ctx).fetch_row_count())
+
+        assert results[0].metadata["dagster/row_count"] == 2
+        row_count_query = mock_get_source.return_value.extract.call_args.args[0]
+        assert "updated_at > '2026-08-01T00:00:00Z'" in row_count_query
 
     def test_run_from_op_context_yields_asset_materialization(
         self, tmp_path: Path

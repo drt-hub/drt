@@ -4,7 +4,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import yaml
-from dagster import AssetKey, AssetSpec, MaterializeResult, materialize
+from dagster import AssetKey, AssetSpec, Definitions, MaterializeResult, materialize
 from dagster.components.scaffold.scaffold import ScaffoldRequest
 from dagster.components.testing import create_defs_folder_sandbox
 from dagster.components.testing.utils import component_defs
@@ -71,6 +71,63 @@ def test_component_loads_from_declarative_yaml(tmp_path: Path) -> None:
                 assets_def.group_names_by_key[AssetKey("drt_test_sync")]
                 == "reverse_etl"
             )
+
+
+def test_multiple_components_merge_without_op_name_collision(tmp_path: Path) -> None:
+    first_project_dir = tmp_path / "first_project"
+    second_project_dir = tmp_path / "second_project"
+    first_project_dir.mkdir()
+    second_project_dir.mkdir()
+    first_project = _setup_project(
+        first_project_dir,
+        {
+            "first.yml": "name: first\nmodel: ref('first')\ndestination:\n"
+            "  type: rest_api\n  url: http://example.com/first\n"
+        },
+    )
+    second_project = _setup_project(
+        second_project_dir,
+        {
+            "second.yml": "name: second\nmodel: ref('second')\ndestination:\n"
+            "  type: rest_api\n  url: http://example.com/second\n"
+        },
+    )
+
+    with create_defs_folder_sandbox() as sandbox:
+        first_defs_path = sandbox.defs_folder_path / "first_syncs"
+        second_defs_path = sandbox.defs_folder_path / "second_syncs"
+        first_defs_path.mkdir()
+        second_defs_path.mkdir()
+        (first_defs_path / "defs.yaml").write_text(
+            "\n".join(
+                [
+                    "type: dagster_drt.DrtSyncComponent",
+                    "attributes:",
+                    f"  project_dir: {first_project}",
+                    "  sync_names: [first]",
+                ]
+            )
+        )
+        (second_defs_path / "defs.yaml").write_text(
+            "\n".join(
+                [
+                    "type: dagster_drt.DrtSyncComponent",
+                    "attributes:",
+                    f"  project_dir: {second_project}",
+                    "  sync_names: [second]",
+                ]
+            )
+        )
+
+        with (
+            sandbox.load_component_and_build_defs(first_defs_path) as (_, first_defs),
+            sandbox.load_component_and_build_defs(second_defs_path) as (_, second_defs),
+        ):
+            merged_defs = Definitions.merge(first_defs, second_defs)
+            Definitions.validate_loadable(merged_defs)
+
+            op_names = {assets_def.op.name for assets_def in merged_defs.assets}
+            assert len(op_names) == 2
 
 
 def test_component_get_asset_spec_and_execute_are_overridable(tmp_path: Path) -> None:

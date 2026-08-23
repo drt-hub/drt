@@ -1,5 +1,7 @@
 """Dagster Components integration for declarative drt sync assets."""
 
+import hashlib
+import re
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from functools import cached_property
@@ -26,6 +28,8 @@ from dagster_drt.assets import drt_assets
 from dagster_drt.event_iterator import DrtEventType
 from dagster_drt.resource import DagsterDrtResource
 from dagster_drt.translator import DagsterDrtTranslator, DrtTranslatorData
+
+_INVALID_OP_NAME_CHARS = re.compile(r"[^A-Za-z0-9_]")
 
 
 def _resolve_project_dir(context: ResolutionContext, project_dir: str) -> str:
@@ -110,13 +114,17 @@ class DrtSyncComponent(Component, Resolvable):
         return spec
 
     def build_defs(self, context: ComponentLoadContext) -> dg.Definitions:
-        del context  # project_dir was resolved from this context during component loading
         translator = _DrtSyncComponentTranslator(self)
+        component_key = context.component_path.get_relative_key(context.defs_module_path)
+        component_slug = _INVALID_OP_NAME_CHARS.sub("_", component_key).strip("_")
+        component_digest = hashlib.sha256(component_key.encode()).hexdigest()[:12]
+        op_name = f"drt_sync_assets_{component_slug or 'root'}_{component_digest}"
 
         @drt_assets(
             project_dir=self.project_dir,
             sync_names=list(self.sync_names) if self.sync_names is not None else None,
             dagster_drt_translator=translator,
+            name=op_name,
         )
         def drt_sync_assets(context: AssetExecutionContext) -> Iterator[DrtEventType]:
             yield from self.execute(context, self.drt_resource)
