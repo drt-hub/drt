@@ -71,6 +71,28 @@ class FileDestination:
 
         return result
 
+    def finalize_sync(
+        self,
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> None:
+        """End-of-sync hook (duck-typed, see ``drt/engine/sync.py``): drop this
+        run's write-state bookkeeping.
+
+        A CLI/engine-driven sync gets a fresh ``FileDestination`` per run (via
+        ``get_destination()``), so this never fires mid-run in that path. It
+        matters for a library caller that reuses one instance across multiple
+        ``run_sync()`` calls (e.g. a loop, or a long-lived process) — without
+        this reset, the second run would append to or fold in the first run's
+        records instead of truncating, contradicting the "first batch of this
+        run replaces the file" contract ``load()`` documents (caught in Codex
+        review on PR #1006).
+        """
+        del config, sync_options
+        self._csv_columns.clear()
+        self._json_records.clear()
+        self._jsonl_started_paths.clear()
+
     def _write_csv(self, path: str, records: list[dict[str, Any]]) -> None:
         columns = self._csv_columns.get(path)
         first_batch = columns is None

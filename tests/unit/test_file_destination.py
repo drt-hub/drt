@@ -319,3 +319,30 @@ def test_csv_column_mismatch_fails_batch_and_on_error_fail_stops(
     assert "missing ['name']" in result.errors[0]
     assert "unexpected ['email']" in result.errors[0]
     assert _read_records(output_path, "csv") == first_batch
+
+
+@pytest.mark.parametrize("file_format", ["csv", "json", "jsonl"])
+def test_reused_instance_does_not_leak_state_into_a_later_run(
+    tmp_path: Path, file_format: str
+) -> None:
+    """A library caller may reuse one FileDestination across separate
+    run_sync() calls. The second run must still start fresh, not append
+    to / fold in the first run's records (#1006 review)."""
+    destination = FileDestination()
+    output_path = tmp_path / f"output.{file_format}"
+
+    first_records = [{"id": i, "name": f"first-{i}"} for i in range(5)]
+    first_sync = _sync(output_path, file_format, batch_size=100)
+    first_result = run_sync(
+        first_sync, _RowsSource(first_records), destination, _profile(), tmp_path
+    )
+    assert first_result.success == 5
+
+    second_records = [{"id": i, "name": f"second-{i}"} for i in range(3)]
+    second_sync = _sync(output_path, file_format, batch_size=100, name="second_run")
+    second_result = run_sync(
+        second_sync, _RowsSource(second_records), destination, _profile(), tmp_path
+    )
+    assert second_result.success == 3
+
+    assert _read_records(output_path, file_format) == second_records
