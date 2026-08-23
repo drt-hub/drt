@@ -16,7 +16,7 @@ Config Parser → Source (BigQuery) → Sync Engine → Destination (REST API)
                                                    State Manager
 ```
 
-Key design principle: **module boundaries are drawn for future Rust rewrite (PyO3)**. The `engine/sync.py` module is the primary Rust candidate — keep it pure (no I/O side effects beyond protocol calls). Logging, state persistence, OTel spans, and any other observability/persistence side effect MUST flow through `drt.engine.observer.SyncObserver`. Direct `logger.*`, `state_manager.save_sync(...)`, or `watermark_storage.save(...)` calls inside `engine/sync.py` are guarded by `tests/unit/test_engine_observer.py` boundary checks and will fail CI.
+Key design principle: **module boundaries are drawn for a possible future Rust core (PyO3)**. The `engine/sync.py` module is the primary candidate if that happens — keep it pure (no I/O side effects beyond protocol calls). Logging, state persistence, OTel spans, and any other observability/persistence side effect MUST flow through `drt.engine.observer.SyncObserver`. Direct `logger.*`, `state_manager.save_sync(...)`, or `watermark_storage.save(...)` calls inside `engine/sync.py` are guarded by `tests/unit/test_engine_observer.py` boundary checks and will fail CI. Whether/how far this actually goes is not yet decided — [ADR 0010](docs/adr/0010-rust-migration-decision.md) is the first real profiling evidence (#301) and explicitly defers the call to the repo owner; read it before assuming a full engine rewrite is the plan.
 
 ## Package Layout
 
@@ -87,7 +87,7 @@ Cloud-warehouse tests remain under `dwh_smoke` and require `DRT_SMOKE_*` secrets
 ## What NOT to do
 
 - Do not add a GUI or web UI — this is a CLI-first tool
-- Do not add RBAC or multi-tenancy — small team / personal use
+- Do not implement or enforce RBAC/multi-tenancy in OSS — small team / personal use. [ADR 0008](docs/adr/0008-enterprise-boundary-rbac-and-audit-hooks.md) is a scoped exception: `drt.security.PermissionChecker`/`drt.observability.AuditLogger` are interface-only, no-op-by-default (`AllowAllPermissionChecker`, `NoOpAuditLogger`) Enterprise-boundary Protocols (#298/#299) — adding another no-op interface in that same spirit needs the same explicit sign-off ADR 0008 got, not a default assumption this rule forbids it outright
 - Do not add `type: ignore` — only allowed for external library issues (`no-untyped-call`, `import-untyped`)
 - Do not add heavy dependencies to core — extras (`[bigquery]`, `[mcp]`) exist for a reason
 
