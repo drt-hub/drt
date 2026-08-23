@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/drt-hub/drt/blob/main/benchmarks/real-io-profile-result-schema.json",
+  "title": "drt real-I/O profiling result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profiler",
+    "leg",
+    "scenario",
+    "row_count",
+    "batch_size",
+    "request_count",
+    "controlled_latency_ms",
+    "git_commit",
+    "timestamp",
+    "measurements"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "profiler": { "const": "cProfile" },
+    "leg": { "enum": ["postgres_source", "rest_destination"] },
+    "scenario": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*$"
+    },
+    "row_count": { "type": "integer", "minimum": 1 },
+    "batch_size": { "type": "integer", "minimum": 1 },
+    "request_count": {
+      "oneOf": [
+        { "type": "integer", "minimum": 1 },
+        { "type": "null" }
+      ]
+    },
+    "controlled_latency_ms": {
+      "oneOf": [
+        { "type": "integer", "minimum": 0 },
+        { "type": "null" }
+      ]
+    },
+    "git_commit": {
+      "type": "string",
+      "pattern": "^([0-9a-f]{40}|unknown)$"
+    },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "measurements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "duration_seconds",
+        "function_calls",
+        "primitive_calls",
+        "buckets",
+        "components"
+      ],
+      "properties": {
+        "duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "function_calls": { "type": "integer", "minimum": 1 },
+        "primitive_calls": { "type": "integer", "minimum": 1 },
+        "buckets": {
+          "type": "object",
+          "minProperties": 2,
+          "additionalProperties": { "$ref": "#/$defs/bucket" }
+        },
+        "components": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "type": "number", "minimum": 0 }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "bucket": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seconds", "percentage", "classification"],
+      "properties": {
+        "seconds": { "type": "number", "minimum": 0 },
+        "percentage": { "type": "number", "minimum": 0, "maximum": 100 },
+        "classification": { "enum": ["cpu_bound", "io_bound", "mixed_io_cpu"] }
+      }
+    }
+  }
+}
