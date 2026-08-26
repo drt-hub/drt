@@ -39,7 +39,7 @@ import httpx
 from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, RetryConfig, SyncOptions, ZendeskDestinationConfig
 from drt.destinations.base import SyncResult
-from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
+from drt.destinations.rate_limiter import RateLimiter, RateLimiterBackend, resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import RowError
 from drt.templates.renderer import render_template
@@ -122,7 +122,7 @@ class ZendeskDestination:
         base_url: str,
         auth: httpx.BasicAuth,
         headers: dict[str, str],
-        rate_limiter: RateLimiter,
+        rate_limiter: RateLimiterBackend,
         result: SyncResult,
         retry_config: RetryConfig,
     ) -> None:
@@ -181,7 +181,7 @@ class ZendeskDestination:
         base_url: str,
         auth: httpx.BasicAuth,
         headers: dict[str, str],
-        rate_limiter: RateLimiter,
+        rate_limiter: RateLimiterBackend,
         result: SyncResult,
         retry_config: RetryConfig,
     ) -> None:

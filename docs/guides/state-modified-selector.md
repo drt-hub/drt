@@ -261,4 +261,5 @@ preview still runs.
 
 - [ADR 0006 — manifest schema v3](../adr/0006-manifest-schema-v3.md)
 - [CI/CD Integration Guide](ci-cd-integration.md)
+- [Rate limiting — batching changed syncs into one process](rate-limiting.md#zero-code-mitigation-batch-changed-syncs-into-one-process)
 - [Issue #772](https://github.com/drt-hub/drt/issues/772)

@@ -6,13 +6,14 @@ Run `drt plugins list` at any time to see what drt has discovered.
 
 ## What works today
 
-Four extension points are fully usable end to end: a plugin registered this way is live the moment its package is installed, with no other configuration.
+Five extension points are fully usable end to end: a plugin registered this way is live the moment its package is installed, with no other configuration.
 
 | Entry-point group | Extends | Registration function |
 |---|---|---|
 | `drt.secret_providers` | New secret-backend URI scheme (like `aws-sm://`, `vault://`) | `drt.config.secret_providers.base.register(scheme, provider)` |
 | `drt.permission_checkers` | Who can run/edit/view which syncs (ADR 0008) | `drt.security.register_permission_checker(checker)` |
 | `drt.audit_loggers` | `config_changed` / `secret_accessed` audit events (ADR 0008) | `drt.observability.register_audit_logger(logger)` |
+| `drt.rate_limiter_backends` | Process-wide rate-limiter construction (ADR 0012) | `drt.destinations.rate_limiter.register_rate_limiter_backend(factory)` |
 | `drt.observers` | Extra `SyncObserver` callbacks (`on_sync_started`, `on_sync_completed`, ...) | `drt.engine.observer.register_extra_observer(observer)` |
 
 ### Example: a third-party audit logger
@@ -35,6 +36,36 @@ my_audit_logger = "my_package:register"
 That's the whole contract: **the entry point's value is a zero-argument callable, loaded and invoked once at drt CLI startup.** The callable performs its own registration as a side effect — it is not itself the `AuditLogger`/`PermissionChecker`/etc. instance. This mirrors how drt's built-in connectors self-register in `drt/connectors/registry.py`.
 
 A broken plugin's exception is caught, logged, and reported by `drt plugins list` (`Status: error: ...`) rather than crashing the CLI — one bad third-party package can't take down unrelated commands.
+
+## Rate-limiter backends: `drt.rate_limiter_backends`
+
+This group registers one active backend factory for the process, the same
+replace-not-error shape as `drt.permission_checkers` and
+`drt.audit_loggers`. It is **not** a keyed registry like sources,
+destinations, or secret-provider schemes: registering a second factory
+replaces the first. The existing endpoint-keyed limiter cache remains inside
+the rate-limiting layer and caches whatever the active factory builds.
+
+```python
+# my_package/__init__.py
+def register() -> None:
+    from drt.destinations.rate_limiter import register_rate_limiter_backend
+    from .backend import build_limiter
+
+    register_rate_limiter_backend(build_limiter)
+```
+
+```toml
+# my_package/pyproject.toml
+[project.entry-points."drt.rate_limiter_backends"]
+shared_rate_limiter = "my_package:register"
+```
+
+drt-core supplies the `RateLimiterBackend` contract and keeps its existing
+local limiter as the default; it does not ship a Redis client or any other
+distributed implementation. See [Rate limiting](rate-limiting.md) for the
+Protocol shape, the cross-process caveat, and the zero-code
+`state:modified` mitigation.
 
 ## Connectors: `drt.sources` / `drt.destinations`
 

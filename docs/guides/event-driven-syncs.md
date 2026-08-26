@@ -66,6 +66,12 @@ change signal and fires one `RunRequest` per detected change. Dagster
 supplies the durability, cursoring, and backfill semantics drt itself
 doesn't have.
 
+Keep destination quota boundaries in mind when a sensor fans out work:
+separate OS processes do not share drt's default rate-limit bucket. Prefer
+one `drt run --select state:modified --state <manifest>` process for a batch
+of changed syncs, or register an external backend if exact cross-process
+coordination is required. See [Rate limiting](rate-limiting.md).
+
 ```python
 from dagster import Definitions
 from dagster_drt import DagsterDrtResource, build_drt_change_sensor, drt_assets

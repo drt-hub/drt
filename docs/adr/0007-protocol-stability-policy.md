@@ -161,7 +161,7 @@ One is explicitly internal:
 | `OrphanCleanup` | `drt/destinations/base.py` | Public, frozen (optional-capability) |
 | `RowCountable` | `drt/destinations/sql_utils.py` | Public, frozen (optional-capability) |
 | `RateLimitKeyed` | `drt/destinations/rate_limiter.py` | Public, frozen — implemented by every `DestinationConfig` member |
-| `LimiterFactory` | `drt/destinations/rate_limiter.py` | Internal — a callable injection point for tests (`resolve_rate_limiter`'s `limiter_factory` param), not implemented by connectors |
+| `LimiterFactory` | `drt/destinations/rate_limiter.py` | Internal — a callable injection point, originally for tests only; since [ADR 0012](0012-cross-process-rate-limit-coordination.md) (#921) also the shape `resolve_rate_limiter()` falls back to via `get_rate_limiter_backend()` when no factory is passed explicitly. Signature unchanged, not implemented by connectors |
 | `StateStore` | `drt/state/manager.py` | **Public, frozen** (#304 names it "StateManager") |
 | `HistoryStore` | `drt/state/history.py` | Public, frozen — same #756 backend-selection surface as `StateStore` |
 | `DlqBackend` | `drt/state/dlq.py` | Public, frozen — same surface |
