@@ -15,7 +15,7 @@ import typer
 
 from drt.cli._app import app
 from drt.cli.output import console
-from drt.plugins import CONNECTOR_GROUPS, load_plugins
+from drt.plugins import load_plugins
 
 plugins_app = typer.Typer(
     name="plugins",
@@ -53,7 +53,11 @@ def list_plugins(
                 "author": e.author,
                 "loaded": e.loaded,
                 "error": e.error,
-                "usable_in_sync_yaml": e.group not in CONNECTOR_GROUPS,
+                # Was `e.group not in CONNECTOR_GROUPS`: a connector used to
+                # register successfully and still be unnameable in a sync YAML.
+                # #997 closed that, so the only thing that makes a plugin
+                # unusable now is failing to load at all.
+                "usable_in_sync_yaml": e.error is None,
             }
             for e in entries
         ]
@@ -84,9 +88,9 @@ def list_plugins(
     for e in entries:
         if e.error:
             status = f"[red]error: {e.error}[/red]"
-        elif e.group in CONNECTOR_GROUPS:
-            status = "[yellow]registered (not yet usable in sync YAML — see ADR 0009)[/yellow]"
         else:
+            # No connector special case since #997 — a registered source or
+            # destination type is nameable in a sync YAML like any built-in.
             status = "[green]loaded[/green]"
         table.add_row(
             e.group, e.name, e.dist_name or "?", e.dist_version or "?", e.author or "?", status

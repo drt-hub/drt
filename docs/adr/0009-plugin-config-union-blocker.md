@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted (documents a blocker; does not resolve it)
+Resolved by [#997](https://github.com/drt-hub/drt/issues/997) — see
+[Resolution](#resolution). Accepted before that as a record of the blocker;
+the Context and Decision below are kept as written so the reasoning that led
+here stays readable.
 
 ## Context
 
@@ -137,3 +140,84 @@ review) separate from #297's entry-point mechanics.
   starting point, not a decision — the choice affects error-message quality,
   mypy narrowing, and validation performance, and deserves its own review
   cycle rather than being folded into #297's PR.
+
+## Resolution
+
+[#997](https://github.com/drt-hub/drt/issues/997) took the **second** candidate
+direction above — a catch-all member appended to the union — with one addition
+that changes its trade-off materially.
+
+### Destinations
+
+`DestinationConfig` keeps its 34 concrete members and gains a 35th,
+[`GenericDestinationConfig`](../../drt/config/base.py). `Field(discriminator="type")`
+becomes a *callable* `Discriminator(_destination_tag)`
+([`drt/config/sync_options.py`](../../drt/config/sync_options.py)), and every
+member carries an explicit `Tag` — pydantic requires one per choice under a
+callable discriminator and raises `PydanticUserError` at import without it, so
+the annotation cannot silently rot.
+
+`_destination_tag` is three-way, and the middle branch is what this ADR did not
+anticipate:
+
+| `type` | routes to | error |
+|---|---|---|
+| a built-in | that concrete config | unchanged, per-field |
+| registered in the connector registry | `GenericDestinationConfig` | — |
+| anything else | — | `union_tag_invalid`, as today |
+
+That third row is the addition. This ADR predicted the option would weaken
+errors "for a plugin type with a typo'd field", and it does — but the far more
+common case, a typo'd *built-in* (`type: postgress`), was also at risk, because
+a catch-all that swallows every unknown type makes `drt validate` pass on it and
+fail much later at `get_destination()`. Consulting the registry for
+membership — not for validation — keeps that case reporting exactly the error
+shape it reports today. The constraint at the top of this ADR is therefore met
+rather than traded away.
+
+What *is* still weakened is unchanged from the prediction: a plugin's own fields
+are `extra="allow"` and carried verbatim, so a typo in one is kept, not
+rejected. drt-core does not know the plugin's schema. The registry already
+stores a `config_class` that could tighten this in a second pass; #997
+deliberately does not implement it.
+
+### Sources / profiles
+
+`load_profile()` keeps its hand-written `if source_type == ...` chain verbatim
+and gains a registry lookup *after* it
+([`drt/config/credentials.py`](../../drt/config/credentials.py)). Built-ins keep
+their exact construction, including per-type defaults, and a plugin cannot
+shadow one. Profiles are plain dataclasses with no validator to hook, so there
+is no generic model here — the registered profile class is constructed directly
+from the YAML mapping, which is the source-side equivalent of accepting extra
+fields.
+
+This also fixed a latent gap the audit turned up: `rest_api` was registered as a
+source and present in the `ProfileConfig` union, but had no branch in the
+dispatch chain, so `load_profile()` rejected it. It now loads through the same
+fallback.
+
+### What did not change
+
+The three constraints this ADR raised held:
+
+- **Error messages** — a typo'd or unregistered type still produces
+  `union_tag_invalid` at `('destination',)`; a missing `type` still produces
+  `union_tag_not_found`; an invalid built-in still produces its per-field error
+  inside its own member.
+- **mypy narrowing** — the union is still a union of concrete classes written
+  out literally, so `isinstance()` narrowing in
+  [`drt/destinations/query.py`](../../drt/destinations/query.py) and throughout
+  `drt/destinations/` is untouched. The tags are hand-written rather than
+  derived precisely so this stays true.
+- **ADR 0007 frozen surface** — `DestinationConfig` gains a member; no existing
+  config class was modified, and none was removed.
+
+One knock-on the design did not anticipate: `SyncConfig`'s generated JSON Schema
+renders the union as `oneOf`, so an open catch-all made every built-in payload
+match two members at once and fail `drt validate`'s schema pass.
+`GenericDestinationConfig.__get_pydantic_json_schema__` pins its `type` to the
+plugin types the registry currently holds, which mirrors the discriminator's
+decision and keeps the schema and the parser in agreement. The consequence is
+that `drt schema` output reflects the plugins installed when it runs — a static
+file cannot describe types that arrive by `pip install`.

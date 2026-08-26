@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from typing import Annotated, Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, GetJsonSchemaHandler, model_validator
+from pydantic.json_schema import JsonSchemaValue
 
 LITERAL_CREDENTIAL_KEY = "literal"
 """Rate-limit identity for a config that inlines its credential (#769).
@@ -353,3 +354,94 @@ class RateLimitConfig(BaseModel):
     # behaviour exactly; a value lets an idle period accumulate up to N
     # requests' worth of credit that can be spent back-to-back.
     burst: int | None = Field(default=None, ge=1)
+
+
+class GenericDestinationConfig(DescribableConfig):
+    """A destination whose ``type`` came from a third-party package (#997).
+
+    ADR 0009 recorded why a plugin could register a connector and still never
+    be nameable in a sync YAML: :data:`~drt.config.sync_options.DestinationConfig`
+    is a closed union, so an unrecognized ``type`` failed validation *before*
+    :func:`drt.connectors.registry.get_destination` was ever consulted. This is
+    the catch-all member that ends that — reached only for a ``type`` the
+    connector registry already knows, never for one of the built-ins.
+
+    ``extra="allow"`` because the plugin's own fields are, by definition,
+    unknown to drt-core: they are carried verbatim so the plugin's destination
+    implementation can read them off the config it is handed. That is the whole
+    trade ADR 0009 flagged for this option — a typo'd *plugin* field is kept
+    rather than rejected, because nothing here knows which fields are real. The
+    registry stores a ``config_class`` that could tighten this later; wiring
+    that second pass up is deliberately **not** part of #997.
+
+    Built-in types never reach this model, so their strict per-field validation
+    and their error messages are untouched.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    # `str`, not a Literal — that is the entire point. Every other member of the
+    # union pins `type` to one value; this one accepts whatever the registry
+    # recognizes, which is what lets a plugin type survive parsing.
+    type: str
+
+    # Mirrored from the built-in configs so the shared machinery keeps working
+    # for a plugin destination: `resolve_retry(config.retry, sync_options)` is
+    # called by connectors generically, and the rate-limiter registry reads
+    # `rate_limit`. Without these two a plugin would silently lose both.
+    retry: RetryConfig | None = None
+    rate_limit: RateLimitConfig | None = None
+
+    def describe(self) -> str:
+        # Type-only, overriding DescribableConfig's `f"{type} (detail)"`: there
+        # is no `_describe_detail` to call, and inventing one out of arbitrary
+        # extra fields is exactly the #696 leak (hosts, URLs, phone numbers)
+        # that `describe_safe` exists to prevent. `describe()` output ships
+        # verbatim into the generated docs site.
+        return self.type
+
+    def describe_safe(self) -> str:
+        return self.type
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: Any, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        """Pin ``type`` to the plugin types actually registered (#997).
+
+        Two problems, one fix. ``SyncConfig``'s generated schema renders the
+        destination union as ``oneOf``, which requires a payload to match
+        *exactly* one member — and this model accepts ``type: str`` plus
+        arbitrary extras, so left open a plain ``type: slack`` matches both
+        ``SlackDestinationConfig`` and this one, and every valid built-in sync
+        fails ``drt validate``. Widening it the other way (any string that is
+        not a built-in) fixes that but makes the schema accept ``type:
+        invalid_type``, losing the typo detection the closed union gave us.
+
+        Enumerating the registry avoids both: the enum holds exactly the types
+        registered but not built in, so a built-in never matches this member and
+        an unregistered typo matches nothing at all. With no plugins installed
+        the enum is empty and matches nothing, which is the pre-#997 behaviour
+        exactly. This mirrors ``_destination_tag``'s three-way decision, so the
+        schema and the parser cannot disagree.
+
+        The schema therefore reflects the plugins installed when it is
+        generated. That is a property of ``drt schema`` output, not a bug: a
+        static file cannot describe types that arrive by ``pip install``.
+        Imported lazily — the tag set is derived from the union, which imports
+        this module.
+        """
+        schema = handler(core_schema)
+        from drt.config.sync_options import _BUILTIN_DESTINATION_TAGS
+        from drt.connectors.registry import registered_destination_types
+
+        plugin_types = sorted(set(registered_destination_types()) - _BUILTIN_DESTINATION_TAGS)
+        schema.setdefault("properties", {})["type"] = {
+            "type": "string",
+            "enum": plugin_types,
+            "description": (
+                "Connector type registered by a third-party package. Built-in "
+                "types are validated against their own schema instead."
+            ),
+        }
+        return schema

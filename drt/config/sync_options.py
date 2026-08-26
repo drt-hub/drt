@@ -6,14 +6,17 @@ the three ``destinations_*`` modules and consumed by :class:`SyncConfig`.
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
-from pydantic import BaseModel, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, Discriminator, Field, PrivateAttr, Tag, model_validator
 
 # RateLimitConfig is defined in base.py (beside RetryConfig) because the
 # destination configs imported below now carry a rate_limit override; it is
 # re-exported here so drt.config.models and existing imports are unchanged.
-from drt.config.base import RateLimitConfig, RetryConfig
+# GenericDestinationConfig joins them for the same reason — it subclasses
+# DescribableConfig and carries retry/rate_limit, so it belongs beside them
+# rather than here, and is re-exported through drt.config.models (#997).
+from drt.config.base import GenericDestinationConfig, RateLimitConfig, RetryConfig
 from drt.config.destinations_saas import (
     AirtableDestinationConfig,
     AmplitudeDestinationConfig,
@@ -580,48 +583,111 @@ class AlertsConfig(BaseModel):
     on_degraded: OnDegradedConfig | None = None
 
 
+# The tag the discriminator returns for a third-party type (#997). Leading and
+# trailing underscores keep it out of the built-in namespace — a connector may
+# not register a `type` shaped like this — while still reading as "not one of
+# yours" if it surfaces in pydantic's "expected one of [...]" list.
+GENERIC_DESTINATION_TAG = "__plugin__"
+
+
+def _destination_tag(value: Any) -> str | None:
+    """Pick the union member that should parse ``value`` (#997).
+
+    A *callable* discriminator rather than ``Field(discriminator="type")``
+    because the built-in set is closed and the plugin set is not: pydantic
+    matches a string discriminator against a fixed member list and rejects
+    anything else outright, which is precisely the wall ADR 0009 documented.
+
+    Three-way, and the middle case is the whole point:
+
+    * a built-in ``type`` returns itself, so the payload lands on that exact
+      concrete model and gets its existing per-field validation;
+    * a ``type`` the connector registry recognizes returns the generic tag, so a
+      plugin's config parses instead of being rejected before
+      ``get_destination()`` is ever reached;
+    * anything else returns the raw string, which pydantic reports as
+      ``union_tag_invalid`` — the same error type, at the same location, that a
+      typo produces today. Routing *every* unknown type to the generic model
+      would have been simpler and is what makes a typo'd built-in silently
+      parse and fail later; the registry check is what keeps `drt validate`
+      honest about ``type: postgress``.
+
+    Returning ``None`` for a missing/non-string ``type`` reproduces today's
+    ``union_tag_not_found``.
+    """
+    type_name = value.get("type") if isinstance(value, dict) else getattr(value, "type", None)
+    if not isinstance(type_name, str):
+        return None
+    if type_name in _BUILTIN_DESTINATION_TAGS:
+        return type_name
+    # Imported here, not at module scope: drt.connectors.registry imports the
+    # destination implementations, which import this module back.
+    from drt.connectors.registry import is_registered_destination
+
+    return GENERIC_DESTINATION_TAG if is_registered_destination(type_name) else type_name
+
+
 # Discriminated union — add new destination types here.
 # PARITY: the members below are hand-maintained and must match the connector
 # registry. tests/unit/test_cli_list_connectors.py::test_DESTINATIONS_matches_registry
 # guards that DESTINATIONS (and thus this surface) stays in sync with
 # drt/connectors/registry.py — update both when adding a destination.
+#
+# Every member carries an explicit `Tag` (#997): pydantic requires one per
+# choice under a callable discriminator and raises `PydanticUserError` at import
+# without it, so this cannot silently rot. The tags are written out rather than
+# derived from each model's `Literal` so mypy still sees a union of concrete
+# classes and keeps narrowing `sync.destination` at the call sites in
+# drt/destinations/query.py and throughout drt/destinations/.
 DestinationConfig = Annotated[
-    RestApiDestinationConfig
-    | SlackDestinationConfig
-    | DiscordDestinationConfig
-    | GitHubActionsDestinationConfig
-    | HubSpotDestinationConfig
-    | ZendeskDestinationConfig
-    | AmplitudeDestinationConfig
-    | MixpanelDestinationConfig
-    | SendGridDestinationConfig
-    | LinearDestinationConfig
-    | GoogleSheetsDestinationConfig
-    | PostgresDestinationConfig
-    | MySQLDestinationConfig
-    | TeamsDestinationConfig
-    | JiraDestinationConfig
-    | ClickHouseDestinationConfig
-    | ParquetDestinationConfig
-    | GoogleAdsDestinationConfig
-    | FileDestinationConfig
-    | S3DestinationConfig
-    | GCSDestinationConfig
-    | AzureBlobDestinationConfig
-    | EmailSmtpDestinationConfig
-    | NotionDestinationConfig
-    | IntercomDestinationConfig
-    | StagedUploadDestinationConfig
-    | SalesforceBulkDestinationConfig
-    | TwilioDestinationConfig
-    | SnowflakeDestinationConfig
-    | DatabricksDestinationConfig
-    | ElasticsearchDestinationConfig
-    | BigQueryDestinationConfig
-    | AirtableDestinationConfig
-    | KlaviyoDestinationConfig,
-    Field(discriminator="type"),
+    Annotated[RestApiDestinationConfig, Tag("rest_api")]
+    | Annotated[SlackDestinationConfig, Tag("slack")]
+    | Annotated[DiscordDestinationConfig, Tag("discord")]
+    | Annotated[GitHubActionsDestinationConfig, Tag("github_actions")]
+    | Annotated[HubSpotDestinationConfig, Tag("hubspot")]
+    | Annotated[ZendeskDestinationConfig, Tag("zendesk")]
+    | Annotated[AmplitudeDestinationConfig, Tag("amplitude")]
+    | Annotated[MixpanelDestinationConfig, Tag("mixpanel")]
+    | Annotated[SendGridDestinationConfig, Tag("sendgrid")]
+    | Annotated[LinearDestinationConfig, Tag("linear")]
+    | Annotated[GoogleSheetsDestinationConfig, Tag("google_sheets")]
+    | Annotated[PostgresDestinationConfig, Tag("postgres")]
+    | Annotated[MySQLDestinationConfig, Tag("mysql")]
+    | Annotated[TeamsDestinationConfig, Tag("teams")]
+    | Annotated[JiraDestinationConfig, Tag("jira")]
+    | Annotated[ClickHouseDestinationConfig, Tag("clickhouse")]
+    | Annotated[ParquetDestinationConfig, Tag("parquet")]
+    | Annotated[GoogleAdsDestinationConfig, Tag("google_ads")]
+    | Annotated[FileDestinationConfig, Tag("file")]
+    | Annotated[S3DestinationConfig, Tag("s3")]
+    | Annotated[GCSDestinationConfig, Tag("gcs")]
+    | Annotated[AzureBlobDestinationConfig, Tag("azure_blob")]
+    | Annotated[EmailSmtpDestinationConfig, Tag("email_smtp")]
+    | Annotated[NotionDestinationConfig, Tag("notion")]
+    | Annotated[IntercomDestinationConfig, Tag("intercom")]
+    | Annotated[StagedUploadDestinationConfig, Tag("staged_upload")]
+    | Annotated[SalesforceBulkDestinationConfig, Tag("salesforce_bulk")]
+    | Annotated[TwilioDestinationConfig, Tag("twilio")]
+    | Annotated[SnowflakeDestinationConfig, Tag("snowflake")]
+    | Annotated[DatabricksDestinationConfig, Tag("databricks")]
+    | Annotated[ElasticsearchDestinationConfig, Tag("elasticsearch")]
+    | Annotated[BigQueryDestinationConfig, Tag("bigquery")]
+    | Annotated[AirtableDestinationConfig, Tag("airtable")]
+    | Annotated[KlaviyoDestinationConfig, Tag("klaviyo")]
+    | Annotated[GenericDestinationConfig, Tag(GENERIC_DESTINATION_TAG)],
+    Discriminator(_destination_tag),
 ]
+
+# Derived from the union itself rather than hand-listed a second time: a member
+# added above without a matching entry here would otherwise route to the generic
+# model and lose its own validation, silently. Excludes the generic member,
+# whose tag is not a connector type.
+_BUILTIN_DESTINATION_TAGS: frozenset[str] = frozenset(
+    tag
+    for member in get_args(get_args(DestinationConfig)[0])
+    for meta in getattr(member, "__metadata__", ())
+    if isinstance(meta, Tag) and (tag := meta.tag) != GENERIC_DESTINATION_TAG
+)
 
 
 class SyncConfig(BaseModel):

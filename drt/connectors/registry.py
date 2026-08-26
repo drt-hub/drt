@@ -72,6 +72,59 @@ def register_source(
     _source_registry[type_name] = (profile_class, source_class)
 
 
+def is_registered_destination(type_name: str) -> bool:
+    """Is ``type_name`` a destination the registry can resolve right now?
+
+    Used by :data:`drt.config.sync_options.DestinationConfig`'s discriminator to
+    tell "a plugin registered this" from "you typed it wrong" (#997). A pure
+    membership test on purpose: it decides which union member parses the
+    payload, nothing more. Validating a plugin's fields against the registered
+    ``config_class`` is the deliberately deferred second pass ADR 0009 sketches.
+
+    Reflects whatever has been registered by the time it is called — built-ins
+    at import of this module, plugins once :func:`drt.plugins.load_plugins` has
+    run (the CLI root callback does this before any command parses config).
+    """
+    return type_name in _destination_registry
+
+
+def is_registered_source(type_name: str) -> bool:
+    """Source-side counterpart of :func:`is_registered_destination` (#997)."""
+    return type_name in _source_registry
+
+
+def registered_destination_types() -> tuple[str, ...]:
+    """Every destination type the registry can resolve, sorted (#997).
+
+    Lets :class:`~drt.config.base.GenericDestinationConfig` enumerate the plugin
+    types in its JSON Schema, so ``drt validate``'s schema pass accepts exactly
+    the types its pydantic pass accepts.
+    """
+    return tuple(sorted(_destination_registry))
+
+
+def registered_source_types() -> tuple[str, ...]:
+    """Every source type the registry can resolve, sorted (#997).
+
+    Only used to make ``load_profile()``'s failure message name the plugin types
+    that *are* installed, so "unsupported" does not read as "your plugin was
+    never seen".
+    """
+    return tuple(sorted(_source_registry))
+
+
+def source_profile_class(type_name: str) -> type[Any] | None:
+    """The profile class registered for ``type_name``, or ``None``.
+
+    ``load_profile()`` builds a plugin's profile from this once its hand-written
+    ``if source_type == ...`` chain has run out of built-ins (#997). The
+    destination side has no equivalent because pydantic constructs the config
+    itself; profiles are plain dataclasses with no validator to hook.
+    """
+    entry = _source_registry.get(type_name)
+    return entry[0] if entry else None
+
+
 def get_destination(config: DestinationConfig) -> Destination:
     """Get a destination instance for the given config.
 

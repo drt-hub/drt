@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Literal, TextIO
+from typing import Any, Literal, TextIO, cast
 
 import yaml
 from pydantic import BaseModel, Field
@@ -423,10 +423,53 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             properties=raw.get("properties") or {},
         )
 
-    raise ValueError(
-        f"Unsupported source type '{source_type}'. "
-        "Supported: bigquery, duckdb, sqlite, postgres, redshift, clickhouse, "
+    # Imported inside the function: drt.connectors.registry imports the source
+    # and destination implementations, which import this module back.
+    from drt.connectors.registry import registered_source_types, source_profile_class
+
+    # Past the built-ins: ask the connector registry before giving up (#997).
+    #
+    # The source-side half of ADR 0009's blocker. Everything above is a closed,
+    # hand-written dispatch chain, so a third-party source could register itself
+    # and still never be loadable from profiles.yml. Deliberately placed *after*
+    # the chain rather than replacing it: every built-in keeps its exact
+    # construction, including per-type defaults and the required-field checks
+    # above, and a plugin cannot shadow a built-in type.
+    #
+    # Profiles are plain dataclasses, not pydantic models, so there is no
+    # validator to hook and no generic fallback model to fall back to — the
+    # registered profile class is constructed directly from the YAML mapping.
+    # That is the profile-side equivalent of GenericDestinationConfig accepting
+    # extra fields: strict per-field checking of a plugin's profile is the same
+    # deferred second pass, not part of #997.
+    profile_class = source_profile_class(source_type) if isinstance(source_type, str) else None
+    if profile_class is not None:
+        fields = {key: value for key, value in raw.items() if key != "type"}
+        try:
+            return cast("ProfileConfig", profile_class(type=source_type, **fields))
+        except TypeError as exc:
+            # A dataclass rejects unknown keyword arguments, so a typo'd or
+            # missing field surfaces here as an unhelpful "unexpected keyword
+            # argument". Name the profile being built and keep the original.
+            raise ValueError(
+                f"Profile '{profile_name}' does not match the '{source_type}' profile "
+                f"registered by its plugin ({profile_class.__module__}."
+                f"{profile_class.__qualname__}): {exc}"
+            ) from exc
+
+    dispatched = (
+        "bigquery, duckdb, sqlite, postgres, redshift, clickhouse, "
         "mysql, snowflake, databricks, sqlserver, deltalake, iceberg"
+    )
+    # Types the registry knows but the chain above does not construct — reached
+    # through the fallback, so they are supported too and belong in the message.
+    # Listed apart from the hand-dispatched ones rather than merged: if a plugin
+    # is installed and the name is still unknown, "drt could see your plugin" is
+    # the useful signal.
+    also = sorted(set(registered_source_types()) - set(dispatched.split(", ")))
+    also_note = f" Also registered: {', '.join(also)}." if also else ""
+    raise ValueError(
+        f"Unsupported source type '{source_type}'. Supported: {dispatched}.{also_note}"
     )
 
 

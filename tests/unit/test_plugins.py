@@ -213,7 +213,9 @@ def test_cli_plugins_list_json_marks_connector_entries_not_yet_usable(
     payload = _json.loads(result.stdout)
     assert payload["plugins"][0]["group"] == "drt.destinations"
     assert payload["plugins"][0]["loaded"] is True
-    assert payload["plugins"][0]["usable_in_sync_yaml"] is False
+    # True since #997: a registered destination type is nameable in a sync
+    # YAML like any built-in. Only a load failure makes a plugin unusable.
+    assert payload["plugins"][0]["usable_in_sync_yaml"] is True
 
 
 def test_cli_plugins_list_reuses_the_startup_callback_cache_not_a_second_load(
@@ -288,7 +290,10 @@ def test_cli_plugins_list_table_shows_connector_and_error_status(
     result = CliRunner().invoke(app, ["plugins", "list"])
 
     assert result.exit_code == 0
-    assert "not yet usable in sync YAML" in result.stdout
+    # The connector caveat is gone (#997); a loaded connector reads the same
+    # as any other loaded plugin, and only real failures are called out.
+    assert "not yet usable in sync YAML" not in result.stdout
+    assert "loaded" in result.stdout
     assert "error: sink unreachable" in result.stdout
 
 

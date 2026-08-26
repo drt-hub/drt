@@ -9,18 +9,14 @@ an explicit import anywhere in drt-core or in the operator's own code. ADR
 via standard ``importlib.metadata`` entry points, the same mechanism
 pytest, sqlalchemy, and Flask extensions use.
 
-**Connector entry points are a partial exception.** ``drt.sources`` /
-``drt.destinations`` are discovered and reported here for visibility, but a
-connector registered this way is not yet reachable from a sync YAML —
-``SyncConfig.destination`` and ``load_profile()`` both validate against a
-closed, hand-enumerated set of ``type`` values *before* the connector
-registry in :mod:`drt.connectors.registry` is ever consulted. See
-`ADR 0009 <../docs/adr/0009-plugin-config-union-blocker.md>`_ for why, and
-what would need to change to lift this. Registering a destination or source
-here still has value (the type participates in ``get_destination()`` /
-``get_source()`` lookups for any code path that constructs a sync
-programmatically rather than through YAML), so the group is not withheld —
-just labeled accurately.
+``drt.sources`` / ``drt.destinations`` are covered too: a connector registered
+through one of these is nameable in a sync YAML exactly like a built-in. That
+was not true when this module landed — ``SyncConfig.destination`` and
+``load_profile()` both validated ``type`` against a closed, hand-enumerated set
+*before* the connector registry in :mod:`drt.connectors.registry` was consulted,
+so a connector could register itself and still be permanently unreachable. #997
+closed that; `ADR 0009 <../docs/adr/0009-plugin-config-union-blocker.md>`_
+records both the blocker and the fix.
 
 Contract for a third-party package: expose a zero-argument callable under
 one of the groups below and have it perform its own registration as a side
