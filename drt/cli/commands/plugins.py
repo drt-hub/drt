@@ -1,12 +1,10 @@
-"""``drt plugins`` — list installed third-party plugin entry points (#297).
+"""``drt plugins`` — inspect installed entry-point extensions.
 
-Discovery covers six ``drt.*`` entry-point groups: sources, destinations,
-secret providers, permission checkers, audit loggers, and extra observers.
-Connector entries (sources/destinations) are marked distinctly — a
-registered connector isn't yet usable from a sync YAML, since
-``SyncConfig.destination`` / ``load_profile()`` validate against a closed
-set of built-in ``type`` values before the connector registry is ever
-consulted. See ``docs/adr/0009-plugin-config-union-blocker.md``.
+Reports every ``drt.*`` entry point discovered, which distribution shipped it,
+and whether its registration callable ran. Connector groups (``drt.sources`` /
+``drt.destinations``) used to be reported distinctly because a registered
+connector still could not be named in a sync YAML; #997 closed that, so a
+loaded connector is now reported like any other loaded plugin.
 """
 
 from __future__ import annotations
@@ -57,7 +55,14 @@ def list_plugins(
                 # register successfully and still be unnameable in a sync YAML.
                 # #997 closed that, so the only thing that makes a plugin
                 # unusable now is failing to load at all.
-                "usable_in_sync_yaml": e.error is None,
+                #
+                # `e.loaded`, not `e.error is None`: DiscoveredPlugin defaults to
+                # loaded=False/error=None, which is exactly what discover_plugins()
+                # returns for an entry point it never invoked — that must not read
+                # as usable. It also keeps this in step with the table below, which
+                # branches on `e.error` and would otherwise disagree whenever an
+                # exception stringifies empty (`str(MyError())` == "").
+                "usable_in_sync_yaml": e.loaded,
             }
             for e in entries
         ]
@@ -86,8 +91,14 @@ def list_plugins(
     table.add_column("Status")
 
     for e in entries:
-        if e.error:
-            status = f"[red]error: {e.error}[/red]"
+        if not e.loaded:
+            # `not e.loaded` rather than `if e.error:` so an exception that
+            # stringifies empty still renders as a failure instead of green.
+            status = (
+                f"[red]error: {e.error}[/red]"
+                if e.error
+                else "[red]not loaded[/red]"
+            )
         else:
             # No connector special case since #997 — a registered source or
             # destination type is nameable in a sync YAML like any built-in.

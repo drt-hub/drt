@@ -22,13 +22,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, Tag, ValidationError
 
 import drt.connectors.registry as registry
 from drt.config.base import GenericDestinationConfig
-from drt.config.credentials import load_profile
+from drt.config.credentials import _DISPATCHED_SOURCE_TYPES, load_profile, save_profile
 from drt.config.models import SlackDestinationConfig, SyncConfig
-from drt.config.sync_options import _BUILTIN_DESTINATION_TAGS
+from drt.config.sync_options import _BUILTIN_DESTINATION_TAGS, GENERIC_DESTINATION_TAG
 
 PLUGIN_DESTINATION = "salesforce_premium"
 PLUGIN_SOURCE = "salesforce_premium_src"
@@ -162,6 +162,22 @@ def test_builtin_tags_match_the_connector_registry() -> None:
     routing through the catch-all and losing its own validation.
     """
     assert _BUILTIN_DESTINATION_TAGS == set(registry._destination_registry)
+
+    # Set equality alone cannot catch a Tag attached to the wrong class, or a
+    # tag and its registration mistyped the same way. Pin each tag to the
+    # Literal on the model it annotates — the correspondence pydantic used to
+    # derive for free from Field(discriminator="type").
+    from typing import get_args as _get_args
+
+    from drt.config.models import DestinationConfig
+
+    for member in _get_args(_get_args(DestinationConfig)[0]):
+        model, *meta = _get_args(member)
+        tag = next(m.tag for m in meta if isinstance(m, Tag))
+        if tag == GENERIC_DESTINATION_TAG:
+            continue
+        literal = _get_args(model.model_fields["type"].annotation)[0]
+        assert tag == literal, f"{model.__name__} is tagged {tag!r} but its type is {literal!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +344,12 @@ def test_typoed_builtin_source_is_still_rejected(tmp_path: Path) -> None:
 def test_plugin_profile_with_an_unknown_field_names_the_plugin(
     tmp_path: Path, clean_registry
 ) -> None:
-    """A dataclass raises a bare TypeError; the message has to be better."""
+    """A signature mismatch must name the class, not blame profiles.yml vaguely.
+
+    Deliberately does not say "its plugin" any more: the same path is reached by
+    any registered profile class, and calling a first-party one a plugin was
+    exactly the rest_api wart this fixes.
+    """
     clean_registry.register_source(PLUGIN_SOURCE, _PluginProfile, _PluginSource)
     d = _write_profiles(
         tmp_path,
@@ -339,25 +360,200 @@ def test_plugin_profile_with_an_unknown_field_names_the_plugin(
           nonsense_field: 1
     """,
     )
-    with pytest.raises(ValueError, match="does not match the .* profile registered by its plugin"):
+    with pytest.raises(ValueError, match="does not match the .* profile registered by"):
         load_profile("bad", config_dir=d)
 
 
-def test_builtin_source_dispatch_wins_over_the_registry(tmp_path: Path, clean_registry) -> None:
+def test_builtin_source_dispatch_wins_over_the_registry(tmp_path: Path) -> None:
     """The fallback is reached only after the hand-written chain runs out.
 
-    ``duckdb`` is both hand-dispatched and registered, so this pins the order:
-    the built-in construction (with its per-type defaults) must still be what
-    runs, not a generic reconstruction from the registry.
+    Asserted on ``port``, not ``database``: the earlier version of this test
+    checked that duckdb yields ``":memory:"``, which the dataclass default
+    supplies either way, so it passed whichever path ran and proved nothing.
+    ``postgres`` coerces ``port`` to ``int`` *in the branch*; a registry-built
+    profile would pass the raw YAML string straight through.
     """
-    d = _write_profiles(
-        tmp_path,
-        """
-        local:
-          type: duckdb
-    """,
+    d = _write_profiles(tmp_path, """
+        pg:
+          type: postgres
+          host: db.example
+          dbname: analytics
+          user: analyst
+          port: "5432"
+    """)
+    profile = load_profile("pg", config_dir=d)
+    assert profile.port == 5432
+    assert isinstance(profile.port, int)
+
+
+def test_every_registered_source_is_dispatched_or_reachable() -> None:
+    """``_DISPATCHED_SOURCE_TYPES`` must not drift from the chain or the registry.
+
+    ``rest_api`` was registered and in the ``ProfileConfig`` union with no branch
+    in the chain, so it fell through to the plugin fallback and was reported to
+    users as third-party. Nothing caught that.
+    """
+    assert _DISPATCHED_SOURCE_TYPES == set(registry._source_registry), (
+        "load_profile()'s hand-written chain and the connector registry disagree; "
+        "a built-in with no branch is reported to users as a plugin."
     )
-    profile = load_profile("local", config_dir=d)
-    # The hand-written branch supplies this default; a registry-built profile
-    # would not have applied it.
-    assert profile.database == ":memory:"
+
+
+def test_unknown_source_message_does_not_advertise_builtins_as_plugins(tmp_path: Path) -> None:
+    """No plugins installed means no 'Also registered' tail."""
+    d = _write_profiles(tmp_path, """
+        nope:
+          type: totally_unknown
+    """)
+    with pytest.raises(ValueError) as exc:
+        load_profile("nope", config_dir=d)
+    assert "Also registered" not in str(exc.value)
+
+
+def test_plugin_profile_must_implement_describe(tmp_path: Path, clean_registry) -> None:
+    """drt-core calls describe() on whatever load_profile() returns.
+
+    ``drt/cli/output.py`` has no hasattr guard, so without this check a plugin
+    profile lacking ``describe()`` crashed with AttributeError several layers
+    into ``drt run --dry-run``.
+    """
+
+    @dataclass
+    class NoDescribe:
+        type: str
+        url: str
+
+    clean_registry.register_source(PLUGIN_SOURCE, NoDescribe, _PluginSource)
+    d = _write_profiles(tmp_path, f"""
+        p:
+          type: {PLUGIN_SOURCE}
+          url: https://x
+    """)
+    with pytest.raises(ValueError, match="does not implement describe"):
+        load_profile("p", config_dir=d)
+
+
+def test_plugin_internal_type_error_is_not_blamed_on_the_profile(
+    tmp_path: Path, clean_registry
+) -> None:
+    """A TypeError from inside the plugin's own __post_init__ is its bug, not the user's."""
+
+    @dataclass
+    class Exploding:
+        type: str
+        port: int | None = None
+
+        def __post_init__(self) -> None:
+            int(self.port)  # raises TypeError on None
+
+        def describe(self) -> str:
+            return self.type
+
+    clean_registry.register_source(PLUGIN_SOURCE, Exploding, _PluginSource)
+    d = _write_profiles(tmp_path, f"""
+        p:
+          type: {PLUGIN_SOURCE}
+          port: null
+    """)
+    # Propagates as the plugin's own TypeError rather than being rewritten into
+    # "your profile does not match".
+    with pytest.raises(TypeError):
+        load_profile("p", config_dir=d)
+
+
+def test_registered_plugin_profile_round_trips_through_save(tmp_path: Path, clean_registry) -> None:
+    """load_profile() and save_profile() must stay symmetric (#997)."""
+    clean_registry.register_source(PLUGIN_SOURCE, _PluginProfile, _PluginSource)
+    save_profile(
+        "p",
+        _PluginProfile(type=PLUGIN_SOURCE, instance_url="https://acme", api_key="k"),
+        config_dir=tmp_path,
+    )
+    loaded = load_profile("p", config_dir=tmp_path)
+    assert isinstance(loaded, _PluginProfile)
+    assert loaded.instance_url == "https://acme"
+
+
+def test_sentinel_tag_is_not_a_usable_destination_type() -> None:
+    """`type: __plugin__` must not reach the catch-all.
+
+    The sentinel is a real tag in the union, so returning it verbatim from the
+    discriminator let a user name it and parse cleanly, deferring the failure to
+    `get_destination()` — the exact thing the registry check exists to prevent.
+    """
+    with pytest.raises(ValidationError) as exc:
+        _sync({"type": GENERIC_DESTINATION_TAG, "anything": 1})
+    assert exc.value.errors()[0]["type"] == "union_tag_not_found"
+
+
+def test_non_dict_mappings_are_accepted() -> None:
+    """pydantic takes any Mapping as model input; the discriminator must too."""
+    from types import MappingProxyType
+
+    dest = _sync(MappingProxyType({"type": "slack", "webhook_url_env": "W"}))
+    assert type(dest) is SlackDestinationConfig
+
+
+def test_plugin_config_class_is_used_when_it_is_a_pydantic_model(clean_registry) -> None:
+    """The registered config_class parses the payload, not the catch-all.
+
+    Without this a plugin's own defaults were lost and the `assert isinstance(
+    config, MyConfig)` that docs/guides/building-a-destination.md tells authors
+    to write in `load()` failed.
+    """
+
+    class AcmeConfig(BaseModel):
+        type: str
+        instance_url: str
+        batch_size: int = 500
+
+        def describe(self) -> str:
+            return f"{self.type} ({self.instance_url})"
+
+    clean_registry.register_destination(PLUGIN_DESTINATION, AcmeConfig, _PluginDestination)
+    dest = _sync({"type": PLUGIN_DESTINATION, "instance_url": "https://acme"})
+
+    assert isinstance(dest, AcmeConfig)
+    assert dest.batch_size == 500  # the plugin's default, not lost
+    assert dest.describe() == f"{PLUGIN_DESTINATION} (https://acme)"
+
+
+def test_plugin_config_class_enforces_its_own_required_fields(clean_registry) -> None:
+    class AcmeConfig(BaseModel):
+        type: str
+        instance_url: str
+
+    clean_registry.register_destination(PLUGIN_DESTINATION, AcmeConfig, _PluginDestination)
+    with pytest.raises(ValidationError):
+        _sync({"type": PLUGIN_DESTINATION})
+
+
+def test_distinct_plugin_destinations_stay_distinct_in_docs(clean_registry) -> None:
+    """drt/docs/builder.py keys nodes on f"{type}|{describe()}".
+
+    A type-only describe() collapsed two plugin destinations pointing at
+    different systems into a single lineage node.
+    """
+
+    class AcmeConfig(BaseModel):
+        type: str
+        instance_url: str
+
+        def describe(self) -> str:
+            return f"{self.type} ({self.instance_url})"
+
+    clean_registry.register_destination(PLUGIN_DESTINATION, AcmeConfig, _PluginDestination)
+    one = _sync({"type": PLUGIN_DESTINATION, "instance_url": "https://one"})
+    two = _sync({"type": PLUGIN_DESTINATION, "instance_url": "https://two"})
+    assert f"{one.type}|{one.describe()}" != f"{two.type}|{two.describe()}"
+
+
+def test_fallback_refuses_extras_drt_core_reads_itself(clean_registry) -> None:
+    """`lookups`/`table` on the permissive path used to crash mid-run.
+
+    Registered with a non-pydantic config_class, so the payload lands on
+    GenericDestinationConfig rather than a plugin model.
+    """
+    clean_registry.register_destination(PLUGIN_DESTINATION, object, _PluginDestination)
+    with pytest.raises(ValidationError, match="drt-core reads off a destination config"):
+        _sync({"type": PLUGIN_DESTINATION, "lookups": {"a": {"table": "t"}}})

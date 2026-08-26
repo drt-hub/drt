@@ -54,10 +54,12 @@ Until #997 this failed `drt validate`: `SyncConfig.destination` and `load_profil
 
 Two things worth knowing when you build one:
 
-- **Your config fields are carried, not validated.** drt-core does not know your schema, so a plugin destination's fields are accepted as-is and handed to your implementation. A typo in one of *your* fields is kept rather than rejected — validate what you need inside your connector. (A typo in the `type` itself is still rejected: an unregistered type is indistinguishable from a misspelled built-in, and is reported as one.)
-- **`retry` and `rate_limit` still work.** Both are understood generically, so `resolve_retry()` and the rate-limiter registry apply to your connector the same way they do to a built-in.
+- **Ship a pydantic config class and drt validates against it.** The class you pass to `register_destination(type_name, config_class, destination_class)` is what parses the YAML, so your field types are enforced, your defaults apply, and your `describe()` / `rate_limit_key()` overrides run — `assert isinstance(config, MyConfig)` in your `load()` holds. Register something that is not a pydantic model and drt falls back to a permissive config that carries your fields verbatim without checking them; drt-core reserves a few names (`lookups`, `table`, `upsert_key`, `model`, `mode`) on that path and will tell you if you collide with one.
+- **`retry` and `rate_limit` still work.** Both are understood generically, so `resolve_retry()` and the rate-limiter registry apply to your connector the same way they do to a built-in. If your config class declares them itself, yours wins.
 
-A source plugin's profile class is constructed directly from the `profiles.yml` mapping, so its fields should match the keys operators will write.
+A typo in the `type` itself is still rejected: an unregistered type is indistinguishable from a misspelled built-in, and is reported as one.
+
+A source plugin's profile class is constructed directly from the `profiles.yml` mapping, so its fields should match the keys operators will write, and it must accept a `type=` keyword and implement `describe() -> str`.
 
 ## `drt plugins list`
 
@@ -70,4 +72,4 @@ $ drt plugins list
 └──────────────────────┴───────────────┴─────────────────┴─────────┴────────┴────────┘
 ```
 
-`--format json` emits the same data as machine-readable JSON, including a `usable_in_sync_yaml` boolean per entry (`false` for `drt.sources` / `drt.destinations`, `true` for the other four groups).
+`--format json` emits the same data as machine-readable JSON, including a `usable_in_sync_yaml` — `true` once the entry point loaded and registered itself, `false` only when loading failed. Connector groups are no longer a special case (#997); check `error` for why a `false` entry failed.

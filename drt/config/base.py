@@ -8,6 +8,7 @@ union). ``models.py`` re-exports everything here — import sites are unchanged.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, GetJsonSchemaHandler, model_validator
@@ -371,13 +372,15 @@ class RateLimitConfig(BaseModel):
 # registry already knows, never for one of the built-ins, which keeps their
 # strict per-field validation and their error messages untouched.
 #
-# `extra="allow"` because the plugin's own fields are, by definition, unknown to
-# drt-core: they are carried verbatim so the plugin's destination implementation
-# can read them off the config it is handed. That is the whole trade ADR 0009
-# flagged for this option — a typo'd *plugin* field is kept rather than
-# rejected, because nothing here knows which fields are real. The registry
-# stores a `config_class` that could tighten this later; wiring that second pass
-# up is deliberately not part of #997.
+# The registry stores each connector's `config_class`, and the wrap validator
+# below hands validation to it, so a plugin that ships a pydantic config gets its
+# own model: its field types are enforced, its defaults apply, and its `describe`
+# / `rate_limit_key` overrides run. This model is the fallback for a plugin that
+# registered something else (a dataclass, or nothing usable), where drt-core has
+# no schema to check against and `extra="allow"` carries the fields verbatim.
+#
+# Names drt-core itself reads off a destination config are refused on that
+# fallback path rather than absorbed — see `_reject_reserved_extras`.
 class GenericDestinationConfig(DescribableConfig):
     """A destination type provided by a third-party connector package."""
 
@@ -394,6 +397,62 @@ class GenericDestinationConfig(DescribableConfig):
     # `rate_limit`. Without these two a plugin would silently lose both.
     retry: RetryConfig | None = None
     rate_limit: RateLimitConfig | None = None
+
+    # Read off `sync.destination` by name, without isinstance, in code that
+    # assumes the built-ins' validated shapes: `lookups` in engine/sync.py and
+    # docs/builder.py, `table` in cli/commands/clean.py, `upsert_key` in
+    # engine/diff.py. Under `extra="allow"` a plugin field with one of these
+    # names arrives as raw YAML and reaches that code unvalidated — an
+    # AttributeError mid-run, after extraction has started. Refuse at parse
+    # time instead, naming the collision.
+    _RESERVED_EXTRAS: ClassVar[frozenset[str]] = frozenset(
+        {"lookups", "table", "upsert_key", "model", "mode"}
+    )
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _use_registered_config_class(cls, value: Any, handler: Any) -> Any:
+        """Validate against the plugin's own config class when it has one.
+
+        Without this the plugin's registered ``config_class`` is never
+        instantiated: every plugin destination became a
+        ``GenericDestinationConfig``, so the ``assert isinstance(config,
+        MyConfig)`` that ``docs/guides/building-a-destination.md`` tells authors
+        to write failed, and every default declared on their model was lost.
+
+        Falls through to this model whenever the registry has no usable pydantic
+        class for the type, which is also what keeps parsing possible before
+        registration has happened at all.
+        """
+        type_name = (
+            value.get("type") if isinstance(value, Mapping) else getattr(value, "type", None)
+        )
+        if isinstance(type_name, str):
+            # Lazy: drt.connectors.registry imports the destination
+            # implementations, which import this module back.
+            from drt.connectors.registry import destination_config_class
+
+            config_class = destination_config_class(type_name)
+            if (
+                isinstance(config_class, type)
+                and issubclass(config_class, BaseModel)
+                and config_class is not cls
+            ):
+                return config_class.model_validate(value)
+
+        # Fallback path only. The reserved-name check lives here rather than in
+        # an `after` validator because the branch above returns a *different*
+        # model, which an `after` validator declared on this class would still
+        # run against.
+        instance = handler(value)
+        clashes = sorted(cls._RESERVED_EXTRAS & set(instance.model_extra or {}))
+        if clashes:
+            raise ValueError(
+                f"destination type '{instance.type}' sets {', '.join(clashes)}, which drt-core "
+                "reads off a destination config itself. Register a pydantic config_class "
+                "declaring these fields so they are validated, or rename them."
+            )
+        return instance
 
     def describe(self) -> str:
         # Type-only, overriding DescribableConfig's `f"{type} (detail)"`: there

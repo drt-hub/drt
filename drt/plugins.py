@@ -50,8 +50,9 @@ PLUGIN_GROUPS: tuple[str, ...] = (
     "drt.observers",
 )
 
-# Groups where a successfully loaded entry point still can't be named in a
-# sync YAML today — see the module docstring and ADR 0009.
+# The two connector groups. Kept as a named constant for callers that want to
+# tell connector plugins from the rest; it no longer marks a limitation —
+# #997 made a registered connector nameable in a sync YAML like any built-in.
 CONNECTOR_GROUPS = frozenset({"drt.sources", "drt.destinations"})
 
 _log = logging.getLogger(__name__)

@@ -6,6 +6,7 @@ the three ``destinations_*`` modules and consumed by :class:`SyncConfig`.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Annotated, Any, Literal, get_args
 
 from pydantic import BaseModel, Discriminator, Field, PrivateAttr, Tag, model_validator
@@ -615,11 +616,20 @@ def _destination_tag(value: Any) -> str | None:
     Returning ``None`` for a missing/non-string ``type`` reproduces today's
     ``union_tag_not_found``.
     """
-    type_name = value.get("type") if isinstance(value, dict) else getattr(value, "type", None)
+    # `Mapping`, not `dict`: pydantic accepts any mapping as model input, and the
+    # string discriminator this replaced extracted the tag itself — narrowing to
+    # `dict` here silently regressed MappingProxyType/UserDict callers (#997).
+    type_name = value.get("type") if isinstance(value, Mapping) else getattr(value, "type", None)
     if not isinstance(type_name, str):
         return None
     if type_name in _BUILTIN_DESTINATION_TAGS:
         return type_name
+    if type_name == GENERIC_DESTINATION_TAG:
+        # The sentinel is a real tag in the union, so returning it verbatim here
+        # would let `type: __plugin__` match the catch-all and parse — the exact
+        # deferred failure the registry check below exists to prevent. `None`
+        # yields `union_tag_not_found`, which is what an unusable type deserves.
+        return None
     # Imported here, not at module scope: drt.connectors.registry imports the
     # destination implementations, which import this module back.
     from drt.connectors.registry import is_registered_destination
