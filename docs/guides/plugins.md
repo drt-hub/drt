@@ -36,16 +36,30 @@ That's the whole contract: **the entry point's value is a zero-argument callable
 
 A broken plugin's exception is caught, logged, and reported by `drt plugins list` (`Status: error: ...`) rather than crashing the CLI — one bad third-party package can't take down unrelated commands.
 
-## What's discovered but not yet usable: `drt.sources` / `drt.destinations`
+## Connectors: `drt.sources` / `drt.destinations`
 
-`drt.sources` and `drt.destinations` entry points are discovered and their registration callables *are* invoked (so `register_source()` / `register_destination()` in `drt/connectors/registry.py` runs, and the type is queryable via `get_source()` / `get_destination()`). `drt plugins list` shows these as `registered (not yet usable in sync YAML — see ADR 0009)`.
+`drt.sources` and `drt.destinations` entry points are discovered, their registration callables are invoked (so `register_source()` / `register_destination()` in `drt/connectors/registry.py` runs), and **the registered type can be named in a sync YAML like any built-in**:
 
-**A sync YAML naming a third-party `type` will fail `drt validate` today.** `SyncConfig.destination` and `load_profile()` both validate the `type` field against a closed, hand-enumerated set of built-in types *before* the connector registry is ever consulted — registering a connector doesn't add it to that set. This is a real architectural gap, not a bug in the plugin loader; see [ADR 0009](../adr/0009-plugin-config-union-blocker.md) for the full explanation and the candidate designs for closing it.
+```yaml
+# syncs/leads.yml — `salesforce_premium` comes from a third-party package
+name: leads_to_salesforce
+model: ref('qualified_leads')
+destination:
+  type: salesforce_premium
+  instance_url: https://acme.my.salesforce.com
+  api_key_env: SF_PREMIUM_KEY
+```
 
-If you're building a third-party connector today:
+Until #997 this failed `drt validate`: `SyncConfig.destination` and `load_profile()` both checked `type` against a closed, hand-enumerated set of built-ins *before* the connector registry was consulted, so a connector could register itself and still be permanently unreachable. [ADR 0009](../adr/0009-plugin-config-union-blocker.md) records that blocker and how it was closed.
 
-- The registration and discovery machinery above is ready for you to build against now — write and ship your `drt.destinations` entry point, and it will "just work" the moment the config-union gap closes, with no changes needed on your side.
-- Until then, in-tree contribution (see [Building a Destination Connector](building-a-destination.md)) is the only way to make a new connector reachable from a sync YAML.
+Two things worth knowing when you build one:
+
+- **Subclass `GenericDestinationConfig` and drt validates against your class.** The class you pass to `register_destination(type_name, config_class, destination_class)` parses the YAML when it subclasses `drt.config.models.GenericDestinationConfig` — your field types are enforced, your defaults apply, your `describe()` / `rate_limit_key()` overrides run, and `assert isinstance(config, MyConfig)` in your `load()` holds. Subclassing is what keeps your config inside `SyncConfig.destination`'s declared union, so it serializes cleanly and inherits `retry` / `rate_limit`. Register a plain `BaseModel` (or anything else) and drt falls back to `GenericDestinationConfig`, which carries your fields verbatim without checking them; drt-core reserves a few names (`lookups`, `table`, `upsert_key`, `model`, `mode`) on that path and will tell you if you collide with one.
+- **`retry` and `rate_limit` still work.** Both are inherited from `GenericDestinationConfig`, so `resolve_retry()` and the rate-limiter registry apply to your connector the same way they do to a built-in. Declare them yourself and yours wins.
+
+A typo in the `type` itself is still rejected: an unregistered type is indistinguishable from a misspelled built-in, and is reported as one.
+
+A source plugin's profile class is constructed directly from the `profiles.yml` mapping, so its fields should match the keys operators will write, and it must accept a `type=` keyword and implement `describe() -> str`.
 
 ## `drt plugins list`
 
@@ -58,4 +72,4 @@ $ drt plugins list
 └──────────────────────┴───────────────┴─────────────────┴─────────┴────────┴────────┘
 ```
 
-`--format json` emits the same data as machine-readable JSON, including a `usable_in_sync_yaml` boolean per entry (`false` for `drt.sources` / `drt.destinations`, `true` for the other four groups).
+`--format json` emits the same data as machine-readable JSON, including a `usable_in_sync_yaml` — `true` once the entry point loaded and registered itself, `false` only when loading failed. Connector groups are no longer a special case (#997); check `error` for why a `false` entry failed.

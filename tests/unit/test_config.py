@@ -1253,7 +1253,15 @@ def _configs_with_retry() -> list[type]:
 
     from drt.config.sync_options import DestinationConfig
 
-    members = typing.get_args(typing.get_args(DestinationConfig)[0])
+    # Each member is `Annotated[Config, Tag("...")]` since #997 made the union
+    # callable-discriminated. Unwrap to the model class so this keeps returning
+    # real classes — `Annotated` proxies attribute access, so the filter below
+    # would still work, but the parametrize ids and `__name__` would be reading
+    # through that proxy rather than off the class.
+    members = [
+        typing.get_args(m)[0] if typing.get_origin(m) is typing.Annotated else m
+        for m in typing.get_args(typing.get_args(DestinationConfig)[0])
+    ]
     return [m for m in members if "retry" in m.model_fields]
 
 
@@ -1274,7 +1282,10 @@ class TestDestinationRateLimitOverride:
         this fails loudly instead.
         """
         with_retry = _configs_with_retry()
-        assert len(with_retry) == 19, "expected 19 retry-capable configs; update the sweep"
+        # 19 built-in connectors, plus GenericDestinationConfig (#997), which
+        # carries both fields precisely so a plugin destination keeps working
+        # with `resolve_retry()` and the rate-limiter registry.
+        assert len(with_retry) == 20, "expected 20 retry-capable configs; update the sweep"
 
         missing = [m.__name__ for m in with_retry if "rate_limit" not in m.model_fields]
         assert missing == []

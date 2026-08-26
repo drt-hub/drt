@@ -27,8 +27,10 @@ Example ~/.drt/profiles.yml:
 from __future__ import annotations
 
 import os
+from dataclasses import asdict, is_dataclass
+from inspect import signature
 from pathlib import Path
-from typing import Any, Literal, TextIO
+from typing import Any, Literal, TextIO, cast
 
 import yaml
 from pydantic import BaseModel, Field
@@ -260,6 +262,32 @@ def load_observability_config(config_dir: Path | None = None) -> ObservabilityCo
 # ---------------------------------------------------------------------------
 
 
+_DISPATCHED_SOURCE_TYPES: frozenset[str] = frozenset(
+    {
+        "bigquery",
+        "duckdb",
+        "sqlite",
+        "postgres",
+        "redshift",
+        "clickhouse",
+        "mysql",
+        "snowflake",
+        "databricks",
+        "sqlserver",
+        "deltalake",
+        "iceberg",
+        "rest_api",
+    }
+)
+"""Source types :func:`load_profile` constructs itself (#997).
+
+Data, not a slice of the error sentence: the "Also registered" line is derived
+from this, so reflowing the message must not change which types drt reports as
+supported. ``tests/unit/test_plugin_config_extensibility.py`` pins it against
+the ``if source_type == ...`` chain and against the connector registry.
+"""
+
+
 def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileConfig:
     """Load a named profile from ~/.drt/profiles.yml.
 
@@ -410,6 +438,19 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             storage_options=raw.get("storage_options") or {},
         )
 
+    if source_type == "rest_api":
+        url = raw.get("url", "")
+        if not url:
+            raise ValueError("REST API profile requires 'url'.")
+        return RestApiProfile(
+            type="rest_api",
+            url=url,
+            auth=raw.get("auth"),
+            pagination=raw.get("pagination"),
+            result_path=raw.get("result_path"),
+            incremental=raw.get("incremental"),
+        )
+
     if source_type == "iceberg":
         table = raw.get("table", "")
         if not table:
@@ -423,10 +464,62 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             properties=raw.get("properties") or {},
         )
 
+    # Imported inside the function: drt.connectors.registry imports the source
+    # and destination implementations, which import this module back.
+    from drt.connectors.registry import registered_source_types, source_profile_class
+
+    # Past the built-ins: ask the connector registry before giving up (#997).
+    #
+    # The source-side half of ADR 0009's blocker. Everything above is a closed,
+    # hand-written dispatch chain, so a third-party source could register itself
+    # and still never be loadable from profiles.yml. Deliberately placed *after*
+    # the chain rather than replacing it: every built-in keeps its exact
+    # construction, including per-type defaults and the required-field checks
+    # above, and a plugin cannot shadow a built-in type.
+    #
+    # Profiles are plain dataclasses, not pydantic models, so there is no
+    # validator to hook and no generic fallback model — the registered profile
+    # class is constructed directly from the YAML mapping. Strict per-field
+    # checking of a plugin's profile is the deferred second pass, not part of
+    # #997; what *is* checked is the interface drt-core itself calls.
+    profile_class = source_profile_class(source_type) if isinstance(source_type, str) else None
+    if profile_class is not None:
+        fields = {key: value for key, value in raw.items() if key != "type"}
+        # Only a TypeError raised by the *call itself* is a profiles.yml/schema
+        # mismatch. One raised inside __init__/__post_init__ is the plugin's own
+        # bug and must not be rewritten into "your profile is wrong" — so the
+        # signature is checked up front rather than by catching broadly.
+        try:
+            signature(profile_class).bind(type=source_type, **fields)
+        except TypeError as exc:
+            raise ValueError(
+                f"Profile '{profile_name}' does not match the '{source_type}' profile "
+                f"registered by {profile_class.__module__}.{profile_class.__qualname__}: {exc}"
+            ) from exc
+        profile = profile_class(type=source_type, **fields)
+
+        # drt-core calls describe() on whatever load_profile() returns
+        # (drt/cli/output.py, drt/cli/commands/run.py, drt/mcp/tools/run_sync.py),
+        # and unlike the destination side those call sites have no hasattr guard.
+        # Fail here, naming the class, rather than with an AttributeError several
+        # layers into a run.
+        if not callable(getattr(profile, "describe", None)):
+            raise ValueError(
+                f"Source type '{source_type}' is registered with "
+                f"{profile_class.__module__}.{profile_class.__qualname__}, which does not "
+                "implement describe(). A profile class must provide describe() -> str."
+            )
+        return cast("ProfileConfig", profile)
+
+    # Types the registry knows but the chain above does not construct. Kept as a
+    # set rather than re-split from the message string: the sentence is
+    # presentation, and reflowing it must not change which types drt reports as
+    # supported.
+    also = sorted(set(registered_source_types()) - _DISPATCHED_SOURCE_TYPES)
+    also_note = f" Also registered: {', '.join(also)}." if also else ""
     raise ValueError(
         f"Unsupported source type '{source_type}'. "
-        "Supported: bigquery, duckdb, sqlite, postgres, redshift, clickhouse, "
-        "mysql, snowflake, databricks, sqlserver, deltalake, iceberg"
+        f"Supported: {', '.join(sorted(_DISPATCHED_SOURCE_TYPES))}.{also_note}"
     )
 
 
@@ -595,6 +688,45 @@ def save_profile(
             entry["catalog_name"] = profile.catalog_name
         if profile.properties:
             entry["properties"] = profile.properties
+    elif isinstance(profile, RestApiProfile):
+        # Explicit, ahead of the dataclass fallback below. rest_api is a
+        # built-in and must stay on the same path as every other built-in
+        # branch: persist the shape, never a resolved secret. `auth` is a
+        # free-form dict that may legitimately carry a literal token, so it is
+        # written only when it names env vars — anything else is dropped with a
+        # pointer, rather than landing verbatim in profiles.yml (which is what
+        # the generic dataclass fallback did once #997 gave it one).
+        entry = {"type": "rest_api", "url": profile.url}
+        if profile.auth:
+            literals = sorted(
+                key
+                for key, value in profile.auth.items()
+                if key != "type" and isinstance(value, str) and not key.endswith("_env")
+            )
+            if literals:
+                raise ValueError(
+                    f"Refusing to write profile '{profile_name}': its auth block sets "
+                    f"{', '.join(literals)} to a literal value. profiles.yml stores env var "
+                    "names, not secrets — use the matching *_env key instead."
+                )
+            entry["auth"] = profile.auth
+        for field_name in ("pagination", "result_path", "incremental"):
+            value = getattr(profile, field_name, None)
+            if value:
+                entry[field_name] = value
+    elif is_dataclass(profile) and not isinstance(profile, type):
+        # A profile from the connector registry (#997). load_profile() gained a
+        # registry fallback; without the same here drt could read a plugin
+        # profile it was unable to write back, which breaks `drt init`'s wizard
+        # for any plugin source. asdict() round-trips the dataclass the fallback
+        # constructed, dropping empty optionals so the file stays as terse as
+        # the hand-written branches above.
+        entry = {
+            key: value
+            for key, value in asdict(profile).items()
+            if value not in (None, {}, [])
+        }
+        entry["type"] = profile.type
     else:
         raise ValueError(f"Unknown profile type: {type(profile)}")
 

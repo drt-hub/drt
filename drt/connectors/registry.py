@@ -72,6 +72,91 @@ def register_source(
     _source_registry[type_name] = (profile_class, source_class)
 
 
+def _ensure_plugins_loaded() -> None:
+    """Make plugin registration happen before the registry answers a question.
+
+    Parse success depends on what is registered (#997), and registration used to
+    happen only in the Typer root callback — so the same sync YAML parsed under
+    ``drt run`` and failed under the MCP server, dagster-drt, and the
+    Airflow/Prefect ``run_drt_sync()`` entry point, with an error indistinguishable
+    from a typo. Every lookup below funnels through here instead, so the answer no
+    longer depends on which entry point the caller came in by.
+
+    :func:`drt.plugins.load_plugins` is cached per process and isolates a broken
+    plugin's exception onto its own entry, so this is cheap and cannot fail the
+    caller. Imported lazily to keep ``drt.plugins`` off this module's import path.
+    """
+    from drt.plugins import load_plugins
+
+    load_plugins()
+
+
+def is_registered_destination(type_name: str) -> bool:
+    """Is ``type_name`` a destination the registry can resolve right now?
+
+    Used by :data:`drt.config.sync_options.DestinationConfig`'s discriminator to
+    tell "a plugin registered this" from "you typed it wrong" (#997). A pure
+    membership test on purpose: it decides which union member parses the
+    payload, nothing more. Validating a plugin's fields against the registered
+    ``config_class`` is the deliberately deferred second pass ADR 0009 sketches.
+
+    Reflects whatever has been registered by the time it is called — built-ins
+    at import of this module, plugins once :func:`drt.plugins.load_plugins` has
+    run (the CLI root callback does this before any command parses config).
+    """
+    _ensure_plugins_loaded()
+    return type_name in _destination_registry
+
+
+def destination_config_class(type_name: str) -> type[Any] | None:
+    """The config class registered for ``type_name``, or ``None`` (#997).
+
+    :class:`~drt.config.base.GenericDestinationConfig` validates a plugin
+    payload against this when it is a pydantic model, so a plugin gets its own
+    config class — with its own defaults, field types, and ``describe()`` —
+    rather than the catch-all. The registry has always stored it; before #997
+    nothing read it.
+    """
+    _ensure_plugins_loaded()
+    entry = _destination_registry.get(type_name)
+    return entry[0] if entry else None
+
+
+def registered_destination_types() -> tuple[str, ...]:
+    """Every destination type the registry can resolve, sorted (#997).
+
+    Lets :class:`~drt.config.base.GenericDestinationConfig` enumerate the plugin
+    types in its JSON Schema, so ``drt validate``'s schema pass accepts exactly
+    the types its pydantic pass accepts.
+    """
+    _ensure_plugins_loaded()
+    return tuple(sorted(_destination_registry))
+
+
+def registered_source_types() -> tuple[str, ...]:
+    """Every source type the registry can resolve, sorted (#997).
+
+    Only used to make ``load_profile()``'s failure message name the plugin types
+    that *are* installed, so "unsupported" does not read as "your plugin was
+    never seen".
+    """
+    _ensure_plugins_loaded()
+    return tuple(sorted(_source_registry))
+
+
+def source_profile_class(type_name: str) -> type[Any] | None:
+    """The profile class registered for ``type_name``, or ``None``.
+
+    ``load_profile()`` builds a plugin's profile from this once its hand-written
+    ``if source_type == ...`` chain has run out of built-ins (#997). The
+    destination side has no equivalent because pydantic constructs the config
+    itself; profiles are plain dataclasses with no validator to hook.
+    """
+    _ensure_plugins_loaded()
+    entry = _source_registry.get(type_name)
+    return entry[0] if entry else None
+
+
 def get_destination(config: DestinationConfig) -> Destination:
     """Get a destination instance for the given config.
 

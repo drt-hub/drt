@@ -8,9 +8,11 @@ union). ``models.py`` re-exports everything here — import sites are unchanged.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Annotated, Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, GetJsonSchemaHandler, model_validator
+from pydantic.json_schema import JsonSchemaValue
 
 LITERAL_CREDENTIAL_KEY = "literal"
 """Rate-limit identity for a config that inlines its credential (#769).
@@ -28,6 +30,21 @@ collapse into one bucket. That errs *toward* throttling — a shared bucket is
 stricter than two, so the failure mode is a slower sync, never a 429. Naming
 the env var is the documented way to get per-account buckets.
 """
+
+
+def destination_type_of(value: Any) -> str | None:
+    """The ``type`` a destination payload declares, or ``None``.
+
+    Shared by :data:`~drt.config.sync_options.DestinationConfig`'s discriminator
+    and :class:`GenericDestinationConfig`'s wrap validator, which must agree on
+    what "the type" is or the union routes one way and validates another.
+
+    ``Mapping``, not ``dict``: pydantic accepts any mapping as model input, and
+    the string discriminator this replaced extracted the tag itself — narrowing
+    to ``dict`` silently regressed MappingProxyType/UserDict callers (#997).
+    """
+    type_name = value.get("type") if isinstance(value, Mapping) else getattr(value, "type", None)
+    return type_name if isinstance(type_name, str) else None
 
 
 class DescribableConfig(BaseModel):
@@ -353,3 +370,165 @@ class RateLimitConfig(BaseModel):
     # behaviour exactly; a value lets an idle period accumulate up to N
     # requests' worth of credit that can be spent back-to-back.
     burst: int | None = Field(default=None, ge=1)
+
+
+# A note on the docstring below: pydantic publishes a model's docstring as the
+# `description` of its JSON Schema definition, and those schemas are bundled
+# into the VS Code extension, where it becomes hover text over a user's YAML.
+# None of the 34 built-in destination configs carries one. So the rationale for
+# this class lives out here in comments, and the docstring stays a short line
+# aimed at whoever is hovering over `type:` in an editor.
+#
+# ADR 0009 recorded why a plugin could register a connector and still never be
+# nameable in a sync YAML: `DestinationConfig` was a closed union, so an
+# unrecognized `type` failed validation *before*
+# `drt.connectors.registry.get_destination` was ever consulted. This is the
+# catch-all member that ends that — reached only for a `type` the connector
+# registry already knows, never for one of the built-ins, which keeps their
+# strict per-field validation and their error messages untouched.
+#
+# The registry stores each connector's `config_class`, and the wrap validator
+# below hands validation to it, so a plugin that ships a pydantic config gets its
+# own model: its field types are enforced, its defaults apply, and its `describe`
+# / `rate_limit_key` overrides run. This model is the fallback for a plugin that
+# registered something else (a dataclass, or nothing usable), where drt-core has
+# no schema to check against and `extra="allow"` carries the fields verbatim.
+#
+# Names drt-core itself reads off a destination config are refused on that
+# fallback path rather than absorbed — see `_reject_reserved_extras`.
+class GenericDestinationConfig(DescribableConfig):
+    """A destination type provided by a third-party connector package."""
+
+    model_config = ConfigDict(extra="allow")
+
+    # `str`, not a Literal — that is the entire point. Every other member of the
+    # union pins `type` to one value; this one accepts whatever the registry
+    # recognizes, which is what lets a plugin type survive parsing.
+    type: str
+
+    # Mirrored from the built-in configs so the shared machinery keeps working
+    # for a plugin destination: `resolve_retry(config.retry, sync_options)` is
+    # called by connectors generically, and the rate-limiter registry reads
+    # `rate_limit`. Without these two a plugin would silently lose both.
+    retry: RetryConfig | None = None
+    rate_limit: RateLimitConfig | None = None
+
+    # Read off `sync.destination` by name, without isinstance, in code that
+    # assumes the built-ins' validated shapes: `lookups` in engine/sync.py and
+    # docs/builder.py, `table` in cli/commands/clean.py, `upsert_key` in
+    # engine/diff.py. Under `extra="allow"` a plugin field with one of these
+    # names arrives as raw YAML and reaches that code unvalidated — an
+    # AttributeError mid-run, after extraction has started. Refuse at parse
+    # time instead, naming the collision.
+    _RESERVED_EXTRAS: ClassVar[frozenset[str]] = frozenset(
+        {"lookups", "table", "upsert_key", "model", "mode"}
+    )
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _use_registered_config_class(cls, value: Any, handler: Any) -> Any:
+        """Validate against the plugin's own config class when it has one.
+
+        Without this the plugin's registered ``config_class`` is never
+        instantiated: every plugin destination became a
+        ``GenericDestinationConfig``, so the ``assert isinstance(config,
+        MyConfig)`` that ``docs/guides/building-a-destination.md`` tells authors
+        to write failed, and every default declared on their model was lost.
+
+        Falls through to this model whenever the registry has no usable pydantic
+        class for the type, which is also what keeps parsing possible before
+        registration has happened at all.
+        """
+        type_name = destination_type_of(value)
+        if type_name is not None:
+            # Lazy: drt.connectors.registry imports the destination
+            # implementations, which import this module back.
+            from drt.connectors.registry import destination_config_class
+
+            config_class = destination_config_class(type_name)
+            # Must be a *subclass of this model*, not merely a BaseModel.
+            # `SyncConfig.destination` is a closed discriminated union, so an
+            # arbitrary model parsed here would leave the field holding a value
+            # outside its own declared type: `SyncConfig.model_dump()` then falls
+            # back to a warning-driven best-effort path (`drt validate --output
+            # json`, `drt docs generate`, the MCP tools all hit it), and any
+            # `retry` / `rate_limit` the operator set is dropped on the floor
+            # rather than reaching `resolve_retry()`. Subclassing keeps the
+            # instance inside the union, inherits both fields, and — with
+            # `SerializeAsAny` on the union member — serializes the plugin's own
+            # fields too. A plugin registering anything else falls through to
+            # this model, which carries its fields as extras.
+            if (
+                isinstance(config_class, type)
+                and issubclass(config_class, cls)
+                and config_class is not cls
+            ):
+                return config_class.model_validate(value)
+
+        # Fallback path only. The reserved-name check lives here rather than in
+        # an `after` validator because the branch above returns a *different*
+        # model, which an `after` validator declared on this class would still
+        # run against.
+        instance = handler(value)
+        clashes = sorted(cls._RESERVED_EXTRAS & set(instance.model_extra or {}))
+        if clashes:
+            raise ValueError(
+                f"destination type '{instance.type}' sets {', '.join(clashes)}, which drt-core "
+                "reads off a destination config itself. Register a pydantic config_class "
+                "declaring these fields so they are validated, or rename them."
+            )
+        return instance
+
+    def describe(self) -> str:
+        # Type-only, overriding DescribableConfig's `f"{type} (detail)"`: there
+        # is no `_describe_detail` to call, and inventing one out of arbitrary
+        # extra fields is exactly the #696 leak (hosts, URLs, phone numbers)
+        # that `describe_safe` exists to prevent. `describe()` output ships
+        # verbatim into the generated docs site.
+        return self.type
+
+    def describe_safe(self) -> str:
+        return self.type
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: Any, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        """Pin ``type`` to the plugin types actually registered (#997).
+
+        Two problems, one fix. ``SyncConfig``'s generated schema renders the
+        destination union as ``oneOf``, which requires a payload to match
+        *exactly* one member — and this model accepts ``type: str`` plus
+        arbitrary extras, so left open a plain ``type: slack`` matches both
+        ``SlackDestinationConfig`` and this one, and every valid built-in sync
+        fails ``drt validate``. Widening it the other way (any string that is
+        not a built-in) fixes that but makes the schema accept ``type:
+        invalid_type``, losing the typo detection the closed union gave us.
+
+        Enumerating the registry avoids both: the enum holds exactly the types
+        registered but not built in, so a built-in never matches this member and
+        an unregistered typo matches nothing at all. With no plugins installed
+        the enum is empty and matches nothing, which is the pre-#997 behaviour
+        exactly. This mirrors ``_destination_tag``'s three-way decision, so the
+        schema and the parser cannot disagree.
+
+        The schema therefore reflects the plugins installed when it is
+        generated. That is a property of ``drt schema`` output, not a bug: a
+        static file cannot describe types that arrive by ``pip install``.
+        Imported lazily — the tag set is derived from the union, which imports
+        this module.
+        """
+        schema = handler(core_schema)
+        from drt.config.sync_options import _BUILTIN_DESTINATION_TAGS
+        from drt.connectors.registry import registered_destination_types
+
+        plugin_types = sorted(set(registered_destination_types()) - _BUILTIN_DESTINATION_TAGS)
+        schema.setdefault("properties", {})["type"] = {
+            "type": "string",
+            "enum": plugin_types,
+            "description": (
+                "Connector type registered by a third-party package. Built-in "
+                "types are validated against their own schema instead."
+            ),
+        }
+        return schema
