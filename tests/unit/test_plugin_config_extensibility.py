@@ -17,6 +17,7 @@ must not have moved — because that is what an extensible union risks.
 from __future__ import annotations
 
 import textwrap
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -26,7 +27,12 @@ from pydantic import BaseModel, Tag, ValidationError
 
 import drt.connectors.registry as registry
 from drt.config.base import GenericDestinationConfig
-from drt.config.credentials import _DISPATCHED_SOURCE_TYPES, load_profile, save_profile
+from drt.config.credentials import (
+    _DISPATCHED_SOURCE_TYPES,
+    RestApiProfile,
+    load_profile,
+    save_profile,
+)
 from drt.config.models import SlackDestinationConfig, SyncConfig
 from drt.config.sync_options import _BUILTIN_DESTINATION_TAGS, GENERIC_DESTINATION_TAG
 
@@ -502,8 +508,7 @@ def test_plugin_config_class_is_used_when_it_is_a_pydantic_model(clean_registry)
     to write in `load()` failed.
     """
 
-    class AcmeConfig(BaseModel):
-        type: str
+    class AcmeConfig(GenericDestinationConfig):
         instance_url: str
         batch_size: int = 500
 
@@ -519,8 +524,7 @@ def test_plugin_config_class_is_used_when_it_is_a_pydantic_model(clean_registry)
 
 
 def test_plugin_config_class_enforces_its_own_required_fields(clean_registry) -> None:
-    class AcmeConfig(BaseModel):
-        type: str
+    class AcmeConfig(GenericDestinationConfig):
         instance_url: str
 
     clean_registry.register_destination(PLUGIN_DESTINATION, AcmeConfig, _PluginDestination)
@@ -535,8 +539,7 @@ def test_distinct_plugin_destinations_stay_distinct_in_docs(clean_registry) -> N
     different systems into a single lineage node.
     """
 
-    class AcmeConfig(BaseModel):
-        type: str
+    class AcmeConfig(GenericDestinationConfig):
         instance_url: str
 
         def describe(self) -> str:
@@ -557,3 +560,89 @@ def test_fallback_refuses_extras_drt_core_reads_itself(clean_registry) -> None:
     clean_registry.register_destination(PLUGIN_DESTINATION, object, _PluginDestination)
     with pytest.raises(ValidationError, match="drt-core reads off a destination config"):
         _sync({"type": PLUGIN_DESTINATION, "lookups": {"a": {"table": "t"}}})
+
+
+def test_config_class_must_subclass_the_catch_all_to_take_over(clean_registry) -> None:
+    """A plugin model outside the union is not delegated to.
+
+    `SyncConfig.destination` is a closed discriminated union; parsing an
+    arbitrary BaseModel there left the field holding a value outside its own
+    declared type, so dumping the *container* fell back to pydantic's
+    warning-driven best-effort path and any operator-set retry/rate_limit was
+    dropped before it could reach resolve_retry().
+    """
+
+    class Outside(BaseModel):
+        type: str
+        instance_url: str
+
+    clean_registry.register_destination(PLUGIN_DESTINATION, Outside, _PluginDestination)
+    dest = _sync(
+        {"type": PLUGIN_DESTINATION, "instance_url": "https://x", "retry": {"max_attempts": 7}}
+    )
+
+    assert isinstance(dest, GenericDestinationConfig)
+    assert dest.retry is not None and dest.retry.max_attempts == 7
+    assert dest.model_extra == {"instance_url": "https://x"}
+
+
+def test_subclassed_config_class_keeps_retry_and_serializes_its_own_fields(clean_registry) -> None:
+    """The documented contract: subclass, and you get both halves."""
+
+    class AcmeConfig(GenericDestinationConfig):
+        instance_url: str
+
+    clean_registry.register_destination(PLUGIN_DESTINATION, AcmeConfig, _PluginDestination)
+    sync = SyncConfig.model_validate(
+        {
+            "name": "s",
+            "model": "m",
+            "destination": {
+                "type": PLUGIN_DESTINATION,
+                "instance_url": "https://acme",
+                "retry": {"max_attempts": 7},
+            },
+        }
+    )
+    assert isinstance(sync.destination, AcmeConfig)
+    assert sync.destination.retry is not None and sync.destination.retry.max_attempts == 7
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        dumped = sync.model_dump()
+    # No pydantic serializer warnings, and SerializeAsAny keeps the subclass's
+    # own declared field in the dump rather than the union member's schema.
+    assert [w for w in caught if "serializer" in str(w.message).lower()] == []
+    assert dumped["destination"]["instance_url"] == "https://acme"
+
+
+def test_save_profile_refuses_a_literal_rest_api_token(tmp_path: Path) -> None:
+    """rest_api must stay on the *_env-only path every other built-in uses.
+
+    Without its own branch it fell into the dataclass fallback #997 added, and
+    asdict() wrote the raw token straight into profiles.yml.
+    """
+    with pytest.raises(ValueError, match="stores env var names, not secrets"):
+        save_profile(
+            "myrest",
+            RestApiProfile(
+                type="rest_api",
+                url="https://api.example.com/v1",
+                auth={"type": "bearer", "token": "sk-live-SECRET-12345"},
+            ),
+            config_dir=tmp_path,
+        )
+
+
+def test_save_profile_writes_rest_api_env_var_form(tmp_path: Path) -> None:
+    save_profile(
+        "ok",
+        RestApiProfile(
+            type="rest_api", url="https://x", auth={"type": "bearer", "token_env": "TOK"}
+        ),
+        config_dir=tmp_path,
+    )
+    written = (tmp_path / "profiles.yml").read_text()
+    assert "token_env: TOK" in written
+    assert "sk-live" not in written
+    assert isinstance(load_profile("ok", config_dir=tmp_path), RestApiProfile)

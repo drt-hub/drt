@@ -6,10 +6,17 @@ the three ``destinations_*`` modules and consumed by :class:`SyncConfig`.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Annotated, Any, Literal, get_args
 
-from pydantic import BaseModel, Discriminator, Field, PrivateAttr, Tag, model_validator
+from pydantic import (
+    BaseModel,
+    Discriminator,
+    Field,
+    PrivateAttr,
+    SerializeAsAny,
+    Tag,
+    model_validator,
+)
 
 # RateLimitConfig is defined in base.py (beside RetryConfig) because the
 # destination configs imported below now carry a rate_limit override; it is
@@ -17,7 +24,12 @@ from pydantic import BaseModel, Discriminator, Field, PrivateAttr, Tag, model_va
 # GenericDestinationConfig joins them for the same reason — it subclasses
 # DescribableConfig and carries retry/rate_limit, so it belongs beside them
 # rather than here, and is re-exported through drt.config.models (#997).
-from drt.config.base import GenericDestinationConfig, RateLimitConfig, RetryConfig
+from drt.config.base import (
+    GenericDestinationConfig,
+    RateLimitConfig,
+    RetryConfig,
+    destination_type_of,
+)
 from drt.config.destinations_saas import (
     AirtableDestinationConfig,
     AmplitudeDestinationConfig,
@@ -616,11 +628,8 @@ def _destination_tag(value: Any) -> str | None:
     Returning ``None`` for a missing/non-string ``type`` reproduces today's
     ``union_tag_not_found``.
     """
-    # `Mapping`, not `dict`: pydantic accepts any mapping as model input, and the
-    # string discriminator this replaced extracted the tag itself — narrowing to
-    # `dict` here silently regressed MappingProxyType/UserDict callers (#997).
-    type_name = value.get("type") if isinstance(value, Mapping) else getattr(value, "type", None)
-    if not isinstance(type_name, str):
+    type_name = destination_type_of(value)
+    if type_name is None:
         return None
     if type_name in _BUILTIN_DESTINATION_TAGS:
         return type_name
@@ -684,7 +693,10 @@ DestinationConfig = Annotated[
     | Annotated[BigQueryDestinationConfig, Tag("bigquery")]
     | Annotated[AirtableDestinationConfig, Tag("airtable")]
     | Annotated[KlaviyoDestinationConfig, Tag("klaviyo")]
-    | Annotated[GenericDestinationConfig, Tag(GENERIC_DESTINATION_TAG)],
+    # SerializeAsAny: a registered config_class is a *subclass* of this member,
+    # and pydantic otherwise serializes through the declared type's schema,
+    # silently dropping every field the subclass declares.
+    | Annotated[SerializeAsAny[GenericDestinationConfig], Tag(GENERIC_DESTINATION_TAG)],
     Discriminator(_destination_tag),
 ]
 

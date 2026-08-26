@@ -688,6 +688,32 @@ def save_profile(
             entry["catalog_name"] = profile.catalog_name
         if profile.properties:
             entry["properties"] = profile.properties
+    elif isinstance(profile, RestApiProfile):
+        # Explicit, ahead of the dataclass fallback below. rest_api is a
+        # built-in and must stay on the same path as every other built-in
+        # branch: persist the shape, never a resolved secret. `auth` is a
+        # free-form dict that may legitimately carry a literal token, so it is
+        # written only when it names env vars — anything else is dropped with a
+        # pointer, rather than landing verbatim in profiles.yml (which is what
+        # the generic dataclass fallback did once #997 gave it one).
+        entry = {"type": "rest_api", "url": profile.url}
+        if profile.auth:
+            literals = sorted(
+                key
+                for key, value in profile.auth.items()
+                if key != "type" and isinstance(value, str) and not key.endswith("_env")
+            )
+            if literals:
+                raise ValueError(
+                    f"Refusing to write profile '{profile_name}': its auth block sets "
+                    f"{', '.join(literals)} to a literal value. profiles.yml stores env var "
+                    "names, not secrets — use the matching *_env key instead."
+                )
+            entry["auth"] = profile.auth
+        for field_name in ("pagination", "result_path", "incremental"):
+            value = getattr(profile, field_name, None)
+            if value:
+                entry[field_name] = value
     elif is_dataclass(profile) and not isinstance(profile, type):
         # A profile from the connector registry (#997). load_profile() gained a
         # registry fallback; without the same here drt could read a plugin

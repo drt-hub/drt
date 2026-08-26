@@ -32,6 +32,21 @@ the env var is the documented way to get per-account buckets.
 """
 
 
+def destination_type_of(value: Any) -> str | None:
+    """The ``type`` a destination payload declares, or ``None``.
+
+    Shared by :data:`~drt.config.sync_options.DestinationConfig`'s discriminator
+    and :class:`GenericDestinationConfig`'s wrap validator, which must agree on
+    what "the type" is or the union routes one way and validates another.
+
+    ``Mapping``, not ``dict``: pydantic accepts any mapping as model input, and
+    the string discriminator this replaced extracted the tag itself — narrowing
+    to ``dict`` silently regressed MappingProxyType/UserDict callers (#997).
+    """
+    type_name = value.get("type") if isinstance(value, Mapping) else getattr(value, "type", None)
+    return type_name if isinstance(type_name, str) else None
+
+
 class DescribableConfig(BaseModel):
     """Mixin base for destination configs whose ``describe()`` is the canonical
     ``f"{type} (detail)"`` shape (#721). Trivial subclasses supply
@@ -424,18 +439,28 @@ class GenericDestinationConfig(DescribableConfig):
         class for the type, which is also what keeps parsing possible before
         registration has happened at all.
         """
-        type_name = (
-            value.get("type") if isinstance(value, Mapping) else getattr(value, "type", None)
-        )
-        if isinstance(type_name, str):
+        type_name = destination_type_of(value)
+        if type_name is not None:
             # Lazy: drt.connectors.registry imports the destination
             # implementations, which import this module back.
             from drt.connectors.registry import destination_config_class
 
             config_class = destination_config_class(type_name)
+            # Must be a *subclass of this model*, not merely a BaseModel.
+            # `SyncConfig.destination` is a closed discriminated union, so an
+            # arbitrary model parsed here would leave the field holding a value
+            # outside its own declared type: `SyncConfig.model_dump()` then falls
+            # back to a warning-driven best-effort path (`drt validate --output
+            # json`, `drt docs generate`, the MCP tools all hit it), and any
+            # `retry` / `rate_limit` the operator set is dropped on the floor
+            # rather than reaching `resolve_retry()`. Subclassing keeps the
+            # instance inside the union, inherits both fields, and — with
+            # `SerializeAsAny` on the union member — serializes the plugin's own
+            # fields too. A plugin registering anything else falls through to
+            # this model, which carries its fields as extras.
             if (
                 isinstance(config_class, type)
-                and issubclass(config_class, BaseModel)
+                and issubclass(config_class, cls)
                 and config_class is not cls
             ):
                 return config_class.model_validate(value)

@@ -32,7 +32,7 @@ make test                  # verify everything passes before you start
 Open `drt/config/models.py` and add your config class. Every destination config must have a `type` field with a `Literal` value that matches the YAML `type:` key.
 
 ```python
-class WebhookDestinationConfig(BaseModel):
+class WebhookDestinationConfig(GenericDestinationConfig):
     type: Literal["webhook"]
     url: str | None = None
     url_env: str | None = None
