@@ -1,6 +1,6 @@
 """drt — data reverse tool.
 
-Reverse ETL for the code-first data stack.
+Reverse ETL as code — no UI, no lock-in, no per-row bill.
 """
 
 from importlib.metadata import PackageNotFoundError, version

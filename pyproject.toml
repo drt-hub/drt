@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "drt-core"
 version = "0.9.1"
-description = "Reverse ETL for the code-first data stack"
+description = "Reverse ETL as code — no UI, no lock-in, no per-row bill."
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "drt-hub", email = "masukai9612kf@gmail.com" }]

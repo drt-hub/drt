@@ -12,6 +12,6 @@ import typer
 
 app = typer.Typer(
     name="drt",
-    help="Reverse ETL for the code-first data stack.",
+    help="Reverse ETL as code — no UI, no lock-in, no per-row bill.",
     no_args_is_help=True,
 )

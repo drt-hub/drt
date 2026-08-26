@@ -11,17 +11,32 @@ dlt (load into DWH) → dbt (transform) → drt (activate out of DWH)
 ```
 
 - **Category:** Reverse ETL
-- **Tagline:** "Reverse ETL for the code-first data stack"
+- **Tagline:** "Reverse ETL as code — no UI, no lock-in, no per-row bill."
 - **Install:** `pip install drt-core` or `uv add drt-core`
 - **Package name:** `drt-core` (PyPI) — CLI command is `drt`
 - **Current version:** v0.9.0
 
 ## What drt is NOT
 
+drt's competitive set is commercial reverse-ETL tools (Census, Hightouch,
+RudderStack Reverse ETL, and similar), not dlt or dbt — those are adjacent
+pipeline stages. Against that competitive set, four things are deliberately
+excluded from `drt-core`, not merely unbuilt — see
+[ADR 0011](../adr/0011-subtraction-positioning-vs-reverse-etl.md):
+
 - Not a data loader (that's dlt)
 - Not a transformer (that's dbt)
 - Not a scheduler — it runs via CLI or cron, not a built-in scheduler
-- Not a SaaS — fully self-hosted OSS (Apache 2.0)
+- Not a SaaS / hosted runtime — fully self-hosted OSS (Apache 2.0); your
+  data never leaves your own infrastructure, and there is no per-row bill
+- Not a UI or dashboard — config-as-code (YAML, git-reviewable) is the
+  product, not a placeholder for one
+- Not an audience/segmentation builder — building the record set to sync is
+  a SQL/dbt-modeling problem; drt syncs exactly what `sync.model` /
+  `sync.query` points it at
+- Not a gatekept connector catalog — destinations are Protocol
+  implementations, extensible via the plugin system without drt-hub in the
+  loop
 
 ## Architecture
 

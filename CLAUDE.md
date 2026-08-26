@@ -6,7 +6,7 @@ This file gives AI agents (Claude Code, Cursor, etc.) the context needed to work
 
 **drt** (data reverse tool) is a CLI tool that syncs data from a data warehouse (BigQuery) to external services via declarative YAML configuration. Think of it as the reverse of dlt: `dlt` loads data *into* a DWH; `drt` activates data *out of* a DWH.
 
-**Tagline:** "Reverse ETL for the code-first data stack."
+**Tagline:** "Reverse ETL as code — no UI, no lock-in, no per-row bill." (see [ADR 0011](docs/adr/0011-subtraction-positioning-vs-reverse-etl.md) for the rationale)
 
 ## Architecture
 
