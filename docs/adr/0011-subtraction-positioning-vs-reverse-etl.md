@@ -1,6 +1,6 @@
 # ADR 0011 — Subtraction as positioning: what drt deliberately does not build
 
-- **Status:** Proposed.
+- **Status:** Accepted 2026-08-26.
 - **Issues:** none yet — this ADR precedes any issue; it exists to give
   future feature-request triage a written boundary to point to, the same
   role ADR 0008 plays for RBAC.
@@ -87,9 +87,14 @@ scope as an OSS sync engine.
   without the dashboard, the audience builder, or the row-based bill" is a
   sharper claim than a feature-parity comparison table, and it's a claim
   competitors structurally cannot match without abandoning their own
-  business model. Drafting that copy is out of scope for this ADR (it's a
-  product-voice decision, not an architecture one) — this ADR only fixes
-  the underlying claim the copy should make.
+  business model. A full feature-matrix comparison against named
+  competitors is deliberately not the vehicle for this — it goes stale and
+  invites line-by-line rebuttal. A single factual claim carries more weight
+  and is cheaper to keep true: **your data never leaves your own
+  infrastructure — commercial reverse-ETL tools route it through their
+  hosted service to sync it.** Drafting the rest of that copy is out of
+  scope for this ADR (it's a product-voice decision, not an architecture
+  one) — this ADR only fixes the underlying claim the copy should make.
 - **Contribution triage gets a written default.** `CONTRIBUTING.md` (or the
   PR-triage habits already tracked in this project's memory) can now point
   to this ADR when declining a UI/dashboard/billing/catalog PR, instead of

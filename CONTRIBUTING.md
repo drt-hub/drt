@@ -130,7 +130,7 @@ drt uses a lightweight **soft assignment** model so contributors don't step on e
 - Comment on the issue saying you'd like to work on it. A maintainer will assign it to you.
 - **Limit: 1–2 issues at a time per contributor.** Finish (or open a draft PR) before grabbing more.
 - **Stale rule: 14 days of no progress → unassigned.** A friendly nudge will come first. Pick it back up anytime by commenting again.
-- **Larger features** (new integrations, extensions, big refactors): post a short design comment first and wait for maintainer feedback before implementing — saves rework.
+- **Larger features** (new integrations, extensions, big refactors): post a short design comment first and wait for maintainer feedback before implementing — saves rework. Before proposing a UI/dashboard, an audience/segmentation builder, a hosted/managed runtime, or a proprietary connector catalog specifically, check [`CLAUDE.md`'s "What NOT to do"](CLAUDE.md#what-not-to-do) and [ADR 0011](docs/adr/0011-subtraction-positioning-vs-reverse-etl.md) first — these are deliberately out of scope for `drt-core`, not merely unbuilt, so a PR proposing one will likely be declined regardless of implementation quality.
 - **Small/quick issues** (typos, single-line fixes): no need to ask — open the PR directly. First PR wins.
 
 This is to keep momentum, not to gatekeep. If you're unsure, just ask in the issue.
