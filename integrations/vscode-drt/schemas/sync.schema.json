@@ -1448,6 +1448,44 @@
       "title": "GCSDestinationConfig",
       "type": "object"
     },
+    "GenericDestinationConfig": {
+      "additionalProperties": true,
+      "description": "A destination type provided by a third-party connector package.",
+      "properties": {
+        "type": {
+          "description": "Connector type registered by a third-party package. Built-in types are validated against their own schema instead.",
+          "enum": [],
+          "type": "string"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "GenericDestinationConfig",
+      "type": "object"
+    },
     "GitHubActionsDestinationConfig": {
       "properties": {
         "type": {
@@ -5002,45 +5040,6 @@
       "type": "string"
     },
     "destination": {
-      "discriminator": {
-        "mapping": {
-          "airtable": "#/$defs/AirtableDestinationConfig",
-          "amplitude": "#/$defs/AmplitudeDestinationConfig",
-          "azure_blob": "#/$defs/AzureBlobDestinationConfig",
-          "bigquery": "#/$defs/BigQueryDestinationConfig",
-          "clickhouse": "#/$defs/ClickHouseDestinationConfig",
-          "databricks": "#/$defs/DatabricksDestinationConfig",
-          "discord": "#/$defs/DiscordDestinationConfig",
-          "elasticsearch": "#/$defs/ElasticsearchDestinationConfig",
-          "email_smtp": "#/$defs/EmailSmtpDestinationConfig",
-          "file": "#/$defs/FileDestinationConfig",
-          "gcs": "#/$defs/GCSDestinationConfig",
-          "github_actions": "#/$defs/GitHubActionsDestinationConfig",
-          "google_ads": "#/$defs/GoogleAdsDestinationConfig",
-          "google_sheets": "#/$defs/GoogleSheetsDestinationConfig",
-          "hubspot": "#/$defs/HubSpotDestinationConfig",
-          "intercom": "#/$defs/IntercomDestinationConfig",
-          "jira": "#/$defs/JiraDestinationConfig",
-          "klaviyo": "#/$defs/KlaviyoDestinationConfig",
-          "linear": "#/$defs/LinearDestinationConfig",
-          "mixpanel": "#/$defs/MixpanelDestinationConfig",
-          "mysql": "#/$defs/MySQLDestinationConfig",
-          "notion": "#/$defs/NotionDestinationConfig",
-          "parquet": "#/$defs/ParquetDestinationConfig",
-          "postgres": "#/$defs/PostgresDestinationConfig",
-          "rest_api": "#/$defs/RestApiDestinationConfig",
-          "s3": "#/$defs/S3DestinationConfig",
-          "salesforce_bulk": "#/$defs/SalesforceBulkDestinationConfig",
-          "sendgrid": "#/$defs/SendGridDestinationConfig",
-          "slack": "#/$defs/SlackDestinationConfig",
-          "snowflake": "#/$defs/SnowflakeDestinationConfig",
-          "staged_upload": "#/$defs/StagedUploadDestinationConfig",
-          "teams": "#/$defs/TeamsDestinationConfig",
-          "twilio": "#/$defs/TwilioDestinationConfig",
-          "zendesk": "#/$defs/ZendeskDestinationConfig"
-        },
-        "propertyName": "type"
-      },
       "oneOf": [
         {
           "$ref": "#/$defs/RestApiDestinationConfig"
@@ -5143,6 +5142,9 @@
         },
         {
           "$ref": "#/$defs/KlaviyoDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/GenericDestinationConfig"
         }
       ],
       "title": "Destination"

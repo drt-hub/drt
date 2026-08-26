@@ -356,27 +356,30 @@ class RateLimitConfig(BaseModel):
     burst: int | None = Field(default=None, ge=1)
 
 
+# A note on the docstring below: pydantic publishes a model's docstring as the
+# `description` of its JSON Schema definition, and those schemas are bundled
+# into the VS Code extension, where it becomes hover text over a user's YAML.
+# None of the 34 built-in destination configs carries one. So the rationale for
+# this class lives out here in comments, and the docstring stays a short line
+# aimed at whoever is hovering over `type:` in an editor.
+#
+# ADR 0009 recorded why a plugin could register a connector and still never be
+# nameable in a sync YAML: `DestinationConfig` was a closed union, so an
+# unrecognized `type` failed validation *before*
+# `drt.connectors.registry.get_destination` was ever consulted. This is the
+# catch-all member that ends that — reached only for a `type` the connector
+# registry already knows, never for one of the built-ins, which keeps their
+# strict per-field validation and their error messages untouched.
+#
+# `extra="allow"` because the plugin's own fields are, by definition, unknown to
+# drt-core: they are carried verbatim so the plugin's destination implementation
+# can read them off the config it is handed. That is the whole trade ADR 0009
+# flagged for this option — a typo'd *plugin* field is kept rather than
+# rejected, because nothing here knows which fields are real. The registry
+# stores a `config_class` that could tighten this later; wiring that second pass
+# up is deliberately not part of #997.
 class GenericDestinationConfig(DescribableConfig):
-    """A destination whose ``type`` came from a third-party package (#997).
-
-    ADR 0009 recorded why a plugin could register a connector and still never
-    be nameable in a sync YAML: :data:`~drt.config.sync_options.DestinationConfig`
-    is a closed union, so an unrecognized ``type`` failed validation *before*
-    :func:`drt.connectors.registry.get_destination` was ever consulted. This is
-    the catch-all member that ends that — reached only for a ``type`` the
-    connector registry already knows, never for one of the built-ins.
-
-    ``extra="allow"`` because the plugin's own fields are, by definition,
-    unknown to drt-core: they are carried verbatim so the plugin's destination
-    implementation can read them off the config it is handed. That is the whole
-    trade ADR 0009 flagged for this option — a typo'd *plugin* field is kept
-    rather than rejected, because nothing here knows which fields are real. The
-    registry stores a ``config_class`` that could tighten this later; wiring
-    that second pass up is deliberately **not** part of #997.
-
-    Built-in types never reach this model, so their strict per-field validation
-    and their error messages are untouched.
-    """
+    """A destination type provided by a third-party connector package."""
 
     model_config = ConfigDict(extra="allow")
 
