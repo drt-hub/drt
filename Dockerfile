@@ -1,7 +1,7 @@
 FROM python:3.12-slim AS base
 
 LABEL maintainer="drt-hub" \
-      description="Reverse ETL for the code-first data stack"
+      description="Reverse ETL as code — no UI, no lock-in, no per-row bill."
 
 WORKDIR /app
 

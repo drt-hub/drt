@@ -50,17 +50,25 @@ hasn't been built yet.**
    is no metered infrastructure to bill against in the first place.
 3. **No audience/segmentation builder.** Building the record set to sync is
    a SQL/dbt-modeling problem, not a reverse-ETL problem — drt reads
-   whatever query or model a sync config points it at (`sync.model` /
-   `sync.query`) and syncs exactly that. Commercial tools fold segmentation
-   into the sync tool because their user often isn't SQL-fluent; drt's user
-   already has dbt (or equivalent) for that work, and duplicating it would
-   be the same "one tool doing four jobs" mistake this ADR is naming.
+   whatever query or model a sync config's required `model` field points it
+   at (raw SQL or a dbt-style reference) and syncs exactly that. Commercial
+   tools fold segmentation into the sync tool because their user often
+   isn't SQL-fluent; drt's user already has dbt (or equivalent) for that
+   work, and duplicating it would be the same "one tool doing four jobs"
+   mistake this ADR is naming.
 4. **No proprietary connector catalog.** Destinations are Protocol
-   implementations (`drt/destinations/base.py`), extensible via the plugin
-   system (#297) without drt-hub as a gatekeeper. A closed connector catalog
-   is a common commercial reverse-ETL lock-in mechanism; drt's answer is
-   architectural, not a promise — anyone can ship a destination without
-   asking.
+   implementations (`drt/destinations/base.py`), and the plugin system
+   (#297) already discovers and registers third-party `drt.destinations`
+   entry points without drt-hub as a gatekeeper. **This is the architectural
+   direction, not yet the full capability**: a registered third-party
+   destination's `type` still can't be named in sync YAML today, because
+   `SyncConfig`/`load_profile()` validate against a closed, hand-enumerated
+   type union before the registry is ever consulted — a real, tracked gap
+   (ADR 0009, follow-up #997), not a promise already delivered. What *is*
+   already true: no drt-hub approval process, catalog fee, or gatekeeping
+   step sits between writing a connector and it becoming usable once #997
+   closes — unlike a commercial reverse-ETL vendor's closed catalog, which
+   is a standing policy, not a temporary implementation gap.
 
 None of these four are framed as "not yet" — they are the position. A
 feature request that reintroduces any of them into drt-core should be
@@ -90,9 +98,14 @@ scope as an OSS sync engine.
   business model. A full feature-matrix comparison against named
   competitors is deliberately not the vehicle for this — it goes stale and
   invites line-by-line rebuttal. A single factual claim carries more weight
-  and is cheaper to keep true: **your data never leaves your own
-  infrastructure — commercial reverse-ETL tools route it through their
-  hosted service to sync it.** Drafting the rest of that copy is out of
+  and is cheaper to keep true: **your data goes straight from your
+  warehouse to the destination, never through a drt-hosted intermediary —
+  commercial reverse-ETL tools route it through their hosted service to
+  sync it.** (Scoped deliberately: a sync's destination is still whatever
+  external service the sync config names — HubSpot, Slack, a REST API —
+  the claim is about the absence of a drt-operated middleman, not about
+  data staying inside the operator's own infrastructure forever.) Drafting
+  the rest of that copy is out of
   scope for this ADR (it's a product-voice decision, not an architecture
   one) — this ADR only fixes the underlying claim the copy should make.
 - **Contribution triage gets a written default.** `CONTRIBUTING.md` (or the

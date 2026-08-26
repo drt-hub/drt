@@ -27,15 +27,19 @@ excluded from `drt-core`, not merely unbuilt — see
 - Not a data loader (that's dlt)
 - Not a transformer (that's dbt)
 - Not a scheduler — it runs via CLI or cron, not a built-in scheduler
-- Not a SaaS / hosted runtime — fully self-hosted OSS (Apache 2.0); your
-  data never leaves your own infrastructure, and there is no per-row bill
+- Not a SaaS / hosted runtime — fully self-hosted OSS (Apache 2.0); data
+  goes straight from your warehouse to the destination, never through a
+  drt-hosted intermediary, and there is no per-row bill
 - Not a UI or dashboard — config-as-code (YAML, git-reviewable) is the
   product, not a placeholder for one
 - Not an audience/segmentation builder — building the record set to sync is
-  a SQL/dbt-modeling problem; drt syncs exactly what `sync.model` /
-  `sync.query` points it at
-- Not a gatekept connector catalog — destinations are Protocol
-  implementations, extensible via the plugin system without drt-hub in the
+  a SQL/dbt-modeling problem; drt syncs exactly what the sync config's
+  `model` field points it at (raw SQL or a dbt-style reference)
+- Not a gatekept connector catalog, though not yet fully wired: the plugin
+  system discovers third-party `drt.destinations` entry points without
+  drt-hub approval, but a registered type can't be named in sync YAML yet
+  (closed config union — see ADR 0009, follow-up #997). No standing
+  gatekeeping policy exists, unlike a commercial vendor's closed catalog
   loop
 
 ## Architecture

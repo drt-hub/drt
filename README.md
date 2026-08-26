@@ -9,7 +9,7 @@
 
 ### The reverse leg of your data stack.
 
-dlt loads data in, dbt transforms it, and **drt** activates it back out — reverse ETL from your warehouse to the tools your team works in, as YAML in your own repo. No dashboard to babysit, no audience builder duplicating what dbt already does, no hosted runtime billing you per row. Your data never leaves your own infrastructure.
+dlt loads data in, dbt transforms it, and **drt** activates it back out — reverse ETL from your warehouse to the tools your team works in, as YAML in your own repo. No dashboard to babysit, no audience builder duplicating what dbt already does, no hosted runtime billing you per row. Your data goes straight from your warehouse to the destination — never through a drt-hosted intermediary.
 
 <p align="center">
   <code>dlt</code> <sub>load</sub> &nbsp;→&nbsp; <code>dbt</code> <sub>transform</sub> &nbsp;→&nbsp; <b><code>drt</code></b> <sub>activate</sub>
