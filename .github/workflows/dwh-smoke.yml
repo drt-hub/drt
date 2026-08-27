@@ -115,6 +115,45 @@ jobs:
       - name: Install drt-core[dev,duckdb,databricks]
         if: steps.creds.outputs.has_creds == 'true'
         run: uv pip install --system -e ".[dev,duckdb,databricks]"
+      # The smoke warehouse auto-stops after idle time, and the databricks-sql-
+      # connector's implicit auto-start-on-connect proved unreliable against it
+      # (observed 2026-08-27: repeated `BAD_REQUEST: Cannot create the resource,
+      # please try again later` at session-open, three attempts over ~10h, while
+      # a manual Start from the Databricks UI succeeded immediately and let the
+      # very next run pass). Start it explicitly via the REST API and wait for
+      # RUNNING before handing off to pytest, rather than relying on the SQL
+      # client to trigger and outlast a cold start on its own.
+      - name: Start Databricks SQL warehouse and wait until running
+        if: steps.creds.outputs.has_creds == 'true'
+        run: |
+          set -euo pipefail
+          warehouse_id="${DRT_SMOKE_DATABRICKS_HTTP_PATH##*/}"
+          api="https://${DRT_SMOKE_DATABRICKS_HOST}/api/2.0/sql/warehouses/${warehouse_id}"
+          auth=(-H "Authorization: Bearer ${DRT_SMOKE_DATABRICKS_TOKEN}")
+
+          state=$(curl -sf "${auth[@]}" "$api" | jq -r '.state')
+          echo "Warehouse ${warehouse_id} current state: ${state}"
+
+          if [ "$state" != "RUNNING" ]; then
+            echo "Starting warehouse..."
+            curl -sf -X POST "${auth[@]}" "${api}/start" >/dev/null
+
+            deadline=$((SECONDS + 300))
+            while [ "$SECONDS" -lt "$deadline" ]; do
+              state=$(curl -sf "${auth[@]}" "$api" | jq -r '.state')
+              echo "  state=${state} (${SECONDS}s elapsed)"
+              if [ "$state" = "RUNNING" ]; then
+                break
+              fi
+              sleep 10
+            done
+
+            if [ "$state" != "RUNNING" ]; then
+              echo "::error::Warehouse did not reach RUNNING within 300s (last state: ${state})"
+              exit 1
+            fi
+          fi
+          echo "Warehouse is running."
       - name: Run Databricks smoke
         if: steps.creds.outputs.has_creds == 'true'
         run: pytest -m dwh_smoke tests/integration/dwh/test_databricks_smoke.py -v

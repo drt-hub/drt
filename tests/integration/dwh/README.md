@@ -93,8 +93,12 @@ Databricks prerequisites (#672):
   Metastore works too — set the catalog to `hive_metastore`). All tables are
   created **Delta** (`USING DELTA`): the `replace_strategy: swap` leg relies on
   Delta `INSERT OVERWRITE` snapshot-isolation atomicity.
-- A running **SQL warehouse**; its HTTP path is `SMOKE_DATABRICKS_HTTP_PATH`.
-  The complex-type leg uses a `VARIANT` column, so the warehouse must be on a
+- A **SQL warehouse**; its HTTP path is `SMOKE_DATABRICKS_HTTP_PATH`. It does
+  not need to be left running between jobs — `dwh-smoke.yml`'s Databricks job
+  starts it via the REST API and waits for `RUNNING` before running pytest,
+  since the `databricks-sql-connector`'s implicit auto-start-on-connect proved
+  unreliable on an idle/auto-stopped warehouse (observed 2026-08-27). The
+  complex-type leg uses a `VARIANT` column, so the warehouse must be on a
   channel that supports VARIANT (current serverless/pro warehouses do).
 - Least-privilege grants for the token principal: `USE CATALOG` + `USE SCHEMA`,
   plus `CREATE TABLE` / `MODIFY` on the smoke schema — the swap leg builds and
