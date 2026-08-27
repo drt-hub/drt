@@ -15,7 +15,9 @@ drt serve --port 8080 --token-env DRT_WEBHOOK_TOKEN
 - `--auth` (default `auto`) — `none`, `bearer`, `hmac`, or `auto` (bearer if the token env var is set, else none)
 - `--token-env` (default `DRT_WEBHOOK_TOKEN`) — env var holding the bearer token
 - `--hmac-secret-env` (default `DRT_WEBHOOK_HMAC_SECRET`) — env var holding the HMAC signing secret
-- `--hmac-header` (default `X-Hub-Signature-256`) — header carrying the HMAC signature
+- `--hmac-header` (defaults to `X-Hub-Signature-256`, or `Stripe-Signature` under `--hmac-scheme stripe`) — header carrying the HMAC signature
+- `--hmac-scheme` (default `generic`) — `generic` (HMAC of the body: GitHub, Shopify, bare hex) or `stripe` (timestamped `t=...,v1=...`)
+- `--hmac-tolerance` (default `300`) — replay window in seconds for `--hmac-scheme stripe`
 
 ```bash
 export DRT_WEBHOOK_TOKEN="$(openssl rand -hex 32)"
@@ -157,8 +159,8 @@ drt serve --auth hmac
 Verifies an HMAC-SHA256 signature of the raw request body. Accepts GitHub's
 `sha256=<hex>` format (default header `X-Hub-Signature-256`), bare hex, and
 base64 digests — so GitHub and Shopify (`--hmac-header X-Shopify-Hmac-Sha256`)
-work out of the box. Stripe's timestamped `t=...,v1=...` scheme is different
-(replay tolerance) and is not covered.
+work out of the box. Stripe signs a different payload and is a separate scheme —
+see below.
 
 `POST /sync/<name>` signs its raw body, including when that body is empty —
 which is the normal way to trigger a sync:
@@ -190,6 +192,52 @@ It proves knowledge of the secret without putting the secret on the wire, but it
 a static value, not a per-request signature. If you poll run state from somewhere
 you wouldn't trust with a replayable credential, run `--auth bearer` for that path
 and verify webhook bodies at a proxy instead.
+
+### Stripe timestamped signature
+
+```bash
+export DRT_WEBHOOK_HMAC_SECRET="whsec_..."   # from the Stripe Dashboard
+drt serve --auth hmac --hmac-scheme stripe
+```
+
+Stripe does not sign the body alone. Its `Stripe-Signature` header carries a
+timestamp and one or more signatures:
+
+```
+Stripe-Signature: t=1492774577,v1=5257a869e7ec...,v0=6ffbb59b2300...
+```
+
+and the signed payload is `<t>.<body>`. drt verifies the `v1` signature over that
+string and rejects a delivery whose `t` is outside `--hmac-tolerance` (default
+300s, matching Stripe's own libraries), which is what stops a captured request
+from being replayed later.
+
+Three details worth knowing:
+
+- **`v0` is ignored.** Stripe attaches a deliberately fake `v0` to test events;
+  its docs say to ignore every scheme that isn't `v1`, because accepting one
+  would be a downgrade attack. A header carrying only `v0` is rejected.
+- **Secret rotation works.** Rolling an endpoint secret leaves the old one live
+  for up to 24 hours and Stripe sends one `v1` per active secret. Any matching
+  `v1` is accepted, so a roll doesn't drop deliveries.
+- **Don't set `--hmac-tolerance 0`.** It is rejected: zero would disable the
+  recency check rather than tighten it.
+
+The raw body must reach drt byte-for-byte. Any proxy that re-encodes, reformats
+or re-serializes JSON on the way through invalidates the signature — this is the
+most common cause of Stripe verification failures. `drt serve` speaks plain HTTP,
+and Stripe requires HTTPS for live endpoints, so a TLS-terminating proxy is
+required; make sure it passes the body through untouched.
+
+**`--hmac-scheme stripe` covers POSTs only.** Stripe never sends a `GET`, so it
+defines no signature shape for one, and `GET /runs/<id>` answers `401` under this
+scheme — deliberately, even if you send a `Stripe-Signature` header. A Stripe
+signature is computed over `<t>.<body>`, which for a bodyless `GET` carries no
+path: one captured header would then read *any* run id for the whole tolerance
+window, which is exactly the replay the generic scheme's path-bound `GET`
+signature avoids. If you need to poll run state, run a second listener with
+`--auth bearer` for that, or query it from the same process that triggered the
+sync using the run id returned by the 202.
 
 Pub/Sub push authenticates with an **OIDC JWT**, not a body signature — that
 verification path is [#903](https://github.com/drt-hub/drt/issues/903), and until it lands Pub/Sub still needs

@@ -9,6 +9,12 @@ import typer
 from drt.cli._app import app
 
 _AUTH_SCHEMES = ("auto", "none", "bearer", "hmac")
+_HMAC_SCHEMES = ("generic", "stripe")
+
+# Each sender names the header differently, so the default follows the scheme
+# rather than making every Stripe user pass --hmac-header. An explicit
+# --hmac-header still wins.
+_DEFAULT_HMAC_HEADER = {"generic": "X-Hub-Signature-256", "stripe": "Stripe-Signature"}
 
 
 @app.command()
@@ -34,9 +40,29 @@ def serve(
         help="Env var holding the HMAC signing secret (for --auth hmac).",
     ),
     hmac_header: str = typer.Option(
-        "X-Hub-Signature-256",
+        "",
         "--hmac-header",
-        help="Header carrying the HMAC signature (for --auth hmac).",
+        help=(
+            "Header carrying the HMAC signature (for --auth hmac). "
+            "Defaults to X-Hub-Signature-256, or Stripe-Signature "
+            "under --hmac-scheme stripe."
+        ),
+    ),
+    hmac_scheme: str = typer.Option(
+        "generic",
+        "--hmac-scheme",
+        help=(
+            "Signature shape for --auth hmac: generic (HMAC of the body — "
+            "GitHub, Shopify, bare hex) or stripe (timestamped t=...,v1=...)."
+        ),
+    ),
+    hmac_tolerance: int = typer.Option(
+        300,
+        "--hmac-tolerance",
+        help=(
+            "Replay window in seconds for --hmac-scheme stripe. "
+            "Stripe's own libraries default to 300."
+        ),
     ),
 ) -> None:
     """Start an HTTP endpoint that triggers drt syncs on demand.
@@ -67,6 +93,18 @@ def serve(
         raise typer.BadParameter(
             f"--auth hmac requires a secret in ${hmac_secret_env}", param_hint="--auth"
         )
+    if hmac_scheme not in _HMAC_SCHEMES:
+        raise typer.BadParameter(
+            f"--hmac-scheme must be one of {', '.join(_HMAC_SCHEMES)}",
+            param_hint="--hmac-scheme",
+        )
+    if hmac_tolerance <= 0:
+        # Stripe's docs call a tolerance of 0 out specifically: it disables the
+        # recency check rather than making it strict.
+        raise typer.BadParameter(
+            "--hmac-tolerance must be a positive number of seconds",
+            param_hint="--hmac-tolerance",
+        )
     serve_impl(
         host=host,
         port=port,
@@ -74,5 +112,7 @@ def serve(
         project_dir=".",
         auth_scheme=auth,
         hmac_secret=hmac_secret,
-        hmac_header=hmac_header,
+        hmac_header=hmac_header or _DEFAULT_HMAC_HEADER[hmac_scheme],
+        hmac_scheme=hmac_scheme,
+        hmac_tolerance=hmac_tolerance,
     )

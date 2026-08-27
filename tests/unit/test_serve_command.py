@@ -51,6 +51,8 @@ def test_serve_passes_options_through(monkeypatch: pytest.MonkeyPatch) -> None:
         auth_scheme="bearer",
         hmac_secret=None,
         hmac_header="X-Hub-Signature-256",
+        hmac_scheme="generic",
+        hmac_tolerance=300,
     )
 
 
@@ -136,3 +138,41 @@ def test_serve_wires_a_real_project(fake_http_server: type[_FakeHTTPServer], tmp
     names = [s.name for s in load_syncs(tmp_path)]
     assert names == ["s1"]
     assert server.handler is not None
+
+
+def test_serve_stripe_scheme_defaults_the_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--hmac-scheme stripe implies Stripe-Signature without repeating it (#969)."""
+    monkeypatch.setenv("DRT_WEBHOOK_HMAC_SECRET", "whsec_x")
+    with mock.patch("drt.cli.server.serve") as served:
+        runner.invoke(app, ["serve", "--auth", "hmac", "--hmac-scheme", "stripe"])
+    assert served.call_args.kwargs["hmac_header"] == "Stripe-Signature"
+    assert served.call_args.kwargs["hmac_scheme"] == "stripe"
+    assert served.call_args.kwargs["hmac_tolerance"] == 300
+
+
+def test_serve_explicit_hmac_header_wins_over_the_scheme_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DRT_WEBHOOK_HMAC_SECRET", "whsec_x")
+    with mock.patch("drt.cli.server.serve") as served:
+        runner.invoke(
+            app,
+            ["serve", "--auth", "hmac", "--hmac-scheme", "stripe", "--hmac-header", "X-Custom"],
+        )
+    assert served.call_args.kwargs["hmac_header"] == "X-Custom"
+
+
+def test_serve_rejects_unknown_hmac_scheme(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DRT_WEBHOOK_HMAC_SECRET", "whsec_x")
+    result = runner.invoke(app, ["serve", "--auth", "hmac", "--hmac-scheme", "paypal"])
+    assert result.exit_code != 0
+
+
+def test_serve_rejects_zero_tolerance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stripe's docs single 0 out: it disables the check rather than tightening it."""
+    monkeypatch.setenv("DRT_WEBHOOK_HMAC_SECRET", "whsec_x")
+    result = runner.invoke(
+        app,
+        ["serve", "--auth", "hmac", "--hmac-scheme", "stripe", "--hmac-tolerance", "0"],
+    )
+    assert result.exit_code != 0
