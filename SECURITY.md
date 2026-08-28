@@ -14,8 +14,8 @@
 
 | Version | Supported |
 |---------|-----------|
+| 0.4.x   | ✅        |
 | 0.3.x   | ✅        |
-| 0.2.x   | ✅        |
 
 ## Supply-Chain Scanning
 
