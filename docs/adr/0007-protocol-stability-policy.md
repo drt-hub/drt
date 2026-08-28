@@ -150,7 +150,7 @@ For a Protocol-level rename or signature change (post-v1.0, following
 ## Freeze-scope table
 
 Not every Protocol in the codebase is a public, frozen-at-v1.0 interface.
-Two are explicitly internal:
+One is explicitly internal:
 
 | Protocol | File | Freeze scope at v1.0 |
 |---|---|---|
@@ -165,7 +165,7 @@ Two are explicitly internal:
 | `RowCountable` | `drt/destinations/sql_utils.py` | Public, frozen (optional-capability) |
 | `RateLimitKeyed` | `drt/destinations/rate_limiter.py` | Public, frozen — implemented by every `DestinationConfig` member |
 | `RateLimiterBackend` | `drt/destinations/rate_limiter.py` | Public, frozen — the cross-process rate-limit coordination extension point ([ADR 0012](0012-cross-process-rate-limit-coordination.md)) |
-| `LimiterFactory` | `drt/destinations/rate_limiter.py` | Internal — a callable injection point, originally for tests only; since [ADR 0012](0012-cross-process-rate-limit-coordination.md) (#921) also the shape `resolve_rate_limiter()` falls back to via `get_rate_limiter_backend()` when no factory is passed explicitly. Signature unchanged, not implemented by connectors |
+| `LimiterFactory` | `drt/destinations/rate_limiter.py` | **Public, frozen** — originally an internal injection point for tests only, but since [ADR 0012](0012-cross-process-rate-limit-coordination.md) (#921) this is the exact callable shape a third-party `drt.rate_limiter_backends` plugin must implement and pass to `register_rate_limiter_backend()`; freezing `RateLimiterBackend` without also freezing the factory contract that constructs it would let a minor release silently break every registered distributed backend. Reclassified from Internal on 2026-08-28 (#304, caught in Codex review) |
 | `StateStore` | `drt/state/manager.py` | **Public, frozen** (#304 names it "StateManager") |
 | `HistoryStore` | `drt/state/history.py` | Public, frozen — same #756 backend-selection surface as `StateStore` |
 | `DlqBackend` | `drt/state/dlq.py` | Public, frozen — same surface |
@@ -199,19 +199,33 @@ future major version could rename one to remove the collision if it ever
 becomes a real source of confusion in practice; nothing found in this
 review makes that case today.
 
-## RBAC / audit hooks — explicitly deferred
+## RBAC / audit hooks — explicitly deferred, since superseded by ADR 0008
 
 #300's scope includes "identify any missing methods needed for Enterprise
-features (RBAC hooks, audit hooks)." **This ADR does not attempt that.**
-#298 (RBAC interface spec) and #299 (audit log hooks) — the issues that would
-define what those hooks need to do — have no committed design yet; inventing
-Protocol method shapes ahead of that design would be exactly the kind of
-speculative building this repo has repeatedly avoided (see #921/#948 in
-ROADMAP.md's "don't build ahead of a measured need" posture). **When #298 and
-#299 land a design, amend this ADR** with the concrete hook shapes and mark
-them in the freeze-scope table above — most likely as new optional-capability
-Protocols (`RbacAware`, `Auditable`) per the extension mechanism this ADR
-already establishes, not as additions to the 4 already-frozen core Protocols.
+features (RBAC hooks, audit hooks)." **This ADR did not attempt that** at
+the time it was written. #298 (RBAC interface spec) and #299 (audit log
+hooks) — the issues that would define what those hooks need to do — had no
+committed design yet; inventing Protocol method shapes ahead of that design
+would have been exactly the kind of speculative building this repo has
+repeatedly avoided (see #921/#948 in ROADMAP.md's "don't build ahead of a
+measured need" posture).
+
+**Superseded, 2026-08-28 (#304):** [ADR 0008](0008-enterprise-boundary-rbac-and-audit-hooks.md)
+has since landed a committed design — `PermissionChecker` and `AuditLogger`,
+both already added to the freeze-scope table above as public, frozen
+Protocols. The "amend this ADR" instruction below is preserved for
+historical context; it has already been carried out.
+
+<details>
+<summary>Original deferral text (historical)</summary>
+
+When #298 and #299 land a design, amend this ADR with the concrete hook
+shapes and mark them in the freeze-scope table above — most likely as new
+optional-capability Protocols (`RbacAware`, `Auditable`) per the extension
+mechanism this ADR already establishes, not as additions to the 4
+already-frozen core Protocols.
+
+</details>
 
 ## Consequences
 
@@ -239,8 +253,11 @@ already establishes, not as additions to the 4 already-frozen core Protocols.
 
 ## Follow-up issues
 
-1. Amend this ADR once #298/#299 land committed designs, adding concrete RBAC
-   / audit optional-capability Protocol shapes to the freeze-scope table.
+1. ~~Amend this ADR once #298/#299 land committed designs, adding concrete
+   RBAC / audit optional-capability Protocol shapes to the freeze-scope
+   table.~~ Done 2026-08-28 (#304) — see "RBAC / audit hooks" above;
+   [ADR 0008](0008-enterprise-boundary-rbac-and-audit-hooks.md)'s
+   `PermissionChecker`/`AuditLogger` are in the table.
 2. #304 (the actual v1.0 freeze) should reference this ADR directly in its
    "Publish stability policy in docs" deliverable rather than restating it.
 3. Consider whether `ObjectClient` (`drt/state/_objectstore.py`) becomes a

@@ -79,10 +79,12 @@ only a signpost to that policy, not a second definition of it.
 The v1.0 freeze covers `Source`, `IncrementalSource`, `Destination`,
 `ConnectionTestable`, `MatchPolicyCapable`, `StagedDestination`,
 `OrphanCleanup`, `QueryableDestination`, `RowCountable`, `RateLimitKeyed`,
-`RateLimiterBackend`, `StateStore` (the Protocol behind the StateManager
-surface), `HistoryStore`, `DlqBackend`, `WatermarkStorage`, `SecretProvider`,
-`SyncObserver`, `PermissionChecker`, and `AuditLogger`. `LimiterFactory` and
-`ObjectClient` remain internal and are not covered by semver.
+`RateLimiterBackend`, `LimiterFactory` (the callable contract third-party
+`drt.rate_limiter_backends` plugins implement), `StateStore` (the Protocol
+behind the StateManager surface), `HistoryStore`, `DlqBackend`,
+`WatermarkStorage`, `SecretProvider`, `SyncObserver`, `PermissionChecker`,
+and `AuditLogger`. `ObjectClient` alone remains internal and is not covered
+by semver.
 
 A deprecated frozen Protocol must remain available for at least two minor
 releases. That floor does not itself permit removal in a later minor release:

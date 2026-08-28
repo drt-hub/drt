@@ -204,7 +204,9 @@ def _reset_limiter_registry() -> None:
 class LimiterFactory(Protocol):
     """Constructs a :class:`RateLimiterBackend`. See ``resolve_rate_limiter``.
 
-    Stability: Internal — not covered by semver, may change without notice.
+    Stability: Stable (frozen at v1.0, see ADR 0007 for the breaking-change
+    policy) — the callable contract a third-party ``drt.rate_limiter_backends``
+    plugin must implement and pass to ``register_rate_limiter_backend()``.
 
     ``key`` is ``config.rate_limit_key()`` — the same string
     :data:`_limiter_registry` uses to cache the *instance* this call
