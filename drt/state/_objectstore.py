@@ -38,6 +38,8 @@ class ObjectPreconditionError(RuntimeError):
 class ObjectClient(Protocol):
     """Minimal conditional object API needed by all remote state stores.
 
+    Stability: Internal — not covered by semver, may change without notice.
+
     Internal — not a public extension point. GCS/S3 are the only expected
     implementations; see ``_ObjectStoreBase`` for the retry/backoff loop
     built on top of it.

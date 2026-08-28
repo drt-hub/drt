@@ -96,6 +96,8 @@ def decode_dead_letter_line(raw_line: str) -> DeadLetter:
 class DlqBackend(Protocol):
     """Persist and replay records that failed during load (#756).
 
+    Stability: Stable (frozen at v1.0, see ADR 0007 for the breaking-change policy).
+
     Extracted first among the three stores because it carries the sharpest
     reported pain: on an ephemeral runner the queue dies with the container,
     so ``drt retry`` can never see a previous run's failures.

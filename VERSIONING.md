@@ -69,6 +69,30 @@ Removing or changing:
 - Adding new commands
 - Changing help text
 
+## Protocol stability
+
+When v1.0 ships, drt's public Protocol interfaces are frozen under semantic
+versioning. The canonical freeze-scope table and full breaking-change policy
+live in [ADR 0007](docs/adr/0007-protocol-stability-policy.md); this section is
+only a signpost to that policy, not a second definition of it.
+
+The v1.0 freeze covers `Source`, `IncrementalSource`, `Destination`,
+`ConnectionTestable`, `MatchPolicyCapable`, `StagedDestination`,
+`OrphanCleanup`, `QueryableDestination`, `RowCountable`, `RateLimitKeyed`,
+`RateLimiterBackend`, `LimiterFactory` (the callable contract third-party
+`drt.rate_limiter_backends` plugins implement), `StateStore` (the Protocol
+behind the StateManager surface), `HistoryStore`, `DlqBackend`,
+`WatermarkStorage`, `SecretProvider`, `SyncObserver`, `PermissionChecker`,
+and `AuditLogger`. `ObjectClient` alone remains internal and is not covered
+by semver.
+
+A deprecated frozen Protocol must remain available for at least two minor
+releases. That floor does not itself permit removal in a later minor release:
+once the v1.0 freeze is in effect, removal may happen only in the next MAJOR
+version. For example, a Protocol deprecated in v1.1 is not removal-eligible in
+v1.3; it may be removed in v2.0 only if the two-minor-version floor has also
+been satisfied.
+
 ## Non-Breaking Changes (MINOR or PATCH)
 
 ### Always Safe

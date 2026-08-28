@@ -52,6 +52,8 @@ class HistoryEntry:
 class HistoryStore(Protocol):
     """Append and read per-sync execution history (#756).
 
+    Stability: Stable (frozen at v1.0, see ADR 0007 for the breaking-change policy).
+
     Extracted so history can outlive the runner that produced it — a fresh CI
     checkout currently shows nothing, and the docs manifest's ``runs`` data
     (#698) is blank in any ephemeral container.

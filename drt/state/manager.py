@@ -37,6 +37,8 @@ class SyncState:
 class StateStore(Protocol):
     """Read and write per-sync run state (#756).
 
+    Stability: Stable (frozen at v1.0, see ADR 0007 for the breaking-change policy).
+
     Extracted so state can live somewhere that survives an ephemeral runner —
     object storage or a warehouse — rather than only in ``.drt/state.json``.
     Same optional-backend shape as :class:`~drt.state.watermark.WatermarkStorage`,

@@ -38,6 +38,8 @@ class AuditLogger(Protocol):
     """Enterprise audit-log extension point for `config_changed` /
     `secret_accessed` (#299, ADR 0008).
 
+    Stability: Stable (frozen at v1.0, see ADR 0007 for the breaking-change policy).
+
     A new, narrow Protocol — not a five-event duplicate of `SyncObserver`.
     Sync-lifecycle audit events (`sync_started`/`sync_completed`/
     `sync_failed`) go through `SyncObserver` + `register_extra_observer`

@@ -45,7 +45,10 @@ if TYPE_CHECKING:
 
 @runtime_checkable
 class SyncObserver(Protocol):
-    """The engine's event surface. All methods are fire-and-forget."""
+    """The engine's event surface. All methods are fire-and-forget.
+
+    Stability: Stable (frozen at v1.0, see ADR 0007 for the breaking-change policy).
+    """
 
     def on_sync_started(self, sync_name: str, started_at: str) -> None:
         """Called once at the top of ``run_sync``."""
