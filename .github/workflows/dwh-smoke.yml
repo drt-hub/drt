@@ -98,8 +98,19 @@ jobs:
       - name: Check credentials
         id: creds
         run: |
-          if [ -z "$DRT_SMOKE_DATABRICKS_HOST" ]; then
-            echo "No Databricks smoke secrets configured — skipping (no-op)."
+          # HOST alone used to be enough to gate the whole job. Now checks all
+          # five secrets `test_databricks_smoke.py`'s own `require_env(...)`
+          # calls require: not just what the warehouse-start step below needs
+          # (HOST/HTTP_PATH/TOKEN, to avoid calling the API with an empty
+          # warehouse ID or token), but also CATALOG/SCHEMA -- otherwise a
+          # partial set missing only those two would still wake the live
+          # warehouse via the API, then have every pytest test skip anyway,
+          # burning compute for a run that validated nothing (Codex review,
+          # #1015). A partially configured secret set is a real,
+          # intentionally supported state per this workflow's own "activates
+          # per-warehouse as secrets are added" design and must fully no-op.
+          if [ -z "$DRT_SMOKE_DATABRICKS_HOST" ] || [ -z "$DRT_SMOKE_DATABRICKS_HTTP_PATH" ] || [ -z "$DRT_SMOKE_DATABRICKS_TOKEN" ] || [ -z "$DRT_SMOKE_DATABRICKS_CATALOG" ] || [ -z "$DRT_SMOKE_DATABRICKS_SCHEMA" ]; then
+            echo "No (or incomplete) Databricks smoke secrets configured — skipping (no-op)."
             echo "has_creds=false" >> "$GITHUB_OUTPUT"
           else
             echo "has_creds=true" >> "$GITHUB_OUTPUT"
@@ -115,6 +126,76 @@ jobs:
       - name: Install drt-core[dev,duckdb,databricks]
         if: steps.creds.outputs.has_creds == 'true'
         run: uv pip install --system -e ".[dev,duckdb,databricks]"
+      # The smoke warehouse auto-stops after idle time, and the databricks-sql-
+      # connector's implicit auto-start-on-connect proved unreliable against it
+      # (observed 2026-08-27: repeated `BAD_REQUEST: Cannot create the resource,
+      # please try again later` at session-open, three attempts over ~10h, while
+      # a manual Start from the Databricks UI succeeded immediately and let the
+      # very next run pass). Start it explicitly via the REST API and wait for
+      # RUNNING before handing off to pytest, rather than relying on the SQL
+      # client to trigger and outlast a cold start on its own.
+      - name: Start Databricks SQL warehouse and wait until running
+        if: steps.creds.outputs.has_creds == 'true'
+        run: |
+          # No `set -e`: every failure point below is handled explicitly.
+          # `curl -sf ... | jq` inside the polling loop must NOT abort the
+          # whole step on one transient 429/5xx/network blip -- that would
+          # spend none of the 300s budget the loop exists to provide (Codex
+          # review, #1015).
+          set -uo pipefail
+          warehouse_id="${DRT_SMOKE_DATABRICKS_HTTP_PATH##*/}"
+          api="https://${DRT_SMOKE_DATABRICKS_HOST}/api/2.0/sql/warehouses/${warehouse_id}"
+          auth=(-H "Authorization: Bearer ${DRT_SMOKE_DATABRICKS_TOKEN}")
+
+          # A short bounded retry for the two one-shot calls below (initial
+          # status check, start request) -- separate from the polling loop's
+          # own longer-running retry budget, so neither call fails the whole
+          # job over a single bad response.
+          curl_retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if curl -sf --connect-timeout 10 --max-time 30 "${auth[@]}" "$@"; then
+                return 0
+              fi
+              sleep 3
+            done
+            return 1
+          }
+
+          state=""
+          if ! state=$(curl_retry "$api" | jq -r '.state'); then
+            echo "::error::Could not reach the Databricks SQL Warehouses API to check status"
+            exit 1
+          fi
+          echo "Warehouse ${warehouse_id} current state: ${state}"
+
+          if [ "$state" != "RUNNING" ]; then
+            echo "Starting warehouse..."
+            if ! curl_retry -X POST "${api}/start" >/dev/null; then
+              echo "::error::Failed to request warehouse start"
+              exit 1
+            fi
+
+            deadline=$((SECONDS + 300))
+            while [ "$SECONDS" -lt "$deadline" ]; do
+              if new_state=$(curl -sf --connect-timeout 10 --max-time 30 "${auth[@]}" "$api" | jq -r '.state'); then
+                state="$new_state"
+                echo "  state=${state} (${SECONDS}s elapsed)"
+                if [ "$state" = "RUNNING" ]; then
+                  break
+                fi
+              else
+                echo "  status check failed transiently, retrying... (${SECONDS}s elapsed)"
+              fi
+              sleep 10
+            done
+
+            if [ "$state" != "RUNNING" ]; then
+              echo "::error::Warehouse did not reach RUNNING within 300s (last state: ${state})"
+              exit 1
+            fi
+          fi
+          echo "Warehouse is running."
       - name: Run Databricks smoke
         if: steps.creds.outputs.has_creds == 'true'
         run: pytest -m dwh_smoke tests/integration/dwh/test_databricks_smoke.py -v
