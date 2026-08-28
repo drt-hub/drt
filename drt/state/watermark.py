@@ -31,7 +31,10 @@ class WatermarkContentionError(RuntimeError):
 
 @runtime_checkable
 class WatermarkStorage(Protocol):
-    """Read and write watermark values for incremental syncs."""
+    """Read and write watermark values for incremental syncs.
+
+    Stability: Stable (frozen at v1.0, see ADR 0007 for the breaking-change policy).
+    """
 
     def get(self, sync_name: str) -> str | None:
         """Return the stored watermark for ``sync_name``, or ``None`` if unset.

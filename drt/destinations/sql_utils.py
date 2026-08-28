@@ -30,6 +30,8 @@ def backtick_quote_ident(table: str) -> str:
 class RowCountable(Protocol):
     """A destination that can report its current table row count.
 
+    Stability: Stable (frozen at v1.0, see ADR 0007 for the breaking-change policy).
+
     Capability is discovered structurally (``isinstance(dest, RowCountable)``)
     rather than enumerated, so a new SQL destination that implements
     ``get_row_count`` is picked up automatically.

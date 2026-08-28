@@ -74,7 +74,10 @@ class SyncResult:
 
 @runtime_checkable
 class Destination(Protocol):
-    """Load records into an external service."""
+    """Load records into an external service.
+
+    Stability: Stable (frozen at v1.0, see ADR 0007 for the breaking-change policy).
+    """
 
     def load(
         self,
@@ -106,7 +109,10 @@ class Destination(Protocol):
 
 @runtime_checkable
 class ConnectionTestable(Protocol):
-    """Optional destination capability for validating external connectivity."""
+    """Optional destination capability for validating external connectivity.
+
+    Stability: Stable (frozen at v1.0, see ADR 0007 for the breaking-change policy).
+    """
 
     def test_connection(self, config: DestinationConfig) -> None:
         """Raise an exception if the destination cannot be reached."""
@@ -116,6 +122,8 @@ class ConnectionTestable(Protocol):
 @runtime_checkable
 class MatchPolicyCapable(Protocol):
     """Destination that honours ``sync.match_policy`` (#757).
+
+    Stability: Stable (frozen at v1.0, see ADR 0007 for the breaking-change policy).
 
     ``match_policy: update_only | create_only`` narrows the per-row upsert to
     only-existing / only-new rows. Not every destination can express that
@@ -137,6 +145,8 @@ class MatchPolicyCapable(Protocol):
 @runtime_checkable
 class StagedDestination(Protocol):
     """Destination that accumulates records, then uploads as a batch job.
+
+    Stability: Stable (frozen at v1.0, see ADR 0007 for the breaking-change policy).
 
     Used for APIs that require file upload → job trigger → poll for completion
     (e.g. Salesforce Bulk API, Amazon Marketing Cloud).
@@ -191,6 +201,8 @@ class StagedDestination(Protocol):
 @runtime_checkable
 class OrphanCleanup(Protocol):
     """Optional protocol for destinations that support orphan swap cleanup.
+
+    Stability: Stable (frozen at v1.0, see ADR 0007 for the breaking-change policy).
 
     Kept separate from `Destination` so existing destination connectors
     remain valid without implementing cleanup methods.
@@ -250,6 +262,8 @@ class QueryableDestination(Protocol):
     addition to ``Destination`` itself — per ADR 0007, adding a required
     method to an already-shipped Protocol breaks every existing
     implementer, so new capability goes here instead.
+
+    Stability: Stable (frozen at v1.0, see ADR 0007 for the breaking-change policy).
 
     Replaces the old ``_QUERYABLE_TYPES`` config-class isinstance tuple that
     ``drt/destinations/query.py``'s ``is_queryable``/``get_table_name``/

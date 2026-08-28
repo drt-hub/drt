@@ -12,7 +12,10 @@ from drt.config.credentials import ProfileConfig
 
 @runtime_checkable
 class Source(Protocol):
-    """Extract records from a data warehouse or database."""
+    """Extract records from a data warehouse or database.
+
+    Stability: Stable (frozen at v1.0, see ADR 0007 for the breaking-change policy).
+    """
 
     def extract(
         self,
@@ -63,6 +66,8 @@ class Source(Protocol):
 @runtime_checkable
 class IncrementalSource(Protocol):
     """Optional source capability — receive the resolved watermark directly (#767).
+
+    Stability: Stable (frozen at v1.0, see ADR 0007 for the breaking-change policy).
 
     SQL sources consume the cursor through the rendered ``WHERE`` clause in
     ``query``; API-shaped sources have no SQL to carry it, so for

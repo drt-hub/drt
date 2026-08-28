@@ -100,6 +100,8 @@ def extract_key(raw: str, ref: SecretRef, *, scheme: str) -> str:
 class SecretProvider(Protocol):
     """Resolves a parsed provider URI to a secret value.
 
+    Stability: Stable (frozen at v1.0, see ADR 0007 for the breaking-change policy).
+
     Implementations do their own SDK import lazily (inside ``fetch``) so
     installing drt-core without the relevant extra never fails at import
     time — only when a profile actually references that provider's scheme.

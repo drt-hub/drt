@@ -6,22 +6,24 @@
   [#304](https://github.com/drt-hub/drt/issues/304) (the v1.0 freeze itself).
 - **Relates to:** [#992](https://github.com/drt-hub/drt/pull/992) (the
   mechanical half of #300 — `@runtime_checkable` consistency and `Raises:`
-  documentation across all 17 Protocols). **This ADR assumes #992 is merged
+  documentation across all 17 Protocols present at the time). **This ADR assumes #992 is merged
   first** — until then, `SecretProvider`, `LimiterFactory`, and
   `WatermarkStorage` still lack `@runtime_checkable`, and this ADR's
-  "16 public/frozen Protocols all `@runtime_checkable`" premise does not yet
+  "15 public/frozen Protocols all `@runtime_checkable`" premise does not yet
   hold. Land #992 before (or in the same merge window as) this ADR.
 - **Implementation:** none directly. This ADR sets the policy #304 enforces
-  and the freeze-scope call each of the 17 Protocols below needs.
+  and the freeze-scope call each of the 21 Protocols below needs.
 
 ## Context
 
-drt has 17 `typing.Protocol` interfaces spanning destinations (`Destination`,
+drt has 21 `typing.Protocol` interfaces spanning destinations (`Destination`,
 `ConnectionTestable`, `MatchPolicyCapable`, `StagedDestination`,
-`OrphanCleanup`, `RowCountable`, `RateLimitKeyed`, `LimiterFactory`), sources
+`OrphanCleanup`, `QueryableDestination`, `RowCountable`, `RateLimitKeyed`,
+`RateLimiterBackend`, `LimiterFactory`), sources
 (`Source`, `IncrementalSource`), state (`StateStore`, `HistoryStore`,
 `DlqBackend`, `WatermarkStorage`, `ObjectClient`), secrets (`SecretProvider`),
-and the engine (`SyncObserver`). #304 commits drt to freezing three of these
+the engine (`SyncObserver`), security (`PermissionChecker`), and observability
+(`AuditLogger`). #304 commits drt to freezing three of these
 ("Source, Destination, StateManager") at v1.0 with a semver guarantee and a
 "deprecated methods stay for at least 2 minor versions" removal policy — but
 neither #304 nor anything else in this repo currently defines **what a
@@ -62,7 +64,7 @@ unsafe once implementers are accounted for, not just callers.
 
 **The rule instead: treat any change to an already-shipped Protocol
 method's signature — parameters or return type, narrowing or widening — as
-breaking.** For any of the 17 Protocols:
+breaking.** For any of the 21 Protocols:
 
 | Change | Breaking? |
 |---|---|
@@ -76,10 +78,10 @@ breaking.** For any of the 17 Protocols:
 
 ## The sanctioned extension mechanism
 
-5 of the 17 Protocols already exist specifically to route around the
+6 of the 21 Protocols already exist specifically to route around the
 no-default-method problem: `ConnectionTestable`, `MatchPolicyCapable`,
-`StagedDestination`, `OrphanCleanup` (destinations), and `IncrementalSource`
-(sources). Each is checked structurally —
+`StagedDestination`, `OrphanCleanup`, `QueryableDestination` (destinations),
+and `IncrementalSource` (sources). Each is checked structurally —
 `isinstance(dest, MatchPolicyCapable)` — rather than being a required part of
 `Destination`/`Source`. A destination that doesn't implement the capability
 is simply not that shape; the engine branches on it rather than requiring it.
@@ -91,8 +93,8 @@ addition to `Destination`/`Source`/`StateStore` directly. This is also why
 [#992](https://github.com/drt-hub/drt/pull/992)'s `@runtime_checkable`
 consistency fix matters as a prerequisite: an optional-capability Protocol
 that isn't `@runtime_checkable` can't be `isinstance()`-checked, so it isn't
-usable as an extension point at all. Once #992 merges, all 17 Protocols have
-it.
+usable as an extension point at all. Once #992 merged, all 17 Protocols
+present at review time had it; the four added later have it as well.
 
 ## Deprecation workflow
 
@@ -148,7 +150,7 @@ For a Protocol-level rename or signature change (post-v1.0, following
 ## Freeze-scope table
 
 Not every Protocol in the codebase is a public, frozen-at-v1.0 interface.
-One is explicitly internal:
+Two are explicitly internal:
 
 | Protocol | File | Freeze scope at v1.0 |
 |---|---|---|
@@ -159,8 +161,10 @@ One is explicitly internal:
 | `MatchPolicyCapable` | `drt/destinations/base.py` | Public, frozen (optional-capability) |
 | `StagedDestination` | `drt/destinations/base.py` | Public, frozen (optional-capability) |
 | `OrphanCleanup` | `drt/destinations/base.py` | Public, frozen (optional-capability) |
+| `QueryableDestination` | `drt/destinations/base.py` | Public, frozen (optional-capability extension of `Destination`) |
 | `RowCountable` | `drt/destinations/sql_utils.py` | Public, frozen (optional-capability) |
 | `RateLimitKeyed` | `drt/destinations/rate_limiter.py` | Public, frozen — implemented by every `DestinationConfig` member |
+| `RateLimiterBackend` | `drt/destinations/rate_limiter.py` | Public, frozen — the cross-process rate-limit coordination extension point ([ADR 0012](0012-cross-process-rate-limit-coordination.md)) |
 | `LimiterFactory` | `drt/destinations/rate_limiter.py` | Internal — a callable injection point, originally for tests only; since [ADR 0012](0012-cross-process-rate-limit-coordination.md) (#921) also the shape `resolve_rate_limiter()` falls back to via `get_rate_limiter_backend()` when no factory is passed explicitly. Signature unchanged, not implemented by connectors |
 | `StateStore` | `drt/state/manager.py` | **Public, frozen** (#304 names it "StateManager") |
 | `HistoryStore` | `drt/state/history.py` | Public, frozen — same #756 backend-selection surface as `StateStore` |
@@ -169,6 +173,12 @@ One is explicitly internal:
 | `ObjectClient` | `drt/state/_objectstore.py` | **Internal, not frozen.** Underscore-prefixed module; not a public extension point today — only GCS/S3 implement it, both inside drt-core. May be reconsidered as a public plugin surface later (see #297), but that is a new decision, not inherited from this freeze. |
 | `SecretProvider` | `drt/config/secret_providers/base.py` | Public, frozen — third-party secret backends are an expected extension |
 | `SyncObserver` | `drt/engine/observer.py` | Public, frozen — explicitly designed as the Rust-migration seam and the OTel/ErrorFormatter plug-in point |
+| `PermissionChecker` | `drt/security/base.py` | Public, frozen — the Enterprise RBAC extension point ([ADR 0008](0008-enterprise-boundary-rbac-and-audit-hooks.md)) |
+| `AuditLogger` | `drt/observability/audit.py` | Public, frozen — scoped to `config_changed`/`secret_accessed`; sync-lifecycle audit events use `SyncObserver` ([ADR 0008](0008-enterprise-boundary-rbac-and-audit-hooks.md)) |
+
+The `QueryableDestination`, `RateLimiterBackend`, `PermissionChecker`, and
+`AuditLogger` rows were added retroactively on 2026-08-28 to correct the
+freeze-scope table drift identified by [#304](https://github.com/drt-hub/drt/issues/304).
 
 ## Known asymmetry, frozen as-is
 
@@ -217,8 +227,9 @@ already establishes, not as additions to the 4 already-frozen core Protocols.
   freeze-timing urgency the way an actual `Destination` shape change would
   have.
 - **#992**, the mechanical PR1 half of #300, is a prerequisite this ADR
-  assumes is merged: it makes `@runtime_checkable` consistent across all 17
-  Protocols (required for the extension mechanism above to work uniformly)
+  assumes is merged: it made `@runtime_checkable` consistent across all 17
+  Protocols present at review time (required for the extension mechanism above
+  to work uniformly)
   and adds the `Raises:` documentation this ADR's breaking-change table
   leans on being accurate.
 - **#304's deliverables** ("Update all Protocol docstrings with stability

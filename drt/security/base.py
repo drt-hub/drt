@@ -29,6 +29,8 @@ class PermissionDeniedError(PermissionError):
 class PermissionChecker(Protocol):
     """Enterprise RBAC extension point (#298, ADR 0008).
 
+    Stability: Stable (frozen at v1.0, see ADR 0007 for the breaking-change policy).
+
     A new, separate Protocol per ADR 0007 — nothing in drt-core's engine or
     CLI has an existing permission seam this could reuse.
     """

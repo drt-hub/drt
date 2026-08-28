@@ -26,6 +26,8 @@ from drt.config.models import RateLimitConfig, SyncOptions
 class RateLimitKeyed(Protocol):
     """A destination config the registry can bucket (#769).
 
+    Stability: Stable (frozen at v1.0, see ADR 0007 for the breaking-change policy).
+
     Structural rather than nominal because the destination configs share no
     common base: 26 members of the ``DestinationConfig`` union inherit
     ``DescribableConfig`` (and with it the default ``rate_limit_key``), while 8
@@ -40,6 +42,8 @@ class RateLimitKeyed(Protocol):
 @runtime_checkable
 class RateLimiterBackend(Protocol):
     """A rate limiter the process-wide registry can share (#921, ADR 0012).
+
+    Stability: Stable (frozen at v1.0, see ADR 0007 for the breaking-change policy).
 
     Structural rather than nominal so a third-party cross-process backend can
     implement the existing limiter shape without subclassing drt-core's local
@@ -199,6 +203,8 @@ def _reset_limiter_registry() -> None:
 @runtime_checkable
 class LimiterFactory(Protocol):
     """Constructs a :class:`RateLimiterBackend`. See ``resolve_rate_limiter``.
+
+    Stability: Internal — not covered by semver, may change without notice.
 
     ``key`` is ``config.rate_limit_key()`` — the same string
     :data:`_limiter_registry` uses to cache the *instance* this call
