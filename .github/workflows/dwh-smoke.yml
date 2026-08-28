@@ -126,24 +126,55 @@ jobs:
       - name: Start Databricks SQL warehouse and wait until running
         if: steps.creds.outputs.has_creds == 'true'
         run: |
-          set -euo pipefail
+          # No `set -e`: every failure point below is handled explicitly.
+          # `curl -sf ... | jq` inside the polling loop must NOT abort the
+          # whole step on one transient 429/5xx/network blip -- that would
+          # spend none of the 300s budget the loop exists to provide (Codex
+          # review, #1015).
+          set -uo pipefail
           warehouse_id="${DRT_SMOKE_DATABRICKS_HTTP_PATH##*/}"
           api="https://${DRT_SMOKE_DATABRICKS_HOST}/api/2.0/sql/warehouses/${warehouse_id}"
           auth=(-H "Authorization: Bearer ${DRT_SMOKE_DATABRICKS_TOKEN}")
 
-          state=$(curl -sf "${auth[@]}" "$api" | jq -r '.state')
+          # A short bounded retry for the two one-shot calls below (initial
+          # status check, start request) -- separate from the polling loop's
+          # own longer-running retry budget, so neither call fails the whole
+          # job over a single bad response.
+          curl_retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if curl -sf "${auth[@]}" "$@"; then
+                return 0
+              fi
+              sleep 3
+            done
+            return 1
+          }
+
+          state=""
+          if ! state=$(curl_retry "$api" | jq -r '.state'); then
+            echo "::error::Could not reach the Databricks SQL Warehouses API to check status"
+            exit 1
+          fi
           echo "Warehouse ${warehouse_id} current state: ${state}"
 
           if [ "$state" != "RUNNING" ]; then
             echo "Starting warehouse..."
-            curl -sf -X POST "${auth[@]}" "${api}/start" >/dev/null
+            if ! curl_retry -X POST "${api}/start" >/dev/null; then
+              echo "::error::Failed to request warehouse start"
+              exit 1
+            fi
 
             deadline=$((SECONDS + 300))
             while [ "$SECONDS" -lt "$deadline" ]; do
-              state=$(curl -sf "${auth[@]}" "$api" | jq -r '.state')
-              echo "  state=${state} (${SECONDS}s elapsed)"
-              if [ "$state" = "RUNNING" ]; then
-                break
+              if new_state=$(curl -sf "${auth[@]}" "$api" | jq -r '.state'); then
+                state="$new_state"
+                echo "  state=${state} (${SECONDS}s elapsed)"
+                if [ "$state" = "RUNNING" ]; then
+                  break
+                fi
+              else
+                echo "  status check failed transiently, retrying... (${SECONDS}s elapsed)"
               fi
               sleep 10
             done
