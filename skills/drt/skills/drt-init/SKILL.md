@@ -45,7 +45,7 @@ Guide the user through initializing a new drt project.
    mkdir my-drt-project && cd my-drt-project
    drt init
    ```
-   Prompts for project name, source type (any of: **bigquery / duckdb / sqlite / postgres / redshift / clickhouse / snowflake / mysql / databricks / sqlserver / deltalake / iceberg / rest_api**), source-specific connection fields, and auth method.
+   Prompts for project name and one of the interactive wizard's source types (**bigquery / duckdb / sqlite / postgres / redshift / clickhouse**), then asks for source-specific connection fields and auth method. The other built-in source types (**snowflake / mysql / databricks / sqlserver / deltalake / iceberg / rest_api**) remain available through templates or a hand-authored `profiles.yml` entry; `drt profile add` also covers MySQL and Snowflake.
 
    Either flow writes:
    ```
