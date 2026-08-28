@@ -15,22 +15,53 @@ See: https://github.com/drt-hub/drt/issues/769
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterator
+from importlib.metadata import EntryPoint
 from unittest.mock import patch
+
+import pytest
 
 from drt.config.base import BearerAuth
 from drt.config.destinations_saas import HubSpotDestinationConfig, SlackDestinationConfig
 from drt.config.models import RateLimitConfig, SyncOptions
 from drt.destinations.rate_limiter import (
     RateLimiter,
+    RateLimiterBackend,
     _reset_limiter_registry,
+    _reset_rate_limiter_backend,
+    get_rate_limiter_backend,
+    register_rate_limiter_backend,
     resolve_rate_limit,
     resolve_rate_limiter,
 )
+from drt.plugins import _reset_plugin_state
+
+
+@pytest.fixture(autouse=True)
+def _reset_backend_registry() -> Iterator[None]:
+    yield
+    _reset_rate_limiter_backend()
 
 
 def _make_limiter(rps: float) -> RateLimiter:
     """Create a fresh RateLimiter with the given rate."""
     return RateLimiter(requests_per_second=rps)
+
+
+# Module-level so a real ``importlib.metadata.EntryPoint.load()`` (an actual
+# import + getattr, not something a test can monkeypatch a value into) can
+# resolve them. Mirrors ``tests/unit/test_plugins.py``'s ``_CALLS`` /
+# ``_register_ok`` pattern.
+_FAKE_BACKEND_SENTINEL = object()
+_FAKE_BACKEND_CALLS: list[str] = []
+
+
+def _register_fake_backend() -> None:
+    def backend(key: str, requests_per_second: float, burst: int | None) -> object:
+        return _FAKE_BACKEND_SENTINEL
+
+    register_rate_limiter_backend(backend)
+    _FAKE_BACKEND_CALLS.append("registered")
 
 
 class TestZeroAndNegativeRps:
@@ -835,10 +866,10 @@ class TestLimiterFactory:
 
     def test_factory_is_used_to_build_a_cold_key(self) -> None:
         sentinel = RateLimiter(requests_per_second=1)
-        calls: list[tuple[float, int | None]] = []
+        calls: list[tuple[str, float, int | None]] = []
 
-        def factory(requests_per_second: float, burst: int | None) -> RateLimiter:
-            calls.append((requests_per_second, burst))
+        def factory(key: str, requests_per_second: float, burst: int | None) -> RateLimiter:
+            calls.append((key, requests_per_second, burst))
             return sentinel
 
         options = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=4, burst=2))
@@ -846,13 +877,15 @@ class TestLimiterFactory:
         limiter = resolve_rate_limiter(self._slack("HOOK_A"), options, limiter_factory=factory)
 
         assert limiter is sentinel
-        assert calls == [(4, 2)], "factory must receive the resolved rate and burst"
+        assert calls == [(self._slack("HOOK_A").rate_limit_key(), 4, 2)], (
+            "factory must receive the endpoint key, resolved rate, and burst"
+        )
 
     def test_factory_receives_the_capped_rate(self) -> None:
         """The vendor cap is applied before construction, not after."""
         calls: list[float] = []
 
-        def factory(requests_per_second: float, burst: int | None) -> RateLimiter:
+        def factory(key: str, requests_per_second: float, burst: int | None) -> RateLimiter:
             calls.append(requests_per_second)
             return RateLimiter(requests_per_second=requests_per_second, burst=burst)
 
@@ -885,3 +918,156 @@ class TestLimiterFactory:
 
         assert isinstance(limiter, RateLimiter)
         assert limiter.requests_per_second == 6
+
+    def test_registered_backend_is_used_when_factory_is_omitted(self) -> None:
+        class _Backend:
+            def acquire(self) -> None:
+                return None
+
+            def tighten_to(self, requests_per_second: float, burst: int | None) -> None:
+                return None
+
+        sentinel = _Backend()
+        calls: list[tuple[str, float, int | None]] = []
+
+        def registered_factory(
+            key: str, requests_per_second: float, burst: int | None
+        ) -> RateLimiterBackend:
+            calls.append((key, requests_per_second, burst))
+            return sentinel
+
+        register_rate_limiter_backend(registered_factory)
+        options = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=4, burst=2))
+
+        limiter = resolve_rate_limiter(self._slack("HOOK_A"), options)
+
+        assert limiter is sentinel
+        assert calls == [(self._slack("HOOK_A").rate_limit_key(), 4, 2)]
+
+    def test_registered_backend_is_used_even_when_the_bare_ratelimiter_class_is_passed(
+        self,
+    ) -> None:
+        """Every destination's unpatched ``load()`` passes ``limiter_factory=RateLimiter``
+        for the test-patch seam (#921, ADR 0012) -- that must not shadow a
+        registered cross-process backend, or the feature is a no-op for every
+        real destination."""
+
+        class _Backend:
+            def acquire(self) -> None:
+                return None
+
+            def tighten_to(self, requests_per_second: float, burst: int | None) -> None:
+                return None
+
+        sentinel = _Backend()
+
+        def registered_factory(
+            key: str, requests_per_second: float, burst: int | None
+        ) -> RateLimiterBackend:
+            return sentinel
+
+        register_rate_limiter_backend(registered_factory)
+
+        limiter = resolve_rate_limiter(
+            self._slack("HOOK_A"), SyncOptions(), limiter_factory=RateLimiter
+        )
+
+        assert limiter is sentinel
+
+    def test_explicit_factory_wins_over_registered_backend(self) -> None:
+        def registered_factory(
+            key: str, requests_per_second: float, burst: int | None
+        ) -> RateLimiterBackend:
+            raise AssertionError("registered backend must not be consulted")
+
+        sentinel = RateLimiter(requests_per_second=1)
+
+        def explicit_factory(
+            key: str, requests_per_second: float, burst: int | None
+        ) -> RateLimiter:
+            return sentinel
+
+        register_rate_limiter_backend(registered_factory)
+
+        limiter = resolve_rate_limiter(
+            self._slack("HOOK_A"), SyncOptions(), limiter_factory=explicit_factory
+        )
+
+        assert limiter is sentinel
+
+
+class TestRateLimiterBackendRegistry:
+    def test_default_backend_constructs_a_plain_rate_limiter(self) -> None:
+        limiter = get_rate_limiter_backend()(key="k", requests_per_second=3, burst=2)
+
+        assert isinstance(limiter, RateLimiter)
+        assert isinstance(limiter, RateLimiterBackend)
+
+    def test_default_backend_ignores_the_key(self) -> None:
+        """The local backend has no distributed state to key by — the
+        in-process ``_limiter_registry`` dict already scopes by key."""
+        a = get_rate_limiter_backend()(key="endpoint-a", requests_per_second=3, burst=None)
+        b = get_rate_limiter_backend()(key="endpoint-b", requests_per_second=3, burst=None)
+
+        assert isinstance(a, RateLimiter)
+        assert isinstance(b, RateLimiter)
+        assert a is not b  # each call constructs its own instance regardless of key
+
+    def test_register_and_get_round_trip(self) -> None:
+        def factory(key: str, requests_per_second: float, burst: int | None) -> RateLimiter:
+            return RateLimiter(requests_per_second=requests_per_second, burst=burst)
+
+        register_rate_limiter_backend(factory)
+
+        assert get_rate_limiter_backend() is factory
+
+    def test_reset_restores_the_default_backend(self) -> None:
+        default = get_rate_limiter_backend()
+
+        def factory(key: str, requests_per_second: float, burst: int | None) -> RateLimiter:
+            return RateLimiter(requests_per_second=requests_per_second, burst=burst)
+
+        register_rate_limiter_backend(factory)
+        _reset_rate_limiter_backend()
+
+        restored = get_rate_limiter_backend()
+        assert restored is default
+        assert isinstance(restored(key="k", requests_per_second=3, burst=None), RateLimiter)
+
+    def test_installed_backend_plugin_is_discovered_outside_the_cli_root_callback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression (#921): plugin discovery used to happen only in the Typer
+        CLI's root callback, so a ``drt.rate_limiter_backends`` entry point
+        installed alongside drt stayed silently unregistered under the MCP
+        server, dagster-drt, and Airflow/Prefect's ``run_drt_sync()`` -- the
+        orchestrator-launched, cross-process entry points this feature exists
+        for. ``get_rate_limiter_backend()`` must trigger discovery itself,
+        the same fix ``drt/connectors/registry.py``'s
+        ``_ensure_plugins_loaded()`` already applies to source/destination
+        lookups, rather than assuming the CLI already ran it."""
+        _reset_plugin_state()
+        _FAKE_BACKEND_CALLS.clear()
+
+        ep = EntryPoint(
+            name="fake_backend",
+            value=f"{__name__}:_register_fake_backend",
+            group="drt.rate_limiter_backends",
+        )
+
+        def _fake_entry_points(*, group: str) -> list[EntryPoint]:
+            return [ep] if group == "drt.rate_limiter_backends" else []
+
+        monkeypatch.setattr("drt.plugins.entry_points", _fake_entry_points)
+
+        try:
+            # No CLI root callback ran here -- simulates a programmatic
+            # entry point (dagster-drt, Airflow/Prefect, MCP, direct library
+            # use) where load_plugins() was never explicitly called.
+            config = SlackDestinationConfig(type="slack", webhook_url_env="HOOK_A")
+            limiter = resolve_rate_limiter(config, SyncOptions(), limiter_factory=RateLimiter)
+            assert limiter is _FAKE_BACKEND_SENTINEL
+            assert _FAKE_BACKEND_CALLS == ["registered"]
+        finally:
+            _reset_plugin_state()
+            _FAKE_BACKEND_CALLS.clear()

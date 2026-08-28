@@ -27,6 +27,16 @@ def _register_broken() -> None:
     raise RuntimeError("sink unreachable")
 
 
+def _register_reentrant() -> None:
+    """A callback that re-enters `load_plugins()` from inside itself (#921) --
+    the shape `get_rate_limiter_backend()` needs to be safe under, since a
+    rate-limiter backend's own `register()` might read the currently active
+    backend to wrap it."""
+    _CALLS.append("reentrant-start")
+    nested = load_plugins()
+    _CALLS.append(f"reentrant-end:{len(nested)}")
+
+
 # Not a function — a plain module-level value, so `ep.load()` returns
 # something non-callable. Covers the case where a plugin's entry point
 # points at the wrong kind of target.
@@ -51,13 +61,14 @@ def _fake_entry_points(
     monkeypatch.setattr("drt.plugins.entry_points", _fake)
 
 
-def test_plugin_groups_include_all_four_adr_0008_registries_plus_connectors() -> None:
+def test_plugin_groups_include_all_extension_registries_plus_connectors() -> None:
     assert set(PLUGIN_GROUPS) == {
         "drt.sources",
         "drt.destinations",
         "drt.secret_providers",
         "drt.permission_checkers",
         "drt.audit_loggers",
+        "drt.rate_limiter_backends",
         "drt.observers",
     }
 
@@ -107,6 +118,30 @@ def test_load_plugins_invokes_registration_callable(monkeypatch: pytest.MonkeyPa
     assert results[0].error is None
 
 
+def test_rate_limiter_backend_entry_point_is_discovered_and_loaded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ep = EntryPoint(
+        name="shared", value=f"{__name__}:_register_ok", group="drt.rate_limiter_backends"
+    )
+    _fake_entry_points(monkeypatch, {"drt.rate_limiter_backends": [ep]})
+
+    results = load_plugins()
+
+    assert _CALLS == ["ok"]
+    assert results == [
+        DiscoveredPlugin(
+            group="drt.rate_limiter_backends",
+            name="shared",
+            value=f"{__name__}:_register_ok",
+            dist_name=None,
+            dist_version=None,
+            author=None,
+            loaded=True,
+        )
+    ]
+
+
 def test_load_plugins_isolates_a_broken_plugin(monkeypatch: pytest.MonkeyPatch) -> None:
     broken = EntryPoint(
         name="broken", value=f"{__name__}:_register_broken", group="drt.audit_loggers"
@@ -122,6 +157,28 @@ def test_load_plugins_isolates_a_broken_plugin(monkeypatch: pytest.MonkeyPatch) 
     assert "sink unreachable" in by_name["broken"].error
     assert by_name["ok"].loaded is True
     assert _CALLS == ["ok"]
+
+
+def test_load_plugins_does_not_deadlock_when_a_callback_reenters_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (#921): a registration callback calling back into
+    `load_plugins()` -- e.g. a rate-limiter backend reading the currently
+    active backend to wrap it -- used to deadlock on `_lock`, a plain,
+    non-reentrant `threading.Lock` this thread already held. The nested
+    call must return immediately instead."""
+    ep = EntryPoint(
+        name="reentrant", value=f"{__name__}:_register_reentrant", group="drt.observers"
+    )
+    _fake_entry_points(monkeypatch, {"drt.observers": [ep]})
+
+    results = load_plugins()  # must return, not hang
+
+    assert [r.loaded for r in results] == [True]
+    # The nested call ran while the outer one was still mid-loop, so it saw
+    # nothing accumulated yet -- 0 results -- and did not re-invoke this same
+    # entry point again (which would have appended a second "reentrant-start").
+    assert _CALLS == ["reentrant-start", "reentrant-end:0"]
 
 
 def test_load_plugins_is_cached_across_calls(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,4 +1,4 @@
-"""Minimum-interval rate limiter with optional burst credit.
+"""Minimum-interval rate limiter with an optional backend extension point.
 
 Despite its original name and docstring this has never been a token bucket:
 it paces requests by sleeping out the remainder of ``1 / requests_per_second``
@@ -35,6 +35,20 @@ class RateLimitKeyed(Protocol):
     """
 
     def rate_limit_key(self) -> str: ...
+
+
+@runtime_checkable
+class RateLimiterBackend(Protocol):
+    """A rate limiter the process-wide registry can share (#921, ADR 0012).
+
+    Structural rather than nominal so a third-party cross-process backend can
+    implement the existing limiter shape without subclassing drt-core's local
+    :class:`RateLimiter` implementation.
+    """
+
+    def acquire(self) -> None: ...
+
+    def tighten_to(self, requests_per_second: float, burst: int | None) -> None: ...
 
 
 def resolve_rate_limit(
@@ -77,6 +91,13 @@ class RateLimiter:
 
     requests_per_second: float
     burst: int | None = None
+    # Accepted-but-unused (#921, ADR 0012): exists only so `type[RateLimiter]`
+    # structurally satisfies `LimiterFactory`, whose `key` param a distributed
+    # backend needs to derive its shared bucket identity. The in-process
+    # `_limiter_registry` dict already scopes instances by key, so a local
+    # `RateLimiter` has nothing to do with it. Excluded from repr/eq so it
+    # never affects existing equality/printing behaviour.
+    key: str = field(default="", repr=False, compare=False)
     # _last is the "next free slot" clock. The 0.0 default reproduces the
     # historical first-call-never-sleeps behaviour when burst is off.
     _last: float = field(default=0.0, init=False, repr=False)
@@ -159,7 +180,7 @@ class RateLimiter:
 # outlive individual ``load()`` calls to pace across them. Entries are tiny
 # (one float and two locks) and bounded by the number of distinct endpoints in
 # the project, so unbounded growth is not a concern.
-_limiter_registry: dict[str, RateLimiter] = {}
+_limiter_registry: dict[str, RateLimiterBackend] = {}
 _registry_lock = threading.Lock()
 
 
@@ -177,13 +198,95 @@ def _reset_limiter_registry() -> None:
 
 @runtime_checkable
 class LimiterFactory(Protocol):
-    """Constructs a :class:`RateLimiter`. See ``resolve_rate_limiter``."""
+    """Constructs a :class:`RateLimiterBackend`. See ``resolve_rate_limiter``.
 
-    def __call__(self, requests_per_second: float, burst: int | None) -> RateLimiter: ...
+    ``key`` is ``config.rate_limit_key()`` — the same string
+    :data:`_limiter_registry` uses to cache the *instance* this call
+    creates. A distributed backend needs it too: it is the only stable
+    identity shared across processes for "which quota is this," so a
+    cross-process implementation derives its own shared bucket name (a
+    Redis key, for example) from it. The local :class:`RateLimiter` ignores
+    it — in-process, the cache dict keyed by the same string already gives
+    every caller for one endpoint the same instance.
+
+    ``key`` carries the same "do not log or serialize" caveat
+    ``resolve_rate_limiter()`` and ``rate_limit_key()`` already document —
+    it may embed a hostname, an env-var name, or other config-derived text.
+    A distributed backend that writes it into a shared store verbatim (a
+    Redis key, say) leaks that text to anything with read access to the
+    store; derive an opaque digest instead (a secret-keyed HMAC, not a bare
+    hash, so the digest can't be brute-forced back to the original text).
+
+    All three parameters are keyword-only: ``resolve_rate_limiter`` always
+    calls by keyword, and this avoids constraining implementers (including
+    ``RateLimiter`` itself, whose dataclass field order is
+    ``requests_per_second, burst, key`` for backward-compatible direct
+    construction, not the Protocol's ``key`` first) to one positional order.
+    """
+
+    def __call__(
+        self, *, key: str, requests_per_second: float, burst: int | None
+    ) -> RateLimiterBackend: ...
 
 
-def _default_limiter_factory(requests_per_second: float, burst: int | None) -> RateLimiter:
-    return RateLimiter(requests_per_second=requests_per_second, burst=burst)
+def _default_limiter_factory(
+    key: str, requests_per_second: float, burst: int | None
+) -> RateLimiter:
+    # `key` is unused by the local backend (the in-process registry dict
+    # already scopes instances by key) but threaded through to RateLimiter's
+    # own inert `key` field for consistency rather than discarded.
+    return RateLimiter(key=key, requests_per_second=requests_per_second, burst=burst)
+
+
+_backend_lock = threading.Lock()
+_limiter_factory: LimiterFactory = _default_limiter_factory
+
+
+def register_rate_limiter_backend(factory: LimiterFactory) -> None:
+    """Install `factory` as the active rate-limiter backend for this process.
+
+    Unlike the endpoint-keyed limiter registry, there is exactly one active
+    backend factory per process — a second call replaces the first rather
+    than erroring, so a caller (e.g. a test fixture) can reset to the local
+    default via ``register_rate_limiter_backend(_default_limiter_factory)``.
+    """
+    global _limiter_factory
+    with _backend_lock:
+        _limiter_factory = factory
+
+
+def get_rate_limiter_backend() -> LimiterFactory:
+    """Return the currently active rate-limiter backend factory (the local default,
+    :func:`_default_limiter_factory`, unless a plugin registered its own via
+    :func:`register_rate_limiter_backend`).
+
+    Ensures plugin discovery has run first (#921), the same fix
+    ``drt/connectors/registry.py``'s ``_ensure_plugins_loaded()`` already
+    applies to source/destination lookups: registration used to happen only
+    in the Typer CLI's root callback, so a ``drt.rate_limiter_backends``
+    entry point installed alongside drt would silently stay unregistered
+    under the MCP server, dagster-drt, and the Airflow/Prefect
+    ``run_drt_sync()`` entry point — exactly the orchestrator-launched,
+    cross-process scenario this registry exists for. :func:`drt.plugins.load_plugins`
+    is cached per process, so this costs one lock-and-flag check after the
+    first call. Imported lazily to keep ``drt.plugins`` off this module's
+    import path, matching that function's own reasoning. Called before
+    acquiring ``_backend_lock``: a plugin's registration callback calls
+    :func:`register_rate_limiter_backend`, which takes that same lock, and
+    a non-reentrant ``threading.Lock`` would deadlock the thread against
+    itself if this ran while the lock was already held.
+    """
+    from drt.plugins import load_plugins
+
+    load_plugins()
+    with _backend_lock:
+        return _limiter_factory
+
+
+def _reset_rate_limiter_backend() -> None:
+    """Restore the local default. Test hook only — not called by production
+    code, which registers at most once per process."""
+    register_rate_limiter_backend(_default_limiter_factory)
 
 
 def resolve_rate_limiter(
@@ -191,7 +294,7 @@ def resolve_rate_limiter(
     sync_options: SyncOptions,
     max_requests_per_second: float | None = None,
     limiter_factory: LimiterFactory | None = None,
-) -> RateLimiter:
+) -> RateLimiterBackend:
     """Return the shared limiter for this destination's endpoint (#769).
 
     Resolves the effective config (``destination.rate_limit`` > ``sync.rate_limit``
@@ -226,12 +329,24 @@ def resolve_rate_limiter(
     correctness against the vendor's limit over per-sync throughput.
 
     ``limiter_factory`` overrides how a *new* limiter is constructed (it is not
-    consulted when the key is already registered). Destinations pass their own
-    module-level ``RateLimiter`` name so that
-    ``patch("drt.destinations.<name>.RateLimiter")`` — the way several
-    destination tests assert per-record pacing — keeps intercepting
-    construction. Without the seam those patches would target a name ``load()``
-    no longer calls and the assertions would quietly pass against nothing.
+    consulted when the key is already registered). Every destination's
+    ``load()`` passes its own module-level ``RateLimiter`` name here — not as a
+    genuine per-call override, but so ``patch("drt.destinations.<name>.RateLimiter")``,
+    the way several destination tests assert per-record pacing, keeps
+    intercepting construction. Without the seam those patches would target a
+    name ``load()`` no longer calls and the assertions would quietly pass
+    against nothing.
+
+    That means an *unpatched* call always supplies the real ``RateLimiter``
+    class as ``limiter_factory`` too, which would permanently shadow a
+    registered cross-process backend (#921, ADR 0012) for every destination —
+    the whole point of the registry defeated by the seam that predates it. So
+    the bare, unpatched ``RateLimiter`` class is treated as "no genuine
+    override" and falls through to :func:`get_rate_limiter_backend` exactly
+    like ``None`` does; only a *different* callable — a test's patched mock,
+    or an explicit caller-supplied factory — wins outright. This distinguishes
+    the two by identity (``is RateLimiter``), not by behavior, so it costs
+    nothing to get right: a mock is never the same object as the real class.
 
     The returned key is process-local. Do not log or serialize it: it may embed
     an env-var name or a credential digest, and the #696 review rejected
@@ -246,12 +361,20 @@ def resolve_rate_limiter(
         # 0 is a sentinel rather than a rate and must not become the ceiling.
         rps = max_requests_per_second
 
-    factory = limiter_factory if limiter_factory is not None else _default_limiter_factory
+    factory = limiter_factory
+    if factory is None or factory is RateLimiter:
+        # None: no override at all. `is RateLimiter`: the bare class, which
+        # every destination's unpatched call also supplies for the test-patch
+        # seam above — not a genuine override, so it must not shadow a
+        # registered backend. A test's `patch(...)` replaces this name with a
+        # distinct mock object, which is never `is RateLimiter`, so patched
+        # tests are unaffected.
+        factory = get_rate_limiter_backend()
 
     with _registry_lock:
         existing = _limiter_registry.get(key)
         if existing is None:
-            limiter = factory(requests_per_second=rps, burst=resolved.burst)
+            limiter = factory(key=key, requests_per_second=rps, burst=resolved.burst)
             _limiter_registry[key] = limiter
             return limiter
 

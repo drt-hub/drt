@@ -58,7 +58,7 @@ from drt.config.models import (
     SyncOptions,
 )
 from drt.destinations.base import SyncResult
-from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
+from drt.destinations.rate_limiter import RateLimiter, RateLimiterBackend, resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import RowError
 from drt.templates.renderer import render_template
@@ -110,7 +110,7 @@ class MixpanelDestination:
         sync_options: SyncOptions,
         base_url: str,
         retry_config: RetryConfig,
-        rate_limiter: RateLimiter,
+        rate_limiter: RateLimiterBackend,
         result: SyncResult,
     ) -> None:
         token = resolve_env(config.project_token, config.project_token_env)
@@ -147,7 +147,7 @@ class MixpanelDestination:
         sync_options: SyncOptions,
         base_url: str,
         retry_config: RetryConfig,
-        rate_limiter: RateLimiter,
+        rate_limiter: RateLimiterBackend,
         result: SyncResult,
     ) -> None:
         username = resolve_env(config.service_account_username, config.service_account_username_env)
@@ -205,7 +205,7 @@ class MixpanelDestination:
         chunk: list[tuple[int, dict[str, Any], dict[str, Any]]],
         result: SyncResult,
         sync_options: SyncOptions,
-        rate_limiter: RateLimiter,
+        rate_limiter: RateLimiterBackend,
         do_post: Any,
     ) -> bool:
         """POST one chunk; record success/row-errors. Returns False to stop."""
