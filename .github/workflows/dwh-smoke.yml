@@ -98,8 +98,15 @@ jobs:
       - name: Check credentials
         id: creds
         run: |
-          if [ -z "$DRT_SMOKE_DATABRICKS_HOST" ]; then
-            echo "No Databricks smoke secrets configured — skipping (no-op)."
+          # HOST alone used to be enough to gate the whole job, but the
+          # warehouse-start step below also needs HTTP_PATH (for the
+          # warehouse ID) and TOKEN (for the REST API call) -- a partially
+          # configured secret set (a real, intentionally supported state per
+          # this workflow's own "activates per-warehouse as secrets are
+          # added" design) must still no-op rather than call the API with an
+          # empty warehouse ID or token (Codex review, #1015).
+          if [ -z "$DRT_SMOKE_DATABRICKS_HOST" ] || [ -z "$DRT_SMOKE_DATABRICKS_HTTP_PATH" ] || [ -z "$DRT_SMOKE_DATABRICKS_TOKEN" ]; then
+            echo "No (or incomplete) Databricks smoke secrets configured — skipping (no-op)."
             echo "has_creds=false" >> "$GITHUB_OUTPUT"
           else
             echo "has_creds=true" >> "$GITHUB_OUTPUT"
