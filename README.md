@@ -427,7 +427,14 @@ defs = Definitions(
 )
 ```
 
-See [dagster-drt README](integrations/dagster-drt/README.md) for full API docs (Translator, Pipes support, DrtConfig dry-run, MaterializeResult).
+For event-driven activation, `build_drt_change_sensor()` watches metadata-only
+change signals from Delta Lake, Iceberg, Snowflake, or SQL Server. The same
+resource also runs explicitly selected syncs from a plain Dagster `@op`, returns
+a chainable `DrtEventIterator` for source row-count checks, and powers the
+declarative `DrtSyncComponent` for `defs.yaml` projects.
+
+See [dagster-drt README](integrations/dagster-drt/README.md) for full API docs
+(sensors, Components, `@op`, Translator, Pipes support, and dry-run config).
 
 ---
 

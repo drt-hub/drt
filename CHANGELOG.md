@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > `dagster-drt` is published as a separate PyPI package with its own version.
 
-### Unreleased (dagster-drt)
+### [0.4.0] - 2026-08-28 (dagster-drt)
 
 - **Chainable `DrtEventIterator` post-processing** ([#182](https://github.com/drt-hub/drt/issues/182)): `DagsterDrtResource.run()` now returns an iterator wrapper, matching dagster-dlt's established execution shape, so asset bodies can write `yield from drt.run(context=context).fetch_row_count()`. `fetch_row_count()` independently re-runs each resolved model against the configured **source** and attaches Dagster's standard `dagster/row_count` metadata; it deliberately does not copy `rows_extracted` or `rows_synced`, which remain the engine result from the original run and therefore are not an independent post-load check. The verification query follows the project's `query_tagging` configuration with its own fresh run id, including both the universal SQL comment and native source tags, and incremental models are rendered with the exact `cursor_value_used` by the original sync so they verify the same window. Fixing this surfaced a separate, pre-existing gap in the same code path: `DagsterDrtResource.run()`'s own `run_sync()` call never passed `project.query_tagging` at all, so a project explicitly disabling tagging (`query_tagging.enabled: false`) or setting custom `extra` tags had that config silently ignored for every sync executed through dagster-drt — the CLI's `drt run` path was unaffected, this was dagster-drt-specific. Now fixed alongside the row-count query. Source-count failures are logged and leave the original materialization intact, matching the optional post-processing contract in dagster-dlt. The same wrapper handles both event forms now emitted by the resource — `MaterializeResult` under `@drt_assets` and `AssetMaterialization` under `@op` — without separate chaining APIs.
 
@@ -24,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Fixed: `DagsterDrtResource.run()` and the legacy `drt_assets_legacy()` path ignored `state.backend`.** Both constructed `StateManager(project_path)` directly instead of going through [#756](https://github.com/drt-hub/drt/issues/756)'s `build_state_bundle()` factory — a project configured with `state.backend: gcs` or `s3` still wrote run state to local disk when executed through dagster-drt, silently defeating the whole point of a remote backend for orchestrator-launched runs. Found while researching [#855](https://github.com/drt-hub/drt/issues/855) (dagster-drt sensors): the sensor's premise — a sensor process and a CI-launched `drt run` sharing durable state — doesn't hold if the execution path itself never picks up the remote backend. Also: `integrations/dagster-drt/tests/` (36 tests) had never run in CI (separate fix, `ci.yml` + `publish-dagster-drt.yml`, no version bump).
 
 - **Fixed: `DagsterDrtResource.run()` never passed `history_manager=` to `run_sync()`** ([#980](https://github.com/drt-hub/drt/issues/980)) — a Dagster-triggered sync's execution history stayed empty regardless of `state.backend`, since `run_sync()` only appends history when `history_manager` is supplied. The identical gap the drt-core `run_drt_sync()` fix closed for Airflow/Prefect (see drt-core's `[Unreleased]` CHANGELOG entry), found while fixing that one but out of scope for it since `dagster-drt` is a separately-versioned package. Now passes `history_manager=bundle.history` and `history_retention_days=project.history.retention_days`, matching the CLI's own call site.
+
+- Requires `drt-core>=0.9.1`, `dagster>=1.10.18` — the 0.9.0 floor is unsafe for this package: its `StatePersistingObserver` advances the watermark on `DagsterDrtResource.run(dry_run=True)` previews ([#978](https://github.com/drt-hub/drt/issues/978), fixed in drt-core 0.9.1)
+
+### [0.3.0] - 2026-04-16 (dagster-drt)
+
+- **Source-volume and incremental-sync observability** ([#343](https://github.com/drt-hub/drt/issues/343)) — `DagsterDrtResource.run()` now reports `rows_extracted` and `duration_seconds` metadata, logs the extracted count, and wires watermark storage so Dagster-launched incremental syncs persist and reuse their cursor.
+- Requires `drt-core>=0.5.3`, `dagster>=1.6`
 
 ### [0.2.0] - 2026-04-04 (dagster-drt)
 
