@@ -150,7 +150,7 @@ jobs:
           curl_retry() {
             local attempt
             for attempt in 1 2 3; do
-              if curl -sf "${auth[@]}" "$@"; then
+              if curl -sf --connect-timeout 10 --max-time 30 "${auth[@]}" "$@"; then
                 return 0
               fi
               sleep 3
@@ -174,7 +174,7 @@ jobs:
 
             deadline=$((SECONDS + 300))
             while [ "$SECONDS" -lt "$deadline" ]; do
-              if new_state=$(curl -sf "${auth[@]}" "$api" | jq -r '.state'); then
+              if new_state=$(curl -sf --connect-timeout 10 --max-time 30 "${auth[@]}" "$api" | jq -r '.state'); then
                 state="$new_state"
                 echo "  state=${state} (${SECONDS}s elapsed)"
                 if [ "$state" = "RUNNING" ]; then
