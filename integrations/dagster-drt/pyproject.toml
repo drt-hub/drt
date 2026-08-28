@@ -11,7 +11,7 @@ license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
 dependencies = [
     "dagster>=1.10.18",  # current defs.yaml Components API + per-project dg CLI contract
-    "drt-core>=0.9.0",  # drt.state.factory.build_state_bundle() first shipped in 0.9.0
+    "drt-core>=0.9.1",  # 0.9.0's StatePersistingObserver advanced the watermark on dry runs (#978, fixed in 0.9.1)
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",

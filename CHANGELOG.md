@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Fixed: `DagsterDrtResource.run()` never passed `history_manager=` to `run_sync()`** ([#980](https://github.com/drt-hub/drt/issues/980)) — a Dagster-triggered sync's execution history stayed empty regardless of `state.backend`, since `run_sync()` only appends history when `history_manager` is supplied. The identical gap the drt-core `run_drt_sync()` fix closed for Airflow/Prefect (see drt-core's `[Unreleased]` CHANGELOG entry), found while fixing that one but out of scope for it since `dagster-drt` is a separately-versioned package. Now passes `history_manager=bundle.history` and `history_retention_days=project.history.retention_days`, matching the CLI's own call site.
 
-- Requires `drt-core>=0.9.0`, `dagster>=1.10.18`
+- Requires `drt-core>=0.9.1`, `dagster>=1.10.18` — the 0.9.0 floor is unsafe for this package: its `StatePersistingObserver` advances the watermark on `DagsterDrtResource.run(dry_run=True)` previews ([#978](https://github.com/drt-hub/drt/issues/978), fixed in drt-core 0.9.1)
 
 ### [0.3.0] - 2026-04-16 (dagster-drt)
 
