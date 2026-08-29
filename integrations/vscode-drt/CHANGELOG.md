@@ -6,6 +6,10 @@ drt-core version its bundled schemas were generated from.
 
 ## [0.1.13] - Unreleased
 
+- Bundled JSON Schemas regenerated from drt-core: `sync.batch_size` now has a
+  minimum of `1` (`exclusiveMinimum: 0`) — `0` or a negative value used to
+  either crash or silently insert nothing on some destinations while
+  reporting success (drt-hub/drt#961).
 - Bundled JSON Schemas regenerated from drt-core: the `destination` union gains
   a `GenericDestinationConfig` member for third-party connector types, and the
   OpenAPI-style `discriminator` block is gone — drt-core now discriminates the
