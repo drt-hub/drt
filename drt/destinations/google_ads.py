@@ -42,7 +42,7 @@ from drt.destinations.auth import AuthHandler
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
-from drt.destinations.row_errors import RowError
+from drt.destinations.row_errors import record_row_error
 
 _API_VERSION = "v17"
 _BASE_URL = "https://googleads.googleapis.com"
@@ -82,18 +82,16 @@ class GoogleAdsDestination:
             gclid = record.get(config.gclid_field)
             conv_time = record.get(config.conversion_time_field)
             if not gclid or not conv_time:
-                result.failed += 1
-                result.row_errors.append(
-                    RowError(
-                        batch_index=i,
-                        record_preview=json.dumps(record, default=str)[:200],
-                        http_status=None,
-                        error_message=(
-                            f"Missing required field: "
-                            f"{config.gclid_field} or "
-                            f"{config.conversion_time_field}"
-                        ),
-                    )
+                record_row_error(
+                    result,
+                    i,
+                    json.dumps(record, default=str)[:200],
+                    ValueError(),
+                    error_message=(
+                        f"Missing required field: "
+                        f"{config.gclid_field} or "
+                        f"{config.conversion_time_field}"
+                    ),
                 )
                 if sync_options.on_error == "fail":
                     break

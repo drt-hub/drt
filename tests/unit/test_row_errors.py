@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from drt.destinations.base import SyncResult
-from drt.destinations.row_errors import RowError
+from drt.destinations.row_errors import RowError, record_row_error
 
 
 class TestRowError:
@@ -94,3 +94,33 @@ class TestSyncResultRowErrors:
     def test_row_errors_empty_on_success(self) -> None:
         result = SyncResult(success=5)
         assert result.row_errors == []
+
+
+class TestRecordRowError:
+    def test_increments_failed_and_uses_exception_message(self) -> None:
+        result = SyncResult(failed=2)
+
+        record_row_error(result, 4, '{"id": 7}', ValueError("invalid"))
+
+        assert result.failed == 3
+        assert len(result.row_errors) == 1
+        assert result.row_errors[0].batch_index == 4
+        assert result.row_errors[0].record_preview == '{"id": 7}'
+        assert result.row_errors[0].http_status is None
+        assert result.row_errors[0].error_message == "invalid"
+
+    def test_preserves_explicit_status_and_message(self) -> None:
+        result = SyncResult()
+
+        record_row_error(
+            result,
+            1,
+            "transformed row",
+            RuntimeError("fallback"),
+            http_status=422,
+            error_message="response body",
+        )
+
+        assert result.failed == 1
+        assert result.row_errors[0].http_status == 422
+        assert result.row_errors[0].error_message == "response body"

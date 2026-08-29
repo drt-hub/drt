@@ -53,7 +53,7 @@ from drt.config.models import DestinationConfig, ElasticsearchDestinationConfig,
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
-from drt.destinations.row_errors import RowError
+from drt.destinations.row_errors import record_row_error
 
 
 class ElasticsearchDestination:
@@ -206,12 +206,11 @@ def _add_row_error(
     http_status: int | None,
     message: str,
 ) -> None:
-    result.failed += 1
-    result.row_errors.append(
-        RowError(
-            batch_index=index,
-            record_preview=json.dumps(record, default=str)[:200],
-            http_status=http_status,
-            error_message=message,
-        )
+    record_row_error(
+        result,
+        index,
+        json.dumps(record, default=str)[:200],
+        Exception(message),
+        http_status=http_status,
+        error_message=message,
     )

@@ -44,7 +44,7 @@ from drt.config.models import (
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
-from drt.destinations.row_errors import RowError
+from drt.destinations.row_errors import record_row_error
 from drt.templates.renderer import render_template
 
 _BASE = "https://a.klaviyo.com/api"
@@ -87,26 +87,22 @@ class KlaviyoDestination:
                     self._upsert(client, config, headers, record, list_id, retry_config)
                     result.success += 1
                 except httpx.HTTPStatusError as e:
-                    result.failed += 1
-                    result.row_errors.append(
-                        RowError(
-                            batch_index=index,
-                            record_preview=str(record)[:200],
-                            http_status=e.response.status_code,
-                            error_message=e.response.text[:500],
-                        )
+                    record_row_error(
+                        result,
+                        index,
+                        str(record)[:200],
+                        e,
+                        http_status=e.response.status_code,
+                        error_message=e.response.text[:500],
                     )
                     if sync_options.on_error == "fail":
                         break
                 except Exception as e:
-                    result.failed += 1
-                    result.row_errors.append(
-                        RowError(
-                            batch_index=index,
-                            record_preview=str(record)[:200],
-                            http_status=None,
-                            error_message=str(e),
-                        )
+                    record_row_error(
+                        result,
+                        index,
+                        str(record)[:200],
+                        e,
                     )
                     if sync_options.on_error == "fail":
                         break

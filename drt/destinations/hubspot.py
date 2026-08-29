@@ -52,7 +52,7 @@ from drt.config.models import DestinationConfig, HubSpotDestinationConfig, SyncO
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
-from drt.destinations.row_errors import RowError
+from drt.destinations.row_errors import record_row_error
 from drt.templates.renderer import render_template
 
 _HUBSPOT_API = "https://api.hubapi.com/crm/v3/objects"
@@ -97,14 +97,12 @@ class HubSpotDestination:
                         rendered = render_template(config.properties_template, record)
                         properties = json.loads(rendered)
                     except (ValueError, json.JSONDecodeError) as e:
-                        result.failed += 1
-                        result.row_errors.append(
-                            RowError(
-                                batch_index=i,
-                                record_preview=json.dumps(record, default=str)[:200],
-                                http_status=None,
-                                error_message=f"properties_template error: {e}",
-                            )
+                        record_row_error(
+                            result,
+                            i,
+                            json.dumps(record, default=str)[:200],
+                            e,
+                            error_message=f"properties_template error: {e}",
                         )
                         continue
                 else:
@@ -169,26 +167,22 @@ class HubSpotDestination:
                     else:
                         result.success += 1
                 except httpx.HTTPStatusError as e:
-                    result.failed += 1
-                    result.row_errors.append(
-                        RowError(
-                            batch_index=i,
-                            record_preview=json.dumps(record, default=str)[:200],
-                            http_status=e.response.status_code,
-                            error_message=e.response.text[:500],
-                        )
+                    record_row_error(
+                        result,
+                        i,
+                        json.dumps(record, default=str)[:200],
+                        e,
+                        http_status=e.response.status_code,
+                        error_message=e.response.text[:500],
                     )
                     if sync_options.on_error == "fail":
                         break
                 except Exception as e:
-                    result.failed += 1
-                    result.row_errors.append(
-                        RowError(
-                            batch_index=i,
-                            record_preview=json.dumps(record, default=str)[:200],
-                            http_status=None,
-                            error_message=str(e),
-                        )
+                    record_row_error(
+                        result,
+                        i,
+                        json.dumps(record, default=str)[:200],
+                        e,
                     )
                     if sync_options.on_error == "fail":
                         break

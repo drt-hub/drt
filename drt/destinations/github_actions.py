@@ -45,7 +45,7 @@ from drt.config.models import (
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
-from drt.destinations.row_errors import RowError
+from drt.destinations.row_errors import record_row_error
 from drt.templates.renderer import render_template
 
 _GITHUB_API = "https://api.github.com"
@@ -95,14 +95,12 @@ class GitHubActionsDestination:
                         rendered = render_template(config.inputs_template, record)
                         inputs = json.loads(rendered)
                     except (ValueError, json.JSONDecodeError) as e:
-                        result.failed += 1
-                        result.row_errors.append(
-                            RowError(
-                                batch_index=i,
-                                record_preview=json.dumps(record, default=str)[:200],
-                                http_status=None,
-                                error_message=f"inputs_template error: {e}",
-                            )
+                        record_row_error(
+                            result,
+                            i,
+                            json.dumps(record, default=str)[:200],
+                            e,
+                            error_message=f"inputs_template error: {e}",
                         )
                         continue
 
@@ -123,26 +121,22 @@ class GitHubActionsDestination:
                     with_retry(do_request, retry_config)
                     result.success += 1
                 except httpx.HTTPStatusError as e:
-                    result.failed += 1
-                    result.row_errors.append(
-                        RowError(
-                            batch_index=i,
-                            record_preview=json.dumps(record, default=str)[:200],
-                            http_status=e.response.status_code,
-                            error_message=e.response.text[:500],
-                        )
+                    record_row_error(
+                        result,
+                        i,
+                        json.dumps(record, default=str)[:200],
+                        e,
+                        http_status=e.response.status_code,
+                        error_message=e.response.text[:500],
                     )
                     if sync_options.on_error == "fail":
                         break
                 except Exception as e:
-                    result.failed += 1
-                    result.row_errors.append(
-                        RowError(
-                            batch_index=i,
-                            record_preview=json.dumps(record, default=str)[:200],
-                            http_status=None,
-                            error_message=str(e),
-                        )
+                    record_row_error(
+                        result,
+                        i,
+                        json.dumps(record, default=str)[:200],
+                        e,
                     )
                     if sync_options.on_error == "fail":
                         break

@@ -18,8 +18,8 @@ from drt.config.models import DestinationConfig, JiraDestinationConfig, RetryCon
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
-from drt.destinations.row_errors import RowError
 from drt.destinations.row_errors import record_preview as _record_preview
+from drt.destinations.row_errors import record_row_error
 from drt.templates.renderer import render_template
 
 logger = logging.getLogger(__name__)
@@ -147,29 +147,25 @@ class JiraDestination:
                         logger.info("Jira issue created for row index %s", i)
                     result.success += 1
                 except httpx.HTTPStatusError as e:
-                    result.failed += 1
-                    logger.warning("Jira request failed for row %s: %s", i, e)
-                    result.row_errors.append(
-                        RowError(
-                            batch_index=i,
-                            record_preview=_record_preview(row),
-                            http_status=e.response.status_code,
-                            error_message=e.response.text[:500],
-                        )
+                    record_row_error(
+                        result,
+                        i,
+                        _record_preview(row),
+                        e,
+                        http_status=e.response.status_code,
+                        error_message=e.response.text[:500],
                     )
+                    logger.warning("Jira request failed for row %s: %s", i, e)
                     if sync_options.on_error == "fail":
                         break
                 except Exception as e:
-                    result.failed += 1
-                    logger.warning("Jira destination failed for row %s: %s", i, e)
-                    result.row_errors.append(
-                        RowError(
-                            batch_index=i,
-                            record_preview=_record_preview(row),
-                            http_status=None,
-                            error_message=str(e),
-                        )
+                    record_row_error(
+                        result,
+                        i,
+                        _record_preview(row),
+                        e,
                     )
+                    logger.warning("Jira destination failed for row %s: %s", i, e)
                     if sync_options.on_error == "fail":
                         break
         return result
