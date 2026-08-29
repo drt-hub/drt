@@ -1,8 +1,8 @@
 """ClickHouse destination — insert rows into a ClickHouse table.
 
-Uses clickhouse-connect for HTTP-based inserts. Each record is inserted
-individually to enable row-level error tracking (consistent with the
-PostgreSQL and MySQL destination pattern).
+Uses clickhouse-connect for HTTP-based batch inserts. A failed batch is
+replayed record by record to preserve row-level error tracking (consistent
+with the PostgreSQL and MySQL destination pattern).
 
 Deduplication is handled by ClickHouse's ReplacingMergeTree engine at merge
 time — the destination performs simple INSERTs.
@@ -134,25 +134,47 @@ class ClickHouseDestination:
                 # the table raw into "INSERT INTO {table} ..." with no quoting
                 # (see clickhouse_connect/driver/insert.py), so pre-quote here.
                 table_q = self._quote_ident(config.table)
-                # TODO: batch insert with fallback to row-by-row on error
-                for i, record in enumerate(records):
-                    try:
-                        row = [[record.get(c) for c in columns]]
-                        client.insert(table_q, row, column_names=columns)
-                        result.success += 1
-                    except Exception as e:
-                        result.failed += 1
-                        result.row_errors.append(
-                            RowError(
-                                batch_index=i,
-                                record_preview=json.dumps(record, default=str)[:200],
-                                http_status=None,
-                                error_message=str(e),
+
+                for start in range(0, len(records), sync_options.batch_size):
+                    record_batch = records[start : start + sync_options.batch_size]
+
+                    # Keep a one-record batch on the existing row path. If it
+                    # fails, replaying the same insert would both add a round
+                    # trip and change the previous single-attempt semantics.
+                    if len(record_batch) > 1:
+                        rows = [
+                            [record.get(c) for c in columns]
+                            for record in record_batch
+                        ]
+                        try:
+                            client.insert(table_q, rows, column_names=columns)
+                            result.success += len(record_batch)
+                            continue
+                        except Exception:
+                            # A failed multi-row INSERT is replayed below one
+                            # row at a time for exact RowError attribution.
+                            pass
+
+                    # Existing per-row insert/error path, used only for a
+                    # singleton batch or as fallback for this failed batch.
+                    for i, record in enumerate(record_batch, start=start):
+                        try:
+                            row = [[record.get(c) for c in columns]]
+                            client.insert(table_q, row, column_names=columns)
+                            result.success += 1
+                        except Exception as e:
+                            result.failed += 1
+                            result.row_errors.append(
+                                RowError(
+                                    batch_index=i,
+                                    record_preview=json.dumps(record, default=str)[:200],
+                                    http_status=None,
+                                    error_message=str(e),
+                                )
                             )
-                        )
-                        if sync_options.on_error == "fail":
-                            return result
-                        continue
+                            if sync_options.on_error == "fail":
+                                return result
+                            continue
 
                 # sync.mode: mirror (#340 Step 3) — accumulate upsert_key
                 # tuples for the finalize_sync DELETE pass. Only keys from

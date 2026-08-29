@@ -292,12 +292,12 @@ def test_mirror_excludes_failed_record_keys_from_accumulation() -> None:
     """
     dest = ClickHouseDestination()
     client = _fake_client()
-    # Make the second insert raise so batch_index=1 ends up in row_errors.
-    call_counter = {"n": 0}
-
-    def _insert_with_one_failure(*_args: Any, **_kwargs: Any) -> None:
-        call_counter["n"] += 1
-        if call_counter["n"] == 2:
+    # Reject the batch, then make its second row fail during per-row replay so
+    # batch_index=1 ends up in row_errors.
+    def _insert_with_one_failure(
+        _table: str, rows: list[list[Any]], **_kwargs: Any
+    ) -> None:
+        if len(rows) > 1 or rows[0][0] == 2:
             raise RuntimeError("forced for test")
 
     client.insert.side_effect = _insert_with_one_failure

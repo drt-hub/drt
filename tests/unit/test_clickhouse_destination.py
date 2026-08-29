@@ -111,8 +111,33 @@ class TestClickHouseDestinationLoad:
 
         assert result.success == 2
         assert result.failed == 0
-        assert client.insert.call_count == 2
+        client.insert.assert_called_once_with(
+            "`analytics_scores`",
+            [
+                [1, 0.95, "2026-03-31"],
+                [2, 0.80, "2026-03-31"],
+            ],
+            column_names=["id", "score", "updated_at"],
+        )
         client.close.assert_called_once()
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_insert_batches_by_sync_batch_size(self, mock_connect: MagicMock) -> None:
+        client = _fake_client()
+        mock_connect.return_value = client
+
+        records = [{"id": i} for i in range(250)]
+        result = ClickHouseDestination().load(
+            records, _config(), _options(batch_size=100)
+        )
+
+        assert result.success == 250
+        assert client.insert.call_count == 3
+        assert [len(call.args[1]) for call in client.insert.call_args_list] == [
+            100,
+            100,
+            50,
+        ]
 
     @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
     def test_empty_records(self, mock_connect: MagicMock) -> None:
@@ -139,37 +164,83 @@ class TestClickHouseDestinationLoad:
     @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
     def test_row_error_on_error_skip(self, mock_connect: MagicMock) -> None:
         client = _fake_client()
-        # First row fails, second succeeds
-        client.insert.side_effect = [Exception("type mismatch"), None]
+
+        def insert_with_one_bad_record(
+            _table: str, rows: list[list[Any]], **_kwargs: Any
+        ) -> None:
+            ids = [row[0] for row in rows]
+            if ids == [3, 4]:
+                raise Exception("batch rejected")
+            if ids == [4]:
+                raise Exception("type mismatch")
+
+        client.insert.side_effect = insert_with_one_bad_record
         mock_connect.return_value = client
 
         records = [
-            {"id": 1, "score": 0.5},
-            {"id": 2, "score": 0.9},
+            {"id": 1, "score": 0.1},
+            {"id": 2, "score": 0.2},
+            {"id": 3, "score": 0.3},
+            {"id": 4, "score": "bad"},
+            {"id": 5, "score": 0.5},
         ]
-        result = ClickHouseDestination().load(records, _config(), _options(on_error="skip"))
+        result = ClickHouseDestination().load(
+            records,
+            _config(),
+            _options(on_error="skip", batch_size=2),
+        )
 
         assert result.failed == 1
-        assert result.success == 1
+        assert result.success == 4
         assert len(result.row_errors) == 1
-        assert "type mismatch" in result.row_errors[0].error_message
+        assert result.row_errors[0].batch_index == 3
+        assert result.row_errors[0].record_preview == '{"id": 4, "score": "bad"}'
+        assert result.row_errors[0].http_status is None
+        assert result.row_errors[0].error_message == "type mismatch"
+        assert [call.args[1] for call in client.insert.call_args_list] == [
+            [[1, 0.1], [2, 0.2]],
+            [[3, 0.3], [4, "bad"]],
+            [[3, 0.3]],
+            [[4, "bad"]],
+            [[5, 0.5]],
+        ]
 
     @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
     def test_row_error_on_error_fail(self, mock_connect: MagicMock) -> None:
         client = _fake_client()
-        client.insert.side_effect = Exception("connection lost")
+
+        def fail_during_batch_fallback(
+            _table: str, rows: list[list[Any]], **_kwargs: Any
+        ) -> None:
+            if len(rows) > 1:
+                raise Exception("batch rejected")
+            if rows[0][0] == 2:
+                raise Exception("connection lost")
+
+        client.insert.side_effect = fail_during_batch_fallback
         mock_connect.return_value = client
 
         records = [
             {"id": 1, "score": 0.5},
             {"id": 2, "score": 0.9},
+            {"id": 3, "score": 0.7},
+            {"id": 4, "score": 0.6},
         ]
-        result = ClickHouseDestination().load(records, _config(), _options(on_error="fail"))
+        result = ClickHouseDestination().load(
+            records,
+            _config(),
+            _options(on_error="fail", batch_size=3),
+        )
 
         assert result.failed == 1
-        assert result.success == 0
-        # Should stop after first failure
-        assert client.insert.call_count == 1
+        assert result.success == 1
+        assert result.row_errors[0].batch_index == 1
+        # Batch attempt, row 0 success, row 1 failure; rows 2+ are untouched.
+        assert [call.args[1] for call in client.insert.call_args_list] == [
+            [[1, 0.5], [2, 0.9], [3, 0.7]],
+            [[1, 0.5]],
+            [[2, 0.9]],
+        ]
 
     @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
     def test_connection_closed_on_success(self, mock_connect: MagicMock) -> None:
@@ -235,7 +306,7 @@ class TestClickHouseReplaceMode:
         assert result.success == 2
         assert result.failed == 0
         client.command.assert_called_once_with("TRUNCATE TABLE `analytics_scores`")
-        assert client.insert.call_count == 2
+        assert client.insert.call_count == 1
 
     @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
     def test_replace_truncates_only_once_across_batches(self, mock_connect: MagicMock) -> None:
