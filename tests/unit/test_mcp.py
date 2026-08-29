@@ -1543,6 +1543,48 @@ async def test_state_reset_tracked_mirror_warns(
     assert result["reset"] == ["tracked-mirror"]
 
 
+@pytest.mark.parametrize(
+    ("destination", "destination_type"),
+    [
+        pytest.param(
+            "drt.destinations.snowflake.SnowflakeDestination",
+            "snowflake",
+            id="snowflake",
+        ),
+        pytest.param(
+            "drt.destinations.databricks.DatabricksDestination",
+            "databricks",
+            id="databricks",
+        ),
+    ],
+)
+def test_state_reset_inherited_unimplemented_reset_stays_unsupported(
+    destination: str,
+    destination_type: str,
+) -> None:
+    from importlib import import_module
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    from drt.mcp.tools.state import state_reset
+
+    module_name, class_name = destination.rsplit(".", 1)
+    destination_class = getattr(import_module(module_name), class_name)
+    sync = SimpleNamespace(
+        name="users",
+        destination=SimpleNamespace(type=destination_type),
+    )
+    ctx = MagicMock()
+    ctx.load_syncs.return_value = [sync]
+    with patch("drt.cli._helpers.get_destination", return_value=destination_class()):
+        result = state_reset(ctx, "users", tracked_mirror=True)
+
+    assert result["warning"] == (
+        f"{destination_type} does not support tracked mirror."
+    )
+    assert "keys_removed" not in result
+
+
 @pytest.mark.asyncio
 async def test_run_sync_rejects_full_refresh_with_cursor_value(
     server: FastMCP,

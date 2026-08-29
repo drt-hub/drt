@@ -56,6 +56,7 @@ from drt.config.credentials import resolve_env
 from drt.config.models import DatabricksDestinationConfig, DestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import record_row_error
+from drt.destinations.sql_base import BaseSqlDestination
 from drt.destinations.sql_utils import tagged_cursor
 
 _SWAP_SUFFIX = "__drt_swap"
@@ -133,37 +134,16 @@ def _rows_per_chunk(n_cols: int) -> int:
     return max(1, _NATIVE_PARAM_LIMIT // max(1, n_cols))
 
 
-class DatabricksDestination:
+class DatabricksDestination(BaseSqlDestination):
     """Write records into Databricks Delta Lake tables."""
 
     def __init__(self) -> None:
-        # sync.mode: mirror — accumulates upsert_key tuples seen across
-        # batches so finalize_sync can DELETE missing rows. ``None`` means
-        # mirror mode hasn't engaged yet (no batch with records); finalize
-        # treats that as "skip DELETE" — safety against deleting
-        # everything when the source produced no data.
-        self._mirror_keys: list[tuple[Any, ...]] | None = None
-        # mirror.scope (#692, mirroring #687) — distinct scope-column value
-        # tuples observed across batches; the finalize DELETE (destination or
-        # tracked strategy) is restricted to rows whose scope values are in
-        # this set.
-        self._mirror_scopes: set[tuple[Any, ...]] | None = None
-
-        # sync.mode: replace (#643) — per-sync state, reused across batches.
-        # ``_replace_truncated`` ensures TRUNCATE runs once for the truncate
-        # strategy. ``_swap_shadow_created`` / ``_swap_table`` track the swap
-        # shadow so finalize_sync can do the atomic INSERT OVERWRITE.
-        # ``_swap_direct_write`` is the first-run fall-through: target table
-        # doesn't exist yet, so we write straight to it and skip the swap.
-        self._replace_truncated: bool = False
-        self._swap_shadow_created: bool = False
-        self._swap_table: str | None = None  # fully-qualified target name
+        super().__init__()
+        # Databricks-only first-run fall-through: target table doesn't exist
+        # yet, so replace-swap writes straight to it and skips the swap.
         self._swap_direct_write: bool = False
 
-        # Layer 3 (#317): information_schema maps, fetched once per table per sync.
-        # ``_schema_cache`` -> column category (json / scalar);
-        # ``_ddl_cache`` -> STRUCT/ARRAY/MAP column -> full type DDL for from_json.
-        self._schema_cache: dict[str, dict[str, str] | None] = {}
+        # Databricks-only STRUCT/ARRAY/MAP column -> full type DDL cache.
         self._ddl_cache: dict[str, dict[str, str] | None] = {}
 
     def _resolve_schema(self, config: DatabricksDestinationConfig) -> dict[str, str] | None:
@@ -248,7 +228,7 @@ class DatabricksDestination:
                 # before the insert/merge/mirror write paths.
                 if sync_options.mode == "replace":
                     if sync_options.replace_strategy == "swap":
-                        self._load_replace_swap(
+                        self._load_replace_swap_databricks(
                             cur,
                             records,
                             columns,
@@ -396,7 +376,7 @@ class DatabricksDestination:
         sql = f"INSERT INTO {table_fq} ({col_list}) {value_clause}"
         self._insert_rows(cur, sql, records, sync_options, result, columns, json_cols)
 
-    def _load_replace_swap(
+    def _load_replace_swap_databricks(
         self,
         cur: Any,
         records: list[dict[str, Any]],
@@ -1079,6 +1059,17 @@ class DatabricksDestination:
                 cur.execute("SELECT 1")
         finally:
             conn.close()
+
+    # --- dialect hooks (#720 phase 1) -------------------------------------
+    def _dialect_connect(
+        self, config: Any, query_tags: dict[str, str] | None = None
+    ) -> Any:
+        assert isinstance(config, DatabricksDestinationConfig)
+        return self._connect(config, query_tags=query_tags)
+
+    def _qualify_ident(self, name: str) -> str:
+        # Databricks' existing path uses unquoted, fully-qualified strings.
+        return name
 
     def list_orphan_swap_tables(
         self,

@@ -76,7 +76,7 @@ class BaseSqlDestination:
         cfg: Any = config
         self._validate_mirror_scope(records, cfg, sync_options)
 
-        conn = self._dialect_connect(config)
+        conn = self._dialect_connect(config, getattr(sync_options, "_query_tags", None))
         result = SyncResult()
 
         try:
@@ -155,7 +155,7 @@ class BaseSqlDestination:
         shadow = self._shadow_name(table)
         old = self._old_name(table)
 
-        conn = self._dialect_connect(config)
+        conn = self._dialect_connect(config, getattr(sync_options, "_query_tags", None))
         try:
             cur = _tagged_cursor(conn.cursor(), sync_options)
             self._rename_swap(conn, cur, table, shadow, old)
@@ -214,7 +214,7 @@ class BaseSqlDestination:
         # list(), not sorted() — scope values may include None (unorderable).
         scopes = list(self._mirror_scopes or set()) if scope_cols else None
 
-        conn = self._dialect_connect(config)
+        conn = self._dialect_connect(config, getattr(sync_options, "_query_tags", None))
         try:
             cur = _tagged_cursor(conn.cursor(), sync_options)
             stmt, params = self._build_mirror_delete(
@@ -337,7 +337,7 @@ class BaseSqlDestination:
         Dialect-agnostic — the connection comes from the ``_dialect_connect``
         hook, which each subclass narrows the config type inside.
         """
-        conn = self._dialect_connect(config)
+        conn = self._dialect_connect(config, None)
         try:
             cur = conn.cursor()
             cur.execute("SELECT 1")
@@ -345,7 +345,9 @@ class BaseSqlDestination:
             conn.close()
 
     # --- dialect hooks (subclasses implement) -----------------------------
-    def _dialect_connect(self, config: Any) -> Any:
+    def _dialect_connect(
+        self, config: Any, query_tags: dict[str, str] | None = None
+    ) -> Any:
         """Return a live DB connection (psycopg2 / pymysql) for this config."""
         raise NotImplementedError
 
@@ -534,7 +536,7 @@ class BaseSqlDestination:
 
         state_ident, state_scope, state_raw = self._state_table_ident(config)
 
-        conn = self._dialect_connect(config)
+        conn = self._dialect_connect(config, None)
         try:
             cur = conn.cursor()
             if not self._state_table_exists(cur, state_scope, state_raw):
@@ -631,7 +633,7 @@ class BaseSqlDestination:
         scope_positions = [upsert_cols.index(c) for c in scope_cols] if scope_cols else None
         observed_scopes = set(self._mirror_scopes or set()) if scope_positions else None
 
-        conn = self._dialect_connect(config)
+        conn = self._dialect_connect(config, getattr(sync_options, "_query_tags", None))
         try:
             cur = _tagged_cursor(conn.cursor(), sync_options)
             # Pre-provisioning (#695): check existence before issuing DDL so a

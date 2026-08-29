@@ -711,7 +711,7 @@ def test_mysql_dialect_connect_delegates_to_connect(monkeypatch: Any) -> None:
 
     monkeypatch.setattr(MySQLDestination, "_connect", staticmethod(_fake_connect))
     d = MySQLDestination()
-    assert d._dialect_connect(SOME_MYSQL_CONFIG) == "CONN"
+    assert d._dialect_connect(SOME_MYSQL_CONFIG, {"sync": "users"}) == "CONN"
     assert calls["cfg"] is SOME_MYSQL_CONFIG
 
 

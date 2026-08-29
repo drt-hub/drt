@@ -187,3 +187,45 @@ class TestResetTrackedMirror:
         removed = _reset_tracked_state("no-such-sync")
 
         assert removed == 0
+
+    @pytest.mark.parametrize(
+        ("destination", "destination_type"),
+        [
+            pytest.param(
+                "drt.destinations.snowflake.SnowflakeDestination",
+                "snowflake",
+                id="snowflake",
+            ),
+            pytest.param(
+                "drt.destinations.databricks.DatabricksDestination",
+                "databricks",
+                id="databricks",
+            ),
+        ],
+    )
+    def test_inherited_unimplemented_reset_stays_unsupported(
+        self,
+        project: Path,
+        destination: str,
+        destination_type: str,
+    ) -> None:
+        """Phase-1 inheritance must not expose the base's unimplemented reset."""
+        from importlib import import_module
+        from types import SimpleNamespace
+
+        module_name, class_name = destination.rsplit(".", 1)
+        destination_class = getattr(import_module(module_name), class_name)
+        sync = SimpleNamespace(
+            name="users",
+            destination=SimpleNamespace(type=destination_type),
+        )
+        with (
+            patch("drt.config.parser.load_syncs", return_value=[sync]),
+            patch("drt.cli._helpers.get_destination", return_value=destination_class()),
+        ):
+            result = runner.invoke(
+                app, ["state", "reset", "users", "--tracked-mirror", "--yes"]
+            )
+
+        assert result.exit_code == 0
+        assert f"{destination_type} does not support tracked mirror" in result.output

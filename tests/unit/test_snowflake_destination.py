@@ -18,6 +18,7 @@ from drt.destinations.snowflake import (
     _bind_row,
     _rows_per_merge_chunk,
 )
+from drt.destinations.sql_base import BaseSqlDestination
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -71,6 +72,64 @@ def _mocked_snowflake_modules(conn: MagicMock | None = None) -> dict[str, MagicM
         mock_connector.connect.return_value = conn
     mock_module.connector = mock_connector
     return {"snowflake": mock_module, "snowflake.connector": mock_connector}
+
+
+def test_snowflake_subclasses_sql_base() -> None:
+    dest = SnowflakeDestination()
+    phase_2_or_3_hooks = {
+        "_build_mirror_delete",
+        "_shadow_name",
+        "_old_name",
+        "_rename_swap",
+        "_load_replace_swap",
+        "_load_replace",
+        "_load_upsert",
+        "_state_table_ident",
+        "_state_table_exists",
+        "_create_state_table",
+        "_state_scope_columns_exist",
+        "_add_state_scope_columns",
+        "_state_sql",
+    }
+
+    assert isinstance(dest, BaseSqlDestination)
+    assert phase_2_or_3_hooks.isdisjoint(SnowflakeDestination.__dict__)
+    assert "load" in SnowflakeDestination.__dict__
+    assert "finalize_sync" in SnowflakeDestination.__dict__
+    assert dest._replace_truncated is False
+    assert dest._swap_shadow_created is False
+    assert dest._swap_table is None
+    assert dest._mirror_keys is None
+    assert dest._mirror_scopes is None
+    assert dest._schema_cache == {}
+
+
+def test_snowflake_dialect_hooks_forward_query_tags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    def _fake_connect(
+        cls: type[SnowflakeDestination],
+        config: SnowflakeDestinationConfig,
+        *,
+        query_tags: dict[str, str] | None = None,
+    ) -> str:
+        calls.update(cls=cls, config=config, query_tags=query_tags)
+        return "CONN"
+
+    monkeypatch.setattr(SnowflakeDestination, "_connect", classmethod(_fake_connect))
+    config = _config()
+    tags = {"sync": "users"}
+
+    dest = SnowflakeDestination()
+    assert dest._dialect_connect(config, tags) == "CONN"
+    assert calls == {
+        "cls": SnowflakeDestination,
+        "config": config,
+        "query_tags": tags,
+    }
+    assert dest._qualify_ident("DB.PUBLIC.USERS") == "DB.PUBLIC.USERS"
 
 
 # ---------------------------------------------------------------------------

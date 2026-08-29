@@ -723,7 +723,10 @@ class PostgresDestination(BaseSqlDestination):
         return frozenset({"upsert", "update_only", "create_only"})
 
     # --- dialect hooks (#719) ---------------------------------------------
-    def _dialect_connect(self, config: Any) -> Any:
+    def _dialect_connect(
+        self, config: Any, query_tags: dict[str, str] | None = None
+    ) -> Any:
+        del query_tags
         return self._connect(config)  # _connect is @classmethod(config) — #723
 
     def _qualify_ident(self, name: str) -> Any:
