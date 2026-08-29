@@ -5,8 +5,21 @@ batch is retried once with the same ClickHouse deduplication token before it
 is replayed record by record for row-level error tracking.
 
 Application-level deduplication is handled by ClickHouse's ReplacingMergeTree
-engine at merge time; the insert token only makes the HTTP retry safe within
-ClickHouse's deduplication window.
+engine at merge time. The insert token is a best-effort mitigation for the
+retry specifically, **not a guarantee**: ``insert_deduplication_token`` only
+takes effect if the target table's insert-deduplication window is actually
+enabled server-side — on by default for ``Replicated*MergeTree`` tables
+(``replicated_deduplication_window``), but **off by default** for a plain,
+non-replicated ``MergeTree``/``ReplacingMergeTree`` table unless the operator
+has explicitly set ``non_replicated_deduplication_window`` > 0. drt does not
+verify or configure this setting — doing so would need an extra round trip
+and table-level assumptions out of scope for a batching perf fix. On a table
+without an enabled dedup window, an ambiguous HTTP failure (the request
+committed server-side but the response was lost) can still result in a
+duplicated batch on retry, or duplicated rows if it takes two ambiguous
+failures to reach the row-by-row fallback. Operators who need a hard
+guarantee against this should enable the appropriate deduplication window on
+their table.
 
 Supports ``sync.mode: replace`` (TRUNCATE TABLE → INSERT) and
 ``replace_strategy: swap`` (zero-downtime: build a shadow table via
@@ -210,6 +223,13 @@ class ClickHouseDestination:
                 # errors row by row. Per-row tokens cannot extend this safety:
                 # the token belongs to the whole INSERT and would not match the
                 # original batch token.
+                #
+                # Best-effort, not a guarantee: insert_deduplication_token only
+                # takes effect if the table's dedup window is enabled server-
+                # side (on by default for Replicated*MergeTree, off by default
+                # for a plain non-replicated table) -- see the module docstring.
+                # drt does not verify this, so on a table without it enabled, an
+                # ambiguous failure can still duplicate rows on retry.
                 for _attempt in range(2):
                     try:
                         client.insert(
