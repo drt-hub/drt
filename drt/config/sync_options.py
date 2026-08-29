@@ -278,7 +278,7 @@ class SyncOptions(BaseModel):
     match_policy: Literal["upsert", "update_only", "create_only"] = "upsert"
     cursor_field: str | None = None  # required when mode=incremental
     watermark: WatermarkConfig | None = None
-    batch_size: int = 100
+    batch_size: int = Field(default=100, gt=0)
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
     retry: RetryConfig = Field(default_factory=RetryConfig)
     on_error: Literal["skip", "fail"] = "fail"

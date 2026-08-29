@@ -111,14 +111,17 @@ class TestClickHouseDestinationLoad:
 
         assert result.success == 2
         assert result.failed == 0
-        client.insert.assert_called_once_with(
+        client.insert.assert_called_once()
+        call = client.insert.call_args
+        assert call.args == (
             "`analytics_scores`",
             [
                 [1, 0.95, "2026-03-31"],
                 [2, 0.80, "2026-03-31"],
             ],
-            column_names=["id", "score", "updated_at"],
         )
+        assert call.kwargs["column_names"] == ["id", "score", "updated_at"]
+        assert set(call.kwargs["settings"]) == {"insert_deduplication_token"}
         client.close.assert_called_once()
 
     @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
@@ -138,6 +141,27 @@ class TestClickHouseDestinationLoad:
             100,
             50,
         ]
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_ambiguous_batch_failure_retries_with_same_token(
+        self, mock_connect: MagicMock
+    ) -> None:
+        client = _fake_client()
+        client.insert.side_effect = [Exception("response lost"), None]
+        mock_connect.return_value = client
+
+        records = [{"id": 1}, {"id": 2}]
+        result = ClickHouseDestination().load(records, _config(), _options())
+
+        assert result.success == 2
+        assert result.failed == 0
+        assert result.row_errors == []
+        assert client.insert.call_count == 2
+        first, retry = client.insert.call_args_list
+        assert first.args[1] == [[1], [2]]
+        assert retry.args[1] == [[1], [2]]
+        assert first.kwargs["settings"] == retry.kwargs["settings"]
+        assert set(first.kwargs["settings"]) == {"insert_deduplication_token"}
 
     @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
     def test_empty_records(self, mock_connect: MagicMock) -> None:
@@ -200,6 +224,7 @@ class TestClickHouseDestinationLoad:
         assert [call.args[1] for call in client.insert.call_args_list] == [
             [[1, 0.1], [2, 0.2]],
             [[3, 0.3], [4, "bad"]],
+            [[3, 0.3], [4, "bad"]],
             [[3, 0.3]],
             [[4, "bad"]],
             [[5, 0.5]],
@@ -235,8 +260,9 @@ class TestClickHouseDestinationLoad:
         assert result.failed == 1
         assert result.success == 1
         assert result.row_errors[0].batch_index == 1
-        # Batch attempt, row 0 success, row 1 failure; rows 2+ are untouched.
+        # Two batch attempts, row 0 success, row 1 failure; rows 2+ untouched.
         assert [call.args[1] for call in client.insert.call_args_list] == [
+            [[1, 0.5], [2, 0.9], [3, 0.7]],
             [[1, 0.5], [2, 0.9], [3, 0.7]],
             [[1, 0.5]],
             [[2, 0.9]],
@@ -343,7 +369,10 @@ class TestClickHouseReplaceSwap:
     ) -> None:
         client = _fake_client()
         mock_connect.return_value = client
-        records = [{"id": 1, "score": 0.95}]
+        records = [
+            {"id": 1, "score": 0.95},
+            {"id": 2, "score": 0.80},
+        ]
 
         dest = ClickHouseDestination()
         dest.load(records, _config(), _options(mode="replace", replace_strategy="swap"))
@@ -359,7 +388,9 @@ class TestClickHouseReplaceSwap:
         # Insert goes to shadow, not the original table, backtick-quoted (#512)
         assert client.insert.call_count == 1
         assert client.insert.call_args[0][0] == "`analytics_scores__drt_swap`"
+        assert client.insert.call_args[0][1] == [[1, 0.95], [2, 0.80]]
         assert client.insert.call_args[1]["column_names"] == ["id", "score"]
+        assert set(client.insert.call_args[1]["settings"]) == {"insert_deduplication_token"}
         # No EXCHANGE TABLES yet — that happens in finalize_sync
         assert not any("EXCHANGE TABLES" in s for s in commands)
 
@@ -440,8 +471,13 @@ class TestClickHouseReplaceSwap:
         so finalize_sync cannot EXCHANGE partial data into the live table.
         """
         client = _fake_client()
-        # Succeed on first row, then fail.
-        client.insert.side_effect = [None, Exception("type mismatch in batch 2")]
+        # Reject both batch attempts, then succeed on row 1 and fail on row 2.
+        client.insert.side_effect = [
+            Exception("batch rejected"),
+            Exception("batch rejected"),
+            None,
+            Exception("type mismatch in row 2"),
+        ]
         mock_connect.return_value = client
 
         dest = ClickHouseDestination()

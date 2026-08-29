@@ -784,6 +784,23 @@ class TestAlertsConfig:
 
 
 # ---------------------------------------------------------------------------
+# Sync options
+# ---------------------------------------------------------------------------
+
+
+class TestSyncOptions:
+    @pytest.mark.parametrize("batch_size", [0, -1])
+    def test_non_positive_batch_size_rejected(self, batch_size: int) -> None:
+        with pytest.raises(ValidationError) as exc_info:
+            SyncOptions(batch_size=batch_size)
+
+        error = exc_info.value.errors()[0]
+        assert error["loc"] == ("batch_size",)
+        assert error["type"] == "greater_than"
+        assert error["ctx"] == {"gt": 0}
+
+
+# ---------------------------------------------------------------------------
 # Replace strategy (zero-downtime swap — #338)
 # ---------------------------------------------------------------------------
 
