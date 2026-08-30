@@ -9,8 +9,8 @@ Future: bincode (Rust) for fast binary serialization.
 
 Thread safety: ``drt run --threads N`` calls ``save_sync`` concurrently
 from each worker. Every method that touches state.json runs under a
-process-local :class:`threading.Lock` so the load-modify-save cycle is
-atomic and parallel writers don't clobber each other's updates.
+:class:`threading.Lock`; mutating read-modify-write cycles additionally hold
+an OS-level sidecar lock so overlapping drt processes do not clobber updates.
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
+
+from drt.state._filelock import advisory_lock
 
 
 @dataclass
@@ -81,10 +83,9 @@ class StateStore(Protocol):
 class LocalStateManager:
     """Read and write sync state from .drt/state.json.
 
-    All public methods are thread-safe via ``self._lock``. The lock
-    serialises the load-modify-save cycle in :meth:`save_sync` and the
-    read-only operations so a reader never observes a partially-written
-    file in-memory either.
+    All public methods are thread-safe via ``self._lock``. Mutations also use
+    an OS-level sidecar lock to serialise read-modify-write cycles across drt
+    processes. Single-writer-at-a-time remains the expected operational model.
     """
 
     def __init__(self, project_dir: Path = Path(".")) -> None:
@@ -127,10 +128,11 @@ class LocalStateManager:
         return {k: SyncState(**v) for k, v in data.items()}
 
     def save_sync(self, state: SyncState) -> None:
-        with self._lock:
-            data = self._load_all()
-            data[state.sync_name] = asdict(state)
-            self._save_all(data)
+        with advisory_lock(self._state_file):
+            with self._lock:
+                data = self._load_all()
+                data[state.sync_name] = asdict(state)
+                self._save_all(data)
 
     def reset(self, sync_name: str) -> bool:
         """Drop the recorded run state for ``sync_name`` (#776).
@@ -149,13 +151,14 @@ class LocalStateManager:
         state concurrently, and a read-modify-write here would otherwise race
         a run finishing.
         """
-        with self._lock:
-            data = self._load_all()
-            if sync_name not in data:
-                return False  # never run — nothing to clear, and no file to create
-            del data[sync_name]
-            self._save_all(data)
-            return True
+        with advisory_lock(self._state_file):
+            with self._lock:
+                data = self._load_all()
+                if sync_name not in data:
+                    return False  # never run — nothing to clear, and no file to create
+                del data[sync_name]
+                self._save_all(data)
+                return True
 
     def now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
