@@ -14,6 +14,7 @@ import pytest
 
 from drt.config.models import DatabricksDestinationConfig, SyncOptions
 from drt.destinations.databricks import DatabricksDestination
+from drt.destinations.sql_base import BaseSqlDestination
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -69,6 +70,65 @@ def _mocked_databricks_modules(conn: MagicMock | None = None) -> dict[str, Magic
     mock_databricks.sql = mock_sql
 
     return {"databricks": mock_databricks, "databricks.sql": mock_sql}
+
+
+def test_databricks_subclasses_sql_base() -> None:
+    dest = DatabricksDestination()
+    phase_2_or_3_hooks = {
+        "_build_mirror_delete",
+        "_shadow_name",
+        "_old_name",
+        "_rename_swap",
+        "_load_replace_swap",
+        "_load_replace",
+        "_load_upsert",
+        "_state_table_ident",
+        "_state_table_exists",
+        "_create_state_table",
+        "_state_scope_columns_exist",
+        "_add_state_scope_columns",
+        "_state_sql",
+    }
+
+    assert isinstance(dest, BaseSqlDestination)
+    assert phase_2_or_3_hooks.isdisjoint(DatabricksDestination.__dict__)
+    assert "load" in DatabricksDestination.__dict__
+    assert "finalize_sync" in DatabricksDestination.__dict__
+    assert dest._replace_truncated is False
+    assert dest._swap_shadow_created is False
+    assert dest._swap_table is None
+    assert dest._mirror_keys is None
+    assert dest._mirror_scopes is None
+    assert dest._schema_cache == {}
+    assert dest._ddl_cache == {}
+
+
+def test_databricks_dialect_hooks_forward_query_tags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    def _fake_connect(
+        cls: type[DatabricksDestination],
+        config: DatabricksDestinationConfig,
+        *,
+        query_tags: dict[str, str] | None = None,
+    ) -> str:
+        calls.update(cls=cls, config=config, query_tags=query_tags)
+        return "CONN"
+
+    monkeypatch.setattr(DatabricksDestination, "_connect", classmethod(_fake_connect))
+    config = _config()
+    tags = {"sync": "users"}
+
+    dest = DatabricksDestination()
+    assert dest._dialect_connect(config, tags) == "CONN"
+    assert calls == {
+        "cls": DatabricksDestination,
+        "config": config,
+        "query_tags": tags,
+    }
+    assert dest._qualify_ident("main.default.users") == "main.default.users"
 
 
 # ---------------------------------------------------------------------------

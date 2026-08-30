@@ -896,7 +896,7 @@ def test_pg_dialect_connect_delegates_to_connect(monkeypatch: Any) -> None:
 
     monkeypatch.setattr(PostgresDestination, "_connect", staticmethod(_fake_connect))
     d = PostgresDestination()
-    assert d._dialect_connect(SOME_PG_CONFIG) == "CONN"
+    assert d._dialect_connect(SOME_PG_CONFIG, {"sync": "users"}) == "CONN"
     assert calls["cfg"] is SOME_PG_CONFIG
 
 

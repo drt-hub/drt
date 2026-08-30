@@ -57,7 +57,19 @@ def _reset_tracked_state(sync_name: str) -> int:
 
     dest = get_destination(syncs[0])
     reset = getattr(dest, "reset_tracked_state", None)
-    if reset is None:
+    if reset is not None:
+        from drt.destinations.sql_base import BaseSqlDestination
+
+        inherited_without_state_hooks = (
+            isinstance(dest, BaseSqlDestination)
+            and getattr(type(dest), "reset_tracked_state", None)
+            is BaseSqlDestination.reset_tracked_state
+            and getattr(type(dest), "_state_table_ident", None)
+            is BaseSqlDestination._state_table_ident
+        )
+    else:
+        inherited_without_state_hooks = False
+    if reset is None or inherited_without_state_hooks:
         console.print(
             f"[yellow]{syncs[0].destination.type} does not support tracked mirror — "
             "nothing to reset.[/yellow]"

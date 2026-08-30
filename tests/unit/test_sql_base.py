@@ -223,7 +223,9 @@ def _load_dest(events: list[str], mode: str, replace_strategy: str = "delete") -
             events.append("close")
 
     class _Dest(BaseSqlDestination):
-        def _dialect_connect(self, config: Any) -> Any:
+        def _dialect_connect(
+            self, config: Any, query_tags: dict[str, str] | None = None
+        ) -> Any:
             events.append("connect")
             return _Conn()
 
@@ -313,7 +315,9 @@ def test_load_closes_connection_on_error() -> None:
             events.append("close")
 
     class _Dest(BaseSqlDestination):
-        def _dialect_connect(self, config: Any) -> Any:
+        def _dialect_connect(
+            self, config: Any, query_tags: dict[str, str] | None = None
+        ) -> Any:
             return _Conn()
 
     d = _Dest()
@@ -347,7 +351,9 @@ def test_connection_runs_select_1_and_closes() -> None:
             events.append("close")
 
     class _Dest(BaseSqlDestination):
-        def _dialect_connect(self, config: Any) -> Any:
+        def _dialect_connect(
+            self, config: Any, query_tags: dict[str, str] | None = None
+        ) -> Any:
             events.append("connect")
             return _Conn()
 
@@ -371,7 +377,9 @@ def test_connection_closes_even_when_execute_raises() -> None:
             events.append("close")
 
     class _Dest(BaseSqlDestination):
-        def _dialect_connect(self, config: Any) -> Any:
+        def _dialect_connect(
+            self, config: Any, query_tags: dict[str, str] | None = None
+        ) -> Any:
             return _Conn()
 
     d = _Dest()
@@ -417,7 +425,9 @@ def _finalize_dest(events: list[str]) -> Any:
             events.append("close")
 
     class _Dest(BaseSqlDestination):
-        def _dialect_connect(self, config: Any) -> Any:
+        def _dialect_connect(
+            self, config: Any, query_tags: dict[str, str] | None = None
+        ) -> Any:
             events.append("connect")
             return _Conn()
 
@@ -504,7 +514,9 @@ def _mirror_dest(events: list[str], tracked_result: Any = None) -> Any:
             events.append("close")
 
     class _Dest(BaseSqlDestination):
-        def _dialect_connect(self, config: Any) -> Any:
+        def _dialect_connect(
+            self, config: Any, query_tags: dict[str, str] | None = None
+        ) -> Any:
             events.append("connect")
             return _Conn()
 
@@ -618,7 +630,9 @@ def test_finalize_mirror_closes_connection_when_execute_raises() -> None:
             events.append("close")
 
     class _Dest(BaseSqlDestination):
-        def _dialect_connect(self, config: Any) -> Any:
+        def _dialect_connect(
+            self, config: Any, query_tags: dict[str, str] | None = None
+        ) -> Any:
             return _Conn()
 
         def _build_mirror_delete(
@@ -715,7 +729,9 @@ def _tracked_dest(
             events.append("close")
 
     class _Dest(BaseSqlDestination):
-        def _dialect_connect(self, config: Any) -> Any:
+        def _dialect_connect(
+            self, config: Any, query_tags: dict[str, str] | None = None
+        ) -> Any:
             events.append("connect")
             return _Conn()
 
@@ -945,7 +961,9 @@ def test_tracked_closes_connection_when_execute_raises() -> None:
             events.append("close")
 
     class _Dest(BaseSqlDestination):
-        def _dialect_connect(self, config: Any) -> Any:
+        def _dialect_connect(
+            self, config: Any, query_tags: dict[str, str] | None = None
+        ) -> Any:
             return _Conn()
 
         def _state_table_ident(self, config: Any) -> tuple[Any, Any, Any]:
