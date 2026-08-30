@@ -60,6 +60,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Internal — RowError recording centralized across 23 destinations** ([#722](https://github.com/drt-hub/drt/issues/722)): the `try/except → result.failed += 1 → row_errors.append(RowError(...))` idiom, duplicated roughly 100 times across the destination layer, now goes through a shared `record_row_error()` helper (`drt/destinations/row_errors.py`). Each site keeps computing its own `record_preview` (a JSON dict dump for most destinations, `str()` of an already-transformed positional bind list for a few warehouse ones) and its own `on_error` control flow (`break`/`continue`/`return`/`raise`, whichever it already used) — only the 3-line "record the failure" block moved. `postgres.py`/`mysql.py` keep their own working `BaseSqlDestination._record_row_error`, unchanged; `clickhouse.py` was deliberately left alone (an unrelated in-flight PR was actively changing its error handling) for a follow-up sweep. No behavior change.
+
 ## [0.10.0] - 2026-08-28
 
 ### Fixed

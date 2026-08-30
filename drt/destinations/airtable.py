@@ -39,7 +39,7 @@ from drt.config.models import AirtableDestinationConfig, DestinationConfig, Sync
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
-from drt.destinations.row_errors import RowError
+from drt.destinations.row_errors import record_row_error
 
 _BASE_URL = "https://api.airtable.com/v0"
 _MAX_BATCH = 10  # Airtable API limit
@@ -115,14 +115,13 @@ class AirtableDestination:
         message: str,
     ) -> None:
         for index, record in chunk:
-            result.failed += 1
-            result.row_errors.append(
-                RowError(
-                    batch_index=index,
-                    record_preview=str(record)[:200],
-                    http_status=status,
-                    error_message=message,
-                )
+            record_row_error(
+                result,
+                index,
+                str(record)[:200],
+                Exception(message),
+                http_status=status,
+                error_message=message,
             )
 
     def test_connection(self, config: DestinationConfig) -> None:

@@ -31,7 +31,7 @@ from typing import Any
 from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, SnowflakeDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
-from drt.destinations.row_errors import RowError
+from drt.destinations.row_errors import record_row_error
 from drt.destinations.sql_utils import tagged_cursor
 
 _SWAP_SUFFIX = "__drt_swap"
@@ -274,14 +274,11 @@ class SnowflakeDestination:
                             cur.execute(sql, _bind_row(row, columns, json_cols))
                             result.success += 1
                         except Exception as e:
-                            result.failed += 1
-                            result.row_errors.append(
-                                RowError(
-                                    batch_index=i,
-                                    record_preview=str(row)[:200],
-                                    http_status=None,
-                                    error_message=str(e),
-                                )
+                            record_row_error(
+                                result,
+                                i,
+                                str(row)[:200],
+                                e,
                             )
                             if sync_options.on_error == "fail":
                                 raise
@@ -329,14 +326,11 @@ class SnowflakeDestination:
                                     )
                                     result.success += 1
                                 except Exception as e:
-                                    result.failed += 1
-                                    result.row_errors.append(
-                                        RowError(
-                                            batch_index=idx,
-                                            record_preview=str(row)[:200],
-                                            http_status=None,
-                                            error_message=str(e),
-                                        )
+                                    record_row_error(
+                                        result,
+                                        idx,
+                                        str(row)[:200],
+                                        e,
                                     )
                                     if sync_options.on_error == "fail":
                                         raise
@@ -466,14 +460,11 @@ class SnowflakeDestination:
                 cur.execute(sql, _bind_row(row, columns, json_cols))
                 result.success += 1
             except Exception as e:
-                result.failed += 1
-                result.row_errors.append(
-                    RowError(
-                        batch_index=i,
-                        record_preview=str(row)[:200],
-                        http_status=None,
-                        error_message=str(e),
-                    )
+                record_row_error(
+                    result,
+                    i,
+                    str(row)[:200],
+                    e,
                 )
                 if sync_options.on_error == "fail":
                     raise

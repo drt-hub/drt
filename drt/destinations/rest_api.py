@@ -30,7 +30,7 @@ from drt.destinations.auth import AuthHandler
 from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
-from drt.destinations.row_errors import RowError
+from drt.destinations.row_errors import RowError, record_row_error
 from drt.templates.renderer import render_template
 
 logger = logging.getLogger(__name__)
@@ -167,15 +167,13 @@ class RestApiDestination:
                         # established the precedent: catch every exception a
                         # template can raise, or on_error: skip stops being
                         # effective for exactly the row that needs it.
-                        result.row_errors.append(
-                            RowError(
-                                batch_index=i,
-                                record_preview=json.dumps(record, default=str)[:200],
-                                http_status=None,
-                                error_message=f"Template error: {e}",
-                            )
+                        record_row_error(
+                            result,
+                            i,
+                            json.dumps(record, default=str)[:200],
+                            e,
+                            error_message=f"Template error: {e}",
                         )
-                        result.failed += 1
                         if sync_options.on_error == "fail":
                             return result
                         continue
@@ -200,27 +198,23 @@ class RestApiDestination:
                     with_retry(do_request, retry_config)
                     result.success += 1
                 except httpx.HTTPStatusError as e:
-                    result.row_errors.append(
-                        RowError(
-                            batch_index=i,
-                            record_preview=json.dumps(record, default=str)[:200],
-                            http_status=e.response.status_code,
-                            error_message=e.response.text[:500],
-                        )
+                    record_row_error(
+                        result,
+                        i,
+                        json.dumps(record, default=str)[:200],
+                        e,
+                        http_status=e.response.status_code,
+                        error_message=e.response.text[:500],
                     )
-                    result.failed += 1
                     if sync_options.on_error == "fail":
                         return result
                 except Exception as e:
-                    result.row_errors.append(
-                        RowError(
-                            batch_index=i,
-                            record_preview=json.dumps(record, default=str)[:200],
-                            http_status=None,
-                            error_message=str(e),
-                        )
+                    record_row_error(
+                        result,
+                        i,
+                        json.dumps(record, default=str)[:200],
+                        e,
                     )
-                    result.failed += 1
                     if sync_options.on_error == "fail":
                         return result
 
@@ -288,15 +282,14 @@ class RestApiDestination:
             if error is None:
                 result.success += 1
                 continue
-            result.row_errors.append(
-                RowError(
-                    batch_index=offset + local_index,
-                    record_preview=json.dumps(record, default=str)[:200],
-                    http_status=response.status_code,
-                    error_message=_batch_error_message(error),
-                )
+            record_row_error(
+                result,
+                offset + local_index,
+                json.dumps(record, default=str)[:200],
+                RuntimeError(),
+                http_status=response.status_code,
+                error_message=_batch_error_message(error),
             )
-            result.failed += 1
 
     def fetch_paginated(
         self,

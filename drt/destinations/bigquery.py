@@ -31,7 +31,7 @@ from typing import Any
 from drt.config.models import BigQueryDestinationConfig, DestinationConfig, SyncOptions
 from drt.config.query_tags import normalize_bigquery_label
 from drt.destinations.base import SyncResult
-from drt.destinations.row_errors import RowError
+from drt.destinations.row_errors import RowError, record_row_error
 
 
 class BigQueryDestination:
@@ -81,18 +81,16 @@ class BigQueryDestination:
 
         for i, row in enumerate(records):
             if i in failed_indices:
-                result.failed += 1
                 msg = next(
                     (str(e.get("errors", e)) for e in errors if e.get("index") == i),
                     "insert failed",
                 )
-                result.row_errors.append(
-                    RowError(
-                        batch_index=i,
-                        record_preview=str(row)[:200],
-                        http_status=None,
-                        error_message=msg,
-                    )
+                record_row_error(
+                    result,
+                    i,
+                    str(row)[:200],
+                    RuntimeError(msg),
+                    error_message=msg,
                 )
             else:
                 result.success += 1

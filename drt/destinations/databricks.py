@@ -55,7 +55,7 @@ from typing import Any
 from drt.config.credentials import resolve_env
 from drt.config.models import DatabricksDestinationConfig, DestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
-from drt.destinations.row_errors import RowError
+from drt.destinations.row_errors import record_row_error
 from drt.destinations.sql_utils import tagged_cursor
 
 _SWAP_SUFFIX = "__drt_swap"
@@ -549,14 +549,11 @@ class DatabricksDestination:
                 if count_success:
                     result.success += 1
             except Exception as e:
-                result.failed += 1
-                result.row_errors.append(
-                    RowError(
-                        batch_index=base_index + i,
-                        record_preview=str(row)[:200],
-                        http_status=None,
-                        error_message=str(e),
-                    )
+                record_row_error(
+                    result,
+                    base_index + i,
+                    str(row)[:200],
+                    e,
                 )
                 if sync_options.on_error == "fail":
                     raise
