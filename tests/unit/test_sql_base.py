@@ -213,7 +213,8 @@ def _load_dest(events: list[str], mode: str, replace_strategy: str = "delete") -
     """A BaseSqlDestination subclass whose write hooks record which path ran."""
 
     class _Cur:
-        pass
+        def close(self) -> None:
+            pass
 
     class _Conn:
         def cursor(self) -> _Cur:
