@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-if os.name == "nt":
+if os.name == "nt":  # pragma: no cover - no Windows CI runner in this repo
     import msvcrt
 else:
     import fcntl
@@ -31,7 +31,7 @@ else:
 _WINDOWS_RETRY_DELAY_SECONDS = 0.05
 
 
-def _acquire_windows(lock_file: Any) -> None:
+def _acquire_windows(lock_file: Any) -> None:  # pragma: no cover - no Windows CI runner
     while True:
         lock_file.seek(0)
         try:
@@ -41,7 +41,7 @@ def _acquire_windows(lock_file: Any) -> None:
             time.sleep(_WINDOWS_RETRY_DELAY_SECONDS)
 
 
-def _release_windows(lock_file: Any) -> None:
+def _release_windows(lock_file: Any) -> None:  # pragma: no cover - no Windows CI runner
     lock_file.seek(0)
     msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
 
@@ -55,7 +55,7 @@ def advisory_lock(path: Path) -> Iterator[None]:
     # a+b creates the sidecar before locking and permits the one-byte Windows
     # locking convention. The sidecar deliberately remains after release.
     with lock_path.open("a+b") as lock_file:
-        if os.name == "nt":
+        if os.name == "nt":  # pragma: no cover - no Windows CI runner in this repo
             lock_file.seek(0)
             if not lock_file.read(1):
                 lock_file.write(b"\0")
@@ -67,7 +67,7 @@ def advisory_lock(path: Path) -> Iterator[None]:
         try:
             yield
         finally:
-            if os.name == "nt":
+            if os.name == "nt":  # pragma: no cover - no Windows CI runner in this repo
                 _release_windows(lock_file)
             else:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
