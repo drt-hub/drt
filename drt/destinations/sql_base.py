@@ -78,6 +78,7 @@ class BaseSqlDestination:
 
         conn = self._dialect_connect(config, getattr(sync_options, "_query_tags", None))
         result = SyncResult()
+        cur = None
 
         try:
             cur = _tagged_cursor(conn.cursor(), sync_options)
@@ -118,6 +119,8 @@ class BaseSqlDestination:
                 if sync_options.mode == "mirror":
                     self._accumulate_mirror_state(records, result, config, sync_options)
         finally:
+            if cur is not None:
+                cur.close()
             conn.close()
 
         return result

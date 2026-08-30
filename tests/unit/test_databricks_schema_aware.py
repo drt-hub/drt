@@ -32,6 +32,9 @@ class _FakeCursor:
     def fetchall(self) -> list[Any]:
         return []
 
+    def close(self) -> None:
+        pass
+
 
 class _FakeConn:
     def __init__(self, cur: _FakeCursor) -> None:

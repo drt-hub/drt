@@ -33,7 +33,7 @@ from drt.config.models import DestinationConfig, SnowflakeDestinationConfig, Syn
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import record_row_error
 from drt.destinations.sql_base import BaseSqlDestination
-from drt.destinations.sql_utils import tagged_cursor
+from drt.destinations.sql_utils import check_mirror_supported, tagged_cursor
 
 _SWAP_SUFFIX = "__drt_swap"
 
@@ -171,198 +171,48 @@ class SnowflakeDestination(BaseSqlDestination):
             self._schema_cache[config.table] = describe_columns(config)
         return self._schema_cache[config.table]
 
-    def load(
+    def _validate_mirror_scope(
         self,
         records: list[dict[str, Any]],
-        config: DestinationConfig,
+        config: Any,
         sync_options: SyncOptions,
-    ) -> SyncResult:
+    ) -> None:
         assert isinstance(config, SnowflakeDestinationConfig)
-        if not records:
-            return SyncResult()
-        conn = self._connect(config, query_tags=sync_options._query_tags)
-        result = SyncResult()
-
-        # sync.mode: mirror forces the MERGE write path regardless of
-        # config.mode — mirror semantics require upsert. Validate
-        # upsert_key here so the misconfiguration is surfaced before any
-        # row touches Snowflake.
-        is_mirror = sync_options.mode == "mirror"
-        # Reject an unserveable mirror config (missing upsert_key, or a
-        # scope+tracked composition where scope isn't a subset of
-        # upsert_key, #694) before writing; close the connection we just
-        # opened before surfacing the error. tracked/scope themselves are
-        # supported on Snowflake since #692.
-        from drt.destinations.sql_utils import check_mirror_supported
-
-        try:
-            check_mirror_supported(config, sync_options, "snowflake", supports_tracked_scope=True)
-        except ValueError:
-            conn.close()
-            raise
+        check_mirror_supported(
+            config,
+            sync_options,
+            "snowflake",
+            supports_tracked_scope=True,
+        )
         if (
-            is_mirror
+            sync_options.mode == "mirror"
             and sync_options.mirror is not None
             and sync_options.mirror.scope
         ):
             missing = [c for c in sync_options.mirror.scope if c not in records[0]]
             if missing:
-                conn.close()
                 raise ValueError(
                     "mirror.scope columns missing from the model output: "
                     f"{missing} (available: {sorted(records[0].keys())})"
                 )
-        try:
-            with tagged_cursor(conn.cursor(), sync_options) as cur:
-                columns = list(records[0].keys())
-                table_fq = f"{config.database}.{config.schema_}.{config.table}"
-                # Layer 3 (#317): map columns to type categories once per sync.
-                schema_map = self._resolve_schema(config)
 
-                # sync.mode: replace (#434) — full-table replace, dispatched
-                # before the insert/merge/mirror write paths.
-                if sync_options.mode == "replace":
-                    if sync_options.replace_strategy == "swap":
-                        self._load_replace_swap_snowflake(
-                            cur,
-                            records,
-                            columns,
-                            config,
-                            table_fq,
-                            sync_options,
-                            result,
-                            schema_map,
-                        )
-                    else:
-                        self._load_replace_truncate(
-                            cur, records, columns, table_fq, sync_options, result, schema_map
-                        )
-                    return result
-
-                effective_mode = "merge" if is_mirror else config.mode
-                col_list = ", ".join(columns)
-                value_clause, json_cols = _value_clause(columns, schema_map)
-
-                if effective_mode == "insert":
-                    sql = f"""
-                        INSERT INTO {table_fq} ({col_list})
-                        {value_clause}
-                    """
-
-                    for i, row in enumerate(records):
-                        try:
-                            cur.execute(sql, _bind_row(row, columns, json_cols))
-                            result.success += 1
-                        except Exception as e:
-                            record_row_error(
-                                result,
-                                i,
-                                str(row)[:200],
-                                e,
-                            )
-                            if sync_options.on_error == "fail":
-                                raise
-
-                elif effective_mode == "merge":
-                    if not config.upsert_key:
-                        raise ValueError("upsert_key is required for merge mode")
-
-                    # #988: chunked MERGE ... USING (VALUES ...) replaces the
-                    # old CREATE TEMP TABLE staging step — no DDL privilege
-                    # needed at all now. The common case is one bulk MERGE per
-                    # chunk; a chunk-level failure falls back to a MERGE per
-                    # individual row within that chunk, so a single bad row
-                    # (a genuine SQL-level rejection — type coercion, a NOT
-                    # NULL violation, etc., same class of error the old
-                    # per-row staging INSERT used to isolate) doesn't take
-                    # down every other row sharing its chunk. This is a
-                    # deliberate design choice, not an incidental one: see
-                    # #988's PR description for why the fallback exists.
-                    chunk_size = _rows_per_merge_chunk(len(columns))
-                    for chunk_start in range(0, len(records), chunk_size):
-                        chunk = records[chunk_start : chunk_start + chunk_size]
-                        try:
-                            using_sql = _merge_using_subquery(columns, schema_map, len(chunk))
-                            merge_sql = _build_merge_sql(
-                                table_fq, columns, config.upsert_key, using_sql
-                            )
-                            flat_params: list[Any] = [
-                                v
-                                for row in chunk
-                                for v in _bind_row(row, columns, json_cols)
-                            ]
-                            cur.execute(merge_sql, flat_params)
-                            result.success += len(chunk)
-                        except Exception:
-                            for offset, row in enumerate(chunk):
-                                idx = chunk_start + offset
-                                try:
-                                    using_sql = _merge_using_subquery(columns, schema_map, 1)
-                                    merge_sql = _build_merge_sql(
-                                        table_fq, columns, config.upsert_key, using_sql
-                                    )
-                                    cur.execute(
-                                        merge_sql, _bind_row(row, columns, json_cols)
-                                    )
-                                    result.success += 1
-                                except Exception as e:
-                                    record_row_error(
-                                        result,
-                                        idx,
-                                        str(row)[:200],
-                                        e,
-                                    )
-                                    if sync_options.on_error == "fail":
-                                        raise
-
-                    # sync.mode: mirror (#340 Step 4) — accumulate upsert_key
-                    # tuples for the finalize_sync DELETE pass. Only keys from
-                    # records that survived the staging INSERT count as
-                    # "source state" — records whose batch_index landed in
-                    # row_errors are skipped.
-                    if is_mirror:
-                        assert config.upsert_key  # guarded above
-                        if self._mirror_keys is None:
-                            self._mirror_keys = []
-                        scope_cols = (
-                            sync_options.mirror.scope
-                            if sync_options.mirror is not None
-                            else None
-                        )
-                        if scope_cols and self._mirror_scopes is None:
-                            self._mirror_scopes = set()
-                        failed_indices = {re.batch_index for re in result.row_errors}
-                        for idx, record in enumerate(records):
-                            if idx in failed_indices:
-                                continue
-                            self._mirror_keys.append(
-                                tuple(record.get(k) for k in config.upsert_key)
-                            )
-                            if scope_cols:
-                                assert self._mirror_scopes is not None
-                                self._mirror_scopes.add(
-                                    tuple(record.get(c) for c in scope_cols)
-                                )
-
-                else:
-                    raise ValueError(f"Unsupported mode: {config.mode}")
-
-        finally:
-            conn.close()
-
-        return result
-
-    def _load_replace_truncate(
+    def _load_replace(
         self,
+        conn: Any,
         cur: Any,
         records: list[dict[str, Any]],
         columns: list[str],
-        table_fq: str,
+        table: str,
         sync_options: SyncOptions,
-        result: SyncResult,
-        schema_map: dict[str, str] | None = None,
-    ) -> None:
+        config: SnowflakeDestinationConfig,
+    ) -> SyncResult:
         """``replace_strategy: truncate`` — TRUNCATE once, then INSERT rows."""
+        del conn
+        assert isinstance(config, SnowflakeDestinationConfig)
+        result = SyncResult()
+        table_fq = f"{config.database}.{config.schema_}.{table}"
+        schema_map = self._resolve_schema(config)
+
         if not self._replace_truncated:
             cur.execute(f"TRUNCATE TABLE {table_fq}")
             self._replace_truncated = True
@@ -371,24 +221,29 @@ class SnowflakeDestination(BaseSqlDestination):
         value_clause, json_cols = _value_clause(columns, schema_map)
         sql = f"INSERT INTO {table_fq} ({col_list}) {value_clause}"
         self._insert_rows(cur, sql, records, sync_options, result, columns, json_cols)
+        return result
 
-    def _load_replace_swap_snowflake(
+    def _load_replace_swap(
         self,
+        conn: Any,
         cur: Any,
         records: list[dict[str, Any]],
         columns: list[str],
-        config: SnowflakeDestinationConfig,
-        table_fq: str,
+        table: str,
         sync_options: SyncOptions,
-        result: SyncResult,
-        schema_map: dict[str, str] | None = None,
-    ) -> None:
+        config: SnowflakeDestinationConfig,
+    ) -> SyncResult:
         """``replace_strategy: swap`` — write to a shadow table; SWAP in finalize.
 
         First batch: if the target table doesn't exist yet, fall through to a
         direct write (no shadow, no swap). Otherwise build the shadow with
         ``CREATE OR REPLACE TABLE ... LIKE`` (carries clustering keys).
         """
+        del conn
+        assert isinstance(config, SnowflakeDestinationConfig)
+        result = SyncResult()
+        table_fq = f"{config.database}.{config.schema_}.{table}"
+        schema_map = self._resolve_schema(config)
         shadow_fq = f"{table_fq}{_SWAP_SUFFIX}"
 
         if not self._swap_shadow_created and not self._swap_direct_write:
@@ -415,6 +270,90 @@ class SnowflakeDestination(BaseSqlDestination):
                 self._swap_shadow_created = False
                 self._swap_table = None
             raise
+        return result
+
+    def _load_upsert(
+        self,
+        conn: Any,
+        cur: Any,
+        records: list[dict[str, Any]],
+        columns: list[str],
+        config: SnowflakeDestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        del conn
+        assert isinstance(config, SnowflakeDestinationConfig)
+        result = SyncResult()
+        table_fq = f"{config.database}.{config.schema_}.{config.table}"
+        schema_map = self._resolve_schema(config)
+        effective_mode = "merge" if sync_options.mode == "mirror" else config.mode
+        col_list = ", ".join(columns)
+        value_clause, json_cols = _value_clause(columns, schema_map)
+
+        if effective_mode == "insert":
+            sql = f"""
+                INSERT INTO {table_fq} ({col_list})
+                {value_clause}
+            """
+
+            for i, row in enumerate(records):
+                try:
+                    cur.execute(sql, _bind_row(row, columns, json_cols))
+                    result.success += 1
+                except Exception as e:
+                    record_row_error(
+                        result,
+                        i,
+                        str(row)[:200],
+                        e,
+                    )
+                    if sync_options.on_error == "fail":
+                        raise
+
+        elif effective_mode == "merge":
+            if not config.upsert_key:
+                raise ValueError("upsert_key is required for merge mode")
+
+            # #988: chunked MERGE ... USING (VALUES ...) replaces the old
+            # CREATE TEMP TABLE staging step — no DDL privilege needed at all
+            # now. A chunk-level failure falls back to one MERGE per row.
+            chunk_size = _rows_per_merge_chunk(len(columns))
+            for chunk_start in range(0, len(records), chunk_size):
+                chunk = records[chunk_start : chunk_start + chunk_size]
+                try:
+                    using_sql = _merge_using_subquery(columns, schema_map, len(chunk))
+                    merge_sql = _build_merge_sql(
+                        table_fq, columns, config.upsert_key, using_sql
+                    )
+                    flat_params: list[Any] = [
+                        v for row in chunk for v in _bind_row(row, columns, json_cols)
+                    ]
+                    cur.execute(merge_sql, flat_params)
+                    result.success += len(chunk)
+                except Exception:
+                    for offset, row in enumerate(chunk):
+                        idx = chunk_start + offset
+                        try:
+                            using_sql = _merge_using_subquery(columns, schema_map, 1)
+                            merge_sql = _build_merge_sql(
+                                table_fq, columns, config.upsert_key, using_sql
+                            )
+                            cur.execute(merge_sql, _bind_row(row, columns, json_cols))
+                            result.success += 1
+                        except Exception as e:
+                            record_row_error(
+                                result,
+                                idx,
+                                str(row)[:200],
+                                e,
+                            )
+                            if sync_options.on_error == "fail":
+                                raise
+
+        else:
+            raise ValueError(f"Unsupported mode: {config.mode}")
+
+        return result
 
     def _insert_rows(
         self,

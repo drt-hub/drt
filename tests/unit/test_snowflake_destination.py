@@ -58,8 +58,9 @@ def _fake_conn() -> MagicMock:
     """Fake snowflake.connector connection with a context-managed cursor."""
     conn = MagicMock()
     cur = MagicMock()
-    conn.cursor.return_value.__enter__.return_value = cur
-    conn.cursor.return_value.__exit__.return_value = False
+    conn.cursor.return_value = cur
+    cur.__enter__.return_value = cur
+    cur.__exit__.return_value = False
     conn._cur = cur  # for assertions
     return conn
 
@@ -76,14 +77,11 @@ def _mocked_snowflake_modules(conn: MagicMock | None = None) -> dict[str, MagicM
 
 def test_snowflake_subclasses_sql_base() -> None:
     dest = SnowflakeDestination()
-    phase_2_or_3_hooks = {
+    phase_3_hooks = {
         "_build_mirror_delete",
         "_shadow_name",
         "_old_name",
         "_rename_swap",
-        "_load_replace_swap",
-        "_load_replace",
-        "_load_upsert",
         "_state_table_ident",
         "_state_table_exists",
         "_create_state_table",
@@ -93,8 +91,11 @@ def test_snowflake_subclasses_sql_base() -> None:
     }
 
     assert isinstance(dest, BaseSqlDestination)
-    assert phase_2_or_3_hooks.isdisjoint(SnowflakeDestination.__dict__)
-    assert "load" in SnowflakeDestination.__dict__
+    assert phase_3_hooks.isdisjoint(SnowflakeDestination.__dict__)
+    assert {"_load_replace_swap", "_load_replace", "_load_upsert"}.issubset(
+        SnowflakeDestination.__dict__
+    )
+    assert "load" not in SnowflakeDestination.__dict__
     assert "finalize_sync" in SnowflakeDestination.__dict__
     assert dest._replace_truncated is False
     assert dest._swap_shadow_created is False

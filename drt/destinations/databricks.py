@@ -57,7 +57,7 @@ from drt.config.models import DatabricksDestinationConfig, DestinationConfig, Sy
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import record_row_error
 from drt.destinations.sql_base import BaseSqlDestination
-from drt.destinations.sql_utils import tagged_cursor
+from drt.destinations.sql_utils import check_mirror_supported, tagged_cursor
 
 _SWAP_SUFFIX = "__drt_swap"
 
@@ -174,199 +174,49 @@ class DatabricksDestination(BaseSqlDestination):
             self._ddl_cache[config.table] = describe_databricks_ddls(config)
         return self._ddl_cache[config.table]
 
-    def load(
+    def _validate_mirror_scope(
         self,
         records: list[dict[str, Any]],
-        config: DestinationConfig,
+        config: Any,
         sync_options: SyncOptions,
-    ) -> SyncResult:
+    ) -> None:
         assert isinstance(config, DatabricksDestinationConfig)
-        if not records:
-            # Empty-source short-circuit — no databricks import, no
-            # warehouse call. Same shape as the other registered
-            # destinations (empty-batch contract suite, #604-#606).
-            return SyncResult()
-
-        result = SyncResult()
-        conn = self._connect(config, query_tags=sync_options._query_tags)
-
-        # sync.mode: mirror forces the MERGE write path regardless of
-        # config.mode — mirror semantics require upsert. Validate
-        # upsert_key here so the misconfiguration is surfaced before any
-        # row touches Databricks.
-        is_mirror = sync_options.mode == "mirror"
-        # Reject an unserveable mirror config (missing upsert_key, or a
-        # scope+tracked composition where scope isn't a subset of
-        # upsert_key, #694) before writing; close the connection we just
-        # opened before surfacing the error. tracked/scope themselves are
-        # supported on Databricks since #692.
-        from drt.destinations.sql_utils import check_mirror_supported
-
-        try:
-            check_mirror_supported(config, sync_options, "databricks", supports_tracked_scope=True)
-        except ValueError:
-            conn.close()
-            raise
-        if is_mirror and sync_options.mirror is not None and sync_options.mirror.scope:
+        check_mirror_supported(
+            config,
+            sync_options,
+            "databricks",
+            supports_tracked_scope=True,
+        )
+        if (
+            sync_options.mode == "mirror"
+            and sync_options.mirror is not None
+            and sync_options.mirror.scope
+        ):
             missing = [c for c in sync_options.mirror.scope if c not in records[0]]
             if missing:
-                conn.close()
                 raise ValueError(
                     "mirror.scope columns missing from the model output: "
                     f"{missing} (available: {sorted(records[0].keys())})"
                 )
-        try:
-            with tagged_cursor(conn.cursor(), sync_options) as cur:
-                columns = list(records[0].keys())
-                table_fq = f"{config.catalog}.{config.schema_}.{config.table}"
-                # Layer 3 (#317): map columns to type categories + json DDLs once
-                # per sync (cached), then wrap json-category binds accordingly.
-                category_map = self._resolve_schema(config)
-                ddls = self._resolve_ddls(config)
 
-                # sync.mode: replace (#643) — full-table replace, dispatched
-                # before the insert/merge/mirror write paths.
-                if sync_options.mode == "replace":
-                    if sync_options.replace_strategy == "swap":
-                        self._load_replace_swap_databricks(
-                            cur,
-                            records,
-                            columns,
-                            config,
-                            table_fq,
-                            sync_options,
-                            result,
-                            category_map,
-                            ddls,
-                        )
-                    else:
-                        self._load_replace_truncate(
-                            cur,
-                            records,
-                            columns,
-                            table_fq,
-                            sync_options,
-                            result,
-                            category_map,
-                            ddls,
-                        )
-                    return result
-
-                effective_mode = "merge" if is_mirror else config.mode
-                col_list = ", ".join(columns)
-                value_clause, json_cols = _value_clause(columns, category_map, ddls)
-
-                if effective_mode == "insert":
-                    sql = f"INSERT INTO {table_fq} ({col_list}) {value_clause}"
-                    self._insert_rows(cur, sql, records, sync_options, result, columns, json_cols)
-
-                elif effective_mode == "merge":
-                    if not config.upsert_key:
-                        raise ValueError("upsert_key is required for merge mode")
-
-                    key_clause = " AND ".join(
-                        [f"target.{k} = source.{k}" for k in config.upsert_key]
-                    )
-                    update_cols = [c for c in columns if c not in config.upsert_key]
-                    update_clause = ", ".join([f"{c} = source.{c}" for c in update_cols])
-                    insert_cols = col_list
-                    insert_vals = ", ".join([f"source.{c}" for c in columns])
-
-                    # Databricks Delta needs a relation on the USING
-                    # side of MERGE. Delta doesn't have session-local
-                    # temp tables (no `CREATE TEMP TABLE`), so we stage
-                    # into a uniquely-named Delta scratch table in the
-                    # target catalog.schema, then DROP it at the end.
-                    # The token-bearing principal needs ``CREATE`` on
-                    # the schema in addition to ``MODIFY`` on the
-                    # target.
-                    staging_table = (
-                        f"{config.catalog}.{config.schema_}.__drt_staging_{config.table}"
-                    )
-
-                    cur.execute(
-                        f"CREATE OR REPLACE TABLE {staging_table} "
-                        f"AS SELECT * FROM {table_fq} WHERE 1=0"
-                    )
-
-                    staging_sql = f"INSERT INTO {staging_table} ({col_list}) {value_clause}"
-                    # Staging success is accounted after the MERGE (success =
-                    # len(records) - failed), so skip per-row success counting.
-                    self._insert_rows(
-                        cur,
-                        staging_sql,
-                        records,
-                        sync_options,
-                        result,
-                        columns,
-                        json_cols,
-                        count_success=False,
-                    )
-
-                    matched_clause = (
-                        f"WHEN MATCHED THEN UPDATE SET {update_clause}" if update_cols else ""
-                    )
-
-                    merge_sql = (
-                        f"MERGE INTO {table_fq} target "
-                        f"USING {staging_table} source "
-                        f"ON {key_clause} "
-                        f"{matched_clause} "
-                        f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                        f"VALUES ({insert_vals})"
-                    )
-                    cur.execute(merge_sql)
-                    result.success += len(records) - result.failed
-
-                    # Clean up the staging Delta table so subsequent
-                    # syncs don't trip over it (and so storage doesn't
-                    # accumulate).
-                    cur.execute(f"DROP TABLE IF EXISTS {staging_table}")
-
-                    # sync.mode: mirror — accumulate upsert_key tuples
-                    # for the finalize_sync DELETE pass. Only keys from
-                    # records that survived the staging INSERT count as
-                    # "source state" — failed records are skipped.
-                    if is_mirror:
-                        assert config.upsert_key
-                        if self._mirror_keys is None:
-                            self._mirror_keys = []
-                        scope_cols = (
-                            sync_options.mirror.scope if sync_options.mirror is not None else None
-                        )
-                        if scope_cols and self._mirror_scopes is None:
-                            self._mirror_scopes = set()
-                        failed_indices = {re.batch_index for re in result.row_errors}
-                        for idx, record in enumerate(records):
-                            if idx in failed_indices:
-                                continue
-                            self._mirror_keys.append(
-                                tuple(record.get(k) for k in config.upsert_key)
-                            )
-                            if scope_cols:
-                                assert self._mirror_scopes is not None
-                                self._mirror_scopes.add(tuple(record.get(c) for c in scope_cols))
-
-                else:
-                    raise ValueError(f"Unsupported mode: {config.mode}")
-
-        finally:
-            conn.close()
-
-        return result
-
-    def _load_replace_truncate(
+    def _load_replace(
         self,
+        conn: Any,
         cur: Any,
         records: list[dict[str, Any]],
         columns: list[str],
-        table_fq: str,
+        table: str,
         sync_options: SyncOptions,
-        result: SyncResult,
-        category_map: dict[str, str] | None = None,
-        ddls: dict[str, str] | None = None,
-    ) -> None:
+        config: DatabricksDestinationConfig,
+    ) -> SyncResult:
         """``replace_strategy: truncate`` — TRUNCATE once, then INSERT rows."""
+        del conn
+        assert isinstance(config, DatabricksDestinationConfig)
+        result = SyncResult()
+        table_fq = f"{config.catalog}.{config.schema_}.{table}"
+        category_map = self._resolve_schema(config)
+        ddls = self._resolve_ddls(config)
+
         if not self._replace_truncated:
             cur.execute(f"TRUNCATE TABLE {table_fq}")
             self._replace_truncated = True
@@ -375,25 +225,30 @@ class DatabricksDestination(BaseSqlDestination):
         value_clause, json_cols = _value_clause(columns, category_map, ddls)
         sql = f"INSERT INTO {table_fq} ({col_list}) {value_clause}"
         self._insert_rows(cur, sql, records, sync_options, result, columns, json_cols)
+        return result
 
-    def _load_replace_swap_databricks(
+    def _load_replace_swap(
         self,
+        conn: Any,
         cur: Any,
         records: list[dict[str, Any]],
         columns: list[str],
-        config: DatabricksDestinationConfig,
-        table_fq: str,
+        table: str,
         sync_options: SyncOptions,
-        result: SyncResult,
-        category_map: dict[str, str] | None = None,
-        ddls: dict[str, str] | None = None,
-    ) -> None:
+        config: DatabricksDestinationConfig,
+    ) -> SyncResult:
         """``replace_strategy: swap`` — stage to a shadow; INSERT OVERWRITE in finalize.
 
         First batch: if the target table doesn't exist yet, fall through to a
         direct write (no shadow, no swap). Otherwise build the shadow by cloning
         the target's schema into an empty Delta table.
         """
+        del conn
+        assert isinstance(config, DatabricksDestinationConfig)
+        result = SyncResult()
+        table_fq = f"{config.catalog}.{config.schema_}.{table}"
+        category_map = self._resolve_schema(config)
+        ddls = self._resolve_ddls(config)
         shadow_fq = f"{table_fq}{_SWAP_SUFFIX}"
 
         if not self._swap_shadow_created and not self._swap_direct_write:
@@ -422,6 +277,84 @@ class DatabricksDestination(BaseSqlDestination):
                 self._swap_shadow_created = False
                 self._swap_table = None
             raise
+        return result
+
+    def _load_upsert(
+        self,
+        conn: Any,
+        cur: Any,
+        records: list[dict[str, Any]],
+        columns: list[str],
+        config: DatabricksDestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        del conn
+        assert isinstance(config, DatabricksDestinationConfig)
+        result = SyncResult()
+        table_fq = f"{config.catalog}.{config.schema_}.{config.table}"
+        category_map = self._resolve_schema(config)
+        ddls = self._resolve_ddls(config)
+        effective_mode = "merge" if sync_options.mode == "mirror" else config.mode
+        col_list = ", ".join(columns)
+        value_clause, json_cols = _value_clause(columns, category_map, ddls)
+
+        if effective_mode == "insert":
+            sql = f"INSERT INTO {table_fq} ({col_list}) {value_clause}"
+            self._insert_rows(cur, sql, records, sync_options, result, columns, json_cols)
+
+        elif effective_mode == "merge":
+            if not config.upsert_key:
+                raise ValueError("upsert_key is required for merge mode")
+
+            key_clause = " AND ".join(
+                [f"target.{k} = source.{k}" for k in config.upsert_key]
+            )
+            update_cols = [c for c in columns if c not in config.upsert_key]
+            update_clause = ", ".join([f"{c} = source.{c}" for c in update_cols])
+            insert_cols = col_list
+            insert_vals = ", ".join([f"source.{c}" for c in columns])
+
+            # Databricks Delta needs a relation on the USING side of MERGE.
+            # Delta has no session-local temp tables, so stage into the same
+            # uniquely-named scratch Delta table as before.
+            staging_table = f"{config.catalog}.{config.schema_}.__drt_staging_{config.table}"
+
+            cur.execute(
+                f"CREATE OR REPLACE TABLE {staging_table} "
+                f"AS SELECT * FROM {table_fq} WHERE 1=0"
+            )
+
+            staging_sql = f"INSERT INTO {staging_table} ({col_list}) {value_clause}"
+            self._insert_rows(
+                cur,
+                staging_sql,
+                records,
+                sync_options,
+                result,
+                columns,
+                json_cols,
+                count_success=False,
+            )
+
+            matched_clause = (
+                f"WHEN MATCHED THEN UPDATE SET {update_clause}" if update_cols else ""
+            )
+            merge_sql = (
+                f"MERGE INTO {table_fq} target "
+                f"USING {staging_table} source "
+                f"ON {key_clause} "
+                f"{matched_clause} "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+            cur.execute(merge_sql)
+            result.success += len(records) - result.failed
+            cur.execute(f"DROP TABLE IF EXISTS {staging_table}")
+
+        else:
+            raise ValueError(f"Unsupported mode: {config.mode}")
+
+        return result
 
     def _insert_rows(
         self,
