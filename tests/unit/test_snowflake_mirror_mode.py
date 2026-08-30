@@ -63,8 +63,9 @@ def _fake_conn() -> MagicMock:
     """Fake snowflake.connector connection with a context-managed cursor."""
     conn = MagicMock()
     cur = MagicMock()
-    conn.cursor.return_value.__enter__.return_value = cur
-    conn.cursor.return_value.__exit__.return_value = False
+    conn.cursor.return_value = cur
+    cur.__enter__.return_value = cur
+    cur.__exit__.return_value = False
     conn._cur = cur  # for assertions
     return conn
 
