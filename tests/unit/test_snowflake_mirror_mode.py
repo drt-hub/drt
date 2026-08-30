@@ -578,6 +578,32 @@ def _tracked_options() -> SyncOptions:
     return opts
 
 
+def test_reset_tracked_state_uses_snowflake_state_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_creds(monkeypatch)
+    conn = _fake_conn()
+    _configure_state_cur(conn, table_exists=True)
+    conn._cur.rowcount = 2
+
+    with patch.dict("sys.modules", _mocked_snowflake_modules(conn)):
+        removed = SnowflakeDestination().reset_tracked_state(
+            _config(), "scores_sync"
+        )
+
+    assert removed == 2
+    delete = next(
+        call
+        for call in conn._cur.execute.call_args_list
+        if call.args and call.args[0].startswith("DELETE FROM")
+    )
+    assert delete.args == (
+        "DELETE FROM ANALYTICS.PUBLIC._drt_synced_keys WHERE sync_name = %s",
+        ["scores_sync"],
+    )
+    conn.commit.assert_not_called()
+
+
 def test_tracked_first_run_baselines_without_deleting_snowflake(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
