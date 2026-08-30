@@ -79,9 +79,6 @@ def test_snowflake_subclasses_sql_base() -> None:
     dest = SnowflakeDestination()
     phase_3_hooks = {
         "_build_mirror_delete",
-        "_shadow_name",
-        "_old_name",
-        "_rename_swap",
         "_state_table_ident",
         "_state_table_exists",
         "_create_state_table",
@@ -91,11 +88,13 @@ def test_snowflake_subclasses_sql_base() -> None:
     }
 
     assert isinstance(dest, BaseSqlDestination)
-    assert phase_3_hooks.isdisjoint(SnowflakeDestination.__dict__)
+    assert phase_3_hooks.issubset(SnowflakeDestination.__dict__)
     assert {"_load_replace_swap", "_load_replace", "_load_upsert"}.issubset(
         SnowflakeDestination.__dict__
     )
     assert "load" not in SnowflakeDestination.__dict__
+    assert "_finalize_mirror" not in SnowflakeDestination.__dict__
+    assert "_finalize_mirror_tracked" not in SnowflakeDestination.__dict__
     assert "finalize_sync" in SnowflakeDestination.__dict__
     assert dest._replace_truncated is False
     assert dest._swap_shadow_created is False

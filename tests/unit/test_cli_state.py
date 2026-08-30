@@ -188,31 +188,15 @@ class TestResetTrackedMirror:
 
         assert removed == 0
 
-    @pytest.mark.parametrize(
-        ("destination", "destination_type"),
-        [
-            pytest.param(
-                "drt.destinations.snowflake.SnowflakeDestination",
-                "snowflake",
-                id="snowflake",
-            ),
-            pytest.param(
-                "drt.destinations.databricks.DatabricksDestination",
-                "databricks",
-                id="databricks",
-            ),
-        ],
-    )
-    def test_inherited_unimplemented_reset_stays_unsupported(
-        self,
-        project: Path,
-        destination: str,
-        destination_type: str,
+    def test_databricks_inherited_unimplemented_reset_stays_unsupported(
+        self, project: Path
     ) -> None:
-        """Phase-1 inheritance must not expose the base's unimplemented reset."""
+        """Databricks does not implement the base tracked-state hooks."""
         from importlib import import_module
         from types import SimpleNamespace
 
+        destination = "drt.destinations.databricks.DatabricksDestination"
+        destination_type = "databricks"
         module_name, class_name = destination.rsplit(".", 1)
         destination_class = getattr(import_module(module_name), class_name)
         sync = SimpleNamespace(
