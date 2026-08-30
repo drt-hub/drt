@@ -4292,6 +4292,7 @@
         },
         "batch_size": {
           "default": 100,
+          "exclusiveMinimum": 0,
           "title": "Batch Size",
           "type": "integer"
         },

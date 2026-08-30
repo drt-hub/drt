@@ -1,11 +1,25 @@
 """ClickHouse destination — insert rows into a ClickHouse table.
 
-Uses clickhouse-connect for HTTP-based inserts. Each record is inserted
-individually to enable row-level error tracking (consistent with the
-PostgreSQL and MySQL destination pattern).
+Uses clickhouse-connect for HTTP-based batch inserts. An ambiguously failed
+batch is retried once with the same ClickHouse deduplication token before it
+is replayed record by record for row-level error tracking.
 
-Deduplication is handled by ClickHouse's ReplacingMergeTree engine at merge
-time — the destination performs simple INSERTs.
+Application-level deduplication is handled by ClickHouse's ReplacingMergeTree
+engine at merge time. The insert token is a best-effort mitigation for the
+retry specifically, **not a guarantee**: ``insert_deduplication_token`` only
+takes effect if the target table's insert-deduplication window is actually
+enabled server-side — on by default for ``Replicated*MergeTree`` tables
+(``replicated_deduplication_window``), but **off by default** for a plain,
+non-replicated ``MergeTree``/``ReplacingMergeTree`` table unless the operator
+has explicitly set ``non_replicated_deduplication_window`` > 0. drt does not
+verify or configure this setting — doing so would need an extra round trip
+and table-level assumptions out of scope for a batching perf fix. On a table
+without an enabled dedup window, an ambiguous HTTP failure (the request
+committed server-side but the response was lost) can still result in a
+duplicated batch on retry, or duplicated rows if it takes two ambiguous
+failures to reach the row-by-row fallback. Operators who need a hard
+guarantee against this should enable the appropriate deduplication window on
+their table.
 
 Supports ``sync.mode: replace`` (TRUNCATE TABLE → INSERT) and
 ``replace_strategy: swap`` (zero-downtime: build a shadow table via
@@ -37,6 +51,7 @@ Example sync YAML:
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any
 
 from drt.config.credentials import resolve_env
@@ -134,25 +149,16 @@ class ClickHouseDestination:
                 # the table raw into "INSERT INTO {table} ..." with no quoting
                 # (see clickhouse_connect/driver/insert.py), so pre-quote here.
                 table_q = self._quote_ident(config.table)
-                # TODO: batch insert with fallback to row-by-row on error
-                for i, record in enumerate(records):
-                    try:
-                        row = [[record.get(c) for c in columns]]
-                        client.insert(table_q, row, column_names=columns)
-                        result.success += 1
-                    except Exception as e:
-                        result.failed += 1
-                        result.row_errors.append(
-                            RowError(
-                                batch_index=i,
-                                record_preview=json.dumps(record, default=str)[:200],
-                                http_status=None,
-                                error_message=str(e),
-                            )
-                        )
-                        if sync_options.on_error == "fail":
-                            return result
-                        continue
+
+                if not self._insert_batched(
+                    client,
+                    table_q,
+                    records,
+                    columns,
+                    sync_options,
+                    result,
+                ):
+                    return result
 
                 # sync.mode: mirror (#340 Step 3) — accumulate upsert_key
                 # tuples for the finalize_sync DELETE pass. Only keys from
@@ -188,6 +194,99 @@ class ClickHouseDestination:
 
         return result
 
+    def _insert_batched(
+        self,
+        client: Any,
+        table_q: str,
+        records: list[dict[str, Any]],
+        columns: list[str],
+        sync_options: SyncOptions,
+        result: SyncResult,
+        *,
+        base_index: int = 0,
+    ) -> bool:
+        """Insert batches, falling back to rows for exact error attribution."""
+        for start in range(0, len(records), sync_options.batch_size):
+            record_batch = records[start : start + sync_options.batch_size]
+
+            # Keep a one-record batch on the existing row path. If it fails,
+            # replaying the same insert would both add a round trip and change
+            # the previous single-attempt semantics.
+            if len(record_batch) > 1:
+                rows = [[record.get(c) for c in columns] for record in record_batch]
+                token = str(uuid.uuid4())
+                settings = {"insert_deduplication_token": token}
+
+                # HTTP failure is ambiguous: ClickHouse may have committed the
+                # batch before the response was lost. Retry the identical batch
+                # once with the same server-side dedup token before attributing
+                # errors row by row. Per-row tokens cannot extend this safety:
+                # the token belongs to the whole INSERT and would not match the
+                # original batch token.
+                #
+                # Best-effort, not a guarantee: insert_deduplication_token only
+                # takes effect if the table's dedup window is enabled server-
+                # side (on by default for Replicated*MergeTree, off by default
+                # for a plain non-replicated table) -- see the module docstring.
+                # drt does not verify this, so on a table without it enabled, an
+                # ambiguous failure can still duplicate rows on retry.
+                for _attempt in range(2):
+                    try:
+                        client.insert(
+                            table_q,
+                            rows,
+                            column_names=columns,
+                            settings=settings,
+                        )
+                        result.success += len(record_batch)
+                        break
+                    except Exception:
+                        pass
+                else:
+                    # Two failed identical batch requests fall back to the
+                    # existing row path for exact RowError attribution.
+                    for i, record in enumerate(record_batch, start=base_index + start):
+                        try:
+                            row = [[record.get(c) for c in columns]]
+                            client.insert(table_q, row, column_names=columns)
+                            result.success += 1
+                        except Exception as e:
+                            result.failed += 1
+                            result.row_errors.append(
+                                RowError(
+                                    batch_index=i,
+                                    record_preview=json.dumps(record, default=str)[:200],
+                                    http_status=None,
+                                    error_message=str(e),
+                                )
+                            )
+                            if sync_options.on_error == "fail":
+                                return False
+                    continue
+
+                continue
+
+            # Existing per-row insert/error path for singleton batches.
+            record = record_batch[0]
+            try:
+                row = [[record.get(c) for c in columns]]
+                client.insert(table_q, row, column_names=columns)
+                result.success += 1
+            except Exception as e:
+                result.failed += 1
+                result.row_errors.append(
+                    RowError(
+                        batch_index=base_index + start,
+                        record_preview=json.dumps(record, default=str)[:200],
+                        http_status=None,
+                        error_message=str(e),
+                    )
+                )
+                if sync_options.on_error == "fail":
+                    return False
+
+        return True
+
     def _load_replace_swap(
         self,
         client: Any,
@@ -213,33 +312,23 @@ class ClickHouseDestination:
             self._swap_shadow_created = True
             self._swap_table = table
 
-        for i, record in enumerate(records):
+        if not self._insert_batched(
+            client,
+            shadow_q,
+            records,
+            columns,
+            sync_options,
+            result,
+        ):
+            # Drop the partial shadow + reset state so finalize_sync() cannot
+            # EXCHANGE partial data into the live table. try/finally guarantees
+            # state reset even if DROP fails; at worst we leave an orphan
+            # shadow (tracked by #433).
             try:
-                row = [[record.get(c) for c in columns]]
-                client.insert(shadow_q, row, column_names=columns)
-                result.success += 1
-            except Exception as e:
-                result.failed += 1
-                result.row_errors.append(
-                    RowError(
-                        batch_index=i,
-                        record_preview=json.dumps(record, default=str)[:200],
-                        http_status=None,
-                        error_message=str(e),
-                    )
-                )
-                if sync_options.on_error == "fail":
-                    # Drop the partial shadow + reset state so finalize_sync()
-                    # cannot EXCHANGE partial data into the live table.
-                    # try/finally guarantees state reset even if DROP fails;
-                    # at worst we leave an orphan shadow (tracked by #433).
-                    try:
-                        client.command(tag_query(f"DROP TABLE IF EXISTS {shadow_q}", sync_options))
-                    finally:
-                        self._swap_shadow_created = False
-                        self._swap_table = None
-                    return result
-                continue
+                client.command(tag_query(f"DROP TABLE IF EXISTS {shadow_q}", sync_options))
+            finally:
+                self._swap_shadow_created = False
+                self._swap_table = None
 
         return result
 
