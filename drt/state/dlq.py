@@ -29,6 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from drt.state._filelock import advisory_lock
+
 
 @dataclass
 class DeadLetter:
@@ -146,11 +148,9 @@ class LocalDlqStore:
     """Append / read / replace dead-letter entries under ``.drt/dlq/``.
 
     One JSONL file per sync (``<sync_name>.jsonl``). All mutating methods run
-    under ``self._lock``, a **process-local** ``threading.Lock`` — it
-    serialises ``drt run --threads N`` workers within a single process, but
-    does **not** coordinate across processes: a concurrent ``drt run`` and
-    ``drt retry`` doing read-modify-write on the same file is last-writer-wins.
-    Single-writer-at-a-time is the expected operational model.
+    under ``self._lock`` for threads sharing this instance and an OS-level
+    sidecar lock for separate drt processes. Single-writer-at-a-time remains
+    the expected operational model.
     """
 
     def __init__(self, project_dir: Path = Path(".")) -> None:
@@ -190,15 +190,16 @@ class LocalDlqStore:
         """
         if not entries:
             return self.depth(sync_name)
-        with self._lock:
-            path = self._path(sync_name)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            lines = self._read_raw(path)
-            lines.extend(json.dumps(asdict(e)) for e in entries)
-            if max_records > 0 and len(lines) > max_records:
-                lines = lines[-max_records:]
-            path.write_text("\n".join(lines) + "\n")
-            return len(lines)
+        path = self._path(sync_name)
+        with advisory_lock(path):
+            with self._lock:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                lines = self._read_raw(path)
+                lines.extend(json.dumps(asdict(e)) for e in entries)
+                if max_records > 0 and len(lines) > max_records:
+                    lines = lines[-max_records:]
+                path.write_text("\n".join(lines) + "\n")
+                return len(lines)
 
     def replace(self, sync_name: str, entries: list[DeadLetter]) -> None:
         """Overwrite the queue with ``entries`` (empty list removes the file).
@@ -210,13 +211,14 @@ class LocalDlqStore:
         method still backs ``clear()`` (discard everything, intentionally)
         and stays available for callers that genuinely want a full overwrite.
         """
-        with self._lock:
-            path = self._path(sync_name)
-            if not entries:
-                path.unlink(missing_ok=True)
-                return
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("\n".join(json.dumps(asdict(e)) for e in entries) + "\n")
+        path = self._path(sync_name)
+        with advisory_lock(path):
+            with self._lock:
+                if not entries:
+                    path.unlink(missing_ok=True)
+                    return
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("\n".join(json.dumps(asdict(e)) for e in entries) + "\n")
 
     def clear(self, sync_name: str) -> None:
         """Remove the queue file for ``sync_name`` if it exists.
@@ -258,40 +260,24 @@ class LocalDlqStore:
         version is this is what ``drt retry`` uses instead of ``replace()``
         so a concurrent append isn't silently overwritten.
 
-        ``self._lock`` is process-local (same caveat as the class docstring
-        above), and this class has no OS-level file lock or conditional
-        write — unlike ``ObjectStoreDlqBackend.reconcile()``, which is
-        genuinely safe against a concurrent writer because generation/ETag
-        preconditioning catches a stale write and forces a retry against
-        fresh state. Here, a separate ``drt run`` **process** appending
-        between this method's read and its write still loses that append
-        exactly as ``replace()`` did (caught in review, #962) — this class
-        was never cross-process-safe (see the docstring above) and this
-        method does not change that. What it *does* fix, on local too: the
-        legacy bug of computing a result from a stale in-memory snapshot
-        (``untouched + remaining``) rather than from a fresh read, and
-        reconciling by identity rather than position — both matter the
-        moment real file locking lands, since a wholesale-overwrite
-        operation could never be made cross-process-safe no matter how it's
-        locked. Real cross-process safety needs OS-level file locking,
-        which no local state store has today; tracked as a follow-up
-        (#963) covering ``LocalStateManager``/``LocalHistoryManager`` too,
-        not just this class.
+        The process-local and OS-level sidecar locks cover the fresh read,
+        identity reconciliation, and write as one cross-process-safe span.
         """
         updates = updates or {}
         remove_ids = set(remove_ids)
-        with self._lock:
-            path = self._path(sync_name)
-            current = self._read_entries(sync_name)
-            result = [
-                updates.get(entry.id, entry) for entry in current if entry.id not in remove_ids
-            ]
-            if not result:
-                path.unlink(missing_ok=True)
-            else:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("\n".join(json.dumps(asdict(e)) for e in result) + "\n")
-            return result
+        path = self._path(sync_name)
+        with advisory_lock(path):
+            with self._lock:
+                current = self._read_entries(sync_name)
+                result = [
+                    updates.get(entry.id, entry) for entry in current if entry.id not in remove_ids
+                ]
+                if not result:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("\n".join(json.dumps(asdict(e)) for e in result) + "\n")
+                return result
 
     def depth(self, sync_name: str) -> int:
         """Return the number of entries queued for ``sync_name``."""
