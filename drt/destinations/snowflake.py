@@ -444,14 +444,14 @@ class SnowflakeDestination(BaseSqlDestination):
             conn.close()
         return SyncResult()
 
-    def _build_snowflake_mirror_delete(
+    def _build_mirror_delete(
         self,
         table_fq: str,
         upsert_cols: list[str],
         keys: list[tuple[Any, ...]],
-        scope_cols: list[str] | None,
-        scopes: list[tuple[Any, ...]] | None,
-        negate: bool,
+        scope_cols: list[str] | None = None,
+        scopes: list[tuple[Any, ...]] | None = None,
+        negate: bool = True,
     ) -> tuple[str, list[Any]]:
         """Build a mirror ``DELETE`` statement (#340 Step 4 / #687 / #692).
 
@@ -502,373 +502,98 @@ class SnowflakeDestination(BaseSqlDestination):
             params = [*scope_params, *(v for key in keys for v in key)]
         return stmt, params
 
-    def _finalize_mirror(
-        self,
-        config: DestinationConfig,
-        sync_options: SyncOptions,
-    ) -> SyncResult | None:
-        """``sync.mode: mirror`` end-of-sync DELETE pass (#340 Step 4 / #687).
-
-        Issues ``DELETE FROM <db>.<schema>.<table> WHERE key NOT IN
-        (<observed>)`` against Snowflake, via
-        :meth:`_build_snowflake_mirror_delete`.
-
-        ``mirror.strategy: tracked`` (#692) dispatches to
-        :meth:`_finalize_mirror_tracked` instead — state-based diff rather
-        than the whole-table diff below. Shares the empty-source guard, so
-        a transient empty source also keeps a tracked baseline intact.
-
-        Returns ``None`` when ``_mirror_keys`` is empty or ``None`` —
-        treats "no batch with records was ever observed" as a signal to
-        skip the DELETE entirely, so a transient empty source doesn't
-        wipe the destination.
-        """
+    # --- mirror-template hooks (#720 phase 3) ----------------------------
+    def _mirror_table_ident(self, config: Any) -> str:
         assert isinstance(config, SnowflakeDestinationConfig)
-        if not self._mirror_keys:
-            return None
+        return f"{config.database}.{config.schema_}.{config.table}"
 
-        if sync_options.mirror is not None and sync_options.mirror.strategy == "tracked":
-            return self._finalize_mirror_tracked(config, sync_options)
+    def _commit_mirror(self, conn: Any) -> None:
+        # Snowflake's existing mirror path relies on connection autocommit.
+        del conn
 
-        upsert_cols = config.upsert_key
-        assert upsert_cols  # guarded in load()
+    def _state_table_ident(self, config: Any) -> tuple[Any, Any, Any]:
+        from drt.destinations._mirror_state import STATE_TABLE
 
-        # Dedupe to keep the IN list compact when batches overlap.
-        keys = list({tuple(k) for k in self._mirror_keys})
-        table_fq = f"{config.database}.{config.schema_}.{config.table}"
+        assert isinstance(config, SnowflakeDestinationConfig)
+        ident = f"{config.database}.{config.schema_}.{STATE_TABLE}"
+        return ident, (config.database, config.schema_), ident
 
-        # mirror.scope (#687/#692) — restrict the diff to rows under parents
-        # this run actually observed. list(), not sorted() — scope values
-        # may include None (unorderable).
-        scope_cols = sync_options.mirror.scope if sync_options.mirror is not None else None
-        scopes = list(self._mirror_scopes or set()) if scope_cols else None
+    def _state_table_exists(self, cur: Any, scope: Any, raw: str) -> bool:
+        from drt.destinations._mirror_state import STATE_TABLE
 
-        conn = self._connect(config, query_tags=sync_options._query_tags)
-        try:
-            with tagged_cursor(conn.cursor(), sync_options) as cur:
-                stmt, params = self._build_snowflake_mirror_delete(
-                    table_fq, upsert_cols, keys, scope_cols, scopes, negate=True
-                )
-                cur.execute(stmt, params)
-        finally:
-            conn.close()
+        del raw
+        database, schema = scope
+        cur.execute(f"SHOW TABLES LIKE '{STATE_TABLE}' IN SCHEMA {database}.{schema}")
+        return bool(cur.fetchall())
 
-        # SyncResult has no dedicated `deleted` field; future work tracks
-        # this separately. Returning a bare SyncResult signals "finalize
-        # ran successfully" to the engine without inflating success/failed.
-        return SyncResult()
-
-    def _finalize_mirror_tracked(
-        self, config: Any, sync_options: SyncOptions
-    ) -> SyncResult | None:
-        """``mirror.strategy: tracked`` (#692) — delete only rows drt synced.
-
-        Snowflake counterpart of ``BaseSqlDestination._finalize_mirror_tracked``
-        (Postgres/MySQL, #686/#694) — same algorithm, own connection/cursor
-        and ``SHOW TABLES`` existence probe (Snowflake has no
-        ``to_regclass``/``information_schema.tables`` equivalent as cheap as
-        the one already used by ``_target_exists`` for the replace-swap path).
-
-        Reads the previously-synced key set for this sync from the
-        drt-managed ``_drt_synced_keys`` table (created lazily in the
-        target's database/schema), deletes ``previous - current`` from the
-        target, and rewrites the state to the current key set.
-
-        First run (or lost state) baselines: record keys, delete nothing,
-        WARN. Rows the application wrote are never candidates for deletion
-        because they were never in the tracked set.
-
-        Unlike Postgres/MySQL, the target DELETE, the state DELETE, and the
-        state INSERT here are **not** one transaction — this Snowflake
-        connection autocommits by default (same as the replace-swap path
-        elsewhere in this file), and nothing here turns autocommit off. A
-        failure between the state DELETE and the state INSERT can leave
-        this sync's state partial. In the common case this still degrades
-        safely (an empty/partial ``previous`` next run reads as "no prior
-        state," triggering the baseline WARN above rather than a wrong
-        delete), but it isn't the code-level guarantee the shared
-        ``BaseSqlDestination`` docstring describes for Postgres/MySQL —
-        caught in review; not fixed here since it would mean wrapping every
-        statement in this method in an explicit
-        ``conn.autocommit(False)``/``conn.commit()`` pair, a larger change
-        than this docstring correction.
-
-        ``mirror.scope`` + ``strategy: tracked`` (#694 part 1) prunes both
-        the state read and the state rewrite to the observed scope — see
-        ``BaseSqlDestination._finalize_mirror_tracked`` for the full
-        rationale; the algorithm here is identical, just against Snowflake's
-        own connection/cursor and explicit-placeholder DELETE shape.
-
-        SQL-side diff (#694 part 2, same rationale/proof as the Postgres/
-        MySQL implementation): this run's keys are staged into a scratch
-        table and ``previous - current`` is computed with a ``NOT EXISTS``
-        join against ``_drt_synced_keys`` in SQL, so a state table with
-        millions of rows never gets read into Python just to compute a
-        typically-small diff — **for unscoped tracked mirror**. Scope-
-        filtering happens in Python afterward, on the diff — mathematically
-        equivalent to filtering the full previous set by scope first, since
-        scope membership and current-membership are independent conditions
-        — but the diff itself isn't scope-narrowed in SQL, so a scoped run
-        touching one of many historically-tracked scopes doesn't get the
-        same memory win (#890; see
-        ``BaseSqlDestination._finalize_mirror_tracked`` for the full
-        caveat). The old "read every untouched row so it can be reinserted
-        unchanged" step is gone: untouched rows are simply never selected
-        by either the diff query or the new-keys query.
-        """
-        import logging
-
-        from drt.destinations._mirror_state import (
-            DIFF_STAGING_TABLE,
-            SCOPE_BACKFILL_PER_RUN,
-            STATE_TABLE,
-            decode_key,
-            key_hash,
-            key_json,
-            scope_key_json,
-            scope_spec_json,
+    def _create_state_table(self, cur: Any, ident: Any) -> None:
+        cur.execute(
+            f"CREATE TABLE IF NOT EXISTS {ident} ("
+            "sync_name VARCHAR(255) NOT NULL, "
+            "key_hash CHAR(64) NOT NULL, "
+            "key_json VARCHAR NOT NULL, "
+            "scope_spec VARCHAR, "
+            "scope_key VARCHAR, "
+            "PRIMARY KEY (sync_name, key_hash))"
         )
 
-        assert isinstance(config, SnowflakeDestinationConfig)
-        sync_name = sync_options._sync_name or config.table
-        current = list({tuple(k) for k in self._mirror_keys or []})
-        upsert_cols = config.upsert_key
-        assert upsert_cols  # guarded in load()
-        table_fq = f"{config.database}.{config.schema_}.{config.table}"
-        state_fq = f"{config.database}.{config.schema_}.{STATE_TABLE}"
-        diff_table = f"{config.database}.{config.schema_}.{DIFF_STAGING_TABLE}"
+    def _state_scope_columns_exist(self, cur: Any, scope: Any, raw: str) -> bool:
+        from drt.destinations._mirror_state import STATE_TABLE
 
-        scope_cols = sync_options.mirror.scope if sync_options.mirror is not None else None
-        scope_positions = [upsert_cols.index(c) for c in scope_cols] if scope_cols else None
-        observed_scopes = set(self._mirror_scopes or set()) if scope_positions else None
+        del raw
+        database, schema = scope
+        cur.execute(
+            f"SELECT COUNT(*) FROM {database}.information_schema.columns "
+            "WHERE table_schema = %s AND table_name = %s "
+            "AND column_name IN ('SCOPE_SPEC', 'SCOPE_KEY')",
+            [schema.upper(), STATE_TABLE.upper()],
+        )
+        row = cur.fetchone()
+        return bool(row is not None and row[0] == 2)
 
-        conn = self._connect(config, query_tags=sync_options._query_tags)
+    def _add_state_scope_columns(self, cur: Any, ident: Any) -> None:
+        cur.execute(
+            f"ALTER TABLE {ident} ADD COLUMN scope_spec VARCHAR, scope_key VARCHAR"
+        )
+
+    def _state_sql(self, template: str, ident: Any) -> Any:
+        return template.format(ident)
+
+    def _state_params(self, *values: Any) -> Any:
+        return list(values)
+
+    def _try_add_state_scope_columns(self, cur: Any, ident: Any) -> bool:
+        # Snowflake autocommits and has no savepoints. A refused ALTER fails
+        # independently and leaves the connection usable.
         try:
-            with tagged_cursor(conn.cursor(), sync_options) as cur:
-                # Pre-provisioning (mirrors #695): only CREATE when the state
-                # table is genuinely absent, so a locked-down destination
-                # user can run against one an admin created ahead of time.
-                cur.execute(
-                    f"SHOW TABLES LIKE '{STATE_TABLE}' IN SCHEMA {config.database}.{config.schema_}"
+            self._add_state_scope_columns(cur, ident)
+        except Exception:  # noqa: BLE001 — no ALTER privilege is a supported state
+            return False
+        return True
+
+    def _stage_mirror_keys(
+        self,
+        cur: Any,
+        config: Any,
+        rows: list[tuple[str, str]],
+    ) -> tuple[bool, str]:
+        from drt.destinations._mirror_state import DIFF_STAGING_TABLE
+
+        assert isinstance(config, SnowflakeDestinationConfig)
+        ident = f"{config.database}.{config.schema_}.{DIFF_STAGING_TABLE}"
+        try:
+            cur.execute(
+                f"CREATE TEMPORARY TABLE {ident} "
+                "(key_hash VARCHAR(64), key_json VARCHAR)"
+            )
+            if rows:
+                cur.executemany(
+                    f"INSERT INTO {ident} (key_hash, key_json) VALUES (%s, %s)",
+                    rows,
                 )
-                fresh_table = not cur.fetchall()
-                if fresh_table:
-                    cur.execute(
-                        f"CREATE TABLE IF NOT EXISTS {state_fq} ("
-                        "sync_name VARCHAR(255) NOT NULL, "
-                        "key_hash CHAR(64) NOT NULL, "
-                        "key_json VARCHAR NOT NULL, "
-                        "scope_spec VARCHAR, "
-                        "scope_key VARCHAR, "
-                        "PRIMARY KEY (sync_name, key_hash))"
-                    )
-
-                # #890: scope columns let the diff be narrowed server-side.
-                # Probed only for a scoped run — an unscoped sync gains nothing
-                # and must not pay a probe, let alone DDL, for it.
-                scope_spec = scope_spec_json(list(scope_cols)) if scope_cols else None
-                scope_sql = False
-                if scope_positions is not None:
-                    if fresh_table:
-                        scope_sql = True  # created with the columns
-                    else:
-                        cur.execute(
-                            f"SELECT COUNT(*) FROM {config.database}.information_schema.columns "
-                            "WHERE table_schema = %s AND table_name = %s "
-                            "AND column_name IN ('SCOPE_SPEC', 'SCOPE_KEY')",
-                            [config.schema_.upper(), STATE_TABLE.upper()],
-                        )
-                        row = cur.fetchone()
-                        if row is not None and row[0] == 2:
-                            scope_sql = True
-                        else:
-                            # No SAVEPOINT on the PG/MySQL leg's model: this
-                            # connection autocommits (see the note above), so a
-                            # refused ALTER fails on its own and leaves nothing
-                            # half-applied to roll back. A refusal — no DDL
-                            # privilege, the #695 family — simply keeps the run
-                            # on the Python-only filter, permanently, no error.
-                            try:
-                                cur.execute(
-                                    f"ALTER TABLE {state_fq} ADD COLUMN "
-                                    "scope_spec VARCHAR, scope_key VARCHAR"
-                                )
-                            except Exception:  # noqa: BLE001 — a supported state
-                                pass
-                            else:
-                                scope_sql = True
-
-                # Baseline check: a cheap existence probe, never a full read.
-                cur.execute(
-                    f"SELECT 1 FROM {state_fq} WHERE sync_name = %s LIMIT 1", [sync_name]
-                )
-                previous_exists = cur.fetchone() is not None
-
-                # Snowflake has session-scoped TEMPORARY tables, same as
-                # Postgres/MySQL — no manual DROP is strictly required, but
-                # one is issued anyway for clarity when staging succeeds. As
-                # with the ALTER fallback above, this autocommitting connection
-                # needs no SAVEPOINT: a refusal leaves no transaction poisoned.
-                staging_available = False
-                existing_key_hashes: set[str] = set()
-                try:
-                    cur.execute(
-                        f"CREATE TEMPORARY TABLE {diff_table} "
-                        "(key_hash VARCHAR(64), key_json VARCHAR)"
-                    )
-                    if current:
-                        cur.executemany(
-                            f"INSERT INTO {diff_table} (key_hash, key_json) VALUES (%s, %s)",
-                            [(key_hash(k), key_json(k)) for k in current],
-                        )
-                except Exception:  # noqa: BLE001 — a supported no-DDL state
-                    pass
-                else:
-                    staging_available = True
-
-                # #890, mirroring the Postgres/MySQL leg. The first two
-                # branches are what keep this a purely *coarse* filter — every
-                # row they let through is re-checked exactly by the Python
-                # filter below, so the predicate can only ever return too many
-                # rows, never too few:
-                #   scope_key IS NULL → written before the columns existed
-                #   scope_spec <> ... → written under a different mirror.scope,
-                #                       so its frozen scope_key means nothing
-                if staging_available:
-                    projection = (
-                        "s.key_hash, s.key_json, s.scope_key"
-                        if scope_sql
-                        else "s.key_hash, s.key_json"
-                    )
-                    diff_sql = (
-                        f"SELECT {projection} FROM {state_fq} s WHERE s.sync_name = %s "
-                        f"AND NOT EXISTS (SELECT 1 FROM {diff_table} c "
-                        "WHERE c.key_hash = s.key_hash)"
-                    )
-                    diff_params: list[Any] = [sync_name]
-                    if scope_sql and observed_scopes:
-                        observed_json = sorted(key_json(sc) for sc in observed_scopes)
-                        placeholders = ", ".join(["%s"] * len(observed_json))
-                        diff_sql += (
-                            " AND (s.scope_key IS NULL OR s.scope_spec <> %s "
-                            f"OR s.scope_key IN ({placeholders}))"
-                        )
-                        diff_params = [sync_name, scope_spec, *observed_json]
-                    cur.execute(diff_sql, diff_params)
-                    fetched = cur.fetchall()
-                else:
-                    projection = (
-                        "key_hash, key_json, scope_key" if scope_sql else "key_hash, key_json"
-                    )
-                    cur.execute(
-                        f"SELECT {projection} FROM {state_fq} WHERE sync_name = %s",
-                        [sync_name],
-                    )
-                    previous = cur.fetchall()
-                    existing_key_hashes = {row[0] for row in previous}
-                    current_key_hashes = {key_hash(k) for k in current}
-                    fetched = [row for row in previous if row[0] not in current_key_hashes]
-                stale_scope = [(h, kj) for h, kj, sk in fetched if sk is None] if scope_sql else []
-                raw_diff = [row[:2] for row in fetched]
-
-                if scope_positions is not None and observed_scopes is not None:
-                    to_delete = [
-                        decode_key(kj)
-                        for _h, kj in raw_diff
-                        if tuple(decode_key(kj)[p] for p in scope_positions) in observed_scopes
-                    ]
-                else:
-                    to_delete = [decode_key(kj) for _h, kj in raw_diff]
-
-                # #890 backfill — see the Postgres/MySQL leg for why this is
-                # needed at all (#694 part 2 never rewrites an already-tracked
-                # row, so rows from before the columns existed would keep their
-                # NULL scope forever and the filter would never engage on an
-                # upgraded state table). Capped per run; rows about to be
-                # deleted are skipped.
-                if stale_scope and scope_positions is not None:
-                    doomed = {key_hash(k) for k in to_delete}
-                    heal = [(h, kj) for h, kj in stale_scope if h not in doomed][
-                        :SCOPE_BACKFILL_PER_RUN
-                    ]
-                    if heal:
-                        cur.executemany(
-                            f"UPDATE {state_fq} SET scope_spec = %s, scope_key = %s "
-                            "WHERE sync_name = %s AND key_hash = %s",
-                            [
-                                (
-                                    scope_spec,
-                                    scope_key_json(decode_key(kj), scope_positions),
-                                    sync_name,
-                                    h,
-                                )
-                                for h, kj in heal
-                            ],
-                        )
-
-                if to_delete:
-                    stmt, params = self._build_snowflake_mirror_delete(
-                        table_fq, upsert_cols, to_delete, None, None, negate=False
-                    )
-                    cur.execute(stmt, params)
-                elif not previous_exists:
-                    logging.getLogger(__name__).warning(
-                        "tracked mirror: no prior state for sync %r in %s — "
-                        "baselining this run's %d key(s); no deletes this run.",
-                        sync_name,
-                        STATE_TABLE,
-                        len(current),
-                    )
-
-                if to_delete:
-                    cur.executemany(
-                        f"DELETE FROM {state_fq} WHERE sync_name = %s AND key_hash = %s",
-                        [(sync_name, key_hash(k)) for k in to_delete],
-                    )
-                if staging_available:
-                    cur.execute(
-                        f"SELECT c.key_hash, c.key_json FROM {diff_table} c "
-                        f"WHERE NOT EXISTS (SELECT 1 FROM {state_fq} s "
-                        "WHERE s.sync_name = %s AND s.key_hash = c.key_hash)",
-                        [sync_name],
-                    )
-                    to_insert = cur.fetchall()
-                else:
-                    to_insert = [
-                        (key_hash(k), key_json(k))
-                        for k in current
-                        if key_hash(k) not in existing_key_hashes
-                    ]
-                if to_insert and scope_sql and scope_positions is not None:
-                    cur.executemany(
-                        f"INSERT INTO {state_fq} "
-                        "(sync_name, key_hash, key_json, scope_spec, scope_key) "
-                        "VALUES (%s, %s, %s, %s, %s)",
-                        [
-                            (
-                                sync_name,
-                                h,
-                                kj,
-                                scope_spec,
-                                scope_key_json(decode_key(kj), scope_positions),
-                            )
-                            for h, kj in to_insert
-                        ],
-                    )
-                elif to_insert:
-                    # Unscoped, or the columns are unavailable — they stay NULL,
-                    # which the predicate above always lets through.
-                    cur.executemany(
-                        f"INSERT INTO {state_fq} (sync_name, key_hash, key_json) "
-                        "VALUES (%s, %s, %s)",
-                        [(sync_name, h, kj) for h, kj in to_insert],
-                    )
-                if staging_available:
-                    cur.execute(f"DROP TABLE {diff_table}")
-        finally:
-            conn.close()
-
-        return SyncResult()
+        except Exception:  # noqa: BLE001 — no temporary-table privilege is supported
+            return False, ident
+        return True, ident
 
     def test_connection(self, config: DestinationConfig) -> None:
         """Test connectivity by establishing a connection and running SELECT 1."""

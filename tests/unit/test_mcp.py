@@ -1543,31 +1543,15 @@ async def test_state_reset_tracked_mirror_warns(
     assert result["reset"] == ["tracked-mirror"]
 
 
-@pytest.mark.parametrize(
-    ("destination", "destination_type"),
-    [
-        pytest.param(
-            "drt.destinations.snowflake.SnowflakeDestination",
-            "snowflake",
-            id="snowflake",
-        ),
-        pytest.param(
-            "drt.destinations.databricks.DatabricksDestination",
-            "databricks",
-            id="databricks",
-        ),
-    ],
-)
-def test_state_reset_inherited_unimplemented_reset_stays_unsupported(
-    destination: str,
-    destination_type: str,
-) -> None:
+def test_databricks_state_reset_inherited_unimplemented_stays_unsupported() -> None:
     from importlib import import_module
     from types import SimpleNamespace
     from unittest.mock import MagicMock, patch
 
     from drt.mcp.tools.state import state_reset
 
+    destination = "drt.destinations.databricks.DatabricksDestination"
+    destination_type = "databricks"
     module_name, class_name = destination.rsplit(".", 1)
     destination_class = getattr(import_module(module_name), class_name)
     sync = SimpleNamespace(

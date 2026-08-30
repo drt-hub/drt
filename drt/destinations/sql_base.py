@@ -1,4 +1,4 @@
-"""Shared base for host-based SQL destinations (Postgres, MySQL).
+"""Shared base for SQL destinations.
 
 Holds the *dialect-agnostic* orchestration that was duplicated verbatim across
 the concrete SQL destinations: per-sync mutable state, the Layer-3 schema-cache
@@ -221,7 +221,7 @@ class BaseSqlDestination:
         try:
             cur = _tagged_cursor(conn.cursor(), sync_options)
             stmt, params = self._build_mirror_delete(
-                config.table,
+                self._mirror_table_ident(config),
                 upsert_cols,
                 keys,
                 scope_cols,
@@ -229,7 +229,7 @@ class BaseSqlDestination:
                 negate=True,
             )
             cur.execute(stmt, params)
-            conn.commit()
+            self._commit_mirror(conn)
         finally:
             conn.close()
 
@@ -446,6 +446,19 @@ class BaseSqlDestination:
         """
         raise NotImplementedError
 
+    def _mirror_table_ident(self, config: Any) -> str:
+        """Target-table identifier handed to ``_build_mirror_delete``.
+
+        Host-based destinations already carry their complete target name in
+        ``config.table``. Cloud warehouses whose config splits catalog/schema
+        from table override this hook to preserve their fully-qualified SQL.
+        """
+        return str(config.table)
+
+    def _commit_mirror(self, conn: Any) -> None:
+        """Commit mirror finalization for transactional dialects."""
+        conn.commit()
+
     def _state_table_ident(self, config: Any) -> tuple[Any, Any, Any]:
         """Locate the drt-managed ``_drt_synced_keys`` state table for ``config``.
 
@@ -508,6 +521,48 @@ class BaseSqlDestination:
         """
         raise NotImplementedError
 
+    def _state_params(self, *values: Any) -> Any:
+        """Build execute parameters for shared tracked-state statements."""
+        return tuple(values)
+
+    def _try_add_state_scope_columns(self, cur: Any, ident: Any) -> bool:
+        """Attempt the #890 scope-column migration without poisoning the tx."""
+        cur.execute("SAVEPOINT drt_scope_cols")
+        try:
+            self._add_state_scope_columns(cur, ident)
+        except Exception:  # noqa: BLE001 — no ALTER privilege is a supported state
+            cur.execute("ROLLBACK TO SAVEPOINT drt_scope_cols")
+            return False
+        cur.execute("RELEASE SAVEPOINT drt_scope_cols")
+        return True
+
+    def _stage_mirror_keys(
+        self,
+        cur: Any,
+        config: Any,
+        rows: list[tuple[str, str]],
+    ) -> tuple[bool, str]:
+        """Stage current tracked keys, returning availability and table name."""
+        from drt.destinations._mirror_state import DIFF_STAGING_TABLE
+
+        cur.execute("SAVEPOINT drt_diff_keys")
+        try:
+            cur.execute(
+                f"CREATE TEMPORARY TABLE {DIFF_STAGING_TABLE} "
+                "(key_hash VARCHAR(64), key_json TEXT)"
+            )
+            if rows:
+                cur.executemany(
+                    f"INSERT INTO {DIFF_STAGING_TABLE} "
+                    "(key_hash, key_json) VALUES (%s, %s)",
+                    rows,
+                )
+        except Exception:  # noqa: BLE001 — no temporary-table privilege is supported
+            cur.execute("ROLLBACK TO SAVEPOINT drt_diff_keys")
+            return False, DIFF_STAGING_TABLE
+        cur.execute("RELEASE SAVEPOINT drt_diff_keys")
+        return True, DIFF_STAGING_TABLE
+
     def reset_tracked_state(self, config: Any, sync_name: str) -> int:
         """Clear one sync's rows from ``_drt_synced_keys`` (#776).
 
@@ -546,10 +601,10 @@ class BaseSqlDestination:
                 return 0  # never ran tracked mirror — nothing to clear
             cur.execute(
                 self._state_sql("DELETE FROM {} WHERE sync_name = %s", state_ident),
-                (sync_name,),
+                self._state_params(sync_name),
             )
             removed = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
-            conn.commit()
+            self._commit_mirror(conn)
             return int(removed)
         finally:
             conn.close()
@@ -562,8 +617,9 @@ class BaseSqlDestination:
         Reads the previously-synced key set for this sync from the drt-managed
         ``_drt_synced_keys`` table (created lazily next to the target table),
         deletes ``previous - current`` from the target, and rewrites the state
-        to the current key set. Target delete and state rewrite share one
-        transaction, so they commit or roll back together.
+        to the current key set. Transactional dialects commit the target delete
+        and state rewrite together; Snowflake preserves its existing autocommit
+        behavior through ``_commit_mirror``.
 
         First run (or lost state) baselines: record keys, delete nothing, WARN
         — matching Census semantics ("the first sync will be an upsert for all
@@ -571,9 +627,9 @@ class BaseSqlDestination:
         application wrote are never candidates for deletion because they were
         never in the tracked set.
 
-        Dialect-agnostic (#719 phase 2b). The four dialect seams are the state
-        identifier (``_state_table_ident``), the pre-provisioning probe
-        (``_state_table_exists``), the DDL (``_create_state_table``), and the
+        Dialect-agnostic (#719 phase 2b / #720 phase 3). The core dialect seams
+        are the state identifier (``_state_table_ident``), the pre-provisioning
+        probe (``_state_table_exists``), the DDL (``_create_state_table``), and the
         ``Composed``/``str`` binding of the state statements (``_state_sql``).
         The target DELETE reuses ``_build_mirror_delete`` in its
         ``negate=False`` ("delete exactly these keys") form.
@@ -617,7 +673,6 @@ class BaseSqlDestination:
         import logging
 
         from drt.destinations._mirror_state import (
-            DIFF_STAGING_TABLE,
             SCOPE_BACKFILL_PER_RUN,
             STATE_TABLE,
             decode_key,
@@ -661,19 +716,11 @@ class BaseSqlDestination:
                 else:
                     # A state table from before #890. Adding the columns is
                     # metadata-only, but the privilege to do it is not
-                    # guaranteed (#695) — so this is attempted inside a
-                    # savepoint and a refusal simply leaves the run on the
-                    # Python-only filter, permanently and without an error.
-                    # The savepoint clears Postgres's failed-transaction state;
-                    # on MySQL the same rollback is a correctly harmless no-op.
-                    # The temp-table optimisation below uses the same guard.
-                    cur.execute("SAVEPOINT drt_scope_cols")
-                    try:
-                        self._add_state_scope_columns(cur, state_ident)
-                    except Exception:  # noqa: BLE001 — no ALTER privilege is a supported state
-                        cur.execute("ROLLBACK TO SAVEPOINT drt_scope_cols")
-                    else:
-                        cur.execute("RELEASE SAVEPOINT drt_scope_cols")
+                    # guaranteed (#695) — so the dialect hook handles the
+                    # refusal and simply leaves the run on the Python-only
+                    # filter, permanently and without an error. Transactional
+                    # dialects use a savepoint; Snowflake autocommits.
+                    if self._try_add_state_scope_columns(cur, state_ident):
                         scope_sql = True
 
             # Baseline check (#694 part 2): a cheap existence probe, never a
@@ -685,7 +732,7 @@ class BaseSqlDestination:
                 self._state_sql(
                     "SELECT 1 FROM {} WHERE sync_name = %s LIMIT 1", state_ident
                 ),
-                (sync_name,),
+                self._state_params(sync_name),
             )
             previous_exists = cur.fetchone() is not None
 
@@ -697,27 +744,12 @@ class BaseSqlDestination:
             # never user-configured, so it needs no Composable-safe quoting
             # the way `state_ident` (schema-qualified from `config.table`)
             # does.
-            staging_available = False
             existing_key_hashes: set[str] = set()
-            cur.execute("SAVEPOINT drt_diff_keys")
-            try:
-                cur.execute(
-                    f"CREATE TEMPORARY TABLE {DIFF_STAGING_TABLE} "
-                    "(key_hash VARCHAR(64), key_json TEXT)"
-                )
-                if current:
-                    cur.executemany(
-                        f"INSERT INTO {DIFF_STAGING_TABLE} (key_hash, key_json) VALUES (%s, %s)",
-                        [(key_hash(k), key_json(k)) for k in current],
-                    )
-            except Exception:  # noqa: BLE001 — no temporary-table privilege is supported
-                # A failed statement poisons a Postgres transaction until the
-                # savepoint is rolled back. MySQL does not poison it, but the
-                # same rollback is harmless and keeps the shared path correct.
-                cur.execute("ROLLBACK TO SAVEPOINT drt_diff_keys")
-            else:
-                cur.execute("RELEASE SAVEPOINT drt_diff_keys")
-                staging_available = True
+            staging_available, diff_table = self._stage_mirror_keys(
+                cur,
+                config,
+                [(key_hash(k), key_json(k)) for k in current],
+            )
 
             # #890: narrow `previous` to the observed scopes *in SQL* when the
             # columns are available. Three branches, and the first two are what
@@ -736,10 +768,10 @@ class BaseSqlDestination:
                 )
                 diff_sql = (
                     f"SELECT {projection} FROM {{}} s WHERE s.sync_name = %s "
-                    f"AND NOT EXISTS (SELECT 1 FROM {DIFF_STAGING_TABLE} c "
+                    f"AND NOT EXISTS (SELECT 1 FROM {diff_table} c "
                     "WHERE c.key_hash = s.key_hash)"
                 )
-                diff_params: tuple[Any, ...] = (sync_name,)
+                diff_params = self._state_params(sync_name)
                 if scope_sql and observed_scopes:
                     observed_json = sorted(key_json(sc) for sc in observed_scopes)
                     placeholders = ", ".join(["%s"] * len(observed_json))
@@ -747,7 +779,9 @@ class BaseSqlDestination:
                         " AND (s.scope_key IS NULL OR s.scope_spec <> %s "
                         f"OR s.scope_key IN ({placeholders}))"
                     )
-                    diff_params = (sync_name, scope_spec, *observed_json)
+                    diff_params = self._state_params(
+                        sync_name, scope_spec, *observed_json
+                    )
                 cur.execute(self._state_sql(diff_sql, state_ident), diff_params)
                 fetched = cur.fetchall()
             else:
@@ -757,7 +791,7 @@ class BaseSqlDestination:
                         f"SELECT {projection} FROM {{}} WHERE sync_name = %s",
                         state_ident,
                     ),
-                    (sync_name,),
+                    self._state_params(sync_name),
                 )
                 previous = cur.fetchall()
                 existing_key_hashes = {row[0] for row in previous}
@@ -824,7 +858,7 @@ class BaseSqlDestination:
 
             if to_delete:
                 stmt, params = self._build_mirror_delete(
-                    config.table,
+                    self._mirror_table_ident(config),
                     upsert_cols,
                     to_delete,
                     None,
@@ -869,12 +903,12 @@ class BaseSqlDestination:
                 cur.execute(
                     self._state_sql(
                         "SELECT c.key_hash, c.key_json FROM "
-                        f"{DIFF_STAGING_TABLE} c WHERE NOT EXISTS "
+                        f"{diff_table} c WHERE NOT EXISTS "
                         "(SELECT 1 FROM {} s WHERE s.sync_name = %s "
                         "AND s.key_hash = c.key_hash)",
                         state_ident,
                     ),
-                    (sync_name,),
+                    self._state_params(sync_name),
                 )
                 to_insert = cur.fetchall()
             else:
@@ -913,8 +947,8 @@ class BaseSqlDestination:
                     [(sync_name, h, kj) for h, kj in to_insert],
                 )
             if staging_available:
-                cur.execute(f"DROP TABLE {DIFF_STAGING_TABLE}")
-            conn.commit()
+                cur.execute(f"DROP TABLE {diff_table}")
+            self._commit_mirror(conn)
         finally:
             conn.close()
 
