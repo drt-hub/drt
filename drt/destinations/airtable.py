@@ -125,26 +125,19 @@ class AirtableDestination:
             )
 
     def test_connection(self, config: DestinationConfig) -> None:
-        """Test connectivity by reading one record from the table.
+        """Test the token with Airtable's scope-free identity endpoint.
 
-        ⚠️ Excluded from `drt validate --check-connection`'s automatic
-        `ConnectionTestable` dispatch (see `_PROBE_NEEDS_BROADER_SCOPE` in
-        `drt/cli/commands/validate.py`) — reading a record requires
-        Airtable's `data.records:read` scope, but this destination's own
-        documented minimal credential (`docs/connectors/airtable.md`) is
-        `data.records:write` only, and `load()` itself never reads
-        anything (POST/PATCH only, via `client.request()`). Auto-probing
-        would report a false failure for a correctly, minimally scoped
-        token. See #1059.
+        ``GET /v0/meta/whoami`` requires no scopes, so this validates any
+        valid token without adding ``data.records:read`` to the documented
+        minimal write-only credential.
         """
         assert isinstance(config, AirtableDestinationConfig)
         token = resolve_env(config.access_token, config.access_token_env)
         if not token:
             raise ValueError("Airtable destination: missing access token.")
-        url = f"{_BASE_URL}/{config.base_id}/{quote(config.table_name)}"
         headers = {"Authorization": f"Bearer {token}"}
         with httpx.Client(timeout=30.0) as client:
-            resp = client.get(url, headers=headers, params={"maxRecords": 1})
+            resp = client.get(f"{_BASE_URL}/meta/whoami", headers=headers)
             resp.raise_for_status()
 
 

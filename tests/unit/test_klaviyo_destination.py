@@ -224,17 +224,62 @@ class TestKlaviyoLoad:
 
 class TestKlaviyoConnection:
     def test_declares_connection_testable(self) -> None:
-        """The class itself still satisfies ConnectionTestable (it's a
-        genuine, working probe) -- drt validate --check-connection's
-        automatic dispatch is what excludes it, not the class (#1059)."""
+        """The destination exposes its least-privilege connectivity probe."""
         assert isinstance(KlaviyoDestination(), ConnectionTestable)
 
-    def test_test_connection(self) -> None:
+    def test_test_connection_succeeds_on_2xx(self) -> None:
         client = MagicMock()
         client.get.return_value = _resp(200, {"data": []})
         with _patch_client(client):
             KlaviyoDestination().test_connection(_config())
         assert "/accounts/" in client.get.call_args.args[0]
+
+    def test_test_connection_accepts_permission_denied_403(self) -> None:
+        client = MagicMock()
+        response = _resp(403, {"errors": [{"code": "permission_denied"}]})
+        client.get.return_value = response
+        with _patch_client(client):
+            KlaviyoDestination().test_connection(_config())
+        response.raise_for_status.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("status", "body"),
+        [
+            (403, {"errors": [{"code": "not_found"}]}),
+            (403, {"unexpected": "body"}),
+            (401, {"errors": [{"code": "not_authenticated"}]}),
+        ],
+    )
+    def test_test_connection_rejects_other_http_errors(
+        self, status: int, body: dict[str, Any]
+    ) -> None:
+        client = MagicMock()
+        client.get.return_value = _resp(status, body)
+        with _patch_client(client), pytest.raises(httpx.HTTPStatusError):
+            KlaviyoDestination().test_connection(_config())
+
+    def test_test_connection_rejects_403_with_unparseable_body(self) -> None:
+        """_permission_denied()'s except-branch (a 403 whose body isn't even
+        valid JSON) must fall through to a genuine failure, not silently
+        swallow the parse error as if it were a benign permission_denied."""
+        client = MagicMock()
+        req = httpx.Request("GET", "https://a.klaviyo.com/api/accounts/")
+        http_resp = httpx.Response(403, content=b"not json", request=req)
+        response = MagicMock()
+        response.status_code = 403
+        response.json.side_effect = ValueError("not valid json")
+        response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "HTTP 403", request=req, response=http_resp
+        )
+        client.get.return_value = response
+        with _patch_client(client), pytest.raises(httpx.HTTPStatusError):
+            KlaviyoDestination().test_connection(_config())
+
+    def test_test_connection_propagates_network_error(self) -> None:
+        client = MagicMock()
+        client.get.side_effect = httpx.ConnectError("no route")
+        with _patch_client(client), pytest.raises(httpx.ConnectError, match="no route"):
+            KlaviyoDestination().test_connection(_config())
 
     def test_test_connection_missing_key(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any

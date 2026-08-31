@@ -201,16 +201,11 @@ class KlaviyoDestination:
         }
 
     def test_connection(self, config: DestinationConfig) -> None:
-        """Test connectivity by listing accounts (a cheap authenticated GET).
+        """Test whether Klaviyo accepts the configured private API key.
 
-        ⚠️ Excluded from `drt validate --check-connection`'s automatic
-        `ConnectionTestable` dispatch (see `_PROBE_NEEDS_BROADER_SCOPE` in
-        `drt/cli/commands/validate.py`) — ``GET /accounts/`` requires
-        Klaviyo's `accounts:read` scope, but this destination's own
-        documented minimal credential (`docs/connectors/klaviyo.md`) is
-        "profile + list write access" only, and `load()` itself never reads
-        anything (POST/PATCH only). Auto-probing would report a false
-        failure for a correctly, minimally scoped API key. See #1059.
+        Klaviyo has no scope-free identity endpoint, so this probes accounts
+        and accepts its documented ``permission_denied`` response as proof
+        that authentication succeeded for a more narrowly scoped key.
         """
         assert isinstance(config, KlaviyoDestinationConfig)
         api_key = resolve_env(config.api_key, config.api_key_env)
@@ -223,7 +218,19 @@ class KlaviyoDestination:
         }
         with httpx.Client(timeout=30.0) as client:
             resp = client.get(f"{_BASE}/accounts/", headers=headers)
+            # A permission_denied 403 means the key was authenticated but lacks
+            # accounts:read, which is expected for the minimal write-only key.
+            if resp.status_code == 403 and _permission_denied(resp):
+                return
             resp.raise_for_status()
+
+
+def _permission_denied(resp: httpx.Response) -> bool:
+    try:
+        errors = resp.json().get("errors", [])
+        return any(err.get("code") == "permission_denied" for err in errors)
+    except Exception:
+        return False
 
 
 def _duplicate_id(resp: httpx.Response) -> str | None:
