@@ -304,14 +304,13 @@ class TestBigQueryDestinationLoad:
 
 class TestBigQueryConnection:
     def test_declares_connection_testable(self) -> None:
-        """The class itself still satisfies ConnectionTestable (it's a
-        genuine, working probe) -- drt validate --check-connection's
-        automatic dispatch is what excludes it, not the class (#1059)."""
+        """The destination exposes its least-privilege connectivity probe."""
         assert isinstance(BigQueryDestination(), ConnectionTestable)
 
-    def test_test_connection_runs_select_1(self) -> None:
+    def test_test_connection_gets_configured_table_without_query_job(self) -> None:
         client = _fake_client()
         modules = _mocked_bq_modules(client)
         with patch.dict("sys.modules", modules):
             BigQueryDestination().test_connection(_config())
-        assert any("SELECT 1" in s for s in _sqls(client))
+        client.get_table.assert_called_once_with("my-proj.analytics.user_scores")
+        client.query.assert_not_called()

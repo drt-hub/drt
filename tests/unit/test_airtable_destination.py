@@ -193,14 +193,18 @@ class TestAirtableConnectionMissing:
 
 class TestAirtableConnection:
     def test_declares_connection_testable(self) -> None:
-        """The class itself still satisfies ConnectionTestable (it's a
-        genuine, working probe) -- drt validate --check-connection's
-        automatic dispatch is what excludes it, not the class (#1059)."""
+        """The destination exposes its least-privilege connectivity probe."""
         assert isinstance(AirtableDestination(), ConnectionTestable)
 
-    def test_test_connection_gets_one_record(self) -> None:
+    def test_test_connection_uses_scope_free_whoami_endpoint(self) -> None:
         client = MagicMock()
         client.get.return_value = _ok()
         with _patch_client(client):
             AirtableDestination().test_connection(_config())
-        assert client.get.call_args.kwargs["params"] == {"maxRecords": 1}
+        client.get.assert_called_once_with(
+            "https://api.airtable.com/v0/meta/whoami",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        url = client.get.call_args.args[0]
+        assert "appABC" not in url
+        assert "Customers" not in url

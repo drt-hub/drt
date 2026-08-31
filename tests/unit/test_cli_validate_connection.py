@@ -1,11 +1,14 @@
 from unittest.mock import MagicMock, patch
 
+import pytest
 from typer.testing import CliRunner
 
 from drt.cli.main import app
 from drt.config.models import (
+    AirtableDestinationConfig,
     BigQueryDestinationConfig,
     DestinationConfig,
+    KlaviyoDestinationConfig,
     PostgresDestinationConfig,
     SlackDestinationConfig,
 )
@@ -77,10 +80,8 @@ def test_validate_check_connection_sql_failure() -> None:
 def test_validate_check_connection_non_sql_gated_type_success() -> None:
     """A non-SQL-gated destination type is tested, not skipped, as long as
     the instance satisfies ConnectionTestable -- dispatch is structural, not
-    keyed on config type. Uses a mocked destination (not the real
-    BigQueryDestination, which doesn't implement this capability -- see
-    #1059); BigQueryDestinationConfig here is only standing in for "some
-    config type the old hardcoded SQL tuple would have excluded"."""
+    keyed on config type. BigQueryDestinationConfig here stands in for a
+    config type the old hardcoded SQL tuple would have excluded."""
     mock_dest = _ConnectionTestDestination()
 
     with patch("drt.connectors.registry.get_destination", return_value=mock_dest), \
@@ -105,19 +106,44 @@ def test_validate_check_connection_non_sql_gated_type_success() -> None:
         assert "✓ connection ok" in result.stdout
 
 
-def test_validate_check_connection_bigquery_is_excluded_despite_capability() -> None:
-    """BigQuery genuinely implements ConnectionTestable (its test_connection()
-    is a real, working probe) but is still skipped -- #1059: SELECT 1 needs
-    bigquery.jobs.create, broader than append mode's documented
-    bigquery.tables.updateData. The real registry resolves the real
-    BigQueryDestination here, not a mock -- this is the actual dispatcher
-    path, not just the generic mechanism."""
-    with patch("drt.config.parser.load_syncs_safe") as mock_load:
+@pytest.mark.parametrize(
+    ("name", "config", "probe_path"),
+    [
+        (
+            "airtable_sync",
+            AirtableDestinationConfig(
+                type="airtable",
+                access_token="pat_test",
+                base_id="appABC",
+                table_name="Customers",
+            ),
+            "drt.destinations.airtable.AirtableDestination.test_connection",
+        ),
+        (
+            "bigquery_sync",
+            BigQueryDestinationConfig(
+                type="bigquery", project="p", dataset="d", table="t"
+            ),
+            "drt.destinations.bigquery.BigQueryDestination.test_connection",
+        ),
+        (
+            "klaviyo_sync",
+            KlaviyoDestinationConfig(type="klaviyo", api_key="pk_test"),
+            "drt.destinations.klaviyo.KlaviyoDestination.test_connection",
+        ),
+    ],
+)
+def test_validate_check_connection_runs_least_privilege_connector_probes(
+    name: str, config: DestinationConfig, probe_path: str
+) -> None:
+    """The real registry dispatches all three #1059 probes normally."""
+    with (
+        patch(probe_path, autospec=True) as mock_probe,
+        patch("drt.config.parser.load_syncs_safe") as mock_load,
+    ):
         mock_sync = MagicMock()
-        mock_sync.name = "bigquery_sync"
-        mock_sync.destination = BigQueryDestinationConfig(
-            type="bigquery", project="p", dataset="d", table="t"
-        )
+        mock_sync.name = name
+        mock_sync.destination = config
 
         mock_result = MagicMock()
         mock_result.syncs = [mock_sync]
@@ -126,11 +152,13 @@ def test_validate_check_connection_bigquery_is_excluded_despite_capability() -> 
         mock_load.return_value = mock_result
 
         result = runner.invoke(
-            app, ["validate", "--check-connection", "--select", "bigquery_sync"]
+            app, ["validate", "--check-connection", "--select", name]
         )
 
         assert result.exit_code == 0
-        assert "⏭ connection test skipped" in result.stdout
+        assert "✓ connection ok" in result.stdout
+        mock_probe.assert_called_once()
+        assert mock_probe.call_args.args[1] is config
 
 
 def test_validate_check_connection_without_capability_skips() -> None:

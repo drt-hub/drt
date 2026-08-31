@@ -8,6 +8,7 @@ import pytest
 
 from drt.destinations.airtable import AirtableDestination
 from drt.destinations.base import ConnectionTestable, Destination, SyncResult
+from drt.destinations.bigquery import BigQueryDestination
 from drt.destinations.clickhouse import ClickHouseDestination
 from drt.destinations.discord import DiscordDestination
 from drt.destinations.file import FileDestination
@@ -45,9 +46,10 @@ ALL_DESTINATIONS = [
 ]
 
 CONNECTION_TESTABLE_DESTINATIONS = [
-    AirtableDestination,  # first non-SQL ConnectionTestable
+    AirtableDestination,
+    BigQueryDestination,
     ClickHouseDestination,
-    KlaviyoDestination,  # non-SQL ConnectionTestable
+    KlaviyoDestination,
     MySQLDestination,
     PostgresDestination,
     SnowflakeDestination,
