@@ -10,7 +10,7 @@ import typer
 if TYPE_CHECKING:
     from drt.config.models import SyncConfig
     from drt.config.profiles import ProfileConfigLike
-    from drt.destinations.base import Destination
+    from drt.destinations.base import Destination, StagedDestination
     from drt.sources.base import Source
 
 
@@ -128,7 +128,7 @@ def _get_watermark_storage(sync: SyncConfig, project_dir: Path) -> Any:
     return get_watermark_storage(sync, project_dir)
 
 
-def _get_destination(sync: SyncConfig) -> Destination:
+def _get_destination(sync: SyncConfig) -> Destination | StagedDestination:
     """Back-compat shim — see ``drt.cli._helpers.get_destination``."""
     from drt.cli._helpers import get_destination
 

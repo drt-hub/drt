@@ -16,6 +16,7 @@ from drt.sources.iceberg import IcebergSource
 from drt.sources.mysql import MySQLSource
 from drt.sources.postgres import PostgresSource
 from drt.sources.redshift import RedshiftSource
+from drt.sources.rest_api import RestApiSource
 from drt.sources.snowflake import SnowflakeSource
 from drt.sources.sqlite import SQLiteSource
 from drt.sources.sqlserver import SQLServerSource
@@ -28,6 +29,7 @@ ALL_SOURCES = [
     MySQLSource,
     PostgresSource,
     RedshiftSource,
+    RestApiSource,
     SnowflakeSource,
     SQLiteSource,
     SQLServerSource,

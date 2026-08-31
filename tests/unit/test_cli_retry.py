@@ -43,6 +43,117 @@ class _FakeDestination:
         return result
 
 
+class _FakeStagedDestination:
+    """Stages every chunk, then attributes configured failures globally."""
+
+    def __init__(self, fail_ids: set[int], finalize_error: Exception | None = None) -> None:
+        self.fail_ids = fail_ids
+        self.finalize_error = finalize_error
+        self.stage_calls: list[list[dict]] = []
+        self.finalize_calls = 0
+        self._records: list[dict] = []
+
+    def stage(self, records, config, sync_options):  # type: ignore[no-untyped-def]
+        self.stage_calls.append(records)
+        self._records.extend(records)
+
+    def finalize(self, config, sync_options):  # type: ignore[no-untyped-def]
+        self.finalize_calls += 1
+        if self.finalize_error is not None:
+            raise self.finalize_error
+
+        result = SyncResult()
+        for i, rec in enumerate(self._records):
+            if rec.get("id") in self.fail_ids:
+                result.failed += 1
+                result.row_errors.append(
+                    RowError(
+                        batch_index=i,
+                        record_preview=str(rec)[:200],
+                        http_status=503,
+                        error_message="staged record still failing",
+                    )
+                )
+            else:
+                result.success += 1
+        self._records.clear()
+        return result
+
+
+class _FakeChunkLocalStagedDestination:
+    """A protocol-conforming StagedDestination whose finalize() reports
+    RowError.batch_index relative to the individual stage() chunk a failure
+    came from, not the full accumulated retry set. StagedDestination's own
+    Protocol (drt/destinations/base.py) never says which convention a
+    finalize() result uses -- this is the plausible interpretation an
+    unrelated third-party implementation could pick (it also matches
+    Destination.load()'s own always-chunk-local batch_index), used to prove
+    retry.py doesn't assume global indexing across multiple stage() calls.
+    """
+
+    def __init__(self, fail_ids: set[int]) -> None:
+        self.fail_ids = fail_ids
+        self.stage_calls: list[list[dict]] = []
+        self._chunks: list[list[dict]] = []
+
+    def stage(self, records, config, sync_options):  # type: ignore[no-untyped-def]
+        self.stage_calls.append(records)
+        self._chunks.append(records)
+
+    def finalize(self, config, sync_options):  # type: ignore[no-untyped-def]
+        result = SyncResult()
+        for chunk in self._chunks:
+            for i, rec in enumerate(chunk):
+                if rec.get("id") in self.fail_ids:
+                    result.failed += 1
+                    result.row_errors.append(
+                        RowError(
+                            batch_index=i,  # local to this chunk, not global
+                            record_preview=str(rec)[:200],
+                            http_status=503,
+                            error_message="chunk-local failure",
+                        )
+                    )
+                else:
+                    result.success += 1
+        self._chunks = []
+        return result
+
+
+class _FakeSalesforceBulkDestination:
+    """Mirrors SalesforceBulkDestination's real quirk: every RowError from a
+    failed-results CSV row reports ``batch_index=0``, regardless of which
+    accumulated record actually failed (drt/destinations/salesforce_bulk.py).
+    """
+
+    def __init__(self, fail_ids: set[int]) -> None:
+        self.fail_ids = fail_ids
+        self._records: list[dict] = []
+        self.finalize_calls = 0
+
+    def stage(self, records, config, sync_options):  # type: ignore[no-untyped-def]
+        self._records.extend(records)
+
+    def finalize(self, config, sync_options):  # type: ignore[no-untyped-def]
+        self.finalize_calls += 1
+        result = SyncResult()
+        for rec in self._records:
+            if rec.get("id") in self.fail_ids:
+                result.failed += 1
+                result.row_errors.append(
+                    RowError(
+                        batch_index=0,
+                        record_preview=str(rec)[:200],
+                        http_status=None,
+                        error_message="sf__Error from failedResults",
+                    )
+                )
+            else:
+                result.success += 1
+        self._records.clear()
+        return result
+
+
 @pytest.fixture
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.chdir(tmp_path)
@@ -72,7 +183,43 @@ def _seed(tmp_path: Path, ids: list[int]) -> DlqStore:
     return store
 
 
-def _patch_dest(monkeypatch: pytest.MonkeyPatch, dest: _FakeDestination) -> None:
+@pytest.fixture
+def salesforce_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "drt_project.yml").write_text(
+        yaml.dump({"name": "t", "version": "0.1", "profile": "default"})
+    )
+    (tmp_path / "syncs").mkdir()
+    (tmp_path / "syncs" / "post_users.yml").write_text(
+        yaml.dump(
+            {
+                "name": "post_users",
+                "model": "ref('users')",
+                "destination": {
+                    "type": "salesforce_bulk",
+                    "object_name": "Contact",
+                    "instance_url_env": "SF_INSTANCE_URL",
+                    "client_id_env": "SF_CLIENT_ID",
+                    "client_secret_env": "SF_CLIENT_SECRET",
+                    "username_env": "SF_USERNAME",
+                    "password_env": "SF_PASSWORD",
+                },
+                "sync": {"batch_size": 2, "dlq": {"enabled": True}},
+            }
+        )
+    )
+    return tmp_path
+
+
+def _patch_dest(
+    monkeypatch: pytest.MonkeyPatch,
+    dest: (
+        _FakeDestination
+        | _FakeStagedDestination
+        | _FakeChunkLocalStagedDestination
+        | _FakeSalesforceBulkDestination
+    ),
+) -> None:
     monkeypatch.setattr(helpers, "get_destination", lambda sync: dest)
 
 
@@ -130,6 +277,137 @@ def test_retry_all_success_drains_queue(project: Path, monkeypatch: pytest.Monke
     assert store.depth("post_users") == 0
     # batch_size=2 → two load() calls (2 + 1).
     assert [len(c) for c in dest.calls] == [2, 1]
+
+
+def test_retry_staged_success_drains_queue(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _seed(project, [1, 2, 3])
+    dest = _FakeStagedDestination(fail_ids=set())
+    _patch_dest(monkeypatch, dest)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    assert "3 succeeded, 0 still failing" in result.output
+    assert store.depth("post_users") == 0
+    assert [len(c) for c in dest.stage_calls] == [2, 1]
+    assert dest.finalize_calls == 1
+
+
+def test_retry_staged_limit_zero_stages_and_finalizes_nothing(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--limit 0 against a staged destination leaves the DLQ untouched and
+    never reaches stage()/finalize() — a queue can be non-empty overall
+    while the requested retry slice is empty.
+    """
+    store = _seed(project, [1, 2, 3])
+    dest = _FakeStagedDestination(fail_ids=set())
+    _patch_dest(monkeypatch, dest)
+
+    result = runner.invoke(app, ["retry", "post_users", "--limit", "0"])
+
+    assert result.exit_code == 0, result.output
+    assert "0 succeeded, 0 still failing" in result.output
+    assert store.depth("post_users") == 3
+    assert dest.stage_calls == []
+    assert dest.finalize_calls == 0
+
+
+def test_retry_staged_partial_failure_single_chunk_trusts_attribution(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retry set small enough for one stage() call has no chunk-local vs.
+    global ambiguity, so a fully-attributable finalize() result is trusted.
+    """
+    store = _seed(project, [1, 2])
+    dest = _FakeStagedDestination(fail_ids={2})
+    _patch_dest(monkeypatch, dest)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    assert "1 succeeded, 1 still failing" in result.output
+    remaining = store.read("post_users")
+    assert [e.record["id"] for e in remaining] == [2]
+    assert [len(c) for c in dest.stage_calls] == [2]
+    assert dest.finalize_calls == 1
+
+
+def test_retry_staged_partial_failure_multi_chunk_never_trusts_batch_index(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """StagedDestination's Protocol doesn't define whether RowError.batch_index
+    from finalize() is local to the stage() chunk it came from or global
+    across the whole accumulated set (caught in Codex review on #1037's PR).
+    id=3 fails alone in the second, single-record chunk and this fake
+    reports batch_index=0 relative to *that* chunk (chunk-local) rather than
+    2 (the global position) -- without the multi-chunk conservative guard,
+    the old "len(distinct indices) == failed" check would wrongly conclude
+    only the record at global index 0 (id=1, which actually succeeded)
+    failed, dropping the real failure (id=3) from the DLQ while re-queuing
+    an already-succeeded record.
+    """
+    store = _seed(project, [1, 2, 3])
+    dest = _FakeChunkLocalStagedDestination(fail_ids={3})
+    _patch_dest(monkeypatch, dest)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    assert "0 succeeded, 3 still failing" in result.output
+    remaining = store.read("post_users")
+    assert {e.record["id"] for e in remaining} == {1, 2, 3}
+    assert [len(c) for c in dest.stage_calls] == [2, 1]
+
+
+def test_retry_staged_finalize_exception_is_reported_and_keeps_queue(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _seed(project, [1, 2, 3])
+    dest = _FakeStagedDestination(
+        fail_ids=set(), finalize_error=RuntimeError("bulk job rejected")
+    )
+    _patch_dest(monkeypatch, dest)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 1
+    assert "Retry failed for 'post_users'" in result.output
+    assert "job rejected" in result.output
+    remaining = store.read("post_users")
+    assert [e.record["id"] for e in remaining] == [1, 2, 3]
+    assert [e.attempts for e in remaining] == [2, 2, 2]
+    assert dest.finalize_calls == 1
+
+
+def test_retry_salesforce_bulk_never_trusts_batch_index_attribution(
+    salesforce_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Salesforce's failedResults CSV carries no original-position info, so
+    its destination always reports RowError.batch_index=0 (verified against
+    drt/destinations/salesforce_bulk.py). Naive attribution (failed count ==
+    len(distinct indices) -> trust it) would wrongly conclude only the
+    record at index 0 failed and silently drop the other entry from the DLQ,
+    even though which record actually failed is unknown.
+
+    Deliberately only 2 entries against this fixture's batch_size=2 (a
+    single stage() call) — the multi-chunk guard would otherwise force
+    ``pinpointed = False`` on its own and this test wouldn't actually
+    exercise the salesforce_bulk-specific check.
+    """
+    store = _seed(salesforce_project, [1, 2])
+    dest = _FakeSalesforceBulkDestination(fail_ids={2})
+    _patch_dest(monkeypatch, dest)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    assert "0 succeeded, 2 still failing" in result.output
+    remaining = store.read("post_users")
+    assert {e.record["id"] for e in remaining} == {1, 2}
+    assert dest.finalize_calls == 1
 
 
 def test_retry_partial_keeps_failures_and_bumps_attempts(

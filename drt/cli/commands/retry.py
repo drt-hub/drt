@@ -11,6 +11,7 @@ replay verbatim) — no source extraction or profile resolution involved.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -21,6 +22,7 @@ from drt.cli.output import console, print_error
 
 if TYPE_CHECKING:
     from drt.config.models import ProjectConfig, SyncConfig
+    from drt.destinations.base import SyncResult
     from drt.state.dlq import DeadLetter
 
 
@@ -49,10 +51,12 @@ def replay_dead_letters(
         - ``"cleared"``  — queue discarded (``clear=True``)
         - ``"dry_run"``  — nothing sent (``dry_run=True``)
         - ``"ok"``       — records replayed; see ``succeeded`` / ``still_failing``
+        - ``"failed"``   — a staged destination failed during ``finalize()``
     """
     from drt.cli._helpers import get_destination
     from drt.config.base import ProjectConfig
     from drt.config.parser import load_project
+    from drt.destinations.base import StagedDestination
     from drt.state.dlq import DeadLetter
     from drt.state.factory import build_state_bundle
 
@@ -93,29 +97,113 @@ def replay_dead_letters(
     updates: dict[str, DeadLetter] = {}
     succeeded = 0
     failed_again = 0
+    retry_groups: Iterator[tuple[list[DeadLetter], SyncResult]]
 
-    for chunk in _chunks(to_retry, sync.sync.batch_size):
-        records = [e.record for e in chunk]
-        result = dest.load(records, sync.destination, sync.sync)
+    if isinstance(dest, StagedDestination) and not to_retry:
+        retry_groups = iter([])
+    elif isinstance(dest, StagedDestination):
+        for chunk in _chunks(to_retry, sync.sync.batch_size):
+            records = [e.record for e in chunk]
+            dest.stage(records, sync.destination, sync.sync)
 
+        try:
+            result = dest.finalize(sync.destination, sync.sync)
+        except Exception as exc:
+            # stage() only buffers; a raised finalize() means persistence was
+            # never confirmed for any record. Keep every retried entry queued
+            # and record the job-level failure against each one.
+            error = f"Staged destination finalize failed: {exc}"
+            for entry in to_retry:
+                updates[entry.id] = DeadLetter(
+                    id=entry.id,
+                    record=entry.record,
+                    error_message=error,
+                    timestamp=entry.timestamp,
+                    attempts=entry.attempts + 1,
+                    sync_run_id=entry.sync_run_id,
+                )
+            final = store.reconcile(sync.name, remove_ids=set(), updates=updates)
+            return {
+                "sync": sync.name,
+                "queued": len(entries),
+                "retried": len(to_retry),
+                "succeeded": 0,
+                "still_failing": len(to_retry),
+                "remaining_depth": len(final),
+                "status": "failed",
+                "error": error,
+            }
+
+        # finalize() covers the full accumulated staging set. Whether
+        # RowError.batch_index is global across to_retry or local to the
+        # individual stage() chunk it came from is not defined by the
+        # StagedDestination Protocol — the correlation loop below only trusts
+        # it when this whole set was staged in a single chunk, where the two
+        # conventions coincide (see the guard there for the multi-chunk case).
+        retry_groups = iter([(to_retry, result)])
+    else:
+        # Keep load() result processing interleaved with each call, preserving
+        # the existing per-chunk behavior for ordinary destinations.
+        retry_groups = (
+            (
+                chunk,
+                dest.load(
+                    [e.record for e in chunk],
+                    sync.destination,
+                    sync.sync,
+                ),
+            )
+            for chunk in _chunks(to_retry, sync.sync.batch_size)
+        )
+
+    for retry_group, result in retry_groups:
         if result.failed == 0:
-            succeeded += len(chunk)
-            remove_ids.update(e.id for e in chunk)
+            succeeded += len(retry_group)
+            remove_ids.update(e.id for e in retry_group)
             continue
 
         # Correlate which records failed again. RowError.batch_index pinpoints
-        # the failures within this chunk; trust that correlation only when the
-        # row_errors fully account for result.failed. Otherwise the batch
-        # failed in a way we can't attribute per-record, so conservatively
-        # keep the whole chunk queued rather than silently dropping records.
-        # Trade-off: on an un-attributable batch, rows that actually succeeded
+        # the failures within this retry group; trust that correlation only
+        # when the row_errors fully account for result.failed. Otherwise the
+        # group failed in a way we can't attribute per-record, so
+        # conservatively keep the whole group queued rather than silently
+        # dropping records. For load() a group is one chunk; for a staged
+        # destination it is the full accumulated record set finalized once.
+        # Trade-off: on an un-attributable group, rows that actually succeeded
         # get re-queued and may be re-sent on the next retry — we prefer a
         # re-send (idempotent for upsert destinations) over a silent drop.
-        failed_idx = {e.batch_index for e in result.row_errors if 0 <= e.batch_index < len(chunk)}
+        failed_idx = {
+            e.batch_index
+            for e in result.row_errors
+            if 0 <= e.batch_index < len(retry_group)
+        }
         pinpointed = len(failed_idx) == result.failed
+        if isinstance(dest, StagedDestination):
+            if len(retry_group) > sync.sync.batch_size:
+                # StagedDestination's Protocol (drt/destinations/base.py) does
+                # not define whether RowError.batch_index from finalize() is
+                # local to the individual stage() call it came from or global
+                # across the whole accumulated set — caught in review. More
+                # than one chunk was staged before this single finalize()
+                # call, so trusting batch_index here would silently
+                # misattribute a later chunk's failure to an earlier chunk's
+                # record for any implementation that reports chunk-local
+                # indices (the more natural convention, matching how
+                # Destination.load()'s own batch_index is always chunk-local).
+                # A single-chunk retry has no such ambiguity — chunk-local and
+                # global indexing coincide when there was only one stage()
+                # call — so only the multi-chunk case falls back here.
+                pinpointed = False
+            elif sync.destination.type == "salesforce_bulk":
+                # Salesforce's failed-results CSV does not expose the original
+                # accumulated-list position; its destination currently emits 0
+                # for every RowError.batch_index regardless of chunk count.
+                # Even a single-chunk retry's one such error therefore cannot
+                # safely identify record 0 as the failed source row.
+                pinpointed = False
         err_by_idx = {e.batch_index: e for e in result.row_errors}
 
-        for i, entry in enumerate(chunk):
+        for i, entry in enumerate(retry_group):
             if pinpointed and i not in failed_idx:
                 succeeded += 1
                 remove_ids.add(entry.id)
@@ -225,6 +313,12 @@ def retry(
                 f"[dim]{summary['untouched']} record(s) left untouched (--limit).[/dim]"
             )
         return
+
+    if status == "failed":
+        print_error(f"Retry failed for '{sync_name}': {summary['error']}")
+        if summary["remaining_depth"]:
+            console.print(f"[dim]{summary['remaining_depth']} record(s) remain in the queue.[/dim]")
+        raise typer.Exit(1)
 
     style = "green" if summary["still_failing"] == 0 else "yellow"
     console.print(
