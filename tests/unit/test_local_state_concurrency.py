@@ -14,6 +14,7 @@ from drt.state._filelock import advisory_lock
 from drt.state.dlq import DeadLetter, LocalDlqStore
 from drt.state.history import HistoryEntry, LocalHistoryManager
 from drt.state.manager import LocalStateManager, SyncState
+from drt.state.watermark import LocalWatermarkStorage
 
 _PROCESS_TIMEOUT_SECONDS = 10
 _BLOCKED_WRITER_PROBE_SECONDS = 1
@@ -108,6 +109,36 @@ def _state_save(project_dir: Path, started: Any, done: Any) -> None:
     manager = LocalStateManager(project_dir)
     started.set()
     manager.save_sync(_sync_state("fast"))
+    done.set()
+
+
+class _PausedWatermarkStorage(LocalWatermarkStorage):
+    def __init__(self, project_dir: Path, read_complete: Any, release: Any) -> None:
+        super().__init__(project_dir)
+        self._read_complete = read_complete
+        self._release = release
+
+    def _load(self) -> dict[str, str]:
+        data = super()._load()
+        self._read_complete.set()
+        _wait(self._release)
+        return data
+
+
+def _paused_watermark_save(project_dir: Path, read_complete: Any, release: Any) -> None:
+    _PausedWatermarkStorage(project_dir, read_complete, release).save("slow", "one")
+
+
+def _paused_watermark_delete(
+    project_dir: Path, read_complete: Any, release: Any
+) -> None:
+    _PausedWatermarkStorage(project_dir, read_complete, release).delete("deleted")
+
+
+def _watermark_save(project_dir: Path, started: Any, done: Any) -> None:
+    storage = LocalWatermarkStorage(project_dir)
+    started.set()
+    storage.save("fast", "two")
     done.set()
 
 
@@ -241,6 +272,43 @@ def test_state_saves_preserve_both_processes(tmp_path: Path, file_lock_supported
     _run_ordered_race(ctx, _paused_state_save, (tmp_path,), _state_save, (tmp_path,))
 
     assert set(LocalStateManager(tmp_path).get_all()) == {"slow", "fast"}
+
+
+def test_watermark_saves_preserve_both_processes(
+    tmp_path: Path, file_lock_supported: bool
+) -> None:
+    assert file_lock_supported
+    ctx = multiprocessing.get_context("spawn")
+    _run_ordered_race(
+        ctx,
+        _paused_watermark_save,
+        (tmp_path,),
+        _watermark_save,
+        (tmp_path,),
+    )
+
+    storage = LocalWatermarkStorage(tmp_path)
+    assert storage.get("slow") == "one"
+    assert storage.get("fast") == "two"
+
+
+def test_watermark_delete_preserves_a_concurrent_process_save(
+    tmp_path: Path, file_lock_supported: bool
+) -> None:
+    assert file_lock_supported
+    storage = LocalWatermarkStorage(tmp_path)
+    storage.save("deleted", "old")
+    ctx = multiprocessing.get_context("spawn")
+    _run_ordered_race(
+        ctx,
+        _paused_watermark_delete,
+        (tmp_path,),
+        _watermark_save,
+        (tmp_path,),
+    )
+
+    assert storage.get("deleted") is None
+    assert storage.get("fast") == "two"
 
 
 def test_dlq_appends_preserve_both_processes(tmp_path: Path, file_lock_supported: bool) -> None:

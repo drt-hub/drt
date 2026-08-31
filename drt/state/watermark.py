@@ -9,9 +9,12 @@ Provides pluggable storage for cursor/watermark values:
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
+
+from drt.state._filelock import advisory_lock
 
 # How many times a conditional watermark write may lose its race before giving
 # up. Contention here is two syncs finishing at the same moment, not sustained
@@ -65,11 +68,17 @@ class WatermarkStorage(Protocol):
 
 
 class LocalWatermarkStorage:
-    """File-based watermark storage using .drt/watermarks.json."""
+    """File-based watermark storage using .drt/watermarks.json.
+
+    Public methods are thread-safe via ``self._lock``. Mutations also use an
+    OS-level sidecar lock to serialise read-modify-write cycles across drt
+    processes.
+    """
 
     def __init__(self, project_dir: Path) -> None:
         self._state_dir = project_dir / ".drt"
         self._file = self._state_dir / "watermarks.json"
+        self._lock = threading.Lock()
 
     def _load(self) -> dict[str, str]:
         if not self._file.exists():
@@ -87,18 +96,25 @@ class LocalWatermarkStorage:
             json.dump(data, f, indent=2)
 
     def get(self, sync_name: str) -> str | None:
-        return self._load().get(sync_name)
+        with self._lock:
+            return self._load().get(sync_name)
 
     def save(self, sync_name: str, value: str) -> None:
-        data = self._load()
-        data[sync_name] = value
-        self._save_all(data)
+        # Unlike GCS's optimistic conditional writes, this blocking lock waits
+        # out contention, so WatermarkContentionError does not apply locally.
+        with advisory_lock(self._file):
+            with self._lock:
+                data = self._load()
+                data[sync_name] = value
+                self._save_all(data)
 
     def delete(self, sync_name: str) -> None:
-        data = self._load()
-        if data.pop(sync_name, None) is None:
-            return  # nothing stored — don't create the file on a fresh project
-        self._save_all(data)
+        with advisory_lock(self._file):
+            with self._lock:
+                data = self._load()
+                if data.pop(sync_name, None) is None:
+                    return  # nothing stored — don't create the file on a fresh project
+                self._save_all(data)
 
 
 def _gcs_client() -> Any:
