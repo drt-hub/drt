@@ -86,6 +86,14 @@
   why `minimum_interval_seconds=` stays a required argument for it. SQL
   Server has that same per-poll connection cost but isn't gated by an
   equivalent required argument today.
+- **Amended:** 2026-08-31 — #1051 closed the asymmetry the amendment above
+  left open: `build_drt_change_sensor()` now requires
+  `minimum_interval_seconds=` for a SQL Server profile too, matching
+  Snowflake — `pymssql.connect()` has the same fresh-connection-per-poll
+  cost `snowflake.connector.connect()` does. **Breaking for any deployed
+  SQL Server sensor that didn't already pass `minimum_interval_seconds=`**
+  — ships as dagster-drt 0.5.0, not folded into a patch; see that
+  release's CHANGELOG entry for the upgrade note.
 - **Issue:** [#786](https://github.com/drt-hub/drt/issues/786)
 - **Implementation:** none — this ADR recommends **not** building a native
   watcher. The work it does sanction is listed under
