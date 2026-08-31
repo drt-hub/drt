@@ -15,6 +15,7 @@ from drt.config.models import (
     SyncOptions,
 )
 from drt.destinations.airtable import AirtableDestination
+from drt.destinations.base import ConnectionTestable
 
 
 def _config(**overrides: Any) -> AirtableDestinationConfig:
@@ -187,13 +188,20 @@ class TestAirtableConnectionMissing:
         monkeypatch.chdir(tmp_path)
         config = _config(access_token=None, access_token_env="AIRTABLE_NOPE")
         with pytest.raises(ValueError, match="missing access token"):
-            AirtableDestination().test_connection(config)
+            AirtableDestination()._test_connection_needs_broader_scope(config)
 
 
 class TestAirtableConnection:
+    def test_does_not_declare_connection_testable(self) -> None:
+        """Deliberately not ConnectionTestable (#1059) -- the probe needs a
+        broader scope than this destination's documented write-only
+        credential, so drt validate --check-connection must skip it, not
+        report a false failure."""
+        assert not isinstance(AirtableDestination(), ConnectionTestable)
+
     def test_test_connection_gets_one_record(self) -> None:
         client = MagicMock()
         client.get.return_value = _ok()
         with _patch_client(client):
-            AirtableDestination().test_connection(_config())
+            AirtableDestination()._test_connection_needs_broader_scope(_config())
         assert client.get.call_args.kwargs["params"] == {"maxRecords": 1}

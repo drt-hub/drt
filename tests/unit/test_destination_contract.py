@@ -45,20 +45,20 @@ ALL_DESTINATIONS = [
 ]
 
 CONNECTION_TESTABLE_DESTINATIONS = [
-    AirtableDestination,  # first non-SQL ConnectionTestable
     ClickHouseDestination,
-    KlaviyoDestination,  # non-SQL ConnectionTestable
     MySQLDestination,
     PostgresDestination,
     SnowflakeDestination,
 ]
 
 NON_CONNECTION_TESTABLE_DESTINATIONS = [
+    AirtableDestination,  # probe needs broader scope than documented (#1059)
     DiscordDestination,
     FileDestination,
     GitHubActionsDestination,
     GoogleSheetsDestination,
     HubSpotDestination,
+    KlaviyoDestination,  # probe needs broader scope than documented (#1059)
     NotionDestination,
     ParquetDestination,
     RestApiDestination,

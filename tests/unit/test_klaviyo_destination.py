@@ -15,6 +15,7 @@ from drt.config.models import (
     RetryConfig,
     SyncOptions,
 )
+from drt.destinations.base import ConnectionTestable
 from drt.destinations.klaviyo import KlaviyoDestination
 
 
@@ -222,11 +223,18 @@ class TestKlaviyoLoad:
 
 
 class TestKlaviyoConnection:
+    def test_does_not_declare_connection_testable(self) -> None:
+        """Deliberately not ConnectionTestable (#1059) -- the probe needs a
+        broader scope than this destination's documented write-only
+        credential, so drt validate --check-connection must skip it, not
+        report a false failure."""
+        assert not isinstance(KlaviyoDestination(), ConnectionTestable)
+
     def test_test_connection(self) -> None:
         client = MagicMock()
         client.get.return_value = _resp(200, {"data": []})
         with _patch_client(client):
-            KlaviyoDestination().test_connection(_config())
+            KlaviyoDestination()._test_connection_needs_broader_scope(_config())
         assert "/accounts/" in client.get.call_args.args[0]
 
     def test_test_connection_missing_key(
@@ -236,4 +244,4 @@ class TestKlaviyoConnection:
         monkeypatch.chdir(tmp_path)
         config = _config(api_key=None, api_key_env="KLAVIYO_NOPE")
         with pytest.raises(ValueError, match="missing api_key"):
-            KlaviyoDestination().test_connection(config)
+            KlaviyoDestination()._test_connection_needs_broader_scope(config)
