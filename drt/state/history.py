@@ -89,7 +89,10 @@ class LocalHistoryManager:
 
     Files live under ``<project_dir>/.drt/history/<sync_name>.jsonl``. All
     writes append a single JSON object per line. Reads return the most recent
-    N entries (newest first).
+    N entries (newest first). Mutating methods use ``self._lock`` for threads
+    sharing this instance and an OS-level sidecar lock for separate drt
+    processes — lock nesting order is load-bearing, see
+    ``drt.state._filelock``.
     """
 
     _MAX_ERRORS_PER_ENTRY = 5

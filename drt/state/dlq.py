@@ -150,7 +150,8 @@ class LocalDlqStore:
     One JSONL file per sync (``<sync_name>.jsonl``). All mutating methods run
     under ``self._lock`` for threads sharing this instance and an OS-level
     sidecar lock for separate drt processes. Single-writer-at-a-time remains
-    the expected operational model.
+    the expected operational model. Lock nesting order is load-bearing — see
+    ``drt.state._filelock``.
     """
 
     def __init__(self, project_dir: Path = Path(".")) -> None:

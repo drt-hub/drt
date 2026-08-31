@@ -5,6 +5,17 @@ These advisory locks coordinate separate drt processes; each store's existing
 are needed. As with advisory ``flock`` generally, locking may be unreliable on
 NFS or other network filesystems whose server or mount configuration does not
 preserve the host OS's locking semantics.
+
+Nesting order is load-bearing: every call site holds ``advisory_lock()``
+*outside* its ``threading.Lock`` — ``with advisory_lock(path): with
+self._lock: ...`` — never the reverse. ``self._lock`` is one mutex shared
+across every sync name a store instance handles; if it were held while
+waiting on the OS lock (which can block for as long as another *process*
+holds it, unbounded), one contended sync would stall every other sync's
+``--threads N`` worker too, even though their own per-file locks are free.
+With the OS lock outside, a thread blocks only on the one file it's actually
+waiting for, and never holds the shared mutex while doing so — caught during
+review of a similar approach in #1012, credit to @Pawansingh3889.
 """
 
 from __future__ import annotations
