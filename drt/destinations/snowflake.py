@@ -395,6 +395,10 @@ class SnowflakeDestination(BaseSqlDestination):
         )
         return bool(cur.fetchall())
 
+    def supported_modes(self) -> frozenset[str]:
+        """Declare the advanced sync modes implemented by Snowflake (#1042)."""
+        return frozenset({"replace", "mirror"})
+
     def _shadow_name(self, table: str) -> str:
         return f"{table}{_SWAP_SUFFIX}"
 

@@ -224,9 +224,16 @@ assert isinstance(MyDatabaseDestination(), ModeCapable)
 destination actually honours; do not include the three always-safe modes. The
 engine discovers this optional capability with
 `isinstance(destination, ModeCapable)` and fails before extraction or writes
-when a configured advanced mode is undeclared. Keep this capability separate
-from the frozen `Destination` Protocol, following the same extension pattern as
-`ConnectionTestable`, `MatchPolicyCapable`, `StagedDestination`,
+when a configured advanced mode is undeclared. **Declare this on the concrete
+destination, never on a shared abstract base** — `BaseSqlDestination`
+deliberately does not implement `supported_modes()` itself, because its
+`_load_replace_swap` / `_build_mirror_delete` / etc. hooks are abstract
+(`NotImplementedError`) until a dialect subclass fills them in; a subclass
+that only wants some of that machinery (e.g. plain upsert) must not silently
+inherit a capability it can't actually serve — Postgres, MySQL, Snowflake,
+and Databricks each declare it individually for this reason. Keep this
+capability separate from the frozen `Destination` Protocol, following the
+same extension pattern as `ConnectionTestable`, `MatchPolicyCapable`, `StagedDestination`,
 `OrphanCleanup`, and `QueryableDestination`.
 
 ---

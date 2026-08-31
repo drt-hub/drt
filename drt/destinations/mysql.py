@@ -235,6 +235,10 @@ class MySQLDestination(BaseSqlDestination):
         conn.commit()
         return result
 
+    def supported_modes(self) -> frozenset[str]:
+        """Declare the advanced sync modes implemented by MySQL (#1042)."""
+        return frozenset({"replace", "mirror"})
+
     def _shadow_name(self, table: str) -> str:
         return f"{table}__drt_swap"
 

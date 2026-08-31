@@ -17,6 +17,7 @@ from drt.destinations.databricks import DatabricksDestination
 from drt.destinations.mysql import MySQLDestination
 from drt.destinations.postgres import PostgresDestination
 from drt.destinations.snowflake import SnowflakeDestination
+from drt.destinations.sql_base import BaseSqlDestination
 from drt.engine.sync import _check_mode_supported, run_sync
 
 
@@ -123,3 +124,26 @@ def test_bigquery_destination_does_not_claim_sync_mode_capability() -> None:
     assert not isinstance(BigQueryDestination(), ModeCapable)
     with pytest.raises(ValueError, match="not supported by BigQueryDestination"):
         _check_mode_supported("mirror", BigQueryDestination())
+
+
+def test_incomplete_base_sql_destination_subclass_does_not_inherit_the_capability() -> None:
+    """``supported_modes()`` must be declared per concrete dialect, not on
+    ``BaseSqlDestination`` itself (caught in review, #1042): the base class's
+    replace/mirror hooks (``_load_replace_swap``, ``_build_mirror_delete``,
+    etc.) are abstract ``NotImplementedError`` stubs, so a subclass that only
+    implements the hooks it needs (e.g. plain upsert) must not silently
+    inherit a capability it can't actually serve — that would let the engine
+    wave a `mirror`/`replace` sync past the fail-fast guard and crash later,
+    mid-run, possibly after some records were already written.
+    """
+
+    class _IncompleteSqlDestination(BaseSqlDestination):
+        """Only implements what a plain-upsert dialect needs."""
+
+    dest = _IncompleteSqlDestination()
+    assert not isinstance(dest, ModeCapable)
+    for mode in ("replace", "mirror"):
+        with pytest.raises(
+            ValueError, match=rf"sync\.mode: {mode} is not supported"
+        ):
+            _check_mode_supported(mode, dest)
