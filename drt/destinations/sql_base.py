@@ -52,6 +52,10 @@ class BaseSqlDestination:
         # being absent = not yet fetched.
         self._schema_cache: dict[str, dict[str, str] | None] = {}
 
+    def supported_modes(self) -> frozenset[str]:
+        """Declare the advanced sync modes implemented by the SQL template."""
+        return frozenset({"replace", "mirror"})
+
     def load(
         self,
         records: list[dict[str, Any]],

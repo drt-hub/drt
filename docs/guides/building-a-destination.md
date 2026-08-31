@@ -198,6 +198,37 @@ For database connectors, the pattern differs slightly:
 
 See `drt/destinations/postgres.py` for the reference implementation.
 
+### Optional advanced sync modes
+
+Every destination supports `sync.mode: full`, `incremental`, and `upsert`
+through its normal `load()` path. A destination must opt in to `replace` or
+`mirror`, because those modes require additional destination-side operations
+such as truncating/swapping a table or deleting rows absent from the source.
+
+Implement the separate `ModeCapable` Protocol only after the connector has the
+complete machinery for each mode it declares:
+
+```python
+from drt.destinations.base import ModeCapable
+
+
+class MyDatabaseDestination:
+    def supported_modes(self) -> frozenset[str]:
+        return frozenset({"replace", "mirror"})
+
+
+assert isinstance(MyDatabaseDestination(), ModeCapable)
+```
+
+`supported_modes()` returns only the subset of `{"replace", "mirror"}` the
+destination actually honours; do not include the three always-safe modes. The
+engine discovers this optional capability with
+`isinstance(destination, ModeCapable)` and fails before extraction or writes
+when a configured advanced mode is undeclared. Keep this capability separate
+from the frozen `Destination` Protocol, following the same extension pattern as
+`ConnectionTestable`, `MatchPolicyCapable`, `StagedDestination`,
+`OrphanCleanup`, and `QueryableDestination`.
+
 ---
 
 ## Step 3: CLI Registration

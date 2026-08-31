@@ -83,6 +83,10 @@ class ClickHouseDestination:
         # this set.
         self._mirror_scopes: set[tuple[Any, ...]] | None = None
 
+    def supported_modes(self) -> frozenset[str]:
+        """Declare the advanced sync modes implemented by ClickHouse."""
+        return frozenset({"replace", "mirror"})
+
     def load(
         self,
         records: list[dict[str, Any]],

@@ -25,6 +25,7 @@ from drt.config.query_tags import build_query_tags, new_run_id, render_comment_h
 from drt.destinations.base import (
     Destination,
     MatchPolicyCapable,
+    ModeCapable,
     StagedDestination,
     SyncResult,
 )
@@ -137,6 +138,34 @@ def _check_match_policy_supported(
             f"{', '.join(sorted(supported)) or 'upsert only'}. "
             "match_policy currently ships on the Postgres destination "
             "(update_only / create_only); other destinations follow (#757)."
+        )
+
+
+def _check_mode_supported(
+    mode: str, destination: Destination | StagedDestination
+) -> None:
+    """Fail fast on an advanced ``sync.mode`` a destination can't serve (#1042).
+
+    No-op for ``full`` / ``incremental`` / ``upsert``: those use the normal
+    destination load path. ``replace`` / ``mirror`` require the destination to
+    declare support via :class:`ModeCapable` and list the specific mode in
+    ``supported_modes()`` — otherwise we raise rather than silently perform a
+    normal load. This is a pure capability check with no I/O, so it is safe
+    inside ``engine/sync.py``.
+    """
+    if mode in {"full", "incremental", "upsert"}:
+        return
+    supported: frozenset[str] = frozenset()
+    if isinstance(destination, ModeCapable):
+        supported = destination.supported_modes()
+    if mode not in supported:
+        dest_name = type(destination).__name__
+        raise ValueError(
+            f"sync.mode: {mode} is not supported by {dest_name}. "
+            f"Supported here: "
+            f"{', '.join(sorted(supported)) or 'full / incremental / upsert only'}. "
+            "replace / mirror currently ship on the Postgres, MySQL, Snowflake, "
+            "Databricks, and ClickHouse destinations (#1042)."
         )
 
 
@@ -452,9 +481,11 @@ def _run_sync_body(
     """Inner body of run_sync. Mutates `total_result` in place so the outer
     finally-block can read partial results when an exception propagates.
     """
-    # match_policy fail-fast (#757): a non-default policy on a destination that
-    # doesn't implement it must error loudly, never be silently ignored. Pure
-    # capability check — no I/O — so it stays inside the engine boundary.
+    # Advanced-mode / match_policy fail-fast (#1042 / #757): a destination
+    # that doesn't implement the configured behaviour must error loudly,
+    # never silently ignore it. Pure capability checks — no I/O — so they stay
+    # inside the engine boundary.
+    _check_mode_supported(sync.sync.mode, destination)
     _check_match_policy_supported(sync.sync.match_policy, destination)
 
     # Load last cursor value for incremental syncs (fallback chain)
