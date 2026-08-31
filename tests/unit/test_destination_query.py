@@ -470,7 +470,12 @@ def test_fetch_rows_mysql_empty_columns_uses_cursor_description() -> None:
     assert rows == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
 
 
-def test_fetch_rows_snowflake_empty_columns_uses_cursor_description() -> None:
+def test_fetch_rows_snowflake_empty_columns_lowercases_cursor_description() -> None:
+    """Snowflake reports unquoted columns in stored UPPERCASE (caught in
+    review, a second pass on #1062): folding to lowercase matches
+    upsert_key's conventional casing, same fold _value_clause already
+    applies for Layer 3 JSON-column matching. Without it, compute_diff()'s
+    row.get(c) for c in upsert_key would return None for every row."""
     cursor = MagicMock()
     cursor.description = [("ID", None), ("NAME", None)]
     cursor.fetchall.return_value = [(1, "alice"), (2, "bob")]
@@ -485,7 +490,7 @@ def test_fetch_rows_snowflake_empty_columns_uses_cursor_description() -> None:
             columns=[],
         )
 
-    assert rows == [{"ID": 1, "NAME": "alice"}, {"ID": 2, "NAME": "bob"}]
+    assert rows == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
 
 
 def test_fetch_rows_clickhouse_empty_columns_uses_result_column_names() -> None:

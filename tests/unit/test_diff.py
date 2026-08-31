@@ -314,6 +314,51 @@ class TestComputeDiffKeyedFetch:
         assert result.deleted[0]["id"] == 3
         assert len(result.updated) == 1
 
+    def test_compute_diff_replace_mode_snowflake_uppercase_columns_end_to_end(
+        self,
+    ) -> None:
+        """A second review pass caught the first #1062 fix's test only
+        exercising fetch_rows() in isolation -- not the real
+        compute_diff() -> fetch_rows() -> _fetch_rows_snowflake() chain
+        where the casing mismatch actually bites. Mocks the real Snowflake
+        cursor (uppercase, unquoted column names) rather than fetch_rows
+        itself, proving the full pipeline no longer collapses every
+        destination row into one keyless entry."""
+        cursor = MagicMock()
+        cursor.description = [("ID", None), ("SCORE", None)]
+        cursor.fetchall.return_value = [(1, 0.5), (2, 0.9), (3, 0.7)]
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        sf_config = SnowflakeDestinationConfig(
+            type="snowflake",
+            account_env="SF_ACCOUNT",
+            user_env="SF_USER",
+            password_env="SF_PASSWORD",
+            database="ANALYTICS",
+            schema="PUBLIC",
+            table="USERS",
+            warehouse="COMPUTE_WH",
+            upsert_key=["id"],
+        )
+        records = [{"id": 1, "score": 0.95}, {"id": 2, "score": 0.9}]
+
+        with patch(
+            "drt.destinations.snowflake.SnowflakeDestination._connect",
+            return_value=conn,
+        ):
+            result = compute_diff(records, sf_config, _options("replace"), limit=20)
+
+        # If uppercase ID/SCORE leaked through unlowered, every destination
+        # row would collapse into one (None, ...)-keyed entry: 2 spurious
+        # "added" (real rows 1/2 misreported as new) and at most 1 deletion
+        # instead of the correct 1.
+        assert len(result.deleted) == 1
+        assert result.deleted[0]["id"] == 3
+        assert result.added == []
+        assert len(result.updated) == 1
+
     @patch("drt.engine.diff.fetch_rows")
     @patch("drt.engine.diff.fetch_rows_by_keys")
     def test_compute_diff_clickhouse_falls_back_to_full_scan(

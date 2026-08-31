@@ -248,13 +248,25 @@ def _fetch_rows_snowflake(
     query: str,
     columns: list[str],
 ) -> list[dict[str, Any]]:
+    """Snowflake leg.
+
+    ``columns`` empty means the replace-mode full-table scan (caught in
+    review, #1062-followup): Snowflake's cursor metadata reports unquoted
+    columns in their stored UPPERCASE form, but ``upsert_key``/source record
+    keys are conventionally lowercase (same fold this codebase already
+    applies for Layer 3 JSON-column matching, see ``_value_clause`` above) —
+    without lowercasing, ``compute_diff()``'s ``row.get(c) for c in
+    upsert_key`` would return ``None`` for every row and collapse them all
+    into one keyless entry, exactly the bug #1062 fixed for the *literal*
+    empty-columns case reappearing via a casing mismatch instead.
+    """
     from drt.destinations.snowflake import SnowflakeDestination
 
     conn = SnowflakeDestination._connect(config)
     try:
         with conn.cursor() as cur:
             cur.execute(query)
-            cols = columns or [d[0] for d in cur.description]
+            cols = columns or [d[0].lower() for d in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
     finally:
         conn.close()
