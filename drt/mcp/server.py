@@ -422,9 +422,10 @@ def create_server(project_dir: Path | None = None) -> Any:
             clear: Discard the queue without replaying (records are lost).
 
         Returns:
-            A summary with ``status`` ("empty" | "cleared" | "dry_run" | "ok")
-            and, for a real run, ``succeeded`` / ``still_failing`` /
-            ``remaining_depth`` counts.
+            A summary with ``status``
+            ("empty" | "cleared" | "dry_run" | "ok" | "failed") and, for a
+            real run, ``succeeded`` / ``still_failing`` / ``remaining_depth``
+            counts. A failed staged finalize also includes ``error``.
         """
         return _retry(ctx, sync_name, limit=limit, dry_run=dry_run, clear=clear)
 

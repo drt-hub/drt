@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from drt.destinations.base import Destination
+from drt.destinations.base import Destination, StagedDestination
 from drt.sources.base import Source
 
 if TYPE_CHECKING:
@@ -157,7 +157,7 @@ def source_profile_class(type_name: str) -> type[Any] | None:
     return entry[0] if entry else None
 
 
-def get_destination(config: DestinationConfig) -> Destination:
+def get_destination(config: DestinationConfig) -> Destination | StagedDestination:
     """Get a destination instance for the given config.
 
     Args:

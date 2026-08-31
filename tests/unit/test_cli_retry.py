@@ -43,6 +43,77 @@ class _FakeDestination:
         return result
 
 
+class _FakeStagedDestination:
+    """Stages every chunk, then attributes configured failures globally."""
+
+    def __init__(self, fail_ids: set[int], finalize_error: Exception | None = None) -> None:
+        self.fail_ids = fail_ids
+        self.finalize_error = finalize_error
+        self.stage_calls: list[list[dict]] = []
+        self.finalize_calls = 0
+        self._records: list[dict] = []
+
+    def stage(self, records, config, sync_options):  # type: ignore[no-untyped-def]
+        self.stage_calls.append(records)
+        self._records.extend(records)
+
+    def finalize(self, config, sync_options):  # type: ignore[no-untyped-def]
+        self.finalize_calls += 1
+        if self.finalize_error is not None:
+            raise self.finalize_error
+
+        result = SyncResult()
+        for i, rec in enumerate(self._records):
+            if rec.get("id") in self.fail_ids:
+                result.failed += 1
+                result.row_errors.append(
+                    RowError(
+                        batch_index=i,
+                        record_preview=str(rec)[:200],
+                        http_status=503,
+                        error_message="staged record still failing",
+                    )
+                )
+            else:
+                result.success += 1
+        self._records.clear()
+        return result
+
+
+class _FakeSalesforceBulkDestination:
+    """Mirrors SalesforceBulkDestination's real quirk: every RowError from a
+    failed-results CSV row reports ``batch_index=0``, regardless of which
+    accumulated record actually failed (drt/destinations/salesforce_bulk.py).
+    """
+
+    def __init__(self, fail_ids: set[int]) -> None:
+        self.fail_ids = fail_ids
+        self._records: list[dict] = []
+        self.finalize_calls = 0
+
+    def stage(self, records, config, sync_options):  # type: ignore[no-untyped-def]
+        self._records.extend(records)
+
+    def finalize(self, config, sync_options):  # type: ignore[no-untyped-def]
+        self.finalize_calls += 1
+        result = SyncResult()
+        for rec in self._records:
+            if rec.get("id") in self.fail_ids:
+                result.failed += 1
+                result.row_errors.append(
+                    RowError(
+                        batch_index=0,
+                        record_preview=str(rec)[:200],
+                        http_status=None,
+                        error_message="sf__Error from failedResults",
+                    )
+                )
+            else:
+                result.success += 1
+        self._records.clear()
+        return result
+
+
 @pytest.fixture
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.chdir(tmp_path)
@@ -72,7 +143,37 @@ def _seed(tmp_path: Path, ids: list[int]) -> DlqStore:
     return store
 
 
-def _patch_dest(monkeypatch: pytest.MonkeyPatch, dest: _FakeDestination) -> None:
+@pytest.fixture
+def salesforce_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "drt_project.yml").write_text(
+        yaml.dump({"name": "t", "version": "0.1", "profile": "default"})
+    )
+    (tmp_path / "syncs").mkdir()
+    (tmp_path / "syncs" / "post_users.yml").write_text(
+        yaml.dump(
+            {
+                "name": "post_users",
+                "model": "ref('users')",
+                "destination": {
+                    "type": "salesforce_bulk",
+                    "object_name": "Contact",
+                    "instance_url_env": "SF_INSTANCE_URL",
+                    "client_id_env": "SF_CLIENT_ID",
+                    "client_secret_env": "SF_CLIENT_SECRET",
+                    "username_env": "SF_USERNAME",
+                    "password_env": "SF_PASSWORD",
+                },
+                "sync": {"batch_size": 2, "dlq": {"enabled": True}},
+            }
+        )
+    )
+    return tmp_path
+
+
+def _patch_dest(
+    monkeypatch: pytest.MonkeyPatch, dest: _FakeDestination | _FakeStagedDestination
+) -> None:
     monkeypatch.setattr(helpers, "get_destination", lambda sync: dest)
 
 
@@ -130,6 +231,86 @@ def test_retry_all_success_drains_queue(project: Path, monkeypatch: pytest.Monke
     assert store.depth("post_users") == 0
     # batch_size=2 → two load() calls (2 + 1).
     assert [len(c) for c in dest.calls] == [2, 1]
+
+
+def test_retry_staged_success_drains_queue(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _seed(project, [1, 2, 3])
+    dest = _FakeStagedDestination(fail_ids=set())
+    _patch_dest(monkeypatch, dest)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    assert "3 succeeded, 0 still failing" in result.output
+    assert store.depth("post_users") == 0
+    assert [len(c) for c in dest.stage_calls] == [2, 1]
+    assert dest.finalize_calls == 1
+
+
+def test_retry_staged_partial_failure_uses_global_batch_indices(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _seed(project, [1, 2, 3])
+    dest = _FakeStagedDestination(fail_ids={3})
+    _patch_dest(monkeypatch, dest)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    assert "2 succeeded, 1 still failing" in result.output
+    remaining = store.read("post_users")
+    assert [e.record["id"] for e in remaining] == [3]
+    assert remaining[0].attempts == 2
+    assert remaining[0].error_message == "staged record still failing"
+    # id=3 was staged in the second chunk, but finalize() reports index 2 in
+    # the one accumulated record set rather than index 0 in that chunk.
+    assert [len(c) for c in dest.stage_calls] == [2, 1]
+    assert dest.finalize_calls == 1
+
+
+def test_retry_staged_finalize_exception_is_reported_and_keeps_queue(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _seed(project, [1, 2, 3])
+    dest = _FakeStagedDestination(
+        fail_ids=set(), finalize_error=RuntimeError("bulk job rejected")
+    )
+    _patch_dest(monkeypatch, dest)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 1
+    assert "Retry failed for 'post_users'" in result.output
+    assert "job rejected" in result.output
+    remaining = store.read("post_users")
+    assert [e.record["id"] for e in remaining] == [1, 2, 3]
+    assert [e.attempts for e in remaining] == [2, 2, 2]
+    assert dest.finalize_calls == 1
+
+
+def test_retry_salesforce_bulk_never_trusts_batch_index_attribution(
+    salesforce_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Salesforce's failedResults CSV carries no original-position info, so
+    its destination always reports RowError.batch_index=0 (verified against
+    drt/destinations/salesforce_bulk.py). Naive attribution (failed count ==
+    len(distinct indices) -> trust it) would wrongly conclude only the
+    record at index 0 failed and silently drop the other two entries from
+    the DLQ, even though which record actually failed is unknown.
+    """
+    store = _seed(salesforce_project, [1, 2, 3])
+    dest = _FakeSalesforceBulkDestination(fail_ids={2})
+    _patch_dest(monkeypatch, dest)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    assert "0 succeeded, 3 still failing" in result.output
+    remaining = store.read("post_users")
+    assert {e.record["id"] for e in remaining} == {1, 2, 3}
+    assert dest.finalize_calls == 1
 
 
 def test_retry_partial_keeps_failures_and_bumps_attempts(

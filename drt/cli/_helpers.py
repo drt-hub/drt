@@ -21,7 +21,7 @@ import typer
 if TYPE_CHECKING:
     from drt.config.models import SyncConfig
     from drt.config.profiles import ProfileConfigLike
-    from drt.destinations.base import Destination
+    from drt.destinations.base import Destination, StagedDestination
     from drt.sources.base import Source
 
 
@@ -91,8 +91,8 @@ def get_source(profile: ProfileConfigLike) -> Source:
     return _registry_get_source(profile)
 
 
-def get_destination(sync: SyncConfig) -> Destination:
-    """Return a Destination instance for the given sync configuration.
+def get_destination(sync: SyncConfig) -> Destination | StagedDestination:
+    """Return a destination instance for the given sync configuration.
 
     Uses the connector registry for automatic connector discovery and
     instantiation.
