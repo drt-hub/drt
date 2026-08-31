@@ -160,13 +160,31 @@ base64 digests — so GitHub and Shopify (`--hmac-header X-Shopify-Hmac-Sha256`)
 work out of the box. Stripe's timestamped `t=...,v1=...` scheme is different
 (replay tolerance) and is not covered.
 
-A `GET` has no body, so `GET /runs/<id>` signs the **empty** body. That makes its
-signature a constant for a given secret, which you can compute once and reuse:
+`POST /sync/<name>` signs its raw body, including when that body is empty —
+which is the normal way to trigger a sync:
 
 ```bash
 SIG="sha256=$(printf '' | openssl dgst -sha256 -hmac "$DRT_WEBHOOK_HMAC_SECRET" | sed 's/^.*= //')"
-curl http://localhost:8080/runs/3f2a9c... -H "X-Hub-Signature-256: $SIG"
+curl -X POST http://localhost:8080/sync/my_sync -H "X-Hub-Signature-256: $SIG"
 ```
+
+A `GET` has no body, so `GET /runs/<id>` signs the **request path** instead, under
+a key derived from your secret. Binding the path in means a signature issued for
+one run id cannot read another (#936), and the derived key means a captured `GET`
+signature cannot be replayed as a `POST` whose body is crafted to match:
+
+```bash
+RUN_ID=3f2a9c...
+# The GET key is HMAC(secret, "drt/serve/v1/get-path"); openssl prints it as hex.
+GET_KEY=$(printf 'drt/serve/v1/get-path' \
+  | openssl mac -digest SHA256 -macopt "key:$DRT_WEBHOOK_HMAC_SECRET" HMAC)
+SIG="sha256=$(printf "/runs/$RUN_ID" \
+  | openssl mac -digest SHA256 -macopt "hexkey:$GET_KEY" HMAC | tr 'A-Z' 'a-z')"
+curl "http://localhost:8080/runs/$RUN_ID" -H "X-Hub-Signature-256: $SIG"
+```
+
+The signature covers the path exactly as sent, so it is per-run rather than a
+constant you can compute once and reuse everywhere.
 
 It proves knowledge of the secret without putting the secret on the wire, but it is
 a static value, not a per-request signature. If you poll run state from somewhere

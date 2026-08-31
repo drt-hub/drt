@@ -293,12 +293,17 @@ def test_health_stays_open_under_auth() -> None:
         server.shutdown()
 
 
-def test_hmac_get_signs_the_empty_body() -> None:
-    """A GET has no body, so its signature is over b"", constant per secret."""
+def _get_sig(secret: str, path: str) -> str:
+    """The signature a client computes for ``GET <path>``."""
+    key = hmac.new(secret.encode(), b"drt/serve/v1/get-path", hashlib.sha256).digest()
+    return "sha256=" + hmac.new(key, path.encode(), hashlib.sha256).hexdigest()
+
+
+def test_hmac_get_signs_the_request_path() -> None:
+    """A GET has no body, so its signature covers the path it asks for."""
     secret = "topsecret"
     payload = b'{"event": "push"}'
     post_sig = "sha256=" + hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
-    get_sig = "sha256=" + hmac.new(secret.encode(), b"", hashlib.sha256).hexdigest()
 
     server, _, port = _run_server(auth=AuthConfig(scheme="hmac", hmac_secret=secret))
     try:
@@ -311,9 +316,82 @@ def test_hmac_get_signs_the_empty_body() -> None:
         assert _get(url)[0] == 401
         # The POST's signature is over its own body and must not open the GET
         assert _get(url, headers={"X-Hub-Signature-256": post_sig})[0] == 401
-        status, body = _get(url, headers={"X-Hub-Signature-256": get_sig})
+        sig = _get_sig(secret, f"/runs/{accepted['run_id']}")
+        status, body = _get(url, headers={"X-Hub-Signature-256": sig})
         assert status == 200
         assert body["run_id"] == accepted["run_id"]
+    finally:
+        server.shutdown()
+
+
+def test_hmac_get_signature_does_not_open_a_different_run() -> None:
+    """#936: a signature issued for run A must not read run B."""
+    secret = "topsecret"
+    payload = b'{"event": "push"}'
+    post_sig = "sha256=" + hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
+
+    server, _, port = _run_server(auth=AuthConfig(scheme="hmac", hmac_secret=secret))
+    try:
+        base = f"http://127.0.0.1:{port}"
+        _, a = _post(f"{base}/sync/s", body=payload, headers={"X-Hub-Signature-256": post_sig})
+        _, b = _post(f"{base}/sync/s", body=payload, headers={"X-Hub-Signature-256": post_sig})
+        assert a["run_id"] != b["run_id"]
+
+        header = {"X-Hub-Signature-256": _get_sig(secret, f"/runs/{a['run_id']}")}
+        # Opens the run it was issued for...
+        assert _get(f"{base}/runs/{a['run_id']}", headers=header)[0] == 200
+        # ...and nothing else.
+        assert _get(f"{base}/runs/{b['run_id']}", headers=header)[0] == 401
+    finally:
+        server.shutdown()
+
+
+def test_hmac_get_signature_cannot_be_replayed_as_a_post() -> None:
+    """A captured GET signature must not authenticate a sync trigger.
+
+    GET signs a path and POST signs a body. Under one key an attacker could
+    send the GET's signed payload *as* a body and reuse the digest, turning a
+    leaked read-only signature into "trigger any sync". The keys differ, so the
+    digests cannot collide.
+    """
+    secret = "topsecret"
+    payload = b'{"event": "push"}'
+    post_sig = "sha256=" + hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
+
+    server, _, port = _run_server(auth=AuthConfig(scheme="hmac", hmac_secret=secret))
+    try:
+        base = f"http://127.0.0.1:{port}"
+        _, run = _post(f"{base}/sync/s", body=payload, headers={"X-Hub-Signature-256": post_sig})
+        path = f"/runs/{run['run_id']}"
+        stolen = _get_sig(secret, path)
+        assert _get(f"{base}{path}", headers={"X-Hub-Signature-256": stolen})[0] == 200
+
+        # Every shape of body an attacker would craft from the signed path.
+        for crafted in (path.encode(), path.encode() + b"\x00", b"\x00" + path.encode()):
+            status, _ = _post(
+                f"{base}/sync/other",
+                body=crafted,
+                headers={"X-Hub-Signature-256": stolen},
+            )
+            assert status == 401, f"GET signature replayed as POST with body {crafted!r}"
+    finally:
+        server.shutdown()
+
+
+def test_hmac_bodyless_post_still_signs_the_empty_body() -> None:
+    """POST /sync/<name> is documented as bodyless; that contract is unchanged."""
+    secret = "topsecret"
+    empty_sig = "sha256=" + hmac.new(secret.encode(), b"", hashlib.sha256).hexdigest()
+
+    server, _, port = _run_server(auth=AuthConfig(scheme="hmac", hmac_secret=secret))
+    try:
+        status, body = _post(
+            f"http://127.0.0.1:{port}/sync/s",
+            body=b"",
+            headers={"X-Hub-Signature-256": empty_sig},
+        )
+        assert status == 202, "an existing bodyless-POST client must not start 401ing"
+        assert "run_id" in body
     finally:
         server.shutdown()
 

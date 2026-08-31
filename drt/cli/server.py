@@ -107,15 +107,44 @@ def _verify_bearer(header_value: str, token: str) -> bool:
     return secrets.compare_digest(header_value.encode(), f"Bearer {token}".encode())
 
 
-def _verify_hmac(body: bytes, header_value: str, secret: str) -> bool:
-    """Check an HMAC-SHA256 body signature in any of the common encodings.
+_GET_KEY_INFO = b"drt/serve/v1/get-path"
+
+
+def _derive_get_key(secret: str) -> bytes:
+    """Derive the separate key GET path signatures are computed under.
+
+    A POST signature has to stay ``HMAC(secret, raw_body)`` because that is what
+    an external sender (GitHub, Shopify) already computes over the body it
+    sends. A GET has no body, so its signature covers the request path instead.
+
+    Those two payloads must never be signed under the same key: the attacker
+    picks a POST body, so any deterministic GET payload can simply be sent
+    *as* a body, and one captured GET signature would authenticate an arbitrary
+    ``POST /sync/<name>``. Separate keys make that collision impossible rather
+    than merely unlikely — no prefix or separator can, since a body is free
+    bytes.
+    """
+    return hmac.new(secret.encode(), _GET_KEY_INFO, hashlib.sha256).digest()
+
+
+def _verify_hmac(body: bytes, header_value: str, secret: str, *, path: str | None = None) -> bool:
+    """Check an HMAC-SHA256 signature in any of the common encodings.
 
     GitHub sends ``sha256=<hex>``, Shopify sends base64, and a hand-rolled
     sender may send bare hex — all three are digests of the same bytes, so
     accepting each costs nothing. Stripe's timestamped ``t=...,v1=...`` scheme
     is genuinely different (replay tolerance) and is not covered here.
+
+    ``path`` is passed for GET only, and switches the signature to cover the
+    request path under :func:`_derive_get_key` instead of the body. It is keyed
+    off the HTTP method, never off "the body happens to be empty" — ``POST
+    /sync/<name>`` is documented as bodyless, and its signature is still over
+    ``b""`` under the raw secret.
     """
-    digest = hmac.new(secret.encode(), body, hashlib.sha256)
+    if path is not None:
+        digest = hmac.new(_derive_get_key(secret), path.encode(), hashlib.sha256)
+    else:
+        digest = hmac.new(secret.encode(), body, hashlib.sha256)
     accepted = (
         f"sha256={digest.hexdigest()}",
         digest.hexdigest(),
@@ -300,7 +329,10 @@ def make_handler(
                 return None
             return self.rfile.read(length) if length else b""
 
-        def _check_auth(self, body: bytes) -> bool:
+        def _check_auth(self, body: bytes, *, path: str | None = None) -> bool:
+            # `path` is set by do_GET only. Passing it switches the hmac scheme
+            # to sign the request path under a separate key; leaving it None
+            # keeps the body-signing contract every POST sender already uses.
             if auth.scheme == "none":
                 return True
             if auth.scheme == "bearer":
@@ -308,18 +340,20 @@ def make_handler(
                 return _verify_bearer(self.headers.get("Authorization", ""), auth.token)
             assert auth.hmac_secret is not None
             signature = self.headers.get(auth.hmac_header, "")
-            return bool(signature) and _verify_hmac(body, signature, auth.hmac_secret)
+            return bool(signature) and _verify_hmac(body, signature, auth.hmac_secret, path=path)
 
         def do_GET(self) -> None:  # noqa: N802
             # /health answers before the auth check so a load-balancer probe
             # needs no credential. Nothing else is exempt: GET /runs/<id>
             # returns the SyncResult and the error string, and the run id stops
             # being a secret the moment a proxy logs the URL path. A GET has no
-            # body, so the hmac scheme signs the empty one.
+            # body, so the hmac scheme signs the request path instead — binding
+            # the signature to the run id it was issued for, so a leaked header
+            # cannot read a different one.
             if self.path == "/health":
                 self._json(200, {"status": "ok", "version": __version__})
                 return
-            if not self._check_auth(b""):
+            if not self._check_auth(b"", path=self.path):
                 self._json(401, {"error": "unauthorized"})
                 return
             if self.path.startswith("/runs/"):
