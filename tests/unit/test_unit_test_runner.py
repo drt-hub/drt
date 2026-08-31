@@ -227,6 +227,26 @@ class TestExceptionsBecomeFailures:
         assert "match_policy" in result.mismatches[0]
 
 
+class TestAdvancedModeUnitTests:
+    """CaptureDestination must accept ``mode: replace``/``mirror`` fixtures
+    unconditionally (#1042) — a unit test verifies the transform pipeline,
+    not destination write mechanics, so it must not reject a mode the
+    sync's *real* destination (here, Postgres) fully supports in production."""
+
+    @pytest.mark.parametrize("mode", ["replace", "mirror"])
+    def test_advanced_mode_against_a_capable_real_destination_is_not_a_false_failure(
+        self, mode: str
+    ) -> None:
+        sync = _postgres_sync()
+        sync = sync.model_copy(update={"sync": sync.sync.model_copy(update={"mode": mode})})
+        test = UnitTest(name=f"{mode}_fixture", given=[{"id": 1}], expect=[{"id": 1}])
+
+        result = run_unit_test(sync, test)
+
+        assert result.passed, result.mismatches
+        assert result.mismatches == []
+
+
 class TestCaptureDestination:
     def test_accumulates_across_multiple_load_calls(self) -> None:
         capture = CaptureDestination()
