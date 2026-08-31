@@ -395,54 +395,38 @@ class SnowflakeDestination(BaseSqlDestination):
         )
         return bool(cur.fetchall())
 
-    def finalize_sync(
-        self,
-        config: DestinationConfig,
-        sync_options: SyncOptions,
-    ) -> SyncResult | None:
-        """End-of-sync hook: atomic SWAP for ``replace_strategy: swap`` (#434),
-        DELETE-missing for ``sync.mode: mirror`` (#340 Step 4).
+    def _shadow_name(self, table: str) -> str:
+        return f"{table}{_SWAP_SUFFIX}"
 
-        - ``mode=mirror``: DELETE rows whose ``upsert_key`` wasn't observed.
-        - ``mode=replace, replace_strategy=swap``: ``ALTER TABLE ... SWAP WITH``
-          the shadow, then DROP the now-old shadow. Skipped when the first run
-          wrote directly to the target (no shadow was built).
+    def _swap_cursor_context(self, conn: Any, sync_options: SyncOptions) -> Any:
+        return tagged_cursor(conn.cursor(), sync_options)
 
-        Resets per-sync state after dispatch so a re-run starts fresh.
-        """
-        if sync_options.mode == "mirror":
-            result = self._finalize_mirror(config, sync_options)
-            self._mirror_keys = None
-            self._mirror_scopes = None
-            return result
+    def _complete_swap(
+        self, conn: Any, cur: Any, table: str, shadow: str
+    ) -> None:
+        """Atomically exchange target/shadow, then drop the old shadow."""
+        # Atomic exchange — preserves grants on the original name.
+        # Snowflake autocommits, so the SWAP commits before the DROP
+        # (mirrors the separate-transaction split in postgres.py).
+        cur.execute(f"ALTER TABLE {table} SWAP WITH {shadow}")
+        # SWAP succeeded — the replace is committed. Reset in-memory state
+        # only now: a failed SWAP leaves it intact so the shadow stays
+        # recoverable (`drt clean --orphans`) and a retry is still possible.
+        self._reset_swap_state()
+        # Best-effort cleanup of the now-old shadow.
+        cur.execute(f"DROP TABLE {shadow}")
 
-        if not self._swap_shadow_created or self._swap_table is None:
-            # truncate-replace / insert / merge / swap-first-run — nothing to do.
-            self._swap_direct_write = False
-            return None
+    def _reset_swap_state(self) -> None:
+        super()._reset_swap_state()
+        self._swap_direct_write = False
 
-        assert isinstance(config, SnowflakeDestinationConfig)
-        table_fq = self._swap_table
-        shadow_fq = f"{table_fq}{_SWAP_SUFFIX}"
-        conn = self._connect(config, query_tags=sync_options._query_tags)
-        try:
-            with tagged_cursor(conn.cursor(), sync_options) as cur:
-                # Atomic exchange — preserves grants on the original name.
-                # Snowflake autocommits, so the SWAP commits before the DROP
-                # (mirrors the separate-transaction split in postgres.py).
-                cur.execute(f"ALTER TABLE {table_fq} SWAP WITH {shadow_fq}")
-                # SWAP succeeded — the replace is committed. Reset in-memory
-                # state only now: a failed SWAP leaves it intact so the shadow
-                # stays recoverable (`drt clean --orphans`) and a retry is
-                # still possible.
-                self._swap_shadow_created = False
-                self._swap_table = None
-                self._swap_direct_write = False
-                # Best-effort cleanup of the now-old shadow.
-                cur.execute(f"DROP TABLE {shadow_fq}")
-        finally:
-            conn.close()
-        return SyncResult()
+    def _reset_swap_state_after_completion(self) -> None:
+        # A failed SWAP must retain state; successful SWAP resets inside
+        # _complete_swap before the cleanup DROP.
+        pass
+
+    def _reset_swap_state_after_noop(self) -> None:
+        self._swap_direct_write = False
 
     def _build_mirror_delete(
         self,

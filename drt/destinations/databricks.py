@@ -476,50 +476,27 @@ class DatabricksDestination(BaseSqlDestination):
         cur.execute(f"SHOW TABLES IN {config.catalog}.{config.schema_} LIKE '{config.table}'")
         return bool(cur.fetchall())
 
-    def finalize_sync(
-        self,
-        config: DestinationConfig,
-        sync_options: SyncOptions,
-    ) -> SyncResult | None:
-        """End-of-sync hook: atomic INSERT OVERWRITE for ``replace_strategy: swap``
-        (#643), DELETE-missing for ``sync.mode: mirror``.
+    def _shadow_name(self, table: str) -> str:
+        return f"{table}{_SWAP_SUFFIX}"
 
-        - ``mode=mirror``: DELETE rows whose ``upsert_key`` wasn't observed.
-        - ``mode=replace, replace_strategy=swap``: ``INSERT OVERWRITE`` the
-          target from the shadow (atomic via Delta snapshot isolation; the
-          target table object — grants / properties / clustering — is
-          preserved), then DROP the shadow. Skipped when the first run wrote
-          directly to the target (no shadow was built).
+    def _swap_cursor_context(self, conn: Any, sync_options: SyncOptions) -> Any:
+        return tagged_cursor(conn.cursor(), sync_options)
 
-        Resets per-sync state after dispatch so a re-run starts fresh.
-        """
-        if sync_options.mode == "mirror":
-            result = self._finalize_mirror(config, sync_options)
-            self._mirror_keys = None
-            self._mirror_scopes = None
-            return result
+    def _complete_swap(
+        self, conn: Any, cur: Any, table: str, shadow: str
+    ) -> None:
+        """Atomically overwrite target data, then drop the staging shadow."""
+        # Atomic data overwrite — Delta snapshot isolation; the target
+        # table object (grants / properties / clustering) is preserved.
+        cur.execute(f"INSERT OVERWRITE {table} SELECT * FROM {shadow}")
+        cur.execute(f"DROP TABLE IF EXISTS {shadow}")
 
-        if not self._swap_shadow_created or self._swap_table is None:
-            # truncate-replace / insert / merge / swap-first-run — nothing to do.
-            self._swap_direct_write = False
-            return None
+    def _reset_swap_state(self) -> None:
+        super()._reset_swap_state()
+        self._swap_direct_write = False
 
-        assert isinstance(config, DatabricksDestinationConfig)
-        table_fq = self._swap_table
-        shadow_fq = f"{table_fq}{_SWAP_SUFFIX}"
-        conn = self._connect(config, query_tags=sync_options._query_tags)
-        try:
-            with tagged_cursor(conn.cursor(), sync_options) as cur:
-                # Atomic data overwrite — Delta snapshot isolation; the target
-                # table object (grants / properties / clustering) is preserved.
-                cur.execute(f"INSERT OVERWRITE {table_fq} SELECT * FROM {shadow_fq}")
-                cur.execute(f"DROP TABLE IF EXISTS {shadow_fq}")
-        finally:
-            conn.close()
-            self._swap_shadow_created = False
-            self._swap_table = None
-            self._swap_direct_write = False
-        return SyncResult()
+    def _reset_swap_state_after_noop(self) -> None:
+        self._swap_direct_write = False
 
     def _delete_via_staged_keys(
         self,

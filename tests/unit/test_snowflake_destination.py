@@ -95,7 +95,13 @@ def test_snowflake_subclasses_sql_base() -> None:
     assert "load" not in SnowflakeDestination.__dict__
     assert "_finalize_mirror" not in SnowflakeDestination.__dict__
     assert "_finalize_mirror_tracked" not in SnowflakeDestination.__dict__
-    assert "finalize_sync" in SnowflakeDestination.__dict__
+    assert "finalize_sync" not in SnowflakeDestination.__dict__
+    assert {
+        "_shadow_name",
+        "_swap_cursor_context",
+        "_complete_swap",
+        "_reset_swap_state",
+    }.issubset(SnowflakeDestination.__dict__)
     assert dest._replace_truncated is False
     assert dest._swap_shadow_created is False
     assert dest._swap_table is None
@@ -503,6 +509,7 @@ class TestSnowflakeReplaceMode:
         dest = SnowflakeDestination()
         with patch.dict("sys.modules", modules):
             dest.load([{"id": 1}], _config(), self._swap_opts())
+            dest._swap_direct_write = True  # prove completion clears dialect state
             fin = dest.finalize_sync(_config(), self._swap_opts())
         assert fin is not None
         sqls = _sqls(conn._cur)
@@ -512,8 +519,11 @@ class TestSnowflakeReplaceMode:
             for s in sqls
         )
         assert any(s.startswith("DROP TABLE ANALYTICS.PUBLIC.USER_SCORES__drt_swap") for s in sqls)
+        conn._cur.__enter__.assert_called_once_with()
+        conn._cur.__exit__.assert_called_once()
         assert dest._swap_shadow_created is False
         assert dest._swap_table is None
+        assert dest._swap_direct_write is False
 
     def test_replace_swap_first_run_target_absent_writes_direct(
         self, monkeypatch: pytest.MonkeyPatch
@@ -525,12 +535,14 @@ class TestSnowflakeReplaceMode:
         dest = SnowflakeDestination()
         with patch.dict("sys.modules", modules):
             result = dest.load([{"id": 1}], _config(), self._swap_opts())
+            assert dest._swap_direct_write is True
             fin = dest.finalize_sync(_config(), self._swap_opts())
         assert result.success == 1
         sqls = _sqls(conn._cur)
         assert not any("__drt_swap" in s for s in sqls)  # no shadow involved
         assert any("INSERT INTO ANALYTICS.PUBLIC.USER_SCORES" in s for s in sqls)
         assert fin is None  # nothing to finalize
+        assert dest._swap_direct_write is False
 
     def test_replace_swap_on_error_fail_drops_shadow(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
@@ -575,11 +587,38 @@ class TestSnowflakeReplaceMode:
         dest = SnowflakeDestination()
         with patch.dict("sys.modules", modules):
             dest.load([{"id": 1}], _config(), self._swap_opts())  # shadow built
+            dest._swap_direct_write = True
             conn._cur.execute.side_effect = Exception("swap boom")
             with pytest.raises(Exception, match="swap boom"):
                 dest.finalize_sync(_config(), self._swap_opts())
         assert dest._swap_shadow_created is True
         assert dest._swap_table == "ANALYTICS.PUBLIC.USER_SCORES"
+        assert dest._swap_direct_write is True
+
+    def test_finalize_drop_failure_keeps_completed_state_reset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # SWAP commits before cleanup. A failed DROP must not make a completed
+        # replace retryable as though the SWAP itself had failed.
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.fetchall.return_value = [("USER_SCORES",)]
+        modules = _mocked_snowflake_modules(conn)
+        dest = SnowflakeDestination()
+        with patch.dict("sys.modules", modules):
+            dest.load([{"id": 1}], _config(), self._swap_opts())
+            dest._swap_direct_write = True
+
+            def fail_drop(sql: str, *args: Any) -> None:
+                if sql.startswith("DROP TABLE ANALYTICS.PUBLIC.USER_SCORES__drt_swap"):
+                    raise Exception("drop boom")
+
+            conn._cur.execute.side_effect = fail_drop
+            with pytest.raises(Exception, match="drop boom"):
+                dest.finalize_sync(_config(), self._swap_opts())
+        assert dest._swap_shadow_created is False
+        assert dest._swap_table is None
+        assert dest._swap_direct_write is False
 
 
 class TestSnowflakeOrphanCleanup:
