@@ -17,7 +17,7 @@ import sqlite3
 from collections.abc import Iterator
 from typing import Any
 
-from drt.config.credentials import ProfileConfig, SQLiteProfile
+from drt.config.credentials import ProfileConfigLike, SQLiteProfile
 
 
 class SQLiteSource:
@@ -26,7 +26,7 @@ class SQLiteSource:
     def extract(
         self,
         query: str,
-        config: ProfileConfig,
+        config: ProfileConfigLike,
         *,
         query_tags: dict[str, str] | None = None,
     ) -> Iterator[dict[str, Any]]:
@@ -52,7 +52,7 @@ class SQLiteSource:
         finally:
             conn.close()
 
-    def test_connection(self, config: ProfileConfig) -> bool:
+    def test_connection(self, config: ProfileConfigLike) -> bool:
         if not isinstance(config, SQLiteProfile):
             raise TypeError("Expected SQLiteProfile")
         try:

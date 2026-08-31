@@ -10,7 +10,7 @@ import httpx
 from pydantic import TypeAdapter
 
 from drt._http_utils import extract_next_link
-from drt.config.credentials import ProfileConfig, RestApiProfile
+from drt.config.credentials import ProfileConfigLike, RestApiProfile
 from drt.config.models import (
     AuthConfig,
     CursorPaginationConfig,
@@ -33,7 +33,7 @@ class RestApiSource(Source):
     def extract(
         self,
         query: str,
-        config: ProfileConfig,
+        config: ProfileConfigLike,
         *,
         query_tags: dict[str, str] | None = None,
     ) -> Iterator[dict[str, Any]]:
@@ -57,7 +57,7 @@ class RestApiSource(Source):
     def extract_incremental(
         self,
         query: str,
-        config: ProfileConfig,
+        config: ProfileConfigLike,
         cursor_value: str | None,
         *,
         query_tags: dict[str, str] | None = None,
@@ -256,7 +256,7 @@ class RestApiSource(Source):
             return [current]
         return []
 
-    def test_connection(self, config: ProfileConfig) -> bool:
+    def test_connection(self, config: ProfileConfigLike) -> bool:
         assert isinstance(config, RestApiProfile)
 
         auth_config: AuthConfig | None = None

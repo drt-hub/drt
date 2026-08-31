@@ -18,9 +18,9 @@ from typing import Any, Literal
 
 from drt._identifiers import new_run_id as new_correlation_id
 from drt.config.base import QueryTaggingConfig
-from drt.config.credentials import ProfileConfig
 from drt.config.duration import parse_duration
 from drt.config.models import LookupConfig, SyncConfig
+from drt.config.profiles import ProfileConfigLike
 from drt.config.query_tags import build_query_tags, new_run_id, render_comment_header
 from drt.destinations.base import (
     Destination,
@@ -196,7 +196,7 @@ class _stage_ctx:
 def _staged_source_iter(
     source: Source,
     query: str,
-    profile: ProfileConfig,
+    profile: ProfileConfigLike,
     cursor_value: str | None = None,
     incremental: bool = False,
     query_tags: dict[str, str] | None = None,
@@ -233,7 +233,7 @@ def run_sync(
     sync: SyncConfig,
     source: Source,
     destination: Destination | StagedDestination,
-    profile: ProfileConfig,
+    profile: ProfileConfigLike,
     project_dir: Path,
     dry_run: bool = False,
     state_manager: StateStore | None = None,
@@ -431,7 +431,7 @@ def _run_sync_body(
     sync: SyncConfig,
     source: Source,
     destination: Destination | StagedDestination,
-    profile: ProfileConfig,
+    profile: ProfileConfigLike,
     project_dir: Path,
     dry_run: bool,
     state_manager: StateStore | None,

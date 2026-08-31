@@ -30,7 +30,7 @@ import os
 from dataclasses import asdict, is_dataclass
 from inspect import signature
 from pathlib import Path
-from typing import Any, Literal, TextIO, cast
+from typing import Any, Literal, TextIO
 
 import yaml
 from pydantic import BaseModel, Field
@@ -45,6 +45,7 @@ from drt.config.profiles import (
     MySQLProfile,
     PostgresProfile,
     ProfileConfig,
+    ProfileConfigLike,
     RedshiftProfile,
     RestApiProfile,
     SnowflakeProfile,
@@ -288,7 +289,7 @@ the ``if source_type == ...`` chain and against the connector registry.
 """
 
 
-def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileConfig:
+def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileConfigLike:
     """Load a named profile from ~/.drt/profiles.yml.
 
     Args:
@@ -509,7 +510,13 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
                 f"{profile_class.__module__}.{profile_class.__qualname__}, which does not "
                 "implement describe(). A profile class must provide describe() -> str."
             )
-        return cast("ProfileConfig", profile)
+        if not isinstance(profile, ProfileConfigLike):
+            raise ValueError(
+                f"Source type '{source_type}' is registered with "
+                f"{profile_class.__module__}.{profile_class.__qualname__}, which does not "
+                "provide the profile type required by ProfileConfigLike."
+            )
+        return profile
 
     # Types the registry knows but the chain above does not construct. Kept as a
     # set rather than re-split from the message string: the sentence is
@@ -560,10 +567,17 @@ def _open_private(path: Path) -> TextIO:
 
 def save_profile(
     profile_name: str,
-    profile: ProfileConfig,
+    profile: ProfileConfigLike,
     config_dir: Path | None = None,
 ) -> Path:
-    """Append or update a profile in ~/.drt/profiles.yml."""
+    """Append or update a profile in ~/.drt/profiles.yml.
+
+    Accepts ``ProfileConfigLike`` rather than the closed ``ProfileConfig``
+    union to stay symmetric with :func:`load_profile` (#1034) — the
+    ``is_dataclass`` fallback branch below already handles a plugin profile
+    at runtime (#997); only the declared type used to be narrower than what
+    this function actually supports.
+    """
     dir_path = _config_dir(config_dir)
     _ensure_private_dir(dir_path)
     profiles_path = dir_path / "profiles.yml"
@@ -830,6 +844,7 @@ __all__ = [
     "OtelConfig",
     "PostgresProfile",
     "ProfileConfig",
+    "ProfileConfigLike",
     "RedshiftProfile",
     "RestApiProfile",
     "SQLServerProfile",

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import textwrap
 import warnings
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -34,7 +35,9 @@ from drt.config.credentials import (
     save_profile,
 )
 from drt.config.models import SlackDestinationConfig, SyncConfig
+from drt.config.profiles import ProfileConfigLike
 from drt.config.sync_options import _BUILTIN_DESTINATION_TAGS, GENERIC_DESTINATION_TAG
+from drt.sources.base import Source
 
 PLUGIN_DESTINATION = "salesforce_premium"
 PLUGIN_SOURCE = "salesforce_premium_src"
@@ -65,6 +68,24 @@ class _PluginDestination:
 
 class _PluginSource:
     """Stand-in for a source class shipped by a third-party package."""
+
+    def extract(
+        self,
+        query: str,
+        config: ProfileConfigLike,
+        *,
+        query_tags: dict[str, str] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        assert isinstance(config, _PluginProfile)
+        yield {
+            "instance_url": config.instance_url,
+            "query": query,
+            "query_tags": query_tags,
+        }
+
+    def test_connection(self, config: ProfileConfigLike) -> bool:
+        assert isinstance(config, _PluginProfile)
+        return bool(config.instance_url)
 
 
 @dataclass
@@ -302,7 +323,9 @@ def test_builtin_source_profile_is_unchanged(tmp_path: Path) -> None:
     assert profile.database == "./analytics.db"
 
 
-def test_registered_third_party_source_loads(tmp_path: Path, clean_registry) -> None:
+def test_registered_third_party_source_extracts_through_source_protocol(
+    tmp_path: Path, clean_registry
+) -> None:
     clean_registry.register_source(PLUGIN_SOURCE, _PluginProfile, _PluginSource)
     d = _write_profiles(
         tmp_path,
@@ -319,7 +342,16 @@ def test_registered_third_party_source_loads(tmp_path: Path, clean_registry) -> 
     assert isinstance(profile, _PluginProfile)
     assert profile.type == PLUGIN_SOURCE
     assert profile.instance_url == "https://acme.my.salesforce.com"
-    assert isinstance(registry.get_source(profile), _PluginSource)
+    source: Source = registry.get_source(profile)
+    assert isinstance(source, Source)
+    assert list(source.extract("SELECT leads", profile, query_tags={"sync": "leads"})) == [
+        {
+            "instance_url": "https://acme.my.salesforce.com",
+            "query": "SELECT leads",
+            "query_tags": {"sync": "leads"},
+        }
+    ]
+    assert source.test_connection(profile) is True
 
 
 def test_unregistered_source_still_raises_with_a_useful_message(tmp_path: Path) -> None:
@@ -436,6 +468,34 @@ def test_plugin_profile_must_implement_describe(tmp_path: Path, clean_registry) 
           url: https://x
     """)
     with pytest.raises(ValueError, match="does not implement describe"):
+        load_profile("p", config_dir=d)
+
+
+def test_plugin_profile_must_satisfy_profile_config_like(
+    tmp_path: Path, clean_registry
+) -> None:
+    """A plugin profile that accepts ``type=`` but doesn't expose it as a
+    readable attribute fails the ProfileConfigLike structural check (#1034),
+    not just the narrower describe()-callable one. Deliberately not a
+    dataclass -- a dataclass field named ``type`` would satisfy the Protocol
+    automatically, so this stores it privately instead.
+    """
+
+    class NoType:
+        def __init__(self, type: str, url: str) -> None:
+            self._type = type
+            self.url = url
+
+        def describe(self) -> str:
+            return "no-type"
+
+    clean_registry.register_source(PLUGIN_SOURCE, NoType, _PluginSource)
+    d = _write_profiles(tmp_path, f"""
+        p:
+          type: {PLUGIN_SOURCE}
+          url: https://x
+    """)
+    with pytest.raises(ValueError, match="ProfileConfigLike"):
         load_profile("p", config_dir=d)
 
 

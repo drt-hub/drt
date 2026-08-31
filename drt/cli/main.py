@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING, Any
 import typer
 
 if TYPE_CHECKING:
-    from drt.config.credentials import ProfileConfig
     from drt.config.models import SyncConfig
+    from drt.config.profiles import ProfileConfigLike
     from drt.destinations.base import Destination
     from drt.sources.base import Source
 
@@ -114,7 +114,7 @@ def main(
 # back-compat note). New callers should import directly from _helpers.
 
 
-def _get_source(profile: ProfileConfig) -> Source:
+def _get_source(profile: ProfileConfigLike) -> Source:
     """Back-compat shim — see ``drt.cli._helpers.get_source``."""
     from drt.cli._helpers import get_source
 

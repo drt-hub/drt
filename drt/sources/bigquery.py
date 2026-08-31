@@ -13,7 +13,7 @@ import os
 from collections.abc import Iterator
 from typing import Any
 
-from drt.config.credentials import BigQueryProfile, ProfileConfig
+from drt.config.credentials import BigQueryProfile, ProfileConfigLike
 from drt.config.query_tags import normalize_bigquery_label
 
 
@@ -23,7 +23,7 @@ class BigQuerySource:
     def extract(
         self,
         query: str,
-        config: ProfileConfig,
+        config: ProfileConfigLike,
         *,
         query_tags: dict[str, str] | None = None,
     ) -> Iterator[dict[str, Any]]:
@@ -60,7 +60,7 @@ class BigQuerySource:
         }
         return bigquery.QueryJobConfig(labels=labels)
 
-    def test_connection(self, config: ProfileConfig) -> bool:
+    def test_connection(self, config: ProfileConfigLike) -> bool:
         """Return True if BigQuery is reachable with the given profile."""
         assert isinstance(config, BigQueryProfile)
         try:

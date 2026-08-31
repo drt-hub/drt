@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
-from drt.config.credentials import PostgresProfile, ProfileConfig, resolve_env
+from drt.config.credentials import PostgresProfile, ProfileConfigLike, resolve_env
 from drt.config.models import RetryConfig
 from drt.destinations.retry import with_retry
 
@@ -82,7 +82,7 @@ class PostgresSource:
     def extract(
         self,
         query: str,
-        config: ProfileConfig,
+        config: ProfileConfigLike,
         *,
         query_tags: dict[str, str] | None = None,
     ) -> Iterator[dict[str, Any]]:
@@ -163,7 +163,7 @@ class PostgresSource:
         finally:
             conn.close()
 
-    def test_connection(self, config: ProfileConfig) -> bool:
+    def test_connection(self, config: ProfileConfigLike) -> bool:
         assert isinstance(config, PostgresProfile)
         try:
             conn = self._connect(config)
