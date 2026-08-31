@@ -86,6 +86,7 @@ class LocalStateManager:
     All public methods are thread-safe via ``self._lock``. Mutations also use
     an OS-level sidecar lock to serialise read-modify-write cycles across drt
     processes. Single-writer-at-a-time remains the expected operational model.
+    Lock nesting order is load-bearing — see ``drt.state._filelock``.
     """
 
     def __init__(self, project_dir: Path = Path(".")) -> None:
