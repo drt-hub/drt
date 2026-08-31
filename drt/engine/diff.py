@@ -169,6 +169,14 @@ def _preview_destination_mirror_deletes(
     Any failure keeps the add/update comparison usable but returns an explicit
     unavailable reason. It must not collapse to a successful zero-delete
     preview: those two outcomes drive different deployment decisions.
+
+    Keys are compared as their string forms (caught in review, #1060): the
+    real ClickHouse DELETE (``_build_mirror_delete``) does the same on both
+    the destination column and the bound source keys — a typed column (e.g.
+    UUID) fetched raw would otherwise compare unequal to the source's plain
+    value and misreport a live row as a preview deletion. Stringifying is a
+    no-op for dialects whose driver already round-trips the same Python type
+    the source produced.
     """
     scope_cols = sync_options.mirror.scope if sync_options.mirror else None
     scopes = _observed_scopes(records, scope_cols) if scope_cols else None
@@ -176,8 +184,13 @@ def _preview_destination_mirror_deletes(
         dest_keys = fetch_all_keys(config, upsert_key, scope_cols, scopes)
     except Exception as error:
         return [], f"{type(error).__name__}: {error}"
+    source_key_strs = {tuple(str(v) for v in key) for key in source_keys}
     return (
-        [dict(zip(upsert_key, key)) for key in dest_keys if key not in source_keys],
+        [
+            dict(zip(upsert_key, key))
+            for key in dest_keys
+            if tuple(str(v) for v in key) not in source_key_strs
+        ],
         None,
     )
 

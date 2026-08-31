@@ -890,10 +890,17 @@ def _fetch_all_keys_clickhouse(
     scope_cols: list[str] | None,
     scopes: list[tuple[Any, ...]] | None,
 ) -> list[tuple[Any, ...]]:
-    """ClickHouse leg — named Array parameters match mirror scope filtering."""
+    """ClickHouse leg — named Array parameters match mirror scope filtering.
+
+    Key columns are read through ``toString()`` (caught in review, #1060):
+    the real mirror DELETE (``_build_mirror_delete``) compares destination
+    keys to source keys as strings for exactly this reason — a typed
+    column (e.g. UUID) fetched raw would compare unequal to the source's
+    plain-string key and misreport a live row as a preview deletion.
+    """
     from drt.destinations.clickhouse import ClickHouseDestination
 
-    col_list = ", ".join(f"`{column}`" for column in key_cols)
+    col_list = ", ".join(f"toString(`{column}`)" for column in key_cols)
     table_q = ClickHouseDestination._quote_ident(config.table)
     where = ""
     params: dict[str, Any] = {}
@@ -922,30 +929,41 @@ def _fetch_all_keys_databricks(
     scope_cols: list[str] | None,
     scopes: list[tuple[Any, ...]] | None,
 ) -> list[tuple[Any, ...]]:
-    """Databricks leg — native ``?`` binds and Delta-safe composite scope."""
-    from drt.destinations.databricks import DatabricksDestination
+    """Databricks leg — native ``?`` binds and Delta-safe composite scope.
 
-    where = ""
-    params: list[Any] = []
-    if scope_cols and scopes:
-        if len(scope_cols) == 1:
-            markers = ", ".join(["?"] * len(scopes))
-            where = f" WHERE {scope_cols[0]} IN ({markers})"
-            params = [scope[0] for scope in scopes]
-        else:
-            one = "(" + " AND ".join(f"{column} = ?" for column in scope_cols) + ")"
-            where = " WHERE (" + " OR ".join([one] * len(scopes)) + ")"
-            params = [value for scope in scopes for value in scope]
+    Chunks ``scopes`` at Databricks' 255-native-parameter-marker limit
+    (caught in review, #1060 — a single unchunked query with more than 255
+    single-column scope values, or 255/len(scope_cols) composite ones, would
+    fail outright). Reuses ``_rows_per_chunk`` from ``databricks.py``, the
+    same math every other Databricks write path already chunks by.
+    """
+    from drt.destinations.databricks import DatabricksDestination, _rows_per_chunk
 
     table_fq = f"{config.catalog}.{config.schema_}.{config.table}"
-    stmt = f"SELECT {', '.join(key_cols)} FROM {table_fq}{where}"
     conn = DatabricksDestination._connect(config)
     try:
-        with conn.cursor() as cur:
-            if params:
-                cur.execute(stmt, params)
-            else:
+        if not (scope_cols and scopes):
+            stmt = f"SELECT {', '.join(key_cols)} FROM {table_fq}"
+            with conn.cursor() as cur:
                 cur.execute(stmt)
-            return _key_tuples_from_rows(cur.fetchall(), key_cols)
+                return _key_tuples_from_rows(cur.fetchall(), key_cols)
+
+        rows_per = _rows_per_chunk(len(scope_cols))
+        result: list[tuple[Any, ...]] = []
+        with conn.cursor() as cur:
+            for batch in _chunks(scopes, rows_per):
+                if len(scope_cols) == 1:
+                    markers = ", ".join(["?"] * len(batch))
+                    where = f" WHERE {scope_cols[0]} IN ({markers})"
+                    params: list[Any] = [scope[0] for scope in batch]
+                else:
+                    one = "(" + " AND ".join(f"{column} = ?" for column in scope_cols) + ")"
+                    where = " WHERE (" + " OR ".join([one] * len(batch)) + ")"
+                    params = [value for scope in batch for value in scope]
+                stmt = f"SELECT {', '.join(key_cols)} FROM {table_fq}{where}"
+                cur.execute(stmt, params)
+                result.extend(_key_tuples_from_rows(cur.fetchall(), key_cols))
+        return result
     finally:
         conn.close()
+

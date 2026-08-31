@@ -599,6 +599,29 @@ class TestComputeDiffMirrorDestination:
 
     @patch("drt.engine.diff.fetch_all_keys")
     @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_dest_and_source_keys_compare_by_string_form(
+        self, mock_fetch_keys: Any, mock_all_keys: Any
+    ) -> None:
+        """Caught in review, #1060: a dialect (e.g. ClickHouse via toString())
+        may return keys as strings even when the source produced a different
+        Python type (e.g. int) for the same logical value. The comparison
+        must not misreport a live row as a preview deletion just because the
+        two sides' native types differ, as long as their string forms match.
+        """
+        mock_fetch_keys.return_value = []
+        # Destination key "1" (string) is the same row as source key 1 (int).
+        mock_all_keys.return_value = [("1",), ("2",)]
+        records = [{"id": 1}]  # source has row 1; destination also has "1" and "2"
+
+        result = compute_diff(
+            records, _pg_config(), _mirror_destination_options(), limit=20
+        )
+
+        # Only "2" (unseen by the source, in either type) previews as deleted.
+        assert result.deleted == [{"id": "2"}]
+
+    @patch("drt.engine.diff.fetch_all_keys")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
     def test_omitted_strategy_defaults_to_destination(
         self, mock_fetch_keys: Any, mock_all_keys: Any
     ) -> None:

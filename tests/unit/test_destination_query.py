@@ -1141,12 +1141,33 @@ def test_fetch_all_keys_clickhouse_scope_uses_named_array() -> None:
 
     assert keys == [(1,), (2,)]
     assert client.query.call_args.args == (
-        "SELECT `id` FROM `analytics`.`users` "
+        "SELECT toString(`id`) FROM `analytics`.`users` "
         "WHERE toString(`region`) IN {scope_keys:Array(String)}",
     )
     assert client.query.call_args.kwargs == {"parameters": {"scope_keys": ["eu", "us"]}}
     client.command.assert_not_called()
     client.close.assert_called_once()
+
+
+def test_fetch_all_keys_clickhouse_keys_are_stringified() -> None:
+    """The SELECT wraps key columns in toString() (#1060) so a typed column
+    (e.g. UUID) compares correctly against the source's plain-string key --
+    matching _build_mirror_delete's own toString()-on-both-sides approach.
+    A raw UUID object returned here would never equal the source's string
+    form, silently misreporting a live row as a preview deletion."""
+    client = MagicMock()
+    client.query.return_value = MagicMock(
+        result_rows=[("3fa85f64-5717-4562-b3fc-2c963f66afa6",)]
+    )
+
+    with patch(
+        "drt.destinations.clickhouse.ClickHouseDestination._connect",
+        return_value=client,
+    ):
+        keys = fetch_all_keys(_clickhouse_config(table="users"), ["id"])
+
+    assert keys == [("3fa85f64-5717-4562-b3fc-2c963f66afa6",)]
+    assert client.query.call_args.args == ("SELECT toString(`id`) FROM `users`",)
 
 
 def test_fetch_all_keys_databricks_composite_scope_uses_or_of_ands() -> None:
@@ -1171,6 +1192,38 @@ def test_fetch_all_keys_databricks_composite_scope_uses_or_of_ands() -> None:
         "WHERE ((region = ? AND tier = ?) OR (region = ? AND tier = ?))",
         ["eu", "gold", "us", "silver"],
     )
+
+
+def test_fetch_all_keys_databricks_chunks_past_255_param_limit() -> None:
+    """Databricks' 255-native-parameter-marker limit (caught in review,
+    #1060): more than 255 single-column scope values must split into
+    multiple queries rather than building one query that would fail
+    outright. Reuses the same _rows_per_chunk math every other Databricks
+    write path already chunks by."""
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [[("k1",)], [("k2",)]]
+    conn = _fake_conn(cursor)
+
+    scopes = [(f"v{i}",) for i in range(300)]  # > 255, forces 2 chunks
+
+    with patch(
+        "drt.destinations.databricks.DatabricksDestination._connect",
+        return_value=conn,
+    ):
+        keys = fetch_all_keys(
+            _databricks_config(),
+            ["id"],
+            scope_cols=["region"],
+            scopes=scopes,
+        )
+
+    assert keys == [("k1",), ("k2",)]
+    assert cursor.execute.call_count == 2
+    first_markers = cursor.execute.call_args_list[0].args[0].count("?")
+    second_markers = cursor.execute.call_args_list[1].args[0].count("?")
+    assert first_markers <= 255
+    assert second_markers <= 255
+    assert first_markers + second_markers == 300
     _assert_read_only(cursor)
     conn.close.assert_called_once()
 
