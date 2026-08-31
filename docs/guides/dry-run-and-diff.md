@@ -26,7 +26,7 @@ Error: --diff requires --dry-run
 
 `--diff` behaves differently depending on the destination type. The flag is the same; the depth varies.
 
-### Queryable destinations (Postgres / MySQL / ClickHouse)
+### Queryable destinations (Postgres / MySQL / Snowflake / ClickHouse / Databricks)
 
 For SQL destinations with an `upsert_key`, drt fetches the current destination state and computes a true diff keyed on the upsert columns. The output shows:
 
@@ -78,7 +78,14 @@ The `destination` strategy is the only one where previewing is not free. It dele
 
 `mirror.scope` ([#687](https://github.com/drt-hub/drt/issues/687)) narrows the preview exactly as it narrows the real `DELETE`: drt computes the scope values your source records would produce and filters the key read to those values server-side, so a scoped mirror never previews deletions under a parent this run did not touch.
 
-Whichever strategy you use, this is a **read-only** preview — no state is written, no state table is created, and no `DELETE` is executed during `--dry-run`. If the read fails (say the state table isn't readable, or the destination denies `SELECT`), the delete preview degrades to empty and the add/update diff still renders rather than the whole diff failing. Destinations whose mirror pass is dialect-specific (ClickHouse, Snowflake) are not previewed for the `destination` strategy.
+Whichever strategy you use, this is a **read-only** preview — no state is written, no state table is created, and no `DELETE` is executed during `--dry-run`. Snowflake, ClickHouse, and Databricks use their own connection, identifier, and parameter conventions for these reads; the syntax of their real DELETE/mutation path does not limit a plain key `SELECT`.
+
+If a mirror-state or destination-key read fails (for example, the state table is not readable or the destination denies `SELECT`), the add/update diff still renders, but drt explicitly marks the delete set as unknown rather than presenting it as zero:
+
+```
+  - Deleted (mirror DELETE): preview unavailable
+    PermissionError: SELECT denied
+```
 
 An **empty source previews no deletions**, matching what a real run does: drt skips the mirror `DELETE` entirely when a run observes no keys, so a transient empty source cannot wipe the destination.
 
@@ -130,6 +137,7 @@ When `--diff` is combined with `--output json`, the diff is embedded in each syn
         ],
         "deleted": [],
         "delete_reason": null,
+        "delete_preview_unavailable_reason": null,
         "truncated": false
       }
     }
@@ -148,14 +156,14 @@ When `--diff` is combined with `--output json`, the diff is embedded in each syn
 
 `"mirror"` and `"mirror_scan"` describe the same blast radius; they differ in what the preview cost, which is what a job budgeting dry-run time needs to know. The `deleted` list itself is unchanged, so existing consumers keep working.
 
+`delete_preview_unavailable_reason` is `null` when the delete preview succeeded, including when it found zero deletions. When the mirror-only read fails, it contains the exception type and message; `deleted` remains empty because the delete set is unknown, not because drt proved it is empty.
+
 This makes `--diff` useful in CI scripts that gate deployments on previewed change counts.
 
 ## Limitations and follow-ups
 
 The current implementation is intentionally simple for v0.7.1. Tracked follow-ups:
 
-- **Snowflake destination** does not yet expose query support, so `--diff` falls back to sample mode for Snowflake. Tracked in [#468](https://github.com/drt-hub/drt/issues/468).
 - The destination read is keyed on the source primary keys (`WHERE <key> IN (…)`, batched) when an `upsert_key` is set and `mode` is not `replace` ([#470](https://github.com/drt-hub/drt/issues/470)). `mode: replace` still needs the whole table — `deleted` there is precisely the rows a keyed read cannot see — and ClickHouse falls back to the full scan for paramstyle reasons.
 - A future `--diff-fields` flag will let you limit the displayed columns ([#471](https://github.com/drt-hub/drt/issues/471)).
 - API-based diff for upsert-keyed SaaS destinations (HubSpot, Notion) is parked behind `--diff-saas` ([#472](https://github.com/drt-hub/drt/issues/472)).
-- The hardcoded "queryable types" tuple will be replaced by a `Destination.fetch_existing()` Protocol method, tracked in v0.9 ([#469](https://github.com/drt-hub/drt/issues/469)).

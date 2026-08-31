@@ -449,13 +449,14 @@ class TestComputeDiffMirrorTracked:
 
         assert result.deleted == []
         assert result.supported
+        assert result.delete_preview_unavailable_reason is None
 
     @patch("drt.engine.diff.fetch_tracked_state")
     @patch("drt.engine.diff.fetch_rows_by_keys")
-    def test_tracked_preview_swallows_state_read_failure(
+    def test_tracked_preview_surfaces_state_read_failure(
         self, mock_fetch_keys: Any, mock_state: Any
     ) -> None:
-        """A failing state read must not break the whole diff — deleted = []."""
+        """A failed state read keeps the diff but marks deletes as unknown."""
         mock_fetch_keys.return_value = [{"id": "a", "score": 0.5}]
         mock_state.side_effect = RuntimeError("permission denied for _drt_synced_keys")
         records = [{"id": "a", "score": 0.9}]
@@ -467,6 +468,9 @@ class TestComputeDiffMirrorTracked:
         assert result.supported  # diff itself still usable
         assert result.deleted == []
         assert len(result.updated) == 1
+        assert result.delete_preview_unavailable_reason == (
+            "RuntimeError: permission denied for _drt_synced_keys"
+        )
 
     @patch("drt.engine.diff.fetch_tracked_state")
     @patch("drt.engine.diff.fetch_rows_by_keys")
@@ -749,10 +753,10 @@ class TestComputeDiffMirrorDestination:
 
     @patch("drt.engine.diff.fetch_all_keys")
     @patch("drt.engine.diff.fetch_rows_by_keys")
-    def test_unsupported_dialect_degrades_to_no_preview(
+    def test_unsupported_config_marks_preview_unavailable(
         self, mock_fetch_keys: Any, mock_all_keys: Any
     ) -> None:
-        """ClickHouse / Snowflake raise → deleted = [], diff still usable."""
+        """An unsupported reader is distinct from a successful zero-delete read."""
         mock_fetch_keys.return_value = [{"id": "a"}]
         mock_all_keys.side_effect = NotImplementedError("clickhouse")
 
@@ -763,6 +767,9 @@ class TestComputeDiffMirrorDestination:
         assert result.supported
         assert result.deleted == []
         assert result.delete_reason is None
+        assert result.delete_preview_unavailable_reason == (
+            "NotImplementedError: clickhouse"
+        )
 
     @patch("drt.engine.diff.fetch_all_keys")
     @patch("drt.engine.diff.fetch_rows_by_keys")
@@ -783,6 +790,9 @@ class TestComputeDiffMirrorDestination:
         assert result.supported
         assert result.deleted == []
         assert len(result.updated) == 1
+        assert result.delete_preview_unavailable_reason == (
+            "RuntimeError: permission denied for users"
+        )
 
     @patch("drt.engine.diff.fetch_all_keys")
     @patch("drt.engine.diff.fetch_rows_by_keys")

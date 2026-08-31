@@ -6,6 +6,7 @@ from typing import Any
 
 from drt.config.models import (
     ClickHouseDestinationConfig,
+    DatabricksDestinationConfig,
     DestinationConfig,
     MySQLDestinationConfig,
     PostgresDestinationConfig,
@@ -180,6 +181,8 @@ def fetch_rows(
         return _fetch_rows_clickhouse(config, query, columns)
     if isinstance(config, SnowflakeDestinationConfig):
         return _fetch_rows_snowflake(config, query, columns)
+    if isinstance(config, DatabricksDestinationConfig):
+        return _fetch_rows_databricks(config, query, columns)
     raise TypeError(f"Cannot fetch rows from {type(config).__name__}")
 
 
@@ -253,6 +256,22 @@ def _fetch_rows_snowflake(
         conn.close()
 
 
+def _fetch_rows_databricks(
+    config: DatabricksDestinationConfig,
+    query: str,
+    columns: list[str],
+) -> list[dict[str, Any]]:
+    from drt.destinations.databricks import DatabricksDestination
+
+    conn = DatabricksDestination._connect(config)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            return [dict(zip(columns, row)) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # fetch_rows_by_keys — parameterized keyed batched SELECT (#470)
 # ---------------------------------------------------------------------------
@@ -296,7 +315,7 @@ def fetch_rows_by_keys(
     the same ``list[dict]`` shape as :func:`fetch_rows`, keyed by the explicit
     ``columns``.
 
-    Supported for Postgres / MySQL / Snowflake only. ClickHouse uses a
+    Supported for Postgres / MySQL / Snowflake / Databricks. ClickHouse uses a
     different paramstyle (``client.query`` in ``_fetch_rows_clickhouse``) and is
     unsupported here — a :class:`NotImplementedError` is raised so the caller
     can fall back to a full scan rather than a silently-wrong query.
@@ -313,6 +332,10 @@ def fetch_rows_by_keys(
         )
     if isinstance(config, SnowflakeDestinationConfig):
         return _fetch_rows_by_keys_snowflake(
+            config, key_cols, key_tuples, columns, batch_size
+        )
+    if isinstance(config, DatabricksDestinationConfig):
+        return _fetch_rows_by_keys_databricks(
             config, key_cols, key_tuples, columns, batch_size
         )
     if isinstance(config, ClickHouseDestinationConfig):
@@ -436,6 +459,36 @@ def _fetch_rows_by_keys_snowflake(
         conn.close()
 
 
+def _fetch_rows_by_keys_databricks(
+    config: DatabricksDestinationConfig,
+    key_cols: list[str],
+    key_tuples: list[tuple[Any, ...]],
+    columns: list[str],
+    batch_size: int,
+) -> list[dict[str, Any]]:
+    from drt.destinations.databricks import DatabricksDestination
+
+    table_fq = f"{config.catalog}.{config.schema_}.{config.table}"
+    col_list = ", ".join(columns)
+    conn = DatabricksDestination._connect(config)
+    try:
+        result: list[dict[str, Any]] = []
+        with conn.cursor() as cur:
+            for batch in _chunks(key_tuples, batch_size):
+                if len(key_cols) == 1:
+                    placeholders = ", ".join(["?"] * len(batch))
+                    predicate = f"{key_cols[0]} IN ({placeholders})"
+                else:
+                    one = "(" + " AND ".join(f"{col} = ?" for col in key_cols) + ")"
+                    predicate = "(" + " OR ".join([one] * len(batch)) + ")"
+                stmt = f"SELECT {col_list} FROM {table_fq} WHERE {predicate}"
+                cur.execute(stmt, _flatten_key_params(batch))
+                result.extend(dict(zip(columns, row)) for row in cur.fetchall())
+        return result
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # fetch_tracked_state — read-only tracked-mirror state read (#693)
 # ---------------------------------------------------------------------------
@@ -461,17 +514,24 @@ def fetch_tracked_state(
     An absent state table yields ``{}``, matching the first-run baseline
     semantics of ``_finalize_mirror_tracked`` (no prior state → no deletes).
 
-    Postgres / MySQL only — the tracked strategy itself is PG/MySQL-only today
-    (other destinations fail fast at load time), so any other config type also
-    yields ``{}`` rather than raising. Returning ``{}`` (not
-    ``NotImplementedError``) keeps the caller a preview-only best-effort path:
-    "no tracked state known" and "no deletions to preview" are the same answer.
+    All five SQL mirror destinations use the same Census-style state-table
+    columns, but each branch deliberately reuses that dialect's own table
+    location, existence probe, parameter style, and connection API. An
+    unsupported config raises :class:`TypeError`; callers surface that as
+    "preview unavailable", which must remain distinct from an existing state
+    table containing zero rows.
     """
     if isinstance(config, PostgresDestinationConfig):
         return _fetch_tracked_state_postgres(config, sync_name)
     if isinstance(config, MySQLDestinationConfig):
         return _fetch_tracked_state_mysql(config, sync_name)
-    return {}
+    if isinstance(config, SnowflakeDestinationConfig):
+        return _fetch_tracked_state_snowflake(config, sync_name)
+    if isinstance(config, ClickHouseDestinationConfig):
+        return _fetch_tracked_state_clickhouse(config, sync_name)
+    if isinstance(config, DatabricksDestinationConfig):
+        return _fetch_tracked_state_databricks(config, sync_name)
+    raise TypeError(f"Cannot fetch tracked state from {type(config).__name__}")
 
 
 def _fetch_tracked_state_postgres(
@@ -560,6 +620,73 @@ def _fetch_tracked_state_mysql(
         conn.close()
 
 
+def _fetch_tracked_state_snowflake(
+    config: SnowflakeDestinationConfig, sync_name: str
+) -> dict[str, str]:
+    """Snowflake leg — reuse the shared mirror template's Snowflake hooks."""
+    from drt.destinations.snowflake import SnowflakeDestination
+
+    destination = SnowflakeDestination()
+    ident, scope, raw = destination._state_table_ident(config)
+    conn = destination._dialect_connect(config)
+    try:
+        with conn.cursor() as cur:
+            if not destination._state_table_exists(cur, scope, raw):
+                return {}
+            cur.execute(
+                destination._state_sql(_STATE_SELECT, ident),
+                destination._state_params(sync_name),
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def _fetch_tracked_state_clickhouse(
+    config: ClickHouseDestinationConfig, sync_name: str
+) -> dict[str, str]:
+    """ClickHouse leg — state is unqualified in the connection's database."""
+    from drt.destinations._mirror_state import STATE_TABLE
+    from drt.destinations.clickhouse import ClickHouseDestination
+
+    state_q = ClickHouseDestination._quote_ident(STATE_TABLE)
+    client = ClickHouseDestination._connect(config)
+    try:
+        exists = client.query(f"EXISTS TABLE {state_q}")
+        if not exists.result_rows or not exists.result_rows[0][0]:
+            return {}
+        result = client.query(
+            f"SELECT key_hash, key_json FROM {state_q} WHERE sync_name = {{sync_name:String}}",
+            parameters={"sync_name": sync_name},
+        )
+        return {row[0]: row[1] for row in result.result_rows}
+    finally:
+        client.close()
+
+
+def _fetch_tracked_state_databricks(
+    config: DatabricksDestinationConfig, sync_name: str
+) -> dict[str, str]:
+    """Databricks leg — state lives beside the target in catalog/schema."""
+    from drt.destinations._mirror_state import STATE_TABLE
+    from drt.destinations.databricks import DatabricksDestination
+
+    state_fq = f"{config.catalog}.{config.schema_}.{STATE_TABLE}"
+    conn = DatabricksDestination._connect(config)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SHOW TABLES IN {config.catalog}.{config.schema_} LIKE '{STATE_TABLE}'")
+            if not cur.fetchall():
+                return {}
+            cur.execute(
+                f"SELECT key_hash, key_json FROM {state_fq} WHERE sync_name = ?",
+                [sync_name],
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # fetch_all_keys — read-only destination key read for the destination-strategy
 # mirror delete preview (#693)
@@ -600,20 +727,14 @@ def fetch_all_keys(
     returns rows whose key IS in the source set.
 
     ``scope_cols`` / ``scopes`` (mirror.scope, #687) narrow the read **in SQL**,
-    with the same clause shape each dialect's ``_build_mirror_delete`` emits, so
-    the preview and the real DELETE consider the same rows: Postgres binds one
-    auto-expanded tuple per ``%s``, MySQL an explicit flattened placeholder list.
+    with the same clause shape each dialect's mirror machinery emits, so the
+    preview and the real DELETE consider the same rows. Parameter styles remain
+    dialect-native: psycopg2 tuple expansion, explicit ``%s`` lists, ClickHouse
+    named arrays, or Databricks ``?`` markers (including its composite-scope
+    OR-of-ANDs form).
     As there, the clause is added only when both are non-empty — a scoped mirror
     that observed no scope values deletes nothing, and the caller is expected to
     skip the preview entirely in that case.
-
-    Postgres / MySQL only — the destinations whose mirror DELETE comes from the
-    shared ``BaseSqlDestination._finalize_mirror`` path. ClickHouse and Snowflake
-    override mirror finalisation with dialect-specific statements, so a
-    :class:`NotImplementedError` is raised rather than returning ``[]``: an empty
-    list is indistinguishable from "this mirror deletes nothing", and quietly
-    claiming that about a mirror which *will* delete rows is the one wrong answer
-    a preview must not give. Callers degrade to "not previewed".
 
     Never writes: one ``SELECT``, no DDL/DML, no ``COMMIT``.
     """
@@ -621,12 +742,12 @@ def fetch_all_keys(
         return _fetch_all_keys_postgres(config, key_cols, scope_cols, scopes)
     if isinstance(config, MySQLDestinationConfig):
         return _fetch_all_keys_mysql(config, key_cols, scope_cols, scopes)
-    if isinstance(config, (ClickHouseDestinationConfig, SnowflakeDestinationConfig)):
-        raise NotImplementedError(
-            f"fetch_all_keys does not support {type(config).__name__} "
-            "(mirror finalisation is dialect-specific there); "
-            "caller should skip the destination-strategy delete preview."
-        )
+    if isinstance(config, SnowflakeDestinationConfig):
+        return _fetch_all_keys_snowflake(config, key_cols, scope_cols, scopes)
+    if isinstance(config, ClickHouseDestinationConfig):
+        return _fetch_all_keys_clickhouse(config, key_cols, scope_cols, scopes)
+    if isinstance(config, DatabricksDestinationConfig):
+        return _fetch_all_keys_databricks(config, key_cols, scope_cols, scopes)
     raise TypeError(f"Cannot fetch keys from {type(config).__name__}")
 
 
@@ -711,5 +832,120 @@ def _fetch_all_keys_mysql(
         else:
             cur.execute(stmt)
         return _key_tuples_from_rows(cur.fetchall(), key_cols)
+    finally:
+        conn.close()
+
+
+def _explicit_scope_clause(
+    scope_cols: list[str] | None,
+    scopes: list[tuple[Any, ...]] | None,
+    marker: str,
+) -> tuple[str, list[Any]]:
+    """Build Snowflake-style row-IN scope SQL and flattened parameters."""
+    if not scope_cols or not scopes:
+        return "", []
+    if len(scope_cols) == 1:
+        placeholders = ", ".join([marker] * len(scopes))
+        return (
+            f" WHERE {scope_cols[0]} IN ({placeholders})",
+            [scope[0] for scope in scopes],
+        )
+    col_tuple = "(" + ", ".join(scope_cols) + ")"
+    row = "(" + ", ".join([marker] * len(scope_cols)) + ")"
+    placeholders = ", ".join([row] * len(scopes))
+    return (
+        f" WHERE {col_tuple} IN ({placeholders})",
+        [value for scope in scopes for value in scope],
+    )
+
+
+def _fetch_all_keys_snowflake(
+    config: SnowflakeDestinationConfig,
+    key_cols: list[str],
+    scope_cols: list[str] | None,
+    scopes: list[tuple[Any, ...]] | None,
+) -> list[tuple[Any, ...]]:
+    """Snowflake leg — fully-qualified target and explicit ``%s`` binds."""
+    from drt.destinations.snowflake import SnowflakeDestination
+
+    table_fq = f"{config.database}.{config.schema_}.{config.table}"
+    where, params = _explicit_scope_clause(scope_cols, scopes, "%s")
+    stmt = f"SELECT {', '.join(key_cols)} FROM {table_fq}{where}"
+
+    conn = SnowflakeDestination._connect(config)
+    try:
+        with conn.cursor() as cur:
+            if params:
+                cur.execute(stmt, params)
+            else:
+                cur.execute(stmt)
+            return _key_tuples_from_rows(cur.fetchall(), key_cols)
+    finally:
+        conn.close()
+
+
+def _fetch_all_keys_clickhouse(
+    config: ClickHouseDestinationConfig,
+    key_cols: list[str],
+    scope_cols: list[str] | None,
+    scopes: list[tuple[Any, ...]] | None,
+) -> list[tuple[Any, ...]]:
+    """ClickHouse leg — named Array parameters match mirror scope filtering."""
+    from drt.destinations.clickhouse import ClickHouseDestination
+
+    col_list = ", ".join(f"`{column}`" for column in key_cols)
+    table_q = ClickHouseDestination._quote_ident(config.table)
+    where = ""
+    params: dict[str, Any] = {}
+    if scope_cols and scopes:
+        if len(scope_cols) == 1:
+            where = f" WHERE toString(`{scope_cols[0]}`) IN {{scope_keys:Array(String)}}"
+            params["scope_keys"] = [str(scope[0]) for scope in scopes]
+        else:
+            col_tuple = "(" + ", ".join(f"toString(`{column}`)" for column in scope_cols) + ")"
+            tuple_type = "Tuple(" + ", ".join(["String"] * len(scope_cols)) + ")"
+            where = f" WHERE {col_tuple} IN {{scope_keys:Array({tuple_type})}}"
+            params["scope_keys"] = [tuple(str(value) for value in scope) for scope in scopes]
+
+    stmt = f"SELECT {col_list} FROM {table_q}{where}"
+    client = ClickHouseDestination._connect(config)
+    try:
+        result = client.query(stmt, parameters=params) if params else client.query(stmt)
+        return _key_tuples_from_rows(result.result_rows, key_cols)
+    finally:
+        client.close()
+
+
+def _fetch_all_keys_databricks(
+    config: DatabricksDestinationConfig,
+    key_cols: list[str],
+    scope_cols: list[str] | None,
+    scopes: list[tuple[Any, ...]] | None,
+) -> list[tuple[Any, ...]]:
+    """Databricks leg — native ``?`` binds and Delta-safe composite scope."""
+    from drt.destinations.databricks import DatabricksDestination
+
+    where = ""
+    params: list[Any] = []
+    if scope_cols and scopes:
+        if len(scope_cols) == 1:
+            markers = ", ".join(["?"] * len(scopes))
+            where = f" WHERE {scope_cols[0]} IN ({markers})"
+            params = [scope[0] for scope in scopes]
+        else:
+            one = "(" + " AND ".join(f"{column} = ?" for column in scope_cols) + ")"
+            where = " WHERE (" + " OR ".join([one] * len(scopes)) + ")"
+            params = [value for scope in scopes for value in scope]
+
+    table_fq = f"{config.catalog}.{config.schema_}.{config.table}"
+    stmt = f"SELECT {', '.join(key_cols)} FROM {table_fq}{where}"
+    conn = DatabricksDestination._connect(config)
+    try:
+        with conn.cursor() as cur:
+            if params:
+                cur.execute(stmt, params)
+            else:
+                cur.execute(stmt)
+            return _key_tuples_from_rows(cur.fetchall(), key_cols)
     finally:
         conn.close()

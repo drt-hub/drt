@@ -438,6 +438,12 @@ def print_diff_table(diff: object, sync_name: str) -> None:
             console.print(f"\n  [red]- Deleted ({n_deleted}):[/red]")
         for row in diff.deleted:
             console.print(f"    [red]-[/red] {_format_row_keys(row)}")
+    elif diff.delete_preview_unavailable_reason is not None:
+        from rich.markup import escape
+
+        reason = escape(diff.delete_preview_unavailable_reason)
+        console.print("\n  [yellow]- Deleted (mirror DELETE): preview unavailable[/yellow]")
+        console.print(f"    [dim]{reason}[/dim]")
     elif diff.deleted == [] and any([n_added, n_updated]):
         # Don't always print "Deleted: none" — only when other change types
         # are present, to avoid noise on full-upsert mode where deleted
@@ -485,5 +491,8 @@ def diff_to_dict(diff: object) -> dict[str, object]:
         # by reading the destination's keys) | null. Additive — ``deleted`` keeps
         # its shape.
         "delete_reason": diff.delete_reason,
+        # null means the delete read succeeded (including a genuine zero-row
+        # result); a string means only the mirror DELETE portion is unknown.
+        "delete_preview_unavailable_reason": diff.delete_preview_unavailable_reason,
         "truncated": diff.truncated,
     }

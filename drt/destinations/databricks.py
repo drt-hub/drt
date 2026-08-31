@@ -974,6 +974,23 @@ class DatabricksDestination(BaseSqlDestination):
         finally:
             conn.close()
 
+    def get_table_name(self, config: DestinationConfig) -> str:
+        """Implements ``QueryableDestination`` for tests and dry-run diffs."""
+        assert isinstance(config, DatabricksDestinationConfig)
+        return f"{config.catalog}.{config.schema_}.{config.table}"
+
+    def execute_test_query(self, config: DestinationConfig, query: str) -> int:
+        """Implements ``QueryableDestination`` with a read-only query."""
+        assert isinstance(config, DatabricksDestinationConfig)
+        conn = self._connect(config)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(query)
+                result: Any = cur.fetchone()[0]
+                return int(result)
+        finally:
+            conn.close()
+
     # --- dialect hooks (#720 phase 1) -------------------------------------
     def _dialect_connect(
         self, config: Any, query_tags: dict[str, str] | None = None
