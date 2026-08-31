@@ -39,7 +39,8 @@ Supported profile types today (see
   against ``CHANGE_TRACKING_MIN_VALID_VERSION``, a table that was never
   individually enabled would silently never advance the signal, and the
   sensor would look like it's working while never actually seeing that
-  table's changes.
+  table's changes. Also requires ``minimum_interval_seconds=`` because each
+  poll opens a fresh ``pymssql.connect()`` session.
 
 Both ``deltalake``/``iceberg`` and ``snowflake``/``sqlserver`` require a
 project-wide or explicit table because a ``DeltaLakeProfile`` /
@@ -59,11 +60,7 @@ suspended — but ``snowflake.connector.connect()`` still does a full
 per-tick auth handshake (private-key decrypt included, when
 ``private_key_env`` is set), unlike Delta/Iceberg's object-storage
 metadata reads. That connection cost is why ``minimum_interval_seconds=``
-stays required for Snowflake — see its check below. SQL Server's
-``pymssql.connect()`` opens a fresh connection per tick too and isn't
-free either; it just isn't gated the same way here yet, which is a real
-asymmetry in this module (not something #975/#985 investigated) rather
-than a claim that SQL Server's cost is lower.
+is required for both Snowflake and SQL Server — see their checks below.
 """
 
 from __future__ import annotations
@@ -103,9 +100,9 @@ def _current_signal(
     metadata. Raises ``NotImplementedError`` for profile types with no signal
     wired up yet, and ``ValueError`` for a supported profile type missing a
     required argument (``watch_table=`` / ``minimum_interval_seconds=`` for
-    Snowflake) or an unresolvable signal (NULL from the warehouse/database).
-    Both are configuration errors and deliberately left to propagate rather
-    than being swallowed as a skip (see the sensor body).
+    Snowflake and SQL Server) or an unresolvable signal (NULL from the
+    warehouse/database). Both are configuration errors and deliberately left
+    to propagate rather than being swallowed as a skip (see the sensor body).
     """
     from drt.config.credentials import (
         DeltaLakeProfile,
@@ -250,6 +247,19 @@ def _current_signal(
                 "change for that table (Codex review, #975/#984). Pass the "
                 "table name CHANGETABLE would use, e.g. 'dbo.MyTable'."
             )
+        if minimum_interval_seconds is None:
+            raise ValueError(
+                "build_drt_change_sensor() requires minimum_interval_seconds= "
+                "for a SQL Server profile. CHANGE_TRACKING_CURRENT_VERSION() "
+                "is a metadata-only signal, but each poll still opens a fresh "
+                "pymssql.connect() session — a full auth handshake — unlike "
+                "Delta/Iceberg's object-storage metadata reads. Without an "
+                "explicit poll interval, Dagster's default tick cadence would "
+                "repeat that handshake far more often than any real source "
+                "needs. Pick an interval that reflects what that connection "
+                "overhead is worth versus the Tier 1 (warehouse-native "
+                "scheduling) / Tier 3 (drt serve) paths (#975)."
+            )
 
         import pymssql
 
@@ -356,7 +366,9 @@ def build_drt_change_sensor(
     Args:
         project_dir: Path to the drt project root.
         name: Optional sensor name (defaults to the decorated function's name).
-        minimum_interval_seconds: Minimum seconds between evaluations.
+        minimum_interval_seconds: Minimum seconds between evaluations. Required
+            for Snowflake and SQL Server profiles because each evaluation opens
+            a fresh database session and performs a full auth handshake.
         job: A JobDefinition/GraphDefinition/UnresolvedAssetJobDefinition
             this sensor triggers. For a plain @drt_assets multi_asset, use
             asset_selection= instead (see Usage above).
@@ -386,12 +398,11 @@ def build_drt_change_sensor(
             surfaces as a failed sensor tick in the Dagster UI rather than
             a silent, permanent skip.
         ValueError: at evaluation time, if the profile is snowflake or
-            sqlserver and ``watch_table=`` (and, for snowflake,
-            ``minimum_interval_seconds=`` too) was not given, if the
-            signal query itself comes back NULL (change tracking not
-            enabled, or an unresolvable ``watch_table``), or — sqlserver
-            only — if ``watch_table`` resolves but doesn't itself have
-            Change Tracking enabled. Same propagate-don't-skip treatment
+            sqlserver and ``watch_table=`` or ``minimum_interval_seconds=``
+            was not given, if the signal query itself comes back NULL (change
+            tracking not enabled, or an unresolvable ``watch_table``), or —
+            sqlserver only — if ``watch_table`` resolves but doesn't itself
+            have Change Tracking enabled. Same propagate-don't-skip treatment
             as ``NotImplementedError`` above.
         ImportError: at evaluation time, if the profile's optional driver
             (``deltalake``, ``pyiceberg``, ``snowflake-connector-python``,

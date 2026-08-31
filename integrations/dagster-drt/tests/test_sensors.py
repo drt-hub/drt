@@ -300,7 +300,9 @@ class TestCurrentSignal:
                 type="sqlserver", host="h", database="D", user="u"
             )
 
-            signal = _current_signal(tmp_path, watch_table="dbo.T")
+            signal = _current_signal(
+                tmp_path, watch_table="dbo.T", minimum_interval_seconds=60
+            )
 
         assert signal == "42"
         pymssql_mod.connect.assert_called_once()
@@ -326,6 +328,25 @@ class TestCurrentSignal:
             with pytest.raises(ValueError, match="watch_table"):
                 _current_signal(tmp_path)
 
+    def test_sqlserver_requires_minimum_interval_seconds(self, tmp_path: Path) -> None:
+        """Each SQL Server poll opens a fresh pymssql session, so callers must
+        choose an interval explicitly just as they do for Snowflake."""
+        from dagster_drt.sensors import _current_signal
+
+        from drt.config.credentials import SQLServerProfile
+
+        with (
+            patch(_P_LOAD_PROJECT) as mock_proj,
+            patch(_P_LOAD_PROFILE) as mock_profile,
+        ):
+            mock_proj.return_value = MagicMock(profile="mssql")
+            mock_profile.return_value = SQLServerProfile(
+                type="sqlserver", host="h", database="D", user="u"
+            )
+
+            with pytest.raises(ValueError, match="minimum_interval_seconds"):
+                _current_signal(tmp_path, watch_table="dbo.T")
+
     def test_sqlserver_watch_table_not_tracked_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -349,7 +370,9 @@ class TestCurrentSignal:
             )
 
             with pytest.raises(ValueError, match="CHANGE_TRACKING_MIN_VALID_VERSION"):
-                _current_signal(tmp_path, watch_table="dbo.T")
+                _current_signal(
+                    tmp_path, watch_table="dbo.T", minimum_interval_seconds=60
+                )
 
     def test_sqlserver_null_signal_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -373,7 +396,9 @@ class TestCurrentSignal:
             )
 
             with pytest.raises(ValueError, match="NULL"):
-                _current_signal(tmp_path, watch_table="dbo.T")
+                _current_signal(
+                    tmp_path, watch_table="dbo.T", minimum_interval_seconds=60
+                )
 
 
 # ===================================================================
