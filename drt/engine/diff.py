@@ -237,24 +237,31 @@ def _preview_tracked_mirror_deletes(
     sync_name = str(sync_options._sync_name or getattr(config, "table", "") or "")
     try:
         previous = fetch_tracked_state(config, sync_name)
+        if not previous:
+            return [], None
+
+        # Scope filtering (and the final diff) stay inside this same guard
+        # (caught in review, #1061): decode_key()/diff_keys() can raise on
+        # malformed or pre-#687 legacy key_json, and a mirror.scope column
+        # that isn't actually a upsert_key member raises ValueError from
+        # .index() — none of that should crash --dry-run --diff when the
+        # add/update comparison is otherwise perfectly usable.
+        scope_cols = sync_options.mirror.scope if sync_options.mirror else None
+        if scope_cols:
+            scope_positions = [upsert_key.index(column) for column in scope_cols]
+            observed_scopes = set(_observed_scopes(records, scope_cols))
+            previous = {
+                key_hash: key_json
+                for key_hash, key_json in previous.items()
+                if tuple(decode_key(key_json)[position] for position in scope_positions)
+                in observed_scopes
+            }
+        deleted_keys = diff_keys(previous, list(source_keys))
     except Exception as error:
         return [], f"{type(error).__name__}: {error}"
-    if not previous:
-        return [], None
-
-    scope_cols = sync_options.mirror.scope if sync_options.mirror else None
-    if scope_cols:
-        scope_positions = [upsert_key.index(column) for column in scope_cols]
-        observed_scopes = set(_observed_scopes(records, scope_cols))
-        previous = {
-            key_hash: key_json
-            for key_hash, key_json in previous.items()
-            if tuple(decode_key(key_json)[position] for position in scope_positions)
-            in observed_scopes
-        }
 
     return (
-        [dict(zip(upsert_key, key)) for key in diff_keys(previous, list(source_keys))],
+        [dict(zip(upsert_key, key)) for key in deleted_keys],
         None,
     )
 

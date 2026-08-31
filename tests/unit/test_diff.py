@@ -477,6 +477,32 @@ class TestComputeDiffMirrorTracked:
 
     @patch("drt.engine.diff.fetch_tracked_state")
     @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_malformed_tracked_state_degrades_instead_of_crashing(
+        self, mock_fetch_keys: Any, mock_state: Any
+    ) -> None:
+        """Caught in review, #1061: scope decoding/filtering must stay inside
+        the same failure-handling guard as the state fetch itself --
+        malformed/legacy key_json (decode_key() raises) must degrade the
+        delete preview to "unavailable", not crash the whole --dry-run
+        --diff command when the add/update comparison is otherwise fine."""
+        mock_fetch_keys.return_value = []
+        mock_state.return_value = {"deadbeef": "not valid json"}
+
+        result = compute_diff(
+            [{"tenant_id": "tenant-a", "id": "current"}],
+            _pg_config(upsert_key=["tenant_id", "id"]),
+            _scoped_mirror_tracked_options(),
+            limit=20,
+        )
+
+        assert result.deleted == []
+        assert result.delete_preview_unavailable_reason is not None
+        # The add/update comparison must still be usable -- not itself part
+        # of what failed.
+        assert result.supported
+
+    @patch("drt.engine.diff.fetch_tracked_state")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
     def test_previews_tracked_mirror_deletes(
         self, mock_fetch_keys: Any, mock_state: Any
     ) -> None:
