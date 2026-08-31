@@ -188,20 +188,19 @@ class TestAirtableConnectionMissing:
         monkeypatch.chdir(tmp_path)
         config = _config(access_token=None, access_token_env="AIRTABLE_NOPE")
         with pytest.raises(ValueError, match="missing access token"):
-            AirtableDestination()._test_connection_needs_broader_scope(config)
+            AirtableDestination().test_connection(config)
 
 
 class TestAirtableConnection:
-    def test_does_not_declare_connection_testable(self) -> None:
-        """Deliberately not ConnectionTestable (#1059) -- the probe needs a
-        broader scope than this destination's documented write-only
-        credential, so drt validate --check-connection must skip it, not
-        report a false failure."""
-        assert not isinstance(AirtableDestination(), ConnectionTestable)
+    def test_declares_connection_testable(self) -> None:
+        """The class itself still satisfies ConnectionTestable (it's a
+        genuine, working probe) -- drt validate --check-connection's
+        automatic dispatch is what excludes it, not the class (#1059)."""
+        assert isinstance(AirtableDestination(), ConnectionTestable)
 
     def test_test_connection_gets_one_record(self) -> None:
         client = MagicMock()
         client.get.return_value = _ok()
         with _patch_client(client):
-            AirtableDestination()._test_connection_needs_broader_scope(_config())
+            AirtableDestination().test_connection(_config())
         assert client.get.call_args.kwargs["params"] == {"maxRecords": 1}

@@ -274,11 +274,26 @@ def _group_secret_findings(
 def _run_connection_test(sync: SyncConfig) -> dict[str, Any]:
     """Internal helper to test connectivity for a sync's destination."""
     from drt.connectors.registry import get_destination
+    from drt.destinations.airtable import AirtableDestination
     from drt.destinations.base import ConnectionTestable
+    from drt.destinations.bigquery import BigQueryDestination
+    from drt.destinations.klaviyo import KlaviyoDestination
+
+    # These three implement ConnectionTestable, but their probe needs
+    # broader API scope than what each connector's own docs recommend as
+    # the minimal write-only credential (#1059) — auto-testing them here
+    # would report a false failure for a correctly, minimally scoped
+    # setup. Excluded here rather than by renaming test_connection() on the
+    # class itself: that method is a public API (VERSIONING.md — any
+    # public method imported from drt.* is a breaking change to rename),
+    # so this dispatcher, not the connector, owns the exclusion.
+    _PROBE_NEEDS_BROADER_SCOPE = (AirtableDestination, BigQueryDestination, KlaviyoDestination)
 
     dest_config = sync.destination
     try:
         dest = get_destination(dest_config)
+        if isinstance(dest, _PROBE_NEEDS_BROADER_SCOPE):
+            return {"success": None, "error": None, "skipped": True}
         if isinstance(dest, ConnectionTestable):
             dest.test_connection(dest_config)
             return {"success": True, "error": None, "skipped": False}

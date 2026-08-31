@@ -303,17 +303,15 @@ class TestBigQueryDestinationLoad:
 
 
 class TestBigQueryConnection:
-    def test_does_not_declare_connection_testable(self) -> None:
-        """Deliberately not ConnectionTestable (#1059) -- SELECT 1 needs
-        bigquery.jobs.create, but this destination's documented append-mode
-        credential (bigquery.tables.updateData) doesn't grant it, so drt
-        validate --check-connection must skip it, not report a false
-        failure."""
-        assert not isinstance(BigQueryDestination(), ConnectionTestable)
+    def test_declares_connection_testable(self) -> None:
+        """The class itself still satisfies ConnectionTestable (it's a
+        genuine, working probe) -- drt validate --check-connection's
+        automatic dispatch is what excludes it, not the class (#1059)."""
+        assert isinstance(BigQueryDestination(), ConnectionTestable)
 
     def test_test_connection_runs_select_1(self) -> None:
         client = _fake_client()
         modules = _mocked_bq_modules(client)
         with patch.dict("sys.modules", modules):
-            BigQueryDestination()._test_connection_needs_broader_scope(_config())
+            BigQueryDestination().test_connection(_config())
         assert any("SELECT 1" in s for s in _sqls(client))

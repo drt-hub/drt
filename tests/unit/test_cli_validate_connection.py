@@ -105,6 +105,34 @@ def test_validate_check_connection_non_sql_gated_type_success() -> None:
         assert "✓ connection ok" in result.stdout
 
 
+def test_validate_check_connection_bigquery_is_excluded_despite_capability() -> None:
+    """BigQuery genuinely implements ConnectionTestable (its test_connection()
+    is a real, working probe) but is still skipped -- #1059: SELECT 1 needs
+    bigquery.jobs.create, broader than append mode's documented
+    bigquery.tables.updateData. The real registry resolves the real
+    BigQueryDestination here, not a mock -- this is the actual dispatcher
+    path, not just the generic mechanism."""
+    with patch("drt.config.parser.load_syncs_safe") as mock_load:
+        mock_sync = MagicMock()
+        mock_sync.name = "bigquery_sync"
+        mock_sync.destination = BigQueryDestinationConfig(
+            type="bigquery", project="p", dataset="d", table="t"
+        )
+
+        mock_result = MagicMock()
+        mock_result.syncs = [mock_sync]
+        mock_result.errors = {}
+        mock_result.deprecations = {}
+        mock_load.return_value = mock_result
+
+        result = runner.invoke(
+            app, ["validate", "--check-connection", "--select", "bigquery_sync"]
+        )
+
+        assert result.exit_code == 0
+        assert "⏭ connection test skipped" in result.stdout
+
+
 def test_validate_check_connection_without_capability_skips() -> None:
     """A destination without ConnectionTestable is skipped."""
     with patch("drt.config.parser.load_syncs_safe") as mock_load:

@@ -223,18 +223,17 @@ class TestKlaviyoLoad:
 
 
 class TestKlaviyoConnection:
-    def test_does_not_declare_connection_testable(self) -> None:
-        """Deliberately not ConnectionTestable (#1059) -- the probe needs a
-        broader scope than this destination's documented write-only
-        credential, so drt validate --check-connection must skip it, not
-        report a false failure."""
-        assert not isinstance(KlaviyoDestination(), ConnectionTestable)
+    def test_declares_connection_testable(self) -> None:
+        """The class itself still satisfies ConnectionTestable (it's a
+        genuine, working probe) -- drt validate --check-connection's
+        automatic dispatch is what excludes it, not the class (#1059)."""
+        assert isinstance(KlaviyoDestination(), ConnectionTestable)
 
     def test_test_connection(self) -> None:
         client = MagicMock()
         client.get.return_value = _resp(200, {"data": []})
         with _patch_client(client):
-            KlaviyoDestination()._test_connection_needs_broader_scope(_config())
+            KlaviyoDestination().test_connection(_config())
         assert "/accounts/" in client.get.call_args.args[0]
 
     def test_test_connection_missing_key(
@@ -244,4 +243,4 @@ class TestKlaviyoConnection:
         monkeypatch.chdir(tmp_path)
         config = _config(api_key=None, api_key_env="KLAVIYO_NOPE")
         with pytest.raises(ValueError, match="missing api_key"):
-            KlaviyoDestination()._test_connection_needs_broader_scope(config)
+            KlaviyoDestination().test_connection(config)
