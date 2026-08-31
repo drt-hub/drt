@@ -54,6 +54,18 @@ from drt.destinations.base import SyncResult
 class GCSDestination:
     """Upload records as a single object to a GCS bucket."""
 
+    def supported_modes(self) -> frozenset[str]:
+        """Declare ``replace``/``mirror`` as accepted, not just tolerated (#1042).
+
+        GCS writes one object per sync run — there is no "replace existing
+        data" semantic here at all, so every ``sync.mode`` behaves
+        identically (documented in ``docs/connectors/gcs.md``). Declaring
+        this (rather than leaving it undeclared) preserves that documented,
+        pre-existing contract instead of turning it into a new breaking
+        failure for anyone already relying on it.
+        """
+        return frozenset({"replace", "mirror"})
+
     def load(
         self,
         records: list[dict[str, Any]],

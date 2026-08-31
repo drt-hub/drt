@@ -12,12 +12,12 @@
   "15 public/frozen Protocols all `@runtime_checkable`" premise does not yet
   hold. Land #992 before (or in the same merge window as) this ADR.
 - **Implementation:** none directly. This ADR sets the policy #304 enforces
-  and the freeze-scope call each of the 21 Protocols below needs.
+  and the freeze-scope call each of the 22 Protocols below needs.
 
 ## Context
 
-drt has 21 `typing.Protocol` interfaces spanning destinations (`Destination`,
-`ConnectionTestable`, `MatchPolicyCapable`, `StagedDestination`,
+drt has 22 `typing.Protocol` interfaces spanning destinations (`Destination`,
+`ConnectionTestable`, `MatchPolicyCapable`, `ModeCapable`, `StagedDestination`,
 `OrphanCleanup`, `QueryableDestination`, `RowCountable`, `RateLimitKeyed`,
 `RateLimiterBackend`, `LimiterFactory`), sources
 (`Source`, `IncrementalSource`), state (`StateStore`, `HistoryStore`,
@@ -64,7 +64,7 @@ unsafe once implementers are accounted for, not just callers.
 
 **The rule instead: treat any change to an already-shipped Protocol
 method's signature — parameters or return type, narrowing or widening — as
-breaking.** For any of the 21 Protocols:
+breaking.** For any of the 22 Protocols:
 
 | Change | Breaking? |
 |---|---|
@@ -78,10 +78,10 @@ breaking.** For any of the 21 Protocols:
 
 ## The sanctioned extension mechanism
 
-6 of the 21 Protocols already exist specifically to route around the
+7 of the 22 Protocols already exist specifically to route around the
 no-default-method problem: `ConnectionTestable`, `MatchPolicyCapable`,
-`StagedDestination`, `OrphanCleanup`, `QueryableDestination` (destinations),
-and `IncrementalSource` (sources). Each is checked structurally —
+`ModeCapable`, `StagedDestination`, `OrphanCleanup`, `QueryableDestination`
+(destinations), and `IncrementalSource` (sources). Each is checked structurally —
 `isinstance(dest, MatchPolicyCapable)` — rather than being a required part of
 `Destination`/`Source`. A destination that doesn't implement the capability
 is simply not that shape; the engine branches on it rather than requiring it.
@@ -159,6 +159,7 @@ One is explicitly internal:
 | `Destination` | `drt/destinations/base.py` | **Public, frozen** (#304 names it explicitly) |
 | `ConnectionTestable` | `drt/destinations/base.py` | Public, frozen (optional-capability) |
 | `MatchPolicyCapable` | `drt/destinations/base.py` | Public, frozen (optional-capability) |
+| `ModeCapable` | `drt/destinations/base.py` | Public, frozen (optional-capability) — the `sync.mode: replace`/`mirror` fail-fast extension point ([#1042](https://github.com/drt-hub/drt/issues/1042)) |
 | `StagedDestination` | `drt/destinations/base.py` | Public, frozen (optional-capability) |
 | `OrphanCleanup` | `drt/destinations/base.py` | Public, frozen (optional-capability) |
 | `QueryableDestination` | `drt/destinations/base.py` | Public, frozen (optional-capability extension of `Destination`) |
@@ -179,6 +180,9 @@ One is explicitly internal:
 The `QueryableDestination`, `RateLimiterBackend`, `PermissionChecker`, and
 `AuditLogger` rows were added retroactively on 2026-08-28 to correct the
 freeze-scope table drift identified by [#304](https://github.com/drt-hub/drt/issues/304).
+The `ModeCapable` row was added retroactively on 2026-08-31 when
+[#1042](https://github.com/drt-hub/drt/issues/1042) shipped it — caught by
+Codex review on that PR as a repeat of the same drift.
 
 ## Known asymmetry, frozen as-is
 

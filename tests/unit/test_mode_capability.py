@@ -10,12 +10,15 @@ import pytest
 
 from drt.config.credentials import BigQueryProfile, ProfileConfig
 from drt.config.models import DestinationConfig, SyncConfig, SyncOptions
+from drt.destinations.azure_blob import AzureBlobDestination
 from drt.destinations.base import ModeCapable, SyncResult
 from drt.destinations.bigquery import BigQueryDestination
 from drt.destinations.clickhouse import ClickHouseDestination
 from drt.destinations.databricks import DatabricksDestination
+from drt.destinations.gcs import GCSDestination
 from drt.destinations.mysql import MySQLDestination
 from drt.destinations.postgres import PostgresDestination
+from drt.destinations.s3 import S3Destination
 from drt.destinations.snowflake import SnowflakeDestination
 from drt.destinations.sql_base import BaseSqlDestination
 from drt.engine.sync import _check_mode_supported, run_sync
@@ -147,3 +150,23 @@ def test_incomplete_base_sql_destination_subclass_does_not_inherit_the_capabilit
             ValueError, match=rf"sync\.mode: {mode} is not supported"
         ):
             _check_mode_supported(mode, dest)
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [S3Destination(), GCSDestination(), AzureBlobDestination()],
+    ids=["s3", "gcs", "azure_blob"],
+)
+@pytest.mark.parametrize("mode", ["replace", "mirror"])
+def test_blob_destinations_accept_modes_they_document_as_a_no_op(
+    destination: ModeCapable, mode: str
+) -> None:
+    """S3/GCS/Azure Blob write one object per run — ``sync.mode`` never
+    changes their behaviour, and their connector docs say so explicitly
+    (``docs/connectors/{s3,gcs,azure-blob}.md``). Caught in review, #1042:
+    the fail-fast guard must not turn that documented, pre-existing
+    no-op contract into a new breaking failure on upgrade.
+    """
+    assert isinstance(destination, ModeCapable)
+    assert destination.supported_modes() == frozenset({"replace", "mirror"})
+    _check_mode_supported(mode, destination)

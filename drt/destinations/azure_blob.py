@@ -62,6 +62,18 @@ from drt.destinations.base import SyncResult
 class AzureBlobDestination:
     """Upload records as a single blob to an Azure Blob Storage container."""
 
+    def supported_modes(self) -> frozenset[str]:
+        """Declare ``replace``/``mirror`` as accepted, not just tolerated (#1042).
+
+        Azure Blob writes one blob per sync run — there is no "replace
+        existing data" semantic here at all, so every ``sync.mode`` behaves
+        identically (documented in ``docs/connectors/azure-blob.md``).
+        Declaring this (rather than leaving it undeclared) preserves that
+        documented, pre-existing contract instead of turning it into a new
+        breaking failure for anyone already relying on it.
+        """
+        return frozenset({"replace", "mirror"})
+
     def load(
         self,
         records: list[dict[str, Any]],

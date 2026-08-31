@@ -61,6 +61,18 @@ from drt.destinations.base import SyncResult
 class S3Destination:
     """Upload records as a single file to an S3 bucket."""
 
+    def supported_modes(self) -> frozenset[str]:
+        """Declare ``replace``/``mirror`` as accepted, not just tolerated (#1042).
+
+        S3 writes one file per sync run — there is no "replace existing
+        data" semantic here at all, so every ``sync.mode`` behaves
+        identically (documented in ``docs/connectors/s3.md``). Declaring
+        this (rather than leaving it undeclared) preserves that documented,
+        pre-existing contract instead of turning it into a new breaking
+        failure for anyone already relying on it.
+        """
+        return frozenset({"replace", "mirror"})
+
     def load(
         self,
         records: list[dict[str, Any]],
