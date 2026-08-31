@@ -7,7 +7,7 @@ Future PyO3 bindings will implement this same protocol.
 from collections.abc import Iterator
 from typing import Any, Protocol, runtime_checkable
 
-from drt.config.credentials import ProfileConfig
+from drt.config.profiles import ProfileConfigLike
 
 
 @runtime_checkable
@@ -20,7 +20,7 @@ class Source(Protocol):
     def extract(
         self,
         query: str,
-        config: ProfileConfig,
+        config: ProfileConfigLike,
         *,
         query_tags: dict[str, str] | None = None,
     ) -> Iterator[dict[str, Any]]:
@@ -43,7 +43,7 @@ class Source(Protocol):
         """
         ...
 
-    def test_connection(self, config: ProfileConfig) -> bool:
+    def test_connection(self, config: ProfileConfigLike) -> bool:
         """Return True if the source is reachable, False otherwise.
 
         Deliberately the opposite contract from
@@ -81,7 +81,7 @@ class IncrementalSource(Protocol):
     def extract_incremental(
         self,
         query: str,
-        config: ProfileConfig,
+        config: ProfileConfigLike,
         cursor_value: str | None,
         *,
         query_tags: dict[str, str] | None = None,

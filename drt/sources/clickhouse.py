@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
-from drt.config.credentials import ClickHouseProfile, ProfileConfig
+from drt.config.credentials import ClickHouseProfile, ProfileConfigLike
 from drt.config.models import RetryConfig
 from drt.destinations.retry import with_retry
 
@@ -58,7 +58,7 @@ class ClickHouseSource:
     def extract(
         self,
         query: str,
-        config: ProfileConfig,
+        config: ProfileConfigLike,
         *,
         query_tags: dict[str, str] | None = None,
     ) -> Iterator[dict[str, Any]]:
@@ -125,7 +125,7 @@ class ClickHouseSource:
         finally:
             client.close()
 
-    def test_connection(self, config: ProfileConfig) -> bool:
+    def test_connection(self, config: ProfileConfigLike) -> bool:
         assert isinstance(config, ClickHouseProfile)
         try:
             client = self._connect(config)

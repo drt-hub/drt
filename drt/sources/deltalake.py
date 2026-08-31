@@ -24,7 +24,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
-from drt.config.credentials import DeltaLakeProfile, ProfileConfig, resolve_env_dict
+from drt.config.credentials import DeltaLakeProfile, ProfileConfigLike, resolve_env_dict
 from drt.config.profiles import DEFAULT_FETCH_SIZE
 
 
@@ -42,7 +42,7 @@ class DeltaLakeSource:
     def extract(
         self,
         query: str,
-        config: ProfileConfig,
+        config: ProfileConfigLike,
         *,
         query_tags: dict[str, str] | None = None,
     ) -> Iterator[dict[str, Any]]:
@@ -92,7 +92,7 @@ class DeltaLakeSource:
         finally:
             conn.close()
 
-    def test_connection(self, config: ProfileConfig) -> bool:
+    def test_connection(self, config: ProfileConfigLike) -> bool:
         assert isinstance(config, DeltaLakeProfile)
         try:
             from deltalake import DeltaTable

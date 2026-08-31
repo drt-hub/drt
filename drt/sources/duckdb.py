@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
-from drt.config.credentials import DuckDBProfile, ProfileConfig
+from drt.config.credentials import DuckDBProfile, ProfileConfigLike
 
 
 class DuckDBSource:
@@ -25,7 +25,7 @@ class DuckDBSource:
     def extract(
         self,
         query: str,
-        config: ProfileConfig,
+        config: ProfileConfigLike,
         *,
         query_tags: dict[str, str] | None = None,
     ) -> Iterator[dict[str, Any]]:
@@ -59,7 +59,7 @@ class DuckDBSource:
         finally:
             conn.close()
 
-    def test_connection(self, config: ProfileConfig) -> bool:
+    def test_connection(self, config: ProfileConfigLike) -> bool:
         assert isinstance(config, DuckDBProfile)
         try:
             import duckdb

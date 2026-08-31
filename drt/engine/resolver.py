@@ -21,10 +21,10 @@ from drt.config.credentials import (
     DuckDBProfile,
     MySQLProfile,
     PostgresProfile,
-    ProfileConfig,
     SnowflakeProfile,
     SQLServerProfile,
 )
+from drt.config.profiles import ProfileConfigLike
 from drt.config.vars import has_var_template, var_environment
 
 # Matches: ref('table') or ref("table")
@@ -52,7 +52,7 @@ def parse_ref(model_str: str) -> str | None:
 def resolve_model_ref(
     model_str: str,
     project_dir: Path,
-    profile: ProfileConfig,
+    profile: ProfileConfigLike,
     cursor_field: str | None = None,
     last_cursor_value: str | None = None,
     vars: dict[str, Any] | None = None,

@@ -1,16 +1,17 @@
 """Source profile dataclasses for drt (#721, phase 2).
 
-The 13 typed ``*Profile`` dataclasses (one per source connector) plus the
-:data:`ProfileConfig` union, extracted verbatim from ``credentials.py`` so the
-credential/secret-loading logic and the profile *shapes* live apart. Pure data:
-these depend on nothing else in ``drt.config``. ``credentials.py`` re-exports
-every name here, so ``from drt.config.credentials import XProfile`` is unchanged.
+The 13 typed ``*Profile`` dataclasses (one per source connector), the closed
+:data:`ProfileConfig` union, and the structural :class:`ProfileConfigLike`
+Protocol. Extracted from ``credentials.py`` so the credential/secret-loading
+logic and the profile *shapes* live apart. Pure data: these depend on nothing
+else in ``drt.config``. ``credentials.py`` re-exports every name here, so
+``from drt.config.credentials import XProfile`` is unchanged.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, runtime_checkable
 
 #: Rows per driver round trip for streaming SQL sources (#765).
 #:
@@ -24,6 +25,22 @@ from typing import Any, Literal
 #: (memory scales with ``fetch_size x row width``, not row count); raising it
 #: buys progressively less.
 DEFAULT_FETCH_SIZE = 10000
+
+
+@runtime_checkable
+class ProfileConfigLike(Protocol):
+    """Profile surface shared by built-in and third-party sources (#1034)."""
+
+    # A read-only Protocol property lets built-ins keep their narrower
+    # ``Literal[...]`` dataclass fields while satisfying this member covariantly.
+    @property
+    def type(self) -> str:
+        """Connector type registered in the source registry."""
+        ...
+
+    def describe(self) -> str:
+        """Return a human-readable description for CLI output."""
+        ...
 
 
 @dataclass

@@ -90,7 +90,7 @@ Two things worth knowing when you build one:
 
 A typo in the `type` itself is still rejected: an unregistered type is indistinguishable from a misspelled built-in, and is reported as one.
 
-A source plugin's profile class is constructed directly from the `profiles.yml` mapping, so its fields should match the keys operators will write, and it must accept a `type=` keyword and implement `describe() -> str`.
+A source plugin's profile class is constructed directly from the `profiles.yml` mapping, so its fields should match the keys operators will write, and it must accept a `type=` keyword and implement `describe() -> str`. Its source methods should accept `ProfileConfigLike` and immediately narrow with `assert isinstance(config, YourProfile)`; see [Building a Source Connector](building-a-source.md#the-profileconfiglike-convention-for-plugins) for the complete pattern and the concrete-parameter contravariance gotcha.
 
 ## `drt plugins list`
 

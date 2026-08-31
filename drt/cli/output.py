@@ -12,8 +12,8 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from drt.config.credentials import ProfileConfig
 from drt.config.models import SyncConfig
+from drt.config.profiles import ProfileConfigLike
 from drt.destinations.base import SyncResult
 from drt.state.manager import SyncState
 
@@ -57,7 +57,7 @@ def print_sync_start(sync_name: str, dry_run: bool) -> None:
 
 def print_dry_run_summary(
     sync: SyncConfig,
-    profile: ProfileConfig,
+    profile: ProfileConfigLike,
     rows: int,
     destination: object | None = None,
 ) -> None:

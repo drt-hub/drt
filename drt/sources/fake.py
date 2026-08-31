@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from drt.config.credentials import ProfileConfig
+    from drt.config.profiles import ProfileConfigLike
 
 
 @dataclass
@@ -77,7 +77,7 @@ class FakeSource:
     def extract(
         self,
         query: str,
-        config: ProfileConfig,
+        config: ProfileConfigLike,
         *,
         query_tags: dict[str, str] | None = None,
     ) -> Iterator[dict[str, Any]]:
@@ -86,6 +86,6 @@ class FakeSource:
         self.query_tags_received.append(query_tags)
         yield from self.rows
 
-    def test_connection(self, config: ProfileConfig) -> bool:
+    def test_connection(self, config: ProfileConfigLike) -> bool:
         """Return ``connection_ok``."""
         return self.connection_ok

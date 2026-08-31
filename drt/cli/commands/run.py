@@ -43,8 +43,8 @@ import typer
 
 if TYPE_CHECKING:
     from drt.config.base import QueryTaggingConfig
-    from drt.config.credentials import ProfileConfig
     from drt.config.models import SyncConfig
+    from drt.config.profiles import ProfileConfigLike
     from drt.destinations.base import Destination  # noqa: F401 — _RunContext field
     from drt.sources.base import Source
     from drt.state.dlq import DlqBackend
@@ -174,7 +174,7 @@ def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
 def _run_one(
     sync: SyncConfig,
     ctx: _RunContext,
-    profile: ProfileConfig,
+    profile: ProfileConfigLike,
 ) -> tuple[str, dict[str, object], bool]:
     """Execute a single sync and return (name, result_dict, had_error)."""
     from drt import telemetry

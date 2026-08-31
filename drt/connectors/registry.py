@@ -18,8 +18,8 @@ from drt.destinations.base import Destination
 from drt.sources.base import Source
 
 if TYPE_CHECKING:
-    from drt.config.credentials import ProfileConfig
     from drt.config.models import DestinationConfig
+    from drt.config.profiles import ProfileConfigLike
 
 # Registry mappings: type_name -> (ConfigClass, ImplementationClass)
 # ConfigClass stored for future plugin validation — not used in lookup yet
@@ -180,7 +180,7 @@ def get_destination(config: DestinationConfig) -> Destination:
     )
 
 
-def get_source(profile: ProfileConfig) -> Source:
+def get_source(profile: ProfileConfigLike) -> Source:
     """Get a source instance for the given profile.
 
     Args:

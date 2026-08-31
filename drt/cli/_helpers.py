@@ -19,8 +19,8 @@ from typing import TYPE_CHECKING, Any
 import typer
 
 if TYPE_CHECKING:
-    from drt.config.credentials import ProfileConfig
     from drt.config.models import SyncConfig
+    from drt.config.profiles import ProfileConfigLike
     from drt.destinations.base import Destination
     from drt.sources.base import Source
 
@@ -80,7 +80,7 @@ def resolve_profile_name(cli_flag: str | None, project_profile: str) -> str:
     return project_profile
 
 
-def get_source(profile: ProfileConfig) -> Source:
+def get_source(profile: ProfileConfigLike) -> Source:
     """Return a Source instance for the given profile configuration.
 
     Uses the connector registry for automatic connector discovery and
