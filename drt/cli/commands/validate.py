@@ -273,39 +273,15 @@ def _group_secret_findings(
 
 def _run_connection_test(sync: SyncConfig) -> dict[str, Any]:
     """Internal helper to test connectivity for a sync's destination."""
-    from drt.config.models import (
-        ClickHouseDestinationConfig,
-        MySQLDestinationConfig,
-        PostgresDestinationConfig,
-        SnowflakeDestinationConfig,
-    )
     from drt.connectors.registry import get_destination
     from drt.destinations.base import ConnectionTestable
 
     dest_config = sync.destination
-    is_sql = isinstance(
-        dest_config,
-        (
-            PostgresDestinationConfig,
-            MySQLDestinationConfig,
-            ClickHouseDestinationConfig,
-            SnowflakeDestinationConfig,
-        ),
-    )
-
-    if not is_sql:
-        return {"success": None, "error": None, "skipped": True}
-
     try:
         dest = get_destination(dest_config)
         if isinstance(dest, ConnectionTestable):
             dest.test_connection(dest_config)
             return {"success": True, "error": None, "skipped": False}
-        else:
-            return {
-                "success": False,
-                "error": "test_connection method missing",
-                "skipped": False,
-            }
+        return {"success": None, "error": None, "skipped": True}
     except Exception as e:
         return {"success": False, "error": str(e), "skipped": False}

@@ -4,6 +4,7 @@ from typer.testing import CliRunner
 
 from drt.cli.main import app
 from drt.config.models import (
+    BigQueryDestinationConfig,
     DestinationConfig,
     PostgresDestinationConfig,
     SlackDestinationConfig,
@@ -72,8 +73,35 @@ def test_validate_check_connection_sql_failure() -> None:
         assert result.exit_code == 0
         assert "✗ connection failed: Conn Error" in result.stdout
 
-def test_validate_check_connection_non_sql_skip() -> None:
-    """Test validate --check-connection for a non-SQL destination (skip)."""
+
+def test_validate_check_connection_bigquery_success() -> None:
+    """A non-SQL-gated ConnectionTestable destination is tested, not skipped."""
+    mock_dest = _ConnectionTestDestination()
+
+    with patch("drt.connectors.registry.get_destination", return_value=mock_dest), \
+         patch("drt.config.parser.load_syncs_safe") as mock_load:
+        mock_sync = MagicMock()
+        mock_sync.name = "bigquery_sync"
+        mock_sync.destination = BigQueryDestinationConfig(
+            type="bigquery", project="project", dataset="dataset", table="table"
+        )
+
+        mock_result = MagicMock()
+        mock_result.syncs = [mock_sync]
+        mock_result.errors = {}
+        mock_result.deprecations = {}
+        mock_load.return_value = mock_result
+
+        result = runner.invoke(
+            app, ["validate", "--check-connection", "--select", "bigquery_sync"]
+        )
+
+        assert result.exit_code == 0
+        assert "✓ connection ok" in result.stdout
+
+
+def test_validate_check_connection_without_capability_skips() -> None:
+    """A destination without ConnectionTestable is skipped."""
     with patch("drt.config.parser.load_syncs_safe") as mock_load:
         
         mock_sync = MagicMock()
@@ -93,8 +121,8 @@ def test_validate_check_connection_non_sql_skip() -> None:
         assert result.exit_code == 0
         assert "⏭ connection test skipped" in result.stdout
 
-def test_validate_check_connection_sql_no_tester_method() -> None:
-    """Test case where is_sql is true but test_connection method is missing."""
+def test_validate_check_connection_no_tester_method_skips() -> None:
+    """A destination without the ConnectionTestable capability is skipped."""
     mock_dest = object() # No test_connection
     
     with patch("drt.connectors.registry.get_destination", return_value=mock_dest), \
@@ -102,8 +130,6 @@ def test_validate_check_connection_sql_no_tester_method() -> None:
         
         mock_sync = MagicMock()
         mock_sync.name = "no_method"
-        # We must make sure this passes the isinstance check in main.py
-        from drt.config.models import PostgresDestinationConfig
         mock_sync.destination = PostgresDestinationConfig(
             type="postgres", table="t", upsert_key=["id"],
             host="localhost", dbname="db"
@@ -118,7 +144,7 @@ def test_validate_check_connection_sql_no_tester_method() -> None:
         result = runner.invoke(app, ["validate", "--check-connection", "--select", "no_method"])
         
         assert result.exit_code == 0
-        assert "✗ connection failed: test_connection method missing" in result.stdout
+        assert "⏭ connection test skipped" in result.stdout
 
 def test_validate_check_connection_json() -> None:
     """Test validate --check-connection --output json."""
@@ -157,7 +183,7 @@ def test_validate_check_connection_json() -> None:
         }
 
 def test_validate_check_connection_skipped_json() -> None:
-    """Test validate --check-connection --output json for non-SQL."""
+    """JSON output marks a destination without ConnectionTestable as skipped."""
     import json
     with patch("drt.config.parser.load_syncs_safe") as mock_load:
         
