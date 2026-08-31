@@ -175,15 +175,13 @@ def test_base_load_hooks_raise_not_implemented() -> None:
 
 
 def test_base_finalize_hooks_raise_not_implemented() -> None:
-    # The swap-rename + shadow/old naming hooks and the mirror-DELETE builder
+    # The swap-completion + shadow naming hooks and the mirror-DELETE builder
     # (the phase-2b placeholder-expansion seam) are abstract by contract.
     base = BaseSqlDestination()
     with pytest.raises(NotImplementedError):
-        base._rename_swap(None, None, "t", "s", "o")
+        base._complete_swap(None, None, "t", "s")
     with pytest.raises(NotImplementedError):
         base._shadow_name("t")
-    with pytest.raises(NotImplementedError):
-        base._old_name("t")
     with pytest.raises(NotImplementedError):
         base._build_mirror_delete("t", ["id"], [(1,)])
 
@@ -412,7 +410,7 @@ def test_record_row_error_appends_truncated_preview() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _finalize_dest(events: list[str]) -> Any:
+def _finalize_dest(events: list[str], *, close_error: bool = False) -> Any:
     """A BaseSqlDestination subclass recording the swap-finalize hook calls."""
 
     class _Cur:
@@ -424,6 +422,8 @@ def _finalize_dest(events: list[str]) -> Any:
 
         def close(self) -> None:
             events.append("close")
+            if close_error:
+                raise RuntimeError("close failed")
 
     class _Dest(BaseSqlDestination):
         def _dialect_connect(
@@ -435,13 +435,14 @@ def _finalize_dest(events: list[str]) -> Any:
         def _shadow_name(self, table: str) -> str:
             return f"{table}__shadow"
 
-        def _old_name(self, table: str) -> str:
-            return f"{table}__old"
-
-        def _rename_swap(
-            self, conn: Any, cur: Any, table: str, shadow: str, old: str
+        def _complete_swap(
+            self, conn: Any, cur: Any, table: str, shadow: str
         ) -> None:
-            events.append(f"rename:{table}:{shadow}:{old}")
+            events.append(f"complete:{table}:{shadow}")
+
+        def _reset_swap_state_after_completion(self) -> None:
+            events.append("reset")
+            super()._reset_swap_state_after_completion()
 
         def _finalize_mirror(self, config: Any, sync_options: Any) -> SyncResult:
             events.append("finalize_mirror")
@@ -471,7 +472,7 @@ def test_finalize_sync_returns_none_when_no_swap() -> None:
     assert events == []
 
 
-def test_finalize_sync_swap_delegates_rename_and_resets() -> None:
+def test_finalize_sync_swap_delegates_completion_and_closes() -> None:
     events: list[str] = []
     d = _finalize_dest(events)
     d._swap_shadow_created = True
@@ -480,11 +481,30 @@ def test_finalize_sync_swap_delegates_rename_and_resets() -> None:
     assert isinstance(result, SyncResult)
     assert events == [
         "connect",
-        "rename:public.scores:public.scores__shadow:public.scores__old",
+        "complete:public.scores:public.scores__shadow",
         "close",
+        "reset",
     ]
     assert d._swap_shadow_created is False
     assert d._swap_table is None
+
+
+def test_finalize_sync_connection_close_failure_preserves_state() -> None:
+    events: list[str] = []
+    d = _finalize_dest(events, close_error=True)
+    d._swap_shadow_created = True
+    d._swap_table = "public.scores"
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        d.finalize_sync(object(), SimpleNamespace(mode="replace"))
+
+    assert events == [
+        "connect",
+        "complete:public.scores:public.scores__shadow",
+        "close",
+    ]
+    assert d._swap_shadow_created is True
+    assert d._swap_table == "public.scores"
 
 
 # ---------------------------------------------------------------------------

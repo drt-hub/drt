@@ -1,8 +1,9 @@
 """Shared base for SQL destinations.
 
-Holds the *dialect-agnostic* orchestration that was duplicated verbatim across
-the concrete SQL destinations: per-sync mutable state, the Layer-3 schema-cache
-resolution (#317), and the ``sync.mode: mirror`` bookkeeping (#340 / #687).
+Holds the *dialect-agnostic* orchestration shared by the concrete SQL
+destinations: per-sync mutable state, the Layer-3 schema-cache resolution
+(#317), ``sync.mode: mirror`` bookkeeping (#340 / #687), and the
+``finalize_sync`` dispatch/connection template (#1030).
 
 Dialect-specific SQL construction — identifier quoting, INSERT / UPSERT / MERGE
 builders, ``_connect`` — stays on the subclasses, because Postgres composes
@@ -20,6 +21,7 @@ entry.
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from typing import Any
 
 from drt.config.models import DestinationConfig, SyncOptions
@@ -134,15 +136,21 @@ class BaseSqlDestination:
 
         - ``mode=mirror`` (#340): delegate to ``_finalize_mirror`` and reset
           mirror state so a re-run starts fresh.
-        - ``mode=replace, replace_strategy=swap``: atomically rename the shadow
-          table over the original via the ``_rename_swap`` hook (PG: two ALTERs
-          with an intermediate commit; MySQL: one atomic RENAME), then clear the
-          swap state.
+        - ``mode=replace, replace_strategy=swap``: complete the staged replace
+          through ``_complete_swap``. PostgreSQL/MySQL rename tables,
+          Snowflake uses ``SWAP WITH``, and Databricks uses ``INSERT
+          OVERWRITE``.
 
-        The swap guard, shadow/old name computation (via ``_shadow_name`` /
-        ``_old_name``), connection, and state reset are dialect-agnostic and
-        live here; only the rename DDL and the naming convention differ, and
-        those are the hooks.
+        The swap guard, shadow-name computation, connection/cursor lifecycle,
+        and dispatch live here. ``_complete_swap`` and
+        ``_reset_swap_state_after_completion`` jointly preserve the exact
+        state-reset timing because recovery differs by dialect:
+        PostgreSQL/MySQL/Databricks clear state after connection close even
+        when completion raises; Snowflake keeps it after a failed ``SWAP`` but
+        clears it before the post-swap cleanup ``DROP``.
+        ``_reset_swap_state_after_noop`` preserves dialect-only state such as
+        the first-run direct-write flag without adding that flag to dialects
+        that do not use it.
         """
         if sync_options.mode == "mirror":
             result = self._finalize_mirror(config, sync_options)
@@ -152,20 +160,19 @@ class BaseSqlDestination:
             return result
 
         if not self._swap_shadow_created or self._swap_table is None:
+            self._reset_swap_state_after_noop()
             return None
 
         table = self._swap_table
         shadow = self._shadow_name(table)
-        old = self._old_name(table)
 
         conn = self._dialect_connect(config, getattr(sync_options, "_query_tags", None))
         try:
-            cur = _tagged_cursor(conn.cursor(), sync_options)
-            self._rename_swap(conn, cur, table, shadow, old)
+            with self._swap_cursor_context(conn, sync_options) as cur:
+                self._complete_swap(conn, cur, table, shadow)
         finally:
             conn.close()
-            self._swap_shadow_created = False
-            self._swap_table = None
+            self._reset_swap_state_after_completion()
 
         return SyncResult()
 
@@ -401,24 +408,67 @@ class BaseSqlDestination:
         raise NotImplementedError
 
     def _shadow_name(self, table: str) -> str:
-        """Name of the per-sync swap shadow table (schema-preserving on PG,
-        f-string suffix on MySQL). Dialect-specific."""
+        """Return the per-sync shadow table name for ``table``.
+
+        PostgreSQL must preserve the schema while suffixing only the relation;
+        the other dialects suffix their fully-qualified string. The result is
+        passed unchanged to ``_complete_swap``.
+        """
         raise NotImplementedError
 
-    def _old_name(self, table: str) -> str:
-        """Name of the transient ``__drt_old`` table used during the swap.
-        Dialect-specific."""
-        raise NotImplementedError
+    def _swap_cursor_context(self, conn: Any, sync_options: SyncOptions) -> Any:
+        """Return the context used for swap-completion cursor access.
 
-    def _rename_swap(
-        self, conn: Any, cur: Any, table: str, shadow: str, old: str
+        PostgreSQL/MySQL historically left finalization cursors to connection
+        close, so the default wraps their tagged cursor in ``nullcontext``.
+        Snowflake/Databricks override this hook to retain their drivers'
+        cursor context-manager entry/exit behavior.
+        """
+        return nullcontext(_tagged_cursor(conn.cursor(), sync_options))
+
+    def _complete_swap(
+        self, conn: Any, cur: Any, table: str, shadow: str
     ) -> None:
-        """Rename ``shadow`` over ``table`` (moving the original to ``old``) and
-        DROP ``old``, committing as today's dialect does: PG issues two
-        ``ALTER TABLE ... RENAME TO`` under one commit then a separate DROP+commit;
-        MySQL issues one atomic ``RENAME TABLE`` + commit then DROP+commit. The
-        whole rename/DROP + transaction boundary is dialect-specific."""
+        """Complete a staged replace and reset swap state at the dialect's
+        recovery-safe point.
+
+        PostgreSQL/MySQL rename ``table`` to a transient old name and
+        ``shadow`` over it; Databricks overwrites ``table`` from ``shadow``;
+        Snowflake exchanges the two table objects. Implementations own commit
+        boundaries and cleanup DDL. Snowflake additionally resets state inside
+        this hook, after ``SWAP WITH`` succeeds but before cleanup; the other
+        dialects use ``_reset_swap_state_after_completion`` so they retain
+        their unconditional-reset behavior.
+        """
         raise NotImplementedError
+
+    def _reset_swap_state(self) -> None:
+        """Clear the common shadow-table state after swap completion.
+
+        Dialects with additional per-sync swap state override this helper,
+        call ``super()``, and clear their own fields. The completion/reset
+        hooks call it at the recovery-safe point defined by that dialect.
+        """
+        self._swap_shadow_created = False
+        self._swap_table = None
+
+    def _reset_swap_state_after_completion(self) -> None:
+        """Clear swap state after the shared template closes its connection.
+
+        This default preserves PostgreSQL/MySQL/Databricks behavior: state is
+        cleared whether completion SQL succeeds or raises, but not when
+        connection close itself raises. Snowflake overrides this with a no-op
+        because its ``_complete_swap`` resets only after a successful exchange.
+        """
+        self._reset_swap_state()
+
+    def _reset_swap_state_after_noop(self) -> None:
+        """Reset dialect-only state when the shared swap guard returns early.
+
+        The base implementation deliberately leaves the common fields alone,
+        matching PostgreSQL/MySQL's prior no-op behavior. Snowflake and
+        Databricks override this to clear their first-run direct-write flag.
+        """
 
     def _build_mirror_delete(
         self,

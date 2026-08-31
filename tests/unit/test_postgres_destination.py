@@ -655,6 +655,24 @@ class TestPostgresReplaceSwap:
         assert result is None or result.success == 0
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_swap_finalize_failure_still_resets_state(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+        dest = PostgresDestination()
+        opts = _options(mode="replace", replace_strategy="swap")
+        dest.load([{"id": 1, "score": 0.95}], _config(), opts)
+        cur.execute.side_effect = Exception("rename boom")
+
+        with pytest.raises(Exception, match="rename boom"):
+            dest.finalize_sync(_config(), opts)
+
+        assert dest._swap_shadow_created is False
+        assert dest._swap_table is None
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
     def test_swap_creates_shadow_only_once_across_batches(
         self, mock_connect: MagicMock
     ) -> None:

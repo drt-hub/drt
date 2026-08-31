@@ -241,11 +241,12 @@ class MySQLDestination(BaseSqlDestination):
     def _old_name(self, table: str) -> str:
         return f"{table}__drt_old"
 
-    def _rename_swap(
-        self, conn: Any, cur: Any, table: str, shadow: str, old: str
+    def _complete_swap(
+        self, conn: Any, cur: Any, table: str, shadow: str
     ) -> None:
         """MySQL swap rename: one atomic multi-table ``RENAME TABLE`` + commit,
         then a separate DROP+commit for the old table."""
+        old = self._old_name(table)
         table_q = self._quote_ident(table)
         shadow_q = self._quote_ident(shadow)
         old_q = self._quote_ident(old)

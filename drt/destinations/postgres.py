@@ -296,13 +296,14 @@ class PostgresDestination(BaseSqlDestination):
     def _old_name(self, table: str) -> str:
         return _with_relation_suffix(table, "__drt_old")
 
-    def _rename_swap(
-        self, conn: Any, cur: Any, table: str, shadow: str, old: str
+    def _complete_swap(
+        self, conn: Any, cur: Any, table: str, shadow: str
     ) -> None:
         """PG swap rename: two ``ALTER TABLE ... RENAME TO`` under one commit,
         then a separate DROP+commit for the old table."""
         from psycopg2 import sql as _pgsql
 
+        old = self._old_name(table)
         # Single transaction: original->old, shadow->original.
         # ALTER TABLE ... RENAME TO takes a bare relation name on the RHS;
         # the schema is preserved automatically.

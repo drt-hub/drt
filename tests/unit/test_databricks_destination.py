@@ -77,9 +77,6 @@ def test_databricks_subclasses_sql_base() -> None:
     dest = DatabricksDestination()
     remaining_hooks = {
         "_build_mirror_delete",
-        "_shadow_name",
-        "_old_name",
-        "_rename_swap",
         "_state_table_ident",
         "_state_table_exists",
         "_create_state_table",
@@ -94,7 +91,13 @@ def test_databricks_subclasses_sql_base() -> None:
         DatabricksDestination.__dict__
     )
     assert "load" not in DatabricksDestination.__dict__
-    assert "finalize_sync" in DatabricksDestination.__dict__
+    assert "finalize_sync" not in DatabricksDestination.__dict__
+    assert {
+        "_shadow_name",
+        "_swap_cursor_context",
+        "_complete_swap",
+        "_reset_swap_state",
+    }.issubset(DatabricksDestination.__dict__)
     assert dest._replace_truncated is False
     assert dest._swap_shadow_created is False
     assert dest._swap_table is None
@@ -760,13 +763,17 @@ class TestDatabricksReplaceMode:
         dest = DatabricksDestination()
         with patch.dict("sys.modules", modules):
             dest.load([{"id": 1}], _config(), self._swap_opts())
+            dest._swap_direct_write = True  # prove completion clears dialect state
             fin = dest.finalize_sync(_config(), self._swap_opts())
         assert fin is not None
         sqls = _sqls(conn._cur)
         assert any(f"INSERT OVERWRITE {_FQ} SELECT * FROM {_SHADOW}" in s for s in sqls)
         assert any(s.startswith(f"DROP TABLE IF EXISTS {_SHADOW}") for s in sqls)
+        conn._cur.__enter__.assert_called_once_with()
+        conn._cur.__exit__.assert_called_once()
         assert dest._swap_shadow_created is False
         assert dest._swap_table is None
+        assert dest._swap_direct_write is False
 
     def test_replace_swap_first_run_target_absent_writes_direct(
         self, monkeypatch: pytest.MonkeyPatch
@@ -778,12 +785,14 @@ class TestDatabricksReplaceMode:
         dest = DatabricksDestination()
         with patch.dict("sys.modules", modules):
             result = dest.load([{"id": 1}], _config(), self._swap_opts())
+            assert dest._swap_direct_write is True
             fin = dest.finalize_sync(_config(), self._swap_opts())
         assert result.success == 1
         sqls = _sqls(conn._cur)
         assert not any("__drt_swap" in s for s in sqls)  # no shadow involved
         assert any(f"INSERT INTO {_FQ} (" in s for s in sqls)
         assert fin is None
+        assert dest._swap_direct_write is False
 
     def test_replace_swap_on_error_fail_drops_shadow(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
@@ -814,6 +823,24 @@ class TestDatabricksReplaceMode:
             dest.load([{"id": 1}], _config(), _options())  # insert mode
             fin = dest.finalize_sync(_config(), _options())
         assert fin is None
+
+    def test_finalize_overwrite_failure_resets_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.fetchall.return_value = [("user_scores",)]
+        modules = _mocked_databricks_modules(conn)
+        dest = DatabricksDestination()
+        with patch.dict("sys.modules", modules):
+            dest.load([{"id": 1}], _config(), self._swap_opts())
+            dest._swap_direct_write = True
+            conn._cur.execute.side_effect = Exception("overwrite boom")
+            with pytest.raises(Exception, match="overwrite boom"):
+                dest.finalize_sync(_config(), self._swap_opts())
+        assert dest._swap_shadow_created is False
+        assert dest._swap_table is None
+        assert dest._swap_direct_write is False
 
 
 class TestDatabricksOrphanCleanup:
