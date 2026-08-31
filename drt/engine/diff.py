@@ -1,6 +1,7 @@
 """Record-level diff for ``drt run --dry-run --diff`` (#413).
 
-For queryable destinations (Postgres / MySQL / ClickHouse), computes a
+For queryable destinations (Postgres / MySQL / Snowflake / ClickHouse /
+Databricks), computes a
 true add/update/delete diff between the extracted source records and the
 current destination state, keyed on ``upsert_key``.
 
@@ -9,9 +10,6 @@ back to "sample mode" — shows the first ``limit`` records that would
 be sent. Same flag, different depth.
 
 Out of scope (tracked separately):
-- Snowflake queryability (#468)
-- Protocol method abstraction over hardcoded ``_QUERYABLE_TYPES`` (#469)
-- Batch ``WHERE id IN (...)`` query optimisation (#470)
 - ``--diff-fields`` column filter (#471)
 - API-based diff for upsert-keyed SaaS destinations (#472)
 """
@@ -21,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from drt.config.models import DestinationConfig, SyncOptions
+from drt.config.models import ClickHouseDestinationConfig, DestinationConfig, SyncOptions
 from drt.destinations._mirror_state import diff_keys
 from drt.destinations.query import (
     fetch_all_keys,
@@ -59,6 +57,11 @@ class DiffResult:
 
     It stays ``None`` when nothing would be deleted.
 
+    ``delete_preview_unavailable_reason`` is set when a mirror delete read
+    fails. This is deliberately separate from ``deleted=[]``: the latter means
+    the read succeeded and found no rows to remove, while the former means the
+    add/update diff is still valid but the DELETE set is unknown.
+
     Lists are bounded by the ``limit`` parameter passed to :func:`compute_diff`;
     ``truncated`` is set when at least one list was capped.
     """
@@ -80,6 +83,7 @@ class DiffResult:
     # Provenance of ``deleted``: "replace" | "mirror" | None (#693).
     # Defaults to None so pre-existing callers keep the legacy rendering.
     delete_reason: str | None = None
+    delete_preview_unavailable_reason: str | None = None
 
     @staticmethod
     def changed_fields(
@@ -147,7 +151,7 @@ def _preview_destination_mirror_deletes(
     upsert_key: list[str],
     source_keys: set[tuple[Any, ...]],
     records: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], str | None]:
     """Read-only preview of the rows destination-strategy mirror would DELETE.
 
     The real pass is ``_build_mirror_delete(..., negate=True)``: "DELETE the rows
@@ -162,19 +166,48 @@ def _preview_destination_mirror_deletes(
     Rows are key-only for the same reason as the tracked preview: only keys are
     read, and re-reading full rows for a preview would cost a second scan.
 
-    Any failure — including the :class:`NotImplementedError` from a dialect that
-    finalises mirror deletes its own way — degrades to "nothing to preview"
-    rather than failing the diff: the add/update comparison still stands.
+    Any failure keeps the add/update comparison usable but returns an explicit
+    unavailable reason. It must not collapse to a successful zero-delete
+    preview: those two outcomes drive different deployment decisions.
+
+    ClickHouse keys are compared as their string forms (caught in review,
+    #1060, then narrowed to ClickHouse-only after a second review pass
+    caught the first version comparing every dialect this way): the real
+    ClickHouse DELETE (``_build_mirror_delete``) does the same on both the
+    destination column and the bound source keys, via ``toString()`` — a
+    typed column (e.g. UUID) fetched raw would otherwise compare unequal to
+    the source's plain value and misreport a live row as a preview
+    deletion. Coercing every dialect this way is wrong, not just
+    unnecessary: a destination ``Decimal('1.00')`` and a source int ``1``
+    are the same row under every other dialect's native comparison, but
+    ``"1.00" != "1"`` as strings — that would have created a false
+    deletion on a currently-correct path.
     """
     scope_cols = sync_options.mirror.scope if sync_options.mirror else None
     scopes = _observed_scopes(records, scope_cols) if scope_cols else None
     try:
         dest_keys = fetch_all_keys(config, upsert_key, scope_cols, scopes)
-    except Exception:
-        return []
-    return [
-        dict(zip(upsert_key, key)) for key in dest_keys if key not in source_keys
-    ]
+    except Exception as error:
+        return [], f"{type(error).__name__}: {error}"
+    if isinstance(config, ClickHouseDestinationConfig):
+        comparison_keys = {tuple(str(v) for v in key) for key in source_keys}
+
+        def _normalize(key: tuple[Any, ...]) -> tuple[Any, ...]:
+            return tuple(str(v) for v in key)
+    else:
+        comparison_keys = source_keys
+
+        def _normalize(key: tuple[Any, ...]) -> tuple[Any, ...]:
+            return key
+
+    return (
+        [
+            dict(zip(upsert_key, key))
+            for key in dest_keys
+            if _normalize(key) not in comparison_keys
+        ],
+        None,
+    )
 
 
 def _preview_tracked_mirror_deletes(
@@ -182,7 +215,7 @@ def _preview_tracked_mirror_deletes(
     sync_options: SyncOptions,
     upsert_key: list[str],
     source_keys: set[tuple[Any, ...]],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], str | None]:
     """Read-only preview of the rows tracked mirror would DELETE (#693).
 
     Reads the drt-managed ``_drt_synced_keys`` state for this sync and returns
@@ -192,22 +225,22 @@ def _preview_tracked_mirror_deletes(
 
     No prior state (first run / absent table) means no deletes, matching the
     baseline semantics of ``BaseSqlDestination._finalize_mirror_tracked``. A
-    failed state read degrades to "nothing to preview" rather than failing the
-    diff — the same tone as the query-failure fallback above, but narrower: only
-    the delete preview is lost, the add/update diff stands.
+    failed state read leaves the add/update diff intact but returns an explicit
+    unavailable reason, distinct from the successful first-run/empty-state case.
     """
     # Same derivation as ``_finalize_mirror_tracked``: the injected sync name,
     # falling back to the target table when the options were built standalone.
     sync_name = str(sync_options._sync_name or getattr(config, "table", "") or "")
     try:
         previous = fetch_tracked_state(config, sync_name)
-    except Exception:
-        return []
+    except Exception as error:
+        return [], f"{type(error).__name__}: {error}"
     if not previous:
-        return []
-    return [
-        dict(zip(upsert_key, key)) for key in diff_keys(previous, list(source_keys))
-    ]
+        return [], None
+    return (
+        [dict(zip(upsert_key, key)) for key in diff_keys(previous, list(source_keys))],
+        None,
+    )
 
 
 def compute_diff(
@@ -335,6 +368,7 @@ def compute_diff(
     # own key set for the ``destination`` strategy (incl. ``mirror.scope``).
     deleted: list[dict[str, Any]] = []
     delete_reason: str | None = None
+    delete_preview_unavailable_reason: str | None = None
     if sync_options.mode == "replace":
         deleted = [
             row for key, row in dest_by_key.items() if key not in source_keys
@@ -346,12 +380,12 @@ def compute_diff(
     # deletes nothing, on either strategy. Previewing a full wipe would tell the
     # operator the opposite of what the run would do.
     elif _is_tracked_mirror(sync_options) and records:
-        deleted = _preview_tracked_mirror_deletes(
+        deleted, delete_preview_unavailable_reason = _preview_tracked_mirror_deletes(
             config, sync_options, upsert_key, source_keys
         )
         delete_reason = "mirror"
     elif _is_destination_mirror(sync_options) and records:
-        deleted = _preview_destination_mirror_deletes(
+        deleted, delete_preview_unavailable_reason = _preview_destination_mirror_deletes(
             config, sync_options, upsert_key, source_keys, records
         )
         delete_reason = "mirror_scan"
@@ -371,4 +405,5 @@ def compute_diff(
         # Only claim a reason when there is something to explain — an empty
         # delete set in replace mode is not a "replace deletion".
         delete_reason=delete_reason if deleted else None,
+        delete_preview_unavailable_reason=delete_preview_unavailable_reason,
     )

@@ -10,6 +10,7 @@ import pytest
 
 from drt.config.models import (
     ClickHouseDestinationConfig,
+    DatabricksDestinationConfig,
     MySQLDestinationConfig,
     PostgresDestinationConfig,
     RestApiDestinationConfig,
@@ -37,9 +38,10 @@ from drt.destinations.query import (
 # ---------------------------------------------------------------------------
 
 
-def test_queryable_destination_isinstance_all_four_sql_dialects() -> None:
+def test_queryable_destination_isinstance_all_five_sql_dialects() -> None:
     from drt.destinations.base import QueryableDestination
     from drt.destinations.clickhouse import ClickHouseDestination
+    from drt.destinations.databricks import DatabricksDestination
     from drt.destinations.mysql import MySQLDestination
     from drt.destinations.postgres import PostgresDestination
     from drt.destinations.snowflake import SnowflakeDestination
@@ -48,6 +50,7 @@ def test_queryable_destination_isinstance_all_four_sql_dialects() -> None:
     assert isinstance(MySQLDestination(), QueryableDestination)
     assert isinstance(ClickHouseDestination(), QueryableDestination)
     assert isinstance(SnowflakeDestination(), QueryableDestination)
+    assert isinstance(DatabricksDestination(), QueryableDestination)
 
 
 def test_queryable_destination_isinstance_false_for_non_sql_destination() -> None:
@@ -304,6 +307,71 @@ def test_fetch_rows_snowflake_returns_dicts() -> None:
     conn.close.assert_called_once()
 
 
+def test_databricks_is_queryable_and_table_name() -> None:
+    config = _databricks_config()
+    assert is_queryable(config) is True
+    assert get_table_name(config) == "main.analytics.users"
+
+
+def test_execute_test_query_databricks_returns_int() -> None:
+    cursor = MagicMock()
+    cursor.fetchone.return_value = (42,)
+    conn = _fake_conn(cursor)
+
+    with patch(
+        "drt.destinations.databricks.DatabricksDestination._connect",
+        return_value=conn,
+    ):
+        result = execute_test_query(_databricks_config(), "SELECT COUNT(*) FROM t")
+
+    assert result == 42
+    cursor.execute.assert_called_once_with("SELECT COUNT(*) FROM t")
+    conn.close.assert_called_once()
+
+
+def test_fetch_rows_databricks_returns_dicts() -> None:
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [(1, "alice"), (2, "bob")]
+    conn = _fake_conn(cursor)
+
+    with patch(
+        "drt.destinations.databricks.DatabricksDestination._connect",
+        return_value=conn,
+    ):
+        rows = fetch_rows(
+            _databricks_config(),
+            "SELECT id, name FROM main.analytics.users",
+            columns=["id", "name"],
+        )
+
+    assert rows == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
+    conn.close.assert_called_once()
+
+
+def test_fetch_rows_databricks_empty_columns_uses_cursor_description() -> None:
+    """compute_diff() passes columns=[] for the replace-mode full-table scan
+    (caught in review, #1060): dict(zip([], row)) would collapse every row
+    to {}, which compute_diff() then keys on via row.get(c) -- silently
+    understating a real replace run's deletions. Real column names must
+    come from the cursor's own description instead."""
+    cursor = MagicMock()
+    cursor.description = [("id", None), ("name", None)]
+    cursor.fetchall.return_value = [(1, "alice"), (2, "bob")]
+    conn = _fake_conn(cursor)
+
+    with patch(
+        "drt.destinations.databricks.DatabricksDestination._connect",
+        return_value=conn,
+    ):
+        rows = fetch_rows(
+            _databricks_config(),
+            "SELECT * FROM main.analytics.users",
+            columns=[],
+        )
+
+    assert rows == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
+
+
 # ---------------------------------------------------------------------------
 # fetch_rows_by_keys — parameterized keyed batched fetch (#470)
 # ---------------------------------------------------------------------------
@@ -343,6 +411,21 @@ def _clickhouse_config(**overrides: Any) -> ClickHouseDestinationConfig:
     }
     defaults.update(overrides)
     return ClickHouseDestinationConfig.model_validate(defaults)
+
+
+def _databricks_config(**overrides: Any) -> DatabricksDestinationConfig:
+    defaults: dict[str, Any] = {
+        "type": "databricks",
+        "host_env": "DATABRICKS_HOST",
+        "http_path_env": "DATABRICKS_HTTP_PATH",
+        "token_env": "DATABRICKS_TOKEN",
+        "catalog": "main",
+        "schema": "analytics",
+        "table": "users",
+        "upsert_key": ["id"],
+    }
+    defaults.update(overrides)
+    return DatabricksDestinationConfig.model_validate(defaults)
 
 
 def _plain_conn(cursor: MagicMock) -> MagicMock:
@@ -439,9 +522,7 @@ def test_fetch_rows_by_keys_mysql_parameterized() -> None:
     cursor.fetchall.side_effect = [[(1, "alice")]]
     conn = _plain_conn(cursor)
 
-    with patch(
-        "drt.destinations.mysql.MySQLDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.mysql.MySQLDestination._connect", return_value=conn):
         rows = fetch_rows_by_keys(
             _mysql_config(),
             key_cols=["id"],
@@ -478,14 +559,91 @@ def test_fetch_rows_by_keys_snowflake_parameterized() -> None:
     assert rows == [{"ID": 1, "NAME": "alice"}]
 
 
+def test_fetch_rows_by_keys_databricks_native_parameterized() -> None:
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [(1, "alice")]
+    conn = _fake_conn(cursor)
+
+    with patch(
+        "drt.destinations.databricks.DatabricksDestination._connect",
+        return_value=conn,
+    ):
+        rows = fetch_rows_by_keys(
+            _databricks_config(),
+            key_cols=["id"],
+            key_tuples=[(1,)],
+            columns=["id", "name"],
+        )
+
+    sql, params = cursor.execute.call_args_list[0][0]
+    assert sql == "SELECT id, name FROM main.analytics.users WHERE id IN (?)"
+    assert params == [1]
+    assert rows == [{"id": 1, "name": "alice"}]
+
+
+def test_fetch_rows_by_keys_databricks_composite_avoids_delta_tuple_in() -> None:
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [("c1", "u1", "alice")]
+    conn = _fake_conn(cursor)
+
+    with patch(
+        "drt.destinations.databricks.DatabricksDestination._connect",
+        return_value=conn,
+    ):
+        rows = fetch_rows_by_keys(
+            _databricks_config(upsert_key=["company_id", "user_id"]),
+            key_cols=["company_id", "user_id"],
+            key_tuples=[("c1", "u1"), ("c2", "u2")],
+            columns=["company_id", "user_id", "name"],
+        )
+
+    sql, params = cursor.execute.call_args.args
+    assert sql == (
+        "SELECT company_id, user_id, name FROM main.analytics.users WHERE "
+        "((company_id = ? AND user_id = ?) OR (company_id = ? AND user_id = ?))"
+    )
+    assert params == ["c1", "u1", "c2", "u2"]
+    assert rows == [{"company_id": "c1", "user_id": "u1", "name": "alice"}]
+
+
+def test_fetch_rows_by_keys_databricks_caps_batch_at_255_params() -> None:
+    """The generic default batch_size=1000 (caught in review, #1060) would
+    bind 1000 markers for a single-column key -- over Databricks' 255
+    native-parameter limit -- so the effective batch size must be capped
+    via _rows_per_chunk regardless of what the caller's batch_size allows."""
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [[(i, f"n{i}") for i in range(255)], [(255, "n255")]]
+    conn = _fake_conn(cursor)
+
+    key_tuples = [(i,) for i in range(256)]  # > 255, forces 2 chunks
+
+    with patch(
+        "drt.destinations.databricks.DatabricksDestination._connect",
+        return_value=conn,
+    ):
+        rows = fetch_rows_by_keys(
+            _databricks_config(),
+            key_cols=["id"],
+            key_tuples=key_tuples,
+            columns=["id", "name"],
+            batch_size=1000,
+        )
+
+    assert cursor.execute.call_count == 2
+    first_markers = cursor.execute.call_args_list[0].args[0].count("?")
+    second_markers = cursor.execute.call_args_list[1].args[0].count("?")
+    assert first_markers <= 255
+    assert second_markers <= 255
+    assert first_markers + second_markers == 256
+    assert len(rows) == 256
+
+
 def test_fetch_rows_by_keys_mysql_composite_key_placeholders() -> None:
     cursor = MagicMock()
     cursor.fetchall.side_effect = [[(1, 5, "alice")]]
     conn = _plain_conn(cursor)
 
-    with patch(
-        "drt.destinations.mysql.MySQLDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.mysql.MySQLDestination._connect", return_value=conn):
         rows = fetch_rows_by_keys(
             _mysql_config(),
             key_cols=["user_id", "company_id"],
@@ -586,6 +744,16 @@ def _assert_read_only(cursor: MagicMock) -> None:
         assert upper.lstrip().startswith("SELECT"), text
         for kw in _WRITE_KEYWORDS:
             assert kw not in upper, f"write keyword {kw} in {text}"
+
+
+def _assert_show_or_select_only(cursor: MagicMock) -> None:
+    """Allow a dialect's read-only SHOW existence probe plus SELECTs."""
+    for call in cursor.execute.call_args_list:
+        text = str(call.args[0])
+        upper = text.upper().lstrip()
+        assert upper.startswith(("SHOW", "SELECT")), text
+        for keyword in _WRITE_KEYWORDS:
+            assert keyword not in upper, f"write keyword {keyword} in {text}"
 
 
 @needs_psycopg2
@@ -708,18 +876,87 @@ def test_fetch_tracked_state_mysql_missing_table_returns_empty() -> None:
     _assert_read_only(cursor)
 
 
-def test_fetch_tracked_state_unsupported_dialect_returns_empty() -> None:
-    # Tracked mirror is Postgres/MySQL-only; other dialects have no state
-    # table to read, so the preview degrades to "no deletions known".
-    assert fetch_tracked_state(_clickhouse_config(), "s") == {}
-    assert fetch_tracked_state(_snowflake_config(), "s") == {}
-    assert (
+def test_fetch_tracked_state_snowflake_uses_fully_qualified_state_table() -> None:
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [
+        [("_DRT_SYNCED_KEYS",)],
+        [("h1", '["a"]'), ("h2", '["b"]')],
+    ]
+    conn = _fake_conn(cursor)
+
+    with patch(
+        "drt.destinations.snowflake.SnowflakeDestination._connect",
+        return_value=conn,
+    ):
+        state = fetch_tracked_state(_snowflake_config(), "users_sync")
+
+    assert state == {"h1": '["a"]', "h2": '["b"]'}
+    assert cursor.execute.call_args_list[0][0][0] == (
+        "SHOW TABLES LIKE '_drt_synced_keys' IN SCHEMA ANALYTICS.PUBLIC"
+    )
+    select_sql, select_params = cursor.execute.call_args_list[1][0]
+    assert select_sql == (
+        "SELECT key_hash, key_json FROM ANALYTICS.PUBLIC._drt_synced_keys WHERE sync_name = %s"
+    )
+    assert select_params == ["users_sync"]
+    _assert_show_or_select_only(cursor)
+    conn.close.assert_called_once()
+
+
+def test_fetch_tracked_state_clickhouse_uses_named_parameter() -> None:
+    client = MagicMock()
+    exists = MagicMock(result_rows=[(1,)])
+    rows = MagicMock(result_rows=[("h1", '["a"]')])
+    client.query.side_effect = [exists, rows]
+
+    with patch(
+        "drt.destinations.clickhouse.ClickHouseDestination._connect",
+        return_value=client,
+    ):
+        state = fetch_tracked_state(_clickhouse_config(), "users_sync")
+
+    assert state == {"h1": '["a"]'}
+    assert client.query.call_args_list[0].args == ("EXISTS TABLE `_drt_synced_keys`",)
+    assert client.query.call_args_list[1].args == (
+        "SELECT key_hash, key_json FROM `_drt_synced_keys` WHERE sync_name = {sync_name:String}",
+    )
+    assert client.query.call_args_list[1].kwargs == {"parameters": {"sync_name": "users_sync"}}
+    client.command.assert_not_called()
+    client.close.assert_called_once()
+
+
+def test_fetch_tracked_state_databricks_uses_catalog_schema_state_table() -> None:
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [
+        [("analytics", "_drt_synced_keys", False)],
+        [("h1", '["a"]')],
+    ]
+    conn = _fake_conn(cursor)
+
+    with patch(
+        "drt.destinations.databricks.DatabricksDestination._connect",
+        return_value=conn,
+    ):
+        state = fetch_tracked_state(_databricks_config(), "users_sync")
+
+    assert state == {"h1": '["a"]'}
+    assert cursor.execute.call_args_list[0].args == (
+        "SHOW TABLES IN main.analytics LIKE '_drt_synced_keys'",
+    )
+    assert cursor.execute.call_args_list[1].args == (
+        "SELECT key_hash, key_json FROM main.analytics._drt_synced_keys WHERE sync_name = ?",
+        ["users_sync"],
+    )
+    _assert_show_or_select_only(cursor)
+    conn.close.assert_called_once()
+
+
+def test_fetch_tracked_state_unsupported_config_raises() -> None:
+    with pytest.raises(TypeError):
         fetch_tracked_state(
             RestApiDestinationConfig(type="rest_api", url="http://x", method="POST"),
             "s",
         )
-        == {}
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -850,7 +1087,9 @@ def test_fetch_all_keys_mysql_selects_key_columns_only() -> None:
     cursor.fetchall.return_value = [(1,), (2,)]
     conn = _plain_conn(cursor)
 
-    with patch("drt.destinations.mysql.MySQLDestination._connect", return_value=conn):
+    with patch(
+        "drt.destinations.mysql.MySQLDestination._connect", return_value=conn
+    ):
         keys = fetch_all_keys(_mysql_config(table="mydb.users"), ["id"])
 
     assert keys == [(1,), (2,)]
@@ -868,7 +1107,9 @@ def test_fetch_all_keys_mysql_scope_uses_explicit_placeholders() -> None:
     cursor.fetchall.return_value = [(1,)]
     conn = _plain_conn(cursor)
 
-    with patch("drt.destinations.mysql.MySQLDestination._connect", return_value=conn):
+    with patch(
+        "drt.destinations.mysql.MySQLDestination._connect", return_value=conn
+    ):
         fetch_all_keys(
             _mysql_config(),
             ["id"],
@@ -914,16 +1155,136 @@ def test_fetch_all_keys_mysql_dict_cursor_rows() -> None:
     assert keys == [("c1", "u1"), ("c1", "u2")]
 
 
-def test_fetch_all_keys_unsupported_dialect_raises() -> None:
-    """ClickHouse / Snowflake implement ``_finalize_mirror`` themselves, so the
-    shared destination-strategy preview does not apply — raise so the caller
-    degrades to "no preview" explicitly rather than silently reporting zero
-    deletions for a mirror that will in fact delete rows.
-    """
-    with pytest.raises(NotImplementedError):
-        fetch_all_keys(_clickhouse_config(), ["id"])
-    with pytest.raises(NotImplementedError):
-        fetch_all_keys(_snowflake_config(), ["id"])
+def test_fetch_all_keys_snowflake_scope_uses_mirror_placeholder_shape() -> None:
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [(1,), (2,)]
+    conn = _fake_conn(cursor)
+
+    with patch(
+        "drt.destinations.snowflake.SnowflakeDestination._connect",
+        return_value=conn,
+    ):
+        keys = fetch_all_keys(
+            _snowflake_config(),
+            ["ID"],
+            scope_cols=["REGION"],
+            scopes=[("EU",), ("US",)],
+        )
+
+    assert keys == [(1,), (2,)]
+    assert cursor.execute.call_args.args == (
+        "SELECT ID FROM ANALYTICS.PUBLIC.USER_SCORES WHERE REGION IN (%s, %s)",
+        ["EU", "US"],
+    )
+    _assert_read_only(cursor)
+    conn.close.assert_called_once()
+
+
+def test_fetch_all_keys_clickhouse_scope_uses_named_array() -> None:
+    client = MagicMock()
+    client.query.return_value = MagicMock(result_rows=[(1,), (2,)])
+
+    with patch(
+        "drt.destinations.clickhouse.ClickHouseDestination._connect",
+        return_value=client,
+    ):
+        keys = fetch_all_keys(
+            _clickhouse_config(table="analytics.users"),
+            ["id"],
+            scope_cols=["region"],
+            scopes=[("eu",), ("us",)],
+        )
+
+    assert keys == [(1,), (2,)]
+    assert client.query.call_args.args == (
+        "SELECT toString(`id`) FROM `analytics`.`users` "
+        "WHERE toString(`region`) IN {scope_keys:Array(String)}",
+    )
+    assert client.query.call_args.kwargs == {"parameters": {"scope_keys": ["eu", "us"]}}
+    client.command.assert_not_called()
+    client.close.assert_called_once()
+
+
+def test_fetch_all_keys_clickhouse_keys_are_stringified() -> None:
+    """The SELECT wraps key columns in toString() (#1060) so a typed column
+    (e.g. UUID) compares correctly against the source's plain-string key --
+    matching _build_mirror_delete's own toString()-on-both-sides approach.
+    A raw UUID object returned here would never equal the source's string
+    form, silently misreporting a live row as a preview deletion."""
+    client = MagicMock()
+    client.query.return_value = MagicMock(
+        result_rows=[("3fa85f64-5717-4562-b3fc-2c963f66afa6",)]
+    )
+
+    with patch(
+        "drt.destinations.clickhouse.ClickHouseDestination._connect",
+        return_value=client,
+    ):
+        keys = fetch_all_keys(_clickhouse_config(table="users"), ["id"])
+
+    assert keys == [("3fa85f64-5717-4562-b3fc-2c963f66afa6",)]
+    assert client.query.call_args.args == ("SELECT toString(`id`) FROM `users`",)
+
+
+def test_fetch_all_keys_databricks_composite_scope_uses_or_of_ands() -> None:
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [("c1", "u1"), ("c1", "u2")]
+    conn = _fake_conn(cursor)
+
+    with patch(
+        "drt.destinations.databricks.DatabricksDestination._connect",
+        return_value=conn,
+    ):
+        keys = fetch_all_keys(
+            _databricks_config(upsert_key=["company_id", "user_id"]),
+            ["company_id", "user_id"],
+            scope_cols=["region", "tier"],
+            scopes=[("eu", "gold"), ("us", "silver")],
+        )
+
+    assert keys == [("c1", "u1"), ("c1", "u2")]
+    assert cursor.execute.call_args.args == (
+        "SELECT company_id, user_id FROM main.analytics.users "
+        "WHERE ((region = ? AND tier = ?) OR (region = ? AND tier = ?))",
+        ["eu", "gold", "us", "silver"],
+    )
+
+
+def test_fetch_all_keys_databricks_chunks_past_255_param_limit() -> None:
+    """Databricks' 255-native-parameter-marker limit (caught in review,
+    #1060): more than 255 single-column scope values must split into
+    multiple queries rather than building one query that would fail
+    outright. Reuses the same _rows_per_chunk math every other Databricks
+    write path already chunks by."""
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [[("k1",)], [("k2",)]]
+    conn = _fake_conn(cursor)
+
+    scopes = [(f"v{i}",) for i in range(300)]  # > 255, forces 2 chunks
+
+    with patch(
+        "drt.destinations.databricks.DatabricksDestination._connect",
+        return_value=conn,
+    ):
+        keys = fetch_all_keys(
+            _databricks_config(),
+            ["id"],
+            scope_cols=["region"],
+            scopes=scopes,
+        )
+
+    assert keys == [("k1",), ("k2",)]
+    assert cursor.execute.call_count == 2
+    first_markers = cursor.execute.call_args_list[0].args[0].count("?")
+    second_markers = cursor.execute.call_args_list[1].args[0].count("?")
+    assert first_markers <= 255
+    assert second_markers <= 255
+    assert first_markers + second_markers == 300
+    _assert_read_only(cursor)
+    conn.close.assert_called_once()
+
+
+def test_fetch_all_keys_unsupported_config_raises() -> None:
     with pytest.raises(TypeError):
         fetch_all_keys(
             RestApiDestinationConfig(type="rest_api", url="http://x", method="POST"),
@@ -944,9 +1305,7 @@ def test_fetch_failing_rows_mysql_tuple_rows() -> None:
     cursor.fetchall.return_value = [(1, "a@example.com"), (2, "b@example.com")]
     conn = _plain_conn(cursor)
 
-    with patch(
-        "drt.destinations.mysql.MySQLDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.mysql.MySQLDestination._connect", return_value=conn):
         rows = fetch_failing_rows(_mysql_config(), "SELECT * FROM t", limit=5)
 
     assert rows == [
@@ -968,9 +1327,7 @@ def test_fetch_failing_rows_mysql_dict_cursor_rows() -> None:
     cursor.fetchall.return_value = [{"id": 1, "email": "a@example.com"}]
     conn = _plain_conn(cursor)
 
-    with patch(
-        "drt.destinations.mysql.MySQLDestination._connect", return_value=conn
-    ):
+    with patch("drt.destinations.mysql.MySQLDestination._connect", return_value=conn):
         rows = fetch_failing_rows(_mysql_config(), "SELECT * FROM t", limit=5)
 
     assert rows == [{"id": 1, "email": "a@example.com"}]

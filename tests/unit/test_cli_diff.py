@@ -298,6 +298,39 @@ def test_diff_to_dict_delete_reason_none_when_nothing_deleted() -> None:
 
     assert payload["deleted"] == []
     assert payload["delete_reason"] is None
+    assert payload["delete_preview_unavailable_reason"] is None
+
+
+def test_delete_preview_unavailable_is_distinct_from_zero_deletes() -> None:
+    """Text and JSON must not present an unknown delete set as zero deletes."""
+    from drt.cli.output import diff_to_dict
+    from drt.engine import diff as diff_mod
+
+    zero = diff_mod.DiffResult(
+        added=[{"id": 1}],
+        total_source_rows=1,
+        supported=True,
+    )
+    unavailable = diff_mod.DiffResult(
+        added=[{"id": 1}],
+        total_source_rows=1,
+        supported=True,
+        delete_preview_unavailable_reason="PermissionError: SELECT denied",
+    )
+
+    zero_payload = diff_to_dict(zero)
+    unavailable_payload = diff_to_dict(unavailable)
+    assert zero_payload["deleted"] == unavailable_payload["deleted"] == []
+    assert zero_payload["delete_preview_unavailable_reason"] is None
+    assert unavailable_payload["delete_preview_unavailable_reason"] == (
+        "PermissionError: SELECT denied"
+    )
+
+    zero_text = _rendered(zero)
+    unavailable_text = _rendered(unavailable)
+    assert "preview unavailable" not in zero_text
+    assert "Deleted (mirror DELETE): preview unavailable" in unavailable_text
+    assert "PermissionError: SELECT denied" in unavailable_text
 
 
 def test_diff_to_dict_unsupported_shape_has_no_delete_reason() -> None:
