@@ -258,6 +258,23 @@ class TestKlaviyoConnection:
         with _patch_client(client), pytest.raises(httpx.HTTPStatusError):
             KlaviyoDestination().test_connection(_config())
 
+    def test_test_connection_rejects_403_with_unparseable_body(self) -> None:
+        """_permission_denied()'s except-branch (a 403 whose body isn't even
+        valid JSON) must fall through to a genuine failure, not silently
+        swallow the parse error as if it were a benign permission_denied."""
+        client = MagicMock()
+        req = httpx.Request("GET", "https://a.klaviyo.com/api/accounts/")
+        http_resp = httpx.Response(403, content=b"not json", request=req)
+        response = MagicMock()
+        response.status_code = 403
+        response.json.side_effect = ValueError("not valid json")
+        response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "HTTP 403", request=req, response=http_resp
+        )
+        client.get.return_value = response
+        with _patch_client(client), pytest.raises(httpx.HTTPStatusError):
+            KlaviyoDestination().test_connection(_config())
+
     def test_test_connection_propagates_network_error(self) -> None:
         client = MagicMock()
         client.get.side_effect = httpx.ConnectError("no route")
