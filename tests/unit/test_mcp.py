@@ -176,7 +176,7 @@ async def test_validate_check_connection_reports_per_sync(
 ) -> None:
     """``check_connection=True`` adds a ``connection_tests`` entry per sync
     (mirrors ``drt validate --check-connection``, #870). ``notify`` is a
-    rest_api destination, which ``_run_connection_test`` skips (SQL-only)."""
+    rest_api destination without ``ConnectionTestable``, so the helper skips it."""
     srv = create_server(project_dir)
     result = await call(srv, "drt_validate", check_connection=True)
     assert result["connection_tests"]["notify"]["skipped"] is True

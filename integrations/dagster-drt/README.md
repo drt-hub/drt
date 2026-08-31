@@ -185,7 +185,13 @@ database-level `ALTER DATABASE ... SET CHANGE_TRACKING = ON` — without
 checking `watch_table` against `CHANGE_TRACKING_MIN_VALID_VERSION`, a table
 that was never individually enabled would silently never advance the
 signal, even while the database-wide version keeps moving from *other*
-tracked tables (caught in Codex review). See
+tracked tables (caught in Codex review). SQL Server also requires
+`minimum_interval_seconds=`, same as Snowflake and for the identical
+reason — `pymssql.connect()` opens a fresh authenticated connection on
+every poll too (#1051). **Upgrading from dagster-drt < 0.5.0:** a SQL
+Server sensor definition that didn't already pass
+`minimum_interval_seconds=` will start raising `ValueError` at evaluation
+time — add the argument, there is no compatibility default. See
 [`docs/guides/event-driven-syncs.md`](https://github.com/drt-hub/drt/blob/main/docs/guides/event-driven-syncs.md)
 for the full picture. Any other profile type raises `NotImplementedError` at
 evaluation time; a supported profile missing a required argument or

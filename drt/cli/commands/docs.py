@@ -153,8 +153,10 @@ def docs_generate(
 
 @docs_app.command(name="serve")
 def docs_serve() -> None:
-    """Live Web UI for the sync catalog (scheduled for v0.8.x — epic #499)."""
-    raise NotImplementedError(
-        "`drt docs serve` is scheduled for v0.8.x (Phase 4 of epic #499). "
-        "Use `drt docs generate --format mermaid` in the meantime."
+    """Live Web UI for the sync catalog (not implemented — epic #499)."""
+    print_error(
+        "`drt docs serve` is not implemented (epic #499). "
+        "Use `drt docs generate --format html` to build a browsable catalog; "
+        "add `--inline` for a single-file catalog."
     )
+    raise typer.Exit(1)

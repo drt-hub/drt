@@ -167,17 +167,33 @@ set) on every tick. Without a deliberate poll interval, Dagster's default
 tick cadence would repeat that handshake far more often than any real
 source needs — `minimum_interval_seconds=` is a required argument for a
 Snowflake profile precisely so this is a choice you make, not a default
-you inherit. (SQL Server's `pymssql.connect()` opens a fresh connection
-per tick too and isn't free either; it's just not gated the same way here
-yet — that's an asymmetry in this module, not evidence Snowflake is
-uniquely costly.)
+you inherit. SQL Server's `pymssql.connect()` opens a fresh connection per
+tick too and isn't free either, so `minimum_interval_seconds=` is required
+there for the identical reason (#1051 — this used to be a real, documented
+asymmetry in this module; it no longer is).
+
+```python
+change_sensor = build_drt_change_sensor(
+    project_dir=".",
+    asset_selection=[my_syncs],
+    watch_table="dbo.MyTable",
+    minimum_interval_seconds=300,  # a deliberate choice, not a default
+)
+```
+
+**Upgrading from dagster-drt < 0.5.0:** a SQL Server sensor definition that
+didn't already pass `minimum_interval_seconds=` will start raising
+`ValueError` at evaluation time after upgrading. Add the argument — there
+is no compatibility default, for the same reason Snowflake never had one:
+picking an interval is a decision about your own database's tolerance for
+poll-connection overhead, not something dagster-drt can safely guess.
 
 Calling `build_drt_change_sensor()` against any other profile type raises
 `NotImplementedError` at evaluation time — a failed sensor tick in the
 Dagster UI, not a silent permanent skip, so a misconfiguration is visible
 rather than quietly inert. A supported profile missing a required argument
 (`watch_table=` for Snowflake/SQL Server, plus `minimum_interval_seconds=`
-for Snowflake) or returning an unusable signal (`NULL`) raises `ValueError`
+for both) or returning an unusable signal (`NULL`) raises `ValueError`
 the same way. A missing optional driver (`snowflake-connector-python`,
 `pymssql`, `deltalake`, `pyiceberg` — none of them are in dagster-drt's base
 install) raises `ImportError`, also propagated rather than treated as a
@@ -239,18 +255,19 @@ the consumption requirement.
 - **Already fresh enough with a schedule?** Stay on Tier 1. It's zero
   drt-side runtime and covers most "fresh enough" requirements (1–15
   minutes).
-- **Running Dagster, and the source is Delta Lake, Iceberg, or SQL Server?**
-  Tier 2 — `build_drt_change_sensor()` gives genuine event-driven activation
-  for free (no per-poll warehouse-compute cost), reusing plumbing you
-  already have.
-- **Running Dagster, and the source is Snowflake?** Tier 2 works
-  (`watch_table=` + `minimum_interval_seconds=` required). The poll itself
-  has no warehouse-compute cost (verified live, #985), but every tick opens
-  a fresh authenticated connection — set `minimum_interval_seconds=` to
-  something that reflects what that connection overhead is worth versus
-  Tier 1 (native `TASK`, already warehouse-scheduled) and Tier 3 (Alert +
-  webhook — no drt-side polling, though the Alert's own condition check
-  still "wraps a poll" on the warehouse side, as noted below).
+- **Running Dagster, and the source is Delta Lake or Iceberg?** Tier 2 —
+  `build_drt_change_sensor()` gives genuine event-driven activation for
+  free (an object-storage metadata read, no connection or warehouse-compute
+  cost), reusing plumbing you already have.
+- **Running Dagster, and the source is Snowflake or SQL Server?** Tier 2
+  works (`watch_table=` + `minimum_interval_seconds=` required for both).
+  Neither poll has warehouse-compute cost (verified live for Snowflake,
+  #985), but every tick opens a fresh authenticated connection — set
+  `minimum_interval_seconds=` to something that reflects what that
+  connection overhead is worth versus Tier 1 (native `TASK`/scheduling,
+  already warehouse-scheduled) and Tier 3 (Alert/webhook — no drt-side
+  polling, though the Alert's own condition check still "wraps a poll" on
+  the warehouse side, as noted below).
 - **A push source with no orchestrator in the picture** (GitHub webhook, dbt
   Cloud job completion, a vendor's own webhook)? Tier 3.
 

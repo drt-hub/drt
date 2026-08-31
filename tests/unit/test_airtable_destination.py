@@ -15,6 +15,7 @@ from drt.config.models import (
     SyncOptions,
 )
 from drt.destinations.airtable import AirtableDestination
+from drt.destinations.base import ConnectionTestable
 
 
 def _config(**overrides: Any) -> AirtableDestinationConfig:
@@ -191,6 +192,12 @@ class TestAirtableConnectionMissing:
 
 
 class TestAirtableConnection:
+    def test_declares_connection_testable(self) -> None:
+        """The class itself still satisfies ConnectionTestable (it's a
+        genuine, working probe) -- drt validate --check-connection's
+        automatic dispatch is what excludes it, not the class (#1059)."""
+        assert isinstance(AirtableDestination(), ConnectionTestable)
+
     def test_test_connection_gets_one_record(self) -> None:
         client = MagicMock()
         client.get.return_value = _ok()

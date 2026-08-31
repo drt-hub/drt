@@ -201,7 +201,17 @@ class KlaviyoDestination:
         }
 
     def test_connection(self, config: DestinationConfig) -> None:
-        """Test connectivity by listing accounts (a cheap authenticated GET)."""
+        """Test connectivity by listing accounts (a cheap authenticated GET).
+
+        ⚠️ Excluded from `drt validate --check-connection`'s automatic
+        `ConnectionTestable` dispatch (see `_PROBE_NEEDS_BROADER_SCOPE` in
+        `drt/cli/commands/validate.py`) — ``GET /accounts/`` requires
+        Klaviyo's `accounts:read` scope, but this destination's own
+        documented minimal credential (`docs/connectors/klaviyo.md`) is
+        "profile + list write access" only, and `load()` itself never reads
+        anything (POST/PATCH only). Auto-probing would report a false
+        failure for a correctly, minimally scoped API key. See #1059.
+        """
         assert isinstance(config, KlaviyoDestinationConfig)
         api_key = resolve_env(config.api_key, config.api_key_env)
         if not api_key:

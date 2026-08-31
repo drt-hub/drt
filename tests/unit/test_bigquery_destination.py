@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from drt.config.models import BigQueryDestinationConfig, SyncOptions
+from drt.destinations.base import ConnectionTestable
 from drt.destinations.bigquery import BigQueryDestination
 
 # ---------------------------------------------------------------------------
@@ -302,6 +303,12 @@ class TestBigQueryDestinationLoad:
 
 
 class TestBigQueryConnection:
+    def test_declares_connection_testable(self) -> None:
+        """The class itself still satisfies ConnectionTestable (it's a
+        genuine, working probe) -- drt validate --check-connection's
+        automatic dispatch is what excludes it, not the class (#1059)."""
+        assert isinstance(BigQueryDestination(), ConnectionTestable)
+
     def test_test_connection_runs_select_1(self) -> None:
         client = _fake_client()
         modules = _mocked_bq_modules(client)

@@ -125,7 +125,18 @@ class AirtableDestination:
             )
 
     def test_connection(self, config: DestinationConfig) -> None:
-        """Test connectivity by reading one record from the table."""
+        """Test connectivity by reading one record from the table.
+
+        ⚠️ Excluded from `drt validate --check-connection`'s automatic
+        `ConnectionTestable` dispatch (see `_PROBE_NEEDS_BROADER_SCOPE` in
+        `drt/cli/commands/validate.py`) — reading a record requires
+        Airtable's `data.records:read` scope, but this destination's own
+        documented minimal credential (`docs/connectors/airtable.md`) is
+        `data.records:write` only, and `load()` itself never reads
+        anything (POST/PATCH only, via `client.request()`). Auto-probing
+        would report a false failure for a correctly, minimally scoped
+        token. See #1059.
+        """
         assert isinstance(config, AirtableDestinationConfig)
         token = resolve_env(config.access_token, config.access_token_env)
         if not token:

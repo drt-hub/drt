@@ -15,6 +15,7 @@ from drt.config.models import (
     RetryConfig,
     SyncOptions,
 )
+from drt.destinations.base import ConnectionTestable
 from drt.destinations.klaviyo import KlaviyoDestination
 
 
@@ -222,6 +223,12 @@ class TestKlaviyoLoad:
 
 
 class TestKlaviyoConnection:
+    def test_declares_connection_testable(self) -> None:
+        """The class itself still satisfies ConnectionTestable (it's a
+        genuine, working probe) -- drt validate --check-connection's
+        automatic dispatch is what excludes it, not the class (#1059)."""
+        assert isinstance(KlaviyoDestination(), ConnectionTestable)
+
     def test_test_connection(self) -> None:
         client = MagicMock()
         client.get.return_value = _resp(200, {"data": []})

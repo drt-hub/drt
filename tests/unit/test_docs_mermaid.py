@@ -200,11 +200,12 @@ class TestDocsGenerateCLI:
         assert "generate" in result.output
         assert "serve" in result.output
 
-    def test_serve_raises_not_implemented(self) -> None:
+    def test_serve_exits_with_clean_not_implemented_error(self) -> None:
         result = runner.invoke(app, ["docs", "serve"])
-        # Typer surfaces uncaught exceptions; we just need a non-zero exit + message.
-        assert result.exit_code != 0
-        assert "v0.8.x" in str(result.exception) or "v0.8.x" in (result.output or "")
+        assert result.exit_code == 1
+        assert "is not implemented" in result.output
+        assert "drt docs generate" in result.output
+        assert "--format html" in result.output
 
     def test_generate_html_writes_static_site(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
