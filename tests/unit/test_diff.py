@@ -18,9 +18,12 @@ import pytest
 
 from drt.config.models import (
     ClickHouseDestinationConfig,
+    DatabricksDestinationConfig,
+    MySQLDestinationConfig,
     PostgresDestinationConfig,
     RestApiDestinationConfig,
     SlackDestinationConfig,
+    SnowflakeDestinationConfig,
     SyncOptions,
 )
 from drt.destinations._mirror_state import key_hash, key_json
@@ -370,7 +373,108 @@ def _mirror_tracked_options(sync_name: str | None = "users_sync") -> SyncOptions
     return options
 
 
+def _scoped_mirror_tracked_options() -> SyncOptions:
+    options = SyncOptions(
+        mode="mirror",
+        mirror={"strategy": "tracked", "scope": ["tenant_id"]},  # type: ignore[arg-type]
+    )
+    options._sync_name = "users_sync"
+    return options
+
+
+SCOPED_TRACKED_CONFIGS = [
+    _pg_config(upsert_key=["tenant_id", "id"]),
+    MySQLDestinationConfig(
+        type="mysql",
+        host="localhost",
+        dbname="test",
+        table="users",
+        upsert_key=["tenant_id", "id"],
+    ),
+    SnowflakeDestinationConfig(
+        type="snowflake",
+        account_env="SF_ACCOUNT",
+        user_env="SF_USER",
+        password_env="SF_PASSWORD",
+        database="ANALYTICS",
+        schema="PUBLIC",
+        table="USERS",
+        warehouse="COMPUTE_WH",
+        upsert_key=["tenant_id", "id"],
+    ),
+    _clickhouse_config(upsert_key=["tenant_id", "id"]),
+    DatabricksDestinationConfig(
+        type="databricks",
+        host_env="DATABRICKS_HOST",
+        http_path_env="DATABRICKS_HTTP_PATH",
+        token_env="DATABRICKS_TOKEN",
+        catalog="main",
+        schema="analytics",
+        table="users",
+        upsert_key=["tenant_id", "id"],
+    ),
+]
+
+
 class TestComputeDiffMirrorTracked:
+    @pytest.mark.parametrize(
+        "config",
+        SCOPED_TRACKED_CONFIGS,
+        ids=["postgres", "mysql", "snowflake", "clickhouse", "databricks"],
+    )
+    @patch("drt.engine.diff.fetch_tracked_state")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_scoped_preview_only_deletes_keys_in_observed_scope(
+        self, mock_fetch_keys: Any, mock_state: Any, config: Any
+    ) -> None:
+        """Tracked state outside this run's observed scope remains untouched."""
+        current = ("tenant-a", "current")
+        stale_observed = ("tenant-a", "stale")
+        stale_unobserved = ("tenant-b", "stale")
+        mock_fetch_keys.return_value = []
+        mock_state.return_value = {
+            key_hash(current): key_json(current),
+            key_hash(stale_observed): key_json(stale_observed),
+            key_hash(stale_unobserved): key_json(stale_unobserved),
+        }
+
+        result = compute_diff(
+            [{"tenant_id": "tenant-a", "id": "current"}],
+            config,
+            _scoped_mirror_tracked_options(),
+            limit=20,
+        )
+
+        assert result.deleted == [{"tenant_id": "tenant-a", "id": "stale"}]
+
+    @patch("drt.engine.diff.fetch_tracked_state")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_unscoped_preview_still_diffs_all_tracked_keys(
+        self, mock_fetch_keys: Any, mock_state: Any
+    ) -> None:
+        """Without mirror.scope, stale keys from every scope remain candidates."""
+        current = ("tenant-a", "current")
+        stale_a = ("tenant-a", "stale")
+        stale_b = ("tenant-b", "stale")
+        mock_fetch_keys.return_value = []
+        mock_state.return_value = {
+            key_hash(current): key_json(current),
+            key_hash(stale_a): key_json(stale_a),
+            key_hash(stale_b): key_json(stale_b),
+        }
+
+        result = compute_diff(
+            [{"tenant_id": "tenant-a", "id": "current"}],
+            _pg_config(upsert_key=["tenant_id", "id"]),
+            _mirror_tracked_options(),
+            limit=20,
+        )
+
+        assert result.deleted == [
+            {"tenant_id": "tenant-a", "id": "stale"},
+            {"tenant_id": "tenant-b", "id": "stale"},
+        ]
+
     @patch("drt.engine.diff.fetch_tracked_state")
     @patch("drt.engine.diff.fetch_rows_by_keys")
     def test_previews_tracked_mirror_deletes(
