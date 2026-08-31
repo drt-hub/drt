@@ -435,6 +435,79 @@ def _plain_conn(cursor: MagicMock) -> MagicMock:
     return conn
 
 
+@needs_psycopg2
+def test_fetch_rows_postgres_empty_columns_uses_cursor_description() -> None:
+    cursor = MagicMock()
+    cursor.description = [("id", None), ("name", None)]
+    cursor.fetchall.return_value = [(1, "alice"), (2, "bob")]
+    conn = _plain_conn(cursor)
+
+    with patch(
+        "drt.destinations.postgres.PostgresDestination._connect", return_value=conn
+    ):
+        rows = fetch_rows(
+            _pg_config(),
+            "SELECT * FROM public.users",
+            columns=[],
+        )
+
+    assert rows == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
+
+
+def test_fetch_rows_mysql_empty_columns_uses_cursor_description() -> None:
+    cursor = MagicMock()
+    cursor.description = [("id", None), ("name", None)]
+    cursor.fetchall.return_value = [(1, "alice"), (2, "bob")]
+    conn = _plain_conn(cursor)
+
+    with patch("drt.destinations.mysql.MySQLDestination._connect", return_value=conn):
+        rows = fetch_rows(
+            _mysql_config(),
+            "SELECT * FROM users",
+            columns=[],
+        )
+
+    assert rows == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
+
+
+def test_fetch_rows_snowflake_empty_columns_uses_cursor_description() -> None:
+    cursor = MagicMock()
+    cursor.description = [("ID", None), ("NAME", None)]
+    cursor.fetchall.return_value = [(1, "alice"), (2, "bob")]
+    conn = _fake_conn(cursor)
+
+    with patch(
+        "drt.destinations.snowflake.SnowflakeDestination._connect", return_value=conn
+    ):
+        rows = fetch_rows(
+            _snowflake_config(),
+            "SELECT * FROM ANALYTICS.PUBLIC.USER_SCORES",
+            columns=[],
+        )
+
+    assert rows == [{"ID": 1, "NAME": "alice"}, {"ID": 2, "NAME": "bob"}]
+
+
+def test_fetch_rows_clickhouse_empty_columns_uses_result_column_names() -> None:
+    client = MagicMock()
+    result = MagicMock()
+    result.column_names = ("id", "name")
+    result.result_rows = [(1, "alice"), (2, "bob")]
+    client.query.return_value = result
+
+    with patch(
+        "drt.destinations.clickhouse.ClickHouseDestination._connect",
+        return_value=client,
+    ):
+        rows = fetch_rows(
+            _clickhouse_config(),
+            "SELECT * FROM users",
+            columns=[],
+        )
+
+    assert rows == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
+
+
 def _render_pg(composed: Any) -> str:
     """Render a psycopg2 ``sql.Composed`` to text without a live connection."""
     from psycopg2.sql import SQL, Composed, Identifier

@@ -197,7 +197,8 @@ def _fetch_rows_postgres(
     try:
         cur = conn.cursor()
         cur.execute(query)
-        return [dict(zip(columns, row)) for row in cur.fetchall()]
+        cols = columns or [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
     finally:
         conn.close()
 
@@ -213,13 +214,14 @@ def _fetch_rows_mysql(
     try:
         cur = conn.cursor()
         cur.execute(query)
+        cols = columns or [d[0] for d in cur.description]
         rows = cur.fetchall()
         result: list[dict[str, Any]] = []
         for row in rows:
             if isinstance(row, dict):
-                result.append({c: row[c] for c in columns})
+                result.append({c: row[c] for c in cols})
             else:
-                result.append(dict(zip(columns, row)))
+                result.append(dict(zip(cols, row)))
         return result
     finally:
         conn.close()
@@ -235,7 +237,8 @@ def _fetch_rows_clickhouse(
     client = ClickHouseDestination._connect(config)
     try:
         result = client.query(query)
-        return [dict(zip(columns, row)) for row in result.result_rows]
+        cols = columns or list(result.column_names)
+        return [dict(zip(cols, row)) for row in result.result_rows]
     finally:
         client.close()
 
@@ -251,7 +254,8 @@ def _fetch_rows_snowflake(
     try:
         with conn.cursor() as cur:
             cur.execute(query)
-            return [dict(zip(columns, row)) for row in cur.fetchall()]
+            cols = columns or [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
     finally:
         conn.close()
 
@@ -267,9 +271,8 @@ def _fetch_rows_databricks(
     (``compute_diff()`` passes ``columns=[]`` there — it doesn't know the
     destination's column set ahead of the query). Falling back to
     ``dict(zip([], row))`` would collapse every row to ``{}`` (caught in
-    review, #1060 — the same pre-existing gap other dialects' ``_fetch_rows_*``
-    have too, tracked separately as #1062); derive real names from the
-    cursor's own ``description`` instead.
+    review, #1060); derive real names from the cursor's own ``description``
+    instead. The other SQL dialects apply the same fallback (#1062).
     """
     from drt.destinations.databricks import DatabricksDestination
 
@@ -987,4 +990,3 @@ def _fetch_all_keys_databricks(
         return result
     finally:
         conn.close()
-
