@@ -119,7 +119,7 @@ class TestReset:
 # after the #756 plan listed these methods, and the plan's list was never
 # updated — a remote backend written against it would have satisfied the
 # Protocol while silently breaking `drt state reset`.
-_STATE_STORE_METHODS = {"get_last_sync", "get_all", "save_sync", "reset", "now"}
+_STATE_STORE_METHODS = {"get_last_sync", "get_all", "save_sync", "reset"}
 
 
 def test_local_state_manager_satisfies_state_store(tmp_path: Path) -> None:

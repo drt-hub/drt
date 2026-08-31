@@ -65,7 +65,6 @@ def test_state_store_conforms_for_read_write_overwrite_and_reset(
     assert store.reset("a") is True
     assert store.reset("a") is False
     assert set(store.get_all()) == {"b"}
-    assert datetime.fromisoformat(store.now()).tzinfo is not None
 
 
 def test_history_store_conforms_for_merge_limit_and_prune(

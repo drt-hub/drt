@@ -168,9 +168,6 @@ class ObjectStoreStateStore(_ObjectStoreBase):
                     self._backoff(attempt)
         return False  # pragma: no cover - loop either returns or raises
 
-    def now(self) -> str:
-        return datetime.now(timezone.utc).isoformat()
-
 
 @dataclass
 class _AppendSnapshot:

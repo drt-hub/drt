@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import threading
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -76,8 +75,6 @@ class StateStore(Protocol):
             StateContentionError: see ``save_sync``.
         """
         ...
-
-    def now(self) -> str: ...
 
 
 class LocalStateManager:
@@ -160,9 +157,6 @@ class LocalStateManager:
                 del data[sync_name]
                 self._save_all(data)
                 return True
-
-    def now(self) -> str:
-        return datetime.now(timezone.utc).isoformat()
 
 
 # Back-compat alias — every existing caller imports ``StateManager``. Kept so
