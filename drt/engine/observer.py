@@ -2,9 +2,14 @@
 
 The engine emits structured events through a ``SyncObserver``; concrete
 observers decide what to do with them (write to logs, persist state,
-publish OTel spans, format errors, etc.). The engine itself stays free
-of direct I/O — every write that used to live inside ``engine/sync.py``
-now goes through this protocol.
+publish OTel spans, format errors, etc.). Logging and state/watermark
+persistence are fully routed through this protocol and enforced by a CI
+boundary check (``tests/unit/test_engine_observer.py``). History
+append/prune, alert dispatch, and final OTel span status are current,
+accepted exceptions — this protocol's existing methods have nowhere to
+carry the outcome/duration/exception data those three need, so they
+stay as direct engine calls. See CLAUDE.md for the fuller note on why,
+and why closing that gap wouldn't require breaking this Protocol.
 
 Why a protocol, not concrete calls
 ----------------------------------
