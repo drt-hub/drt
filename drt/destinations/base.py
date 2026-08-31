@@ -143,6 +143,31 @@ class MatchPolicyCapable(Protocol):
 
 
 @runtime_checkable
+class ModeCapable(Protocol):
+    """Destination that honours advanced ``sync.mode`` values (#1042).
+
+    Stability: Stable (frozen at v1.0, see ADR 0007 for the breaking-change policy).
+
+    ``sync.mode: replace | mirror`` requires destination-side machinery beyond
+    the normal per-record load path. Not every destination provides that
+    machinery (a SaaS API, say), so support is an opt-in capability the engine
+    checks structurally — ``isinstance(dest, ModeCapable)`` — before running
+    one of those modes. Destinations that don't implement it fail fast with a
+    clear error instead of silently treating the requested mode as a normal
+    load.
+
+    Implementations return the subset of ``replace`` / ``mirror`` they honour
+    so the engine can reject an unsupported *value* on an otherwise-capable
+    destination. The always-safe ``full`` / ``incremental`` / ``upsert`` modes
+    do not need to be declared.
+    """
+
+    def supported_modes(self) -> frozenset[str]:
+        """Return the advanced ``sync.mode`` values this destination honours."""
+        ...
+
+
+@runtime_checkable
 class StagedDestination(Protocol):
     """Destination that accumulates records, then uploads as a batch job.
 

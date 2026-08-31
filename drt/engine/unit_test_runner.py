@@ -63,6 +63,19 @@ class CaptureDestination:
 
     records: list[dict[str, Any]] = field(default_factory=list)
 
+    def supported_modes(self) -> frozenset[str]:
+        """Accept every ``sync.mode`` unconditionally (#1042).
+
+        A unit test verifies the transform pipeline (which rows come out),
+        not destination write mechanics — ``sync.mode``'s TRUNCATE/swap/DELETE
+        machinery never runs against this stand-in regardless of what the
+        *real* destination configured on the sync supports. Gating on it here
+        would reject every ``replace``/``mirror`` fixture as a false failure,
+        including ones whose real destination fully supports the mode
+        (caught in review, #1042).
+        """
+        return frozenset({"replace", "mirror"})
+
     def load(
         self,
         records: list[dict[str, Any]],
