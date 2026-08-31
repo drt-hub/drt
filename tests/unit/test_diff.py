@@ -359,6 +359,46 @@ class TestComputeDiffKeyedFetch:
         assert result.added == []
         assert len(result.updated) == 1
 
+    def test_compute_diff_replace_mode_snowflake_uppercase_upsert_key_preserved(
+        self,
+    ) -> None:
+        """A third review pass caught the second #1062-followup fix's blanket
+        lowercase corrupting a sync genuinely configured with an uppercase
+        upsert_key (itself Snowflake-native for unquoted DDL) -- 'ID' must
+        stay 'ID', not fold to 'id', or the same collapse-to-one-entry bug
+        reappears from the opposite direction. compute_diff() now passes
+        upsert_key through as key_hint for case-insensitive reconciliation."""
+        cursor = MagicMock()
+        cursor.description = [("ID", None), ("SCORE", None)]
+        cursor.fetchall.return_value = [(1, 0.5), (2, 0.9), (3, 0.7)]
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        sf_config = SnowflakeDestinationConfig(
+            type="snowflake",
+            account_env="SF_ACCOUNT",
+            user_env="SF_USER",
+            password_env="SF_PASSWORD",
+            database="ANALYTICS",
+            schema="PUBLIC",
+            table="USERS",
+            warehouse="COMPUTE_WH",
+            upsert_key=["ID"],
+        )
+        records = [{"ID": 1, "score": 0.95}, {"ID": 2, "score": 0.9}]
+
+        with patch(
+            "drt.destinations.snowflake.SnowflakeDestination._connect",
+            return_value=conn,
+        ):
+            result = compute_diff(records, sf_config, _options("replace"), limit=20)
+
+        assert len(result.deleted) == 1
+        assert result.deleted[0]["ID"] == 3
+        assert result.added == []
+        assert len(result.updated) == 1
+
     @patch("drt.engine.diff.fetch_rows")
     @patch("drt.engine.diff.fetch_rows_by_keys")
     def test_compute_diff_clickhouse_falls_back_to_full_scan(

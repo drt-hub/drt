@@ -171,8 +171,20 @@ def fetch_rows(
     config: DestinationConfig,
     query: str,
     columns: list[str],
+    key_hint: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Execute a SELECT against a DB destination and return rows as dicts."""
+    """Execute a SELECT against a DB destination and return rows as dicts.
+
+    ``key_hint`` (optional, only consulted when ``columns`` is empty) is the
+    caller's own expected column-name casing — typically ``upsert_key`` —
+    used by dialects whose driver doesn't round-trip a column's configured
+    case (Snowflake folds unquoted identifiers to uppercase). Reconciled
+    case-insensitively per column rather than a blanket transform in either
+    direction, so a sync genuinely configured with uppercase field names
+    (e.g. ``upsert_key: ["ID"]``, itself Snowflake-native) is not corrupted
+    just as much as an unreconciled uppercase would corrupt the common
+    lowercase case (#1062-followup, caught in review across two passes).
+    """
     if isinstance(config, PostgresDestinationConfig):
         return _fetch_rows_postgres(config, query, columns)
     if isinstance(config, MySQLDestinationConfig):
@@ -180,10 +192,20 @@ def fetch_rows(
     if isinstance(config, ClickHouseDestinationConfig):
         return _fetch_rows_clickhouse(config, query, columns)
     if isinstance(config, SnowflakeDestinationConfig):
-        return _fetch_rows_snowflake(config, query, columns)
+        return _fetch_rows_snowflake(config, query, columns, key_hint)
     if isinstance(config, DatabricksDestinationConfig):
         return _fetch_rows_databricks(config, query, columns)
     raise TypeError(f"Cannot fetch rows from {type(config).__name__}")
+
+
+def _reconcile_column_case(
+    metadata_names: list[str], key_hint: list[str] | None
+) -> list[str]:
+    """Map ``metadata_names`` (e.g. Snowflake's uppercase-folded columns)
+    onto ``key_hint``'s casing wherever a case-insensitive match exists,
+    falling back to lowercase for the rest (the common, non-hinted case)."""
+    hint_by_lower = {c.lower(): c for c in key_hint} if key_hint else {}
+    return [hint_by_lower.get(name.lower(), name.lower()) for name in metadata_names]
 
 
 def _fetch_rows_postgres(
@@ -247,18 +269,22 @@ def _fetch_rows_snowflake(
     config: SnowflakeDestinationConfig,
     query: str,
     columns: list[str],
+    key_hint: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Snowflake leg.
 
     ``columns`` empty means the replace-mode full-table scan (caught in
-    review, #1062-followup): Snowflake's cursor metadata reports unquoted
-    columns in their stored UPPERCASE form, but ``upsert_key``/source record
-    keys are conventionally lowercase (same fold this codebase already
-    applies for Layer 3 JSON-column matching, see ``_value_clause`` above) —
-    without lowercasing, ``compute_diff()``'s ``row.get(c) for c in
+    review, #1062-followup, then refined across a second pass): Snowflake's
+    cursor metadata reports unquoted columns in their stored UPPERCASE
+    form, but ``upsert_key``/source record keys are conventionally
+    lowercase — unreconciled, ``compute_diff()``'s ``row.get(c) for c in
     upsert_key`` would return ``None`` for every row and collapse them all
-    into one keyless entry, exactly the bug #1062 fixed for the *literal*
-    empty-columns case reappearing via a casing mismatch instead.
+    into one keyless entry. A blanket lowercase fold fixes the common case
+    but corrupts the opposite one (a sync genuinely configured with
+    uppercase field names, itself Snowflake-native) — ``key_hint``
+    (``upsert_key`` from the caller) lets ``_reconcile_column_case`` match
+    case-insensitively and prefer the caller's actual casing, falling back
+    to lowercase only for columns it has no hint for.
     """
     from drt.destinations.snowflake import SnowflakeDestination
 
@@ -266,7 +292,9 @@ def _fetch_rows_snowflake(
     try:
         with conn.cursor() as cur:
             cur.execute(query)
-            cols = columns or [d[0].lower() for d in cur.description]
+            cols = columns or _reconcile_column_case(
+                [d[0] for d in cur.description], key_hint
+            )
             return [dict(zip(cols, row)) for row in cur.fetchall()]
     finally:
         conn.close()

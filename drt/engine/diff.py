@@ -346,10 +346,10 @@ def compute_diff(
                 # ClickHouse (different paramstyle) — fall back to full scan.
                 # keyed fetch is an optimisation, never a correctness need.
                 select_query = f"SELECT * FROM {table}"  # noqa: S608 — table from trusted config
-                dest_rows = fetch_rows(config, select_query, columns=[])
+                dest_rows = fetch_rows(config, select_query, columns=[], key_hint=upsert_key)
         else:
             select_query = f"SELECT * FROM {table}"  # noqa: S608 — table from trusted config
-            dest_rows = fetch_rows(config, select_query, columns=[])
+            dest_rows = fetch_rows(config, select_query, columns=[], key_hint=upsert_key)
     except Exception as e:
         return DiffResult(
             sample=list(records[:limit]),
