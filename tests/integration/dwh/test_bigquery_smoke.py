@@ -179,7 +179,7 @@ def test_bigquery_connection() -> None:
             "keyfile": creds["DRT_SMOKE_BIGQUERY_KEYFILE"],
         }
     )
-    BigQueryDestination().test_connection(dest)
+    BigQueryDestination()._test_connection_needs_broader_scope(dest)
 
 
 def test_bigquery_complex_type_roundtrip(tmp_path: Path) -> None:

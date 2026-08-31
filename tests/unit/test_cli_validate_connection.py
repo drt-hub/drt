@@ -74,8 +74,13 @@ def test_validate_check_connection_sql_failure() -> None:
         assert "✗ connection failed: Conn Error" in result.stdout
 
 
-def test_validate_check_connection_bigquery_success() -> None:
-    """A non-SQL-gated ConnectionTestable destination is tested, not skipped."""
+def test_validate_check_connection_non_sql_gated_type_success() -> None:
+    """A non-SQL-gated destination type is tested, not skipped, as long as
+    the instance satisfies ConnectionTestable -- dispatch is structural, not
+    keyed on config type. Uses a mocked destination (not the real
+    BigQueryDestination, which doesn't implement this capability -- see
+    #1059); BigQueryDestinationConfig here is only standing in for "some
+    config type the old hardcoded SQL tuple would have excluded"."""
     mock_dest = _ConnectionTestDestination()
 
     with patch("drt.connectors.registry.get_destination", return_value=mock_dest), \

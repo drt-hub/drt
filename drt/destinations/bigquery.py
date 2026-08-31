@@ -185,8 +185,21 @@ class BigQueryDestination:
 
         return bigquery.QueryJobConfig(labels=labels)
 
-    def test_connection(self, config: DestinationConfig) -> None:
-        """Test connectivity by running ``SELECT 1``."""
+    def _test_connection_needs_broader_scope(self, config: DestinationConfig) -> None:
+        """Connectivity probe — NOT wired to ``ConnectionTestable`` (#1059).
+
+        Deliberately not named ``test_connection`` so it doesn't satisfy the
+        structural `ConnectionTestable` Protocol. ``SELECT 1`` is a query
+        job and requires `bigquery.jobs.create`, but this destination's own
+        documented minimal credential for append mode
+        (`docs/connectors/bigquery.md`) is `bigquery.tables.updateData`
+        only — `bigquery.jobs.create` is needed *only* for the merge-mode
+        temp table, which insert-mode `load()` never touches. Wiring this
+        into `drt validate --check-connection` (#1049) would report a
+        false failure for any correctly, minimally scoped append-only
+        principal. See #1059 before renaming this back to
+        `test_connection`.
+        """
         assert isinstance(config, BigQueryDestinationConfig)
         client = self._build_client(config)
         client.query("SELECT 1").result()
