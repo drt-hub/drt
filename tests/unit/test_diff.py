@@ -18,9 +18,12 @@ import pytest
 
 from drt.config.models import (
     ClickHouseDestinationConfig,
+    DatabricksDestinationConfig,
+    MySQLDestinationConfig,
     PostgresDestinationConfig,
     RestApiDestinationConfig,
     SlackDestinationConfig,
+    SnowflakeDestinationConfig,
     SyncOptions,
 )
 from drt.destinations._mirror_state import key_hash, key_json
@@ -311,6 +314,91 @@ class TestComputeDiffKeyedFetch:
         assert result.deleted[0]["id"] == 3
         assert len(result.updated) == 1
 
+    def test_compute_diff_replace_mode_snowflake_uppercase_columns_end_to_end(
+        self,
+    ) -> None:
+        """A second review pass caught the first #1062 fix's test only
+        exercising fetch_rows() in isolation -- not the real
+        compute_diff() -> fetch_rows() -> _fetch_rows_snowflake() chain
+        where the casing mismatch actually bites. Mocks the real Snowflake
+        cursor (uppercase, unquoted column names) rather than fetch_rows
+        itself, proving the full pipeline no longer collapses every
+        destination row into one keyless entry."""
+        cursor = MagicMock()
+        cursor.description = [("ID", None), ("SCORE", None)]
+        cursor.fetchall.return_value = [(1, 0.5), (2, 0.9), (3, 0.7)]
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        sf_config = SnowflakeDestinationConfig(
+            type="snowflake",
+            account_env="SF_ACCOUNT",
+            user_env="SF_USER",
+            password_env="SF_PASSWORD",
+            database="ANALYTICS",
+            schema="PUBLIC",
+            table="USERS",
+            warehouse="COMPUTE_WH",
+            upsert_key=["id"],
+        )
+        records = [{"id": 1, "score": 0.95}, {"id": 2, "score": 0.9}]
+
+        with patch(
+            "drt.destinations.snowflake.SnowflakeDestination._connect",
+            return_value=conn,
+        ):
+            result = compute_diff(records, sf_config, _options("replace"), limit=20)
+
+        # If uppercase ID/SCORE leaked through unlowered, every destination
+        # row would collapse into one (None, ...)-keyed entry: 2 spurious
+        # "added" (real rows 1/2 misreported as new) and at most 1 deletion
+        # instead of the correct 1.
+        assert len(result.deleted) == 1
+        assert result.deleted[0]["id"] == 3
+        assert result.added == []
+        assert len(result.updated) == 1
+
+    def test_compute_diff_replace_mode_snowflake_uppercase_upsert_key_preserved(
+        self,
+    ) -> None:
+        """A third review pass caught the second #1062-followup fix's blanket
+        lowercase corrupting a sync genuinely configured with an uppercase
+        upsert_key (itself Snowflake-native for unquoted DDL) -- 'ID' must
+        stay 'ID', not fold to 'id', or the same collapse-to-one-entry bug
+        reappears from the opposite direction. compute_diff() now passes
+        upsert_key through as key_hint for case-insensitive reconciliation."""
+        cursor = MagicMock()
+        cursor.description = [("ID", None), ("SCORE", None)]
+        cursor.fetchall.return_value = [(1, 0.5), (2, 0.9), (3, 0.7)]
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        sf_config = SnowflakeDestinationConfig(
+            type="snowflake",
+            account_env="SF_ACCOUNT",
+            user_env="SF_USER",
+            password_env="SF_PASSWORD",
+            database="ANALYTICS",
+            schema="PUBLIC",
+            table="USERS",
+            warehouse="COMPUTE_WH",
+            upsert_key=["ID"],
+        )
+        records = [{"ID": 1, "score": 0.95}, {"ID": 2, "score": 0.9}]
+
+        with patch(
+            "drt.destinations.snowflake.SnowflakeDestination._connect",
+            return_value=conn,
+        ):
+            result = compute_diff(records, sf_config, _options("replace"), limit=20)
+
+        assert len(result.deleted) == 1
+        assert result.deleted[0]["ID"] == 3
+        assert result.added == []
+        assert len(result.updated) == 1
+
     @patch("drt.engine.diff.fetch_rows")
     @patch("drt.engine.diff.fetch_rows_by_keys")
     def test_compute_diff_clickhouse_falls_back_to_full_scan(
@@ -370,7 +458,134 @@ def _mirror_tracked_options(sync_name: str | None = "users_sync") -> SyncOptions
     return options
 
 
+def _scoped_mirror_tracked_options() -> SyncOptions:
+    options = SyncOptions(
+        mode="mirror",
+        mirror={"strategy": "tracked", "scope": ["tenant_id"]},  # type: ignore[arg-type]
+    )
+    options._sync_name = "users_sync"
+    return options
+
+
+SCOPED_TRACKED_CONFIGS = [
+    _pg_config(upsert_key=["tenant_id", "id"]),
+    MySQLDestinationConfig(
+        type="mysql",
+        host="localhost",
+        dbname="test",
+        table="users",
+        upsert_key=["tenant_id", "id"],
+    ),
+    SnowflakeDestinationConfig(
+        type="snowflake",
+        account_env="SF_ACCOUNT",
+        user_env="SF_USER",
+        password_env="SF_PASSWORD",
+        database="ANALYTICS",
+        schema="PUBLIC",
+        table="USERS",
+        warehouse="COMPUTE_WH",
+        upsert_key=["tenant_id", "id"],
+    ),
+    _clickhouse_config(upsert_key=["tenant_id", "id"]),
+    DatabricksDestinationConfig(
+        type="databricks",
+        host_env="DATABRICKS_HOST",
+        http_path_env="DATABRICKS_HTTP_PATH",
+        token_env="DATABRICKS_TOKEN",
+        catalog="main",
+        schema="analytics",
+        table="users",
+        upsert_key=["tenant_id", "id"],
+    ),
+]
+
+
 class TestComputeDiffMirrorTracked:
+    @pytest.mark.parametrize(
+        "config",
+        SCOPED_TRACKED_CONFIGS,
+        ids=["postgres", "mysql", "snowflake", "clickhouse", "databricks"],
+    )
+    @patch("drt.engine.diff.fetch_tracked_state")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_scoped_preview_only_deletes_keys_in_observed_scope(
+        self, mock_fetch_keys: Any, mock_state: Any, config: Any
+    ) -> None:
+        """Tracked state outside this run's observed scope remains untouched."""
+        current = ("tenant-a", "current")
+        stale_observed = ("tenant-a", "stale")
+        stale_unobserved = ("tenant-b", "stale")
+        mock_fetch_keys.return_value = []
+        mock_state.return_value = {
+            key_hash(current): key_json(current),
+            key_hash(stale_observed): key_json(stale_observed),
+            key_hash(stale_unobserved): key_json(stale_unobserved),
+        }
+
+        result = compute_diff(
+            [{"tenant_id": "tenant-a", "id": "current"}],
+            config,
+            _scoped_mirror_tracked_options(),
+            limit=20,
+        )
+
+        assert result.deleted == [{"tenant_id": "tenant-a", "id": "stale"}]
+
+    @patch("drt.engine.diff.fetch_tracked_state")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_unscoped_preview_still_diffs_all_tracked_keys(
+        self, mock_fetch_keys: Any, mock_state: Any
+    ) -> None:
+        """Without mirror.scope, stale keys from every scope remain candidates."""
+        current = ("tenant-a", "current")
+        stale_a = ("tenant-a", "stale")
+        stale_b = ("tenant-b", "stale")
+        mock_fetch_keys.return_value = []
+        mock_state.return_value = {
+            key_hash(current): key_json(current),
+            key_hash(stale_a): key_json(stale_a),
+            key_hash(stale_b): key_json(stale_b),
+        }
+
+        result = compute_diff(
+            [{"tenant_id": "tenant-a", "id": "current"}],
+            _pg_config(upsert_key=["tenant_id", "id"]),
+            _mirror_tracked_options(),
+            limit=20,
+        )
+
+        assert result.deleted == [
+            {"tenant_id": "tenant-a", "id": "stale"},
+            {"tenant_id": "tenant-b", "id": "stale"},
+        ]
+
+    @patch("drt.engine.diff.fetch_tracked_state")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_malformed_tracked_state_degrades_instead_of_crashing(
+        self, mock_fetch_keys: Any, mock_state: Any
+    ) -> None:
+        """Caught in review, #1061: scope decoding/filtering must stay inside
+        the same failure-handling guard as the state fetch itself --
+        malformed/legacy key_json (decode_key() raises) must degrade the
+        delete preview to "unavailable", not crash the whole --dry-run
+        --diff command when the add/update comparison is otherwise fine."""
+        mock_fetch_keys.return_value = []
+        mock_state.return_value = {"deadbeef": "not valid json"}
+
+        result = compute_diff(
+            [{"tenant_id": "tenant-a", "id": "current"}],
+            _pg_config(upsert_key=["tenant_id", "id"]),
+            _scoped_mirror_tracked_options(),
+            limit=20,
+        )
+
+        assert result.deleted == []
+        assert result.delete_preview_unavailable_reason is not None
+        # The add/update comparison must still be usable -- not itself part
+        # of what failed.
+        assert result.supported
+
     @patch("drt.engine.diff.fetch_tracked_state")
     @patch("drt.engine.diff.fetch_rows_by_keys")
     def test_previews_tracked_mirror_deletes(

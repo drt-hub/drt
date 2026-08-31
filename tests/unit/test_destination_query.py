@@ -435,6 +435,110 @@ def _plain_conn(cursor: MagicMock) -> MagicMock:
     return conn
 
 
+@needs_psycopg2
+def test_fetch_rows_postgres_empty_columns_uses_cursor_description() -> None:
+    cursor = MagicMock()
+    cursor.description = [("id", None), ("name", None)]
+    cursor.fetchall.return_value = [(1, "alice"), (2, "bob")]
+    conn = _plain_conn(cursor)
+
+    with patch(
+        "drt.destinations.postgres.PostgresDestination._connect", return_value=conn
+    ):
+        rows = fetch_rows(
+            _pg_config(),
+            "SELECT * FROM public.users",
+            columns=[],
+        )
+
+    assert rows == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
+
+
+def test_fetch_rows_mysql_empty_columns_uses_cursor_description() -> None:
+    cursor = MagicMock()
+    cursor.description = [("id", None), ("name", None)]
+    cursor.fetchall.return_value = [(1, "alice"), (2, "bob")]
+    conn = _plain_conn(cursor)
+
+    with patch("drt.destinations.mysql.MySQLDestination._connect", return_value=conn):
+        rows = fetch_rows(
+            _mysql_config(),
+            "SELECT * FROM users",
+            columns=[],
+        )
+
+    assert rows == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
+
+
+def test_fetch_rows_snowflake_empty_columns_lowercases_cursor_description() -> None:
+    """Snowflake reports unquoted columns in stored UPPERCASE (caught in
+    review, a second pass on #1062): folding to lowercase matches
+    upsert_key's conventional casing, same fold _value_clause already
+    applies for Layer 3 JSON-column matching. Without it, compute_diff()'s
+    row.get(c) for c in upsert_key would return None for every row."""
+    cursor = MagicMock()
+    cursor.description = [("ID", None), ("NAME", None)]
+    cursor.fetchall.return_value = [(1, "alice"), (2, "bob")]
+    conn = _fake_conn(cursor)
+
+    with patch(
+        "drt.destinations.snowflake.SnowflakeDestination._connect", return_value=conn
+    ):
+        rows = fetch_rows(
+            _snowflake_config(),
+            "SELECT * FROM ANALYTICS.PUBLIC.USER_SCORES",
+            columns=[],
+        )
+
+    assert rows == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
+
+
+def test_fetch_rows_snowflake_key_hint_preserves_uppercase_configured_keys() -> None:
+    """A third review pass caught the second fix's blanket lowercase
+    corrupting the opposite case: a sync genuinely configured with an
+    uppercase upsert_key (itself Snowflake-native, since unquoted DDL
+    stores it that way) needs 'ID' preserved, not folded to 'id'. key_hint
+    (the caller's upsert_key) is matched case-insensitively per column;
+    only columns with no hint match fall back to lowercase."""
+    cursor = MagicMock()
+    cursor.description = [("ID", None), ("NAME", None)]
+    cursor.fetchall.return_value = [(1, "alice")]
+    conn = _fake_conn(cursor)
+
+    with patch(
+        "drt.destinations.snowflake.SnowflakeDestination._connect", return_value=conn
+    ):
+        rows = fetch_rows(
+            _snowflake_config(),
+            "SELECT * FROM ANALYTICS.PUBLIC.USER_SCORES",
+            columns=[],
+            key_hint=["ID"],
+        )
+
+    # ID matched the hint -> preserved as configured. NAME had no hint -> lowercased.
+    assert rows == [{"ID": 1, "name": "alice"}]
+
+
+def test_fetch_rows_clickhouse_empty_columns_uses_result_column_names() -> None:
+    client = MagicMock()
+    result = MagicMock()
+    result.column_names = ("id", "name")
+    result.result_rows = [(1, "alice"), (2, "bob")]
+    client.query.return_value = result
+
+    with patch(
+        "drt.destinations.clickhouse.ClickHouseDestination._connect",
+        return_value=client,
+    ):
+        rows = fetch_rows(
+            _clickhouse_config(),
+            "SELECT * FROM users",
+            columns=[],
+        )
+
+    assert rows == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
+
+
 def _render_pg(composed: Any) -> str:
     """Render a psycopg2 ``sql.Composed`` to text without a live connection."""
     from psycopg2.sql import SQL, Composed, Identifier

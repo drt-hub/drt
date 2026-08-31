@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from drt.config.models import ClickHouseDestinationConfig, DestinationConfig, SyncOptions
-from drt.destinations._mirror_state import diff_keys
+from drt.destinations._mirror_state import decode_key, diff_keys
 from drt.destinations.query import (
     fetch_all_keys,
     fetch_rows,
@@ -215,13 +215,17 @@ def _preview_tracked_mirror_deletes(
     sync_options: SyncOptions,
     upsert_key: list[str],
     source_keys: set[tuple[Any, ...]],
+    records: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Read-only preview of the rows tracked mirror would DELETE (#693).
 
     Reads the drt-managed ``_drt_synced_keys`` state for this sync and returns
-    ``previous - current`` as key-column dicts. Rows are key-only: the state
-    table stores keys, not full rows, and re-reading the destination for the
-    other columns would cost a second scan for a preview.
+    ``previous - current`` as key-column dicts. With ``mirror.scope``, previous
+    keys are first narrowed to the scope values observed in this run, matching
+    ``BaseSqlDestination._finalize_mirror_tracked``: a run touching one scope
+    must not preview deletions from another. Rows are key-only: the state table
+    stores keys, not full rows, and re-reading the destination for the other
+    columns would cost a second scan for a preview.
 
     No prior state (first run / absent table) means no deletes, matching the
     baseline semantics of ``BaseSqlDestination._finalize_mirror_tracked``. A
@@ -233,12 +237,31 @@ def _preview_tracked_mirror_deletes(
     sync_name = str(sync_options._sync_name or getattr(config, "table", "") or "")
     try:
         previous = fetch_tracked_state(config, sync_name)
+        if not previous:
+            return [], None
+
+        # Scope filtering (and the final diff) stay inside this same guard
+        # (caught in review, #1061): decode_key()/diff_keys() can raise on
+        # malformed or pre-#687 legacy key_json, and a mirror.scope column
+        # that isn't actually a upsert_key member raises ValueError from
+        # .index() — none of that should crash --dry-run --diff when the
+        # add/update comparison is otherwise perfectly usable.
+        scope_cols = sync_options.mirror.scope if sync_options.mirror else None
+        if scope_cols:
+            scope_positions = [upsert_key.index(column) for column in scope_cols]
+            observed_scopes = set(_observed_scopes(records, scope_cols))
+            previous = {
+                key_hash: key_json
+                for key_hash, key_json in previous.items()
+                if tuple(decode_key(key_json)[position] for position in scope_positions)
+                in observed_scopes
+            }
+        deleted_keys = diff_keys(previous, list(source_keys))
     except Exception as error:
         return [], f"{type(error).__name__}: {error}"
-    if not previous:
-        return [], None
+
     return (
-        [dict(zip(upsert_key, key)) for key in diff_keys(previous, list(source_keys))],
+        [dict(zip(upsert_key, key)) for key in deleted_keys],
         None,
     )
 
@@ -310,8 +333,7 @@ def compute_diff(
     use_keyed_fetch = sync_options.mode != "replace" and bool(records)
     try:
         if use_keyed_fetch:
-            # Explicit columns (never []) so returned dicts are keyed — this
-            # also sidesteps the fetch_rows(columns=[]) empty-dict trap.
+            # Explicit columns avoid metadata introspection on the keyed path.
             columns = list(records[0].keys())
             try:
                 dest_rows = fetch_rows_by_keys(
@@ -324,10 +346,10 @@ def compute_diff(
                 # ClickHouse (different paramstyle) — fall back to full scan.
                 # keyed fetch is an optimisation, never a correctness need.
                 select_query = f"SELECT * FROM {table}"  # noqa: S608 — table from trusted config
-                dest_rows = fetch_rows(config, select_query, columns=[])
+                dest_rows = fetch_rows(config, select_query, columns=[], key_hint=upsert_key)
         else:
             select_query = f"SELECT * FROM {table}"  # noqa: S608 — table from trusted config
-            dest_rows = fetch_rows(config, select_query, columns=[])
+            dest_rows = fetch_rows(config, select_query, columns=[], key_hint=upsert_key)
     except Exception as e:
         return DiffResult(
             sample=list(records[:limit]),
@@ -381,7 +403,7 @@ def compute_diff(
     # operator the opposite of what the run would do.
     elif _is_tracked_mirror(sync_options) and records:
         deleted, delete_preview_unavailable_reason = _preview_tracked_mirror_deletes(
-            config, sync_options, upsert_key, source_keys
+            config, sync_options, upsert_key, source_keys, records
         )
         delete_reason = "mirror"
     elif _is_destination_mirror(sync_options) and records:
