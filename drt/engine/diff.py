@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from drt.config.models import DestinationConfig, SyncOptions
+from drt.config.models import ClickHouseDestinationConfig, DestinationConfig, SyncOptions
 from drt.destinations._mirror_state import diff_keys
 from drt.destinations.query import (
     fetch_all_keys,
@@ -170,13 +170,18 @@ def _preview_destination_mirror_deletes(
     unavailable reason. It must not collapse to a successful zero-delete
     preview: those two outcomes drive different deployment decisions.
 
-    Keys are compared as their string forms (caught in review, #1060): the
-    real ClickHouse DELETE (``_build_mirror_delete``) does the same on both
-    the destination column and the bound source keys — a typed column (e.g.
-    UUID) fetched raw would otherwise compare unequal to the source's plain
-    value and misreport a live row as a preview deletion. Stringifying is a
-    no-op for dialects whose driver already round-trips the same Python type
-    the source produced.
+    ClickHouse keys are compared as their string forms (caught in review,
+    #1060, then narrowed to ClickHouse-only after a second review pass
+    caught the first version comparing every dialect this way): the real
+    ClickHouse DELETE (``_build_mirror_delete``) does the same on both the
+    destination column and the bound source keys, via ``toString()`` — a
+    typed column (e.g. UUID) fetched raw would otherwise compare unequal to
+    the source's plain value and misreport a live row as a preview
+    deletion. Coercing every dialect this way is wrong, not just
+    unnecessary: a destination ``Decimal('1.00')`` and a source int ``1``
+    are the same row under every other dialect's native comparison, but
+    ``"1.00" != "1"`` as strings — that would have created a false
+    deletion on a currently-correct path.
     """
     scope_cols = sync_options.mirror.scope if sync_options.mirror else None
     scopes = _observed_scopes(records, scope_cols) if scope_cols else None
@@ -184,12 +189,22 @@ def _preview_destination_mirror_deletes(
         dest_keys = fetch_all_keys(config, upsert_key, scope_cols, scopes)
     except Exception as error:
         return [], f"{type(error).__name__}: {error}"
-    source_key_strs = {tuple(str(v) for v in key) for key in source_keys}
+    if isinstance(config, ClickHouseDestinationConfig):
+        comparison_keys = {tuple(str(v) for v in key) for key in source_keys}
+
+        def _normalize(key: tuple[Any, ...]) -> tuple[Any, ...]:
+            return tuple(str(v) for v in key)
+    else:
+        comparison_keys = source_keys
+
+        def _normalize(key: tuple[Any, ...]) -> tuple[Any, ...]:
+            return key
+
     return (
         [
             dict(zip(upsert_key, key))
             for key in dest_keys
-            if tuple(str(v) for v in key) not in source_key_strs
+            if _normalize(key) not in comparison_keys
         ],
         None,
     )

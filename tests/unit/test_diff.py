@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from drt.config.models import (
+    ClickHouseDestinationConfig,
     PostgresDestinationConfig,
     RestApiDestinationConfig,
     SlackDestinationConfig,
@@ -52,6 +53,18 @@ def _pg_config(
         dbname="test",
         user="test",
         password="test",
+        table=table,
+        upsert_key=upsert_key or ["id"],
+    )
+
+
+def _clickhouse_config(
+    table: str = "users", upsert_key: list[str] | None = None
+) -> ClickHouseDestinationConfig:
+    return ClickHouseDestinationConfig(
+        type="clickhouse",
+        host="localhost",
+        database="test",
         table=table,
         upsert_key=upsert_key or ["id"],
     )
@@ -599,14 +612,17 @@ class TestComputeDiffMirrorDestination:
 
     @patch("drt.engine.diff.fetch_all_keys")
     @patch("drt.engine.diff.fetch_rows_by_keys")
-    def test_dest_and_source_keys_compare_by_string_form(
+    def test_clickhouse_dest_and_source_keys_compare_by_string_form(
         self, mock_fetch_keys: Any, mock_all_keys: Any
     ) -> None:
-        """Caught in review, #1060: a dialect (e.g. ClickHouse via toString())
-        may return keys as strings even when the source produced a different
-        Python type (e.g. int) for the same logical value. The comparison
-        must not misreport a live row as a preview deletion just because the
-        two sides' native types differ, as long as their string forms match.
+        """Caught in review, #1060: ClickHouse's key SELECT wraps columns in
+        toString() (matching its real DELETE's own comparison), so
+        fetch_all_keys returns strings even when the source produced a
+        different Python type (e.g. int) for the same logical value. The
+        comparison must not misreport a live row as a preview deletion just
+        because the two sides' native types differ, as long as their string
+        forms match. ClickHouse-only -- see the sibling test below proving
+        other dialects are NOT coerced this way.
         """
         mock_fetch_keys.return_value = []
         # Destination key "1" (string) is the same row as source key 1 (int).
@@ -614,11 +630,39 @@ class TestComputeDiffMirrorDestination:
         records = [{"id": 1}]  # source has row 1; destination also has "1" and "2"
 
         result = compute_diff(
-            records, _pg_config(), _mirror_destination_options(), limit=20
+            records, _clickhouse_config(), _mirror_destination_options(), limit=20
         )
 
         # Only "2" (unseen by the source, in either type) previews as deleted.
         assert result.deleted == [{"id": "2"}]
+
+    @patch("drt.engine.diff.fetch_all_keys")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_non_clickhouse_keys_are_not_stringified(
+        self, mock_fetch_keys: Any, mock_all_keys: Any
+    ) -> None:
+        """A second review pass caught the first version of the ClickHouse
+        fix comparing every dialect by string form -- wrong, not just
+        unnecessary: coercing to strings can turn two natively-equal values
+        into a false mismatch (e.g. numeric types whose string forms differ)
+        just as easily as it can fix one. This proves non-ClickHouse
+        dialects still compare keys with plain native equality, unchanged
+        from before #1060 -- Postgres' own driver already returns the same
+        Python type the source produced, so no coercion was ever needed
+        there."""
+        mock_fetch_keys.return_value = []
+        mock_all_keys.return_value = [(1,)]  # destination key: int 1
+        records = [{"id": "1"}]  # source key: str "1" (mismatched type)
+
+        result = compute_diff(
+            records, _pg_config(), _mirror_destination_options(), limit=20
+        )
+
+        # If this were stringified (as the first version of the fix did for
+        # every dialect), str(1) == "1" and this would wrongly show as
+        # nothing to delete. Native comparison correctly treats int 1 and
+        # str "1" as different keys, so 1 previews as deleted.
+        assert result.deleted == [{"id": 1}]
 
     @patch("drt.engine.diff.fetch_all_keys")
     @patch("drt.engine.diff.fetch_rows_by_keys")

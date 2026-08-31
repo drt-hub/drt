@@ -261,13 +261,24 @@ def _fetch_rows_databricks(
     query: str,
     columns: list[str],
 ) -> list[dict[str, Any]]:
+    """Databricks leg.
+
+    ``columns`` is empty for the replace-mode full-table scan
+    (``compute_diff()`` passes ``columns=[]`` there — it doesn't know the
+    destination's column set ahead of the query). Falling back to
+    ``dict(zip([], row))`` would collapse every row to ``{}`` (caught in
+    review, #1060 — the same pre-existing gap other dialects' ``_fetch_rows_*``
+    have too, tracked separately as #1062); derive real names from the
+    cursor's own ``description`` instead.
+    """
     from drt.destinations.databricks import DatabricksDestination
 
     conn = DatabricksDestination._connect(config)
     try:
         with conn.cursor() as cur:
             cur.execute(query)
-            return [dict(zip(columns, row)) for row in cur.fetchall()]
+            cols = columns or [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
     finally:
         conn.close()
 
@@ -466,15 +477,25 @@ def _fetch_rows_by_keys_databricks(
     columns: list[str],
     batch_size: int,
 ) -> list[dict[str, Any]]:
-    from drt.destinations.databricks import DatabricksDestination
+    """Databricks leg.
+
+    ``batch_size`` (default 1000, from :func:`fetch_rows_by_keys`'s generic
+    signature) is capped at Databricks' 255-native-parameter-marker limit
+    (caught in review, #1060 — a two-column key at 1000 rows/batch binds
+    2000 markers and the query fails outright). Reuses the same
+    ``_rows_per_chunk`` math every other Databricks write path chunks by;
+    a smaller caller-supplied ``batch_size`` still wins.
+    """
+    from drt.destinations.databricks import DatabricksDestination, _rows_per_chunk
 
     table_fq = f"{config.catalog}.{config.schema_}.{config.table}"
     col_list = ", ".join(columns)
+    effective_batch_size = min(batch_size, _rows_per_chunk(len(key_cols)))
     conn = DatabricksDestination._connect(config)
     try:
         result: list[dict[str, Any]] = []
         with conn.cursor() as cur:
-            for batch in _chunks(key_tuples, batch_size):
+            for batch in _chunks(key_tuples, effective_batch_size):
                 if len(key_cols) == 1:
                     placeholders = ", ".join(["?"] * len(batch))
                     predicate = f"{key_cols[0]} IN ({placeholders})"

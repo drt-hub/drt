@@ -348,6 +348,30 @@ def test_fetch_rows_databricks_returns_dicts() -> None:
     conn.close.assert_called_once()
 
 
+def test_fetch_rows_databricks_empty_columns_uses_cursor_description() -> None:
+    """compute_diff() passes columns=[] for the replace-mode full-table scan
+    (caught in review, #1060): dict(zip([], row)) would collapse every row
+    to {}, which compute_diff() then keys on via row.get(c) -- silently
+    understating a real replace run's deletions. Real column names must
+    come from the cursor's own description instead."""
+    cursor = MagicMock()
+    cursor.description = [("id", None), ("name", None)]
+    cursor.fetchall.return_value = [(1, "alice"), (2, "bob")]
+    conn = _fake_conn(cursor)
+
+    with patch(
+        "drt.destinations.databricks.DatabricksDestination._connect",
+        return_value=conn,
+    ):
+        rows = fetch_rows(
+            _databricks_config(),
+            "SELECT * FROM main.analytics.users",
+            columns=[],
+        )
+
+    assert rows == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
+
+
 # ---------------------------------------------------------------------------
 # fetch_rows_by_keys — parameterized keyed batched fetch (#470)
 # ---------------------------------------------------------------------------
@@ -580,6 +604,38 @@ def test_fetch_rows_by_keys_databricks_composite_avoids_delta_tuple_in() -> None
     )
     assert params == ["c1", "u1", "c2", "u2"]
     assert rows == [{"company_id": "c1", "user_id": "u1", "name": "alice"}]
+
+
+def test_fetch_rows_by_keys_databricks_caps_batch_at_255_params() -> None:
+    """The generic default batch_size=1000 (caught in review, #1060) would
+    bind 1000 markers for a single-column key -- over Databricks' 255
+    native-parameter limit -- so the effective batch size must be capped
+    via _rows_per_chunk regardless of what the caller's batch_size allows."""
+    cursor = MagicMock()
+    cursor.fetchall.side_effect = [[(i, f"n{i}") for i in range(255)], [(255, "n255")]]
+    conn = _fake_conn(cursor)
+
+    key_tuples = [(i,) for i in range(256)]  # > 255, forces 2 chunks
+
+    with patch(
+        "drt.destinations.databricks.DatabricksDestination._connect",
+        return_value=conn,
+    ):
+        rows = fetch_rows_by_keys(
+            _databricks_config(),
+            key_cols=["id"],
+            key_tuples=key_tuples,
+            columns=["id", "name"],
+            batch_size=1000,
+        )
+
+    assert cursor.execute.call_count == 2
+    first_markers = cursor.execute.call_args_list[0].args[0].count("?")
+    second_markers = cursor.execute.call_args_list[1].args[0].count("?")
+    assert first_markers <= 255
+    assert second_markers <= 255
+    assert first_markers + second_markers == 256
+    assert len(rows) == 256
 
 
 def test_fetch_rows_by_keys_mysql_composite_key_placeholders() -> None:
