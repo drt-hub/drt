@@ -295,6 +295,26 @@ def test_retry_staged_success_drains_queue(
     assert dest.finalize_calls == 1
 
 
+def test_retry_staged_limit_zero_stages_and_finalizes_nothing(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--limit 0 against a staged destination leaves the DLQ untouched and
+    never reaches stage()/finalize() — a queue can be non-empty overall
+    while the requested retry slice is empty.
+    """
+    store = _seed(project, [1, 2, 3])
+    dest = _FakeStagedDestination(fail_ids=set())
+    _patch_dest(monkeypatch, dest)
+
+    result = runner.invoke(app, ["retry", "post_users", "--limit", "0"])
+
+    assert result.exit_code == 0, result.output
+    assert "0 succeeded, 0 still failing" in result.output
+    assert store.depth("post_users") == 3
+    assert dest.stage_calls == []
+    assert dest.finalize_calls == 0
+
+
 def test_retry_staged_partial_failure_single_chunk_trusts_attribution(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -369,19 +389,24 @@ def test_retry_salesforce_bulk_never_trusts_batch_index_attribution(
     its destination always reports RowError.batch_index=0 (verified against
     drt/destinations/salesforce_bulk.py). Naive attribution (failed count ==
     len(distinct indices) -> trust it) would wrongly conclude only the
-    record at index 0 failed and silently drop the other two entries from
-    the DLQ, even though which record actually failed is unknown.
+    record at index 0 failed and silently drop the other entry from the DLQ,
+    even though which record actually failed is unknown.
+
+    Deliberately only 2 entries against this fixture's batch_size=2 (a
+    single stage() call) — the multi-chunk guard would otherwise force
+    ``pinpointed = False`` on its own and this test wouldn't actually
+    exercise the salesforce_bulk-specific check.
     """
-    store = _seed(salesforce_project, [1, 2, 3])
+    store = _seed(salesforce_project, [1, 2])
     dest = _FakeSalesforceBulkDestination(fail_ids={2})
     _patch_dest(monkeypatch, dest)
 
     result = runner.invoke(app, ["retry", "post_users"])
 
     assert result.exit_code == 0, result.output
-    assert "0 succeeded, 3 still failing" in result.output
+    assert "0 succeeded, 2 still failing" in result.output
     remaining = store.read("post_users")
-    assert {e.record["id"] for e in remaining} == {1, 2, 3}
+    assert {e.record["id"] for e in remaining} == {1, 2}
     assert dest.finalize_calls == 1
 
 
