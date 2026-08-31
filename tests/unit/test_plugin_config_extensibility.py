@@ -471,6 +471,34 @@ def test_plugin_profile_must_implement_describe(tmp_path: Path, clean_registry) 
         load_profile("p", config_dir=d)
 
 
+def test_plugin_profile_must_satisfy_profile_config_like(
+    tmp_path: Path, clean_registry
+) -> None:
+    """A plugin profile that accepts ``type=`` but doesn't expose it as a
+    readable attribute fails the ProfileConfigLike structural check (#1034),
+    not just the narrower describe()-callable one. Deliberately not a
+    dataclass -- a dataclass field named ``type`` would satisfy the Protocol
+    automatically, so this stores it privately instead.
+    """
+
+    class NoType:
+        def __init__(self, type: str, url: str) -> None:
+            self._type = type
+            self.url = url
+
+        def describe(self) -> str:
+            return "no-type"
+
+    clean_registry.register_source(PLUGIN_SOURCE, NoType, _PluginSource)
+    d = _write_profiles(tmp_path, f"""
+        p:
+          type: {PLUGIN_SOURCE}
+          url: https://x
+    """)
+    with pytest.raises(ValueError, match="ProfileConfigLike"):
+        load_profile("p", config_dir=d)
+
+
 def test_plugin_internal_type_error_is_not_blamed_on_the_profile(
     tmp_path: Path, clean_registry
 ) -> None:
