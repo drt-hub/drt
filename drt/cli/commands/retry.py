@@ -134,10 +134,12 @@ def replay_dead_letters(
                 "error": error,
             }
 
-        # finalize() covers the full accumulated staging set, so any
-        # RowError.batch_index is global across to_retry rather than local to
-        # one stage() chunk. As in the load() path below, only trust complete,
-        # in-range attribution; otherwise keep the whole set queued.
+        # finalize() covers the full accumulated staging set. Whether
+        # RowError.batch_index is global across to_retry or local to the
+        # individual stage() chunk it came from is not defined by the
+        # StagedDestination Protocol — the correlation loop below only trusts
+        # it when this whole set was staged in a single chunk, where the two
+        # conventions coincide (see the guard there for the multi-chunk case).
         retry_groups = iter([(to_retry, result)])
     else:
         # Keep load() result processing interleaved with each call, preserving
@@ -176,12 +178,29 @@ def replay_dead_letters(
             if 0 <= e.batch_index < len(retry_group)
         }
         pinpointed = len(failed_idx) == result.failed
-        if isinstance(dest, StagedDestination) and sync.destination.type == "salesforce_bulk":
-            # Salesforce's failed-results CSV does not expose the original
-            # accumulated-list position; its destination currently emits 0
-            # for every RowError.batch_index. Even one such error therefore
-            # cannot safely identify record 0 as the failed source row.
-            pinpointed = False
+        if isinstance(dest, StagedDestination):
+            if len(retry_group) > sync.sync.batch_size:
+                # StagedDestination's Protocol (drt/destinations/base.py) does
+                # not define whether RowError.batch_index from finalize() is
+                # local to the individual stage() call it came from or global
+                # across the whole accumulated set — caught in review. More
+                # than one chunk was staged before this single finalize()
+                # call, so trusting batch_index here would silently
+                # misattribute a later chunk's failure to an earlier chunk's
+                # record for any implementation that reports chunk-local
+                # indices (the more natural convention, matching how
+                # Destination.load()'s own batch_index is always chunk-local).
+                # A single-chunk retry has no such ambiguity — chunk-local and
+                # global indexing coincide when there was only one stage()
+                # call — so only the multi-chunk case falls back here.
+                pinpointed = False
+            elif sync.destination.type == "salesforce_bulk":
+                # Salesforce's failed-results CSV does not expose the original
+                # accumulated-list position; its destination currently emits 0
+                # for every RowError.batch_index regardless of chunk count.
+                # Even a single-chunk retry's one such error therefore cannot
+                # safely identify record 0 as the failed source row.
+                pinpointed = False
         err_by_idx = {e.batch_index: e for e in result.row_errors}
 
         for i, entry in enumerate(retry_group):
