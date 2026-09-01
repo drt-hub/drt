@@ -18,12 +18,17 @@ All three are open-source, CLI-first, YAML-configured, and MCP-enabled. Together
 
 ## The core difference
 
-**Your data goes straight from your warehouse to the destination, never
-through a drt-hosted intermediary.** Commercial reverse-ETL tools —
-Census, Hightouch, RudderStack Reverse ETL, Polytomic, and similar — route
-it through their hosted service to sync it. drt runs wherever you already
-run code (GitHub Actions, Dagster, cron, a container) and talks directly
-to the destination API.
+**drt has no hosted service to opt out of.** There's no drt-operated
+control plane, data plane, or intermediary of any kind — your data goes
+straight from your warehouse to the destination, using infrastructure you
+already run (GitHub Actions, Dagster, cron, a container). This isn't a
+deployment tier or a cost-conscious fallback; it's the only mode drt has.
+Commercial reverse-ETL tools (Census, Hightouch, RudderStack Reverse ETL,
+Polytomic, and similar) are SaaS-first by default — some offer a
+self-hosted or on-prem tier as a secondary option layered onto an
+otherwise hosted product, others don't offer one at all; either way,
+self-hosting isn't the product's default shape the way it is drt's only
+shape.
 
 That one structural fact is also why three other things are true, on
 purpose rather than by accident of what hasn't been built yet:
