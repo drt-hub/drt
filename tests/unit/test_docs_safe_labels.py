@@ -137,6 +137,7 @@ SAMPLES: dict[str, object] = {
         pixel_id=S,
         event_name="Purchase",
         event_id_field="event_id",
+        email_field="email",
     ),
     "mixpanel": MixpanelDestinationConfig(type="mixpanel", token_env="T"),
     "mysql": MySQLDestinationConfig(

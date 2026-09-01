@@ -49,6 +49,7 @@ ALL_DESTINATIONS = [
         pixel_id="123456789",
         event_name="Purchase",
         event_id_field="event_id",
+        email_field="email",
     ),
     PostgresDestinationConfig(
         type="postgres", host="localhost", dbname="db", table="public.table", upsert_key=["id"]

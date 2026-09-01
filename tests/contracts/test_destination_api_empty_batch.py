@@ -236,6 +236,7 @@ API_DESTINATIONS: list[Any] = [
             pixel_id="123456789",
             event_name="Purchase",
             event_id_field="event_id",
+            email_field="email",
             access_token_env="META_CONVERSIONS_ACCESS_TOKEN_TEST",
         ),
         {"META_CONVERSIONS_ACCESS_TOKEN_TEST": "dummy"},

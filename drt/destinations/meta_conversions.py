@@ -11,6 +11,7 @@ Example::
       pixel_id: "123456789012345"
       event_name: Purchase
       event_id_field: event_id  # Required so retries can be deduplicated.
+      email_field: email        # At least one customer identifier is required.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from drt.destinations.row_errors import record_preview, record_row_error
 
 _BASE_URL = "https://graph.facebook.com"
 _MAX_EVENTS_PER_REQUEST = 1000
+_MAX_EVENT_AGE_SECONDS = 604_800
 
 
 class MetaConversionsDestination:
@@ -156,7 +158,12 @@ def _build_event(
         "event_time": _event_time(record, config),
         "action_source": config.action_source,
     }
-    _copy_optional(event, "event_id", record, config.event_id_field)
+    event_id_field = config.event_id_field
+    assert event_id_field is not None
+    event_id = _nonempty(record.get(event_id_field))
+    if event_id is None:
+        raise ValueError(f"Row missing event id field {event_id_field!r}.")
+    event["event_id"] = event_id
     _copy_optional(
         event,
         "event_source_url",
@@ -191,8 +198,12 @@ def _build_event(
     )
     _copy_optional(user_data, "fbc", record, config.fbc_field)
     _copy_optional(user_data, "fbp", record, config.fbp_field)
-    if user_data:
-        event["user_data"] = user_data
+    if not user_data:
+        raise ValueError(
+            "Row missing customer information; at least one configured user_data "
+            "field must resolve to a non-empty value."
+        )
+    event["user_data"] = user_data
 
     if config.value_field is not None:
         value = record.get(config.value_field)
@@ -208,14 +219,23 @@ def _build_event(
 def _event_time(
     record: dict[str, Any], config: MetaConversionsDestinationConfig
 ) -> int:
+    current_time = time.time()
     if config.event_time_field is None:
-        return int(time.time())
-    value = record.get(config.event_time_field)
-    if value is None:
-        raise ValueError(f"Row missing event time field {config.event_time_field!r}.")
-    timestamp = int(value)
-    if isinstance(value, float) and not value.is_integer():
-        raise ValueError("event_time must be a Unix timestamp in whole seconds.")
+        timestamp = int(current_time)
+    else:
+        value = record.get(config.event_time_field)
+        if value is None:
+            raise ValueError(f"Row missing event time field {config.event_time_field!r}.")
+        timestamp = int(value)
+        if isinstance(value, float) and not value.is_integer():
+            raise ValueError("event_time must be a Unix timestamp in whole seconds.")
+
+    cutoff = current_time - _MAX_EVENT_AGE_SECONDS
+    if timestamp < cutoff:
+        raise ValueError(
+            f"event_time timestamp {timestamp} is older than Meta's seven-day "
+            f"cutoff {cutoff}."
+        )
     return timestamp
 
 

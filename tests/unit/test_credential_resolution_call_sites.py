@@ -101,6 +101,7 @@ _URI = "aws-sm://prod/drt/credentials#value"
                 pixel_id="123",
                 event_name="Purchase",
                 event_id_field="event_id",
+                email_field="email",
                 access_token_env=_URI,
             ),
             "meta-token",

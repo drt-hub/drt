@@ -19,6 +19,7 @@ from drt.config.models import (
 )
 from drt.destinations.meta_conversions import (
     MetaConversionsDestination,
+    _event_time,
     _hash_email,
     _hash_phone,
     _normalize_phone,
@@ -35,9 +36,19 @@ def _config(**overrides: object) -> MetaConversionsDestinationConfig:
         "access_token": "meta-token",
         "event_name": "Purchase",
         "event_id_field": "event_id",
+        "email_field": "email",
     }
     values.update(overrides)
     return MetaConversionsDestinationConfig.model_validate(values)
+
+
+def _record(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "event_id": "conversion-1",
+        "email": "test@example.com",
+    }
+    values.update(overrides)
+    return values
 
 
 @pytest.mark.parametrize("email", ["test@example.com", "  Test@Example.com  "])
@@ -82,7 +93,13 @@ def test_request_uses_query_param_auth_and_expected_payload() -> None:
         json={"events_received": 1, "messages": [], "fbtrace_id": "trace"},
         request=httpx.Request("POST", "https://graph.facebook.com/events"),
     )
-    with patch("drt.destinations.meta_conversions.httpx.Client") as client_class:
+    with (
+        patch(
+            "drt.destinations.meta_conversions.time.time",
+            return_value=1_633_552_688 + 604_800,
+        ),
+        patch("drt.destinations.meta_conversions.httpx.Client") as client_class,
+    ):
         client = client_class.return_value.__enter__.return_value
         client.post.return_value = response
         result = MetaConversionsDestination().load([record], config, SyncOptions())
@@ -132,7 +149,7 @@ def test_json_logging_does_not_emit_query_param_access_token() -> None:
             side_effect=lambda **kwargs: real_client(transport=transport, **kwargs),
         ):
             result = MetaConversionsDestination().load(
-                [{"event_id": "conversion-1"}],
+                [_record()],
                 _config(access_token=token),
                 SyncOptions(),
             )
@@ -172,7 +189,7 @@ def test_event_time_defaults_to_current_unix_seconds() -> None:
     ):
         client = client_class.return_value.__enter__.return_value
         client.post.return_value = response
-        MetaConversionsDestination().load([{}], _config(), SyncOptions())
+        MetaConversionsDestination().load([_record()], _config(), SyncOptions())
 
     assert client.post.call_args.kwargs["json"]["data"][0]["event_time"] == 1_700_000_000
 
@@ -190,7 +207,7 @@ def test_batches_at_most_1000_events_per_request() -> None:
         client = client_class.return_value.__enter__.return_value
         client.post.side_effect = responses
         result = MetaConversionsDestination().load(
-            [{} for _ in range(2001)],
+            [_record(event_id=f"conversion-{index}") for index in range(2001)],
             _config(),
             SyncOptions(rate_limit=RateLimitConfig(requests_per_second=0)),
         )
@@ -225,7 +242,7 @@ def test_retry_acquires_rate_limiter_for_every_attempt() -> None:
     ):
         client = client_class.return_value.__enter__.return_value
         client.post.side_effect = [transient, success]
-        result = MetaConversionsDestination().load([{}], _config(), options)
+        result = MetaConversionsDestination().load([_record()], _config(), options)
 
     assert result.success == 1
     assert client.post.call_count == 2
@@ -253,7 +270,11 @@ def test_invalid_events_received_fails_the_whole_batch(
     )
     with patch("drt.destinations.meta_conversions.httpx.Client") as client_class:
         client_class.return_value.__enter__.return_value.post.return_value = response
-        result = MetaConversionsDestination().load([{}, {}], _config(), SyncOptions())
+        result = MetaConversionsDestination().load(
+            [_record(event_id="conversion-1"), _record(event_id="conversion-2")],
+            _config(),
+            SyncOptions(),
+        )
 
     assert result.success == 0
     assert result.failed == 2
@@ -286,3 +307,99 @@ def test_exactly_one_event_name_source_is_required(values: dict[str, str | None]
 def test_event_id_field_is_required_for_retry_deduplication() -> None:
     with pytest.raises(ValidationError, match="event_id_field is required"):
         _config(event_id_field=None)
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"email": "test@example.com"},
+        {"event_id": None, "email": "test@example.com"},
+        {"event_id": "", "email": "test@example.com"},
+        {"event_id": "   ", "email": "test@example.com"},
+    ],
+    ids=["missing", "null", "empty", "blank"],
+)
+def test_event_id_field_must_resolve_for_each_row(record: dict[str, object]) -> None:
+    result = MetaConversionsDestination().load([record], _config(), SyncOptions())
+
+    assert result.success == 0
+    assert result.failed == 1
+    assert "event id field 'event_id'" in result.row_errors[0].error_message
+
+
+def test_at_least_one_customer_information_field_is_required() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        _config(email_field=None)
+
+    message = str(exc_info.value)
+    for field in (
+        "email_field",
+        "phone_field",
+        "client_ip_address_field",
+        "client_user_agent_field",
+        "fbc_field",
+        "fbp_field",
+    ):
+        assert field in message
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "email_field",
+        "phone_field",
+        "client_ip_address_field",
+        "client_user_agent_field",
+        "fbc_field",
+        "fbp_field",
+    ],
+)
+def test_each_customer_information_field_satisfies_config_requirement(field: str) -> None:
+    values: dict[str, object] = {"email_field": None, field: "identifier"}
+
+    assert getattr(_config(**values), field) == "identifier"
+
+
+@pytest.mark.parametrize("email", [None, "", "   "], ids=["null", "empty", "blank"])
+def test_customer_information_must_resolve_for_each_row(email: object) -> None:
+    result = MetaConversionsDestination().load(
+        [_record(email=email)], _config(), SyncOptions()
+    )
+
+    assert result.success == 0
+    assert result.failed == 1
+    assert "Row missing customer information" in result.row_errors[0].error_message
+
+
+def test_event_time_exactly_at_seven_day_boundary_is_accepted() -> None:
+    current_time = 2_000_000_000
+    timestamp = current_time - 604_800
+    config = _config(event_time_field="occurred_at")
+
+    with patch("drt.destinations.meta_conversions.time.time", return_value=current_time):
+        assert _event_time({"occurred_at": timestamp}, config) == timestamp
+
+
+def test_event_time_just_past_seven_day_boundary_is_rejected() -> None:
+    current_time = 2_000_000_000
+    timestamp = current_time - 604_801
+    cutoff = current_time - 604_800
+    config = _config(event_time_field="occurred_at")
+
+    with (
+        patch("drt.destinations.meta_conversions.time.time", return_value=current_time),
+        pytest.raises(ValueError) as exc_info,
+    ):
+        _event_time({"occurred_at": timestamp}, config)
+
+    assert str(timestamp) in str(exc_info.value)
+    assert str(cutoff) in str(exc_info.value)
+
+
+def test_event_time_comfortably_within_seven_day_boundary_is_accepted() -> None:
+    current_time = 2_000_000_000
+    timestamp = current_time - 86_400
+    config = _config(event_time_field="occurred_at")
+
+    with patch("drt.destinations.meta_conversions.time.time", return_value=current_time):
+        assert _event_time({"occurred_at": timestamp}, config) == timestamp

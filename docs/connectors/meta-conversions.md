@@ -39,12 +39,12 @@ destination:
 | `event_time_field` | string \| null | null | Row field containing a Unix timestamp in seconds. When unset, drt uses the current time. Meta accepts times up to seven days old. |
 | `event_id_field` | string | — | Row field containing a stable conversion id. **Required** so Meta can deduplicate a retry when the first response is lost. Use the browser Pixel event id for Pixel + Conversions API deduplication. |
 | `event_source_url_field` | string \| null | null | Optional row field containing the page URL where the event occurred. |
-| `email_field` | string \| null | null | Optional row field mapped to hashed `user_data.em`. |
-| `phone_field` | string \| null | null | Optional row field mapped to hashed `user_data.ph`. |
-| `client_ip_address_field` | string \| null | null | Optional row field mapped unchanged to `user_data.client_ip_address`. |
-| `client_user_agent_field` | string \| null | null | Optional row field mapped unchanged to `user_data.client_user_agent`. |
-| `fbc_field` | string \| null | null | Optional row field mapped unchanged to `user_data.fbc`. |
-| `fbp_field` | string \| null | null | Optional row field mapped unchanged to `user_data.fbp`. |
+| `email_field` | string \| null | null | Row field mapped to hashed `user_data.em`. At least one of the six customer-information mappings (`email_field` through `fbp_field`) must be configured, and every row must resolve at least one mapping to a non-empty value. |
+| `phone_field` | string \| null | null | Row field mapped to hashed `user_data.ph`; counts toward the required customer-information mapping. |
+| `client_ip_address_field` | string \| null | null | Row field mapped unchanged to `user_data.client_ip_address`; counts toward the required customer-information mapping. |
+| `client_user_agent_field` | string \| null | null | Row field mapped unchanged to `user_data.client_user_agent`; counts toward the required customer-information mapping. |
+| `fbc_field` | string \| null | null | Row field mapped unchanged to `user_data.fbc`; counts toward the required customer-information mapping. |
+| `fbp_field` | string \| null | null | Row field mapped unchanged to `user_data.fbp`; counts toward the required customer-information mapping. |
 | `value_field` | string \| null | null | Optional row field mapped to `custom_data.value`. |
 | `currency` | string | `"USD"` | Currency paired with `custom_data.value`. |
 | `retry` | RetryConfig \| null | null | Per-destination override of `sync.retry`. |
@@ -77,7 +77,8 @@ Pre-hashing or double-hashing those four values is incorrect.
 ## Batching and errors
 
 drt sends up to 1000 events in each request. Local mapping failures (for
-example, an empty configured `event_name_field`) are attributed to that row.
+example, an empty configured event name, event id, or customer-information
+field, or an event time older than seven days) are attributed to that row.
 Meta's synchronous response reports an aggregate `events_received` count but
 does not document an event-indexed partial-failure array, so request failures
 and acknowledgement-count mismatches fail the submitted batch atomically; drt
@@ -96,6 +97,7 @@ destination:
   pixel_id: "123456789012345"
   event_name: Purchase
   event_id_field: event_id
+  email_field: email
   rate_limit:
     requests_per_second: 5
 ```
@@ -105,6 +107,6 @@ destination:
 ## Notes
 
 - Core connector — no `pip install` extras needed.
-- Every row should provide a stable value in `event_id_field`; retries can otherwise submit the same conversion more than once. The value should match the browser Pixel event id when using Meta's 48-hour Pixel+CAPI deduplication window.
+- Every row must provide a non-empty stable value in `event_id_field`; invalid rows are not sent. The value should match the browser Pixel event id when using Meta's 48-hour Pixel+CAPI deduplication window.
 - Meta Graph API versions expire on a roughly two-year cycle. Review the [Meta version schedule](https://developers.facebook.com/docs/graph-api/changelog/versions/) periodically and override or bump `api_version` before `v25.0` expires.
 - This connector covers the core synchronous Pixel events endpoint. Meta's Payload Helper, Events Manager UI workflows, and app-event-specific fields beyond the generic configurable `action_source` are out of scope.
