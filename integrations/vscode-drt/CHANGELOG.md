@@ -6,6 +6,11 @@ drt-core version its bundled schemas were generated from.
 
 ## [0.1.13] - Unreleased
 
+- Bundled JSON Schemas regenerated from drt-core: the `klaviyo` destination
+  gains an `endpoint: profile | event` mode plus `metric_name`,
+  `metric_name_field`, `time_field`, `value_field`, and `unique_id_field` for
+  sending events (not just profile updates) to Klaviyo's Events API
+  (drt-hub/drt#1052).
 - Bundled JSON Schemas regenerated from drt-core: the destination union gains
   the `meta_conversions` connector for batched Meta Conversions API events,
   including field mappings, hashing inputs, retry, and rate-limit configuration
