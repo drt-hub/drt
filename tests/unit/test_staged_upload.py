@@ -430,6 +430,43 @@ def test_poll_clamps_request_timeout_to_fresh_remaining_budget() -> None:
     assert client.request.call_args.kwargs["timeout"] == 3.0
 
 
+def test_poll_raises_timeout_at_loop_top_without_another_request() -> None:
+    """If the deadline has already passed by the time the next iteration
+    starts (e.g. the interval sleep after a non-terminal status consumed
+    the remaining budget), the loop must raise immediately rather than
+    attempt one more request."""
+    poll_config = StagedUploadPollConfig(
+        url="https://api.example.com/jobs/j-1",
+        interval_seconds=0,
+        timeout_seconds=5,
+    )
+    running = httpx.Response(
+        200,
+        json={"status": "RUNNING"},
+        request=httpx.Request("GET", poll_config.url),
+    )
+
+    with (
+        patch("drt.destinations.staged_upload.httpx.Client") as client_class,
+        patch(
+            "drt.destinations.staged_upload.time.monotonic",
+            side_effect=[100.0, 101.0, 101.0, 101.0, 106.0],
+        ),
+        patch(
+            "drt.destinations.staged_upload.with_retry",
+            side_effect=lambda operation, _config: operation(),
+        ),
+    ):
+        client = client_class.return_value.__enter__.return_value
+        client.request.return_value = running
+        with pytest.raises(TimeoutError, match="Poll timed out after 5s"):
+            StagedUploadDestination()._poll(
+                poll_config, {}, RetryConfig(), MagicMock()
+            )
+
+    assert client.request.call_count == 1
+
+
 def test_finalize_poll_acquires_rate_limiter_per_status_check() -> None:
     config = StagedUploadDestinationConfig(
         type="staged_upload",
