@@ -179,8 +179,14 @@ class KlaviyoDestination:
         if config.time_field:
             time_value = record.get(config.time_field)
             if time_value is not None:
-                if isinstance(time_value, (datetime, date)):
+                if isinstance(time_value, datetime):
                     time_value = time_value.isoformat()
+                elif isinstance(time_value, date):
+                    raise ValueError(
+                        f"Klaviyo event time field {config.time_field!r} must use a "
+                        "TIMESTAMP/DATETIME-typed source column, not a DATE-typed "
+                        "source column."
+                    )
                 attributes["time"] = time_value
         if config.value_field:
             value = record.get(config.value_field)

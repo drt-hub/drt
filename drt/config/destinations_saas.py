@@ -409,7 +409,7 @@ class KlaviyoDestinationConfig(BaseModel):
     list_id: str | None = None
     list_id_env: str | None = None
     # Klaviyo API revision (sent as the `revision` header).
-    revision: str = "2024-10-15"
+    revision: str = "2026-01-15"
     retry: RetryConfig | None = None
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 

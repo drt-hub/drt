@@ -24,12 +24,12 @@ destination:
 | `email_field` | string | `"email"` | Row field used as the profile identifier. |
 | `metric_name_field` | string \| null | null | Row field holding the event/metric name (maximum 128 characters) for `endpoint: event`. Required unless `metric_name` is set. |
 | `metric_name` | string \| null | null | Constant event/metric name (maximum 128 characters) for `endpoint: event`. Alternative to `metric_name_field`. |
-| `time_field` | string \| null | null | Row field holding the event timestamp. Omitted from the payload when unset or null; Klaviyo then defaults to the current time. |
+| `time_field` | string \| null | null | Row field holding the event timestamp. A warehouse `TIMESTAMP`/`DATETIME` value is sent as ISO-8601; a date-only `DATE` value is rejected because Klaviyo requires a time component. Omitted from the payload when unset or null; Klaviyo then defaults to the current time. |
 | `value_field` | string \| null | null | Row field holding the event's numeric `value`. Omitted when unset or null. |
 | `unique_id_field` | string \| null | null | Row field holding Klaviyo's event deduplication key (`unique_id`). Required for `endpoint: event`; omitted when the configured row value is null. |
 | `properties_template` | string \| null | null | Jinja2 JSON template → custom profile/event `properties`. When omitted, profile mode sends all row fields except `email_field`; event mode also excludes configured metric/time/value/unique-ID control fields. Event payloads always include `properties` (at least `{}`). |
 | `list_id` / `list_id_env` | string \| null | null | For `endpoint: profile`, add each upserted profile to this Klaviyo list. |
-| `revision` | string | `"2024-10-15"` | Klaviyo API revision (sent as the `revision` header). |
+| `revision` | string | `"2026-01-15"` | Klaviyo API revision (sent as the `revision` header). |
 | `retry` | RetryConfig \| null | null | Per-destination override of `sync.retry`. |
 | `rate_limit` | RateLimitConfig \| null | null | Per-destination override of `sync.rate_limit`. |
 
@@ -69,7 +69,7 @@ destination:
     {"cart_id": "{{ row.cart_id }}", "plan": "{{ row.plan }}"}
 ```
 
-Every event needs a non-empty email and metric name. Set either `metric_name_field` for a per-row name or `metric_name` for one constant name. `unique_id_field` is required: [Klaviyo documents](https://developers.klaviyo.com/en/reference/events_api_overview) that an omitted `unique_id` defaults to the event timestamp truncated to one second, which can silently discard distinct same-profile/metric events in that second and makes an ambiguous request retry non-idempotent. Use a stable source ID for each logical event. `time` and `value` are optional and omitted when their configured row value is null; date/datetime values are sent as ISO-8601 strings and numeric values are sent as numbers. Without a template, configured event control fields are excluded from `properties`; custom templates remain explicit. Event `properties` is always sent, using `{}` when there are no properties.
+Every event needs a non-empty email and metric name. Set either `metric_name_field` for a per-row name or `metric_name` for one constant name. `unique_id_field` is required: [Klaviyo documents](https://developers.klaviyo.com/en/reference/events_api_overview) that an omitted `unique_id` defaults to the event timestamp truncated to one second, which can silently discard distinct same-profile/metric events in that second and makes an ambiguous request retry non-idempotent. Use a stable source ID for each logical event. `time` and `value` are optional and omitted when their configured row value is null; datetime values are sent as ISO-8601 strings, date-only values are rejected, and numeric values are sent as numbers. Use a warehouse `TIMESTAMP`/`DATETIME` source column—not a `DATE` column—for `time_field`. Without a template, configured event control fields are excluded from `properties`; custom templates remain explicit. Event `properties` is always sent, using `{}` when there are no properties.
 
 ## Rate limiting
 

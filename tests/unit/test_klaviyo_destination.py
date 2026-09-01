@@ -132,7 +132,7 @@ class TestKlaviyoLoad:
         assert client.post.call_args.kwargs == {
             "headers": {
                 "Authorization": "Klaviyo-API-Key pk_test",
-                "revision": "2024-10-15",
+                "revision": "2026-01-15",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             },
@@ -310,7 +310,7 @@ class TestKlaviyoEventLoad:
         assert client.post.call_args.args == ("https://a.klaviyo.com/api/events/",)
         assert client.post.call_args.kwargs["headers"] == {
             "Authorization": "Klaviyo-API-Key pk_test",
-            "revision": "2024-10-15",
+            "revision": "2026-01-15",
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
@@ -338,15 +338,12 @@ class TestKlaviyoEventLoad:
             }
         }
 
-    @pytest.mark.parametrize(
-        "occurred_at",
-        [datetime(2022, 11, 8, tzinfo=timezone.utc), date(2022, 11, 8)],
-    )
     def test_event_normalizes_warehouse_types_and_excludes_control_fields(
-        self, occurred_at: datetime | date
+        self,
     ) -> None:
         client = MagicMock()
         client.post.return_value = _resp(202)
+        occurred_at = datetime(2022, 11, 8, tzinfo=timezone.utc)
         config = _config(
             endpoint="event",
             metric_name_field="event_name",
@@ -374,6 +371,32 @@ class TestKlaviyoEventLoad:
         assert attributes["unique_id"] == "123"
         assert attributes["properties"] == {"plan": "pro"}
         json.dumps(body)  # httpx's json= encoding must accept the final payload.
+
+    def test_event_rejects_date_only_time_field(self) -> None:
+        client = MagicMock()
+        config = _config(
+            endpoint="event",
+            metric_name="Placed Order",
+            time_field="occurred_at",
+            unique_id_field="event_id",
+        )
+        record = {
+            "email": "a@x.com",
+            "occurred_at": date(2022, 11, 8),
+            "event_id": "evt-123",
+        }
+
+        with _patch_client(client):
+            result = KlaviyoDestination().load([record], config, _options())
+
+        assert result.success == 0
+        assert result.failed == 1
+        assert (
+            "time field 'occurred_at' must use a TIMESTAMP/DATETIME-typed source "
+            "column, not a DATE-typed source column"
+            in result.row_errors[0].error_message
+        )
+        client.post.assert_not_called()
 
     @pytest.mark.parametrize(
         ("config_field", "payload_key"),
