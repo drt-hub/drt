@@ -188,8 +188,11 @@ class KlaviyoDestination:
                 attributes["value"] = float(value)
         if config.unique_id_field:
             unique_id = record.get(config.unique_id_field)
-            if unique_id is not None:
-                attributes["unique_id"] = str(unique_id)
+            if unique_id is None or str(unique_id).strip() == "":
+                raise ValueError(
+                    f"Row missing unique_id field {config.unique_id_field!r}."
+                )
+            attributes["unique_id"] = str(unique_id)
 
         payload = {"data": {"type": "event", "attributes": attributes}}
 

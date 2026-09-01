@@ -417,7 +417,7 @@ class TestKlaviyoEventLoad:
                         "email": "a@x.com",
                         "occurred_at": None,
                         "amount": None,
-                        "event_id": None,
+                        "event_id": "evt-123",
                     }
                 ],
                 config,
@@ -428,7 +428,35 @@ class TestKlaviyoEventLoad:
         attributes = client.post.call_args.kwargs["json"]["data"]["attributes"]
         assert "time" not in attributes
         assert "value" not in attributes
-        assert "unique_id" not in attributes
+        assert attributes["unique_id"] == "evt-123"
+
+    @pytest.mark.parametrize(
+        "record",
+        [
+            {"email": "a@x.com"},
+            {"email": "a@x.com", "event_id": None},
+            {"email": "a@x.com", "event_id": ""},
+            {"email": "a@x.com", "event_id": "  "},
+        ],
+    )
+    def test_event_missing_or_blank_unique_id_is_recorded(
+        self, record: dict[str, Any]
+    ) -> None:
+        client = MagicMock()
+        config = _config(
+            endpoint="event",
+            metric_name="Upgraded Plan",
+            unique_id_field="event_id",
+        )
+
+        with _patch_client(client):
+            result = KlaviyoDestination().load([record], config, _options())
+
+        assert result.success == 0
+        assert result.failed == 1
+        assert "unique_id field 'event_id'" in result.row_errors[0].error_message
+        client.post.assert_not_called()
+        client.request.assert_not_called()
 
     def test_event_sends_empty_properties_when_row_has_no_properties(self) -> None:
         client = MagicMock()
