@@ -63,6 +63,88 @@ def test_phone_hashing_normalizes_before_sha256(phone: str) -> None:
     assert _hash_phone(phone) == PHONE_HASH
 
 
+def test_integer_event_id_is_coerced_to_string() -> None:
+    response = httpx.Response(
+        200,
+        json={"events_received": 1},
+        request=httpx.Request("POST", "https://graph.facebook.com/events"),
+    )
+    with patch("drt.destinations.meta_conversions.httpx.Client") as client_class:
+        client = client_class.return_value.__enter__.return_value
+        client.post.return_value = response
+        result = MetaConversionsDestination().load(
+            [_record(event_id=12345)], _config(), SyncOptions()
+        )
+
+    assert result.success == 1
+    assert client.post.call_args.kwargs["json"]["data"][0]["event_id"] == "12345"
+
+
+@pytest.mark.parametrize("event_id", [True, {"id": 12345}, [12345]])
+def test_invalid_event_id_type_is_rejected_per_row(event_id: object) -> None:
+    result = MetaConversionsDestination().load(
+        [_record(event_id=event_id)], _config(), SyncOptions()
+    )
+
+    assert result.success == 0
+    assert result.failed == 1
+    assert "event id field 'event_id' must be a string or a plain number" in (
+        result.row_errors[0].error_message
+    )
+
+
+@pytest.mark.parametrize(
+    "email",
+    [float("nan"), 12345, True, {"address": "test@example.com"}, ["test@example.com"]],
+    ids=["nan", "integer", "bool", "dict", "list"],
+)
+def test_non_string_email_is_rejected_per_row(email: object) -> None:
+    result = MetaConversionsDestination().load(
+        [_record(email=email)], _config(), SyncOptions()
+    )
+
+    assert result.success == 0
+    assert result.failed == 1
+    assert "email must be a string" in result.row_errors[0].error_message
+
+
+@pytest.mark.parametrize(
+    "phone",
+    [14155551234.0, True, {"number": "14155551234"}, ["14155551234"]],
+    ids=["float", "bool", "dict", "list"],
+)
+def test_invalid_phone_type_is_rejected_per_row(phone: object) -> None:
+    result = MetaConversionsDestination().load(
+        [_record(phone=phone)],
+        _config(email_field=None, phone_field="phone"),
+        SyncOptions(),
+    )
+
+    assert result.success == 0
+    assert result.failed == 1
+    assert "phone must be a string or integer" in result.row_errors[0].error_message
+
+
+def test_integer_phone_is_accepted_and_hashed() -> None:
+    response = httpx.Response(
+        200,
+        json={"events_received": 1},
+        request=httpx.Request("POST", "https://graph.facebook.com/events"),
+    )
+    with patch("drt.destinations.meta_conversions.httpx.Client") as client_class:
+        client = client_class.return_value.__enter__.return_value
+        client.post.return_value = response
+        result = MetaConversionsDestination().load(
+            [_record(phone=14155551234)],
+            _config(email_field=None, phone_field="phone"),
+            SyncOptions(),
+        )
+
+    assert result.success == 1
+    user_data = client.post.call_args.kwargs["json"]["data"][0]["user_data"]
+    assert user_data["ph"] == [PHONE_HASH]
+
+
 def test_request_uses_bearer_auth_without_token_in_url_and_expected_payload() -> None:
     config = _config(
         event_time_field="occurred_at",

@@ -173,6 +173,12 @@ def _build_event(
     event_id = _nonempty(record.get(event_id_field))
     if event_id is None:
         raise ValueError(f"Row missing event id field {event_id_field!r}.")
+    if isinstance(event_id, bool) or not isinstance(event_id, (str, int, float)):
+        raise ValueError(
+            f"Row event id field {event_id_field!r} must be a string or a plain "
+            f"number, not a container or boolean; got {type(event_id).__name__}."
+        )
+    event_id = str(event_id)
     event["event_id"] = event_id
     if config.action_source == "website":
         event_source_url_field = config.event_source_url_field
@@ -326,7 +332,11 @@ def _sha256(value: str) -> str:
 
 
 def _normalize_email(value: Any) -> str:
-    return str(value).strip().lower()
+    if not isinstance(value, str):
+        raise ValueError(
+            f"email must be a string; got {type(value).__name__}."
+        )
+    return value.strip().lower()
 
 
 def _hash_email(value: Any) -> str:
@@ -334,6 +344,11 @@ def _hash_email(value: Any) -> str:
 
 
 def _normalize_phone(value: Any) -> str:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError(
+            "phone must be a string or integer, not a float, container, or boolean; "
+            f"got {type(value).__name__}."
+        )
     return re.sub(r"[^0-9]", "", str(value))
 
 
