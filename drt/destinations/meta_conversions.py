@@ -19,7 +19,7 @@ Example::
 from __future__ import annotations
 
 import hashlib
-import logging
+import json
 import math
 import re
 import time
@@ -41,12 +41,6 @@ from drt.destinations.row_errors import record_preview, record_row_error
 _BASE_URL = "https://graph.facebook.com"
 _MAX_EVENTS_PER_REQUEST = 1000
 _MAX_EVENT_AGE_SECONDS = 604_800
-
-# Best-effort protection against httpx's default request log exposing Meta's access
-# token, which this API sends in the URL query string. This runs once at import time;
-# an embedding app that later reconfigures logging (for example, via dictConfig) can
-# override it. That limitation is a known, accepted residual risk.
-logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 class MetaConversionsDestination:
@@ -99,8 +93,10 @@ class MetaConversionsDestination:
                     rate_limiter.acquire()
                     response = client.post(
                         url,
-                        params={"access_token": access_token},
-                        headers={"Content-Type": "application/json"},
+                        headers={
+                            "Authorization": f"Bearer {access_token}",
+                            "Content-Type": "application/json",
+                        },
                         json=payload,
                     )
                     response.raise_for_status()
@@ -253,6 +249,14 @@ def _build_event(
                 "value": value,
                 "currency": config.currency,
             }
+
+    try:
+        json.dumps(event, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Row event_id {event_id!r} contains a value that cannot be sent to Meta: "
+            f"{exc}"
+        ) from exc
 
     return event
 

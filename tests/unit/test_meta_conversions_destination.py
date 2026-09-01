@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-import importlib
-import io
-import logging
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 from pydantic import ValidationError
 
-from drt.cli._logging import _configure_json_logging
 from drt.config.models import (
     MetaConversionsDestinationConfig,
     RateLimitConfig,
@@ -67,7 +63,7 @@ def test_phone_hashing_normalizes_before_sha256(phone: str) -> None:
     assert _hash_phone(phone) == PHONE_HASH
 
 
-def test_request_uses_query_param_auth_and_expected_payload() -> None:
+def test_request_uses_bearer_auth_without_token_in_url_and_expected_payload() -> None:
     config = _config(
         event_time_field="occurred_at",
         event_id_field="id",
@@ -112,8 +108,9 @@ def test_request_uses_query_param_auth_and_expected_payload() -> None:
     assert result.success == 1
     request = client.post.call_args
     assert request.args[0] == "https://graph.facebook.com/v25.0/123456789/events"
-    assert request.kwargs["params"] == {"access_token": "meta-token"}
-    assert "Authorization" not in request.kwargs["headers"]
+    assert "params" not in request.kwargs
+    assert "access_token" not in request.args[0]
+    assert request.kwargs["headers"]["Authorization"] == "Bearer meta-token"
     event = request.kwargs["json"]["data"][0]
     assert event == {
         "event_name": "Purchase",
@@ -131,82 +128,6 @@ def test_request_uses_query_param_auth_and_expected_payload() -> None:
         },
         "custom_data": {"value": 100.2, "currency": "USD"},
     }
-
-
-def test_json_logging_does_not_emit_query_param_access_token() -> None:
-    token = "SUPERSECRET_META_TOKEN"
-    stream = io.StringIO()
-    root = logging.root
-    httpx_logger = logging.getLogger("httpx")
-    previous_handlers = root.handlers[:]
-    previous_root_level = root.level
-    previous_httpx_level = httpx_logger.level
-    real_client = httpx.Client
-    transport = httpx.MockTransport(
-        lambda _request: httpx.Response(200, json={"events_received": 1})
-    )
-
-    try:
-        _configure_json_logging()
-        root.handlers[0].setStream(stream)
-        with patch(
-            "drt.destinations.meta_conversions.httpx.Client",
-            side_effect=lambda **kwargs: real_client(transport=transport, **kwargs),
-        ):
-            result = MetaConversionsDestination().load(
-                [_record()],
-                _config(access_token=token),
-                SyncOptions(),
-            )
-    finally:
-        root.handlers = previous_handlers
-        root.setLevel(previous_root_level)
-        httpx_logger.setLevel(previous_httpx_level)
-
-    assert result.success == 1
-    assert token not in stream.getvalue()
-
-
-def test_library_import_suppresses_httpx_token_logging_with_info_root() -> None:
-    import drt.destinations.meta_conversions as meta_conversions
-
-    token = "ORCHESTRATOR_META_TOKEN"
-    stream = io.StringIO()
-    handler = logging.StreamHandler(stream)
-    root = logging.root
-    httpx_logger = logging.getLogger("httpx")
-    previous_handlers = root.handlers[:]
-    previous_root_level = root.level
-    previous_httpx_level = httpx_logger.level
-    real_client = httpx.Client
-    transport = httpx.MockTransport(
-        lambda _request: httpx.Response(200, json={"events_received": 1})
-    )
-
-    try:
-        root.handlers = [handler]
-        root.setLevel(logging.INFO)
-        httpx_logger.setLevel(logging.NOTSET)
-        meta_conversions = importlib.reload(meta_conversions)
-        assert httpx_logger.level == logging.WARNING
-        with patch.object(
-            meta_conversions.httpx,
-            "Client",
-            side_effect=lambda **kwargs: real_client(transport=transport, **kwargs),
-        ):
-            result = meta_conversions.MetaConversionsDestination().load(
-                [_record()],
-                _config(access_token=token),
-                SyncOptions(),
-            )
-    finally:
-        root.handlers = previous_handlers
-        root.setLevel(previous_root_level)
-        httpx_logger.setLevel(previous_httpx_level)
-
-    assert result.success == 1
-    assert token not in stream.getvalue()
-
 
 def test_action_source_defaults_to_website() -> None:
     assert _config().action_source == "website"
@@ -352,6 +273,39 @@ def test_non_finite_value_fails_only_its_row() -> None:
         result.row_errors[0].error_message
     )
     assert len(client.post.call_args.kwargs["json"]["data"]) == 3
+
+
+@pytest.mark.parametrize("on_error", ["fail", "skip"])
+def test_non_serializable_user_agent_fails_only_its_row(on_error: str) -> None:
+    response = httpx.Response(
+        200,
+        json={"events_received": 1},
+        request=httpx.Request("POST", "https://graph.facebook.com/events"),
+    )
+    records = [
+        _record(event_id="conversion-valid"),
+        _record(event_id="conversion-invalid", user_agent=object()),
+    ]
+
+    with patch("drt.destinations.meta_conversions.httpx.Client") as client_class:
+        client = client_class.return_value.__enter__.return_value
+        client.post.return_value = response
+        result = MetaConversionsDestination().load(
+            records,
+            _config(),
+            SyncOptions(on_error=on_error),
+        )
+
+    assert result.success == 1
+    assert result.failed == 1
+    assert len(result.row_errors) == 1
+    assert result.row_errors[0].batch_index == 1
+    assert "event_id 'conversion-invalid'" in result.row_errors[0].error_message
+    assert "cannot be sent to Meta" in result.row_errors[0].error_message
+    assert client.post.call_count == 1
+    assert client.post.call_args.kwargs["json"]["data"][0]["event_id"] == (
+        "conversion-valid"
+    )
 
 
 def test_retry_acquires_rate_limiter_for_every_attempt() -> None:
