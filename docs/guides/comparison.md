@@ -1,6 +1,10 @@
 # Choosing a Reverse ETL Tool
 
-This page compares approaches to reverse ETL — activating data from your warehouse to external services. We focus on factual differences so you can make the right choice for your stack.
+This page explains how drt differs from commercial reverse-ETL tools — not
+with a feature checklist, but with the one structural claim that actually
+matters, plus the reasoning behind it. See
+[ADR 0011](../adr/0011-subtraction-positioning-vs-reverse-etl.md) for the
+full decision this page is based on.
 
 ## The Modern Data Activation Stack
 
@@ -12,45 +16,32 @@ All three are open-source, CLI-first, YAML-configured, and MCP-enabled. Together
 
 ---
 
-## Comparison
+## The core difference
 
-|  | **drt** | **Census** | **Hightouch** | **Polytomic** |
-|---|---|---|---|---|
-| **Type** | OSS (Apache 2.0) | SaaS (Fivetran) | SaaS | SaaS / self-hosted |
-| **Pricing** | Free | Paid plans | Paid plans | Paid plans / free tier |
-| **Deployment** | Self-hosted | Managed cloud | Managed cloud | Managed / self-hosted |
-| **Configuration** | YAML + CLI | GUI | GUI | GUI |
-| **Git-native** | Yes (YAML in repo) | Partial (API) | Partial (API) | Partial (API) |
-| **CI/CD** | Native (exit codes, `--output json`) | Webhook/API | Webhook/API | API |
-| **Sources** | 10 | 20+ | 30+ | 20+ |
-| **Destinations** | 22 | 200+ | 200+ | 50+ |
-| **MCP Server** | Yes (6 tools) | Partial (enrichment) | No | Yes |
-| **LLM Skills** | Yes (Claude Code) | AI Columns | No | No |
-| **Orchestration** | Dagster, Airflow, Prefect | Built-in | Built-in | Built-in |
-| **Data validation** | `drt test` (5 validators) | Built-in | Built-in | Limited |
-| **Incremental sync** | Cursor-based | Multiple strategies | Multiple strategies | Multiple strategies |
-| **Managed infrastructure** | No (you host) | Yes | Yes | Yes / No |
+**Your data goes straight from your warehouse to the destination, never
+through a drt-hosted intermediary.** Commercial reverse-ETL tools —
+Census, Hightouch, RudderStack Reverse ETL, Polytomic, and similar — route
+it through their hosted service to sync it. drt runs wherever you already
+run code (GitHub Actions, Dagster, cron, a container) and talks directly
+to the destination API.
 
----
+That one structural fact is also why three other things are true, on
+purpose rather than by accident of what hasn't been built yet:
 
-## When to choose drt
+- **No per-row bill.** There's no metered infrastructure standing between
+  your warehouse and the destination to bill against.
+- **No web UI.** Config-as-code — YAML in your repo, reviewed in PRs,
+  diffable — is the position, not a placeholder for a UI that hasn't been
+  built yet.
+- **No audience/segmentation builder.** Building the record set to sync is
+  a SQL/dbt-modeling problem. drt reads whatever query or dbt model a
+  sync's `model` field points at and syncs exactly that — it doesn't
+  duplicate the modeling layer you already have.
 
-**drt is a good fit when:**
-
-- You want a **free, self-hosted** solution with no vendor lock-in
-- Your team already uses **dbt and/or dlt** and wants the same developer experience for reverse ETL
-- You value **Git-native configuration** — YAML files in your repo, reviewed in PRs, deployed via CI
-- You work with **AI coding tools** (Claude, Cursor) and want your reverse ETL layer to be accessible via MCP
-- You need **10-30 destinations** rather than 200+ — and the ones you need are covered
-- You prefer to **own your data pipeline** end-to-end
-- You want to grant **read-only access to your source warehouse** — drt's supported incremental strategy (cursor-based, reading a column like `updated_at`) never needs to write into the source *to read from it*. (One opt-in exception: `sync.watermark.storage: bigquery` — see below.)
-
-**drt is not the right fit when:**
-
-- You need **200+ pre-built connectors** out of the box — Census and Hightouch have much larger connector catalogs
-- You need a **managed, no-ops solution** — drt requires you to host and maintain the pipeline
-- Your team is **non-technical** and prefers a GUI over YAML/CLI
-- You need **built-in scheduling and monitoring** — drt relies on external orchestrators (Dagster, Airflow, cron)
+drt does one thing — read a query, map fields, write to a destination API
+— and leaves loading, transforming, hosting, and billing to the tools built
+for those jobs. This is a deliberate design decision, not a temporary gap:
+see the FAQ below for the reasoning and its honest tradeoff.
 
 ---
 
@@ -90,6 +81,45 @@ project/dataset) to keep the source warehouse completely untouched.
 
 ---
 
+## FAQ: why not a UI, a hosted runtime, or an audience builder?
+
+**Isn't a UI table stakes for a reverse-ETL tool?** For a commercial
+product, yes — the UI usually *is* the product. drt's position is that
+config-as-code is a better fit for a team that already reviews dbt models
+and Airflow DAGs in pull requests: a sync is a YAML file, diffable and
+git-blame-able like any other change to the pipeline.
+
+**Why no hosted/managed version?** Because that's what makes "no per-row
+bill" structural rather than a pricing tier that could change later.
+There's no drt-operated service between your warehouse and your
+destinations to meter in the first place — drt runs as a process inside
+infrastructure you already operate.
+
+**Why doesn't drt have an audience builder?** Because you likely already
+have one: dbt. Segmenting "which rows should sync" is a modeling problem,
+and duplicating dbt's job inside the sync tool is the same "one tool doing
+four jobs" mistake this design avoids elsewhere. Point a sync's `model`
+field at a dbt model or raw SQL, and drt syncs exactly what that query
+returns.
+
+**Does this mean drt is missing features?** Depends on what you're
+comparing. drt covers 13 sources and 34 destinations today (see below) —
+fewer than a 200+-connector commercial catalog, and if your workflow
+needs one of those, a commercial tool is the better fit. What drt doesn't
+have is a UI, a hosted runtime, or an audience builder to catch up on —
+those are the position, not gaps waiting to be filled. New destinations
+are also a plugin away, not a request to drt-hub: see
+[Contributing](https://github.com/drt-hub/drt/blob/main/CONTRIBUTING.md).
+
+**Is this permanent?** For `drt-core` (this repository), yes — a feature
+request reintroducing a UI, hosted runtime, or audience builder here would
+be declined by default, citing
+[ADR 0011](../adr/0011-subtraction-positioning-vs-reverse-etl.md). That
+ADR governs this OSS engine specifically, not every product drt-hub might
+ever build.
+
+---
+
 ## The ecosystem advantage
 
 drt is designed to complement, not compete with, the modern data stack:
@@ -120,13 +150,13 @@ This means your entire data pipeline — from ingestion to activation — can be
 
 drt currently supports:
 
-**Sources (10):** BigQuery, DuckDB, PostgreSQL, Snowflake, SQLite, Redshift, ClickHouse, MySQL, Databricks, SQL Server
+**Sources (13):** BigQuery, DuckDB, PostgreSQL, Snowflake, SQLite, Redshift, ClickHouse, MySQL, Databricks, SQL Server, Delta Lake, Iceberg, REST API
 
-**Destinations (23):** REST API, Slack, Discord, Teams, GitHub Actions, HubSpot, Zendesk, Google Sheets, PostgreSQL, MySQL, ClickHouse, Parquet, CSV/JSON/JSONL, Jira, Linear, SendGrid, Notion, Twilio SMS, Intercom, Email SMTP, Salesforce Bulk API, Google Ads, Staged Upload
+**Destinations (34):** REST API, Slack, Discord, Teams, GitHub Actions, HubSpot, Zendesk, Google Sheets, PostgreSQL, MySQL, ClickHouse, Snowflake, Databricks, BigQuery, Parquet, File (CSV/JSON/JSONL), S3, GCS, Azure Blob, Jira, Linear, SendGrid, Notion, Twilio SMS, Intercom, Email SMTP, Salesforce Bulk API, Staged Upload, Google Ads, Amplitude, Mixpanel, Elasticsearch, Airtable, Klaviyo
 
 **Integrations:** Dagster (`dagster-drt`), Airflow (built-in), Prefect (built-in), dbt manifest reader
 
-New connectors are added regularly by the community. The generic REST API destination covers any HTTP endpoint not yet supported natively. See [Good First Issues](https://github.com/drt-hub/drt/issues?q=is%3Aopen+label%3A%22good+first+issue%22) to contribute a connector.
+New connectors are added regularly by the community, and third-party connectors can register as a plugin without drt-hub as a gatekeeper. The generic REST API destination covers any HTTP endpoint not yet supported natively. See [Good First Issues](https://github.com/drt-hub/drt/issues?q=is%3Aopen+label%3A%22good+first+issue%22) to contribute a connector.
 
 ---
 
