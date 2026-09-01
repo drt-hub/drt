@@ -58,6 +58,9 @@ jobs:
       - name: Install drt-core
         run: uv pip install --system -e .
 
+      - name: Show resolved pydantic version
+        run: python -c "import pydantic; print(f'pydantic {pydantic.__version__}')"
+
       - name: Regenerate bundled schemas
         working-directory: integrations/vscode-drt
         run: ./scripts/regenerate-schemas.sh
