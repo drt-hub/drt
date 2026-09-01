@@ -10,6 +10,13 @@ drt-core version its bundled schemas were generated from.
   `salesforce_bulk` destinations now validate destination-level `retry` and
   `rate_limit` overrides, matching every other rate-limited destination type
   (drt-hub/drt#1048).
+- Bundled JSON Schemas regenerated: the `destination` union's schema also picked
+  up the #997 callable-discriminator shape (a flat `oneOf` list including
+  `GenericDestinationConfig`, no `discriminator`/`mapping` block) — the
+  previously-committed copy hadn't actually reflected that change, because the
+  exact JSON Schema this union serializes to depends on the installed pydantic
+  version and isn't pinned (drt-hub/drt#1070). No behavior change: draft-07
+  doesn't use `discriminator` as a validation keyword either way.
 - Bundled JSON Schemas regenerated from drt-core: `sync.batch_size` now has a
   minimum of `1` (`exclusiveMinimum: 0`) — `0` or a negative value used to
   either crash or silently insert nothing on some destinations while
