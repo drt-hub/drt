@@ -103,9 +103,7 @@ def connector_inventory() -> dict[str, list[dict[str, str]]]:
     already keeps aligned with these lists).
     """
     return {
-        "sources": [
-            {"name": name, "type": t, "install": install_target(t)} for t, name in SOURCES
-        ],
+        "sources": [{"name": name, "type": t, "install": install_target(t)} for t, name in SOURCES],
         "destinations": [
             {"name": name, "type": t, "install": install_target(t)} for t, name in DESTINATIONS
         ],

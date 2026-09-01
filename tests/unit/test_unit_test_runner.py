@@ -182,9 +182,7 @@ class TestAlertsStripped:
                 "model": "ref('t')",
                 "destination": {"type": "rest_api", "url": "https://example.com"},
                 "sync": {"on_error": "skip"},
-                "alerts": {
-                    "on_failure": [{"type": "webhook", "url": "https://hooks.example/x"}]
-                },
+                "alerts": {"on_failure": [{"type": "webhook", "url": "https://hooks.example/x"}]},
             }
         )
 

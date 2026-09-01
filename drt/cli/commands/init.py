@@ -83,9 +83,7 @@ def _init_from_template(name: str, project_dir: Path) -> None:
     created: list[str] = []
     project_file = project_dir / "drt_project.yml"
     if not project_file.exists():
-        project_file.write_text(
-            "name: my_drt_project\nprofile: default\n"
-        )
+        project_file.write_text("name: my_drt_project\nprofile: default\n")
         created.append(str(project_file))
 
     drt_dir = project_dir / ".drt"

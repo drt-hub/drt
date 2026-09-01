@@ -146,8 +146,7 @@ def docs_generate(
         return
 
     raise typer.BadParameter(
-        f"Unknown --format value: {format!r}. "
-        "Expected: html | mermaid | json | dbt-exposures."
+        f"Unknown --format value: {format!r}. Expected: html | mermaid | json | dbt-exposures."
     )
 
 

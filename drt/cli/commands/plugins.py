@@ -94,11 +94,7 @@ def list_plugins(
         if not e.loaded:
             # `not e.loaded` rather than `if e.error:` so an exception that
             # stringifies empty still renders as a failure instead of green.
-            status = (
-                f"[red]error: {e.error}[/red]"
-                if e.error
-                else "[red]not loaded[/red]"
-            )
+            status = f"[red]error: {e.error}[/red]" if e.error else "[red]not loaded[/red]"
         else:
             # No connector special case since #997 — a registered source or
             # destination type is nameable in a sync YAML like any built-in.

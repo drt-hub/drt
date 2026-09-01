@@ -88,8 +88,7 @@ def extract_key(raw: str, ref: SecretRef, *, scheme: str) -> str:
         payload = json.loads(raw)
     except json.JSONDecodeError as e:
         raise LookupError(
-            f"{scheme}: '{ref.path}#{ref.key}' requested a key, but the secret "
-            "value isn't JSON"
+            f"{scheme}: '{ref.path}#{ref.key}' requested a key, but the secret value isn't JSON"
         ) from e
     if not isinstance(payload, dict):
         raise LookupError(f"{scheme}: key '{ref.key}' not found in secret '{ref.path}'")

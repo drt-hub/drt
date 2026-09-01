@@ -84,10 +84,7 @@ def _sync(
 def _read_records(path: Path, file_format: str) -> list[dict[str, Any]]:
     if file_format == "csv":
         with path.open(newline="", encoding="utf-8") as f:
-            return [
-                {"id": int(row["id"]), "name": row["name"]}
-                for row in csv.DictReader(f)
-            ]
+            return [{"id": int(row["id"]), "name": row["name"]} for row in csv.DictReader(f)]
     if file_format == "json":
         with path.open(encoding="utf-8") as f:
             return json.load(f)
@@ -234,9 +231,7 @@ class TestFileDestinationEdgeCases:
 
 
 @pytest.mark.parametrize("file_format", ["csv", "json", "jsonl"])
-def test_engine_sync_accumulates_all_batches(
-    tmp_path: Path, file_format: str
-) -> None:
+def test_engine_sync_accumulates_all_batches(tmp_path: Path, file_format: str) -> None:
     records = [{"id": i, "name": f"user-{i}"} for i in range(250)]
     output_path = tmp_path / f"output.{file_format}"
     sync = _sync(output_path, file_format, batch_size=100)

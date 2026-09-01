@@ -272,9 +272,7 @@ async def test_run_test_dry_run_previews_without_executing(
 
 
 @pytest.mark.asyncio
-async def test_run_test_fail_fast_skips_remaining_syncs(
-    tmp_path: Path, monkeypatch: Any
-) -> None:
+async def test_run_test_fail_fast_skips_remaining_syncs(tmp_path: Path, monkeypatch: Any) -> None:
     """``fail_fast=True`` (#870) stops after the first sync with a failing
     test; remaining syncs are reported skipped, not run (mirrors ``drt test
     --fail-fast``)."""
@@ -1418,9 +1416,7 @@ async def test_state_show_reports_no_state(server: FastMCP) -> None:
 
 
 @pytest.mark.asyncio
-async def test_state_show_returns_the_stored_watermark(
-    server: FastMCP, project_dir: Path
-) -> None:
+async def test_state_show_returns_the_stored_watermark(server: FastMCP, project_dir: Path) -> None:
     from drt.state.manager import StateManager, SyncState
 
     StateManager(project_dir).save_sync(
@@ -1482,9 +1478,7 @@ async def test_state_reset_runs_clears_state(server: FastMCP, project_dir: Path)
 
 
 @pytest.mark.asyncio
-async def test_state_reset_dry_run_changes_nothing(
-    server: FastMCP, project_dir: Path
-) -> None:
+async def test_state_reset_dry_run_changes_nothing(server: FastMCP, project_dir: Path) -> None:
     from drt.state.manager import StateManager, SyncState
 
     StateManager(project_dir).save_sync(
@@ -1529,14 +1523,10 @@ async def test_state_reset_watermark_level(server: FastMCP, project_dir: Path) -
 
 
 @pytest.mark.asyncio
-async def test_state_reset_tracked_mirror_warns(
-    server: FastMCP, project_dir: Path
-) -> None:
+async def test_state_reset_tracked_mirror_warns(server: FastMCP, project_dir: Path) -> None:
     """An agent has no help text, so the re-baseline consequence has to be in
     the response itself (#686)."""
-    result = await call(
-        server, "drt_state_reset", sync_name="no-such-sync", tracked_mirror=True
-    )
+    result = await call(server, "drt_state_reset", sync_name="no-such-sync", tracked_mirror=True)
 
     # Unknown sync: no destination to touch, but the level is still reported
     # rather than silently dropped.
@@ -1563,9 +1553,7 @@ def test_databricks_state_reset_inherited_unimplemented_stays_unsupported() -> N
     with patch("drt.cli._helpers.get_destination", return_value=destination_class()):
         result = state_reset(ctx, "users", tracked_mirror=True)
 
-    assert result["warning"] == (
-        f"{destination_type} does not support tracked mirror."
-    )
+    assert result["warning"] == (f"{destination_type} does not support tracked mirror.")
     assert "keys_removed" not in result
 
 

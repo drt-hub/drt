@@ -135,9 +135,7 @@ class MySQLDestination(BaseSqlDestination):
         return backtick_quote_ident(table)
 
     # --- dialect hooks (#719) ---------------------------------------------
-    def _dialect_connect(
-        self, config: Any, query_tags: dict[str, str] | None = None
-    ) -> Any:
+    def _dialect_connect(self, config: Any, query_tags: dict[str, str] | None = None) -> Any:
         del query_tags
         return self._connect(config)  # _connect is @classmethod(config) — #723
 
@@ -245,9 +243,7 @@ class MySQLDestination(BaseSqlDestination):
     def _old_name(self, table: str) -> str:
         return f"{table}__drt_old"
 
-    def _complete_swap(
-        self, conn: Any, cur: Any, table: str, shadow: str
-    ) -> None:
+    def _complete_swap(self, conn: Any, cur: Any, table: str, shadow: str) -> None:
         """MySQL swap rename: one atomic multi-table ``RENAME TABLE`` + commit,
         then a separate DROP+commit for the old table."""
         old = self._old_name(table)
@@ -256,9 +252,7 @@ class MySQLDestination(BaseSqlDestination):
         old_q = self._quote_ident(old)
 
         # MySQL's multi-table RENAME is atomic in a single statement.
-        cur.execute(
-            f"RENAME TABLE {table_q} TO {old_q}, {shadow_q} TO {table_q}"
-        )
+        cur.execute(f"RENAME TABLE {table_q} TO {old_q}, {shadow_q} TO {table_q}")
         conn.commit()
         # DROP old in separate tx (failure here doesn't break the swap).
         cur.execute(f"DROP TABLE {old_q}")
@@ -305,19 +299,13 @@ class MySQLDestination(BaseSqlDestination):
         if len(upsert_cols) == 1:
             placeholders = ", ".join(["%s"] * len(keys))
             col_q = f"`{upsert_cols[0]}`"
-            stmt = (
-                f"DELETE FROM {table_q} WHERE {scope_clause}{col_q} "
-                f"{op} ({placeholders})"
-            )
+            stmt = f"DELETE FROM {table_q} WHERE {scope_clause}{col_q} {op} ({placeholders})"
             params: list[Any] = scope_params + [k[0] for k in keys]
         else:
             col_tuple = "(" + ", ".join(f"`{c}`" for c in upsert_cols) + ")"
             row_placeholder = "(" + ", ".join(["%s"] * len(upsert_cols)) + ")"
             placeholders = ", ".join([row_placeholder] * len(keys))
-            stmt = (
-                f"DELETE FROM {table_q} WHERE {scope_clause}{col_tuple} "
-                f"{op} ({placeholders})"
-            )
+            stmt = f"DELETE FROM {table_q} WHERE {scope_clause}{col_tuple} {op} ({placeholders})"
             params = scope_params + [v for key in keys for v in key]
         return stmt, params
 

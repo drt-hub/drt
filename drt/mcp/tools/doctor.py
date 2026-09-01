@@ -25,9 +25,7 @@ def doctor() -> dict[str, Any]:
     required_ok = True
 
     py_ok, py_msg = _check_python()
-    checks.append(
-        {"category": "runtime", "name": "Python version", "ok": py_ok, "message": py_msg}
-    )
+    checks.append({"category": "runtime", "name": "Python version", "ok": py_ok, "message": py_msg})
     required_ok = required_ok and py_ok
 
     checks.append(

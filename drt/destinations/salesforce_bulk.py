@@ -136,9 +136,7 @@ class SalesforceBulkDestination:
 
             # STEP 7 — poll for completion
             retry_config = resolve_retry(config.retry, sync_options)
-            rate_limiter = resolve_rate_limiter(
-                config, sync_options, limiter_factory=RateLimiter
-            )
+            rate_limiter = resolve_rate_limiter(config, sync_options, limiter_factory=RateLimiter)
             deadline = time.monotonic() + config.poll_timeout_seconds
             final_state: dict[str, Any] = {}
             while True:

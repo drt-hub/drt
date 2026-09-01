@@ -195,9 +195,7 @@ class KlaviyoDestination:
         if config.unique_id_field is not None:
             unique_id = record.get(config.unique_id_field)
             if unique_id is None or str(unique_id).strip() == "":
-                raise ValueError(
-                    f"Row missing unique_id field {config.unique_id_field!r}."
-                )
+                raise ValueError(f"Row missing unique_id field {config.unique_id_field!r}.")
             attributes["unique_id"] = str(unique_id)
 
         payload = {"data": {"type": "event", "attributes": attributes}}
@@ -292,9 +290,7 @@ class KlaviyoDestination:
         with_retry(_post, retry_config)
 
     @staticmethod
-    def _properties(
-        record: dict[str, Any], config: KlaviyoDestinationConfig
-    ) -> dict[str, Any]:
+    def _properties(record: dict[str, Any], config: KlaviyoDestinationConfig) -> dict[str, Any]:
         if config.properties_template:
             rendered = render_template(config.properties_template, record)
             parsed = json.loads(rendered)
@@ -309,11 +305,7 @@ class KlaviyoDestination:
             ):
                 if field:
                     excluded_fields.add(field)
-        return {
-            k: v
-            for k, v in record.items()
-            if k not in excluded_fields and v is not None
-        }
+        return {k: v for k, v in record.items() if k not in excluded_fields and v is not None}
 
     def test_connection(self, config: DestinationConfig) -> None:
         """Test whether Klaviyo accepts the configured private API key.

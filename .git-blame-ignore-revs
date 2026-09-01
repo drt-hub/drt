@@ -1,0 +1,4 @@
+# Revisions to ignore when browsing blame history.
+
+# One-time Ruff 0.16 formatting sweep for #944.
+d159ddd81746a0cc3df7a3d5454d0ee2856aa42d

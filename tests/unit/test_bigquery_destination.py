@@ -158,9 +158,7 @@ class TestBigQueryDestinationLoad:
             result = BigQueryDestination().load(records, _config(), _options())
         assert result.success == 2
         assert result.failed == 0
-        client.insert_rows_json.assert_called_once_with(
-            "my-proj.analytics.user_scores", records
-        )
+        client.insert_rows_json.assert_called_once_with("my-proj.analytics.user_scores", records)
 
     def test_insert_per_row_error_on_error_skip(self) -> None:
         client = _fake_client()
@@ -168,9 +166,7 @@ class TestBigQueryDestinationLoad:
         modules = _mocked_bq_modules(client)
         records = [{"id": 1}, {"id": 2}]
         with patch.dict("sys.modules", modules):
-            result = BigQueryDestination().load(
-                records, _config(), _options(on_error="skip")
-            )
+            result = BigQueryDestination().load(records, _config(), _options(on_error="skip"))
         assert result.failed == 1
         assert result.success == 1
         assert len(result.row_errors) == 1

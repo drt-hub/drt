@@ -86,9 +86,7 @@ class DiffResult:
     delete_preview_unavailable_reason: str | None = None
 
     @staticmethod
-    def changed_fields(
-        old: dict[str, Any], new: dict[str, Any]
-    ) -> dict[str, tuple[Any, Any]]:
+    def changed_fields(old: dict[str, Any], new: dict[str, Any]) -> dict[str, tuple[Any, Any]]:
         """Return the columns that differ between *old* and *new* as
         ``{col: (old_value, new_value)}``. Equal columns are omitted.
 
@@ -126,9 +124,7 @@ def _is_destination_mirror(sync_options: SyncOptions) -> bool:
     )
 
 
-def _observed_scopes(
-    records: list[dict[str, Any]], scope_cols: list[str]
-) -> list[tuple[Any, ...]]:
+def _observed_scopes(records: list[dict[str, Any]], scope_cols: list[str]) -> list[tuple[Any, ...]]:
     """The distinct ``mirror.scope`` value tuples these records would produce.
 
     Recomputed from the source records rather than read from
@@ -201,11 +197,7 @@ def _preview_destination_mirror_deletes(
             return key
 
     return (
-        [
-            dict(zip(upsert_key, key))
-            for key in dest_keys
-            if _normalize(key) not in comparison_keys
-        ],
+        [dict(zip(upsert_key, key)) for key in dest_keys if _normalize(key) not in comparison_keys],
         None,
     )
 
@@ -392,9 +384,7 @@ def compute_diff(
     delete_reason: str | None = None
     delete_preview_unavailable_reason: str | None = None
     if sync_options.mode == "replace":
-        deleted = [
-            row for key, row in dest_by_key.items() if key not in source_keys
-        ]
+        deleted = [row for key, row in dest_by_key.items() if key not in source_keys]
         delete_reason = "replace"
     # ``and records`` on both mirror legs: ``_finalize_mirror`` returns early
     # when no key was observed (``if not self._mirror_keys: return None``), and
@@ -412,9 +402,7 @@ def compute_diff(
         )
         delete_reason = "mirror_scan"
 
-    truncated = (
-        len(added) > limit or len(updated) > limit or len(deleted) > limit
-    )
+    truncated = len(added) > limit or len(updated) > limit or len(deleted) > limit
 
     return DiffResult(
         added=added[:limit],

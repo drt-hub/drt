@@ -60,9 +60,7 @@ def _write_sync(
     )
 
 
-def test_cli_emits_valid_ref_only_dbt_exposures_and_skip_note(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_cli_emits_valid_ref_only_dbt_exposures_and_skip_note(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     _write_project(tmp_path)
     _write_sync(
@@ -100,9 +98,7 @@ def test_cli_emits_valid_ref_only_dbt_exposures_and_skip_note(
                 "maturity": "high",
                 "owner": {"name": "drt"},
                 "depends_on": ["ref('mart_users')"],
-                "description": (
-                    "drt sync users_to_hubspot -> hubspot (upsert). Managed by drt."
-                ),
+                "description": ("drt sync users_to_hubspot -> hubspot (upsert). Managed by drt."),
                 "url": "docs/sync/users-to-hubspot.html",
                 "meta": {
                     "drt": {
@@ -151,9 +147,7 @@ def test_output_is_identical_before_and_after_html_docs_generation(
     )
 
 
-def test_output_is_sorted_by_sync_name_and_byte_identical(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_output_is_sorted_by_sync_name_and_byte_identical(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     _write_project(tmp_path)
     _write_sync(
@@ -182,9 +176,7 @@ def test_output_is_sorted_by_sync_name_and_byte_identical(
     ]
 
 
-def test_empty_ref_set_is_valid_yaml_with_sorted_skip_notes(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_empty_ref_set_is_valid_yaml_with_sorted_skip_notes(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     _write_project(tmp_path)
     _write_sync(
@@ -223,9 +215,7 @@ def test_exposure_name_is_a_valid_dbt_identifier_and_meta_keeps_original(
     assert exposure["meta"]["drt"]["sync"] == original_name
 
 
-def test_page_slug_collisions_omit_only_affected_urls(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_page_slug_collisions_omit_only_affected_urls(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     _write_project(tmp_path)
     _write_sync(tmp_path, "dash.yml", name="a-b", model="ref('dash_model')")

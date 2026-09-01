@@ -205,10 +205,7 @@ class BaseSqlDestination:
         # mirror.strategy: tracked (#686) — state-based diff instead of the
         # destination-table diff below. Shares the empty-source guard above,
         # so a transient empty source also keeps the tracked baseline intact.
-        if (
-            sync_options.mirror is not None
-            and sync_options.mirror.strategy == "tracked"
-        ):
+        if sync_options.mirror is not None and sync_options.mirror.strategy == "tracked":
             return self._finalize_mirror_tracked(config, sync_options)
 
         # Dedupe to keep the IN list compact when batches overlap.
@@ -218,9 +215,7 @@ class BaseSqlDestination:
         # mirror.scope (#687) — prepend "scope IN (observed)" so the diff
         # only touches rows under parents this run actually saw. Rows under
         # unobserved parents (other pipelines / the application) stay put.
-        scope_cols = (
-            sync_options.mirror.scope if sync_options.mirror is not None else None
-        )
+        scope_cols = sync_options.mirror.scope if sync_options.mirror is not None else None
         # list(), not sorted() — scope values may include None (unorderable).
         scopes = list(self._mirror_scopes or set()) if scope_cols else None
 
@@ -355,9 +350,7 @@ class BaseSqlDestination:
             conn.close()
 
     # --- dialect hooks (subclasses implement) -----------------------------
-    def _dialect_connect(
-        self, config: Any, query_tags: dict[str, str] | None = None
-    ) -> Any:
+    def _dialect_connect(self, config: Any, query_tags: dict[str, str] | None = None) -> Any:
         """Return a live DB connection (psycopg2 / pymysql) for this config."""
         raise NotImplementedError
 
@@ -426,9 +419,7 @@ class BaseSqlDestination:
         """
         return nullcontext(_tagged_cursor(conn.cursor(), sync_options))
 
-    def _complete_swap(
-        self, conn: Any, cur: Any, table: str, shadow: str
-    ) -> None:
+    def _complete_swap(self, conn: Any, cur: Any, table: str, shadow: str) -> None:
         """Complete a staged replace and reset swap state at the dialect's
         recovery-safe point.
 
@@ -598,13 +589,11 @@ class BaseSqlDestination:
         cur.execute("SAVEPOINT drt_diff_keys")
         try:
             cur.execute(
-                f"CREATE TEMPORARY TABLE {DIFF_STAGING_TABLE} "
-                "(key_hash VARCHAR(64), key_json TEXT)"
+                f"CREATE TEMPORARY TABLE {DIFF_STAGING_TABLE} (key_hash VARCHAR(64), key_json TEXT)"
             )
             if rows:
                 cur.executemany(
-                    f"INSERT INTO {DIFF_STAGING_TABLE} "
-                    "(key_hash, key_json) VALUES (%s, %s)",
+                    f"INSERT INTO {DIFF_STAGING_TABLE} (key_hash, key_json) VALUES (%s, %s)",
                     rows,
                 )
         except Exception:  # noqa: BLE001 — no temporary-table privilege is supported
@@ -659,9 +648,7 @@ class BaseSqlDestination:
         finally:
             conn.close()
 
-    def _finalize_mirror_tracked(
-        self, config: Any, sync_options: SyncOptions
-    ) -> SyncResult | None:
+    def _finalize_mirror_tracked(self, config: Any, sync_options: SyncOptions) -> SyncResult | None:
         """``mirror.strategy: tracked`` (#686) — delete only rows drt synced.
 
         Reads the previously-synced key set for this sync from the drt-managed
@@ -779,9 +766,7 @@ class BaseSqlDestination:
             # (WARN) apart from a run that's simply the first to touch this
             # particular scope (silent — see below).
             cur.execute(
-                self._state_sql(
-                    "SELECT 1 FROM {} WHERE sync_name = %s LIMIT 1", state_ident
-                ),
+                self._state_sql("SELECT 1 FROM {} WHERE sync_name = %s LIMIT 1", state_ident),
                 self._state_params(sync_name),
             )
             previous_exists = cur.fetchone() is not None
@@ -829,9 +814,7 @@ class BaseSqlDestination:
                         " AND (s.scope_key IS NULL OR s.scope_spec <> %s "
                         f"OR s.scope_key IN ({placeholders}))"
                     )
-                    diff_params = self._state_params(
-                        sync_name, scope_spec, *observed_json
-                    )
+                    diff_params = self._state_params(sync_name, scope_spec, *observed_json)
                 cur.execute(self._state_sql(diff_sql, state_ident), diff_params)
                 fetched = cur.fetchall()
             else:
@@ -990,8 +973,7 @@ class BaseSqlDestination:
                 # NULL, which the predicate above always lets through.
                 cur.executemany(
                     self._state_sql(
-                        "INSERT INTO {} (sync_name, key_hash, key_json) "
-                        "VALUES (%s, %s, %s)",
+                        "INSERT INTO {} (sync_name, key_hash, key_json) VALUES (%s, %s, %s)",
                         state_ident,
                     ),
                     [(sync_name, h, kj) for h, kj in to_insert],

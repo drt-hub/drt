@@ -160,9 +160,7 @@ def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
         StatePersistingObserver(ctx.state_mgr, wm_storage),
     ]
     if not ctx.dry_run and sync.sync.dlq is not None and sync.sync.dlq.enabled:
-        observers.append(
-            DlqObserver(ctx.dlq_store, max_records=sync.sync.dlq.max_records)
-        )
+        observers.append(DlqObserver(ctx.dlq_store, max_records=sync.sync.dlq.max_records))
     # Enterprise extension point (#299, ADR 0008) — an audit-log observer
     # registered via drt.engine.observer.register_extra_observer sees
     # every sync_started/sync_completed this run fires, same as the
@@ -345,10 +343,9 @@ def _run_one(
                     dispatch_targets,
                     evaluate_conditions,
                 )
+
                 dlq_depth = ctx.dlq_store.depth(sync.name)
-                tripped = evaluate_conditions(
-                    result, dlq_depth, sync.alerts.on_degraded.conditions
-                )
+                tripped = evaluate_conditions(result, dlq_depth, sync.alerts.on_degraded.conditions)
                 if tripped:
                     entry["conditions_tripped"] = [
                         {
@@ -687,6 +684,7 @@ def run(
     # A clean previous state exits 0 — recovery loops shouldn't page when
     # there is nothing to recover. (Record-level replay is `drt retry`.)
     if failed_only:
+
         def _last_run_failed(sync_cfg: SyncConfig) -> bool:
             prev = state_bundle.state.get_last_sync(sync_cfg.name)
             return prev is not None and prev.status != "success"

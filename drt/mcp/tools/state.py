@@ -125,9 +125,7 @@ def state_reset(
             else:
                 inherited_without_state_hooks = False
             if reset is None or inherited_without_state_hooks:
-                result["warning"] = (
-                    f"{syncs[0].destination.type} does not support tracked mirror."
-                )
+                result["warning"] = f"{syncs[0].destination.type} does not support tracked mirror."
             else:
                 result["keys_removed"] = int(reset(syncs[0].destination, sync_name))
                 result["warning"] = (

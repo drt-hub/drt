@@ -38,9 +38,7 @@ def _sync(dest: RestApiDestinationConfig, model: str = "ref('users')") -> SyncCo
     )
 
 
-def test_full_pipeline_three_seeded_rows_reach_destination(
-    httpserver, duckdb_with_users, tmp_path
-):
+def test_full_pipeline_three_seeded_rows_reach_destination(httpserver, duckdb_with_users, tmp_path):
     """Happy path: 3 seeded rows in DuckDB → 3 POSTs received."""
     source, profile = duckdb_with_users
     received: list[dict] = []
@@ -63,9 +61,7 @@ def test_full_pipeline_three_seeded_rows_reach_destination(
     assert {r["name"] for r in received} == {"Alice", "Bob", "Carol"}
 
 
-def test_empty_query_yields_no_destination_requests(
-    httpserver, duckdb_with_users, tmp_path
-):
+def test_empty_query_yields_no_destination_requests(httpserver, duckdb_with_users, tmp_path):
     """Empty result set: 0 rows extracted → 0 POSTs sent."""
     source, profile = duckdb_with_users
     received: list[dict] = []
@@ -87,9 +83,7 @@ def test_empty_query_yields_no_destination_requests(
     assert received == []
 
 
-def test_extracted_column_values_flow_into_request_body(
-    httpserver, duckdb_with_users, tmp_path
-):
+def test_extracted_column_values_flow_into_request_body(httpserver, duckdb_with_users, tmp_path):
     """Values read from DuckDB appear unchanged in the destination request body."""
     source, profile = duckdb_with_users
     received: list[dict] = []

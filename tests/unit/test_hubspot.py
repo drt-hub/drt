@@ -68,9 +68,7 @@ _RECORD = {"email": "a@b.com", "firstname": "Ada"}
 def test_hubspot_declares_match_policy_capability() -> None:
     dest = HubSpotDestination()
     assert isinstance(dest, MatchPolicyCapable)
-    assert dest.supported_match_policies() == frozenset(
-        {"upsert", "update_only", "create_only"}
-    )
+    assert dest.supported_match_policies() == frozenset({"upsert", "update_only", "create_only"})
 
 
 # ---------------------------------------------------------------------------
@@ -112,9 +110,7 @@ def test_create_only_skips_existing_and_never_patches() -> None:
         patch("httpx.Client.post", return_value=_response(409)) as post,
         patch("httpx.Client.patch") as patch_call,
     ):
-        result = HubSpotDestination().load(
-            [_RECORD], _config(), _options("create_only")
-        )
+        result = HubSpotDestination().load([_RECORD], _config(), _options("create_only"))
 
     assert (result.success, result.skipped, result.failed) == (0, 1, 0)
     assert result.skipped_no_match == 1  # #757 — named subset of skipped
@@ -127,9 +123,7 @@ def test_create_only_counts_new_record_as_success() -> None:
         patch("httpx.Client.post", return_value=_response(201)) as post,
         patch("httpx.Client.patch") as patch_call,
     ):
-        result = HubSpotDestination().load(
-            [_RECORD], _config(), _options("create_only")
-        )
+        result = HubSpotDestination().load([_RECORD], _config(), _options("create_only"))
 
     assert (result.success, result.skipped, result.failed) == (1, 0, 0)
     post.assert_called_once()
@@ -146,9 +140,7 @@ def test_update_only_patches_directly_and_never_posts() -> None:
         patch("httpx.Client.post") as post,
         patch("httpx.Client.patch", return_value=_response(200)) as patch_call,
     ):
-        result = HubSpotDestination().load(
-            [_RECORD], _config(), _options("update_only")
-        )
+        result = HubSpotDestination().load([_RECORD], _config(), _options("update_only"))
 
     assert (result.success, result.skipped, result.failed) == (1, 0, 0)
     post.assert_not_called()  # never creates
@@ -163,9 +155,7 @@ def test_update_only_skips_when_no_match() -> None:
         patch("httpx.Client.post") as post,
         patch("httpx.Client.patch", return_value=_response(404)) as patch_call,
     ):
-        result = HubSpotDestination().load(
-            [_RECORD], _config(), _options("update_only")
-        )
+        result = HubSpotDestination().load([_RECORD], _config(), _options("update_only"))
 
     assert (result.success, result.skipped, result.failed) == (0, 1, 0)
     assert result.skipped_no_match == 1

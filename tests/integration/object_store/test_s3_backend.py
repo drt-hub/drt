@@ -73,8 +73,7 @@ def test_history_store_conforms_for_merge_limit_and_prune(
     assert store.read("missing") == []
     old = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
     recent = [
-        (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-        for hours in (3, 2, 1)
+        (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat() for hours in (3, 2, 1)
     ]
     store.append(_history("a", old))
     for timestamp in recent:
@@ -116,9 +115,7 @@ def test_dlq_store_conforms_for_fifo_replace_clear_and_depths(
     store.append("corrupt", [_dead(6)])
     body, token = s3_client.read_for_update(corrupt_key)
     assert body is not None
-    s3_client.write_if(
-        corrupt_key, body + b"not json\n{\"unexpected\": true}\n", token
-    )
+    s3_client.write_if(corrupt_key, body + b'not json\n{"unexpected": true}\n', token)
     assert [entry.record["id"] for entry in store.read("corrupt")] == [6]
 
 
@@ -194,8 +191,5 @@ def test_same_sync_race_finishes_with_one_acknowledged_value(
     final = stores[0].get_last_sync("shared")
     assert final is not None
     assert final.records_synced in successful_values
-    assert all(
-        error is None or isinstance(error, StateContentionError)
-        for _, error in outcomes
-    )
+    assert all(error is None or isinstance(error, StateContentionError) for _, error in outcomes)
     assert counting.write_attempts <= workers * stores[0].MAX_WRITE_ATTEMPTS

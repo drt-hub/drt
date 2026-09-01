@@ -41,6 +41,8 @@ To run on all files manually:
 pre-commit run --all-files
 ```
 
+To hide repository-wide formatting-only commits from `git blame`, run `git config blame.ignoreRevsFile .git-blame-ignore-revs` locally.
+
 **With pip:**
 
 ```bash
@@ -476,4 +478,3 @@ drt ships Claude Code skills via the plugin marketplace (`skills/drt/`). When yo
 Keep the version in sync with `pyproject.toml` (e.g. if releasing `0.4.0`, set all plugin versions to `0.4.0`).
 
 If you add a **new skill**, also add an entry to `skills/drt/.claude-plugin/plugin.json` if needed, and document it in `README.md` and `docs/llm/CONTEXT.md`.
-

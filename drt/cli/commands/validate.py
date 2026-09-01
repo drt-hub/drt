@@ -116,9 +116,7 @@ def validate(
                 from drt.cli._state_selection import load_state_diff
 
                 state_diff = load_state_diff(state, result.syncs, Path("."))
-                selected = select_syncs(
-                    result.syncs, select, exclude, state_diff=state_diff
-                )
+                selected = select_syncs(result.syncs, select, exclude, state_diff=state_diff)
             else:
                 selected = select_syncs(result.syncs, select, exclude)
         except SelectionError as e:
@@ -150,9 +148,7 @@ def validate(
             error_names = {k for k in error_names if not _fnmatch_token(k, token)}
         result.syncs = selected
         result.errors = {k: v for k, v in result.errors.items() if k in error_names}
-        result.deprecations = {
-            k: v for k, v in result.deprecations.items() if k in selected_names
-        }
+        result.deprecations = {k: v for k, v in result.deprecations.items() if k in selected_names}
         secret_findings = [f for f in secret_findings if f.sync_name in selected_names]
         if not result.syncs and not result.errors:
             if is_state_only_select(select):

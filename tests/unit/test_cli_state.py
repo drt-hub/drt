@@ -81,14 +81,10 @@ class TestResetRuns:
         assert StateManager(project).get_last_sync("users") is None
 
     def test_dry_run_changes_nothing(self, project: Path) -> None:
-        result = runner.invoke(
-            app, ["state", "reset", "users", "--runs", "--dry-run", "--yes"]
-        )
+        result = runner.invoke(app, ["state", "reset", "users", "--runs", "--dry-run", "--yes"])
 
         assert result.exit_code == 0
-        assert StateManager(project).get_last_sync("users") is not None, (
-            "--dry-run wrote to state"
-        )
+        assert StateManager(project).get_last_sync("users") is not None, "--dry-run wrote to state"
 
     def test_refuses_without_yes_in_ci(self, project: Path) -> None:
         """EOF stdin — CliRunner with no input is exactly the CI shape."""
@@ -132,9 +128,7 @@ class TestResetWatermark:
     """
 
     def test_reports_when_no_backend_is_configured(self, project: Path) -> None:
-        result = runner.invoke(
-            app, ["state", "reset", "users", "--watermark", "--yes"]
-        )
+        result = runner.invoke(app, ["state", "reset", "users", "--watermark", "--yes"])
 
         assert result.exit_code == 0
         assert "--runs" in result.output, (
@@ -144,9 +138,7 @@ class TestResetWatermark:
     def test_clears_a_configured_backend(self, project: Path) -> None:
         storage = MagicMock()
         with patch("drt.cli._helpers.get_watermark_storage", return_value=storage):
-            result = runner.invoke(
-                app, ["state", "reset", "users", "--watermark", "--yes"]
-            )
+            result = runner.invoke(app, ["state", "reset", "users", "--watermark", "--yes"])
 
         assert result.exit_code == 0
 
@@ -165,9 +157,7 @@ class TestResetTrackedMirror:
         """The re-baseline warning must appear — an operator has no other
         signal that this changes deletion semantics (#686)."""
         with patch("drt.cli.commands.state._reset_tracked_state", return_value=3):
-            result = runner.invoke(
-                app, ["state", "reset", "users", "--tracked-mirror", "--yes"]
-            )
+            result = runner.invoke(app, ["state", "reset", "users", "--tracked-mirror", "--yes"])
 
         assert result.exit_code == 0
         assert "re-baseline" in result.output.lower()
@@ -175,9 +165,7 @@ class TestResetTrackedMirror:
 
     def test_reports_when_there_was_nothing_to_clear(self, project: Path) -> None:
         with patch("drt.cli.commands.state._reset_tracked_state", return_value=0):
-            result = runner.invoke(
-                app, ["state", "reset", "users", "--tracked-mirror", "--yes"]
-            )
+            result = runner.invoke(app, ["state", "reset", "users", "--tracked-mirror", "--yes"])
 
         assert "no tracked-mirror state" in result.output.lower()
 
@@ -207,9 +195,7 @@ class TestResetTrackedMirror:
             patch("drt.config.parser.load_syncs", return_value=[sync]),
             patch("drt.cli._helpers.get_destination", return_value=destination_class()),
         ):
-            result = runner.invoke(
-                app, ["state", "reset", "users", "--tracked-mirror", "--yes"]
-            )
+            result = runner.invoke(app, ["state", "reset", "users", "--tracked-mirror", "--yes"])
 
         assert result.exit_code == 0
         assert f"{destination_type} does not support tracked mirror" in result.output

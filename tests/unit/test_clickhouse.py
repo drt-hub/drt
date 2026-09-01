@@ -35,6 +35,7 @@ def _fake_client() -> MagicMock:
     client = MagicMock()
     return client
 
+
 def _streaming_client(rows, columns=("id", "name")) -> MagicMock:
     """A client whose query_rows_stream() behaves like the real one.
 
@@ -328,8 +329,6 @@ class TestClickHouseSourceRetry:
         assert len(attempts) == 1
 
 
-
-
 class TestStreamingExtraction:
     """#765 slice 3: ClickHouse streams via query_rows_stream().
 
@@ -399,6 +398,8 @@ class TestStreamingExtraction:
 
         assert len(clients) == 1
         clients[0].close.assert_called_once()
+
+
 def test_the_fake_exception_hierarchy_matches_the_real_driver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

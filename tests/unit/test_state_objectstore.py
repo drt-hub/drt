@@ -190,9 +190,7 @@ def test_state_json_is_byte_compatible_with_local(tmp_path: Path) -> None:
     client = MemoryObjectClient()
     ObjectStoreStateStore(client, prefix="project").save_sync(state)
 
-    assert client.objects["project/state.json"] == (
-        tmp_path / ".drt" / "state.json"
-    ).read_bytes()
+    assert client.objects["project/state.json"] == (tmp_path / ".drt" / "state.json").read_bytes()
 
 
 def test_history_append_then_noop_prune_uses_cached_snapshot() -> None:
@@ -258,9 +256,7 @@ def test_remote_history_applies_entry_cap_only_during_prune() -> None:
     client = MemoryObjectClient()
     store = ObjectStoreHistoryStore(client, max_entries=2)
     now = datetime.now(timezone.utc)
-    timestamps = [
-        (now - timedelta(days=days_ago)).isoformat() for days_ago in (3, 2, 1)
-    ]
+    timestamps = [(now - timedelta(days=days_ago)).isoformat() for days_ago in (3, 2, 1)]
     for started_at in timestamps:
         store.append(_history(started_at=started_at))
 
@@ -331,9 +327,10 @@ def test_history_jsonl_is_byte_compatible_with_local(tmp_path: Path) -> None:
     client = MemoryObjectClient()
     ObjectStoreHistoryStore(client).append(entry)
 
-    assert client.objects["history/s.jsonl"] == (
-        tmp_path / ".drt" / "history" / "s.jsonl"
-    ).read_bytes()
+    assert (
+        client.objects["history/s.jsonl"]
+        == (tmp_path / ".drt" / "history" / "s.jsonl").read_bytes()
+    )
 
 
 def test_dlq_conformance_and_nonempty_depth_listing() -> None:
@@ -405,8 +402,7 @@ def test_dlq_append_non_precondition_error_warns_and_returns_existing_depth(
     assert depth == 1
     assert write.call_count == 1
     assert any(
-        "DLQ append failed for sync=s: network down" in record.message
-        for record in caplog.records
+        "DLQ append failed for sync=s: network down" in record.message for record in caplog.records
     )
 
 
@@ -434,9 +430,7 @@ def test_dlq_reconcile_removes_and_updates_by_id_leaves_others_untouched() -> No
     store = ObjectStoreDlqBackend(MemoryObjectClient())
     store.append("s", [_dead(1), _dead(2), _dead(3)])
     [e1, e2, e3] = store.read("s")
-    bumped = DeadLetter(
-        id=e3.id, record=e3.record, error_message="still failing", attempts=2
-    )
+    bumped = DeadLetter(id=e3.id, record=e3.record, error_message="still failing", attempts=2)
 
     result = store.reconcile("s", remove_ids={e2.id}, updates={e3.id: bumped})
 
@@ -482,9 +476,7 @@ def test_dlq_reconcile_raises_after_bounded_contention() -> None:
 
 def test_dlq_all_depths_skips_keys_outside_expected_prefix_or_suffix() -> None:
     client = MemoryObjectClient()
-    client.objects["project/dlq/alpha.jsonl"] = ObjectStoreDlqBackend._encode(
-        [_dead(1)]
-    )
+    client.objects["project/dlq/alpha.jsonl"] = ObjectStoreDlqBackend._encode([_dead(1)])
     client.objects["other/dlq/unrelated.jsonl"] = b"not a DLQ object"
     client.objects["project/dlq/readme.txt"] = b"not a DLQ object"
     store = ObjectStoreDlqBackend(client, prefix="project")
@@ -510,6 +502,4 @@ def test_dlq_jsonl_is_byte_compatible_with_local(tmp_path: Path) -> None:
     client = MemoryObjectClient()
     ObjectStoreDlqBackend(client).append("s", entries)
 
-    assert client.objects["dlq/s.jsonl"] == (
-        tmp_path / ".drt" / "dlq" / "s.jsonl"
-    ).read_bytes()
+    assert client.objects["dlq/s.jsonl"] == (tmp_path / ".drt" / "dlq" / "s.jsonl").read_bytes()

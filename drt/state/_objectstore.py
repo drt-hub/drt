@@ -212,9 +212,7 @@ class ObjectStoreHistoryStore(_ObjectStoreBase):
             try:
                 entries.append(HistoryEntry(**json.loads(raw)))
             except (json.JSONDecodeError, TypeError) as exc:
-                logger.warning(
-                    "history: skipping malformed line %s in %s: %s", lineno, key, exc
-                )
+                logger.warning("history: skipping malformed line %s in %s: %s", lineno, key, exc)
         return entries
 
     @staticmethod
@@ -248,14 +246,10 @@ class ObjectStoreHistoryStore(_ObjectStoreBase):
                         return
                     self._backoff(attempt)
                 except Exception as exc:  # noqa: BLE001 — best-effort history contract
-                    logger.warning(
-                        "history append failed for sync=%s: %s", entry.sync_name, exc
-                    )
+                    logger.warning("history append failed for sync=%s: %s", entry.sync_name, exc)
                     return
 
-    def read(
-        self, sync_name: str | None = None, limit: int = 20
-    ) -> list[HistoryEntry]:
+    def read(self, sync_name: str | None = None, limit: int = 20) -> list[HistoryEntry]:
         with self._lock:
             if sync_name is not None:
                 keys = [self._history_key(sync_name)]
@@ -407,8 +401,7 @@ class ObjectStoreDlqBackend(_ObjectStoreBase):
         with self._lock:
             if not self._replace_with_retry(sync_name, entries):
                 raise ObjectPreconditionError(
-                    f"DLQ replace for '{sync_name}' exhausted "
-                    f"{self.MAX_WRITE_ATTEMPTS} attempts"
+                    f"DLQ replace for '{sync_name}' exhausted {self.MAX_WRITE_ATTEMPTS} attempts"
                 )
 
     def clear(self, sync_name: str) -> None:

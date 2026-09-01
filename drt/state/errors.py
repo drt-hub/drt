@@ -8,4 +8,3 @@ class StateContentionError(RuntimeError):
     recreate the lost-update failure that remote state exists to prevent.
     History and DLQ persistence have their own best-effort contracts instead.
     """
-

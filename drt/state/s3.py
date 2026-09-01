@@ -21,9 +21,7 @@ def _s3_client(
     try:
         import boto3  # type: ignore[import-untyped]
     except ImportError as exc:
-        raise ImportError(
-            "S3 state storage requires: pip install drt-core[s3]"
-        ) from exc
+        raise ImportError("S3 state storage requires: pip install drt-core[s3]") from exc
 
     # Keep credential resolution byte-for-byte equivalent to S3Destination:
     # state storage and destination uploads must not expose two subtly
@@ -34,17 +32,9 @@ def _s3_client(
     if region:
         session_kwargs["region_name"] = region
 
-    access_key = (
-        resolve_env(None, aws_access_key_id_env) if aws_access_key_id_env else None
-    )
-    secret_key = (
-        resolve_env(None, aws_secret_access_key_env)
-        if aws_secret_access_key_env
-        else None
-    )
-    session_token = (
-        resolve_env(None, aws_session_token_env) if aws_session_token_env else None
-    )
+    access_key = resolve_env(None, aws_access_key_id_env) if aws_access_key_id_env else None
+    secret_key = resolve_env(None, aws_secret_access_key_env) if aws_secret_access_key_env else None
+    session_token = resolve_env(None, aws_session_token_env) if aws_session_token_env else None
     if access_key:
         session_kwargs["aws_access_key_id"] = access_key
     if secret_key:
@@ -64,9 +54,7 @@ def _client_error_type() -> Any:
     try:
         from botocore.exceptions import ClientError  # type: ignore[import-untyped]
     except ImportError as exc:
-        raise ImportError(
-            "S3 state storage requires: pip install drt-core[s3]"
-        ) from exc
+        raise ImportError("S3 state storage requires: pip install drt-core[s3]") from exc
     return ClientError
 
 
@@ -216,8 +204,4 @@ class S3ObjectClient:
     def list_keys(self, prefix: str) -> list[str]:
         paginator = self._client().get_paginator("list_objects_v2")
         pages = paginator.paginate(Bucket=self._bucket_name, Prefix=prefix)
-        return [
-            str(item["Key"])
-            for page in pages
-            for item in page.get("Contents", [])
-        ]
+        return [str(item["Key"]) for page in pages for item in page.get("Contents", [])]

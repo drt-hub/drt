@@ -71,32 +71,6 @@ class ObservabilityConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # Union type — used throughout the codebase
 
 
@@ -192,9 +166,7 @@ def resolve_env(value: str | None, env_var: str | None) -> str | None:
     return None
 
 
-def load_snowflake_private_key(
-    pem: str, passphrase: str | None = None
-) -> bytes:
+def load_snowflake_private_key(pem: str, passphrase: str | None = None) -> bytes:
     """Decode a PEM private key to the DER bytes snowflake-connector expects.
 
     Shared by the Snowflake source and destination for key-pair auth (#737).
@@ -736,9 +708,7 @@ def save_profile(
         # constructed, dropping empty optionals so the file stays as terse as
         # the hand-written branches above.
         entry = {
-            key: value
-            for key, value in asdict(profile).items()
-            if value not in (None, {}, [])
+            key: value for key, value in asdict(profile).items() if value not in (None, {}, [])
         }
         entry["type"] = profile.type
     else:
@@ -777,9 +747,7 @@ def load_raw_profiles(config_dir: Path | None = None) -> dict[str, Any]:
     return _profiles_mapping(data)
 
 
-def _rewrite_profiles(
-    profiles: dict[str, Any], data: dict[str, Any], profiles_path: Path
-) -> None:
+def _rewrite_profiles(profiles: dict[str, Any], data: dict[str, Any], profiles_path: Path) -> None:
     """Write ``profiles`` back to disk, preserving the observability block."""
     observability = data.get("observability")
     out: dict[str, Any] = {}

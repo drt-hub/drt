@@ -179,9 +179,7 @@ def test_run_span_carries_correlation_ids(rec_tracer: _RecTracer, tmp_path: Path
     assert result.run_id == "invocation-abc"
 
 
-def test_run_span_omits_run_id_attribute_when_none(
-    rec_tracer: _RecTracer, tmp_path: Path
-) -> None:
+def test_run_span_omits_run_id_attribute_when_none(rec_tracer: _RecTracer, tmp_path: Path) -> None:
     """No invocation run_id was supplied — the span carries no run.id attribute
     at all (not a null/empty one), so a backend query for `run.id EXISTS`
     cleanly separates CLI-driven runs from library calls that never set one."""

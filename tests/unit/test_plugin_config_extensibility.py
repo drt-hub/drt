@@ -411,14 +411,17 @@ def test_builtin_source_dispatch_wins_over_the_registry(tmp_path: Path) -> None:
     ``postgres`` coerces ``port`` to ``int`` *in the branch*; a registry-built
     profile would pass the raw YAML string straight through.
     """
-    d = _write_profiles(tmp_path, """
+    d = _write_profiles(
+        tmp_path,
+        """
         pg:
           type: postgres
           host: db.example
           dbname: analytics
           user: analyst
           port: "5432"
-    """)
+    """,
+    )
     profile = load_profile("pg", config_dir=d)
     assert profile.port == 5432
     assert isinstance(profile.port, int)
@@ -439,10 +442,13 @@ def test_every_registered_source_is_dispatched_or_reachable() -> None:
 
 def test_unknown_source_message_does_not_advertise_builtins_as_plugins(tmp_path: Path) -> None:
     """No plugins installed means no 'Also registered' tail."""
-    d = _write_profiles(tmp_path, """
+    d = _write_profiles(
+        tmp_path,
+        """
         nope:
           type: totally_unknown
-    """)
+    """,
+    )
     with pytest.raises(ValueError) as exc:
         load_profile("nope", config_dir=d)
     assert "Also registered" not in str(exc.value)
@@ -462,18 +468,19 @@ def test_plugin_profile_must_implement_describe(tmp_path: Path, clean_registry) 
         url: str
 
     clean_registry.register_source(PLUGIN_SOURCE, NoDescribe, _PluginSource)
-    d = _write_profiles(tmp_path, f"""
+    d = _write_profiles(
+        tmp_path,
+        f"""
         p:
           type: {PLUGIN_SOURCE}
           url: https://x
-    """)
+    """,
+    )
     with pytest.raises(ValueError, match="does not implement describe"):
         load_profile("p", config_dir=d)
 
 
-def test_plugin_profile_must_satisfy_profile_config_like(
-    tmp_path: Path, clean_registry
-) -> None:
+def test_plugin_profile_must_satisfy_profile_config_like(tmp_path: Path, clean_registry) -> None:
     """A plugin profile that accepts ``type=`` but doesn't expose it as a
     readable attribute fails the ProfileConfigLike structural check (#1034),
     not just the narrower describe()-callable one. Deliberately not a
@@ -490,11 +497,14 @@ def test_plugin_profile_must_satisfy_profile_config_like(
             return "no-type"
 
     clean_registry.register_source(PLUGIN_SOURCE, NoType, _PluginSource)
-    d = _write_profiles(tmp_path, f"""
+    d = _write_profiles(
+        tmp_path,
+        f"""
         p:
           type: {PLUGIN_SOURCE}
           url: https://x
-    """)
+    """,
+    )
     with pytest.raises(ValueError, match="ProfileConfigLike"):
         load_profile("p", config_dir=d)
 
@@ -516,11 +526,14 @@ def test_plugin_internal_type_error_is_not_blamed_on_the_profile(
             return self.type
 
     clean_registry.register_source(PLUGIN_SOURCE, Exploding, _PluginSource)
-    d = _write_profiles(tmp_path, f"""
+    d = _write_profiles(
+        tmp_path,
+        f"""
         p:
           type: {PLUGIN_SOURCE}
           port: null
-    """)
+    """,
+    )
     # Propagates as the plugin's own TypeError rather than being rewritten into
     # "your profile does not match".
     with pytest.raises(TypeError):

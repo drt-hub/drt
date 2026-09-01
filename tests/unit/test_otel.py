@@ -394,6 +394,7 @@ def test_fallback_noop_meter_creates_instruments() -> None:
     assert isinstance(meter.create_histogram("h"), otel._FallbackNoOpInstrument)
     assert isinstance(meter.create_gauge("g"), otel._FallbackNoOpInstrument)
 
+
 def _build_fake_import(
     trace_api: Any,
     metrics_api: Any,
@@ -512,6 +513,7 @@ def test_shutdown_telemetry_noop_when_otel_inactive(monkeypatch: pytest.MonkeyPa
     assert otel._STATE.trace_provider is None
 
     otel.shutdown_telemetry()  # must not raise
+
 
 def test_shutdown_telemetry_swallows_provider_shutdown_errors() -> None:
     """A provider whose shutdown() raises is caught and logged, never propagated."""

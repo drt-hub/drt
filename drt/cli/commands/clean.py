@@ -12,9 +12,7 @@ from drt.cli._helpers import get_destination
 
 @app.command()
 def clean(
-    orphans: bool = typer.Option(
-        False, "--orphans", help="List or drop orphan __drt_swap tables."
-    ),
+    orphans: bool = typer.Option(False, "--orphans", help="List or drop orphan __drt_swap tables."),
     execute: bool = typer.Option(False, "--execute", help="Execute drops (default: dry-run)."),
     config: str = typer.Option("drt.yml", "--config", "-c", help="Path to config file."),
 ) -> None:

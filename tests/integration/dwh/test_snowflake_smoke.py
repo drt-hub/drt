@@ -479,9 +479,7 @@ def test_snowflake_merge_mode_chunks_large_batch_without_temp_table(tmp_path: Pa
     sync_options = SyncOptions(mode="mirror", batch_size=1500)
 
     n = 1500
-    records = [
-        {"id": i, "name": f"name{i}", "email": f"n{i}@x.com"} for i in range(n)
-    ]
+    records = [{"id": i, "name": f"name{i}", "email": f"n{i}@x.com"} for i in range(n)]
 
     dest = SnowflakeDestination()
     try:
@@ -776,9 +774,7 @@ def test_snowflake_last_change_commit_time_does_not_require_active_warehouse(
                 # real error than manufacture an unverified finding.
                 cur.execute(f"SELECT SYSTEM$LAST_CHANGE_COMMIT_TIME('{fq}')")
                 val = cur.fetchone()[0]
-                assert val is not None, (
-                    "#975: call while warehouse was suspended returned NULL"
-                )
+                assert val is not None, "#975: call while warehouse was suspended returned NULL"
 
                 assert _is_suspended(cur), (
                     "#975 REGRESSION: warehouse is no longer SUSPENDED after "

@@ -83,6 +83,9 @@ jobs:
       - name: Lint (ruff)
         run: ruff check drt tests
 
+      - name: Check formatting (ruff)
+        run: ruff format --check drt tests
+
       - name: Type check (mypy)
         run: mypy drt
 

@@ -75,8 +75,7 @@ def get_row_count_for_destination(
 # across every SQL destination that raises them (the tests assert these
 # strings, so a per-file copy would silently drift).
 MIRROR_UPSERT_KEY_MSG = (
-    "sync.mode: mirror requires destination.upsert_key "
-    "(needed to identify which rows to DELETE)."
+    "sync.mode: mirror requires destination.upsert_key (needed to identify which rows to DELETE)."
 )
 
 
@@ -122,9 +121,7 @@ def check_scope_subset_of_upsert_key(config: Any, sync_options: Any) -> None:
     ):
         extra = [c for c in sync_options.mirror.scope if c not in (config.upsert_key or [])]
         if extra:
-            raise ValueError(
-                scope_not_subset_of_upsert_key_msg(extra, config.upsert_key)
-            )
+            raise ValueError(scope_not_subset_of_upsert_key_msg(extra, config.upsert_key))
 
 
 def check_mirror_supported(
@@ -147,8 +144,10 @@ def check_mirror_supported(
         return
     if not config.upsert_key:
         raise ValueError(MIRROR_UPSERT_KEY_MSG)
-    if not supports_tracked_scope and sync_options.mirror is not None and (
-        sync_options.mirror.strategy == "tracked" or sync_options.mirror.scope
+    if (
+        not supports_tracked_scope
+        and sync_options.mirror is not None
+        and (sync_options.mirror.strategy == "tracked" or sync_options.mirror.scope)
     ):
         raise ValueError(unsupported_tracked_scope_msg(dialect))
     check_scope_subset_of_upsert_key(config, sync_options)

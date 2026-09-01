@@ -63,8 +63,15 @@ def test_state_recorded_after_successful_sync(
     httpserver.expect_request("/sink", method="POST").respond_with_data("OK", status=200)
 
     state = StateManager(tmp_path)
-    run_sync(_sync_cfg(_dest(httpserver)), source, RestApiDestination(), profile, tmp_path,
-             state_manager=state, observer=StatePersistingObserver(state, None))
+    run_sync(
+        _sync_cfg(_dest(httpserver)),
+        source,
+        RestApiDestination(),
+        profile,
+        tmp_path,
+        state_manager=state,
+        observer=StatePersistingObserver(state, None),
+    )
 
     saved = state.get_last_sync("idem_sync")
     assert saved is not None
@@ -96,12 +103,22 @@ def test_second_run_resends_all_rows_without_cursor(
     state = StateManager(tmp_path)
     cfg = _sync_cfg(_dest(httpserver))
     run_sync(
-        cfg, source, RestApiDestination(), profile, tmp_path,
-        state_manager=state, observer=StatePersistingObserver(state, None),
+        cfg,
+        source,
+        RestApiDestination(),
+        profile,
+        tmp_path,
+        state_manager=state,
+        observer=StatePersistingObserver(state, None),
     )
     run_sync(
-        cfg, source, RestApiDestination(), profile, tmp_path,
-        state_manager=state, observer=StatePersistingObserver(state, None),
+        cfg,
+        source,
+        RestApiDestination(),
+        profile,
+        tmp_path,
+        state_manager=state,
+        observer=StatePersistingObserver(state, None),
     )
 
     assert len(received) == 6  # 3 rows × 2 runs
@@ -119,14 +136,24 @@ def test_state_entry_is_overwritten_not_appended(
     state = StateManager(tmp_path)
     cfg = _sync_cfg(_dest(httpserver))
     run_sync(
-        cfg, source, RestApiDestination(), profile, tmp_path,
-        state_manager=state, observer=StatePersistingObserver(state, None),
+        cfg,
+        source,
+        RestApiDestination(),
+        profile,
+        tmp_path,
+        state_manager=state,
+        observer=StatePersistingObserver(state, None),
     )
     first_run_at = state.get_last_sync("idem_sync").last_run_at  # type: ignore[union-attr]
 
     run_sync(
-        cfg, source, RestApiDestination(), profile, tmp_path,
-        state_manager=state, observer=StatePersistingObserver(state, None),
+        cfg,
+        source,
+        RestApiDestination(),
+        profile,
+        tmp_path,
+        state_manager=state,
+        observer=StatePersistingObserver(state, None),
     )
     all_states = state.get_all()
 

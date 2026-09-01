@@ -161,13 +161,9 @@ class MaskRule(BaseModel):
     def _validate_length(self) -> MaskRule:
         if self.strategy == "truncate":
             if self.length is None or self.length < 0:
-                raise ValueError(
-                    "the 'truncate' strategy requires a non-negative 'length'"
-                )
+                raise ValueError("the 'truncate' strategy requires a non-negative 'length'")
         elif self.length is not None:
-            raise ValueError(
-                f"'length' is not valid for the '{self.strategy}' strategy"
-            )
+            raise ValueError(f"'length' is not valid for the '{self.strategy}' strategy")
         return self
 
 
@@ -255,8 +251,7 @@ class MetadataColumnsConfig(BaseModel):
         targets = [v for _, v in configured]
         if len(targets) != len(set(targets)):
             raise ValueError(
-                "metadata_columns entries must map to distinct column names "
-                f"(got {targets})."
+                f"metadata_columns entries must map to distinct column names (got {targets})."
             )
         return self
 

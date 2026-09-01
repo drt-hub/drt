@@ -215,15 +215,12 @@ def deploy_github_actions(
 
     if schedule is not None and len(schedule.split()) != 5:
         print_error(
-            f'"{schedule}" does not look like a 5-field cron expression '
-            '(e.g. "40 3 * * *").'
+            f'"{schedule}" does not look like a 5-field cron expression (e.g. "40 3 * * *").'
         )
         raise typer.Exit(code=1)
 
     envs, types, has_profiles = _scan_project(project_dir)
-    inferred_extras = ",".join(
-        sorted({_TYPE_TO_EXTRA[t] for t in types if t in _TYPE_TO_EXTRA})
-    )
+    inferred_extras = ",".join(sorted({_TYPE_TO_EXTRA[t] for t in types if t in _TYPE_TO_EXTRA}))
     effective_extras = extras if extras is not None else inferred_extras
     secrets = sorted(envs)
 

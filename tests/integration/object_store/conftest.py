@@ -90,9 +90,7 @@ def generation_preconditions_supported(fake_gcs: tuple[Any, str]) -> bool:
             "concurrency results would be false-green"
         )
 
-    old_version = storage_client.bucket(bucket_name).blob(
-        key, generation=int(first_generation)
-    )
+    old_version = storage_client.bucket(bucket_name).blob(key, generation=int(first_generation))
     try:
         old_version.download_as_bytes()
     except (NotFound, PreconditionFailed):
@@ -107,9 +105,7 @@ def generation_preconditions_supported(fake_gcs: tuple[Any, str]) -> bool:
 
 
 @pytest.fixture
-def gcs_client(
-    fake_gcs: tuple[Any, str], generation_preconditions_supported: bool
-) -> Any:
+def gcs_client(fake_gcs: tuple[Any, str], generation_preconditions_supported: bool) -> Any:
     assert generation_preconditions_supported
     from drt.state.gcs import GCSObjectClient
 
@@ -205,9 +201,7 @@ def s3_preconditions_supported(localstack_s3: tuple[Any, str]) -> bool:
 
 
 @pytest.fixture
-def s3_client(
-    localstack_s3: tuple[Any, str], s3_preconditions_supported: bool
-) -> Any:
+def s3_client(localstack_s3: tuple[Any, str], s3_preconditions_supported: bool) -> Any:
     assert s3_preconditions_supported
     from drt.state.s3 import S3ObjectClient
 

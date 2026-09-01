@@ -120,9 +120,7 @@ def test_malformed_schema_version_warns_and_treats_everything_as_new(
     corrupted baseline can carry a non-numeric schema_version. That must not
     crash with a raw TypeError out of the < comparison."""
     baseline = tmp_path / "baseline.json"
-    baseline.write_text(
-        f'{{"schema_version": {bad_version}, "drt_version": "0.8.4", "syncs": []}}'
-    )
+    baseline.write_text(f'{{"schema_version": {bad_version}, "drt_version": "0.8.4", "syncs": []}}')
 
     with caplog.at_level(logging.WARNING, logger="drt.cli._state_selection"):
         diff = load_state_diff(baseline, [_sync("users")], tmp_path)

@@ -58,7 +58,5 @@ def validate(
     if warnings:
         response["warnings"] = warnings
     if check_connection:
-        response["connection_tests"] = {
-            s.name: _run_connection_test(s) for s in result.syncs
-        }
+        response["connection_tests"] = {s.name: _run_connection_test(s) for s in result.syncs}
     return response

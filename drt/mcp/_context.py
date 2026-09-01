@@ -59,9 +59,7 @@ class McpContext:
 
         return load_syncs_safe(self.project_dir)
 
-    def find_sync(
-        self, sync_name: str, vars: dict[str, Any] | None = None
-    ) -> SyncConfig | None:
+    def find_sync(self, sync_name: str, vars: dict[str, Any] | None = None) -> SyncConfig | None:
         """First sync named *sync_name* among ``load_syncs(vars=vars)``, or None."""
         return next((s for s in self.load_syncs(vars=vars) if s.name == sync_name), None)
 

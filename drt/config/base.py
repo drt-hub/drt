@@ -234,13 +234,9 @@ class StateConfig(BaseModel):
             field for field in s3_only_fields if getattr(self, field) is not None
         ]
         if self.backend == "local" and (
-            self.bucket is not None
-            or self.prefix is not None
-            or configured_s3_fields
+            self.bucket is not None or self.prefix is not None or configured_s3_fields
         ):
-            raise ValueError(
-                "Remote state fields are not valid when backend is 'local'."
-            )
+            raise ValueError("Remote state fields are not valid when backend is 'local'.")
         if self.backend == "gcs" and not self.bucket:
             raise ValueError("state.bucket is required when backend is 'gcs'.")
         if self.backend == "gcs" and configured_s3_fields:

@@ -353,9 +353,7 @@ def test_drt_run_auto_decrypts_project_secrets_in_memory(
     )
     plaintext = drt_dir / "secrets.toml"
     webhook_url = "https://hooks.slack.test/encrypted"
-    plaintext.write_text(
-        f'[destinations.slack]\nSLACK_WEBHOOK_URL = "{webhook_url}"\n'
-    )
+    plaintext.write_text(f'[destinations.slack]\nSLACK_WEBHOOK_URL = "{webhook_url}"\n')
     encrypt_secrets_file(plaintext)
     plaintext.unlink()
 
