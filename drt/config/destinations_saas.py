@@ -393,30 +393,38 @@ class KlaviyoDestinationConfig(BaseModel):
     type: Literal["klaviyo"]
     api_key: str | None = None
     api_key_env: str | None = "KLAVIYO_API_KEY"
+    endpoint: Literal["profile", "event"] = "profile"
     # Row field used as the profile identifier (email).
     email_field: str = "email"
-    # Jinja2 JSON template → custom profile properties. When omitted, all
-    # row fields except email_field are sent as custom properties.
+    # Event name configuration. metric_name_field takes precedence when set.
+    metric_name_field: str | None = None
+    metric_name: str | None = None
+    time_field: str | None = None
+    value_field: str | None = None
+    unique_id_field: str | None = None
+    # Jinja2 JSON template → custom profile/event properties. When omitted,
+    # all row fields except email_field are sent as custom properties.
     properties_template: str | None = None
     # Optional: add each upserted profile to this Klaviyo list.
     list_id: str | None = None
     list_id_env: str | None = None
     # Klaviyo API revision (sent as the `revision` header).
-    revision: str = "2024-10-15"
+    revision: str = "2026-01-15"
     retry: RetryConfig | None = None
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
     def describe(self) -> str:
-        return "klaviyo (profiles)"
+        resource = "profiles" if self.endpoint == "profile" else "events"
+        return f"klaviyo ({resource})"
 
     def describe_safe(self) -> str:
         return self.describe()  # detail is object identity only (#696)
 
     def rate_limit_key(self) -> str:
         """Per Klaviyo account (API key) (#769). ``list_id`` is excluded — the
-        quota is account-wide, and ``describe()`` is the constant
-        ``"klaviyo (profiles)"`` for every config, so it cannot serve as a key.
-        (``BaseModel``-direct config — see ``AirtableDestinationConfig``.)
+        quota is account-wide, and ``describe()`` includes the selected endpoint,
+        so it cannot serve as the shared account key. (``BaseModel``-direct
+        config — see ``AirtableDestinationConfig``.)
         """
         account = self.api_key_env or (LITERAL_CREDENTIAL_KEY if self.api_key else "unset")
         return f"{self.type}:{account}"
@@ -425,6 +433,22 @@ class KlaviyoDestinationConfig(BaseModel):
     def _check_api_key(self) -> KlaviyoDestinationConfig:
         if not self.api_key and not self.api_key_env:
             raise ValueError("api_key or api_key_env is required.")
+        return self
+
+    @model_validator(mode="after")
+    def _check_event_endpoint(self) -> KlaviyoDestinationConfig:
+        if self.endpoint == "event" and not self.metric_name and not self.metric_name_field:
+            raise ValueError(
+                "metric_name or metric_name_field is required when endpoint is 'event'."
+            )
+        # Klaviyo defaults an omitted unique_id to the event timestamp truncated
+        # to one second, which can drop distinct events and makes retries unsafe.
+        if self.endpoint == "event" and (
+            self.unique_id_field is None or not self.unique_id_field.strip()
+        ):
+            raise ValueError(
+                "unique_id_field is required when endpoint is 'event'."
+            )
         return self
 
 

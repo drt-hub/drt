@@ -1,6 +1,6 @@
 # Klaviyo Destination
 
-> Upsert profiles into Klaviyo (v3 API) — sync DWH customer segments (LTV, churn risk, plan) to the email/SMS marketing platform. Core connector — no extra install (uses `httpx`).
+> Upsert profiles or track behavioral events in Klaviyo — sync DWH customer segments and warehouse-computed events to the email/SMS marketing platform. Core connector — no extra install (uses `httpx`).
 
 ## YAML Example
 
@@ -20,15 +20,22 @@ destination:
 |---|---|---|---|
 | `type` | `"klaviyo"` | — | Required |
 | `api_key` / `api_key_env` | string \| null | `api_key_env: KLAVIYO_API_KEY` | Private API key (`Authorization: Klaviyo-API-Key …`). Prefer the `_env` form. One is required. |
+| `endpoint` | `"profile"` \| `"event"` | `"profile"` | Upsert a profile or send a behavioral event. |
 | `email_field` | string | `"email"` | Row field used as the profile identifier. |
-| `properties_template` | string \| null | null | Jinja2 JSON template → custom profile `properties`. When omitted, **all row fields except `email_field`** are sent as custom properties. |
-| `list_id` / `list_id_env` | string \| null | null | When set, each upserted profile is added to this Klaviyo list. |
-| `revision` | string | `"2024-10-15"` | Klaviyo API revision (sent as the `revision` header). |
+| `metric_name_field` | string \| null | null | Row field holding the event/metric name (maximum 128 characters) for `endpoint: event`. Required unless `metric_name` is set. |
+| `metric_name` | string \| null | null | Constant event/metric name (maximum 128 characters) for `endpoint: event`. Alternative to `metric_name_field`. |
+| `time_field` | string \| null | null | Row field holding the event timestamp. A warehouse `TIMESTAMP`/`DATETIME` value is sent as ISO-8601; a date-only `DATE` value is rejected because Klaviyo requires a time component. Omitted from the payload when unset or null; Klaviyo then defaults to the current time. |
+| `value_field` | string \| null | null | Row field holding the event's numeric `value`. Omitted when unset or null. |
+| `unique_id_field` | string \| null | null | Row field holding Klaviyo's event deduplication key (`unique_id`). Required for `endpoint: event`; omitted when the configured row value is null. |
+| `properties_template` | string \| null | null | Jinja2 JSON template → custom profile/event `properties`. When omitted, profile mode sends all row fields except `email_field`; event mode also excludes configured metric/time/value/unique-ID control fields. Event payloads always include `properties` (at least `{}`). |
+| `list_id` / `list_id_env` | string \| null | null | For `endpoint: profile`, add each upserted profile to this Klaviyo list. |
+| `revision` | string | `"2026-01-15"` | Klaviyo API revision (sent as the `revision` header). |
 | `retry` | RetryConfig \| null | null | Per-destination override of `sync.retry`. |
+| `rate_limit` | RateLimitConfig \| null | null | Per-destination override of `sync.rate_limit`. |
 
 ## Authentication
 
-Create a [private API key](https://www.klaviyo.com/settings/account/api-keys) with profile + list write access:
+Create a [private API key](https://www.klaviyo.com/settings/account/api-keys) with the profile/list or event write access needed by the selected endpoint:
 
 ```bash
 export KLAVIYO_API_KEY="pk_..."
@@ -44,9 +51,34 @@ Each row is upserted **by email**, one record per request:
 
 Per-record failures land in `result.row_errors` with the HTTP status (`on_error: skip` continues / `fail` stops).
 
+## Event tracking
+
+`endpoint: event` sends one JSON:API event per row to `POST /api/events/`. This lets a warehouse-computed behavior such as an abandoned cart or plan upgrade trigger a Klaviyo flow. A successful create returns `202 Accepted`.
+
+```yaml
+destination:
+  type: klaviyo
+  api_key_env: KLAVIYO_API_KEY
+  endpoint: event
+  email_field: email
+  metric_name_field: event_name
+  time_field: occurred_at       # optional
+  value_field: amount           # optional
+  unique_id_field: event_id     # required stable deduplication key
+  properties_template: |
+    {"cart_id": "{{ row.cart_id }}", "plan": "{{ row.plan }}"}
+```
+
+Every event needs a non-empty email and metric name. Set either `metric_name_field` for a per-row name or `metric_name` for one constant name. `unique_id_field` is required: [Klaviyo documents](https://developers.klaviyo.com/en/reference/events_api_overview) that an omitted `unique_id` defaults to the event timestamp truncated to one second, which can silently discard distinct same-profile/metric events in that second and makes an ambiguous request retry non-idempotent. Use a stable source ID for each logical event. `time` and `value` are optional and omitted when their configured row value is null; datetime values are sent as ISO-8601 strings, date-only values are rejected, and numeric values are sent as numbers. Use a warehouse `TIMESTAMP`/`DATETIME` source column—not a `DATE` column—for `time_field`. Without a template, configured event control fields are excluded from `properties`; custom templates remain explicit. Event `properties` is always sent, using `{}` when there are no properties.
+
 ## Rate limiting
 
-**Vendor limit:** 75 requests/second (burst) on the profiles endpoint, 700/minute steady. drt applies **no automatic cap** here — set one explicitly:
+**Vendor limits depend on the selected endpoint:**
+
+- `endpoint: profile`: 75 requests/second burst, 700/minute steady.
+- `endpoint: event`: 350 requests/second burst, 3500/minute steady.
+
+drt applies **no endpoint-specific automatic cap** here — set one explicitly:
 
 ```yaml
 destination:
@@ -63,7 +95,7 @@ The limiter is shared per **account** (API key) — `list_id` is deliberately ex
 ## Notes
 
 - Core connector — no `pip install` extras needed.
-- Calls are **per profile** — set `sync.rate_limit.requests_per_second` to respect Klaviyo's limit (75 req/s).
+- Calls are **per profile or event** — set `sync.rate_limit.requests_per_second` to respect the selected endpoint's limit.
 - Each row must include a non-empty `email_field` value; rows without one are recorded as errors.
-- `sync.mode: mirror` and event tracking (`/api/events/`) are not implemented — follow-ups.
+- `sync.mode: mirror` is not implemented — follow-up.
 - `--dry-run` is honoured — `destination.load()` is never called when dry_run is on.

@@ -1967,10 +1967,79 @@
           "default": "KLAVIYO_API_KEY",
           "title": "Api Key Env"
         },
+        "endpoint": {
+          "default": "profile",
+          "enum": [
+            "profile",
+            "event"
+          ],
+          "title": "Endpoint",
+          "type": "string"
+        },
         "email_field": {
           "default": "email",
           "title": "Email Field",
           "type": "string"
+        },
+        "metric_name_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metric Name Field"
+        },
+        "metric_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metric Name"
+        },
+        "time_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Time Field"
+        },
+        "value_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value Field"
+        },
+        "unique_id_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unique Id Field"
         },
         "properties_template": {
           "anyOf": [
@@ -2009,7 +2078,7 @@
           "title": "List Id Env"
         },
         "revision": {
-          "default": "2024-10-15",
+          "default": "2026-01-15",
           "title": "Revision",
           "type": "string"
         },
