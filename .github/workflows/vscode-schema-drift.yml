@@ -66,10 +66,12 @@ jobs:
         run: pip install uv
 
       - name: Install drt-core
-        # `[dev]`, not plain `-e .`: the exact pydantic pin that makes schema
-        # generation reproducible (#1070) lives in the dev extra, not the
-        # published runtime dependency range.
-        run: uv pip install --system -e ".[dev]"
+        # `[schema-gen]`, not plain `-e .` or `[dev]`: the exact pydantic pin
+        # that makes schema generation reproducible (#1070) lives in its own
+        # extra, kept out of both the published runtime dependency range and
+        # the shared `dev` extra (which the main CI matrix installs — pinning
+        # there would freeze every test run at one pydantic version).
+        run: uv pip install --system -e ".[schema-gen]"
 
       - name: Show resolved pydantic version
         run: python -c "import pydantic; print(f'pydantic {pydantic.__version__}')"

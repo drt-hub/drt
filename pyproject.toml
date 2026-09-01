@@ -96,13 +96,6 @@ otel = [
     "opentelemetry-exporter-otlp-proto-grpc>=1.20.0",
 ]
 dev = [
-    # Exact pin, separate from the runtime `pydantic>=2.5,<3` range above:
-    # the JSON Schema this version emits for the destination union's callable
-    # Discriminator (#997) is what `regenerate-schemas.sh` / CI's
-    # vscode-schema-drift job treat as canonical (#1070). A wider range here
-    # would let a contributor's local pydantic silently diverge from CI's
-    # again — the exact failure mode #1070 exists to prevent.
-    "pydantic==2.13.5",
     "pyrage>=1.3,<2",
     "pygments>=2.17",
     "pytest>=8.0",
@@ -114,6 +107,16 @@ dev = [
     "types-pyyaml",
     "types-PyMySQL",
     "testcontainers[postgres]>=4.0",
+]
+# Deliberately its own extra, not part of `dev`: `dev` is installed by the
+# main CI test matrix and the dagster-drt job, so pinning pydantic there
+# would freeze every test run at one exact version and silently stop
+# exercising the rest of the runtime-supported `pydantic>=2.5,<3` range.
+# This extra exists only for schema-generation reproducibility (#1070) —
+# `regenerate-schemas.sh` and CI's vscode-schema-drift job install it, and
+# nothing else should.
+schema-gen = [
+    "pydantic==2.13.5",
 ]
 
 [project.scripts]
