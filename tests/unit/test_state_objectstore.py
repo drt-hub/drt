@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -257,12 +257,16 @@ def test_history_append_non_precondition_error_warns_without_retry(
 def test_remote_history_applies_entry_cap_only_during_prune() -> None:
     client = MemoryObjectClient()
     store = ObjectStoreHistoryStore(client, max_entries=2)
-    for day in range(1, 4):
-        store.append(_history(started_at=f"2026-08-0{day}T00:00:00+00:00"))
+    now = datetime.now(timezone.utc)
+    timestamps = [
+        (now - timedelta(days=days_ago)).isoformat() for days_ago in (3, 2, 1)
+    ]
+    for started_at in timestamps:
+        store.append(_history(started_at=started_at))
 
     assert len(store.read("s", limit=20)) == 3
     assert store.prune("s", retention_days=30) == 1
-    assert [entry.started_at[9] for entry in store.read("s")] == ["3", "2"]
+    assert [entry.started_at for entry in store.read("s")] == timestamps[::-1][:2]
 
 
 def test_prune_caps_by_started_at_not_append_order() -> None:
@@ -274,14 +278,18 @@ def test_prune_caps_by_started_at_not_append_order() -> None:
     """
     client = MemoryObjectClient()
     store = ObjectStoreHistoryStore(client, max_entries=2)
-    # Appended oldest-started-at last, as if a later-starting run's batch
+    now = datetime.now(timezone.utc)
+    oldest = (now - timedelta(days=3)).isoformat()
+    middle = (now - timedelta(days=2)).isoformat()
+    newest = (now - timedelta(days=1)).isoformat()
+    # Append out of started_at order, as if a later-starting run's batch
     # observer flushed and completed before an earlier-starting run did.
-    store.append(_history(started_at="2026-08-03T00:00:00+00:00"))
-    store.append(_history(started_at="2026-08-01T00:00:00+00:00"))
-    store.append(_history(started_at="2026-08-02T00:00:00+00:00"))
+    store.append(_history(started_at=newest))
+    store.append(_history(started_at=oldest))
+    store.append(_history(started_at=middle))
 
     assert store.prune("s", retention_days=30) == 1
-    assert [entry.started_at[9] for entry in store.read("s")] == ["3", "2"]
+    assert [entry.started_at for entry in store.read("s")] == [newest, middle]
 
 
 def test_history_reads_all_syncs_newest_first_and_prunes_old_entries() -> None:
