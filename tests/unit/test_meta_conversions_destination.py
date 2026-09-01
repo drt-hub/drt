@@ -93,6 +93,17 @@ def test_invalid_event_id_type_is_rejected_per_row(event_id: object) -> None:
     )
 
 
+@pytest.mark.parametrize("event_id", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_event_id_is_rejected_per_row(event_id: float) -> None:
+    result = MetaConversionsDestination().load(
+        [_record(event_id=event_id)], _config(), SyncOptions()
+    )
+
+    assert result.success == 0
+    assert result.failed == 1
+    assert "is NaN or infinite" in result.row_errors[0].error_message
+
+
 @pytest.mark.parametrize(
     "email",
     [float("nan"), 12345, True, {"address": "test@example.com"}, ["test@example.com"]],

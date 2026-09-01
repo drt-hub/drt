@@ -178,6 +178,14 @@ def _build_event(
             f"Row event id field {event_id_field!r} must be a string or a plain "
             f"number, not a container or boolean; got {type(event_id).__name__}."
         )
+    if isinstance(event_id, float) and not math.isfinite(event_id):
+        raise ValueError(
+            f"Row event id field {event_id_field!r} is NaN or infinite — a common "
+            "missing-value sentinel in tabular data, not a usable id. Distinct rows "
+            "with a NaN id would all stringify to the same 'nan' event_id, and Meta "
+            "deduplicates matching event name + event_id pairs, silently discarding "
+            "all but one."
+        )
     event_id = str(event_id)
     event["event_id"] = event_id
     if config.action_source == "website":
