@@ -443,7 +443,9 @@ class KlaviyoDestinationConfig(BaseModel):
             )
         # Klaviyo defaults an omitted unique_id to the event timestamp truncated
         # to one second, which can drop distinct events and makes retries unsafe.
-        if self.endpoint == "event" and self.unique_id_field is None:
+        if self.endpoint == "event" and (
+            self.unique_id_field is None or not self.unique_id_field.strip()
+        ):
             raise ValueError(
                 "unique_id_field is required when endpoint is 'event'."
             )

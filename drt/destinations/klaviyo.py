@@ -186,7 +186,7 @@ class KlaviyoDestination:
             value = record.get(config.value_field)
             if value is not None:
                 attributes["value"] = float(value)
-        if config.unique_id_field:
+        if config.unique_id_field is not None:
             unique_id = record.get(config.unique_id_field)
             if unique_id is None or str(unique_id).strip() == "":
                 raise ValueError(

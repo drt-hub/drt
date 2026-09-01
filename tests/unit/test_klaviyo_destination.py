@@ -73,6 +73,17 @@ class TestKlaviyoConfig:
         with pytest.raises(ValueError, match="unique_id_field"):
             _config(endpoint="event", metric_name="Upgraded Plan")
 
+    @pytest.mark.parametrize("unique_id_field", ["", "   "])
+    def test_event_rejects_blank_unique_id_field(
+        self, unique_id_field: str
+    ) -> None:
+        with pytest.raises(ValueError, match="unique_id_field"):
+            _config(
+                endpoint="event",
+                metric_name="Upgraded Plan",
+                unique_id_field=unique_id_field,
+            )
+
     def test_describe(self) -> None:
         assert _config().describe() == "klaviyo (profiles)"
         assert _config(
