@@ -237,6 +237,8 @@ API_DESTINATIONS: list[Any] = [
             event_name="Purchase",
             event_id_field="event_id",
             email_field="email",
+            event_source_url_field="page_url",
+            client_user_agent_field="user_agent",
             access_token_env="META_CONVERSIONS_ACCESS_TOKEN_TEST",
         ),
         {"META_CONVERSIONS_ACCESS_TOKEN_TEST": "dummy"},

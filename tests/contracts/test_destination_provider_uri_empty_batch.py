@@ -97,6 +97,8 @@ PROVIDER_URI_DESTINATIONS: list[Any] = [
             event_name="Purchase",
             event_id_field="event_id",
             email_field="email",
+            event_source_url_field="event_source_url",
+            client_user_agent_field="client_user_agent",
             access_token_env=_URI,
         ),
         False,
