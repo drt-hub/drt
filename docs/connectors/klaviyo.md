@@ -26,8 +26,8 @@ destination:
 | `metric_name` | string \| null | null | Constant event/metric name (maximum 128 characters) for `endpoint: event`. Alternative to `metric_name_field`. |
 | `time_field` | string \| null | null | Row field holding the event timestamp. Omitted from the payload when unset or null; Klaviyo then defaults to the current time. |
 | `value_field` | string \| null | null | Row field holding the event's numeric `value`. Omitted when unset or null. |
-| `unique_id_field` | string \| null | null | Row field holding Klaviyo's event deduplication key (`unique_id`). Omitted when unset or null. |
-| `properties_template` | string \| null | null | Jinja2 JSON template → custom profile/event `properties`. When omitted, **all row fields except `email_field`** are sent as custom properties. Event payloads always include `properties` (at least `{}`). |
+| `unique_id_field` | string \| null | null | Row field holding Klaviyo's event deduplication key (`unique_id`). Required for `endpoint: event`; omitted when the configured row value is null. |
+| `properties_template` | string \| null | null | Jinja2 JSON template → custom profile/event `properties`. When omitted, profile mode sends all row fields except `email_field`; event mode also excludes configured metric/time/value/unique-ID control fields. Event payloads always include `properties` (at least `{}`). |
 | `list_id` / `list_id_env` | string \| null | null | For `endpoint: profile`, add each upserted profile to this Klaviyo list. |
 | `revision` | string | `"2024-10-15"` | Klaviyo API revision (sent as the `revision` header). |
 | `retry` | RetryConfig \| null | null | Per-destination override of `sync.retry`. |
@@ -64,12 +64,12 @@ destination:
   metric_name_field: event_name
   time_field: occurred_at       # optional
   value_field: amount           # optional
-  unique_id_field: event_id     # optional deduplication key
+  unique_id_field: event_id     # required stable deduplication key
   properties_template: |
     {"cart_id": "{{ row.cart_id }}", "plan": "{{ row.plan }}"}
 ```
 
-Every event needs a non-empty email and metric name. Set either `metric_name_field` for a per-row name or `metric_name` for one constant name. `time`, `value`, and `unique_id` are independently optional and omitted when their configured row value is null. `properties` uses the same template/fallback behavior as profile upserts and is always sent, using `{}` when there are no properties.
+Every event needs a non-empty email and metric name. Set either `metric_name_field` for a per-row name or `metric_name` for one constant name. `unique_id_field` is required: [Klaviyo documents](https://developers.klaviyo.com/en/reference/events_api_overview) that an omitted `unique_id` defaults to the event timestamp truncated to one second, which can silently discard distinct same-profile/metric events in that second and makes an ambiguous request retry non-idempotent. Use a stable source ID for each logical event. `time` and `value` are optional and omitted when their configured row value is null; date/datetime values are sent as ISO-8601 strings and numeric values are sent as numbers. Without a template, configured event control fields are excluded from `properties`; custom templates remain explicit. Event `properties` is always sent, using `{}` when there are no properties.
 
 ## Rate limiting
 

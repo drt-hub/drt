@@ -11,8 +11,8 @@ is upserted by **email**:
 3. If ``list_id`` is set, the profile is added to that Klaviyo list.
 
 With ``endpoint: event``, each row is instead sent to ``POST /api/events/``
-with an email-identified profile, a metric name, properties, and any configured
-``time`` / ``value`` / ``unique_id`` fields.
+with an email-identified profile, a metric name, properties, a required stable
+``unique_id``, and any configured ``time`` / ``value`` fields.
 
 Auth is an API key (``Authorization: Klaviyo-API-Key <key>``) plus the
 ``revision`` header. No extra dependencies beyond core ``httpx``. Per-record
@@ -40,7 +40,7 @@ Example sync YAML — event tracking:
       metric_name_field: event_name
       time_field: occurred_at
       value_field: value
-      unique_id_field: event_id
+      unique_id_field: event_id  # required stable deduplication key
 
 ``sync.mode: mirror`` is not implemented — follow-up.
 """
@@ -48,6 +48,7 @@ Example sync YAML — event tracking:
 from __future__ import annotations
 
 import json
+from datetime import date, datetime
 from typing import Any
 
 import httpx
@@ -175,14 +176,20 @@ class KlaviyoDestination:
                 }
             },
         }
-        optional_fields = (
-            ("time", config.time_field),
-            ("value", config.value_field),
-            ("unique_id", config.unique_id_field),
-        )
-        for payload_key, row_field in optional_fields:
-            if row_field and record.get(row_field) is not None:
-                attributes[payload_key] = record[row_field]
+        if config.time_field:
+            time_value = record.get(config.time_field)
+            if time_value is not None:
+                if isinstance(time_value, (datetime, date)):
+                    time_value = time_value.isoformat()
+                attributes["time"] = time_value
+        if config.value_field:
+            value = record.get(config.value_field)
+            if value is not None:
+                attributes["value"] = float(value)
+        if config.unique_id_field:
+            unique_id = record.get(config.unique_id_field)
+            if unique_id is not None:
+                attributes["unique_id"] = str(unique_id)
 
         payload = {"data": {"type": "event", "attributes": attributes}}
 
@@ -283,10 +290,20 @@ class KlaviyoDestination:
             rendered = render_template(config.properties_template, record)
             parsed = json.loads(rendered)
             return parsed if isinstance(parsed, dict) else {}
+        excluded_fields = {config.email_field}
+        if config.endpoint == "event":
+            for field in (
+                config.time_field,
+                config.value_field,
+                config.unique_id_field,
+                config.metric_name_field,
+            ):
+                if field:
+                    excluded_fields.add(field)
         return {
             k: v
             for k, v in record.items()
-            if k != config.email_field and v is not None
+            if k not in excluded_fields and v is not None
         }
 
     def test_connection(self, config: DestinationConfig) -> None:

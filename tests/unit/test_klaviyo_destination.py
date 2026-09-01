@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -65,13 +67,19 @@ class TestKlaviyoConfig:
 
     def test_event_requires_metric_name_configuration(self) -> None:
         with pytest.raises(ValueError, match="metric_name or metric_name_field"):
-            _config(endpoint="event")
+            _config(endpoint="event", unique_id_field="event_id")
+
+    def test_event_requires_unique_id_field(self) -> None:
+        with pytest.raises(ValueError, match="unique_id_field"):
+            _config(endpoint="event", metric_name="Upgraded Plan")
 
     def test_describe(self) -> None:
         assert _config().describe() == "klaviyo (profiles)"
-        assert _config(endpoint="event", metric_name="Upgraded Plan").describe() == (
-            "klaviyo (events)"
-        )
+        assert _config(
+            endpoint="event",
+            metric_name="Upgraded Plan",
+            unique_id_field="event_id",
+        ).describe() == "klaviyo (events)"
 
     def test_missing_api_key_raises(self) -> None:
         with pytest.raises(ValueError, match="api_key"):
@@ -320,11 +328,47 @@ class TestKlaviyoEventLoad:
         }
 
     @pytest.mark.parametrize(
+        "occurred_at",
+        [datetime(2022, 11, 8, tzinfo=timezone.utc), date(2022, 11, 8)],
+    )
+    def test_event_normalizes_warehouse_types_and_excludes_control_fields(
+        self, occurred_at: datetime | date
+    ) -> None:
+        client = MagicMock()
+        client.post.return_value = _resp(202)
+        config = _config(
+            endpoint="event",
+            metric_name_field="event_name",
+            time_field="occurred_at",
+            value_field="amount",
+            unique_id_field="event_id",
+        )
+        record = {
+            "email": "a@x.com",
+            "event_name": "Placed Order",
+            "occurred_at": occurred_at,
+            "amount": Decimal("12.34"),
+            "event_id": Decimal("123"),
+            "plan": "pro",
+        }
+
+        with _patch_client(client):
+            result = KlaviyoDestination().load([record], config, _options())
+
+        assert result.success == 1
+        body = client.post.call_args.kwargs["json"]
+        attributes = body["data"]["attributes"]
+        assert attributes["time"] == occurred_at.isoformat()
+        assert attributes["value"] == 12.34
+        assert attributes["unique_id"] == "123"
+        assert attributes["properties"] == {"plan": "pro"}
+        json.dumps(body)  # httpx's json= encoding must accept the final payload.
+
+    @pytest.mark.parametrize(
         ("config_field", "payload_key"),
         [
             ("time_field", "time"),
             ("value_field", "value"),
-            ("unique_id_field", "unique_id"),
         ],
     )
     def test_event_optional_field_is_independently_omitted_when_unconfigured(
@@ -389,11 +433,15 @@ class TestKlaviyoEventLoad:
     def test_event_sends_empty_properties_when_row_has_no_properties(self) -> None:
         client = MagicMock()
         client.post.return_value = _resp(202)
-        config = _config(endpoint="event", metric_name="Upgraded Plan")
+        config = _config(
+            endpoint="event",
+            metric_name="Upgraded Plan",
+            unique_id_field="event_id",
+        )
 
         with _patch_client(client):
             result = KlaviyoDestination().load(
-                [{"email": "a@x.com"}], config, _options()
+                [{"email": "a@x.com", "event_id": "evt-123"}], config, _options()
             )
 
         assert result.success == 1
@@ -404,7 +452,11 @@ class TestKlaviyoEventLoad:
         client = MagicMock()
         client.post.side_effect = [_resp(500), _resp(202)]
         limiter = MagicMock()
-        config = _config(endpoint="event", metric_name="Upgraded Plan")
+        config = _config(
+            endpoint="event",
+            metric_name="Upgraded Plan",
+            unique_id_field="event_id",
+        )
         options = _options(
             retry=RetryConfig(
                 max_attempts=2,
@@ -420,7 +472,9 @@ class TestKlaviyoEventLoad:
             ),
             _patch_client(client),
         ):
-            result = KlaviyoDestination().load([{"email": "a@x.com"}], config, options)
+            result = KlaviyoDestination().load(
+                [{"email": "a@x.com", "event_id": "evt-123"}], config, options
+            )
 
         assert result.success == 1
         assert client.post.call_count == 2
@@ -428,7 +482,11 @@ class TestKlaviyoEventLoad:
 
     def test_event_missing_metric_name_is_recorded(self) -> None:
         client = MagicMock()
-        config = _config(endpoint="event", metric_name_field="event_name")
+        config = _config(
+            endpoint="event",
+            metric_name_field="event_name",
+            unique_id_field="event_id",
+        )
 
         with _patch_client(client):
             result = KlaviyoDestination().load(
