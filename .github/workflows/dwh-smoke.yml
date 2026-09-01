@@ -171,8 +171,13 @@ jobs:
 
           if [ "$state" != "RUNNING" ]; then
             echo "Starting warehouse..."
-            if ! curl_retry -X POST "${api}/start" >/dev/null; then
-              echo "::error::Failed to request warehouse start"
+            start_response=$(curl -sS --connect-timeout 10 --max-time 30 "${auth[@]}" \
+              -X POST -w '\nHTTP_STATUS:%{http_code}' "${api}/start")
+            start_status="${start_response##*HTTP_STATUS:}"
+            start_body="${start_response%HTTP_STATUS:*}"
+            echo "DIAG start response status=${start_status} body=${start_body}"
+            if [ "$start_status" -lt 200 ] || [ "$start_status" -ge 300 ]; then
+              echo "::error::Failed to request warehouse start (status ${start_status}): ${start_body}"
               exit 1
             fi
 
