@@ -327,7 +327,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 ### Destinations
 
 <details>
-<summary><b>34 destinations</b> — warehouses, SaaS APIs, cloud storage, files &amp; webhooks (click to expand)</summary>
+<summary><b>35 destinations</b> — warehouses, SaaS APIs, cloud storage, files &amp; webhooks (click to expand)</summary>
 
 | Connector               | Status    | Install                            | Auth                              |
 | ----------------------- | --------- | ---------------------------------- | --------------------------------- |
@@ -341,6 +341,7 @@ Copy the files from `.claude/commands/` into your drt project's `.claude/command
 | Klaviyo                 | ✅ v0.8   | (core)                             | Private API key (env var)         |
 | Mixpanel                | ✅ v0.8   | (core)                             | Project token / service account   |
 | Google Ads              | ✅ v0.6   | (core)                             | OAuth2 Client Credentials         |
+| Meta Conversions        | ✅ next   | (core)                             | Long-lived access token (env var) |
 | Google Sheets           | ✅ v0.4   | `pip install drt-core[sheets]`     | Service Account Keyfile           |
 | PostgreSQL (upsert)     | ✅ v0.4   | `pip install drt-core[postgres]`   | Password (env var)                |
 | MySQL (upsert)          | ✅ v0.4   | `pip install drt-core[mysql]`      | Password (env var)                |

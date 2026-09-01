@@ -48,6 +48,8 @@ fixed direct environment access in the `discord`, `email_smtp`,
 `slack`, `teams`, and `twilio` destinations and the `postgres` and
 `redshift` sources. These now accept provider URIs on their credential
 `*_env` fields just like the connectors that already used `resolve_env()`.
+New connectors follow the same rule; for example, Meta Conversions accepts a
+provider URI in `access_token_env`.
 On an empty destination batch, credential resolution is skipped entirely,
 so a provider URI does not cause a needless Secrets Manager or Vault request.
 

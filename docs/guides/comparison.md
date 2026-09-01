@@ -108,7 +108,7 @@ field at a dbt model or raw SQL, and drt syncs exactly what that query
 returns.
 
 **Does this mean drt is missing features?** Depends on what you're
-comparing. drt covers 13 sources and 34 destinations today (see below) —
+comparing. drt covers 13 sources and 35 destinations today (see below) —
 fewer than a 200+-connector commercial catalog, and if your workflow
 needs one of those, a commercial tool is the better fit. What drt doesn't
 have is a UI, a hosted runtime, or an audience builder to catch up on —
@@ -157,7 +157,7 @@ drt currently supports:
 
 **Sources (13):** BigQuery, DuckDB, PostgreSQL, Snowflake, SQLite, Redshift, ClickHouse, MySQL, Databricks, SQL Server, Delta Lake, Iceberg, REST API
 
-**Destinations (34):** REST API, Slack, Discord, Teams, GitHub Actions, HubSpot, Zendesk, Google Sheets, PostgreSQL, MySQL, ClickHouse, Snowflake, Databricks, BigQuery, Parquet, File (CSV/JSON/JSONL), S3, GCS, Azure Blob, Jira, Linear, SendGrid, Notion, Twilio SMS, Intercom, Email SMTP, Salesforce Bulk API, Staged Upload, Google Ads, Amplitude, Mixpanel, Elasticsearch, Airtable, Klaviyo
+**Destinations (35):** REST API, Slack, Discord, Teams, GitHub Actions, HubSpot, Zendesk, Google Sheets, PostgreSQL, MySQL, ClickHouse, Snowflake, Databricks, BigQuery, Parquet, File (CSV/JSON/JSONL), S3, GCS, Azure Blob, Jira, Linear, SendGrid, Notion, Twilio SMS, Intercom, Email SMTP, Salesforce Bulk API, Staged Upload, Google Ads, Meta Conversions, Amplitude, Mixpanel, Elasticsearch, Airtable, Klaviyo
 
 **Integrations:** Dagster (`dagster-drt`), Airflow (built-in), Prefect (built-in), dbt manifest reader
 

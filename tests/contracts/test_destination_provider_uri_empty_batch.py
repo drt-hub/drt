@@ -19,6 +19,7 @@ from drt.config.models import (
     GoogleAdsDestinationConfig,
     IntercomDestinationConfig,
     JiraDestinationConfig,
+    MetaConversionsDestinationConfig,
     SalesforceBulkDestinationConfig,
     SlackDestinationConfig,
     SyncOptions,
@@ -31,6 +32,7 @@ from drt.destinations import (
     google_ads,
     intercom,
     jira,
+    meta_conversions,
     salesforce_bulk,
     slack,
     teams,
@@ -41,6 +43,7 @@ from drt.destinations.email_smtp import EmailSmtpDestination
 from drt.destinations.google_ads import GoogleAdsDestination
 from drt.destinations.intercom import IntercomDestination
 from drt.destinations.jira import JiraDestination
+from drt.destinations.meta_conversions import MetaConversionsDestination
 from drt.destinations.salesforce_bulk import SalesforceBulkDestination
 from drt.destinations.slack import SlackDestination
 from drt.destinations.teams import TeamsDestination
@@ -84,6 +87,18 @@ PROVIDER_URI_DESTINATIONS: list[Any] = [
         ),
         False,
         id="google_ads",
+    ),
+    pytest.param(
+        meta_conversions,
+        MetaConversionsDestination(),
+        MetaConversionsDestinationConfig(
+            type="meta_conversions",
+            pixel_id="123",
+            event_name="Purchase",
+            access_token_env=_URI,
+        ),
+        False,
+        id="meta_conversions",
     ),
     pytest.param(
         intercom,

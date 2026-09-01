@@ -10,6 +10,7 @@ from drt.config.models import (
     HubSpotDestinationConfig,
     JiraDestinationConfig,
     LinearDestinationConfig,
+    MetaConversionsDestinationConfig,
     MySQLDestinationConfig,
     ParquetDestinationConfig,
     PostgresDestinationConfig,
@@ -42,6 +43,9 @@ ALL_DESTINATIONS = [
     ),
     LinearDestinationConfig(
         type="linear", title_template="title", description_template="description"
+    ),
+    MetaConversionsDestinationConfig(
+        type="meta_conversions", pixel_id="123456789", event_name="Purchase"
     ),
     PostgresDestinationConfig(
         type="postgres", host="localhost", dbname="db", table="public.table", upsert_key=["id"]

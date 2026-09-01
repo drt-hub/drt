@@ -47,6 +47,7 @@ from drt.config.models import (
     JiraDestinationConfig,
     KlaviyoDestinationConfig,
     LinearDestinationConfig,
+    MetaConversionsDestinationConfig,
     MixpanelDestinationConfig,
     MySQLDestinationConfig,
     NotionDestinationConfig,
@@ -131,6 +132,9 @@ SAMPLES: dict[str, object] = {
     ),
     "klaviyo": KlaviyoDestinationConfig(type="klaviyo", api_key_env="K"),
     "linear": LinearDestinationConfig(type="linear", title_template="t", description_template="d"),
+    "meta_conversions": MetaConversionsDestinationConfig(
+        type="meta_conversions", pixel_id=S, event_name="Purchase"
+    ),
     "mixpanel": MixpanelDestinationConfig(type="mixpanel", token_env="T"),
     "mysql": MySQLDestinationConfig(
         type="mysql", host=f"{S}.corp", dbname="app", table="scores", upsert_key=["id"]
@@ -208,6 +212,7 @@ EXPECTED_SAFE: dict[str, str] = {
     "jira": "jira (OPS)",
     "klaviyo": "klaviyo (profiles)",
     "linear": "linear (issue)",
+    "meta_conversions": "meta_conversions",  # Pixel id dropped
     "mixpanel": "mixpanel",  # endpoint/region dropped
     "mysql": "mysql (scores)",
     "notion": "notion (database)",  # database uuid dropped

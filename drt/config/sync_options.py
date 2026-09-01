@@ -43,6 +43,7 @@ from drt.config.destinations_saas import (
     JiraDestinationConfig,
     KlaviyoDestinationConfig,
     LinearDestinationConfig,
+    MetaConversionsDestinationConfig,
     MixpanelDestinationConfig,
     NotionDestinationConfig,
     RestApiDestinationConfig,
@@ -677,6 +678,7 @@ DestinationConfig = Annotated[
     | Annotated[ClickHouseDestinationConfig, Tag("clickhouse")]
     | Annotated[ParquetDestinationConfig, Tag("parquet")]
     | Annotated[GoogleAdsDestinationConfig, Tag("google_ads")]
+    | Annotated[MetaConversionsDestinationConfig, Tag("meta_conversions")]
     | Annotated[FileDestinationConfig, Tag("file")]
     | Annotated[S3DestinationConfig, Tag("s3")]
     | Annotated[GCSDestinationConfig, Tag("gcs")]

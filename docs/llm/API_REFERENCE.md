@@ -1065,6 +1065,30 @@ destination:
     client_secret_env: GOOGLE_ADS_CLIENT_SECRET
 ```
 
+### `type: meta_conversions`
+
+```yaml
+destination:
+  type: meta_conversions
+  pixel_id: "123456789012345"          # required: Meta Pixel/data-source id
+  access_token_env: META_CONVERSIONS_ACCESS_TOKEN
+  api_version: v25.0                    # configurable Graph API version
+  action_source: website               # default: website
+  event_name: Purchase                  # exactly one of fixed/field name
+  # event_name_field: event_name
+  event_time_field: occurred_at         # optional Unix-seconds row field
+  event_id_field: event_id              # optional Pixel+CAPI dedup id
+  event_source_url_field: page_url
+  email_field: email                    # normalized + SHA-256 → user_data.em[]
+  phone_field: phone                    # digits only + SHA-256 → user_data.ph[]
+  client_ip_address_field: client_ip    # plain text; never hashed
+  client_user_agent_field: user_agent   # plain text; never hashed
+  fbc_field: fbc                        # plain text; never hashed
+  fbp_field: fbp                        # plain text; never hashed
+  value_field: revenue
+  currency: USD
+```
+
 ---
 
 ## Auth Configs

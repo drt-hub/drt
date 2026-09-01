@@ -57,6 +57,7 @@ from drt.config.models import (
     JiraDestinationConfig,
     KlaviyoDestinationConfig,
     LinearDestinationConfig,
+    MetaConversionsDestinationConfig,
     MixpanelDestinationConfig,
     NotionDestinationConfig,
     RateLimitConfig,
@@ -76,6 +77,7 @@ from drt.destinations.intercom import IntercomDestination
 from drt.destinations.jira import JiraDestination
 from drt.destinations.klaviyo import KlaviyoDestination
 from drt.destinations.linear import LinearDestination
+from drt.destinations.meta_conversions import MetaConversionsDestination
 from drt.destinations.mixpanel import MixpanelDestination
 from drt.destinations.notion import NotionDestination
 from drt.destinations.sendgrid import SendGridDestination
@@ -226,6 +228,17 @@ API_DESTINATIONS: list[Any] = [
         ),
         {"GOOGLE_ADS_DEVELOPER_TOKEN_TEST": "dummy"},
         id="google_ads",
+    ),
+    pytest.param(
+        MetaConversionsDestination,
+        lambda: MetaConversionsDestinationConfig(
+            type="meta_conversions",
+            pixel_id="123456789",
+            event_name="Purchase",
+            access_token_env="META_CONVERSIONS_ACCESS_TOKEN_TEST",
+        ),
+        {"META_CONVERSIONS_ACCESS_TOKEN_TEST": "dummy"},
+        id="meta_conversions",
     ),
     pytest.param(
         SendGridDestination,
