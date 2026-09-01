@@ -77,7 +77,6 @@ def test_build_and_test_help_show_state_examples() -> None:
         "drt build --select state:modified --state ci-baseline/manifest.json --dry-run"
         in _plain(build_result.output)
     )
-    assert (
-        "drt test --select state:modified --state ci-baseline/manifest.json --dry-run"
-        in _plain(test_result.output)
+    assert "drt test --select state:modified --state ci-baseline/manifest.json --dry-run" in _plain(
+        test_result.output
     )

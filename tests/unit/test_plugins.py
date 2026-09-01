@@ -84,9 +84,7 @@ def test_discover_plugins_empty_by_default(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_discover_plugins_does_not_invoke_the_target(monkeypatch: pytest.MonkeyPatch) -> None:
-    ep = EntryPoint(
-        name="my_logger", value=f"{__name__}:_register_ok", group="drt.audit_loggers"
-    )
+    ep = EntryPoint(name="my_logger", value=f"{__name__}:_register_ok", group="drt.audit_loggers")
     _fake_entry_points(monkeypatch, {"drt.audit_loggers": [ep]})
 
     results = discover_plugins()
@@ -105,9 +103,7 @@ def test_discover_plugins_does_not_invoke_the_target(monkeypatch: pytest.MonkeyP
 
 
 def test_load_plugins_invokes_registration_callable(monkeypatch: pytest.MonkeyPatch) -> None:
-    ep = EntryPoint(
-        name="my_logger", value=f"{__name__}:_register_ok", group="drt.audit_loggers"
-    )
+    ep = EntryPoint(name="my_logger", value=f"{__name__}:_register_ok", group="drt.audit_loggers")
     _fake_entry_points(monkeypatch, {"drt.audit_loggers": [ep]})
 
     results = load_plugins()

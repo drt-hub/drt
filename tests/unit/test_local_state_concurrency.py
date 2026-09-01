@@ -129,9 +129,7 @@ def _paused_watermark_save(project_dir: Path, read_complete: Any, release: Any) 
     _PausedWatermarkStorage(project_dir, read_complete, release).save("slow", "one")
 
 
-def _paused_watermark_delete(
-    project_dir: Path, read_complete: Any, release: Any
-) -> None:
+def _paused_watermark_delete(project_dir: Path, read_complete: Any, release: Any) -> None:
     _PausedWatermarkStorage(project_dir, read_complete, release).delete("deleted")
 
 
@@ -274,9 +272,7 @@ def test_state_saves_preserve_both_processes(tmp_path: Path, file_lock_supported
     assert set(LocalStateManager(tmp_path).get_all()) == {"slow", "fast"}
 
 
-def test_watermark_saves_preserve_both_processes(
-    tmp_path: Path, file_lock_supported: bool
-) -> None:
+def test_watermark_saves_preserve_both_processes(tmp_path: Path, file_lock_supported: bool) -> None:
     assert file_lock_supported
     ctx = multiprocessing.get_context("spawn")
     _run_ordered_race(

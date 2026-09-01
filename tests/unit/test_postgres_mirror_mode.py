@@ -335,8 +335,9 @@ def test_mirror_excludes_failed_record_keys_from_accumulation() -> None:
         ],
     )
 
-    with patch.object(PostgresDestination, "_connect", return_value=conn), patch.object(
-        PostgresDestination, "_load_upsert", return_value=canned_result
+    with (
+        patch.object(PostgresDestination, "_connect", return_value=conn),
+        patch.object(PostgresDestination, "_load_upsert", return_value=canned_result),
     ):
         dest.load(
             [
@@ -425,9 +426,7 @@ def test_tracked_second_run_deletes_only_stale_tracked_keys() -> None:
 
     dest = PostgresDestination()
     load_conn = _fake_connection()
-    finalize_conn = _state_conn(
-        raw_diff=[(key_hash((3,)), key_json((3,)))], to_insert=[]
-    )
+    finalize_conn = _state_conn(raw_diff=[(key_hash((3,)), key_json((3,)))], to_insert=[])
     cur = finalize_conn.cursor.return_value
 
     with patch.object(PostgresDestination, "_connect", return_value=load_conn):
@@ -481,16 +480,12 @@ def test_tracked_composite_key_uses_tuple_in_form() -> None:
 
     dest = PostgresDestination()
     load_conn = _fake_connection()
-    finalize_conn = _state_conn(
-        raw_diff=[(key_hash((2, "b")), key_json((2, "b")))], to_insert=[]
-    )
+    finalize_conn = _state_conn(raw_diff=[(key_hash((2, "b")), key_json((2, "b")))], to_insert=[])
     cur = finalize_conn.cursor.return_value
     config = _config(upsert_key=["tenant_id", "user_id"])
 
     with patch.object(PostgresDestination, "_connect", return_value=load_conn):
-        dest.load(
-            [{"tenant_id": 1, "user_id": "a"}], config, _tracked_options()
-        )
+        dest.load([{"tenant_id": 1, "user_id": "a"}], config, _tracked_options())
     with patch.object(PostgresDestination, "_connect", return_value=finalize_conn):
         dest.finalize_sync(config, _tracked_options())
 
@@ -601,9 +596,7 @@ def test_tracked_scoped_rewrite_preserves_out_of_scope_state() -> None:
     # never re-inserted, and once healed it is filtered out in SQL and never
     # read again. Asserting the shape rather than dropping the check, so a
     # future change that starts deleting or rewriting it still fails here.
-    touched = [
-        c for c in cur.executemany.call_args_list if key_hash((2, "x")) in str(c.args[1])
-    ]
+    touched = [c for c in cur.executemany.call_args_list if key_hash((2, "x")) in str(c.args[1])]
     assert len(touched) <= 1
     for call in touched:
         assert str(call.args[0]).startswith("UPDATE") or "SET scope_spec" in str(call.args[0])
@@ -685,9 +678,7 @@ def test_tracked_scoped_composite_scope_columns() -> None:
     dest = PostgresDestination()
     load_conn = _fake_connection()
     finalize_conn = _state_conn(
-        raw_diff=[
-            (key_hash(k), key_json(k)) for k in ((1, 1, "b"), (1, 2, "x"))
-        ],
+        raw_diff=[(key_hash(k), key_json(k)) for k in ((1, 1, "b"), (1, 2, "x"))],
         to_insert=[],
     )
     cur = finalize_conn.cursor.return_value
@@ -722,9 +713,7 @@ def test_tracked_creates_state_table_when_absent() -> None:
     with patch.object(PostgresDestination, "_connect", return_value=finalize_conn):
         dest.finalize_sync(_config(), _tracked_options())
 
-    assert any(
-        "CREATE TABLE" in str(c.args[0]) for c in cur.execute.call_args_list
-    )
+    assert any("CREATE TABLE" in str(c.args[0]) for c in cur.execute.call_args_list)
 
 
 def test_tracked_skips_create_when_state_table_preprovisioned() -> None:
@@ -741,13 +730,9 @@ def test_tracked_skips_create_when_state_table_preprovisioned() -> None:
     with patch.object(PostgresDestination, "_connect", return_value=finalize_conn):
         dest.finalize_sync(_config(), _tracked_options())
 
-    assert not any(
-        "CREATE TABLE" in str(c.args[0]) for c in cur.execute.call_args_list
-    )
+    assert not any("CREATE TABLE" in str(c.args[0]) for c in cur.execute.call_args_list)
     # the sync still functions: state is read and rewritten
-    assert any(
-        "_drt_synced_keys" in str(c.args[0]) for c in cur.execute.call_args_list
-    )
+    assert any("_drt_synced_keys" in str(c.args[0]) for c in cur.execute.call_args_list)
 
 
 # ---------------------------------------------------------------------------
@@ -964,7 +949,7 @@ def test_scoped_diff_is_narrowed_in_sql_when_columns_exist() -> None:
     sql, params = str(call.args[0]), call.args[1]
     assert "s.scope_key IN" in sql
     # the observed scope travels as a bound parameter, never interpolated
-    assert '[1]' in params
+    assert "[1]" in params
 
 
 def test_scoped_diff_lets_rows_from_another_scope_spec_through() -> None:

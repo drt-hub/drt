@@ -75,8 +75,7 @@ def test_history_store_conforms_for_merge_limit_and_prune(
     assert store.read("missing") == []
     old = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
     recent = [
-        (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-        for hours in (3, 2, 1)
+        (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat() for hours in (3, 2, 1)
     ]
     store.append(_history("a", old))
     for timestamp in recent:
@@ -118,9 +117,7 @@ def test_dlq_store_conforms_for_fifo_replace_clear_and_depths(
     store.append("corrupt", [_dead(6)])
     body, token = gcs_client.read_for_update(corrupt_key)
     assert body is not None
-    gcs_client.write_if(
-        corrupt_key, body + b"not json\n{\"unexpected\": true}\n", token
-    )
+    gcs_client.write_if(corrupt_key, body + b'not json\n{"unexpected": true}\n', token)
     assert [entry.record["id"] for entry in store.read("corrupt")] == [6]
 
 

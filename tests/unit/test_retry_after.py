@@ -212,9 +212,7 @@ def test_retry_on_predicate_can_inspect_attributes_not_just_type() -> None:
 
     with patch("drt.destinations.retry.time.sleep") as sleep:
         with pytest.raises(_FakeDriverError):
-            with_retry(
-                lambda: (_ for _ in ()).throw(permanent), _config(), retry_on=is_transient
-            )
+            with_retry(lambda: (_ for _ in ()).throw(permanent), _config(), retry_on=is_transient)
     sleep.assert_not_called()
 
 

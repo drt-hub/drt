@@ -14,9 +14,7 @@ def _gcs_client() -> Any:
         # see the same house pattern in drt.state.watermark (#561).
         from google.cloud.storage import Client  # type: ignore[import-untyped]
     except ImportError as exc:
-        raise ImportError(
-            "GCS state storage requires: pip install drt-core[gcs]"
-        ) from exc
+        raise ImportError("GCS state storage requires: pip install drt-core[gcs]") from exc
     return Client()
 
 
@@ -46,9 +44,7 @@ class GCSObjectClient:
         try:
             from google.cloud.exceptions import NotFound  # type: ignore[import-untyped]
         except ImportError as exc:
-            raise ImportError(
-                "GCS state storage requires: pip install drt-core[gcs]"
-            ) from exc
+            raise ImportError("GCS state storage requires: pip install drt-core[gcs]") from exc
 
         bucket = self._client().bucket(self._bucket_name)
         for _ in range(self._READ_SNAPSHOT_ATTEMPTS):
@@ -83,9 +79,7 @@ class GCSObjectClient:
                 PreconditionFailed,
             )
         except ImportError as exc:
-            raise ImportError(
-                "GCS state storage requires: pip install drt-core[gcs]"
-            ) from exc
+            raise ImportError("GCS state storage requires: pip install drt-core[gcs]") from exc
 
         blob = self._client().bucket(self._bucket_name).blob(key)
         try:
@@ -103,4 +97,3 @@ class GCSObjectClient:
     def list_keys(self, prefix: str) -> list[str]:
         blobs = self._client().list_blobs(self._bucket_name, prefix=prefix)
         return [str(blob.name) for blob in blobs]
-

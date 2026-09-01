@@ -254,9 +254,7 @@ def test_run_one_entry_includes_correlation_ids_on_success(
     both surface in the entry dict --output json reads."""
     _wire_run_sync(
         monkeypatch,
-        lambda *_a, **_k: SyncResult(
-            rows_extracted=1, success=1, failed=0, sync_run_id="sync-abc"
-        ),
+        lambda *_a, **_k: SyncResult(rows_extracted=1, success=1, failed=0, sync_run_id="sync-abc"),
     )
     _name, entry, _err = _run_one(_fake_sync(), _ctx(run_id="cli-xyz"), _fake_profile())
     assert entry["run_id"] == "cli-xyz"
@@ -321,9 +319,7 @@ def test_run_one_verbose_prints_row_errors(
     rows = [RowError(batch_index=0, record_preview="x", http_status=500, error_message="boom")]
     _wire_run_sync(
         monkeypatch,
-        lambda *_a, **_k: SyncResult(
-            rows_extracted=2, success=1, failed=1, row_errors=rows
-        ),
+        lambda *_a, **_k: SyncResult(rows_extracted=2, success=1, failed=1, row_errors=rows),
     )
     called: list[Any] = []
     monkeypatch.setattr("drt.cli.commands.run.print_row_errors", lambda errs: called.append(errs))

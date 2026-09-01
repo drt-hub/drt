@@ -77,9 +77,7 @@ class MetaConversionsDestination:
             return result
 
         retry_config = resolve_retry(config.retry, sync_options)
-        rate_limiter = resolve_rate_limiter(
-            config, sync_options, limiter_factory=RateLimiter
-        )
+        rate_limiter = resolve_rate_limiter(config, sync_options, limiter_factory=RateLimiter)
         url = f"{_BASE_URL}/{config.api_version}/{config.pixel_id}/events"
 
         with httpx.Client(timeout=60.0) as client:
@@ -127,9 +125,7 @@ class MetaConversionsDestination:
                     result.success += len(batch)
                 except Exception as exc:
                     status = (
-                        exc.response.status_code
-                        if isinstance(exc, httpx.HTTPStatusError)
-                        else None
+                        exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
                     )
                     if isinstance(exc, httpx.HTTPStatusError):
                         message = (
@@ -256,9 +252,7 @@ def _build_event(
         if raw_value is not None:
             value = float(raw_value)
             if not math.isfinite(value):
-                raise ValueError(
-                    f"custom_data.value {value!r} is not JSON-serializable."
-                )
+                raise ValueError(f"custom_data.value {value!r} is not JSON-serializable.")
             event["custom_data"] = {
                 "value": value,
                 "currency": config.currency,
@@ -268,8 +262,7 @@ def _build_event(
         json.dumps(event, allow_nan=False)
     except (TypeError, ValueError) as exc:
         raise ValueError(
-            f"Row event_id {event_id!r} contains a value that cannot be sent to Meta: "
-            f"{exc}"
+            f"Row event_id {event_id!r} contains a value that cannot be sent to Meta: {exc}"
         ) from exc
 
     return event
@@ -289,9 +282,7 @@ def _is_meta_transient_error(exc: Exception) -> bool:
     return isinstance(error, dict) and error.get("is_transient") is True
 
 
-def _event_time(
-    record: dict[str, Any], config: MetaConversionsDestinationConfig
-) -> int:
+def _event_time(record: dict[str, Any], config: MetaConversionsDestinationConfig) -> int:
     current_time = time.time()
     if config.event_time_field is None:
         timestamp = int(current_time)
@@ -306,8 +297,7 @@ def _event_time(
     cutoff = current_time - _MAX_EVENT_AGE_SECONDS
     if timestamp < cutoff:
         raise ValueError(
-            f"event_time timestamp {timestamp} is older than Meta's seven-day "
-            f"cutoff {cutoff}."
+            f"event_time timestamp {timestamp} is older than Meta's seven-day cutoff {cutoff}."
         )
     return timestamp
 
@@ -341,9 +331,7 @@ def _sha256(value: str) -> str:
 
 def _normalize_email(value: Any) -> str:
     if not isinstance(value, str):
-        raise ValueError(
-            f"email must be a string; got {type(value).__name__}."
-        )
+        raise ValueError(f"email must be a string; got {type(value).__name__}.")
     return value.strip().lower()
 
 

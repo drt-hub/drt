@@ -338,9 +338,7 @@ def test_status_poll_retry_success_after_deadline_raises_timeout(
         sleeps.append(seconds)
         clock["now"] += seconds + 0.01
 
-    monkeypatch.setattr(
-        "drt.destinations.salesforce_bulk.time.monotonic", lambda: clock["now"]
-    )
+    monkeypatch.setattr("drt.destinations.salesforce_bulk.time.monotonic", lambda: clock["now"])
     monkeypatch.setattr("drt.destinations.retry.time.sleep", fake_sleep)
 
     with (
@@ -396,9 +394,7 @@ def test_status_poll_clamps_retry_backoff_to_remaining_timeout(
             "drt.destinations.salesforce_bulk.time.monotonic",
             side_effect=[100.0, 101.0, 101.0],
         ),
-        patch(
-            "drt.destinations.salesforce_bulk.with_retry", return_value=complete
-        ) as retry_call,
+        patch("drt.destinations.salesforce_bulk.with_retry", return_value=complete) as retry_call,
         patch(
             "drt.destinations.salesforce_bulk.resolve_rate_limiter",
             return_value=MagicMock(),

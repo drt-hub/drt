@@ -205,12 +205,8 @@ def test_is_transient_request_error_cold_start(monkeypatch: pytest.MonkeyPatch) 
     assert DatabricksSource()._is_transient(exc) is True
 
 
-@pytest.mark.parametrize(
-    "exc_name", ["ProgrammingError", "DatabaseError", "NotSupportedError"]
-)
-def test_is_transient_false_for_permanent(
-    monkeypatch: pytest.MonkeyPatch, exc_name: str
-) -> None:
+@pytest.mark.parametrize("exc_name", ["ProgrammingError", "DatabaseError", "NotSupportedError"])
+def test_is_transient_false_for_permanent(monkeypatch: pytest.MonkeyPatch, exc_name: str) -> None:
     exc_mod = _install_fake_dbsql_exc(monkeypatch)
     exc = getattr(exc_mod, exc_name)("nope")
     assert DatabricksSource()._is_transient(exc) is False

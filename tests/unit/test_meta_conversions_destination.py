@@ -110,9 +110,7 @@ def test_non_finite_event_id_is_rejected_per_row(event_id: float) -> None:
     ids=["nan", "integer", "bool", "dict", "list"],
 )
 def test_non_string_email_is_rejected_per_row(email: object) -> None:
-    result = MetaConversionsDestination().load(
-        [_record(email=email)], _config(), SyncOptions()
-    )
+    result = MetaConversionsDestination().load([_record(email=email)], _config(), SyncOptions())
 
     assert result.success == 0
     assert result.failed == 1
@@ -222,6 +220,7 @@ def test_request_uses_bearer_auth_without_token_in_url_and_expected_payload() ->
         "custom_data": {"value": 100.2, "currency": "USD"},
     }
 
+
 def test_action_source_defaults_to_website() -> None:
     assert _config().action_source == "website"
 
@@ -237,9 +236,7 @@ def test_action_source_defaults_to_website() -> None:
         ("client_user_agent_field", "   "),
     ],
 )
-def test_website_action_source_requires_website_field_mappings(
-    field: str, value: object
-) -> None:
+def test_website_action_source_requires_website_field_mappings(field: str, value: object) -> None:
     with pytest.raises(ValidationError) as exc_info:
         _config(**{field: value})
 
@@ -270,9 +267,7 @@ def test_non_website_action_source_does_not_require_website_field_mappings() -> 
         ("user_agent", "   ", "client user agent field 'user_agent'"),
     ],
 )
-def test_website_fields_must_resolve_for_each_row(
-    field: str, value: object, message: str
-) -> None:
+def test_website_fields_must_resolve_for_each_row(field: str, value: object, message: str) -> None:
     result = MetaConversionsDestination().load(
         [_record(**{field: value})], _config(), SyncOptions()
     )
@@ -362,9 +357,7 @@ def test_non_finite_value_fails_only_its_row() -> None:
     assert result.failed == 1
     assert len(result.row_errors) == 1
     assert result.row_errors[0].batch_index == 2
-    assert "custom_data.value nan is not JSON-serializable" in (
-        result.row_errors[0].error_message
-    )
+    assert "custom_data.value nan is not JSON-serializable" in (result.row_errors[0].error_message)
     assert len(client.post.call_args.kwargs["json"]["data"]) == 3
 
 
@@ -396,9 +389,7 @@ def test_non_serializable_user_agent_fails_only_its_row(on_error: str) -> None:
     assert "event_id 'conversion-invalid'" in result.row_errors[0].error_message
     assert "cannot be sent to Meta" in result.row_errors[0].error_message
     assert client.post.call_count == 1
-    assert client.post.call_args.kwargs["json"]["data"][0]["event_id"] == (
-        "conversion-valid"
-    )
+    assert client.post.call_args.kwargs["json"]["data"][0]["event_id"] == ("conversion-valid")
 
 
 def test_retry_acquires_rate_limiter_for_every_attempt() -> None:
@@ -523,8 +514,7 @@ def test_invalid_events_received_fails_the_whole_batch(
     assert result.success == 0
     assert result.failed == 2
     assert all(
-        "does not identify individual failures" in err.error_message
-        for err in result.row_errors
+        "does not identify individual failures" in err.error_message for err in result.row_errors
     )
 
 

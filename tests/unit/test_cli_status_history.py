@@ -27,8 +27,8 @@ def _seed_history(project_dir: Path, sync: str = "demo", count: int = 3) -> None
         mgr.append(
             HistoryEntry(
                 sync_name=sync,
-                started_at=f"2026-05-0{i+1}T10:00:00+00:00",
-                completed_at=f"2026-05-0{i+1}T10:00:30+00:00",
+                started_at=f"2026-05-0{i + 1}T10:00:00+00:00",
+                completed_at=f"2026-05-0{i + 1}T10:00:30+00:00",
                 duration_seconds=30.0,
                 status="success" if i % 2 == 0 else "partial",
                 records_synced=100 * (i + 1),

@@ -306,9 +306,7 @@ class DatabricksDestination(BaseSqlDestination):
             if not config.upsert_key:
                 raise ValueError("upsert_key is required for merge mode")
 
-            key_clause = " AND ".join(
-                [f"target.{k} = source.{k}" for k in config.upsert_key]
-            )
+            key_clause = " AND ".join([f"target.{k} = source.{k}" for k in config.upsert_key])
             update_cols = [c for c in columns if c not in config.upsert_key]
             update_clause = ", ".join([f"{c} = source.{c}" for c in update_cols])
             insert_cols = col_list
@@ -320,8 +318,7 @@ class DatabricksDestination(BaseSqlDestination):
             staging_table = f"{config.catalog}.{config.schema_}.__drt_staging_{config.table}"
 
             cur.execute(
-                f"CREATE OR REPLACE TABLE {staging_table} "
-                f"AS SELECT * FROM {table_fq} WHERE 1=0"
+                f"CREATE OR REPLACE TABLE {staging_table} AS SELECT * FROM {table_fq} WHERE 1=0"
             )
 
             staging_sql = f"INSERT INTO {staging_table} ({col_list}) {value_clause}"
@@ -336,9 +333,7 @@ class DatabricksDestination(BaseSqlDestination):
                 count_success=False,
             )
 
-            matched_clause = (
-                f"WHEN MATCHED THEN UPDATE SET {update_clause}" if update_cols else ""
-            )
+            matched_clause = f"WHEN MATCHED THEN UPDATE SET {update_clause}" if update_cols else ""
             merge_sql = (
                 f"MERGE INTO {table_fq} target "
                 f"USING {staging_table} source "
@@ -486,9 +481,7 @@ class DatabricksDestination(BaseSqlDestination):
     def _swap_cursor_context(self, conn: Any, sync_options: SyncOptions) -> Any:
         return tagged_cursor(conn.cursor(), sync_options)
 
-    def _complete_swap(
-        self, conn: Any, cur: Any, table: str, shadow: str
-    ) -> None:
+    def _complete_swap(self, conn: Any, cur: Any, table: str, shadow: str) -> None:
         """Atomically overwrite target data, then drop the staging shadow."""
         # Atomic data overwrite — Delta snapshot isolation; the target
         # table object (grants / properties / clustering) is preserved.
@@ -992,9 +985,7 @@ class DatabricksDestination(BaseSqlDestination):
             conn.close()
 
     # --- dialect hooks (#720 phase 1) -------------------------------------
-    def _dialect_connect(
-        self, config: Any, query_tags: dict[str, str] | None = None
-    ) -> Any:
+    def _dialect_connect(self, config: Any, query_tags: dict[str, str] | None = None) -> Any:
         assert isinstance(config, DatabricksDestinationConfig)
         return self._connect(config, query_tags=query_tags)
 

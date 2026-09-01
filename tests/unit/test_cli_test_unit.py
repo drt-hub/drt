@@ -60,7 +60,8 @@ class TestNoUnitTests:
         """sync.tests: alone must not make a sync eligible for --unit."""
         monkeypatch.chdir(tmp_path)
         _write_sync(
-            tmp_path, _rest_sync(name="quality_only", tests=[{"row_count": {"min": 1}}]),
+            tmp_path,
+            _rest_sync(name="quality_only", tests=[{"row_count": {"min": 1}}]),
             name="a",
         )
         _write_sync(
@@ -104,9 +105,7 @@ class TestPassAndFail:
         _write_sync(
             tmp_path,
             _rest_sync(
-                unit_tests=[
-                    {"name": "wrong", "given": [{"id": 1}], "expect": [{"id": 999}]}
-                ]
+                unit_tests=[{"name": "wrong", "given": [{"id": 1}], "expect": [{"id": 999}]}]
             ),
         )
         result = runner.invoke(app, ["test", "--unit"])
@@ -193,9 +192,7 @@ class TestFailFast:
                 tmp_path,
                 _rest_sync(
                     name=name,
-                    unit_tests=[
-                        {"name": "t", "given": [{"id": 1}], "expect": [{"id": expect_id}]}
-                    ],
+                    unit_tests=[{"name": "t", "given": [{"id": 1}], "expect": [{"id": expect_id}]}],
                 ),
                 name=name,
             )
@@ -217,9 +214,7 @@ class TestFailFast:
                 tmp_path,
                 _rest_sync(
                     name=name,
-                    unit_tests=[
-                        {"name": "t", "given": [{"id": 1}], "expect": [{"id": expect_id}]}
-                    ],
+                    unit_tests=[{"name": "t", "given": [{"id": 1}], "expect": [{"id": expect_id}]}],
                 ),
                 name=name,
             )

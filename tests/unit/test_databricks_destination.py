@@ -824,9 +824,7 @@ class TestDatabricksReplaceMode:
             fin = dest.finalize_sync(_config(), _options())
         assert fin is None
 
-    def test_finalize_overwrite_failure_resets_state(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_finalize_overwrite_failure_resets_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
         conn = _fake_conn()
         conn._cur.fetchall.return_value = [("user_scores",)]

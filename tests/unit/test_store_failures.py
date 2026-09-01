@@ -229,9 +229,7 @@ def test_store_failures_writes_up_to_the_cap(
     )
     all_rows = [{"id": i, "email": f"u{i}@x.com"} for i in range(25)]
     _patch_destination_query(monkeypatch, count=25, rows=all_rows)
-    result = runner.invoke(
-        app, ["test", "--store-failures", "--store-failures-limit", "5"]
-    )
+    result = runner.invoke(app, ["test", "--store-failures", "--store-failures-limit", "5"])
     assert result.exit_code == 1
     path = tmp_path / ".drt" / "test_failures" / "orders_sync" / "email_nn.jsonl"
     lines = path.read_text().splitlines()
@@ -438,9 +436,7 @@ def test_store_failures_limit_rejects_non_positive(
     whose exact line breaks and ANSI codes are platform-dependent (this CI
     caught the previous text-match version failing on Linux)."""
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(
-        app, ["test", "--store-failures", "--store-failures-limit", "0"]
-    )
+    result = runner.invoke(app, ["test", "--store-failures", "--store-failures-limit", "0"])
     assert result.exit_code == 2
 
 
@@ -679,9 +675,7 @@ def test_store_failures_disambiguates_colliding_slugs(
             ],
         },
     )
-    _patch_destination_query(
-        monkeypatch, count=1, rows=[{"id": 1, "email": "a@example.com"}]
-    )
+    _patch_destination_query(monkeypatch, count=1, rows=[{"id": 1, "email": "a@example.com"}])
     result = runner.invoke(app, ["test", "--store-failures"])
 
     assert result.exit_code == 1

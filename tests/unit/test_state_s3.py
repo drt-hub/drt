@@ -59,9 +59,7 @@ class FakePaginator:
 
 class FakeS3Client:
     def __init__(self, *, race_reads: int = 0) -> None:
-        self.objects: dict[str, tuple[bytes, str]] = {
-            "state.json": (b"etag one", '"1"')
-        }
+        self.objects: dict[str, tuple[bytes, str]] = {"state.json": (b"etag one", '"1"')}
         self.race_reads = race_reads
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.last_body: FakeBody | None = None
@@ -113,9 +111,7 @@ class FakeS3Client:
         existing = self.objects.get(key)
         if kwargs.get("IfNoneMatch") == "*" and existing is not None:
             raise FakeClientError("PreconditionFailed", 412)
-        if "IfMatch" in kwargs and (
-            existing is None or kwargs["IfMatch"] != existing[1]
-        ):
+        if "IfMatch" in kwargs and (existing is None or kwargs["IfMatch"] != existing[1]):
             raise FakeClientError("PreconditionFailed", 412)
         value = int(existing[1].strip('"')) + 1 if existing else 1
         etag = f'"{value}"'

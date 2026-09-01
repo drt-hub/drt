@@ -66,9 +66,7 @@ def execute_test_query(config: DestinationConfig, query: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-def fetch_failing_rows(
-    config: DestinationConfig, query: str, limit: int
-) -> list[dict[str, Any]]:
+def fetch_failing_rows(config: DestinationConfig, query: str, limit: int) -> list[dict[str, Any]]:
     """Run *query* (the failing-rows SELECT from ``build_failing_rows_query``)
     and return up to *limit* rows as dicts.
 
@@ -111,9 +109,7 @@ def _fetch_failing_rows_postgres(
         conn.close()
 
 
-def _fetch_failing_rows_mysql(
-    config: MySQLDestinationConfig, query: str
-) -> list[dict[str, Any]]:
+def _fetch_failing_rows_mysql(config: MySQLDestinationConfig, query: str) -> list[dict[str, Any]]:
     from drt.destinations.mysql import MySQLDestination
 
     conn = MySQLDestination._connect(config)
@@ -198,9 +194,7 @@ def fetch_rows(
     raise TypeError(f"Cannot fetch rows from {type(config).__name__}")
 
 
-def _reconcile_column_case(
-    metadata_names: list[str], key_hint: list[str] | None
-) -> list[str]:
+def _reconcile_column_case(metadata_names: list[str], key_hint: list[str] | None) -> list[str]:
     """Map ``metadata_names`` (e.g. Snowflake's uppercase-folded columns)
     onto ``key_hint``'s casing wherever a case-insensitive match exists,
     falling back to lowercase for the rest (the common, non-hinted case)."""
@@ -292,9 +286,7 @@ def _fetch_rows_snowflake(
     try:
         with conn.cursor() as cur:
             cur.execute(query)
-            cols = columns or _reconcile_column_case(
-                [d[0] for d in cur.description], key_hint
-            )
+            cols = columns or _reconcile_column_case([d[0] for d in cur.description], key_hint)
             return [dict(zip(cols, row)) for row in cur.fetchall()]
     finally:
         conn.close()
@@ -348,9 +340,7 @@ def _flatten_key_params(key_tuples: list[tuple[Any, ...]]) -> list[Any]:
     return [v for key in key_tuples for v in key]
 
 
-def _chunks(
-    seq: list[tuple[Any, ...]], size: int
-) -> list[list[tuple[Any, ...]]]:
+def _chunks(seq: list[tuple[Any, ...]], size: int) -> list[list[tuple[Any, ...]]]:
     return [seq[i : i + size] for i in range(0, len(seq), size)]
 
 
@@ -377,21 +367,13 @@ def fetch_rows_by_keys(
     if not key_tuples:
         return []
     if isinstance(config, PostgresDestinationConfig):
-        return _fetch_rows_by_keys_postgres(
-            config, key_cols, key_tuples, columns, batch_size
-        )
+        return _fetch_rows_by_keys_postgres(config, key_cols, key_tuples, columns, batch_size)
     if isinstance(config, MySQLDestinationConfig):
-        return _fetch_rows_by_keys_mysql(
-            config, key_cols, key_tuples, columns, batch_size
-        )
+        return _fetch_rows_by_keys_mysql(config, key_cols, key_tuples, columns, batch_size)
     if isinstance(config, SnowflakeDestinationConfig):
-        return _fetch_rows_by_keys_snowflake(
-            config, key_cols, key_tuples, columns, batch_size
-        )
+        return _fetch_rows_by_keys_snowflake(config, key_cols, key_tuples, columns, batch_size)
     if isinstance(config, DatabricksDestinationConfig):
-        return _fetch_rows_by_keys_databricks(
-            config, key_cols, key_tuples, columns, batch_size
-        )
+        return _fetch_rows_by_keys_databricks(config, key_cols, key_tuples, columns, batch_size)
     if isinstance(config, ClickHouseDestinationConfig):
         raise NotImplementedError(
             "fetch_rows_by_keys does not support ClickHouse "
@@ -424,12 +406,8 @@ def _fetch_rows_by_keys_postgres(
         cur = conn.cursor()
         result: list[dict[str, Any]] = []
         for batch in _chunks(key_tuples, batch_size):
-            placeholders = _pgsql.SQL(
-                _in_placeholder(len(batch), len(key_cols))
-            )
-            stmt = _pgsql.SQL(
-                "SELECT {cols} FROM {table} WHERE {key} IN ({ph})"
-            ).format(
+            placeholders = _pgsql.SQL(_in_placeholder(len(batch), len(key_cols)))
+            stmt = _pgsql.SQL("SELECT {cols} FROM {table} WHERE {key} IN ({ph})").format(
                 cols=col_list,
                 table=_qualified_ident(config.table),
                 key=key_expr,
@@ -465,10 +443,7 @@ def _fetch_rows_by_keys_mysql(
         result: list[dict[str, Any]] = []
         for batch in _chunks(key_tuples, batch_size):
             placeholders = _in_placeholder(len(batch), len(key_cols))
-            stmt = (
-                f"SELECT {col_list} FROM {table_q} "
-                f"WHERE {key_expr} IN ({placeholders})"
-            )
+            stmt = f"SELECT {col_list} FROM {table_q} WHERE {key_expr} IN ({placeholders})"
             cur.execute(stmt, _flatten_key_params(batch))
             for row in cur.fetchall():
                 if isinstance(row, dict):
@@ -502,10 +477,7 @@ def _fetch_rows_by_keys_snowflake(
         with conn.cursor() as cur:
             for batch in _chunks(key_tuples, batch_size):
                 placeholders = _in_placeholder(len(batch), len(key_cols))
-                stmt = (
-                    f"SELECT {col_list} FROM {table_fq} "
-                    f"WHERE {key_expr} IN ({placeholders})"
-                )
+                stmt = f"SELECT {col_list} FROM {table_fq} WHERE {key_expr} IN ({placeholders})"
                 cur.execute(stmt, _flatten_key_params(batch))
                 result.extend(dict(zip(columns, row)) for row in cur.fetchall())
         return result
@@ -560,9 +532,7 @@ def _fetch_rows_by_keys_databricks(
 _STATE_SELECT = "SELECT key_hash, key_json FROM {} WHERE sync_name = %s"
 
 
-def fetch_tracked_state(
-    config: DestinationConfig, sync_name: str
-) -> dict[str, str]:
+def fetch_tracked_state(config: DestinationConfig, sync_name: str) -> dict[str, str]:
     """Read the tracked-mirror key state for *sync_name*, **read-only**.
 
     Returns ``{key_hash: key_json}`` — the same mapping
@@ -633,9 +603,7 @@ def _fetch_tracked_state_postgres(
         conn.close()
 
 
-def _fetch_tracked_state_mysql(
-    config: MySQLDestinationConfig, sync_name: str
-) -> dict[str, str]:
+def _fetch_tracked_state_mysql(config: MySQLDestinationConfig, sync_name: str) -> dict[str, str]:
     """MySQL leg — mirrors ``MySQLDestination._state_table_ident`` /
     ``_state_table_exists`` (state table lives in the target's database; the
     probe binds the database name, or falls back to ``DATABASE()``)."""
@@ -667,9 +635,7 @@ def _fetch_tracked_state_mysql(
         probe = cur.fetchone()
         # Same shape tolerance as ``_fetch_rows_mysql``: a DictCursor yields a
         # mapping rather than a tuple.
-        count = (
-            next(iter(probe.values()), 0) if isinstance(probe, dict) else probe[0]
-        )
+        count = next(iter(probe.values()), 0) if isinstance(probe, dict) else probe[0]
         if not count:
             return {}
         cur.execute(_STATE_SELECT.format(ident), (sync_name,))

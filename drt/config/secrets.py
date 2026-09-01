@@ -100,9 +100,7 @@ def _find_in_value(
     if isinstance(value, list):
         findings = []
         for index, child in enumerate(value):
-            findings.extend(
-                _find_in_value(child, sync_name, filename, (*path_parts, f"[{index}]"))
-            )
+            findings.extend(_find_in_value(child, sync_name, filename, (*path_parts, f"[{index}]")))
         return findings
 
     return []

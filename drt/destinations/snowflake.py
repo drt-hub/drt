@@ -322,9 +322,7 @@ class SnowflakeDestination(BaseSqlDestination):
                 chunk = records[chunk_start : chunk_start + chunk_size]
                 try:
                     using_sql = _merge_using_subquery(columns, schema_map, len(chunk))
-                    merge_sql = _build_merge_sql(
-                        table_fq, columns, config.upsert_key, using_sql
-                    )
+                    merge_sql = _build_merge_sql(table_fq, columns, config.upsert_key, using_sql)
                     flat_params: list[Any] = [
                         v for row in chunk for v in _bind_row(row, columns, json_cols)
                     ]
@@ -405,9 +403,7 @@ class SnowflakeDestination(BaseSqlDestination):
     def _swap_cursor_context(self, conn: Any, sync_options: SyncOptions) -> Any:
         return tagged_cursor(conn.cursor(), sync_options)
 
-    def _complete_swap(
-        self, conn: Any, cur: Any, table: str, shadow: str
-    ) -> None:
+    def _complete_swap(self, conn: Any, cur: Any, table: str, shadow: str) -> None:
         """Atomically exchange target/shadow, then drop the old shadow."""
         # Atomic exchange — preserves grants on the original name.
         # Snowflake autocommits, so the SWAP commits before the DROP
@@ -478,8 +474,7 @@ class SnowflakeDestination(BaseSqlDestination):
         if len(upsert_cols) == 1:
             placeholders = ", ".join(["%s"] * len(keys))
             stmt = (
-                f"DELETE FROM {table_fq} WHERE {scope_clause}{upsert_cols[0]} "
-                f"{op} ({placeholders})"
+                f"DELETE FROM {table_fq} WHERE {scope_clause}{upsert_cols[0]} {op} ({placeholders})"
             )
             params = [*scope_params, *(k[0] for k in keys)]
         else:
@@ -540,9 +535,7 @@ class SnowflakeDestination(BaseSqlDestination):
         return bool(row is not None and row[0] == 2)
 
     def _add_state_scope_columns(self, cur: Any, ident: Any) -> None:
-        cur.execute(
-            f"ALTER TABLE {ident} ADD COLUMN scope_spec VARCHAR, scope_key VARCHAR"
-        )
+        cur.execute(f"ALTER TABLE {ident} ADD COLUMN scope_spec VARCHAR, scope_key VARCHAR")
 
     def _state_sql(self, template: str, ident: Any) -> Any:
         return template.format(ident)
@@ -570,10 +563,7 @@ class SnowflakeDestination(BaseSqlDestination):
         assert isinstance(config, SnowflakeDestinationConfig)
         ident = f"{config.database}.{config.schema_}.{DIFF_STAGING_TABLE}"
         try:
-            cur.execute(
-                f"CREATE TEMPORARY TABLE {ident} "
-                "(key_hash VARCHAR(64), key_json VARCHAR)"
-            )
+            cur.execute(f"CREATE TEMPORARY TABLE {ident} (key_hash VARCHAR(64), key_json VARCHAR)")
             if rows:
                 cur.executemany(
                     f"INSERT INTO {ident} (key_hash, key_json) VALUES (%s, %s)",
@@ -594,9 +584,7 @@ class SnowflakeDestination(BaseSqlDestination):
             conn.close()
 
     # --- dialect hooks (#720 phase 1) -------------------------------------
-    def _dialect_connect(
-        self, config: Any, query_tags: dict[str, str] | None = None
-    ) -> Any:
+    def _dialect_connect(self, config: Any, query_tags: dict[str, str] | None = None) -> Any:
         assert isinstance(config, SnowflakeDestinationConfig)
         return self._connect(config, query_tags=query_tags)
 

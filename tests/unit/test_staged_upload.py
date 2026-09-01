@@ -277,9 +277,7 @@ def test_post_poll_does_not_retry_transient_failure() -> None:
             StagedUploadDestination()._poll(poll_config, {}, retry_config, limiter)
 
     retry_call.assert_not_called()
-    client.request.assert_called_once_with(
-        "POST", poll_config.url, headers={}, timeout=ANY
-    )
+    client.request.assert_called_once_with("POST", poll_config.url, headers={}, timeout=ANY)
     limiter.acquire.assert_called_once_with()
 
 
@@ -341,9 +339,7 @@ def test_poll_retry_success_after_deadline_raises_timeout(
         sleeps.append(seconds)
         clock["now"] += seconds + 0.01
 
-    monkeypatch.setattr(
-        "drt.destinations.staged_upload.time.monotonic", lambda: clock["now"]
-    )
+    monkeypatch.setattr("drt.destinations.staged_upload.time.monotonic", lambda: clock["now"])
     monkeypatch.setattr("drt.destinations.retry.time.sleep", fake_sleep)
 
     with patch("drt.destinations.staged_upload.httpx.Client") as client_class:
@@ -380,13 +376,9 @@ def test_poll_clamps_retry_backoff_to_remaining_timeout() -> None:
             "drt.destinations.staged_upload.time.monotonic",
             side_effect=[100.0, 101.0, 101.0],
         ),
-        patch(
-            "drt.destinations.staged_upload.with_retry", return_value=response
-        ) as retry_call,
+        patch("drt.destinations.staged_upload.with_retry", return_value=response) as retry_call,
     ):
-        StagedUploadDestination()._poll(
-            poll_config, {}, retry_config, MagicMock()
-        )
+        StagedUploadDestination()._poll(poll_config, {}, retry_config, MagicMock())
 
     clamped = retry_call.call_args.args[1]
     assert clamped is not retry_config
@@ -423,9 +415,7 @@ def test_poll_clamps_request_timeout_to_fresh_remaining_budget() -> None:
     ):
         client = client_class.return_value.__enter__.return_value
         client.request.return_value = response
-        StagedUploadDestination()._poll(
-            poll_config, {}, RetryConfig(), MagicMock()
-        )
+        StagedUploadDestination()._poll(poll_config, {}, RetryConfig(), MagicMock())
 
     assert client.request.call_args.kwargs["timeout"] == 3.0
 
@@ -460,9 +450,7 @@ def test_poll_raises_timeout_at_loop_top_without_another_request() -> None:
         client = client_class.return_value.__enter__.return_value
         client.request.return_value = running
         with pytest.raises(TimeoutError, match="Poll timed out after 5s"):
-            StagedUploadDestination()._poll(
-                poll_config, {}, RetryConfig(), MagicMock()
-            )
+            StagedUploadDestination()._poll(poll_config, {}, RetryConfig(), MagicMock())
 
     assert client.request.call_count == 1
 

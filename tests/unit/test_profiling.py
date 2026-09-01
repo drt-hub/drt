@@ -20,9 +20,7 @@ from benchmarks.profile_scenarios import (
 )
 
 _COMMIT = "a" * 40
-_SCHEMA_PATH = (
-    Path(__file__).parent.parent.parent / "benchmarks" / "profile-result-schema.json"
-)
+_SCHEMA_PATH = Path(__file__).parent.parent.parent / "benchmarks" / "profile-result-schema.json"
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=lambda scenario: scenario.name)
@@ -46,12 +44,15 @@ def test_standard_scenario_produces_complete_profile(
     assert buckets.source_extraction.classification == "cpu_bound"
     assert buckets.transformation_serialization.classification == "cpu_bound"
     assert buckets.destination_io.classification == "io_bound"
-    assert round(
-        buckets.source_extraction.percentage
-        + buckets.transformation_serialization.percentage
-        + buckets.destination_io.percentage,
-        2,
-    ) == 100.0
+    assert (
+        round(
+            buckets.source_extraction.percentage
+            + buckets.transformation_serialization.percentage
+            + buckets.destination_io.percentage,
+            2,
+        )
+        == 100.0
+    )
 
 
 def test_destination_file_io_includes_complete_makedirs_subtree_once() -> None:

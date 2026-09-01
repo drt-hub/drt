@@ -391,9 +391,7 @@ class DlqObserver:
         if not dead_letters:
             return
         try:
-            self._store.append(
-                sync_name, dead_letters, max_records=self._max_records
-            )
+            self._store.append(sync_name, dead_letters, max_records=self._max_records)
         except Exception as exc:  # noqa: BLE001 — fire-and-forget contract
             self._logger.warning("DLQ persist failure for '%s': %s", sync_name, exc)
 

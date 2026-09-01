@@ -82,12 +82,13 @@ def test_state_selectors(syncs: list[SyncConfig]) -> None:
         modified=frozenset({"users_backfill", "events_to_rest"}),
     )
 
-    assert [
-        s.name for s in select_syncs(syncs, ["state:new"], state_diff=state_diff)
-    ] == ["events_to_rest"]
-    assert [
-        s.name for s in select_syncs(syncs, ["state:modified"], state_diff=state_diff)
-    ] == ["users_backfill", "events_to_rest"]
+    assert [s.name for s in select_syncs(syncs, ["state:new"], state_diff=state_diff)] == [
+        "events_to_rest"
+    ]
+    assert [s.name for s in select_syncs(syncs, ["state:modified"], state_diff=state_diff)] == [
+        "users_backfill",
+        "events_to_rest",
+    ]
 
 
 def test_star_and_all_sentinels(syncs: list[SyncConfig]) -> None:
@@ -110,9 +111,7 @@ def test_unknown_state_selector_has_distinct_error(syncs: list[SyncConfig]) -> N
 
 
 @pytest.mark.parametrize("token", ["state:modified", "state:new"])
-def test_state_selector_without_diff_requires_baseline(
-    syncs: list[SyncConfig], token: str
-) -> None:
+def test_state_selector_without_diff_requires_baseline(syncs: list[SyncConfig], token: str) -> None:
     with pytest.raises(SelectionError, match="requires --state"):
         select_syncs(syncs, [token])
 
@@ -184,9 +183,7 @@ def test_no_match_destination_message(syncs: list[SyncConfig]) -> None:
 
 
 @pytest.mark.parametrize("token", ["state:modified", "state:new"])
-def test_state_token_matching_nothing_does_not_raise(
-    syncs: list[SyncConfig], token: str
-) -> None:
+def test_state_token_matching_nothing_does_not_raise(syncs: list[SyncConfig], token: str) -> None:
     """Unlike tag:/destination:/bare-name, a state: token matching nothing is
     the normal, healthy "nothing changed" outcome, not a typo-shaped error —
     select_syncs() must not raise, just contribute zero syncs to the union."""
@@ -201,9 +198,7 @@ def test_state_token_mixed_with_other_selectors_still_unions(
     tokens in the same --select list."""
     empty = StateDiff(new=frozenset(), modified=frozenset())
     result = select_syncs(syncs, ["state:modified", "tag:crm"], state_diff=empty)
-    assert [s.name for s in result] == [
-        s.name for s in syncs if matches(s, "tag:crm")
-    ]
+    assert [s.name for s in result] == [s.name for s in syncs if matches(s, "tag:crm")]
 
 
 @pytest.mark.parametrize(

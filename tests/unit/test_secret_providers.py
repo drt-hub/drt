@@ -397,9 +397,7 @@ class TestAwsSecretsManagerProvider:
     def test_json_secret_with_key_extracts_field(self) -> None:
         client = _fake_client(secret_string=json.dumps({"password": "hunter2", "user": "svc"}))
         with patch.dict("sys.modules", _mock_boto3(client)):
-            value = AwsSecretsManagerProvider().fetch(
-                SecretRef(path="prod/drt/x", key="password")
-            )
+            value = AwsSecretsManagerProvider().fetch(SecretRef(path="prod/drt/x", key="password"))
         assert value == "hunter2"
 
     def test_json_secret_missing_key_raises(self) -> None:
@@ -622,9 +620,7 @@ class TestVaultProvider:
     def test_custom_mount_point_is_passed_through(self) -> None:
         client = _fake_hvac_client(data={"password": "hunter2"})
         with patch.dict("sys.modules", _mock_hvac_modules(client)):
-            VaultProvider().fetch(
-                SecretRef(path="kv2-custom/data/drt/snowflake", key="password")
-            )
+            VaultProvider().fetch(SecretRef(path="kv2-custom/data/drt/snowflake", key="password"))
         client.secrets.kv.v2.read_secret_version.assert_called_once_with(
             path="drt/snowflake", mount_point="kv2-custom"
         )
@@ -641,9 +637,7 @@ class TestVaultProvider:
         client = _fake_hvac_client(not_found=True)
         with patch.dict("sys.modules", _mock_hvac_modules(client)):
             with pytest.raises(LookupError, match="no secret found"):
-                VaultProvider().fetch(
-                    SecretRef(path="secret/data/nope", key="password")
-                )
+                VaultProvider().fetch(SecretRef(path="secret/data/nope", key="password"))
 
     def test_missing_extra_raises_helpful_import_error(self) -> None:
         with patch.dict("sys.modules", {"hvac": None}):
@@ -686,9 +680,7 @@ class TestResolveEnvIntegration:
         provider.fetch.return_value = "resolved-secret"
         assert resolve_env(None, f"{scheme}://a/b#c") == "resolved-secret"
 
-    def test_explicit_value_beats_provider_uri(
-        self, _fake_provider: tuple[str, MagicMock]
-    ) -> None:
+    def test_explicit_value_beats_provider_uri(self, _fake_provider: tuple[str, MagicMock]) -> None:
         scheme, provider = _fake_provider
         assert resolve_env("explicit", f"{scheme}://a/b") == "explicit"
         provider.fetch.assert_not_called()

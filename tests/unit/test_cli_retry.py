@@ -279,9 +279,7 @@ def test_retry_all_success_drains_queue(project: Path, monkeypatch: pytest.Monke
     assert [len(c) for c in dest.calls] == [2, 1]
 
 
-def test_retry_staged_success_drains_queue(
-    project: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_retry_staged_success_drains_queue(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = _seed(project, [1, 2, 3])
     dest = _FakeStagedDestination(fail_ids=set())
     _patch_dest(monkeypatch, dest)
@@ -366,9 +364,7 @@ def test_retry_staged_finalize_exception_is_reported_and_keeps_queue(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = _seed(project, [1, 2, 3])
-    dest = _FakeStagedDestination(
-        fail_ids=set(), finalize_error=RuntimeError("bulk job rejected")
-    )
+    dest = _FakeStagedDestination(fail_ids=set(), finalize_error=RuntimeError("bulk job rejected"))
     _patch_dest(monkeypatch, dest)
 
     result = runner.invoke(app, ["retry", "post_users"])
@@ -506,9 +502,7 @@ def test_retry_survives_concurrent_append(project: Path, monkeypatch: pytest.Mon
             # Simulates another process's `drt run` appending a fresh dead
             # letter mid-retry — after replay_dead_letters()'s own read at
             # the top of the function, before its write-back at the end.
-            store.append(
-                "post_users", [DeadLetter(record={"id": 99}, error_message="new failure")]
-            )
+            store.append("post_users", [DeadLetter(record={"id": 99}, error_message="new failure")])
             result = SyncResult()
             result.success = len(records)
             return result

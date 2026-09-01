@@ -73,18 +73,18 @@ def _check_syncs(project_data: dict[str, object] | None) -> tuple[int, bool, str
 # Optional extras to check (mirrors [project.optional-dependencies] in pyproject.toml).
 # Tuple shape: (extra_name, install_hint_package, import_name).
 _EXTRAS = [
-    ("bigquery",   "google-cloud-bigquery",      "google.cloud.bigquery"),
-    ("duckdb",     "duckdb",                     "duckdb"),
-    ("postgres",   "psycopg2-binary",            "psycopg2"),
-    ("redshift",   "psycopg2-binary",            "psycopg2"),
-    ("clickhouse", "clickhouse-connect",         "clickhouse_connect"),
-    ("snowflake",  "snowflake-connector-python", "snowflake.connector"),
-    ("databricks", "databricks-sql-connector",   "databricks.sql"),
-    ("sqlserver",  "pymssql",                    "pymssql"),
-    ("sheets",     "google-api-python-client",   "googleapiclient"),
-    ("mysql",      "pymysql",                    "pymysql"),
-    ("parquet",    "pyarrow",                    "pyarrow"),
-    ("mcp",        "fastmcp",                    "fastmcp"),
+    ("bigquery", "google-cloud-bigquery", "google.cloud.bigquery"),
+    ("duckdb", "duckdb", "duckdb"),
+    ("postgres", "psycopg2-binary", "psycopg2"),
+    ("redshift", "psycopg2-binary", "psycopg2"),
+    ("clickhouse", "clickhouse-connect", "clickhouse_connect"),
+    ("snowflake", "snowflake-connector-python", "snowflake.connector"),
+    ("databricks", "databricks-sql-connector", "databricks.sql"),
+    ("sqlserver", "pymssql", "pymssql"),
+    ("sheets", "google-api-python-client", "googleapiclient"),
+    ("mysql", "pymysql", "pymysql"),
+    ("parquet", "pyarrow", "pyarrow"),
+    ("mcp", "fastmcp", "fastmcp"),
 ]
 
 

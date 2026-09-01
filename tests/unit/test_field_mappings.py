@@ -22,9 +22,7 @@ class TestApplyFieldMappings:
 
     def test_renames_mapped_keys_keeps_others(self) -> None:
         records = [{"user_id": 1, "full_name": "Alice", "extra": "keep"}]
-        result = apply_field_mappings(
-            records, {"user_id": "id", "full_name": "name"}
-        )
+        result = apply_field_mappings(records, {"user_id": "id", "full_name": "name"})
         assert result == [{"id": 1, "name": "Alice", "extra": "keep"}]
 
     def test_does_not_mutate_input(self) -> None:
@@ -39,9 +37,7 @@ class TestApplyFieldMappings:
             {"user_id": 1, "full_name": "Alice"},
             {"user_id": 2},  # no full_name on this row
         ]
-        result = apply_field_mappings(
-            records, {"user_id": "id", "full_name": "name"}
-        )
+        result = apply_field_mappings(records, {"user_id": "id", "full_name": "name"})
         assert result == [
             {"id": 1, "name": "Alice"},
             {"id": 2},
@@ -59,9 +55,7 @@ class TestApplyFieldMappings:
     def test_value_types_preserved(self) -> None:
         records = [{"ts": None, "n": 0, "flag": False, "obj": {"x": 1}}]
         result = apply_field_mappings(records, {"ts": "created_at"})
-        assert result == [
-            {"created_at": None, "n": 0, "flag": False, "obj": {"x": 1}}
-        ]
+        assert result == [{"created_at": None, "n": 0, "flag": False, "obj": {"x": 1}}]
 
     def test_empty_records_list(self) -> None:
         assert apply_field_mappings([], {"a": "b"}) == []

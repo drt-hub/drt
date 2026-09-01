@@ -41,10 +41,7 @@ def _has_psycopg2() -> bool:
 # (rather than a mock) to show no write statement is issued — which means they
 # need the [postgres] extra. Every other case here mocks the fetch, so only
 # these two are marked.
-needs_psycopg2 = pytest.mark.skipif(
-    not _has_psycopg2(), reason="requires drt-core[postgres]"
-)
-
+needs_psycopg2 = pytest.mark.skipif(not _has_psycopg2(), reason="requires drt-core[postgres]")
 
 
 def _pg_config(
@@ -588,9 +585,7 @@ class TestComputeDiffMirrorTracked:
 
     @patch("drt.engine.diff.fetch_tracked_state")
     @patch("drt.engine.diff.fetch_rows_by_keys")
-    def test_previews_tracked_mirror_deletes(
-        self, mock_fetch_keys: Any, mock_state: Any
-    ) -> None:
+    def test_previews_tracked_mirror_deletes(self, mock_fetch_keys: Any, mock_state: Any) -> None:
         """previous={a,b,c}, source={a,b} → deleted previews {c}, read-only.
 
         Mirror mode takes the keyed-fetch path (#470), which structurally can
@@ -605,9 +600,7 @@ class TestComputeDiffMirrorTracked:
         }
         records = [{"id": "a", "score": 0.9}, {"id": "b", "score": 0.8}]
 
-        result = compute_diff(
-            records, _pg_config(), _mirror_tracked_options(), limit=20
-        )
+        result = compute_diff(records, _pg_config(), _mirror_tracked_options(), limit=20)
 
         assert result.supported
         assert result.deleted == [{"id": "c"}]
@@ -619,9 +612,7 @@ class TestComputeDiffMirrorTracked:
     @patch("drt.engine.diff.fetch_tracked_state")
     @patch("drt.engine.diff.fetch_rows_by_keys")
     @needs_psycopg2
-    def test_tracked_preview_is_read_only(
-        self, mock_fetch_keys: Any, mock_state: Any
-    ) -> None:
+    def test_tracked_preview_is_read_only(self, mock_fetch_keys: Any, mock_state: Any) -> None:
         """The preview must never write: only SELECTs reach the cursor.
 
         ``fetch_tracked_state`` is exercised for real against a fake cursor so
@@ -671,9 +662,7 @@ class TestComputeDiffMirrorTracked:
         mock_state.return_value = {}
         records = [{"id": "a"}]
 
-        result = compute_diff(
-            records, _pg_config(), _mirror_tracked_options(), limit=20
-        )
+        result = compute_diff(records, _pg_config(), _mirror_tracked_options(), limit=20)
 
         assert result.deleted == []
         assert result.supported
@@ -689,9 +678,7 @@ class TestComputeDiffMirrorTracked:
         mock_state.side_effect = RuntimeError("permission denied for _drt_synced_keys")
         records = [{"id": "a", "score": 0.9}]
 
-        result = compute_diff(
-            records, _pg_config(), _mirror_tracked_options(), limit=20
-        )
+        result = compute_diff(records, _pg_config(), _mirror_tracked_options(), limit=20)
 
         assert result.supported  # diff itself still usable
         assert result.deleted == []
@@ -816,9 +803,7 @@ class TestComputeDiffMirrorDestination:
         mock_all_keys.return_value = [("a",), ("b",), ("c",)]
         records = [{"id": "a", "score": 0.9}, {"id": "b", "score": 0.8}]
 
-        result = compute_diff(
-            records, _pg_config(), _mirror_destination_options(), limit=20
-        )
+        result = compute_diff(records, _pg_config(), _mirror_destination_options(), limit=20)
 
         assert result.supported
         assert result.deleted == [{"id": "c"}]
@@ -869,9 +854,7 @@ class TestComputeDiffMirrorDestination:
         mock_all_keys.return_value = [(1,)]  # destination key: int 1
         records = [{"id": "1"}]  # source key: str "1" (mismatched type)
 
-        result = compute_diff(
-            records, _pg_config(), _mirror_destination_options(), limit=20
-        )
+        result = compute_diff(records, _pg_config(), _mirror_destination_options(), limit=20)
 
         # If this were stringified (as the first version of the fix did for
         # every dialect), str(1) == "1" and this would wrongly show as
@@ -1016,9 +999,7 @@ class TestComputeDiffMirrorDestination:
 
     @patch("drt.engine.diff.fetch_all_keys")
     @patch("drt.engine.diff.fetch_rows")
-    def test_empty_source_previews_no_deletes(
-        self, mock_fetch: Any, mock_all_keys: Any
-    ) -> None:
+    def test_empty_source_previews_no_deletes(self, mock_fetch: Any, mock_all_keys: Any) -> None:
         """Empty source → no preview, because the real run skips the DELETE.
 
         ``_finalize_mirror`` returns early on an empty ``_mirror_keys`` so a
@@ -1042,16 +1023,12 @@ class TestComputeDiffMirrorDestination:
         mock_fetch_keys.return_value = [{"id": "a"}]
         mock_all_keys.side_effect = NotImplementedError("clickhouse")
 
-        result = compute_diff(
-            [{"id": "a"}], _pg_config(), _mirror_destination_options(), limit=20
-        )
+        result = compute_diff([{"id": "a"}], _pg_config(), _mirror_destination_options(), limit=20)
 
         assert result.supported
         assert result.deleted == []
         assert result.delete_reason is None
-        assert result.delete_preview_unavailable_reason == (
-            "NotImplementedError: clickhouse"
-        )
+        assert result.delete_preview_unavailable_reason == ("NotImplementedError: clickhouse")
 
     @patch("drt.engine.diff.fetch_all_keys")
     @patch("drt.engine.diff.fetch_rows_by_keys")
@@ -1128,9 +1105,7 @@ class TestComputeDiffMirrorDestination:
         mock_fetch_keys.return_value = []
         mock_all_keys.return_value = [("a",), ("b",), ("c",)]
 
-        result = compute_diff(
-            [{"id": "a"}], _pg_config(), _mirror_destination_options(), limit=1
-        )
+        result = compute_diff([{"id": "a"}], _pg_config(), _mirror_destination_options(), limit=1)
 
         assert result.truncated is True
         assert len(result.deleted) == 1

@@ -173,9 +173,7 @@ def replay_dead_letters(
         # get re-queued and may be re-sent on the next retry — we prefer a
         # re-send (idempotent for upsert destinations) over a silent drop.
         failed_idx = {
-            e.batch_index
-            for e in result.row_errors
-            if 0 <= e.batch_index < len(retry_group)
+            e.batch_index for e in result.row_errors if 0 <= e.batch_index < len(retry_group)
         }
         pinpointed = len(failed_idx) == result.failed
         if isinstance(dest, StagedDestination):
@@ -309,9 +307,7 @@ def retry(
             f"record(s) for '{sync_name}'.[/cyan]"
         )
         if summary["untouched"]:
-            console.print(
-                f"[dim]{summary['untouched']} record(s) left untouched (--limit).[/dim]"
-            )
+            console.print(f"[dim]{summary['untouched']} record(s) left untouched (--limit).[/dim]")
         return
 
     if status == "failed":

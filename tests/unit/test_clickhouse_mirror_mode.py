@@ -292,11 +292,10 @@ def test_mirror_excludes_failed_record_keys_from_accumulation() -> None:
     """
     dest = ClickHouseDestination()
     client = _fake_client()
+
     # Reject the batch, then make its second row fail during per-row replay so
     # batch_index=1 ends up in row_errors.
-    def _insert_with_one_failure(
-        _table: str, rows: list[list[Any]], **_kwargs: Any
-    ) -> None:
+    def _insert_with_one_failure(_table: str, rows: list[list[Any]], **_kwargs: Any) -> None:
         if len(rows) > 1 or rows[0][0] == 2:
             raise RuntimeError("forced for test")
 
@@ -578,9 +577,7 @@ def test_tracked_baseline_logs_warning_clickhouse(caplog: pytest.LogCaptureFixtu
 
     dest = ClickHouseDestination()
     load_client = _fake_client()
-    finalize_client = _state_client(
-        raw_diff=[], new_hashes=[key_hash((1,))], previous_exists=False
-    )
+    finalize_client = _state_client(raw_diff=[], new_hashes=[key_hash((1,))], previous_exists=False)
 
     with patch.object(ClickHouseDestination, "_connect", return_value=load_client):
         dest.load([{"id": 1}], _config(), _tracked_options())

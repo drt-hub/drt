@@ -656,9 +656,7 @@ def test_databricks_tracked_scoped_mirror_and_scope_backfill(tmp_path: Path) -> 
     conn = _connect(creds)
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                f"CREATE TABLE {fqn} (parent_id INT, id STRING, label STRING) USING DELTA"
-            )
+            cur.execute(f"CREATE TABLE {fqn} (parent_id INT, id STRING, label STRING) USING DELTA")
             for p, i in tracked:
                 cur.execute(f"INSERT INTO {fqn} VALUES ({p}, '{i}', 'seeded')")
             # A state table in its pre-#890 shape — three columns, no scope.

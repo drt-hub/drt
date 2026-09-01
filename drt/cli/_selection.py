@@ -64,8 +64,7 @@ def matches(sync: SyncConfig, token: str, *, state_diff: StateDiff | None = None
             )
         if state_diff is None:
             raise SelectionError(
-                f"Selector '{token}' requires --state "
-                "<path-to-baseline-manifest.json>."
+                f"Selector '{token}' requires --state <path-to-baseline-manifest.json>."
             )
         names = state_diff.new if token == "state:new" else state_diff.modified
         return sync.name in names
@@ -83,9 +82,9 @@ def _no_match_message(token: str) -> str:
     # state: tokens never reach here — select_syncs() exempts them from the
     # must-match-something check (see its docstring and is_state_only_select).
     if token.startswith("tag:"):
-        return f"No syncs with tag '{token[len('tag:'):]}' found."
+        return f"No syncs with tag '{token[len('tag:') :]}' found."
     if token.startswith("destination:"):
-        return f"No syncs with destination '{token[len('destination:'):]}' found."
+        return f"No syncs with destination '{token[len('destination:') :]}' found."
     if is_glob(token):
         return f"No syncs matching '{token}' found."
     return f"No sync named '{token}' found."

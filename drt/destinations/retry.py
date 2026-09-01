@@ -137,9 +137,7 @@ def with_retry(
         try:
             return fn()
         except httpx.HTTPStatusError as e:
-            default_retryable = (
-                e.response.status_code in config.retryable_status_codes
-            )
+            default_retryable = e.response.status_code in config.retryable_status_codes
             if not default_retryable and (retry_on is None or not retry_on(e)):
                 raise
             last_exc = e

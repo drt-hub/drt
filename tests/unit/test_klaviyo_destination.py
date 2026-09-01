@@ -74,9 +74,7 @@ class TestKlaviyoConfig:
             _config(endpoint="event", metric_name="Upgraded Plan")
 
     @pytest.mark.parametrize("unique_id_field", ["", "   "])
-    def test_event_rejects_blank_unique_id_field(
-        self, unique_id_field: str
-    ) -> None:
+    def test_event_rejects_blank_unique_id_field(self, unique_id_field: str) -> None:
         with pytest.raises(ValueError, match="unique_id_field"):
             _config(
                 endpoint="event",
@@ -86,11 +84,14 @@ class TestKlaviyoConfig:
 
     def test_describe(self) -> None:
         assert _config().describe() == "klaviyo (profiles)"
-        assert _config(
-            endpoint="event",
-            metric_name="Upgraded Plan",
-            unique_id_field="event_id",
-        ).describe() == "klaviyo (events)"
+        assert (
+            _config(
+                endpoint="event",
+                metric_name="Upgraded Plan",
+                unique_id_field="event_id",
+            ).describe()
+            == "klaviyo (events)"
+        )
 
     def test_missing_api_key_raises(self) -> None:
         with pytest.raises(ValueError, match="api_key"):
@@ -154,9 +155,7 @@ class TestKlaviyoLoad:
         )
         client.patch.return_value = _resp(200, {"data": {"id": "P9"}})
         with _patch_client(client):
-            result = KlaviyoDestination().load(
-                [{"email": "a@x.com"}], _config(), _options()
-            )
+            result = KlaviyoDestination().load([{"email": "a@x.com"}], _config(), _options())
         assert result.success == 1
         assert "/profiles/P9/" in client.patch.call_args.args[0]
         assert client.patch.call_args.kwargs["json"]["data"]["id"] == "P9"
@@ -186,8 +185,7 @@ class TestKlaviyoLoad:
             )
         assert result.success == 1
         list_calls = [
-            c for c in client.post.call_args_list
-            if "relationships/profiles" in c.args[0]
+            c for c in client.post.call_args_list if "relationships/profiles" in c.args[0]
         ]
         assert len(list_calls) == 1
         assert "/lists/LIST1/" in list_calls[0].args[0]
@@ -272,9 +270,7 @@ class TestKlaviyoLoad:
         assert result.failed == 1
         client.patch.assert_not_called()
 
-    def test_missing_api_key_at_load(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-    ) -> None:
+    def test_missing_api_key_at_load(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
         monkeypatch.delenv("KLAVIYO_NOPE", raising=False)
         monkeypatch.chdir(tmp_path)
         config = _config(api_key=None, api_key_env="KLAVIYO_NOPE")
@@ -393,8 +389,7 @@ class TestKlaviyoEventLoad:
         assert result.failed == 1
         assert (
             "time field 'occurred_at' must use a TIMESTAMP/DATETIME-typed source "
-            "column, not a DATE-typed source column"
-            in result.row_errors[0].error_message
+            "column, not a DATE-typed source column" in result.row_errors[0].error_message
         )
         client.post.assert_not_called()
 
@@ -473,9 +468,7 @@ class TestKlaviyoEventLoad:
             {"email": "a@x.com", "event_id": "  "},
         ],
     )
-    def test_event_missing_or_blank_unique_id_is_recorded(
-        self, record: dict[str, Any]
-    ) -> None:
+    def test_event_missing_or_blank_unique_id_is_recorded(self, record: dict[str, Any]) -> None:
         client = MagicMock()
         config = _config(
             endpoint="event",

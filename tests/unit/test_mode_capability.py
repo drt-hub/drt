@@ -146,9 +146,7 @@ def test_incomplete_base_sql_destination_subclass_does_not_inherit_the_capabilit
     dest = _IncompleteSqlDestination()
     assert not isinstance(dest, ModeCapable)
     for mode in ("replace", "mirror"):
-        with pytest.raises(
-            ValueError, match=rf"sync\.mode: {mode} is not supported"
-        ):
+        with pytest.raises(ValueError, match=rf"sync\.mode: {mode} is not supported"):
             _check_mode_supported(mode, dest)
 
 
