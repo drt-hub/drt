@@ -760,6 +760,22 @@ class MetaConversionsDestinationConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _check_website_fields(self) -> MetaConversionsDestinationConfig:
+        if self.action_source == "website" and not all(
+            field is not None and field.strip()
+            for field in (
+                self.event_source_url_field,
+                self.client_user_agent_field,
+            )
+        ):
+            raise ValueError(
+                "event_source_url_field and client_user_agent_field are required "
+                "for action_source: 'website' because Meta requires both parameters "
+                "for website events."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _check_user_data_field(self) -> MetaConversionsDestinationConfig:
         if not any(
             (

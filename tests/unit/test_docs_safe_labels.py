@@ -137,6 +137,8 @@ SAMPLES: dict[str, object] = {
         pixel_id=S,
         event_name="Purchase",
         event_id_field="event_id",
+        event_source_url_field="page_url",
+        client_user_agent_field="user_agent",
         email_field="email",
     ),
     "mixpanel": MixpanelDestinationConfig(type="mixpanel", token_env="T"),

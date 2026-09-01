@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import io
 import logging
 from unittest.mock import MagicMock, patch
@@ -36,6 +37,8 @@ def _config(**overrides: object) -> MetaConversionsDestinationConfig:
         "access_token": "meta-token",
         "event_name": "Purchase",
         "event_id_field": "event_id",
+        "event_source_url_field": "page_url",
+        "client_user_agent_field": "user_agent",
         "email_field": "email",
     }
     values.update(overrides)
@@ -45,6 +48,8 @@ def _config(**overrides: object) -> MetaConversionsDestinationConfig:
 def _record(**overrides: object) -> dict[str, object]:
     values: dict[str, object] = {
         "event_id": "conversion-1",
+        "page_url": "https://example.com/products/1",
+        "user_agent": "test browser",
         "email": "test@example.com",
     }
     values.update(overrides)
@@ -162,8 +167,105 @@ def test_json_logging_does_not_emit_query_param_access_token() -> None:
     assert token not in stream.getvalue()
 
 
+def test_library_import_suppresses_httpx_token_logging_with_info_root() -> None:
+    import drt.destinations.meta_conversions as meta_conversions
+
+    token = "ORCHESTRATOR_META_TOKEN"
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    root = logging.root
+    httpx_logger = logging.getLogger("httpx")
+    previous_handlers = root.handlers[:]
+    previous_root_level = root.level
+    previous_httpx_level = httpx_logger.level
+    real_client = httpx.Client
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(200, json={"events_received": 1})
+    )
+
+    try:
+        root.handlers = [handler]
+        root.setLevel(logging.INFO)
+        httpx_logger.setLevel(logging.NOTSET)
+        meta_conversions = importlib.reload(meta_conversions)
+        assert httpx_logger.level == logging.WARNING
+        with patch.object(
+            meta_conversions.httpx,
+            "Client",
+            side_effect=lambda **kwargs: real_client(transport=transport, **kwargs),
+        ):
+            result = meta_conversions.MetaConversionsDestination().load(
+                [_record()],
+                _config(access_token=token),
+                SyncOptions(),
+            )
+    finally:
+        root.handlers = previous_handlers
+        root.setLevel(previous_root_level)
+        httpx_logger.setLevel(previous_httpx_level)
+
+    assert result.success == 1
+    assert token not in stream.getvalue()
+
+
 def test_action_source_defaults_to_website() -> None:
     assert _config().action_source == "website"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("event_source_url_field", None),
+        ("event_source_url_field", ""),
+        ("event_source_url_field", "   "),
+        ("client_user_agent_field", None),
+        ("client_user_agent_field", ""),
+        ("client_user_agent_field", "   "),
+    ],
+)
+def test_website_action_source_requires_website_field_mappings(
+    field: str, value: object
+) -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        _config(**{field: value})
+
+    message = str(exc_info.value)
+    assert "event_source_url_field" in message
+    assert "client_user_agent_field" in message
+    assert "action_source: 'website'" in message
+
+
+def test_non_website_action_source_does_not_require_website_field_mappings() -> None:
+    config = _config(
+        action_source="system_generated",
+        event_source_url_field=None,
+        client_user_agent_field=None,
+    )
+
+    assert config.action_source == "system_generated"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("page_url", None, "event source URL field 'page_url'"),
+        ("page_url", "", "event source URL field 'page_url'"),
+        ("page_url", "   ", "event source URL field 'page_url'"),
+        ("user_agent", None, "client user agent field 'user_agent'"),
+        ("user_agent", "", "client user agent field 'user_agent'"),
+        ("user_agent", "   ", "client user agent field 'user_agent'"),
+    ],
+)
+def test_website_fields_must_resolve_for_each_row(
+    field: str, value: object, message: str
+) -> None:
+    result = MetaConversionsDestination().load(
+        [_record(**{field: value})], _config(), SyncOptions()
+    )
+
+    assert result.success == 0
+    assert result.failed == 1
+    assert message in result.row_errors[0].error_message
 
 
 def test_rate_limit_key_is_shared_per_pixel_without_token_material() -> None:
@@ -329,7 +431,12 @@ def test_event_id_field_must_resolve_for_each_row(record: dict[str, object]) -> 
 
 def test_at_least_one_customer_information_field_is_required() -> None:
     with pytest.raises(ValidationError) as exc_info:
-        _config(email_field=None)
+        _config(
+            action_source="system_generated",
+            event_source_url_field=None,
+            client_user_agent_field=None,
+            email_field=None,
+        )
 
     message = str(exc_info.value)
     for field in (
@@ -355,7 +462,17 @@ def test_at_least_one_customer_information_field_is_required() -> None:
     ],
 )
 def test_each_customer_information_field_satisfies_config_requirement(field: str) -> None:
-    values: dict[str, object] = {"email_field": None, field: "identifier"}
+    values: dict[str, object] = {
+        "action_source": "system_generated",
+        "event_source_url_field": None,
+        "email_field": None,
+        "phone_field": None,
+        "client_ip_address_field": None,
+        "client_user_agent_field": None,
+        "fbc_field": None,
+        "fbp_field": None,
+        field: "identifier",
+    }
 
     assert getattr(_config(**values), field) == "identifier"
 
@@ -363,7 +480,13 @@ def test_each_customer_information_field_satisfies_config_requirement(field: str
 @pytest.mark.parametrize("email", [None, "", "   "], ids=["null", "empty", "blank"])
 def test_customer_information_must_resolve_for_each_row(email: object) -> None:
     result = MetaConversionsDestination().load(
-        [_record(email=email)], _config(), SyncOptions()
+        [_record(email=email)],
+        _config(
+            action_source="system_generated",
+            event_source_url_field=None,
+            client_user_agent_field=None,
+        ),
+        SyncOptions(),
     )
 
     assert result.success == 0

@@ -11,12 +11,15 @@ Example::
       pixel_id: "123456789012345"
       event_name: Purchase
       event_id_field: event_id  # Required so retries can be deduplicated.
+      event_source_url_field: page_url  # Required for website events.
+      client_user_agent_field: user_agent  # Required for website events.
       email_field: email        # At least one customer identifier is required.
 """
 
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import time
 from typing import Any
@@ -37,6 +40,10 @@ from drt.destinations.row_errors import record_preview, record_row_error
 _BASE_URL = "https://graph.facebook.com"
 _MAX_EVENTS_PER_REQUEST = 1000
 _MAX_EVENT_AGE_SECONDS = 604_800
+
+# Meta documents query-parameter access tokens for this API. Prevent httpx's
+# full-URL INFO record from exposing them when a library caller configures logging.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 class MetaConversionsDestination:
@@ -164,12 +171,23 @@ def _build_event(
     if event_id is None:
         raise ValueError(f"Row missing event id field {event_id_field!r}.")
     event["event_id"] = event_id
-    _copy_optional(
-        event,
-        "event_source_url",
-        record,
-        config.event_source_url_field,
-    )
+    if config.action_source == "website":
+        event_source_url_field = config.event_source_url_field
+        assert event_source_url_field is not None
+        event_source_url = _nonempty(record.get(event_source_url_field))
+        if event_source_url is None:
+            raise ValueError(
+                f"Row missing event source URL field {event_source_url_field!r} "
+                "required for action_source 'website'."
+            )
+        event["event_source_url"] = event_source_url
+    else:
+        _copy_optional(
+            event,
+            "event_source_url",
+            record,
+            config.event_source_url_field,
+        )
 
     user_data: dict[str, Any] = {}
     if config.email_field is not None:
@@ -190,12 +208,23 @@ def _build_event(
         record,
         config.client_ip_address_field,
     )
-    _copy_optional(
-        user_data,
-        "client_user_agent",
-        record,
-        config.client_user_agent_field,
-    )
+    if config.action_source == "website":
+        client_user_agent_field = config.client_user_agent_field
+        assert client_user_agent_field is not None
+        client_user_agent = _nonempty(record.get(client_user_agent_field))
+        if client_user_agent is None:
+            raise ValueError(
+                f"Row missing client user agent field {client_user_agent_field!r} "
+                "required for action_source 'website'."
+            )
+        user_data["client_user_agent"] = client_user_agent
+    else:
+        _copy_optional(
+            user_data,
+            "client_user_agent",
+            record,
+            config.client_user_agent_field,
+        )
     _copy_optional(user_data, "fbc", record, config.fbc_field)
     _copy_optional(user_data, "fbp", record, config.fbp_field)
     if not user_data:
