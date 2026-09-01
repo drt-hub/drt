@@ -7,7 +7,12 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from drt.config.models import RateLimitConfig, SalesforceBulkDestinationConfig, SyncOptions
+from drt.config.models import (
+    RateLimitConfig,
+    RetryConfig,
+    SalesforceBulkDestinationConfig,
+    SyncOptions,
+)
 from drt.destinations.salesforce_bulk import SalesforceBulkDestination
 
 # ---------------------------------------------------------------------------
@@ -203,3 +208,302 @@ def test_empty_records_returns_early() -> None:
         mock_client_cls.assert_not_called()
 
     assert result.rows_extracted == 0
+
+
+def test_status_poll_retries_transient_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_sf_env(monkeypatch)
+    dest = SalesforceBulkDestination()
+    config = _config()
+    options = SyncOptions(
+        retry=RetryConfig(max_attempts=2, initial_backoff=0.0, max_backoff=0.0),
+        rate_limit=RateLimitConfig(requests_per_second=0),
+    )
+    dest.stage([{"id": "1", "name": "Alice"}], config, options)
+
+    mock_client = MagicMock()
+    mock_client.post.side_effect = [
+        _make_response(200, {"access_token": "tok123"}),
+        _make_response(200, {"id": "job001"}),
+    ]
+    mock_client.put.return_value = _make_response(201, {})
+    mock_client.patch.return_value = _make_response(200, {})
+    transient = httpx.Response(
+        503,
+        request=httpx.Request(
+            "GET", "https://test.salesforce.com/services/data/v58.0/jobs/ingest/job001"
+        ),
+    )
+    complete = _make_response(
+        200,
+        {
+            "state": "JobComplete",
+            "numberRecordsProcessed": 1,
+            "numberRecordsFailed": 0,
+        },
+    )
+    mock_client.get.side_effect = [transient, complete]
+
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value.__enter__.return_value = mock_client
+        result = dest.finalize(config, options)
+
+    assert result.success == 1
+    assert mock_client.get.call_count == 2
+
+
+def test_status_poll_retry_acquires_rate_limiter_per_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_sf_env(monkeypatch)
+    dest = SalesforceBulkDestination()
+    config = _config()
+    options = SyncOptions(
+        retry=RetryConfig(max_attempts=2, initial_backoff=0.0, max_backoff=0.0),
+        rate_limit=RateLimitConfig(requests_per_second=0),
+    )
+    dest.stage([{"id": "1", "name": "Alice"}], config, options)
+
+    mock_client = MagicMock()
+    mock_client.post.side_effect = [
+        _make_response(200, {"access_token": "tok123"}),
+        _make_response(200, {"id": "job001"}),
+    ]
+    mock_client.put.return_value = _make_response(201, {})
+    mock_client.patch.return_value = _make_response(200, {})
+    mock_client.get.side_effect = [
+        httpx.Response(
+            503,
+            request=httpx.Request(
+                "GET", "https://test.salesforce.com/services/data/v58.0/jobs/ingest/job001"
+            ),
+        ),
+        _make_response(
+            200,
+            {
+                "state": "JobComplete",
+                "numberRecordsProcessed": 1,
+                "numberRecordsFailed": 0,
+            },
+        ),
+    ]
+    limiter = MagicMock()
+
+    with (
+        patch("httpx.Client") as mock_client_cls,
+        patch(
+            "drt.destinations.salesforce_bulk.resolve_rate_limiter",
+            return_value=limiter,
+        ),
+    ):
+        mock_client_cls.return_value.__enter__.return_value = mock_client
+        result = dest.finalize(config, options)
+
+    assert result.success == 1
+    assert mock_client.get.call_count == 2
+    assert limiter.acquire.call_count == 2
+
+
+def test_status_poll_retry_success_after_deadline_raises_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_sf_env(monkeypatch)
+    dest = SalesforceBulkDestination()
+    config = _config().model_copy(update={"poll_timeout_seconds": 1})
+    options = SyncOptions(
+        retry=RetryConfig(max_attempts=2, initial_backoff=60.0, max_backoff=60.0),
+        rate_limit=RateLimitConfig(requests_per_second=0),
+    )
+    dest.stage([{"id": "1", "name": "Alice"}], config, options)
+
+    mock_client = MagicMock()
+    mock_client.post.side_effect = [
+        _make_response(200, {"access_token": "tok123"}),
+        _make_response(200, {"id": "job001"}),
+    ]
+    mock_client.put.return_value = _make_response(201, {})
+    mock_client.patch.return_value = _make_response(200, {})
+    mock_client.get.side_effect = [
+        httpx.Response(
+            503,
+            request=httpx.Request(
+                "GET", "https://test.salesforce.com/services/data/v58.0/jobs/ingest/job001"
+            ),
+        ),
+        _make_response(200, {"state": "JobComplete"}),
+    ]
+    clock = {"now": 0.0}
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["now"] += seconds + 0.01
+
+    monkeypatch.setattr(
+        "drt.destinations.salesforce_bulk.time.monotonic", lambda: clock["now"]
+    )
+    monkeypatch.setattr("drt.destinations.retry.time.sleep", fake_sleep)
+
+    with (
+        patch("httpx.Client") as mock_client_cls,
+        patch(
+            "drt.destinations.salesforce_bulk.resolve_rate_limiter",
+            return_value=MagicMock(),
+        ),
+    ):
+        mock_client_cls.return_value.__enter__.return_value = mock_client
+        with pytest.raises(TimeoutError, match="did not complete within 1s"):
+            dest.finalize(config, options)
+
+    assert sleeps == [1.0]
+    assert mock_client.get.call_count == 2
+
+
+def test_status_poll_clamps_retry_backoff_to_remaining_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_sf_env(monkeypatch)
+    dest = SalesforceBulkDestination()
+    config = _config().model_copy(update={"poll_timeout_seconds": 5})
+    retry_config = RetryConfig(
+        max_attempts=4,
+        initial_backoff=2.0,
+        backoff_multiplier=3.0,
+        max_backoff=60.0,
+        retryable_status_codes=(429, 503),
+    )
+    options = SyncOptions(retry=retry_config)
+    dest.stage([{"id": "1", "name": "Alice"}], config, options)
+
+    mock_client = MagicMock()
+    mock_client.post.side_effect = [
+        _make_response(200, {"access_token": "tok123"}),
+        _make_response(200, {"id": "job001"}),
+    ]
+    mock_client.put.return_value = _make_response(201, {})
+    mock_client.patch.return_value = _make_response(200, {})
+    complete = _make_response(
+        200,
+        {
+            "state": "JobComplete",
+            "numberRecordsProcessed": 1,
+            "numberRecordsFailed": 0,
+        },
+    )
+
+    with (
+        patch("httpx.Client") as mock_client_cls,
+        patch(
+            "drt.destinations.salesforce_bulk.time.monotonic",
+            side_effect=[100.0, 101.0, 101.0],
+        ),
+        patch(
+            "drt.destinations.salesforce_bulk.with_retry", return_value=complete
+        ) as retry_call,
+        patch(
+            "drt.destinations.salesforce_bulk.resolve_rate_limiter",
+            return_value=MagicMock(),
+        ),
+    ):
+        mock_client_cls.return_value.__enter__.return_value = mock_client
+        result = dest.finalize(config, options)
+
+    clamped = retry_call.call_args.args[1]
+    assert result.success == 1
+    assert clamped is not retry_config
+    assert clamped.max_backoff == 4.0
+    assert clamped.max_attempts == retry_config.max_attempts
+    assert clamped.initial_backoff == retry_config.initial_backoff
+    assert clamped.backoff_multiplier == retry_config.backoff_multiplier
+    assert clamped.retryable_status_codes == retry_config.retryable_status_codes
+    assert retry_config.max_backoff == 60.0
+
+
+def test_status_poll_clamps_request_timeout_to_fresh_remaining_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_sf_env(monkeypatch)
+    dest = SalesforceBulkDestination()
+    config = _config().model_copy(update={"poll_timeout_seconds": 5})
+    options = SyncOptions(retry=RetryConfig())
+    dest.stage([{"id": "1", "name": "Alice"}], config, options)
+
+    mock_client = MagicMock()
+    mock_client.post.side_effect = [
+        _make_response(200, {"access_token": "tok123"}),
+        _make_response(200, {"id": "job001"}),
+    ]
+    mock_client.put.return_value = _make_response(201, {})
+    mock_client.patch.return_value = _make_response(200, {})
+    mock_client.get.return_value = _make_response(
+        200,
+        {
+            "state": "JobComplete",
+            "numberRecordsProcessed": 1,
+            "numberRecordsFailed": 0,
+        },
+    )
+
+    with (
+        patch("httpx.Client") as mock_client_cls,
+        patch(
+            "drt.destinations.salesforce_bulk.time.monotonic",
+            side_effect=[100.0, 101.0, 102.0, 102.0],
+        ),
+        patch(
+            "drt.destinations.salesforce_bulk.with_retry",
+            side_effect=lambda operation, _config: operation(),
+        ),
+        patch(
+            "drt.destinations.salesforce_bulk.resolve_rate_limiter",
+            return_value=MagicMock(),
+        ),
+    ):
+        mock_client_cls.return_value.__enter__.return_value = mock_client
+        result = dest.finalize(config, options)
+
+    assert result.success == 1
+    assert mock_client.get.call_args.kwargs["timeout"] == 3.0
+
+
+def test_status_poll_acquires_rate_limiter_per_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_sf_env(monkeypatch)
+    dest = SalesforceBulkDestination()
+    config = _config()
+    options = _sync_options()
+    dest.stage([{"id": "1", "name": "Alice"}], config, options)
+
+    mock_client = MagicMock()
+    mock_client.post.side_effect = [
+        _make_response(200, {"access_token": "tok123"}),
+        _make_response(200, {"id": "job001"}),
+    ]
+    mock_client.put.return_value = _make_response(201, {})
+    mock_client.patch.return_value = _make_response(200, {})
+    mock_client.get.side_effect = [
+        _make_response(200, {"state": "InProgress"}),
+        _make_response(
+            200,
+            {
+                "state": "JobComplete",
+                "numberRecordsProcessed": 1,
+                "numberRecordsFailed": 0,
+            },
+        ),
+    ]
+    limiter = MagicMock()
+
+    with (
+        patch("httpx.Client") as mock_client_cls,
+        patch(
+            "drt.destinations.salesforce_bulk.resolve_rate_limiter",
+            return_value=limiter,
+        ) as resolve_limiter,
+    ):
+        mock_client_cls.return_value.__enter__.return_value = mock_client
+        result = dest.finalize(config, options)
+
+    assert result.success == 1
+    resolve_limiter.assert_called_once()
+    assert limiter.acquire.call_count == 2

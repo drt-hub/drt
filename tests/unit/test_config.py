@@ -1299,10 +1299,10 @@ class TestDestinationRateLimitOverride:
         this fails loudly instead.
         """
         with_retry = _configs_with_retry()
-        # 19 built-in connectors, plus GenericDestinationConfig (#997), which
+        # 21 built-in connectors, plus GenericDestinationConfig (#997), which
         # carries both fields precisely so a plugin destination keeps working
         # with `resolve_retry()` and the rate-limiter registry.
-        assert len(with_retry) == 20, "expected 20 retry-capable configs; update the sweep"
+        assert len(with_retry) == 22, "expected 22 retry-capable configs; update the sweep"
 
         missing = [m.__name__ for m in with_retry if "rate_limit" not in m.model_fields]
         assert missing == []

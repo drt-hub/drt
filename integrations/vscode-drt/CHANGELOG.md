@@ -6,6 +6,10 @@ drt-core version its bundled schemas were generated from.
 
 ## [0.1.13] - Unreleased
 
+- Bundled JSON Schemas regenerated from drt-core: `staged_upload` and
+  `salesforce_bulk` destinations now validate destination-level `retry` and
+  `rate_limit` overrides, matching every other rate-limited destination type
+  (drt-hub/drt#1048).
 - Bundled JSON Schemas regenerated from drt-core: `sync.batch_size` now has a
   minimum of `1` (`exclusiveMinimum: 0`) — `0` or a negative value used to
   either crash or silently insert nothing on some destinations while

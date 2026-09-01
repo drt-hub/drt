@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import ANY, MagicMock, patch
 
+import httpx
+import pytest
 from pytest_httpserver import HTTPServer
 
 from drt.config.models import (
+    RateLimitConfig,
+    RetryConfig,
     StagedUploadDestinationConfig,
     StagedUploadPhaseConfig,
     StagedUploadPollConfig,
@@ -193,6 +198,291 @@ def test_finalize_poll_failure(httpserver: HTTPServer) -> None:
     assert result.success == 0
     assert result.failed == 1
     assert any("failed" in e.lower() for e in result.errors)
+
+
+def test_finalize_poll_retries_transient_failure() -> None:
+    """A transient status-check failure is retried without replaying earlier phases."""
+    config = StagedUploadDestinationConfig(
+        type="staged_upload",
+        stage=StagedUploadPhaseConfig(
+            url="https://upload.example.com",
+            response_extract={"upload_id": "uploadId"},
+        ),
+        trigger=StagedUploadPhaseConfig(
+            url="https://api.example.com/jobs",
+            response_extract={"job_id": "jobId"},
+        ),
+        poll=StagedUploadPollConfig(
+            url="https://api.example.com/jobs/{{ job_id }}",
+            interval_seconds=0,
+            timeout_seconds=5,
+        ),
+    )
+    options = SyncOptions(
+        retry=RetryConfig(max_attempts=2, initial_backoff=0.0, max_backoff=0.0),
+        rate_limit=RateLimitConfig(requests_per_second=0),
+    )
+    dest = StagedUploadDestination()
+    dest._records = [{"x": 1}]
+    transient = httpx.Response(
+        503,
+        request=httpx.Request("GET", "https://api.example.com/jobs/j-1"),
+    )
+    complete = httpx.Response(
+        200,
+        json={"status": "SUCCEEDED"},
+        request=httpx.Request("GET", "https://api.example.com/jobs/j-1"),
+    )
+    client = MagicMock()
+    client.request.side_effect = [transient, complete]
+
+    with (
+        patch.object(
+            dest,
+            "_http_phase",
+            side_effect=[{"uploadId": "u-1"}, {"jobId": "j-1"}],
+        ) as http_phase,
+        patch("drt.destinations.staged_upload.httpx.Client") as client_class,
+    ):
+        client_class.return_value.__enter__.return_value = client
+        result = dest.finalize(config, options)
+
+    assert result.success == 1
+    assert result.failed == 0
+    assert http_phase.call_count == 2
+    assert client.request.call_count == 2
+
+
+def test_post_poll_does_not_retry_transient_failure() -> None:
+    poll_config = StagedUploadPollConfig(
+        url="https://api.example.com/jobs/j-1",
+        method="POST",
+        interval_seconds=0,
+        timeout_seconds=5,
+    )
+    retry_config = RetryConfig(max_attempts=3, initial_backoff=0.0, max_backoff=0.0)
+    limiter = MagicMock()
+    client = MagicMock()
+    client.request.return_value = httpx.Response(
+        503,
+        request=httpx.Request("POST", poll_config.url),
+    )
+
+    with (
+        patch("drt.destinations.staged_upload.httpx.Client") as client_class,
+        patch("drt.destinations.staged_upload.with_retry") as retry_call,
+    ):
+        client_class.return_value.__enter__.return_value = client
+        with pytest.raises(httpx.HTTPStatusError):
+            StagedUploadDestination()._poll(poll_config, {}, retry_config, limiter)
+
+    retry_call.assert_not_called()
+    client.request.assert_called_once_with(
+        "POST", poll_config.url, headers={}, timeout=ANY
+    )
+    limiter.acquire.assert_called_once_with()
+
+
+def test_poll_retry_acquires_rate_limiter_per_attempt() -> None:
+    poll_config = StagedUploadPollConfig(
+        url="https://api.example.com/jobs/j-1",
+        interval_seconds=0,
+        timeout_seconds=5,
+    )
+    retry_config = RetryConfig(max_attempts=2, initial_backoff=0.0, max_backoff=0.0)
+    limiter = MagicMock()
+    client = MagicMock()
+    client.request.side_effect = [
+        httpx.Response(
+            503,
+            request=httpx.Request("GET", poll_config.url),
+        ),
+        httpx.Response(
+            200,
+            json={"status": "SUCCEEDED"},
+            request=httpx.Request("GET", poll_config.url),
+        ),
+    ]
+
+    with patch("drt.destinations.staged_upload.httpx.Client") as client_class:
+        client_class.return_value.__enter__.return_value = client
+        StagedUploadDestination()._poll(poll_config, {}, retry_config, limiter)
+
+    assert client.request.call_count == 2
+    assert limiter.acquire.call_count == 2
+
+
+def test_poll_retry_success_after_deadline_raises_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    poll_config = StagedUploadPollConfig(
+        url="https://api.example.com/jobs/j-1",
+        interval_seconds=0,
+        timeout_seconds=1,
+    )
+    retry_config = RetryConfig(max_attempts=2, initial_backoff=60.0, max_backoff=60.0)
+    limiter = MagicMock()
+    client = MagicMock()
+    client.request.side_effect = [
+        httpx.Response(
+            503,
+            request=httpx.Request("GET", poll_config.url),
+        ),
+        httpx.Response(
+            200,
+            json={"status": "SUCCEEDED"},
+            request=httpx.Request("GET", poll_config.url),
+        ),
+    ]
+    clock = {"now": 0.0}
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["now"] += seconds + 0.01
+
+    monkeypatch.setattr(
+        "drt.destinations.staged_upload.time.monotonic", lambda: clock["now"]
+    )
+    monkeypatch.setattr("drt.destinations.retry.time.sleep", fake_sleep)
+
+    with patch("drt.destinations.staged_upload.httpx.Client") as client_class:
+        client_class.return_value.__enter__.return_value = client
+        with pytest.raises(TimeoutError, match="Poll timed out after 1s"):
+            StagedUploadDestination()._poll(poll_config, {}, retry_config, limiter)
+
+    assert sleeps == [1.0]
+    assert client.request.call_count == 2
+
+
+def test_poll_clamps_retry_backoff_to_remaining_timeout() -> None:
+    poll_config = StagedUploadPollConfig(
+        url="https://api.example.com/jobs/j-1",
+        interval_seconds=0,
+        timeout_seconds=5,
+    )
+    retry_config = RetryConfig(
+        max_attempts=4,
+        initial_backoff=2.0,
+        backoff_multiplier=3.0,
+        max_backoff=60.0,
+        retryable_status_codes=(429, 503),
+    )
+    response = httpx.Response(
+        200,
+        json={"status": "SUCCEEDED"},
+        request=httpx.Request("GET", poll_config.url),
+    )
+
+    with (
+        patch("drt.destinations.staged_upload.httpx.Client"),
+        patch(
+            "drt.destinations.staged_upload.time.monotonic",
+            side_effect=[100.0, 101.0, 101.0],
+        ),
+        patch(
+            "drt.destinations.staged_upload.with_retry", return_value=response
+        ) as retry_call,
+    ):
+        StagedUploadDestination()._poll(
+            poll_config, {}, retry_config, MagicMock()
+        )
+
+    clamped = retry_call.call_args.args[1]
+    assert clamped is not retry_config
+    assert clamped.max_backoff == 4.0
+    assert clamped.max_attempts == retry_config.max_attempts
+    assert clamped.initial_backoff == retry_config.initial_backoff
+    assert clamped.backoff_multiplier == retry_config.backoff_multiplier
+    assert clamped.retryable_status_codes == retry_config.retryable_status_codes
+    assert retry_config.max_backoff == 60.0
+
+
+def test_poll_clamps_request_timeout_to_fresh_remaining_budget() -> None:
+    poll_config = StagedUploadPollConfig(
+        url="https://api.example.com/jobs/j-1",
+        interval_seconds=0,
+        timeout_seconds=5,
+    )
+    response = httpx.Response(
+        200,
+        json={"status": "SUCCEEDED"},
+        request=httpx.Request("GET", poll_config.url),
+    )
+
+    with (
+        patch("drt.destinations.staged_upload.httpx.Client") as client_class,
+        patch(
+            "drt.destinations.staged_upload.time.monotonic",
+            side_effect=[100.0, 101.0, 102.0, 102.0],
+        ),
+        patch(
+            "drt.destinations.staged_upload.with_retry",
+            side_effect=lambda operation, _config: operation(),
+        ),
+    ):
+        client = client_class.return_value.__enter__.return_value
+        client.request.return_value = response
+        StagedUploadDestination()._poll(
+            poll_config, {}, RetryConfig(), MagicMock()
+        )
+
+    assert client.request.call_args.kwargs["timeout"] == 3.0
+
+
+def test_finalize_poll_acquires_rate_limiter_per_status_check() -> None:
+    config = StagedUploadDestinationConfig(
+        type="staged_upload",
+        stage=StagedUploadPhaseConfig(
+            url="https://upload.example.com",
+            response_extract={"upload_id": "uploadId"},
+        ),
+        trigger=StagedUploadPhaseConfig(
+            url="https://api.example.com/jobs",
+            response_extract={"job_id": "jobId"},
+        ),
+        poll=StagedUploadPollConfig(
+            url="https://api.example.com/jobs/{{ job_id }}",
+            interval_seconds=0,
+            timeout_seconds=5,
+        ),
+    )
+    options = SyncOptions(rate_limit=RateLimitConfig(requests_per_second=7))
+    limiter = MagicMock()
+    dest = StagedUploadDestination()
+    dest._records = [{"x": 1}]
+    client = MagicMock()
+    client.request.side_effect = [
+        httpx.Response(
+            200,
+            json={"status": "RUNNING"},
+            request=httpx.Request("GET", "https://api.example.com/jobs/j-1"),
+        ),
+        httpx.Response(
+            200,
+            json={"status": "SUCCEEDED"},
+            request=httpx.Request("GET", "https://api.example.com/jobs/j-1"),
+        ),
+    ]
+
+    with (
+        patch.object(
+            dest,
+            "_http_phase",
+            side_effect=[{"uploadId": "u-1"}, {"jobId": "j-1"}],
+        ),
+        patch("drt.destinations.staged_upload.httpx.Client") as client_class,
+        patch(
+            "drt.destinations.staged_upload.resolve_rate_limiter",
+            return_value=limiter,
+        ) as resolve_limiter,
+    ):
+        client_class.return_value.__enter__.return_value = client
+        result = dest.finalize(config, options)
+
+    assert result.success == 1
+    resolve_limiter.assert_called_once()
+    assert limiter.acquire.call_count == 2
 
 
 def test_finalize_stage_error(httpserver: HTTPServer) -> None:

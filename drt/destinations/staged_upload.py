@@ -57,6 +57,7 @@ from jinja2.exceptions import UndefinedError
 
 from drt.config.models import (
     DestinationConfig,
+    RetryConfig,
     StagedUploadDestinationConfig,
     StagedUploadPhaseConfig,
     StagedUploadPollConfig,
@@ -64,6 +65,12 @@ from drt.config.models import (
 )
 from drt.destinations.auth import AuthHandler
 from drt.destinations.base import SyncResult
+from drt.destinations.rate_limiter import (
+    RateLimiter,
+    RateLimiterBackend,
+    resolve_rate_limiter,
+)
+from drt.destinations.retry import resolve_retry, with_retry
 from drt.templates.renderer import tojson_safe
 
 
@@ -124,7 +131,11 @@ class StagedUploadDestination:
 
             # Phase 3: Poll — wait for completion (optional)
             if config.poll is not None:
-                self._poll(config.poll, context)
+                retry_config = resolve_retry(config.retry, sync_options)
+                rate_limiter = resolve_rate_limiter(
+                    config, sync_options, limiter_factory=RateLimiter
+                )
+                self._poll(config.poll, context, retry_config, rate_limiter)
 
             result.success = record_count
         except Exception as e:
@@ -211,6 +222,8 @@ class StagedUploadDestination:
         self,
         poll_config: StagedUploadPollConfig,
         context: dict[str, str],
+        retry_config: RetryConfig,
+        rate_limiter: RateLimiterBackend,
     ) -> None:
         """Poll for job completion."""
         url = _render(poll_config.url, context) if "{{" in poll_config.url else poll_config.url
@@ -219,23 +232,49 @@ class StagedUploadDestination:
             headers.update(AuthHandler(poll_config.auth).get_headers())
 
         deadline = time.monotonic() + poll_config.timeout_seconds
+        status = ""
+        retry_poll = poll_config.method.upper() in {"GET", "HEAD"}
 
         with httpx.Client(timeout=60.0) as client:
             while True:
-                response = client.request(poll_config.method, url, headers=headers)
-                response.raise_for_status()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"Poll timed out after {poll_config.timeout_seconds}s"
+                        f" (last status: {status})"
+                    )
+
+                def _send() -> httpx.Response:
+                    rate_limiter.acquire()
+                    request_remaining = deadline - time.monotonic()
+                    response = client.request(
+                        poll_config.method,
+                        url,
+                        headers=headers,
+                        timeout=max(0.1, min(60.0, request_remaining)),
+                    )
+                    response.raise_for_status()
+                    return response
+
+                if retry_poll:
+                    poll_retry_config = retry_config.model_copy(
+                        update={"max_backoff": min(retry_config.max_backoff, remaining)}
+                    )
+                    response = with_retry(_send, poll_retry_config)
+                else:
+                    response = _send()
                 data = response.json()
 
                 status = str(data.get(poll_config.status_field, ""))
 
-                if status in poll_config.success_values:
-                    return
-                if status in poll_config.failure_values:
-                    raise RuntimeError(f"Job failed with status: {status}")
                 if time.monotonic() > deadline:
                     raise TimeoutError(
                         f"Poll timed out after {poll_config.timeout_seconds}s"
                         f" (last status: {status})"
                     )
+                if status in poll_config.success_values:
+                    return
+                if status in poll_config.failure_values:
+                    raise RuntimeError(f"Job failed with status: {status}")
 
                 time.sleep(poll_config.interval_seconds)
