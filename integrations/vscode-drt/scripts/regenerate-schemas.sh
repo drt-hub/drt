@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # Regenerate the bundled JSON Schemas from the installed drt-core version.
 #
-# Requires drt-core importable in the current environment:
-#   pip install drt-core
+# Requires drt-core installed with the `schema-gen` extra, from a repo
+# checkout — not a plain `pip install drt-core` — so the exact pydantic
+# version pinned there (#1070) is what generates the schema, matching what
+# CI's vscode-schema-drift job installs. A different pydantic version can
+# emit a different JSON Schema for the destination union's callable
+# discriminator.
+#   pip install -e ".[schema-gen]"
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

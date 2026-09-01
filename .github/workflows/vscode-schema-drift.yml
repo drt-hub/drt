@@ -28,6 +28,11 @@ on:
       - 'integrations/vscode-drt/schemas/**'
       - 'integrations/vscode-drt/scripts/regenerate-schemas.sh'
       - '.github/workflows/vscode-schema-drift.yml'
+      # The dev extra's pinned pydantic version (#1070) is what this job
+      # treats as canonical for schema generation — a pyproject-only bump
+      # of that pin (e.g. a routine Dependabot PR) must also re-run this
+      # check, or a stale bundled schema could merge undetected.
+      - 'pyproject.toml'
   # No `branches:` filter — see #801: it matches the PR's base, so gating on
   # `main` silently exempts every stacked PR. The `paths:` filter stays.
   pull_request:
@@ -36,6 +41,11 @@ on:
       - 'integrations/vscode-drt/schemas/**'
       - 'integrations/vscode-drt/scripts/regenerate-schemas.sh'
       - '.github/workflows/vscode-schema-drift.yml'
+      # The dev extra's pinned pydantic version (#1070) is what this job
+      # treats as canonical for schema generation — a pyproject-only bump
+      # of that pin (e.g. a routine Dependabot PR) must also re-run this
+      # check, or a stale bundled schema could merge undetected.
+      - 'pyproject.toml'
   workflow_dispatch:
 
 permissions:
@@ -56,7 +66,15 @@ jobs:
         run: pip install uv
 
       - name: Install drt-core
-        run: uv pip install --system -e .
+        # `[schema-gen]`, not plain `-e .` or `[dev]`: the exact pydantic pin
+        # that makes schema generation reproducible (#1070) lives in its own
+        # extra, kept out of both the published runtime dependency range and
+        # the shared `dev` extra (which the main CI matrix installs — pinning
+        # there would freeze every test run at one pydantic version).
+        run: uv pip install --system -e ".[schema-gen]"
+
+      - name: Show resolved pydantic version
+        run: python -c "import pydantic; print(f'pydantic {pydantic.__version__}')"
 
       - name: Regenerate bundled schemas
         working-directory: integrations/vscode-drt
