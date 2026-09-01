@@ -11,6 +11,10 @@ drt-core version its bundled schemas were generated from.
   `metric_name_field`, `time_field`, `value_field`, and `unique_id_field` for
   sending events (not just profile updates) to Klaviyo's Events API
   (drt-hub/drt#1052).
+- Bundled JSON Schemas regenerated from drt-core: the destination union gains
+  the `meta_conversions` connector for batched Meta Conversions API events,
+  including field mappings, hashing inputs, retry, and rate-limit configuration
+  (drt-hub/drt#1054).
 - Bundled JSON Schemas regenerated from drt-core: `staged_upload` and
   `salesforce_bulk` destinations now validate destination-level `retry` and
   `rate_limit` overrides, matching every other rate-limited destination type

@@ -67,6 +67,7 @@ DESTINATION_CONFIG_CLASSES: dict[str, type[BaseModel]] = {
     "jira": _models.JiraDestinationConfig,
     "klaviyo": _models.KlaviyoDestinationConfig,
     "linear": _models.LinearDestinationConfig,
+    "meta_conversions": _models.MetaConversionsDestinationConfig,
     "mixpanel": _models.MixpanelDestinationConfig,
     "mysql": _models.MySQLDestinationConfig,
     "notion": _models.NotionDestinationConfig,
@@ -250,7 +251,9 @@ def _render_sample_yaml(type_str: str, kind: str, fields: list[_FieldInfo]) -> s
         "password_env",
         "account_env",
         "token_env",
+        "access_token_env",
         "api_key_env",
+        "event_name",
     )
     field_by_name = {f.name: f for f in fields}
     for name in preferred:

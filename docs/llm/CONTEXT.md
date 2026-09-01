@@ -114,6 +114,7 @@ default:
 | Linear | `linear` | Create issues via GraphQL API |
 | SendGrid | `sendgrid` | Transactional emails via v3 Mail Send API |
 | Google Ads | `google_ads` | Offline click conversion upload |
+| Meta Conversions | `meta_conversions` | Batched server-side Pixel conversion events |
 | Staged Upload | `staged_upload` | Async bulk APIs: file upload → job trigger → poll |
 | Notion | `notion` | Append rows to Notion databases |
 | Twilio SMS | `twilio` | Send SMS per row via Twilio Messages API |

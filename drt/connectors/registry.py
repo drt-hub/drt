@@ -244,6 +244,7 @@ def _register_all_connectors() -> None:
         JiraDestinationConfig,
         KlaviyoDestinationConfig,
         LinearDestinationConfig,
+        MetaConversionsDestinationConfig,
         MixpanelDestinationConfig,
         MySQLDestinationConfig,
         NotionDestinationConfig,
@@ -281,6 +282,7 @@ def _register_all_connectors() -> None:
     from drt.destinations.jira import JiraDestination
     from drt.destinations.klaviyo import KlaviyoDestination
     from drt.destinations.linear import LinearDestination
+    from drt.destinations.meta_conversions import MetaConversionsDestination
     from drt.destinations.mixpanel import MixpanelDestination
     from drt.destinations.mysql import MySQLDestination
     from drt.destinations.notion import NotionDestination
@@ -338,6 +340,9 @@ def _register_all_connectors() -> None:
     register_destination("elasticsearch", ElasticsearchDestinationConfig, ElasticsearchDestination)
     register_destination("linear", LinearDestinationConfig, LinearDestination)
     register_destination("google_ads", GoogleAdsDestinationConfig, GoogleAdsDestination)
+    register_destination(
+        "meta_conversions", MetaConversionsDestinationConfig, MetaConversionsDestination
+    )
     register_destination("notion", NotionDestinationConfig, NotionDestination)
     register_destination(
         "salesforce_bulk", SalesforceBulkDestinationConfig, SalesforceBulkDestination

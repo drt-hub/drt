@@ -16,6 +16,7 @@ from drt.destinations.github_actions import GitHubActionsDestination
 from drt.destinations.google_sheets import GoogleSheetsDestination
 from drt.destinations.hubspot import HubSpotDestination
 from drt.destinations.klaviyo import KlaviyoDestination
+from drt.destinations.meta_conversions import MetaConversionsDestination
 from drt.destinations.mysql import MySQLDestination
 from drt.destinations.notion import NotionDestination
 from drt.destinations.parquet import ParquetDestination
@@ -35,6 +36,7 @@ ALL_DESTINATIONS = [
     GoogleSheetsDestination,
     HubSpotDestination,
     KlaviyoDestination,
+    MetaConversionsDestination,
     MySQLDestination,
     NotionDestination,
     ParquetDestination,
@@ -61,6 +63,7 @@ NON_CONNECTION_TESTABLE_DESTINATIONS = [
     GitHubActionsDestination,
     GoogleSheetsDestination,
     HubSpotDestination,
+    MetaConversionsDestination,
     NotionDestination,
     ParquetDestination,
     RestApiDestination,

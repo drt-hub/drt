@@ -2308,6 +2308,230 @@
       "title": "MaskRule",
       "type": "object"
     },
+    "MetaConversionsDestinationConfig": {
+      "properties": {
+        "type": {
+          "const": "meta_conversions",
+          "title": "Type",
+          "type": "string"
+        },
+        "pixel_id": {
+          "title": "Pixel Id",
+          "type": "string"
+        },
+        "access_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Access Token"
+        },
+        "access_token_env": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "META_CONVERSIONS_ACCESS_TOKEN",
+          "title": "Access Token Env"
+        },
+        "api_version": {
+          "default": "v25.0",
+          "title": "Api Version",
+          "type": "string"
+        },
+        "action_source": {
+          "default": "website",
+          "title": "Action Source",
+          "type": "string"
+        },
+        "event_name_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event Name Field"
+        },
+        "event_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event Name"
+        },
+        "event_time_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event Time Field"
+        },
+        "event_id_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event Id Field"
+        },
+        "event_source_url_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event Source Url Field"
+        },
+        "email_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Email Field"
+        },
+        "phone_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Phone Field"
+        },
+        "client_ip_address_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Client Ip Address Field"
+        },
+        "client_user_agent_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Client User Agent Field"
+        },
+        "fbc_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fbc Field"
+        },
+        "fbp_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fbp Field"
+        },
+        "value_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value Field"
+        },
+        "currency": {
+          "default": "USD",
+          "title": "Currency",
+          "type": "string"
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rate_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type",
+        "pixel_id"
+      ],
+      "title": "MetaConversionsDestinationConfig",
+      "type": "object"
+    },
     "MetadataColumnsConfig": {
       "description": "``sync.metadata_columns`` \u2014 opt-in engine-injected bookkeeping columns (#762).\n\nEach field is ``None`` (not added) or the destination column name to add\nit as. Unlike ``computed_fields``, values here are never user templates \u2014\nthey're engine-owned facts about the run itself (dlt's ``_dlt_load_id``\nis the ecosystem-familiar precedent):\n\n- ``synced_at`` \u2014 the run's UTC start timestamp (one value per\n  ``run_sync()`` call, not per-record or per-batch, so every row a run\n  writes shares it \u2014 matching a load-id's \"one per load\" semantics).\n- ``run_id`` \u2014 the CLI-invocation-level id, ``None`` for library callers\n  that don't pass one to ``run_sync()`` (same nullability as\n  ``SyncResult.run_id``).\n- ``sync_name`` \u2014 the sync's own name, off by default; useful once\n  multiple syncs write into a shared table and rows need to name their\n  owner.\n\nRequires the target column to already exist on the destination \u2014 this\nis dict enrichment, not DDL. A destination without that column fails the\nwrite normally (governed by ``on_error``, like any other column mismatch).",
       "properties": {
@@ -5208,6 +5432,9 @@
         },
         {
           "$ref": "#/$defs/GoogleAdsDestinationConfig"
+        },
+        {
+          "$ref": "#/$defs/MetaConversionsDestinationConfig"
         },
         {
           "$ref": "#/$defs/FileDestinationConfig"

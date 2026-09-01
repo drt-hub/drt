@@ -40,3 +40,6 @@ def _configure_json_logging() -> None:
     handler.setFormatter(_JsonFormatter())
     logging.root.handlers = [handler]
     logging.root.setLevel(logging.INFO)
+    # httpx's INFO record includes the full request URL, including query-string
+    # credentials used by APIs such as Meta Conversions.
+    logging.getLogger("httpx").setLevel(logging.WARNING)

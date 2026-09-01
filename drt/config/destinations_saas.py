@@ -740,6 +740,100 @@ class GoogleAdsDestinationConfig(BaseModel):
         return f"{self.type}:{self.developer_token_env}"
 
 
+class MetaConversionsDestinationConfig(BaseModel):
+    type: Literal["meta_conversions"]
+    pixel_id: str
+    access_token: str | None = None
+    access_token_env: str | None = "META_CONVERSIONS_ACCESS_TOKEN"
+    api_version: str = "v25.0"
+    action_source: str = "website"
+
+    # Event fields. Exactly one name source, an event-id mapping, and at least one
+    # customer-information mapping are required; the remaining mappings are optional.
+    event_name_field: str | None = None
+    event_name: str | None = None
+    event_time_field: str | None = None
+    event_id_field: str | None = None
+    event_source_url_field: str | None = None
+    email_field: str | None = None
+    phone_field: str | None = None
+    client_ip_address_field: str | None = None
+    client_user_agent_field: str | None = None
+    fbc_field: str | None = None
+    fbp_field: str | None = None
+    value_field: str | None = None
+    currency: str = "USD"
+    retry: RetryConfig | None = None
+    rate_limit: RateLimitConfig | None = None
+
+    @model_validator(mode="after")
+    def _check_event_name(self) -> MetaConversionsDestinationConfig:
+        configured = int(bool(self.event_name and self.event_name.strip())) + int(
+            bool(self.event_name_field and self.event_name_field.strip())
+        )
+        if configured != 1:
+            raise ValueError("exactly one of event_name or event_name_field is required.")
+        return self
+
+    @model_validator(mode="after")
+    def _check_event_id_field(self) -> MetaConversionsDestinationConfig:
+        if self.event_id_field is None:
+            raise ValueError(
+                "event_id_field is required to deduplicate retried conversions."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_website_fields(self) -> MetaConversionsDestinationConfig:
+        if self.action_source == "website" and not all(
+            field is not None and field.strip()
+            for field in (
+                self.event_source_url_field,
+                self.client_user_agent_field,
+            )
+        ):
+            raise ValueError(
+                "event_source_url_field and client_user_agent_field are required "
+                "for action_source: 'website' because Meta requires both parameters "
+                "for website events."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_user_data_field(self) -> MetaConversionsDestinationConfig:
+        if not any(
+            (
+                self.email_field,
+                self.phone_field,
+                self.client_ip_address_field,
+                self.client_user_agent_field,
+                self.fbc_field,
+                self.fbp_field,
+            )
+        ):
+            raise ValueError(
+                "at least one of email_field, phone_field, client_ip_address_field, "
+                "client_user_agent_field, fbc_field, or fbp_field is required."
+            )
+        return self
+
+    def describe(self) -> str:
+        return f"meta_conversions ({self.pixel_id})"
+
+    def describe_safe(self) -> str:
+        return "meta_conversions"
+
+    def rate_limit_key(self) -> str:
+        """Per Meta Pixel.
+
+        The events edge is scoped to ``pixel_id`` and all syncs publishing to
+        one Pixel share its request budget. The access token is deliberately
+        excluded so neither a literal secret nor a secret-provider URI reaches
+        the process-wide limiter registry.
+        """
+        return f"{self.type}:{self.pixel_id}"
+
+
 class StagedUploadPhaseConfig(BaseModel):
     url: str
     method: str = "POST"

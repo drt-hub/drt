@@ -47,6 +47,7 @@ DESTINATIONS = [
     ("jira", "Jira"),
     ("klaviyo", "Klaviyo"),
     ("linear", "Linear"),
+    ("meta_conversions", "Meta Conversions"),
     ("mixpanel", "Mixpanel"),
     ("mysql", "MySQL"),
     ("notion", "Notion"),

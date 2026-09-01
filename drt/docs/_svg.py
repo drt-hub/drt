@@ -86,6 +86,7 @@ _BADGES: dict[str, tuple[str, str, str]] = {
     "amplitude": ("AM", "#1f6fff", "#ffffff"),
     "mixpanel": ("MX", "#7856ff", "#ffffff"),
     "google_ads": ("GA", "#4285f4", "#ffffff"),
+    "meta_conversions": ("M", "#0668e1", "#ffffff"),
     "google_sheets": ("GS", "#0f9d58", "#ffffff"),
     # Issue trackers / other
     "jira": ("JR", "#0052cc", "#ffffff"),
