@@ -743,6 +743,8 @@ class StagedUploadDestinationConfig(BaseModel):
     trigger: StagedUploadPhaseConfig
     poll: StagedUploadPollConfig | None = None
     format: Literal["csv", "json", "jsonl"] = "csv"
+    retry: RetryConfig | None = None  # destination-level override of sync.retry
+    rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
     def describe(self) -> str:
         return "staged_upload"
@@ -774,6 +776,8 @@ class SalesforceBulkDestinationConfig(BaseModel):
     client_secret_env: str
     username_env: str
     password_env: str
+    retry: RetryConfig | None = None  # destination-level override of sync.retry
+    rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
     def describe(self) -> str:
         return f"salesforce_bulk ({self.object_name})"

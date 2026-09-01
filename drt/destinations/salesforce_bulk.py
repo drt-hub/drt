@@ -29,6 +29,8 @@ import httpx
 from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, SalesforceBulkDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
+from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
+from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import RowError
 
 
@@ -133,18 +135,40 @@ class SalesforceBulkDestination:
                 )
 
             # STEP 7 — poll for completion
+            retry_config = resolve_retry(config.retry, sync_options)
+            rate_limiter = resolve_rate_limiter(
+                config, sync_options, limiter_factory=RateLimiter
+            )
             deadline = time.monotonic() + config.poll_timeout_seconds
             final_state: dict[str, Any] = {}
             while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"Salesforce job {job_id} did not complete within "
+                        f"{config.poll_timeout_seconds}s"
+                    )
+
+                def _poll_status() -> httpx.Response:
+                    rate_limiter.acquire()
+                    request_remaining = deadline - time.monotonic()
+                    response = client.get(
+                        f"{instance_url}/services/data/v58.0/jobs/ingest/{job_id}",
+                        headers=auth_headers,
+                        timeout=max(0.1, min(30.0, request_remaining)),
+                    )
+                    response.raise_for_status()
+                    return response
+
+                poll_retry_config = retry_config.model_copy(
+                    update={"max_backoff": min(retry_config.max_backoff, remaining)}
+                )
+                poll_resp = with_retry(_poll_status, poll_retry_config)
                 if time.monotonic() > deadline:
                     raise TimeoutError(
                         f"Salesforce job {job_id} did not complete within "
                         f"{config.poll_timeout_seconds}s"
                     )
-                poll_resp = client.get(
-                    f"{instance_url}/services/data/v58.0/jobs/ingest/{job_id}",
-                    headers=auth_headers,
-                )
                 final_state = poll_resp.json()
                 state = final_state.get("state", "")
                 if state == "JobComplete":
