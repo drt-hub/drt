@@ -61,9 +61,17 @@ def _patch_client(client: MagicMock) -> Any:
 class TestKlaviyoConfig:
     def test_valid(self) -> None:
         assert _config().email_field == "email"
+        assert _config().endpoint == "profile"
+
+    def test_event_requires_metric_name_configuration(self) -> None:
+        with pytest.raises(ValueError, match="metric_name or metric_name_field"):
+            _config(endpoint="event")
 
     def test_describe(self) -> None:
         assert _config().describe() == "klaviyo (profiles)"
+        assert _config(endpoint="event", metric_name="Upgraded Plan").describe() == (
+            "klaviyo (events)"
+        )
 
     def test_missing_api_key_raises(self) -> None:
         with pytest.raises(ValueError, match="api_key"):
@@ -86,6 +94,39 @@ class TestKlaviyoLoad:
         body = client.post.call_args.kwargs["json"]
         assert body["data"]["attributes"]["email"] == "a@x.com"
         assert body["data"]["attributes"]["properties"] == {"plan": "pro"}
+
+    @pytest.mark.parametrize("endpoint", [None, "profile"])
+    def test_profile_payload_is_unchanged_for_default_and_explicit_endpoint(
+        self, endpoint: str | None
+    ) -> None:
+        client = MagicMock()
+        client.post.return_value = _resp(201, {"data": {"id": "P1"}})
+        config = _config() if endpoint is None else _config(endpoint=endpoint)
+
+        with _patch_client(client):
+            result = KlaviyoDestination().load(
+                [{"email": "a@x.com", "plan": "pro"}], config, _options()
+            )
+
+        assert result.success == 1
+        assert client.post.call_args.args == ("https://a.klaviyo.com/api/profiles/",)
+        assert client.post.call_args.kwargs == {
+            "headers": {
+                "Authorization": "Klaviyo-API-Key pk_test",
+                "revision": "2024-10-15",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            "json": {
+                "data": {
+                    "type": "profile",
+                    "attributes": {
+                        "email": "a@x.com",
+                        "properties": {"plan": "pro"},
+                    },
+                }
+            },
+        }
 
     def test_upsert_409_patches_existing(self) -> None:
         client = MagicMock()
@@ -220,6 +261,183 @@ class TestKlaviyoLoad:
         config = _config(api_key=None, api_key_env="KLAVIYO_NOPE")
         with pytest.raises(ValueError, match="api_key"):
             KlaviyoDestination().load([{"email": "a@x.com"}], config, _options())
+
+
+class TestKlaviyoEventLoad:
+    def test_event_payload_with_all_optional_fields(self) -> None:
+        client = MagicMock()
+        client.post.return_value = _resp(202)
+        config = _config(
+            endpoint="event",
+            metric_name_field="event_name",
+            time_field="occurred_at",
+            value_field="amount",
+            unique_id_field="event_id",
+            properties_template='{"cart_id": "{{ row.cart_id }}"}',
+        )
+        record = {
+            "email": "a@x.com",
+            "event_name": "Abandoned Cart",
+            "occurred_at": "2022-11-08T00:00:00+00:00",
+            "amount": 9.99,
+            "event_id": "evt-123",
+            "cart_id": "cart-456",
+        }
+
+        with _patch_client(client):
+            result = KlaviyoDestination().load([record], config, _options())
+
+        assert result.success == 1
+        assert client.post.call_args.args == ("https://a.klaviyo.com/api/events/",)
+        assert client.post.call_args.kwargs["headers"] == {
+            "Authorization": "Klaviyo-API-Key pk_test",
+            "revision": "2024-10-15",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        assert client.post.call_args.kwargs["json"] == {
+            "data": {
+                "type": "event",
+                "attributes": {
+                    "properties": {"cart_id": "cart-456"},
+                    "metric": {
+                        "data": {
+                            "type": "metric",
+                            "attributes": {"name": "Abandoned Cart"},
+                        }
+                    },
+                    "profile": {
+                        "data": {
+                            "type": "profile",
+                            "attributes": {"email": "a@x.com"},
+                        }
+                    },
+                    "time": "2022-11-08T00:00:00+00:00",
+                    "value": 9.99,
+                    "unique_id": "evt-123",
+                },
+            }
+        }
+
+    @pytest.mark.parametrize(
+        ("config_field", "payload_key"),
+        [
+            ("time_field", "time"),
+            ("value_field", "value"),
+            ("unique_id_field", "unique_id"),
+        ],
+    )
+    def test_event_optional_field_is_independently_omitted_when_unconfigured(
+        self, config_field: str, payload_key: str
+    ) -> None:
+        client = MagicMock()
+        client.post.return_value = _resp(202)
+        config_values: dict[str, Any] = {
+            "endpoint": "event",
+            "metric_name": "Upgraded Plan",
+            "time_field": "occurred_at",
+            "value_field": "amount",
+            "unique_id_field": "event_id",
+        }
+        config_values[config_field] = None
+        config = _config(**config_values)
+        record = {
+            "email": "a@x.com",
+            "occurred_at": "2022-11-08T00:00:00+00:00",
+            "amount": 9.99,
+            "event_id": "evt-123",
+        }
+
+        with _patch_client(client):
+            result = KlaviyoDestination().load([record], config, _options())
+
+        assert result.success == 1
+        attributes = client.post.call_args.kwargs["json"]["data"]["attributes"]
+        assert payload_key not in attributes
+
+    def test_event_optional_fields_with_null_values_are_omitted(self) -> None:
+        client = MagicMock()
+        client.post.return_value = _resp(202)
+        config = _config(
+            endpoint="event",
+            metric_name="Upgraded Plan",
+            time_field="occurred_at",
+            value_field="amount",
+            unique_id_field="event_id",
+        )
+
+        with _patch_client(client):
+            result = KlaviyoDestination().load(
+                [
+                    {
+                        "email": "a@x.com",
+                        "occurred_at": None,
+                        "amount": None,
+                        "event_id": None,
+                    }
+                ],
+                config,
+                _options(),
+            )
+
+        assert result.success == 1
+        attributes = client.post.call_args.kwargs["json"]["data"]["attributes"]
+        assert "time" not in attributes
+        assert "value" not in attributes
+        assert "unique_id" not in attributes
+
+    def test_event_sends_empty_properties_when_row_has_no_properties(self) -> None:
+        client = MagicMock()
+        client.post.return_value = _resp(202)
+        config = _config(endpoint="event", metric_name="Upgraded Plan")
+
+        with _patch_client(client):
+            result = KlaviyoDestination().load(
+                [{"email": "a@x.com"}], config, _options()
+            )
+
+        assert result.success == 1
+        attributes = client.post.call_args.kwargs["json"]["data"]["attributes"]
+        assert attributes["properties"] == {}
+
+    def test_event_retry_acquires_rate_limit_for_each_attempt(self) -> None:
+        client = MagicMock()
+        client.post.side_effect = [_resp(500), _resp(202)]
+        limiter = MagicMock()
+        config = _config(endpoint="event", metric_name="Upgraded Plan")
+        options = _options(
+            retry=RetryConfig(
+                max_attempts=2,
+                initial_backoff=0.0,
+                backoff_multiplier=1.0,
+            )
+        )
+
+        with (
+            patch(
+                "drt.destinations.klaviyo.resolve_rate_limiter",
+                return_value=limiter,
+            ),
+            _patch_client(client),
+        ):
+            result = KlaviyoDestination().load([{"email": "a@x.com"}], config, options)
+
+        assert result.success == 1
+        assert client.post.call_count == 2
+        assert limiter.acquire.call_count == 2
+
+    def test_event_missing_metric_name_is_recorded(self) -> None:
+        client = MagicMock()
+        config = _config(endpoint="event", metric_name_field="event_name")
+
+        with _patch_client(client):
+            result = KlaviyoDestination().load(
+                [{"email": "a@x.com"}], config, _options(on_error="skip")
+            )
+
+        assert result.failed == 1
+        assert "metric name" in result.row_errors[0].error_message
+        client.post.assert_not_called()
 
 
 class TestKlaviyoConnection:
