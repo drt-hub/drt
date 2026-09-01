@@ -724,8 +724,8 @@ class MetaConversionsDestinationConfig(BaseModel):
     api_version: str = "v25.0"
     action_source: str = "website"
 
-    # Event fields. Exactly one name source is required; the remaining mappings
-    # are optional and omitted from an event when their row value is absent.
+    # Event fields. Exactly one name source and an event-id mapping are required;
+    # the remaining mappings are optional and omitted when their row value is absent.
     event_name_field: str | None = None
     event_name: str | None = None
     event_time_field: str | None = None
@@ -749,6 +749,14 @@ class MetaConversionsDestinationConfig(BaseModel):
         )
         if configured != 1:
             raise ValueError("exactly one of event_name or event_name_field is required.")
+        return self
+
+    @model_validator(mode="after")
+    def _check_event_id_field(self) -> MetaConversionsDestinationConfig:
+        if self.event_id_field is None:
+            raise ValueError(
+                "event_id_field is required to deduplicate retried conversions."
+            )
         return self
 
     def describe(self) -> str:

@@ -95,6 +95,7 @@ PROVIDER_URI_DESTINATIONS: list[Any] = [
             type="meta_conversions",
             pixel_id="123",
             event_name="Purchase",
+            event_id_field="event_id",
             access_token_env=_URI,
         ),
         False,

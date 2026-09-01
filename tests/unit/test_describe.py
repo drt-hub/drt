@@ -45,7 +45,10 @@ ALL_DESTINATIONS = [
         type="linear", title_template="title", description_template="description"
     ),
     MetaConversionsDestinationConfig(
-        type="meta_conversions", pixel_id="123456789", event_name="Purchase"
+        type="meta_conversions",
+        pixel_id="123456789",
+        event_name="Purchase",
+        event_id_field="event_id",
     ),
     PostgresDestinationConfig(
         type="postgres", host="localhost", dbname="db", table="public.table", upsert_key=["id"]

@@ -133,7 +133,10 @@ SAMPLES: dict[str, object] = {
     "klaviyo": KlaviyoDestinationConfig(type="klaviyo", api_key_env="K"),
     "linear": LinearDestinationConfig(type="linear", title_template="t", description_template="d"),
     "meta_conversions": MetaConversionsDestinationConfig(
-        type="meta_conversions", pixel_id=S, event_name="Purchase"
+        type="meta_conversions",
+        pixel_id=S,
+        event_name="Purchase",
+        event_id_field="event_id",
     ),
     "mixpanel": MixpanelDestinationConfig(type="mixpanel", token_env="T"),
     "mysql": MySQLDestinationConfig(

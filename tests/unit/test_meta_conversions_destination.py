@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import io
+import logging
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 from pydantic import ValidationError
 
+from drt.cli._logging import _configure_json_logging
 from drt.config.models import (
     MetaConversionsDestinationConfig,
     RateLimitConfig,
@@ -31,6 +34,7 @@ def _config(**overrides: object) -> MetaConversionsDestinationConfig:
         "pixel_id": "123456789",
         "access_token": "meta-token",
         "event_name": "Purchase",
+        "event_id_field": "event_id",
     }
     values.update(overrides)
     return MetaConversionsDestinationConfig.model_validate(values)
@@ -105,6 +109,40 @@ def test_request_uses_query_param_auth_and_expected_payload() -> None:
         },
         "custom_data": {"value": 100.2, "currency": "USD"},
     }
+
+
+def test_json_logging_does_not_emit_query_param_access_token() -> None:
+    token = "SUPERSECRET_META_TOKEN"
+    stream = io.StringIO()
+    root = logging.root
+    httpx_logger = logging.getLogger("httpx")
+    previous_handlers = root.handlers[:]
+    previous_root_level = root.level
+    previous_httpx_level = httpx_logger.level
+    real_client = httpx.Client
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(200, json={"events_received": 1})
+    )
+
+    try:
+        _configure_json_logging()
+        root.handlers[0].setStream(stream)
+        with patch(
+            "drt.destinations.meta_conversions.httpx.Client",
+            side_effect=lambda **kwargs: real_client(transport=transport, **kwargs),
+        ):
+            result = MetaConversionsDestination().load(
+                [{"event_id": "conversion-1"}],
+                _config(access_token=token),
+                SyncOptions(),
+            )
+    finally:
+        root.handlers = previous_handlers
+        root.setLevel(previous_root_level)
+        httpx_logger.setLevel(previous_httpx_level)
+
+    assert result.success == 1
+    assert token not in stream.getvalue()
 
 
 def test_action_source_defaults_to_website() -> None:
@@ -194,10 +232,23 @@ def test_retry_acquires_rate_limiter_for_every_attempt() -> None:
     assert limiter.acquire.call_count == 2
 
 
-def test_events_received_mismatch_fails_the_whole_batch() -> None:
+@pytest.mark.parametrize(
+    "response_data",
+    [
+        {},
+        {"events_received": None},
+        {"events_received": "0"},
+        {"events_received": True},
+        {"events_received": 1, "messages": ["one event rejected"]},
+    ],
+    ids=["missing", "null", "string", "bool", "wrong-integer-count"],
+)
+def test_invalid_events_received_fails_the_whole_batch(
+    response_data: dict[str, object],
+) -> None:
     response = httpx.Response(
         200,
-        json={"events_received": 1, "messages": ["one event rejected"]},
+        json=response_data,
         request=httpx.Request("POST", "https://graph.facebook.com/events"),
     )
     with patch("drt.destinations.meta_conversions.httpx.Client") as client_class:
@@ -230,3 +281,8 @@ def test_event_name_field_must_resolve_for_each_row() -> None:
 def test_exactly_one_event_name_source_is_required(values: dict[str, str | None]) -> None:
     with pytest.raises(ValidationError, match="exactly one of event_name or event_name_field"):
         _config(**values)
+
+
+def test_event_id_field_is_required_for_retry_deduplication() -> None:
+    with pytest.raises(ValidationError, match="event_id_field is required"):
+        _config(event_id_field=None)

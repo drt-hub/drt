@@ -13,7 +13,7 @@ destination:
   action_source: website
   event_name: Purchase          # or event_name_field: event_name
   event_time_field: occurred_at # Unix seconds; current time when unset
-  event_id_field: event_id      # optional Pixel+CAPI deduplication id
+  event_id_field: event_id      # required: retries need a stable deduplication id
   event_source_url_field: page_url
   email_field: email
   phone_field: phone
@@ -37,7 +37,7 @@ destination:
 | `event_name` | string \| null | null | Fixed Meta standard/custom event name. Exactly one of this and `event_name_field` is required. |
 | `event_name_field` | string \| null | null | Row field containing the event name. Exactly one of this and `event_name` is required. |
 | `event_time_field` | string \| null | null | Row field containing a Unix timestamp in seconds. When unset, drt uses the current time. Meta accepts times up to seven days old. |
-| `event_id_field` | string \| null | null | Optional row field used for Pixel + Conversions API deduplication. |
+| `event_id_field` | string | — | Row field containing a stable conversion id. **Required** so Meta can deduplicate a retry when the first response is lost. Use the browser Pixel event id for Pixel + Conversions API deduplication. |
 | `event_source_url_field` | string \| null | null | Optional row field containing the page URL where the event occurred. |
 | `email_field` | string \| null | null | Optional row field mapped to hashed `user_data.em`. |
 | `phone_field` | string \| null | null | Optional row field mapped to hashed `user_data.ph`. |
@@ -95,6 +95,7 @@ destination:
   type: meta_conversions
   pixel_id: "123456789012345"
   event_name: Purchase
+  event_id_field: event_id
   rate_limit:
     requests_per_second: 5
 ```
@@ -104,6 +105,6 @@ destination:
 ## Notes
 
 - Core connector — no `pip install` extras needed.
-- `event_id` should match the browser Pixel event id when using Meta's 48-hour Pixel+CAPI deduplication window.
+- Every row should provide a stable value in `event_id_field`; retries can otherwise submit the same conversion more than once. The value should match the browser Pixel event id when using Meta's 48-hour Pixel+CAPI deduplication window.
 - Meta Graph API versions expire on a roughly two-year cycle. Review the [Meta version schedule](https://developers.facebook.com/docs/graph-api/changelog/versions/) periodically and override or bump `api_version` before `v25.0` expires.
 - This connector covers the core synchronous Pixel events endpoint. Meta's Payload Helper, Events Manager UI workflows, and app-event-specific fields beyond the generic configurable `action_source` are out of scope.

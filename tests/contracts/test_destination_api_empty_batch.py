@@ -235,6 +235,7 @@ API_DESTINATIONS: list[Any] = [
             type="meta_conversions",
             pixel_id="123456789",
             event_name="Purchase",
+            event_id_field="event_id",
             access_token_env="META_CONVERSIONS_ACCESS_TOKEN_TEST",
         ),
         {"META_CONVERSIONS_ACCESS_TOKEN_TEST": "dummy"},

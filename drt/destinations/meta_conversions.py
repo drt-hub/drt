@@ -3,6 +3,14 @@
 Sends warehouse conversion events to a Meta Pixel's synchronous ``/events``
 edge. Meta accepts at most 1000 events per request, so records are transformed
 and uploaded in batches rather than one request per row.
+
+Example::
+
+    destination:
+      type: meta_conversions
+      pixel_id: "123456789012345"
+      event_name: Purchase
+      event_id_field: event_id  # Required so retries can be deduplicated.
 """
 
 from __future__ import annotations
@@ -89,8 +97,16 @@ class MetaConversionsDestination:
                 try:
                     response = with_retry(_post, retry_config)
                     response_data = response.json()
-                    events_received = response_data.get("events_received")
-                    if isinstance(events_received, int) and events_received != len(batch):
+                    events_received = (
+                        response_data.get("events_received")
+                        if isinstance(response_data, dict)
+                        else None
+                    )
+                    if (
+                        not isinstance(events_received, int)
+                        or isinstance(events_received, bool)
+                        or events_received != len(batch)
+                    ):
                         raise ValueError(
                             "Meta Conversions API acknowledged "
                             f"{events_received} of {len(batch)} events; the response does "
