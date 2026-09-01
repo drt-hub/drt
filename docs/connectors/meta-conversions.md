@@ -78,7 +78,10 @@ Pre-hashing or double-hashing those four values is incorrect.
 
 drt sends up to 1000 events in each request. Local mapping failures (for
 example, an empty configured event name, event id, or customer-information
-field, or an event time older than seven days) are attributed to that row.
+field, an event time older than seven days, or a non-finite conversion value)
+are attributed to that row. HTTP 400 responses are retried only when Meta's
+error envelope explicitly sets `error.is_transient` to `true`; missing, false,
+malformed, and non-JSON classifications fail immediately.
 Meta's synchronous response reports an aggregate `events_received` count but
 does not document an event-indexed partial-failure array, so request failures
 and acknowledgement-count mismatches fail the submitted batch atomically; drt
@@ -110,5 +113,6 @@ destination:
 
 - Core connector — no `pip install` extras needed.
 - Every row must provide a non-empty stable value in `event_id_field`; invalid rows are not sent. The value should match the browser Pixel event id when using Meta's 48-hour Pixel+CAPI deduplication window.
+- Import-time suppression of httpx's default request logging is best-effort protection for the access token in the URL query string; an embedding application that reconfigures logging afterward can override it, which is a known, accepted residual risk.
 - Meta Graph API versions expire on a roughly two-year cycle. Review the [Meta version schedule](https://developers.facebook.com/docs/graph-api/changelog/versions/) periodically and override or bump `api_version` before `v25.0` expires.
 - This connector covers the core synchronous Pixel events endpoint. Meta's Payload Helper, Events Manager UI workflows, and app-event-specific fields beyond the generic configurable `action_source` are out of scope.

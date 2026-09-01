@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import re
 import time
 from typing import Any
@@ -41,8 +42,10 @@ _BASE_URL = "https://graph.facebook.com"
 _MAX_EVENTS_PER_REQUEST = 1000
 _MAX_EVENT_AGE_SECONDS = 604_800
 
-# Meta documents query-parameter access tokens for this API. Prevent httpx's
-# full-URL INFO record from exposing them when a library caller configures logging.
+# Best-effort protection against httpx's default request log exposing Meta's access
+# token, which this API sends in the URL query string. This runs once at import time;
+# an embedding app that later reconfigures logging (for example, via dictConfig) can
+# override it. That limitation is a known, accepted residual risk.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
@@ -104,7 +107,11 @@ class MetaConversionsDestination:
                     return response
 
                 try:
-                    response = with_retry(_post, retry_config)
+                    response = with_retry(
+                        _post,
+                        retry_config,
+                        retry_on=_is_meta_transient_error,
+                    )
                     response_data = response.json()
                     events_received = (
                         response_data.get("events_received")
@@ -235,14 +242,33 @@ def _build_event(
     event["user_data"] = user_data
 
     if config.value_field is not None:
-        value = record.get(config.value_field)
-        if value is not None:
+        raw_value = record.get(config.value_field)
+        if raw_value is not None:
+            value = float(raw_value)
+            if not math.isfinite(value):
+                raise ValueError(
+                    f"custom_data.value {value!r} is not JSON-serializable."
+                )
             event["custom_data"] = {
-                "value": float(value),
+                "value": value,
                 "currency": config.currency,
             }
 
     return event
+
+
+def _is_meta_transient_error(exc: Exception) -> bool:
+    """Return whether Meta explicitly marks an HTTP 400 response transient."""
+    if not isinstance(exc, httpx.HTTPStatusError) or exc.response.status_code != 400:
+        return False
+    try:
+        response_data = exc.response.json()
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(response_data, dict):
+        return False
+    error = response_data.get("error")
+    return isinstance(error, dict) and error.get("is_transient") is True
 
 
 def _event_time(

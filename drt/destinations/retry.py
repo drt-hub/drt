@@ -114,17 +114,18 @@ def with_retry(
     a large or hostile header can't stall the run. Network failures and
     responses without the header keep pure exponential backoff.
 
-    ``retry_on`` (#766) opens the same backoff loop to non-HTTP callers — the
-    SQL sources classify their own driver's exceptions, since every driver is
-    an optional dependency this module cannot import. It is a **predicate, not
-    a tuple of exception types**, because transient-ness frequently depends on
-    an attribute rather than the class: Snowflake's ``390114`` session expiry
-    is an ``OperationalError``, and so are plenty of permanent errors.
+    ``retry_on`` (#766) opens the same backoff loop to caller-defined
+    classifications, including non-HTTP exceptions and HTTP statuses outside
+    ``retryable_status_codes``. The SQL sources classify their own driver's
+    exceptions, since every driver is an optional dependency this module cannot
+    import. It is a **predicate, not a tuple of exception types**, because
+    transient-ness frequently depends on an attribute rather than the class:
+    Snowflake's ``390114`` session expiry is an ``OperationalError``, and so are
+    plenty of permanent errors.
 
     ``retry_on`` is purely **additive** — it widens what counts as retryable
-    and never suppresses the built-in httpx handling. When it is ``None``
-    (every existing destination call site), behaviour is exactly as it was
-    before #766.
+    and never suppresses the built-in httpx handling. When it is ``None``,
+    behaviour is exactly as it was before #766.
 
     Raises the last exception if all attempts are exhausted.
     """
@@ -136,7 +137,10 @@ def with_retry(
         try:
             return fn()
         except httpx.HTTPStatusError as e:
-            if e.response.status_code not in config.retryable_status_codes:
+            default_retryable = (
+                e.response.status_code in config.retryable_status_codes
+            )
+            if not default_retryable and (retry_on is None or not retry_on(e)):
                 raise
             last_exc = e
             retry_after = _retry_after_from_response(e.response)

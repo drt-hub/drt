@@ -322,6 +322,38 @@ def test_batches_at_most_1000_events_per_request() -> None:
     ]
 
 
+def test_non_finite_value_fails_only_its_row() -> None:
+    response = httpx.Response(
+        200,
+        json={"events_received": 3},
+        request=httpx.Request("POST", "https://graph.facebook.com/events"),
+    )
+    records = [
+        _record(event_id="conversion-1", amount=10),
+        _record(event_id="conversion-2", amount=20),
+        _record(event_id="conversion-invalid", amount=float("nan")),
+        _record(event_id="conversion-3", amount=30),
+    ]
+
+    with patch("drt.destinations.meta_conversions.httpx.Client") as client_class:
+        client = client_class.return_value.__enter__.return_value
+        client.post.return_value = response
+        result = MetaConversionsDestination().load(
+            records,
+            _config(value_field="amount"),
+            SyncOptions(on_error="skip"),
+        )
+
+    assert result.success == 3
+    assert result.failed == 1
+    assert len(result.row_errors) == 1
+    assert result.row_errors[0].batch_index == 2
+    assert "custom_data.value nan is not JSON-serializable" in (
+        result.row_errors[0].error_message
+    )
+    assert len(client.post.call_args.kwargs["json"]["data"]) == 3
+
+
 def test_retry_acquires_rate_limiter_for_every_attempt() -> None:
     transient = httpx.Response(
         503,
@@ -349,6 +381,69 @@ def test_retry_acquires_rate_limiter_for_every_attempt() -> None:
     assert result.success == 1
     assert client.post.call_count == 2
     assert limiter.acquire.call_count == 2
+
+
+def test_meta_declared_transient_400_retries_and_succeeds() -> None:
+    transient = httpx.Response(
+        400,
+        json={"error": {"message": "try again", "is_transient": True}},
+        request=httpx.Request("POST", "https://graph.facebook.com/events"),
+    )
+    success = httpx.Response(
+        200,
+        json={"events_received": 1},
+        request=httpx.Request("POST", "https://graph.facebook.com/events"),
+    )
+    options = SyncOptions(
+        retry=RetryConfig(max_attempts=2, initial_backoff=0, max_backoff=0),
+        rate_limit=RateLimitConfig(requests_per_second=0),
+    )
+
+    with patch("drt.destinations.meta_conversions.httpx.Client") as client_class:
+        client = client_class.return_value.__enter__.return_value
+        client.post.side_effect = [transient, success]
+        result = MetaConversionsDestination().load([_record()], _config(), options)
+
+    assert result.success == 1
+    assert result.failed == 0
+    assert client.post.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(
+            400,
+            json={"error": {"message": "permanent", "is_transient": False}},
+            request=httpx.Request("POST", "https://graph.facebook.com/events"),
+        ),
+        httpx.Response(
+            400,
+            json={"error": {"message": "classification missing"}},
+            request=httpx.Request("POST", "https://graph.facebook.com/events"),
+        ),
+        httpx.Response(
+            400,
+            text="not JSON",
+            request=httpx.Request("POST", "https://graph.facebook.com/events"),
+        ),
+    ],
+    ids=["false", "missing", "non-json"],
+)
+def test_other_400_responses_do_not_retry(response: httpx.Response) -> None:
+    options = SyncOptions(
+        retry=RetryConfig(max_attempts=3, initial_backoff=0, max_backoff=0),
+        rate_limit=RateLimitConfig(requests_per_second=0),
+    )
+
+    with patch("drt.destinations.meta_conversions.httpx.Client") as client_class:
+        client = client_class.return_value.__enter__.return_value
+        client.post.return_value = response
+        result = MetaConversionsDestination().load([_record()], _config(), options)
+
+    assert result.success == 0
+    assert result.failed == 1
+    assert client.post.call_count == 1
 
 
 @pytest.mark.parametrize(
