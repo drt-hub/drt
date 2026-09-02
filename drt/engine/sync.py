@@ -35,6 +35,7 @@ from drt.destinations.lookup import (
     detect_ambiguous_lookup_ordering,
 )
 from drt.engine.computed_fields import apply_computed_fields
+from drt.engine.cursor import cursor_gt as _cursor_gt
 from drt.engine.field_mappings import apply_field_mappings
 from drt.engine.masking import apply_mask
 from drt.engine.metadata_columns import apply_metadata_columns
@@ -46,14 +47,6 @@ from drt.state.dlq import DeadLetter
 from drt.state.history import HistoryEntry, HistoryStore
 from drt.state.manager import StateStore
 from drt.state.watermark import WatermarkStorage
-
-
-def _cursor_gt(new: str, current: str) -> bool:
-    """Return True if new > current, using numeric comparison when both are numeric."""
-    try:
-        return float(new) > float(current)
-    except (ValueError, TypeError):
-        return new > current
 
 
 def _stringify_cursor_value(val: Any) -> str:

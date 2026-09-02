@@ -203,6 +203,57 @@ def test_state_persisting_observer_writes_watermark(tmp_path: Path) -> None:
     assert wm.get("wm_sync") == "2026-05-10"
 
 
+def test_state_persisting_observer_never_regresses_cursor(tmp_path: Path) -> None:
+    """Regression test (#1074 round 5, Codex review on #1083): a #1074
+    rollback (or, independent of #1074, an ordinary race between two runs
+    of the same sync) can hand this observer an older cursor value than
+    what's already persisted. Writing it anyway would silently regress the
+    watermark and re-trigger a wide re-extraction window on the next run.
+    The observer must never move last_cursor_value backward."""
+    state_mgr = StateManager(tmp_path)
+    obs = StatePersistingObserver(state_mgr, None)
+
+    # A concurrent successful run already advanced the watermark to a
+    # recent value.
+    obs.on_sync_completed(
+        "inc", SyncResult(success=5, failed=0), "2026-05-24T00:00:00Z", "2026-05-10", "updated_at"
+    )
+    assert state_mgr.get_last_sync("inc").last_cursor_value == "2026-05-10"
+
+    # This (failing, rolled-back) run's completion carries an OLDER value.
+    obs.on_sync_completed(
+        "inc", SyncResult(success=0, failed=1), "2026-05-24T01:00:00Z", "2020-01-01", "updated_at"
+    )
+
+    state = state_mgr.get_last_sync("inc")
+    assert state is not None
+    # NOT "2020-01-01" — the already-advanced watermark must survive.
+    assert state.last_cursor_value == "2026-05-10"
+    # Other fields (status, last_run_at) still update normally — only the
+    # cursor itself is protected from regressing.
+    assert state.status == "failed"
+    assert state.last_run_at == "2026-05-24T01:00:00Z"
+
+
+def test_state_persisting_observer_never_regresses_watermark_storage(tmp_path: Path) -> None:
+    """Same never-regress guard, external watermark storage."""
+    from drt.state.watermark import LocalWatermarkStorage
+
+    wm = LocalWatermarkStorage(tmp_path)
+    obs = StatePersistingObserver(None, wm)
+
+    obs.on_sync_completed(
+        "wm_sync", SyncResult(success=1, failed=0), "2026-05-24T00:00:00Z", "2026-05-10", "field"
+    )
+    assert wm.get("wm_sync") == "2026-05-10"
+
+    obs.on_sync_completed(
+        "wm_sync", SyncResult(success=0, failed=1), "2026-05-24T01:00:00Z", "2020-01-01", "field"
+    )
+
+    assert wm.get("wm_sync") == "2026-05-10"
+
+
 def test_state_persisting_observer_swallows_state_save_errors(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
