@@ -630,12 +630,6 @@ def _run_sync_body(
 
             total_result.rows_extracted += len(record_batch)
 
-            # Snapshot before this batch's cursor tracking (and the lowest
-            # cursor value seen *within* this batch) so a failed load below
-            # (on_error="fail") can roll the watermark back safely (#1074).
-            cursor_value_before_batch = new_cursor_value
-            batch_min_cursor: str | None = None
-
             # Track max cursor value seen across all batches.
             # Stringify with tz-naive UTC normalization for tz-aware datetimes
             # to avoid #475 (re-emit-at-boundary when user SQL is tz-naive).
@@ -646,8 +640,6 @@ def _run_sync_body(
                     val = row.get(cursor_field)
                     if val is not None:
                         str_val = _stringify_cursor_value(val)
-                        if batch_min_cursor is None or _cursor_gt(batch_min_cursor, str_val):
-                            batch_min_cursor = str_val
                         if new_cursor_value is None or _cursor_gt(str_val, new_cursor_value):
                             new_cursor_value = str_val
 
@@ -759,34 +751,29 @@ def _run_sync_body(
                         observer.on_records_failed(sync.name, dead_letters)
 
                 if sync.sync.on_error == "fail" and result.failed > 0:
-                    # Roll back so retry re-extracts this batch (#1074),
-                    # scoped as narrowly as it's safe to: rolling back only
-                    # to the *whole run's* start (rather than to just
-                    # before this batch) risks re-sending already-succeeded
-                    # rows from earlier batches to non-idempotent
-                    # destinations (Slack, email — caught in Codex review
-                    # on #1083), so we only widen the rollback when the
-                    # narrower one would be unsafe.
+                    # Roll the whole run's cursor progress back to where it
+                    # started (#1074). A narrower, per-batch-local rollback
+                    # was tried and rejected in review (Codex, #1083): drt
+                    # does not guarantee extraction is ordered by
+                    # cursor_field (no ORDER BY is injected — verified in
+                    # drt/engine/resolver.py), and once this break stops
+                    # consuming the source iterator, an unconsumed later
+                    # batch could have contained a *lower* cursor value
+                    # than what a batch-local check could see — no local
+                    # heuristic can rule that out without reading batches
+                    # the break specifically avoids reading. Reverting to
+                    # the run's start is the only rollback that's safe
+                    # regardless of extraction order: it guarantees every
+                    # row this run saw is re-extracted on retry.
                     #
-                    # The pre-batch snapshot is unsafe exactly when this
-                    # batch's own lowest cursor value ties or falls below
-                    # it — extraction is not guaranteed strictly ordered by
-                    # cursor_field, so that can happen (a batch boundary
-                    # splitting rows that share a cursor value, verified by
-                    # a regression test). Persisting a value that ties an
-                    # unconfirmed row's cursor would exclude it from every
-                    # future retry under the strict `>` predicate, so in
-                    # that case fall back to the run's starting watermark,
-                    # which is provably below anything this run tracked.
-                    if batch_min_cursor is not None and cursor_value_before_batch is not None:
-                        tie_or_reversed = not _cursor_gt(
-                            batch_min_cursor, cursor_value_before_batch
-                        )
-                    else:
-                        tie_or_reversed = False
-                    new_cursor_value = (
-                        last_cursor_value if tie_or_reversed else cursor_value_before_batch
-                    )
+                    # Trade-off, accepted deliberately: retrying re-sends
+                    # every row from batches that already succeeded earlier
+                    # in this same run. For destinations without natural
+                    # replay safety (e.g. Slack, email) that means a
+                    # duplicate message/email, not just a duplicate
+                    # warehouse upsert. Silently and permanently losing
+                    # rows is judged the worse failure mode of the two.
+                    new_cursor_value = last_cursor_value
                     break
 
             batches_processed += 1

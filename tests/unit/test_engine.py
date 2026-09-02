@@ -274,19 +274,18 @@ def test_incremental_saves_max_cursor(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_incremental_on_error_fail_rolls_back_to_last_good_batch(
-    tmp_path: Path,
-) -> None:
+def test_incremental_on_error_fail_reverts_whole_run(tmp_path: Path) -> None:
     """Regression test (#1074): a failed load under on_error="fail" must not
     persist a cursor past rows that were never actually loaded — the next
     incremental run would then skip them forever.
 
-    Scoped as narrowly as safe: normal (cursor-ordered) extraction rolls
-    back only to the last batch that was confirmed loaded, not the whole
-    run — rolling back further than necessary would re-send already
-    -succeeded rows to non-idempotent destinations (Slack, email) on retry,
-    a regression Codex review caught on #1083 in an earlier whole-run-revert
-    version of this fix."""
+    Reverts the whole run's cursor progress, not just the failed batch's.
+    A narrower, per-batch-local rollback was tried and rejected across two
+    rounds of Codex review on #1083 (a tied cursor straddling a batch
+    boundary, then a lower cursor in a batch the break never even
+    consumed) — drt does not guarantee extraction is ordered by
+    cursor_field, so no local heuristic can rule out data loss without
+    reading batches the break specifically avoids reading."""
     from drt.state.manager import StateManager, SyncState
 
     state_mgr = StateManager(tmp_path)
@@ -337,26 +336,22 @@ def test_incremental_on_error_fail_rolls_back_to_last_good_batch(
 
     state = state_mgr.get_last_sync("inc_sync")
     assert state is not None
-    # Rolled back to the first (fully-succeeded) batch's max cursor — not
-    # the failing batch's rows (never loaded), and not all the way back to
-    # the run's start, since this batch's rows are strictly newer than
-    # what was already persisted (no tie/reversal — the narrow rollback is
-    # safe here).
-    assert state.last_cursor_value == "2024-01-02"
+    # Reverted to exactly where this run started — not the failing batch's
+    # rows (never loaded), and not even the first batch's max cursor.
+    assert state.last_cursor_value == "2023-12-31"
 
 
 def test_incremental_on_error_fail_tied_cursor_across_batch_boundary_not_lost(
     tmp_path: Path,
 ) -> None:
-    """Regression test (#1074 / Codex review on #1083): if the batch that
-    succeeds and the batch that fails share the same max cursor value (a
-    tie straddling the batch boundary), a per-batch rollback would persist
-    that shared value — and the retry's strict `cursor > last_cursor_value`
-    predicate would then silently and permanently skip the failed row,
-    since it has that exact value. The fix detects this (the failing
-    batch's own minimum cursor value ties or falls below the pre-batch
-    snapshot) and widens the rollback to the run's starting watermark only
-    in that case."""
+    """Regression test (#1074 / Codex review on #1083, round 1): if the
+    batch that succeeds and the batch that fails share the same max cursor
+    value (a tie straddling the batch boundary), persisting any value
+    tracked during this run — even the earlier batch's — would tie the
+    failed row's own cursor value, and the retry's strict `cursor >
+    last_cursor_value` predicate would then silently and permanently skip
+    it. Whole-run revert avoids this unconditionally: it never persists
+    any value from a run that hit a fail stop, tie or not."""
     from drt.state.manager import StateManager
 
     rows = [
@@ -397,8 +392,73 @@ def test_incremental_on_error_fail_tied_cursor_across_batch_boundary_not_lost(
     assert state is not None
     # NOT "2024-01-02" — that would tie the failed row's own cursor value
     # and exclude it from every future retry under a strict `>` predicate.
-    # Widened to the run's start (None: this was the sync's first run).
     assert state.last_cursor_value is None
+
+
+def test_incremental_on_error_fail_unconsumed_lower_cursor_batch_not_lost(
+    tmp_path: Path,
+) -> None:
+    """Regression test (#1074 / Codex review on #1083, round 3): extraction
+    is not guaranteed ordered by cursor_field, so a batch the engine never
+    even reaches (because it already broke on an earlier failure) could
+    have contained a *lower* cursor value than anything seen so far. No
+    per-batch-local safety check can catch this — it would require reading
+    a batch the break specifically avoids reading. Whole-run revert sidesteps
+    the problem entirely: it never persists anything tracked during a run
+    that hit a fail stop, so an unconsumed batch's cursor value, high or
+    low, never matters."""
+    from drt.state.manager import StateManager, SyncState
+
+    state_mgr = StateManager(tmp_path)
+    state_mgr.save_sync(
+        SyncState(
+            sync_name="inc_sync",
+            last_run_at="2023-12-31T00:00:00",
+            records_synced=1,
+            status="success",
+            last_cursor_value="2023-12-31",
+        )
+    )
+
+    rows = [
+        {"id": 1, "updated_at": "2024-01-10"},  # batch 1 (cursor 01-10) succeeds
+        {"id": 2, "updated_at": "2024-01-20"},  # batch 2 (cursor 01-20) fails, breaks
+        {"id": 3, "updated_at": "2024-01-05"},  # batch 3 — LOWER cursor, never consumed
+    ]
+    source = FakeSource(rows)
+    dest = FakeDestination(fail_indices={1})  # id=2, second batch
+    sync = SyncConfig.model_validate(
+        {
+            "name": "inc_sync",
+            "model": "ref('events')",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {
+                "mode": "incremental",
+                "cursor_field": "updated_at",
+                "batch_size": 1,
+                "on_error": "fail",
+            },
+        }
+    )
+
+    result = run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
+
+    assert result.failed > 0
+    assert len(dest.calls) == 2  # third batch never reached
+
+    state = state_mgr.get_last_sync("inc_sync")
+    assert state is not None
+    # NOT "2024-01-10" (the succeeded batch's cursor) — that would exclude
+    # the never-consumed, lower-cursor row (id=3) from every future retry.
+    assert state.last_cursor_value == "2023-12-31"
 
 
 class FakeStagedDestination:
