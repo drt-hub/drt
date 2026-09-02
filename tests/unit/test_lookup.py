@@ -369,7 +369,7 @@ class TestApplyLookups:
             {"user_id": "u1", "name": "Alice"},
             {"user_id": "u2", "name": "Bob"},
         ]
-        enriched, errors = apply_lookups(records, self._make_maps(), "fail")
+        enriched, errors, fatal = apply_lookups(records, self._make_maps(), "fail")
 
         assert len(enriched) == 2
         assert enriched[0]["parent_id"] == 10
@@ -383,7 +383,7 @@ class TestApplyLookups:
             {"user_id": "unknown", "name": "Ghost"},
             {"user_id": "u2", "name": "Bob"},
         ]
-        enriched, errors = apply_lookups(records, self._make_maps("skip"), "skip")
+        enriched, errors, fatal = apply_lookups(records, self._make_maps("skip"), "skip")
 
         assert len(enriched) == 2
         assert enriched[0]["parent_id"] == 10
@@ -397,31 +397,39 @@ class TestApplyLookups:
             {"user_id": "unknown", "name": "Ghost"},
             {"user_id": "u2", "name": "Bob"},
         ]
-        enriched, errors = apply_lookups(records, self._make_maps("fail"), "fail")
+        enriched, errors, fatal = apply_lookups(records, self._make_maps("fail"), "fail")
 
         # Should stop at the first fail
         assert len(enriched) == 1
         assert enriched[0]["parent_id"] == 10
         assert len(errors) == 1
+        # #1084 / #1083: the caller relies on this to know it must stop the
+        # whole run and revert the cursor, not just skip this batch — the
+        # "Ghost" row (and anything after it in the batch) was never
+        # attempted, so any cursor value tracked for it must not persist.
+        assert fatal is True
 
     def test_on_miss_fail_with_on_error_skip(self) -> None:
         records = [
             {"user_id": "unknown", "name": "Ghost"},
             {"user_id": "u1", "name": "Alice"},
         ]
-        enriched, errors = apply_lookups(records, self._make_maps("fail"), "skip")
+        enriched, errors, fatal = apply_lookups(records, self._make_maps("fail"), "skip")
 
         # on_error=skip means we continue past failed rows
         assert len(enriched) == 1
         assert enriched[0]["parent_id"] == 10
         assert len(errors) == 1
+        # Not fatal: on_error=skip means a lookup miss — even one whose own
+        # on_miss policy is "fail" — is just a per-row outcome here.
+        assert fatal is False
 
     def test_on_miss_null(self) -> None:
         records = [
             {"user_id": "u1", "name": "Alice"},
             {"user_id": "unknown", "name": "Ghost"},
         ]
-        enriched, errors = apply_lookups(records, self._make_maps("null"), "fail")
+        enriched, errors, fatal = apply_lookups(records, self._make_maps("null"), "fail")
 
         assert len(enriched) == 2
         assert enriched[0]["parent_id"] == 10
@@ -445,7 +453,7 @@ class TestApplyLookups:
         }
         records = [{"user_id": "u1", "company_code": "acme", "name": "A"}]
 
-        enriched, errors = apply_lookups(records, maps, "fail")
+        enriched, errors, fatal = apply_lookups(records, maps, "fail")
 
         assert len(enriched) == 1
         assert enriched[0]["parent_id"] == 10
@@ -469,13 +477,13 @@ class TestApplyLookups:
         }
         records = [{"user_id": "u1", "company_code": "unknown", "name": "A"}]
 
-        enriched, errors = apply_lookups(records, maps, "skip")
+        enriched, errors, fatal = apply_lookups(records, maps, "skip")
 
         assert len(enriched) == 0  # skipped due to second lookup miss
         assert len(errors) == 1
 
     def test_empty_records(self) -> None:
-        enriched, errors = apply_lookups([], self._make_maps(), "fail")
+        enriched, errors, fatal = apply_lookups([], self._make_maps(), "fail")
         assert enriched == []
         assert errors == []
 
@@ -493,7 +501,7 @@ class TestApplyLookups:
             {"company_id": "c2", "user_id": "u2", "name": "B"},
         ]
 
-        enriched, errors = apply_lookups(records, maps, "fail")
+        enriched, errors, fatal = apply_lookups(records, maps, "fail")
 
         assert len(enriched) == 2
         assert enriched[0]["parent_id"] == 10
@@ -501,7 +509,7 @@ class TestApplyLookups:
 
     def test_row_error_contains_preview(self) -> None:
         records = [{"user_id": "missing", "data": "x" * 300}]
-        enriched, errors = apply_lookups(records, self._make_maps("skip"), "skip")
+        enriched, errors, fatal = apply_lookups(records, self._make_maps("skip"), "skip")
 
         assert len(errors) == 1
         assert len(errors[0].record_preview) <= 200
@@ -509,7 +517,7 @@ class TestApplyLookups:
     def test_drop_match_columns_default(self) -> None:
         """Match columns are dropped by default after lookup resolution."""
         records = [{"user_id": "u1", "name": "Alice"}]
-        enriched, errors = apply_lookups(records, self._make_maps(), "fail")
+        enriched, errors, fatal = apply_lookups(records, self._make_maps(), "fail")
 
         assert len(enriched) == 1
         assert enriched[0]["parent_id"] == 10
@@ -528,7 +536,7 @@ class TestApplyLookups:
             "parent_id": (lk, {("u1",): 10}),
         }
         records = [{"user_id": "u1", "name": "Alice"}]
-        enriched, errors = apply_lookups(records, maps, "fail")
+        enriched, errors, fatal = apply_lookups(records, maps, "fail")
 
         assert len(enriched) == 1
         assert enriched[0]["parent_id"] == 10
@@ -551,7 +559,7 @@ class TestApplyLookups:
             "user_id": (lk2, {("u1",): 99}),  # user_id is also a target
         }
         records = [{"user_id": "u1", "name": "Alice"}]
-        enriched, errors = apply_lookups(records, maps, "fail")
+        enriched, errors, fatal = apply_lookups(records, maps, "fail")
 
         assert len(enriched) == 1
         assert enriched[0]["parent_id"] == 10
@@ -575,7 +583,7 @@ class TestApplyLookups:
             "company_id": (lk2, {("acme",): 100}),
         }
         records = [{"user_id": "u1", "company_code": "acme", "name": "A"}]
-        enriched, errors = apply_lookups(records, maps, "fail")
+        enriched, errors, fatal = apply_lookups(records, maps, "fail")
 
         assert len(enriched) == 1
         assert "user_id" not in enriched[0]  # dropped (lk1 default)
@@ -610,7 +618,7 @@ class TestApplyLookupsCheckOnly:
             {"user_id": "u1", "name": "Alice"},
             {"user_id": "u2", "name": "Bob"},
         ]
-        enriched, errors = apply_lookups(records, self._check_only_maps(), "fail")
+        enriched, errors, fatal = apply_lookups(records, self._check_only_maps(), "fail")
 
         assert len(enriched) == 2
         # Source FK column preserved (purpose: still go to destination)
@@ -627,7 +635,7 @@ class TestApplyLookupsCheckOnly:
             {"user_id": "ghost", "name": "Ghost"},
             {"user_id": "u2", "name": "Bob"},
         ]
-        enriched, errors = apply_lookups(records, self._check_only_maps("skip"), "skip")
+        enriched, errors, fatal = apply_lookups(records, self._check_only_maps("skip"), "skip")
 
         assert len(enriched) == 2
         assert {r["user_id"] for r in enriched} == {"u1", "u2"}
@@ -640,17 +648,18 @@ class TestApplyLookupsCheckOnly:
             {"user_id": "ghost", "name": "Ghost"},
             {"user_id": "u2", "name": "Bob"},
         ]
-        enriched, errors = apply_lookups(records, self._check_only_maps("fail"), "fail")
+        enriched, errors, fatal = apply_lookups(records, self._check_only_maps("fail"), "fail")
 
         assert len(enriched) == 1
         assert enriched[0]["user_id"] == "u1"
         assert len(errors) == 1
+        assert fatal is True
 
     def test_check_only_does_not_drop_match_source_column(self) -> None:
         """check_only is filter-only — source columns must NOT be dropped
         even when target_name != source_col (target is just a label)."""
         records = [{"user_id": "u1", "name": "Alice"}]
-        enriched, errors = apply_lookups(records, self._check_only_maps(), "fail")
+        enriched, errors, fatal = apply_lookups(records, self._check_only_maps(), "fail")
 
         assert len(enriched) == 1
         assert enriched[0]["user_id"] == "u1"  # FK preserved for destination INSERT
@@ -678,7 +687,7 @@ class TestApplyLookupsCheckOnly:
             {"user_id": "ghost", "company_code": "acme", "name": "B"},
         ]
 
-        enriched, errors = apply_lookups(records, maps, "skip")
+        enriched, errors, fatal = apply_lookups(records, maps, "skip")
 
         assert len(enriched) == 1
         assert enriched[0]["user_id"] == "u1"  # check_only preserves

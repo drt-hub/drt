@@ -266,6 +266,44 @@ def test_run_sync_lag_skipped_for_cli_override(tmp_path: Path) -> None:
     assert result.watermark_source == "cli_override"
 
 
+def test_run_sync_cursor_override_dry_run_does_not_touch_watermark_backend(
+    tmp_path: Path,
+) -> None:
+    """Regression test (#1074 round 6, Codex review on #1083): #1083 added
+    a durable-cursor read (for its failure-path rollback target) that
+    fires whenever --cursor-value is supplied — but a dry run never
+    reaches that rollback path and never persists anything
+    (StatePersistingObserver.on_sync_completed returns immediately on
+    result.dry_run, #978), so the read is pure waste for one. Worse: it
+    made a --cursor-value *preview* — previously usable with no durable
+    storage access at all — start depending on a remote watermark backend
+    being reachable. A dry run must never call it."""
+
+    class ExplodingWatermarkStorage:
+        def get(self, sync_name: str) -> str | None:
+            raise RuntimeError("watermark backend unreachable")
+
+        def save(self, sync_name: str, value: str) -> None:
+            raise AssertionError("dry run must never save a watermark")
+
+    source = QueryCapturingSource([{"id": 1, "updated_at": "2026-07-10 07:00:00"}])
+    sync = _make_incremental_sync(lag="1 hour")
+
+    result = run_sync(
+        sync,
+        source,
+        CollectDestination(),
+        _make_profile(),
+        tmp_path,
+        dry_run=True,
+        watermark_storage=ExplodingWatermarkStorage(),
+        cursor_value_override="2026-07-10 06:00:00",
+    )
+
+    assert result.success == 1
+    assert result.watermark_source == "cli_override"
+
+
 def test_run_sync_lag_skipped_for_default_value_first_run(tmp_path: Path) -> None:
     source = QueryCapturingSource([])
     storage = FakeWatermarkStorage(None)  # nothing stored yet — first run

@@ -182,7 +182,7 @@ def test_lookup_ambiguity_warning_and_fully_filtered_batch(
     )
     monkeypatch.setattr(sync_mod, "build_lookup_map", lambda dest, cfg: {})
     # Filter every row out -> record_batch becomes empty -> the engine `continue`s.
-    monkeypatch.setattr(sync_mod, "apply_lookups", lambda batch, maps, on_err: ([], []))
+    monkeypatch.setattr(sync_mod, "apply_lookups", lambda batch, maps, on_err: ([], [], False))
 
     observer = MagicMock()
     dest = FakeDestination()

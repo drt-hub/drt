@@ -262,13 +262,51 @@ class StatePersistingObserver:
         if result.dry_run:
             return
 
+        from drt.engine.cursor import cursor_gt
         from drt.state.manager import SyncState
 
         if self._state_manager is not None:
             status = (
                 "success" if result.failed == 0 else "partial" if result.success > 0 else "failed"
             )
+            persist_cursor_value = new_cursor_value if cursor_field else None
             try:
+                # Never regress an already-persisted watermark (#1074
+                # round 5, Codex review on #1083): a #1074 rollback can
+                # hand this observer an older (or, on a from-scratch
+                # revert, a None) cursor than what's already stored, and —
+                # independent of #1074 — so can an ordinary race between
+                # two runs of the same sync. Reading the current value
+                # first and refusing to move it backward is the cheap,
+                # single-process-safe half of that; true cross-process
+                # atomicity needs a CAS/generation-token primitive the
+                # StateStore Protocol doesn't have yet (that's #756's
+                # scope, not this fix's) — a run that reads here, loses a
+                # race to a concurrent writer, and then writes anyway can
+                # still regress the cursor in the narrow window between
+                # this read and the save_sync() call below.
+                #
+                # persist_cursor_value being None must NOT short-circuit
+                # this check (round 6, Codex review): a from-scratch
+                # revert legitimately has nothing of its own to persist,
+                # but that must mean "leave the existing cursor alone",
+                # never "overwrite it with None" — round 5's fix only
+                # skipped the read (and so the guard) when the proposed
+                # value was already None, which reintroduced exactly the
+                # unconditional-None-wipe failure mode this whole fix
+                # exists to close, just gated on a race instead of on
+                # every failed run.
+                if cursor_field:
+                    current = self._state_manager.get_last_sync(sync_name)
+                    if (
+                        current is not None
+                        and current.last_cursor_value is not None
+                        and (
+                            persist_cursor_value is None
+                            or not cursor_gt(persist_cursor_value, current.last_cursor_value)
+                        )
+                    ):
+                        persist_cursor_value = current.last_cursor_value
                 self._state_manager.save_sync(
                     SyncState(
                         sync_name=sync_name,
@@ -276,7 +314,7 @@ class StatePersistingObserver:
                         records_synced=result.success,
                         status=status,
                         error=result.errors[0] if result.errors else None,
-                        last_cursor_value=new_cursor_value if cursor_field else None,
+                        last_cursor_value=persist_cursor_value,
                     )
                 )
             except Exception as exc:  # noqa: BLE001 — fire-and-forget contract
@@ -284,7 +322,17 @@ class StatePersistingObserver:
 
         if self._watermark_storage is not None and cursor_field and new_cursor_value:
             try:
-                self._watermark_storage.save(sync_name, new_cursor_value)
+                # Same never-regress guard as the state_manager branch above
+                # — but only skip on a TRUE regression (current strictly
+                # greater). An unchanged value (e.g. an empty run) must
+                # still write: #759's watermark.lag relies on this exact
+                # call happening every time to re-persist the unlagged
+                # value (see the comment at effective_cursor_value's
+                # assignment in sync.py), and other code paths already
+                # depend on save() being unconditional.
+                current_wm = self._watermark_storage.get(sync_name)
+                if current_wm is None or not cursor_gt(current_wm, new_cursor_value):
+                    self._watermark_storage.save(sync_name, new_cursor_value)
             except Exception as exc:  # noqa: BLE001 — fire-and-forget contract
                 self._logger.warning("Watermark save failure for '%s': %s", sync_name, exc)
 

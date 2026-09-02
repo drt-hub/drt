@@ -270,6 +270,386 @@ def test_incremental_saves_max_cursor(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Watermark safety on partial failure (#1074)
+# ---------------------------------------------------------------------------
+
+
+def test_incremental_on_error_fail_reverts_whole_run(tmp_path: Path) -> None:
+    """Regression test (#1074): a failed load under on_error="fail" must not
+    persist a cursor past rows that were never actually loaded — the next
+    incremental run would then skip them forever.
+
+    Reverts the whole run's cursor progress, not just the failed batch's.
+    A narrower, per-batch-local rollback was tried and rejected across two
+    rounds of Codex review on #1083 (a tied cursor straddling a batch
+    boundary, then a lower cursor in a batch the break never even
+    consumed) — drt does not guarantee extraction is ordered by
+    cursor_field, so no local heuristic can rule out data loss without
+    reading batches the break specifically avoids reading."""
+    from drt.state.manager import StateManager, SyncState
+
+    state_mgr = StateManager(tmp_path)
+    state_mgr.save_sync(
+        SyncState(
+            sync_name="inc_sync",
+            last_run_at="2023-12-31T00:00:00",
+            records_synced=1,
+            status="success",
+            last_cursor_value="2023-12-31",
+        )
+    )
+
+    rows = [
+        {"id": 1, "updated_at": "2024-01-01"},
+        {"id": 2, "updated_at": "2024-01-02"},
+        {"id": 3, "updated_at": "2024-01-05"},  # first row of the failing batch
+        {"id": 4, "updated_at": "2024-01-06"},
+    ]
+    source = FakeSource(rows)
+    dest = FakeDestination(fail_indices={2})  # id=3, second batch
+    sync = SyncConfig.model_validate(
+        {
+            "name": "inc_sync",
+            "model": "ref('events')",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {
+                "mode": "incremental",
+                "cursor_field": "updated_at",
+                "batch_size": 2,
+                "on_error": "fail",
+            },
+        }
+    )
+
+    result = run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
+
+    assert result.failed > 0
+    assert len(dest.calls) == 2  # second batch attempted, then break
+
+    state = state_mgr.get_last_sync("inc_sync")
+    assert state is not None
+    # Reverted to exactly where this run started — not the failing batch's
+    # rows (never loaded), and not even the first batch's max cursor.
+    assert state.last_cursor_value == "2023-12-31"
+
+
+def test_incremental_on_error_fail_with_cursor_override_does_not_corrupt_durable_state(
+    tmp_path: Path,
+) -> None:
+    """Regression test (#1074 / Codex review on #1083, round 4): a failed
+    run using --cursor-value (a one-run backfill/recovery override, per its
+    own CLI help text) must not persist that override as durable state.
+    Rolling back to `last_cursor_value` — which IS the override when one is
+    supplied — would silently replace a recent, real watermark with
+    whatever old date the operator passed for a one-off backfill test, so
+    the *next* regular incremental run would re-process everything since
+    then. The rollback target must be the durable watermark from before
+    this run, resolved independently of the override."""
+    from drt.state.manager import StateManager, SyncState
+
+    state_mgr = StateManager(tmp_path)
+    state_mgr.save_sync(
+        SyncState(
+            sync_name="inc_sync",
+            last_run_at="2026-08-01T00:00:00",
+            records_synced=100,
+            status="success",
+            last_cursor_value="2026-08-01",  # the real, recent watermark
+        )
+    )
+
+    rows = [
+        {"id": 1, "updated_at": "2020-01-01"},
+        {"id": 2, "updated_at": "2020-01-02"},
+    ]
+    source = FakeSource(rows)
+    dest = FakeDestination(fail_indices={0})  # first record fails
+    sync = SyncConfig.model_validate(
+        {
+            "name": "inc_sync",
+            "model": "ref('events')",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {
+                "mode": "incremental",
+                "cursor_field": "updated_at",
+                "batch_size": 10,
+                "on_error": "fail",
+            },
+        }
+    )
+
+    result = run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+        cursor_value_override="2020-01-01",  # a one-off historical backfill test
+    )
+
+    assert result.failed > 0
+
+    state = state_mgr.get_last_sync("inc_sync")
+    assert state is not None
+    # NOT "2020-01-01" (the override) — the real watermark must survive a
+    # failed backfill attempt unchanged.
+    assert state.last_cursor_value == "2026-08-01"
+
+
+def test_incremental_on_error_fail_tied_cursor_across_batch_boundary_not_lost(
+    tmp_path: Path,
+) -> None:
+    """Regression test (#1074 / Codex review on #1083, round 1): if the
+    batch that succeeds and the batch that fails share the same max cursor
+    value (a tie straddling the batch boundary), persisting any value
+    tracked during this run — even the earlier batch's — would tie the
+    failed row's own cursor value, and the retry's strict `cursor >
+    last_cursor_value` predicate would then silently and permanently skip
+    it. Whole-run revert avoids this unconditionally: it never persists
+    any value from a run that hit a fail stop, tie or not."""
+    from drt.state.manager import StateManager
+
+    rows = [
+        {"id": 1, "updated_at": "2024-01-01"},
+        {"id": 2, "updated_at": "2024-01-02"},  # batch 1 ends here
+        {"id": 3, "updated_at": "2024-01-02"},  # batch 2 starts with the SAME value...
+        {"id": 4, "updated_at": "2024-01-03"},  # ...and fails
+    ]
+    source = FakeSource(rows)
+    dest = FakeDestination(fail_indices={2})  # id=3, second batch
+    sync = SyncConfig.model_validate(
+        {
+            "name": "inc_sync",
+            "model": "ref('events')",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {
+                "mode": "incremental",
+                "cursor_field": "updated_at",
+                "batch_size": 2,
+                "on_error": "fail",
+            },
+        }
+    )
+    state_mgr = StateManager(tmp_path)
+
+    result = run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
+
+    assert result.failed > 0
+    state = state_mgr.get_last_sync("inc_sync")
+    assert state is not None
+    # NOT "2024-01-02" — that would tie the failed row's own cursor value
+    # and exclude it from every future retry under a strict `>` predicate.
+    assert state.last_cursor_value is None
+
+
+def test_incremental_on_error_fail_unconsumed_lower_cursor_batch_not_lost(
+    tmp_path: Path,
+) -> None:
+    """Regression test (#1074 / Codex review on #1083, round 3): extraction
+    is not guaranteed ordered by cursor_field, so a batch the engine never
+    even reaches (because it already broke on an earlier failure) could
+    have contained a *lower* cursor value than anything seen so far. No
+    per-batch-local safety check can catch this — it would require reading
+    a batch the break specifically avoids reading. Whole-run revert sidesteps
+    the problem entirely: it never persists anything tracked during a run
+    that hit a fail stop, so an unconsumed batch's cursor value, high or
+    low, never matters."""
+    from drt.state.manager import StateManager, SyncState
+
+    state_mgr = StateManager(tmp_path)
+    state_mgr.save_sync(
+        SyncState(
+            sync_name="inc_sync",
+            last_run_at="2023-12-31T00:00:00",
+            records_synced=1,
+            status="success",
+            last_cursor_value="2023-12-31",
+        )
+    )
+
+    rows = [
+        {"id": 1, "updated_at": "2024-01-10"},  # batch 1 (cursor 01-10) succeeds
+        {"id": 2, "updated_at": "2024-01-20"},  # batch 2 (cursor 01-20) fails, breaks
+        {"id": 3, "updated_at": "2024-01-05"},  # batch 3 — LOWER cursor, never consumed
+    ]
+    source = FakeSource(rows)
+    dest = FakeDestination(fail_indices={1})  # id=2, second batch
+    sync = SyncConfig.model_validate(
+        {
+            "name": "inc_sync",
+            "model": "ref('events')",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {
+                "mode": "incremental",
+                "cursor_field": "updated_at",
+                "batch_size": 1,
+                "on_error": "fail",
+            },
+        }
+    )
+
+    result = run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
+
+    assert result.failed > 0
+    assert len(dest.calls) == 2  # third batch never reached
+
+    state = state_mgr.get_last_sync("inc_sync")
+    assert state is not None
+    # NOT "2024-01-10" (the succeeded batch's cursor) — that would exclude
+    # the never-consumed, lower-cursor row (id=3) from every future retry.
+    assert state.last_cursor_value == "2023-12-31"
+
+
+class FakeStagedDestination:
+    def __init__(self, fail: bool) -> None:
+        self.staged: list[dict] = []
+        self._fail = fail
+
+    def stage(
+        self, records: list[dict], config: DestinationConfig, sync_options: SyncOptions
+    ) -> None:
+        self.staged.extend(records)
+
+    def finalize(self, config: DestinationConfig, sync_options: SyncOptions) -> SyncResult:
+        if self._fail:
+            return SyncResult(failed=len(self.staged), errors=["finalize failed"])
+        return SyncResult(success=len(self.staged))
+
+
+def test_incremental_staged_finalize_failure_reverts_cursor(tmp_path: Path) -> None:
+    """Regression test (#1074, staged path — caught in Codex review on
+    #1083): the staged extraction loop has no per-batch break (stage() has
+    no per-batch result to fail on), so new_cursor_value already covers
+    every extracted row by the time finalize() runs once at the end. A
+    failed finalize() under on_error="fail" means nothing was actually
+    delivered — unlike the row-by-row destination.load() path there's no
+    already-succeeded subset to narrow the rollback around — so the cursor
+    must revert all the way to where the run started."""
+    from drt.state.manager import StateManager, SyncState
+
+    state_mgr = StateManager(tmp_path)
+    state_mgr.save_sync(
+        SyncState(
+            sync_name="inc_sync",
+            last_run_at="2023-12-31T00:00:00",
+            records_synced=1,
+            status="success",
+            last_cursor_value="2023-12-31",
+        )
+    )
+
+    rows = [
+        {"id": 1, "updated_at": "2024-01-01"},
+        {"id": 2, "updated_at": "2024-01-02"},
+    ]
+    source = FakeSource(rows)
+    dest = FakeStagedDestination(fail=True)
+    sync = SyncConfig.model_validate(
+        {
+            "name": "inc_sync",
+            "model": "ref('events')",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {
+                "mode": "incremental",
+                "cursor_field": "updated_at",
+                "batch_size": 10,
+                "on_error": "fail",
+            },
+        }
+    )
+
+    result = run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
+
+    assert result.failed > 0
+    assert len(dest.staged) == 2  # both rows staged before finalize failed
+
+    state = state_mgr.get_last_sync("inc_sync")
+    assert state is not None
+    assert state.last_cursor_value == "2023-12-31"
+
+
+def test_incremental_on_error_skip_still_advances_cursor(tmp_path: Path) -> None:
+    """The #1074 rollback is scoped to on_error="fail" — a skip-mode sync
+    with row failures must keep advancing the watermark as before, or
+    every sync with any bad row would stall forever."""
+    from drt.state.manager import StateManager
+
+    rows = [
+        {"id": 1, "updated_at": "2024-01-01"},
+        {"id": 2, "updated_at": "2024-01-02"},
+        {"id": 3, "updated_at": "2024-01-05"},
+        {"id": 4, "updated_at": "2024-01-06"},
+    ]
+    source = FakeSource(rows)
+    dest = FakeDestination(fail_indices={2})
+    sync = SyncConfig.model_validate(
+        {
+            "name": "inc_sync",
+            "model": "ref('events')",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {
+                "mode": "incremental",
+                "cursor_field": "updated_at",
+                "batch_size": 2,
+                "on_error": "skip",
+            },
+        }
+    )
+    state_mgr = StateManager(tmp_path)
+
+    result = run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
+
+    assert result.failed == 1
+    assert len(dest.calls) == 2  # both batches processed despite the failure
+
+    state = state_mgr.get_last_sync("inc_sync")
+    assert state is not None
+    assert state.last_cursor_value == "2024-01-06"
+
+
+# ---------------------------------------------------------------------------
 # Cursor value stringification (#475)
 # ---------------------------------------------------------------------------
 
@@ -668,6 +1048,144 @@ def test_run_sync_with_lookup_dry_run(
     assert result.rows_extracted == 1
     assert result.success == 1
     assert dest.calls == []  # destination never called
+
+
+def _make_incremental_lookup_sync() -> SyncConfig:
+    return SyncConfig.model_validate(
+        {
+            "name": "lookup_sync",
+            "model": "ref('child_table')",
+            "destination": {
+                "type": "mysql",
+                "host": "localhost",
+                "dbname": "testdb",
+                "table": "child_table",
+                "upsert_key": ["parent_id", "code"],
+                "lookups": {
+                    "parent_id": {
+                        "table": "parent_table",
+                        "match": {"user_id": "user_id"},
+                        "select": "id",
+                        "on_miss": "fail",
+                    },
+                },
+            },
+            "sync": {
+                "batch_size": 10,
+                "mode": "incremental",
+                "cursor_field": "updated_at",
+                "on_error": "fail",
+            },
+        }
+    )
+
+
+@patch(
+    "drt.engine.sync.build_lookup_map",
+    return_value={("u1",): 10, ("u3",): 30},
+)
+def test_run_sync_fatal_lookup_miss_reverts_cursor(
+    mock_build: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """Regression test (#1084 / #1074, Codex review on #1083): a fatal
+    lookup miss (on_miss: fail) under on_error: fail must stop the run and
+    revert the cursor, not just skip the batch. Cursor tracking runs over
+    the whole raw batch *before* lookups — so without this fix, the u3 row
+    (cursor 13, never even attempted because apply_lookups() stopped at
+    the u2 miss) would have its cursor persisted anyway once the
+    surviving u1 prefix loads cleanly, permanently excluding it."""
+    from drt.state.manager import StateManager
+
+    rows = [
+        {"user_id": "u1", "code": "a", "updated_at": "11"},
+        {"user_id": "u2", "code": "b", "updated_at": "12"},  # misses the lookup, fatal
+        {"user_id": "u3", "code": "c", "updated_at": "13"},  # never even attempted
+    ]
+    source = FakeSource(rows)
+    dest = FakeDestination()
+    sync = _make_incremental_lookup_sync()
+    state_mgr = StateManager(tmp_path)
+
+    result = run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
+
+    assert result.failed > 0
+    # Only the pre-miss prefix (u1) ever reached the destination.
+    assert len(dest.calls) == 1
+    assert dest.calls[0][0]["code"] == "a"
+
+    state = state_mgr.get_last_sync("lookup_sync")
+    assert state is not None
+    # NOT "13" — reverted to before this (first) run started.
+    assert state.last_cursor_value is None
+
+
+@patch(
+    "drt.engine.sync.build_lookup_map",
+    return_value={("u1",): 10, ("u3",): 30},
+)
+def test_run_sync_fatal_lookup_miss_in_later_batch_reverts_to_run_start(
+    mock_build: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """Same as test_run_sync_fatal_lookup_miss_reverts_cursor, but with the
+    fatal miss in the SECOND batch (batch_size=1) after a first batch that
+    loaded cleanly on its own. The revert must land on the durable cursor
+    from before this run started — not on the first batch's own (higher)
+    max cursor, matching the whole-run-revert design #1074/#1083 settled
+    on for the destination.load() fatal path."""
+    from drt.state.manager import StateManager, SyncState
+
+    state_mgr = StateManager(tmp_path)
+    state_mgr.save_sync(
+        SyncState(
+            sync_name="lookup_sync",
+            last_run_at="2023-12-31T00:00:00",
+            records_synced=1,
+            status="success",
+            last_cursor_value="10",
+        )
+    )
+
+    rows = [
+        {"user_id": "u1", "code": "a", "updated_at": "11"},  # batch 1: loads cleanly
+        {"user_id": "u2", "code": "b", "updated_at": "12"},  # batch 2: fatal miss
+        {"user_id": "u3", "code": "c", "updated_at": "13"},  # never even attempted
+    ]
+    source = FakeSource(rows)
+    dest = FakeDestination()
+    sync = _make_incremental_lookup_sync()
+    sync.sync.batch_size = 1
+
+    result = run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
+
+    assert result.failed > 0
+    # Batch 1 (u1) loaded; batch 2's fatal miss stopped the run before any
+    # further destination call.
+    assert len(dest.calls) == 1
+    assert dest.calls[0][0]["code"] == "a"
+
+    state = state_mgr.get_last_sync("lookup_sync")
+    assert state is not None
+    # NOT "11" (batch 1's own max) and NOT "13" — reverted all the way to
+    # the run's start.
+    assert state.last_cursor_value == "10"
 
 
 def test_full_sync_no_cursor_saved(tmp_path: Path) -> None:

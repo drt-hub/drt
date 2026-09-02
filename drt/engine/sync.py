@@ -35,6 +35,7 @@ from drt.destinations.lookup import (
     detect_ambiguous_lookup_ordering,
 )
 from drt.engine.computed_fields import apply_computed_fields
+from drt.engine.cursor import cursor_gt as _cursor_gt
 from drt.engine.field_mappings import apply_field_mappings
 from drt.engine.masking import apply_mask
 from drt.engine.metadata_columns import apply_metadata_columns
@@ -46,14 +47,6 @@ from drt.state.dlq import DeadLetter
 from drt.state.history import HistoryEntry, HistoryStore
 from drt.state.manager import StateStore
 from drt.state.watermark import WatermarkStorage
-
-
-def _cursor_gt(new: str, current: str) -> bool:
-    """Return True if new > current, using numeric comparison when both are numeric."""
-    try:
-        return float(new) > float(current)
-    except (ValueError, TypeError):
-        return new > current
 
 
 def _stringify_cursor_value(val: Any) -> str:
@@ -518,6 +511,38 @@ def _run_sync_body(
             watermark_source = "default_value"
             observer.on_watermark_resolved(sync.name, "default_value", last_cursor_value)
 
+    # The durable watermark from BEFORE this run, ignoring any --cursor-value
+    # override — used as the #1074 failure-path rollback target, never as
+    # the extraction predicate. A CLI override is documented as a one-run
+    # value ("backfill/recovery"); persisting it as durable state on a
+    # *failed* run would silently replace the real watermark with the
+    # override — a failed historical backfill could roll a recent watermark
+    # back years (caught in Codex review on #1083). When no override is in
+    # play, last_cursor_value already IS the durable value, so no extra read
+    # is needed.
+    # dry_run never persists (StatePersistingObserver.on_sync_completed
+    # returns immediately on result.dry_run — #978), so this value is never
+    # actually used for one; skip the read entirely rather than making a
+    # preview depend on a remote watermark backend being reachable (round
+    # 6, Codex review — a backfill/recovery *preview* using --cursor-value
+    # previously needed no durable-storage access at all, and shouldn't
+    # start needing it just because #1083 added a fallback target that a
+    # dry run will never reach).
+    durable_cursor_value: str | None
+    if cursor_field and cursor_value_override is not None and not dry_run:
+        durable_cursor_value = None
+        if watermark_storage:
+            durable_cursor_value = watermark_storage.get(sync.name)
+        elif state_manager:
+            prev = state_manager.get_last_sync(sync.name)
+            durable_cursor_value = prev.last_cursor_value if prev else None
+        if durable_cursor_value is None:
+            wm_durable = sync.sync.watermark
+            if wm_durable and wm_durable.default_value is not None:
+                durable_cursor_value = wm_durable.default_value
+    else:
+        durable_cursor_value = last_cursor_value
+
     # Overlap window (#759): widen the *read* window by watermark.lag so
     # late-arriving rows are re-synced. Storage-sourced watermarks only —
     # CLI overrides are exact by contract and default_value already marks a
@@ -644,16 +669,38 @@ def _run_sync_body(
                             new_cursor_value = str_val
 
             # Apply destination lookups (FK resolution)
+            lookup_fatal = False
             if lookup_maps:
                 batch_len_before = len(record_batch)
-                record_batch, lookup_errors = apply_lookups(
+                record_batch, lookup_errors, lookup_fatal = apply_lookups(
                     record_batch,
                     lookup_maps,
                     sync.sync.on_error,
                 )
                 total_result.row_errors.extend(lookup_errors)
                 total_result.skipped += batch_len_before - len(record_batch)
+                if lookup_fatal:
+                    # A fatal (on_miss: fail) lookup miss under on_error:
+                    # fail (#1084 / #1074 / #1083 review): apply_lookups
+                    # stopped enriching immediately, so record_batch is
+                    # only the prefix before the miss. Same watermark-
+                    # safety hazard as a fatal destination.load() —
+                    # cursor tracking above already covers every row in
+                    # this batch, including the ones dropped here — so
+                    # this counts as a failure and reverts the cursor
+                    # the same way, whether or not any prefix survives to
+                    # load. Watermark handling only, though: unlike a
+                    # destination.load() failure, this RowError never
+                    # becomes a DeadLetter (that conversion below is
+                    # built from the destination's own result.row_errors,
+                    # not total_result.row_errors), so the missed row
+                    # doesn't reach the DLQ / `drt retry` — it comes back
+                    # only via re-extraction once the watermark reverts.
+                    total_result.failed += 1
                 if not record_batch:
+                    if lookup_fatal:
+                        new_cursor_value = durable_cursor_value
+                        break
                     continue
 
             # Declarative derived columns (#763). First of the three payload
@@ -751,7 +798,45 @@ def _run_sync_body(
                         observer.on_records_failed(sync.name, dead_letters)
 
                 if sync.sync.on_error == "fail" and result.failed > 0:
+                    # Roll the whole run's cursor progress back to where it
+                    # started (#1074). A narrower, per-batch-local rollback
+                    # was tried and rejected in review (Codex, #1083): drt
+                    # does not guarantee extraction is ordered by
+                    # cursor_field (no ORDER BY is injected — verified in
+                    # drt/engine/resolver.py), and once this break stops
+                    # consuming the source iterator, an unconsumed later
+                    # batch could have contained a *lower* cursor value
+                    # than what a batch-local check could see — no local
+                    # heuristic can rule that out without reading batches
+                    # the break specifically avoids reading. Reverting to
+                    # the run's start is the only rollback that's safe
+                    # regardless of extraction order: it guarantees every
+                    # row this run saw is re-extracted on retry.
+                    #
+                    # Trade-off, accepted deliberately: retrying re-sends
+                    # every row from batches that already succeeded earlier
+                    # in this same run. For destinations without natural
+                    # replay safety (e.g. Slack, email) that means a
+                    # duplicate message/email, not just a duplicate
+                    # warehouse upsert. Silently and permanently losing
+                    # rows is judged the worse failure mode of the two.
+                    #
+                    # durable_cursor_value, not last_cursor_value: the
+                    # latter is override-aware (--cursor-value), and a
+                    # one-run override must never become durable state on
+                    # failure (caught in Codex review on #1083).
+                    new_cursor_value = durable_cursor_value
                     break
+
+            if lookup_fatal:
+                # The (possibly empty) prefix apply_lookups() salvaged was
+                # already loaded normally above like any other batch —
+                # those rows really did succeed. But this batch also hit a
+                # fatal lookup miss, so the run as a whole must still stop
+                # and revert, whether or not destination.load() itself
+                # reported any failure for the prefix it did see.
+                new_cursor_value = durable_cursor_value
+                break
 
             batches_processed += 1
     finally:
@@ -769,6 +854,21 @@ def _run_sync_body(
         total_result.failed += finalize_result.failed
         total_result.errors.extend(finalize_result.errors)
         total_result.row_errors.extend(getattr(finalize_result, "row_errors", []))
+
+        if sync.sync.on_error == "fail" and finalize_result.failed > 0:
+            # The staged path has no per-batch break (stage() has no
+            # per-batch result to fail on) — extraction and staging ran to
+            # completion for every batch, and new_cursor_value above
+            # already covers every extracted row. finalize() is the only
+            # point that reports success/failure, and it's authoritative
+            # for the *whole* staged set (#1074, staged path, caught in
+            # Codex review on #1083): unlike the row-by-row destination.load()
+            # path, nothing here was confirmed delivered, so — unlike that
+            # path — there's no already-succeeded subset to narrow the
+            # rollback around. Revert to the run's starting watermark —
+            # durable_cursor_value, not last_cursor_value, for the same
+            # --cursor-value reason as the non-staged branch above.
+            new_cursor_value = durable_cursor_value
 
     # Duck-typed end-of-sync hook for non-staged destinations
     # (e.g. swap-finalize for replace_strategy=swap on Postgres/MySQL/ClickHouse).
