@@ -518,6 +518,30 @@ def _run_sync_body(
             watermark_source = "default_value"
             observer.on_watermark_resolved(sync.name, "default_value", last_cursor_value)
 
+    # The durable watermark from BEFORE this run, ignoring any --cursor-value
+    # override — used as the #1074 failure-path rollback target, never as
+    # the extraction predicate. A CLI override is documented as a one-run
+    # value ("backfill/recovery"); persisting it as durable state on a
+    # *failed* run would silently replace the real watermark with the
+    # override — a failed historical backfill could roll a recent watermark
+    # back years (caught in Codex review on #1083). When no override is in
+    # play, last_cursor_value already IS the durable value, so no extra read
+    # is needed.
+    durable_cursor_value: str | None
+    if cursor_field and cursor_value_override is not None:
+        durable_cursor_value = None
+        if watermark_storage:
+            durable_cursor_value = watermark_storage.get(sync.name)
+        elif state_manager:
+            prev = state_manager.get_last_sync(sync.name)
+            durable_cursor_value = prev.last_cursor_value if prev else None
+        if durable_cursor_value is None:
+            wm_durable = sync.sync.watermark
+            if wm_durable and wm_durable.default_value is not None:
+                durable_cursor_value = wm_durable.default_value
+    else:
+        durable_cursor_value = last_cursor_value
+
     # Overlap window (#759): widen the *read* window by watermark.lag so
     # late-arriving rows are re-synced. Storage-sourced watermarks only —
     # CLI overrides are exact by contract and default_value already marks a
@@ -773,7 +797,12 @@ def _run_sync_body(
                     # duplicate message/email, not just a duplicate
                     # warehouse upsert. Silently and permanently losing
                     # rows is judged the worse failure mode of the two.
-                    new_cursor_value = last_cursor_value
+                    #
+                    # durable_cursor_value, not last_cursor_value: the
+                    # latter is override-aware (--cursor-value), and a
+                    # one-run override must never become durable state on
+                    # failure (caught in Codex review on #1083).
+                    new_cursor_value = durable_cursor_value
                     break
 
             batches_processed += 1
@@ -803,8 +832,10 @@ def _run_sync_body(
             # Codex review on #1083): unlike the row-by-row destination.load()
             # path, nothing here was confirmed delivered, so — unlike that
             # path — there's no already-succeeded subset to narrow the
-            # rollback around. Revert to the run's starting watermark.
-            new_cursor_value = last_cursor_value
+            # rollback around. Revert to the run's starting watermark —
+            # durable_cursor_value, not last_cursor_value, for the same
+            # --cursor-value reason as the non-staged branch above.
+            new_cursor_value = durable_cursor_value
 
     # Duck-typed end-of-sync hook for non-staged destinations
     # (e.g. swap-finalize for replace_strategy=swap on Postgres/MySQL/ClickHouse).

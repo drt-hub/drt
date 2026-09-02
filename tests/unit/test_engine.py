@@ -341,6 +341,71 @@ def test_incremental_on_error_fail_reverts_whole_run(tmp_path: Path) -> None:
     assert state.last_cursor_value == "2023-12-31"
 
 
+def test_incremental_on_error_fail_with_cursor_override_does_not_corrupt_durable_state(
+    tmp_path: Path,
+) -> None:
+    """Regression test (#1074 / Codex review on #1083, round 4): a failed
+    run using --cursor-value (a one-run backfill/recovery override, per its
+    own CLI help text) must not persist that override as durable state.
+    Rolling back to `last_cursor_value` — which IS the override when one is
+    supplied — would silently replace a recent, real watermark with
+    whatever old date the operator passed for a one-off backfill test, so
+    the *next* regular incremental run would re-process everything since
+    then. The rollback target must be the durable watermark from before
+    this run, resolved independently of the override."""
+    from drt.state.manager import StateManager, SyncState
+
+    state_mgr = StateManager(tmp_path)
+    state_mgr.save_sync(
+        SyncState(
+            sync_name="inc_sync",
+            last_run_at="2026-08-01T00:00:00",
+            records_synced=100,
+            status="success",
+            last_cursor_value="2026-08-01",  # the real, recent watermark
+        )
+    )
+
+    rows = [
+        {"id": 1, "updated_at": "2020-01-01"},
+        {"id": 2, "updated_at": "2020-01-02"},
+    ]
+    source = FakeSource(rows)
+    dest = FakeDestination(fail_indices={0})  # first record fails
+    sync = SyncConfig.model_validate(
+        {
+            "name": "inc_sync",
+            "model": "ref('events')",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {
+                "mode": "incremental",
+                "cursor_field": "updated_at",
+                "batch_size": 10,
+                "on_error": "fail",
+            },
+        }
+    )
+
+    result = run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+        cursor_value_override="2020-01-01",  # a one-off historical backfill test
+    )
+
+    assert result.failed > 0
+
+    state = state_mgr.get_last_sync("inc_sync")
+    assert state is not None
+    # NOT "2020-01-01" (the override) — the real watermark must survive a
+    # failed backfill attempt unchanged.
+    assert state.last_cursor_value == "2026-08-01"
+
+
 def test_incremental_on_error_fail_tied_cursor_across_batch_boundary_not_lost(
     tmp_path: Path,
 ) -> None:
