@@ -630,6 +630,12 @@ def _run_sync_body(
 
             total_result.rows_extracted += len(record_batch)
 
+            # Snapshot before this batch's cursor tracking (and the lowest
+            # cursor value seen *within* this batch) so a failed load below
+            # (on_error="fail") can roll the watermark back safely (#1074).
+            cursor_value_before_batch = new_cursor_value
+            batch_min_cursor: str | None = None
+
             # Track max cursor value seen across all batches.
             # Stringify with tz-naive UTC normalization for tz-aware datetimes
             # to avoid #475 (re-emit-at-boundary when user SQL is tz-naive).
@@ -640,6 +646,8 @@ def _run_sync_body(
                     val = row.get(cursor_field)
                     if val is not None:
                         str_val = _stringify_cursor_value(val)
+                        if batch_min_cursor is None or _cursor_gt(batch_min_cursor, str_val):
+                            batch_min_cursor = str_val
                         if new_cursor_value is None or _cursor_gt(str_val, new_cursor_value):
                             new_cursor_value = str_val
 
@@ -751,22 +759,34 @@ def _run_sync_body(
                         observer.on_records_failed(sync.name, dead_letters)
 
                 if sync.sync.on_error == "fail" and result.failed > 0:
-                    # Roll the whole run's cursor progress back to where it
-                    # started (#1074), not just to the failed batch. A
-                    # per-batch rollback is not safe here: extraction is not
-                    # guaranteed strictly ordered by cursor_field, so a
-                    # failed batch can share its cursor value with an
-                    # already-succeeded batch (a tie straddling the batch
-                    # boundary) or contain a lower value than one already
-                    # tracked — either way, persisting anything past the
-                    # run's starting watermark risks the strict `>` retry
-                    # predicate silently and permanently skipping the failed
-                    # rows. Reverting to the run's start guarantees every
-                    # row from this run is re-extracted on retry, at the
-                    # cost of re-loading rows batches before the failure
-                    # already loaded successfully (safe: destinations here
-                    # are upsert/idempotent on retry).
-                    new_cursor_value = last_cursor_value
+                    # Roll back so retry re-extracts this batch (#1074),
+                    # scoped as narrowly as it's safe to: rolling back only
+                    # to the *whole run's* start (rather than to just
+                    # before this batch) risks re-sending already-succeeded
+                    # rows from earlier batches to non-idempotent
+                    # destinations (Slack, email — caught in Codex review
+                    # on #1083), so we only widen the rollback when the
+                    # narrower one would be unsafe.
+                    #
+                    # The pre-batch snapshot is unsafe exactly when this
+                    # batch's own lowest cursor value ties or falls below
+                    # it — extraction is not guaranteed strictly ordered by
+                    # cursor_field, so that can happen (a batch boundary
+                    # splitting rows that share a cursor value, verified by
+                    # a regression test). Persisting a value that ties an
+                    # unconfirmed row's cursor would exclude it from every
+                    # future retry under the strict `>` predicate, so in
+                    # that case fall back to the run's starting watermark,
+                    # which is provably below anything this run tracked.
+                    if batch_min_cursor is not None and cursor_value_before_batch is not None:
+                        tie_or_reversed = not _cursor_gt(
+                            batch_min_cursor, cursor_value_before_batch
+                        )
+                    else:
+                        tie_or_reversed = False
+                    new_cursor_value = (
+                        last_cursor_value if tie_or_reversed else cursor_value_before_batch
+                    )
                     break
 
             batches_processed += 1
@@ -785,6 +805,19 @@ def _run_sync_body(
         total_result.failed += finalize_result.failed
         total_result.errors.extend(finalize_result.errors)
         total_result.row_errors.extend(getattr(finalize_result, "row_errors", []))
+
+        if sync.sync.on_error == "fail" and finalize_result.failed > 0:
+            # The staged path has no per-batch break (stage() has no
+            # per-batch result to fail on) — extraction and staging ran to
+            # completion for every batch, and new_cursor_value above
+            # already covers every extracted row. finalize() is the only
+            # point that reports success/failure, and it's authoritative
+            # for the *whole* staged set (#1074, staged path, caught in
+            # Codex review on #1083): unlike the row-by-row destination.load()
+            # path, nothing here was confirmed delivered, so — unlike that
+            # path — there's no already-succeeded subset to narrow the
+            # rollback around. Revert to the run's starting watermark.
+            new_cursor_value = last_cursor_value
 
     # Duck-typed end-of-sync hook for non-staged destinations
     # (e.g. swap-finalize for replace_strategy=swap on Postgres/MySQL/ClickHouse).

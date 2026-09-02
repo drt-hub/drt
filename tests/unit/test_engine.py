@@ -274,22 +274,19 @@ def test_incremental_saves_max_cursor(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_incremental_on_error_fail_reverts_whole_run_not_just_failed_batch(
+def test_incremental_on_error_fail_rolls_back_to_last_good_batch(
     tmp_path: Path,
 ) -> None:
     """Regression test (#1074): a failed load under on_error="fail" must not
     persist a cursor past rows that were never actually loaded — the next
     incremental run would then skip them forever.
 
-    A prior fix rolled back only to the failed batch's own starting cursor
-    (batch-local rollback). Codex review on #1083 found that unsafe: it
-    still persists a value from *this* run whenever a still-earlier batch
-    in the same run advanced the cursor, and extraction is not guaranteed
-    strictly ordered by cursor_field — a batch boundary can split rows that
-    share the same cursor value, or a later batch can contain a lower one.
-    The fix instead reverts the *whole run's* cursor progress back to
-    whatever it was when the run started, so retry always re-extracts
-    every row this run saw, regardless of ordering or ties."""
+    Scoped as narrowly as safe: normal (cursor-ordered) extraction rolls
+    back only to the last batch that was confirmed loaded, not the whole
+    run — rolling back further than necessary would re-send already
+    -succeeded rows to non-idempotent destinations (Slack, email) on retry,
+    a regression Codex review caught on #1083 in an earlier whole-run-revert
+    version of this fix."""
     from drt.state.manager import StateManager, SyncState
 
     state_mgr = StateManager(tmp_path)
@@ -340,11 +337,12 @@ def test_incremental_on_error_fail_reverts_whole_run_not_just_failed_batch(
 
     state = state_mgr.get_last_sync("inc_sync")
     assert state is not None
-    # Reverted to exactly where this run started — not the failing batch's
-    # rows (never loaded), and not even the first batch's max cursor,
-    # since a partial-credit rollback is what #1083's review caught as
-    # unsafe under ties/out-of-order extraction.
-    assert state.last_cursor_value == "2023-12-31"
+    # Rolled back to the first (fully-succeeded) batch's max cursor — not
+    # the failing batch's rows (never loaded), and not all the way back to
+    # the run's start, since this batch's rows are strictly newer than
+    # what was already persisted (no tie/reversal — the narrow rollback is
+    # safe here).
+    assert state.last_cursor_value == "2024-01-02"
 
 
 def test_incremental_on_error_fail_tied_cursor_across_batch_boundary_not_lost(
@@ -352,12 +350,13 @@ def test_incremental_on_error_fail_tied_cursor_across_batch_boundary_not_lost(
 ) -> None:
     """Regression test (#1074 / Codex review on #1083): if the batch that
     succeeds and the batch that fails share the same max cursor value (a
-    tie straddling the batch boundary), a batch-local rollback would
-    persist that shared value — and the retry's strict `cursor >
-    last_cursor_value` predicate would then silently and permanently skip
-    the failed row, since it has that exact value. The whole-run rollback
-    avoids this: it never persists any value from a run that hit a fail
-    stop, tie or not."""
+    tie straddling the batch boundary), a per-batch rollback would persist
+    that shared value — and the retry's strict `cursor > last_cursor_value`
+    predicate would then silently and permanently skip the failed row,
+    since it has that exact value. The fix detects this (the failing
+    batch's own minimum cursor value ties or falls below the pre-batch
+    snapshot) and widens the rollback to the run's starting watermark only
+    in that case."""
     from drt.state.manager import StateManager
 
     rows = [
@@ -398,7 +397,84 @@ def test_incremental_on_error_fail_tied_cursor_across_batch_boundary_not_lost(
     assert state is not None
     # NOT "2024-01-02" — that would tie the failed row's own cursor value
     # and exclude it from every future retry under a strict `>` predicate.
+    # Widened to the run's start (None: this was the sync's first run).
     assert state.last_cursor_value is None
+
+
+class FakeStagedDestination:
+    def __init__(self, fail: bool) -> None:
+        self.staged: list[dict] = []
+        self._fail = fail
+
+    def stage(
+        self, records: list[dict], config: DestinationConfig, sync_options: SyncOptions
+    ) -> None:
+        self.staged.extend(records)
+
+    def finalize(self, config: DestinationConfig, sync_options: SyncOptions) -> SyncResult:
+        if self._fail:
+            return SyncResult(failed=len(self.staged), errors=["finalize failed"])
+        return SyncResult(success=len(self.staged))
+
+
+def test_incremental_staged_finalize_failure_reverts_cursor(tmp_path: Path) -> None:
+    """Regression test (#1074, staged path — caught in Codex review on
+    #1083): the staged extraction loop has no per-batch break (stage() has
+    no per-batch result to fail on), so new_cursor_value already covers
+    every extracted row by the time finalize() runs once at the end. A
+    failed finalize() under on_error="fail" means nothing was actually
+    delivered — unlike the row-by-row destination.load() path there's no
+    already-succeeded subset to narrow the rollback around — so the cursor
+    must revert all the way to where the run started."""
+    from drt.state.manager import StateManager, SyncState
+
+    state_mgr = StateManager(tmp_path)
+    state_mgr.save_sync(
+        SyncState(
+            sync_name="inc_sync",
+            last_run_at="2023-12-31T00:00:00",
+            records_synced=1,
+            status="success",
+            last_cursor_value="2023-12-31",
+        )
+    )
+
+    rows = [
+        {"id": 1, "updated_at": "2024-01-01"},
+        {"id": 2, "updated_at": "2024-01-02"},
+    ]
+    source = FakeSource(rows)
+    dest = FakeStagedDestination(fail=True)
+    sync = SyncConfig.model_validate(
+        {
+            "name": "inc_sync",
+            "model": "ref('events')",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {
+                "mode": "incremental",
+                "cursor_field": "updated_at",
+                "batch_size": 10,
+                "on_error": "fail",
+            },
+        }
+    )
+
+    result = run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
+
+    assert result.failed > 0
+    assert len(dest.staged) == 2  # both rows staged before finalize failed
+
+    state = state_mgr.get_last_sync("inc_sync")
+    assert state is not None
+    assert state.last_cursor_value == "2023-12-31"
 
 
 def test_incremental_on_error_skip_still_advances_cursor(tmp_path: Path) -> None:
