@@ -11,20 +11,65 @@ from typing import Any
 
 import yaml
 from jsonschema import validators
+from pydantic.json_schema import GenerateJsonSchema, JsonSchemaValue
+from pydantic_core import core_schema
 
+from drt.config.base import _registered_plugin_destination_type_schema
 from drt.config.models import ProjectConfig, SyncConfig
 
 JSON_SCHEMA_DRAFT_07 = "http://json-schema.org/draft-07/schema#"
 
 
+class DeterministicGenerateJsonSchema(GenerateJsonSchema):
+    """Normalize schema shapes that vary across supported pydantic 2.x releases."""
+
+    def literal_schema(self, schema: core_schema.LiteralSchema) -> JsonSchemaValue:
+        json_schema = super().literal_schema(schema)
+
+        # Pydantic 2.5--2.9 variously omitted ``type`` or duplicated a
+        # single-value Literal as both ``const`` and ``enum``. Match 2.13.5:
+        # one ``const`` plus the JSON type.
+        if len(schema["expected"]) == 1:
+            json_schema.pop("enum", None)
+            json_type = {
+                str: "string",
+                int: "integer",
+                float: "number",
+                bool: "boolean",
+                list: "array",
+                type(None): "null",
+            }.get(type(json_schema.get("const")))
+            if json_type is not None:
+                json_schema["type"] = json_type
+
+        return json_schema
+
+    def dict_schema(self, schema: core_schema.DictSchema) -> JsonSchemaValue:
+        json_schema = super().dict_schema(schema)
+
+        # Pydantic 2.11 made the permissive value semantics of dict[str, Any]
+        # explicit. Preserve that 2.13.5 shape on every supported version.
+        if "additionalProperties" not in json_schema and "patternProperties" not in json_schema:
+            json_schema["additionalProperties"] = True
+
+        return json_schema
+
+
 def generate_project_schema() -> dict[str, Any]:
-    schema = ProjectConfig.model_json_schema()
+    schema = ProjectConfig.model_json_schema(schema_generator=DeterministicGenerateJsonSchema)
     schema["$schema"] = JSON_SCHEMA_DRAFT_07
     return schema
 
 
 def generate_sync_schema() -> dict[str, Any]:
-    schema = SyncConfig.model_json_schema()
+    schema = SyncConfig.model_json_schema(schema_generator=DeterministicGenerateJsonSchema)
+    # Pydantic 2.5--2.10 drops GenericDestinationConfig's JSON-schema hook
+    # when composing it with the model's wrap validator (#1081). Reapply the
+    # shared schema unconditionally so live plugin reflection never depends on
+    # that pydantic implementation detail.
+    schema["$defs"]["GenericDestinationConfig"]["properties"]["type"] = (
+        _registered_plugin_destination_type_schema()
+    )
     schema["$schema"] = JSON_SCHEMA_DRAFT_07
     return schema
 
