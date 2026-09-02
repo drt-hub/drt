@@ -274,21 +274,97 @@ def test_incremental_saves_max_cursor(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_incremental_on_error_fail_does_not_advance_past_failed_batch(
+def test_incremental_on_error_fail_reverts_whole_run_not_just_failed_batch(
     tmp_path: Path,
 ) -> None:
-    """Regression test (#1074): the cursor tracked a batch's rows before
-    destination.load() ran, so a failed load under on_error="fail" still
-    persisted a watermark past rows that were never actually loaded — the
-    next incremental run would then skip them forever. The persisted
-    cursor must stop at the last batch that was confirmed loaded."""
-    from drt.state.manager import StateManager
+    """Regression test (#1074): a failed load under on_error="fail" must not
+    persist a cursor past rows that were never actually loaded — the next
+    incremental run would then skip them forever.
+
+    A prior fix rolled back only to the failed batch's own starting cursor
+    (batch-local rollback). Codex review on #1083 found that unsafe: it
+    still persists a value from *this* run whenever a still-earlier batch
+    in the same run advanced the cursor, and extraction is not guaranteed
+    strictly ordered by cursor_field — a batch boundary can split rows that
+    share the same cursor value, or a later batch can contain a lower one.
+    The fix instead reverts the *whole run's* cursor progress back to
+    whatever it was when the run started, so retry always re-extracts
+    every row this run saw, regardless of ordering or ties."""
+    from drt.state.manager import StateManager, SyncState
+
+    state_mgr = StateManager(tmp_path)
+    state_mgr.save_sync(
+        SyncState(
+            sync_name="inc_sync",
+            last_run_at="2023-12-31T00:00:00",
+            records_synced=1,
+            status="success",
+            last_cursor_value="2023-12-31",
+        )
+    )
 
     rows = [
         {"id": 1, "updated_at": "2024-01-01"},
         {"id": 2, "updated_at": "2024-01-02"},
         {"id": 3, "updated_at": "2024-01-05"},  # first row of the failing batch
         {"id": 4, "updated_at": "2024-01-06"},
+    ]
+    source = FakeSource(rows)
+    dest = FakeDestination(fail_indices={2})  # id=3, second batch
+    sync = SyncConfig.model_validate(
+        {
+            "name": "inc_sync",
+            "model": "ref('events')",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {
+                "mode": "incremental",
+                "cursor_field": "updated_at",
+                "batch_size": 2,
+                "on_error": "fail",
+            },
+        }
+    )
+
+    result = run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
+
+    assert result.failed > 0
+    assert len(dest.calls) == 2  # second batch attempted, then break
+
+    state = state_mgr.get_last_sync("inc_sync")
+    assert state is not None
+    # Reverted to exactly where this run started — not the failing batch's
+    # rows (never loaded), and not even the first batch's max cursor,
+    # since a partial-credit rollback is what #1083's review caught as
+    # unsafe under ties/out-of-order extraction.
+    assert state.last_cursor_value == "2023-12-31"
+
+
+def test_incremental_on_error_fail_tied_cursor_across_batch_boundary_not_lost(
+    tmp_path: Path,
+) -> None:
+    """Regression test (#1074 / Codex review on #1083): if the batch that
+    succeeds and the batch that fails share the same max cursor value (a
+    tie straddling the batch boundary), a batch-local rollback would
+    persist that shared value — and the retry's strict `cursor >
+    last_cursor_value` predicate would then silently and permanently skip
+    the failed row, since it has that exact value. The whole-run rollback
+    avoids this: it never persists any value from a run that hit a fail
+    stop, tie or not."""
+    from drt.state.manager import StateManager
+
+    rows = [
+        {"id": 1, "updated_at": "2024-01-01"},
+        {"id": 2, "updated_at": "2024-01-02"},  # batch 1 ends here
+        {"id": 3, "updated_at": "2024-01-02"},  # batch 2 starts with the SAME value...
+        {"id": 4, "updated_at": "2024-01-03"},  # ...and fails
     ]
     source = FakeSource(rows)
     dest = FakeDestination(fail_indices={2})  # id=3, second batch
@@ -318,13 +394,11 @@ def test_incremental_on_error_fail_does_not_advance_past_failed_batch(
     )
 
     assert result.failed > 0
-    assert len(dest.calls) == 2  # second batch attempted, then break
-
     state = state_mgr.get_last_sync("inc_sync")
     assert state is not None
-    # Rolled back to the first (fully-succeeded) batch's max cursor — NOT
-    # the failing batch's rows, which were tracked but never loaded.
-    assert state.last_cursor_value == "2024-01-02"
+    # NOT "2024-01-02" — that would tie the failed row's own cursor value
+    # and exclude it from every future retry under a strict `>` predicate.
+    assert state.last_cursor_value is None
 
 
 def test_incremental_on_error_skip_still_advances_cursor(tmp_path: Path) -> None:

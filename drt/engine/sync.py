@@ -630,14 +630,6 @@ def _run_sync_body(
 
             total_result.rows_extracted += len(record_batch)
 
-            # Snapshot before this batch's cursor tracking so a failed load
-            # below (on_error="fail") can roll the watermark back to here —
-            # the last point every row was confirmed loaded (#1074). Without
-            # this, new_cursor_value already includes rows from the very
-            # batch whose load just failed, so the failed rows would never
-            # be re-extracted on retry.
-            cursor_value_before_batch = new_cursor_value
-
             # Track max cursor value seen across all batches.
             # Stringify with tz-naive UTC normalization for tz-aware datetimes
             # to avoid #475 (re-emit-at-boundary when user SQL is tz-naive).
@@ -759,11 +751,22 @@ def _run_sync_body(
                         observer.on_records_failed(sync.name, dead_letters)
 
                 if sync.sync.on_error == "fail" and result.failed > 0:
-                    # Roll back to the last confirmed-loaded cursor (#1074) —
-                    # this batch's rows were tracked into new_cursor_value
-                    # above but destination.load() just reported failures
-                    # for it, so persisting past it would skip them forever.
-                    new_cursor_value = cursor_value_before_batch
+                    # Roll the whole run's cursor progress back to where it
+                    # started (#1074), not just to the failed batch. A
+                    # per-batch rollback is not safe here: extraction is not
+                    # guaranteed strictly ordered by cursor_field, so a
+                    # failed batch can share its cursor value with an
+                    # already-succeeded batch (a tie straddling the batch
+                    # boundary) or contain a lower value than one already
+                    # tracked — either way, persisting anything past the
+                    # run's starting watermark risks the strict `>` retry
+                    # predicate silently and permanently skipping the failed
+                    # rows. Reverting to the run's start guarantees every
+                    # row from this run is re-extracted on retry, at the
+                    # cost of re-loading rows batches before the failure
+                    # already loaded successfully (safe: destinations here
+                    # are upsert/idempotent on retry).
+                    new_cursor_value = last_cursor_value
                     break
 
             batches_processed += 1
