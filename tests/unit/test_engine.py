@@ -1050,6 +1050,144 @@ def test_run_sync_with_lookup_dry_run(
     assert dest.calls == []  # destination never called
 
 
+def _make_incremental_lookup_sync() -> SyncConfig:
+    return SyncConfig.model_validate(
+        {
+            "name": "lookup_sync",
+            "model": "ref('child_table')",
+            "destination": {
+                "type": "mysql",
+                "host": "localhost",
+                "dbname": "testdb",
+                "table": "child_table",
+                "upsert_key": ["parent_id", "code"],
+                "lookups": {
+                    "parent_id": {
+                        "table": "parent_table",
+                        "match": {"user_id": "user_id"},
+                        "select": "id",
+                        "on_miss": "fail",
+                    },
+                },
+            },
+            "sync": {
+                "batch_size": 10,
+                "mode": "incremental",
+                "cursor_field": "updated_at",
+                "on_error": "fail",
+            },
+        }
+    )
+
+
+@patch(
+    "drt.engine.sync.build_lookup_map",
+    return_value={("u1",): 10, ("u3",): 30},
+)
+def test_run_sync_fatal_lookup_miss_reverts_cursor(
+    mock_build: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """Regression test (#1084 / #1074, Codex review on #1083): a fatal
+    lookup miss (on_miss: fail) under on_error: fail must stop the run and
+    revert the cursor, not just skip the batch. Cursor tracking runs over
+    the whole raw batch *before* lookups — so without this fix, the u3 row
+    (cursor 13, never even attempted because apply_lookups() stopped at
+    the u2 miss) would have its cursor persisted anyway once the
+    surviving u1 prefix loads cleanly, permanently excluding it."""
+    from drt.state.manager import StateManager
+
+    rows = [
+        {"user_id": "u1", "code": "a", "updated_at": "11"},
+        {"user_id": "u2", "code": "b", "updated_at": "12"},  # misses the lookup, fatal
+        {"user_id": "u3", "code": "c", "updated_at": "13"},  # never even attempted
+    ]
+    source = FakeSource(rows)
+    dest = FakeDestination()
+    sync = _make_incremental_lookup_sync()
+    state_mgr = StateManager(tmp_path)
+
+    result = run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
+
+    assert result.failed > 0
+    # Only the pre-miss prefix (u1) ever reached the destination.
+    assert len(dest.calls) == 1
+    assert dest.calls[0][0]["code"] == "a"
+
+    state = state_mgr.get_last_sync("lookup_sync")
+    assert state is not None
+    # NOT "13" — reverted to before this (first) run started.
+    assert state.last_cursor_value is None
+
+
+@patch(
+    "drt.engine.sync.build_lookup_map",
+    return_value={("u1",): 10, ("u3",): 30},
+)
+def test_run_sync_fatal_lookup_miss_in_later_batch_reverts_to_run_start(
+    mock_build: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """Same as test_run_sync_fatal_lookup_miss_reverts_cursor, but with the
+    fatal miss in the SECOND batch (batch_size=1) after a first batch that
+    loaded cleanly on its own. The revert must land on the durable cursor
+    from before this run started — not on the first batch's own (higher)
+    max cursor, matching the whole-run-revert design #1074/#1083 settled
+    on for the destination.load() fatal path."""
+    from drt.state.manager import StateManager, SyncState
+
+    state_mgr = StateManager(tmp_path)
+    state_mgr.save_sync(
+        SyncState(
+            sync_name="lookup_sync",
+            last_run_at="2023-12-31T00:00:00",
+            records_synced=1,
+            status="success",
+            last_cursor_value="10",
+        )
+    )
+
+    rows = [
+        {"user_id": "u1", "code": "a", "updated_at": "11"},  # batch 1: loads cleanly
+        {"user_id": "u2", "code": "b", "updated_at": "12"},  # batch 2: fatal miss
+        {"user_id": "u3", "code": "c", "updated_at": "13"},  # never even attempted
+    ]
+    source = FakeSource(rows)
+    dest = FakeDestination()
+    sync = _make_incremental_lookup_sync()
+    sync.sync.batch_size = 1
+
+    result = run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
+
+    assert result.failed > 0
+    # Batch 1 (u1) loaded; batch 2's fatal miss stopped the run before any
+    # further destination call.
+    assert len(dest.calls) == 1
+    assert dest.calls[0][0]["code"] == "a"
+
+    state = state_mgr.get_last_sync("lookup_sync")
+    assert state is not None
+    # NOT "11" (batch 1's own max) and NOT "13" — reverted all the way to
+    # the run's start.
+    assert state.last_cursor_value == "10"
+
+
 def test_full_sync_no_cursor_saved(tmp_path: Path) -> None:
     from drt.state.manager import StateManager
 

@@ -121,7 +121,7 @@ def apply_lookups(
     records: list[dict[str, Any]],
     lookup_maps: dict[str, tuple[LookupConfig, dict[tuple[Any, ...], Any]]],
     on_error: str,
-) -> tuple[list[dict[str, Any]], list[RowError]]:
+) -> tuple[list[dict[str, Any]], list[RowError], bool]:
     """Enrich records with resolved lookup values.
 
     **Ordering invariant:** lookups are evaluated in YAML insertion order
@@ -138,8 +138,22 @@ def apply_lookups(
         on_error: Sync-level error handling (``"skip"`` or ``"fail"``).
 
     Returns:
-        Tuple of (enriched records, row-level errors).
-        Skipped rows are excluded from the returned list.
+        Tuple of (enriched records, row-level errors, fatal). ``fatal`` is
+        True iff a lookup with ``on_miss: fail`` missed while
+        ``on_error == "fail"`` — the caller stopped enriching immediately
+        (#1084 / #1074 / #1083 review), so ``records`` is only the
+        successfully-enriched *prefix* up to (not including) the missed
+        row, and every row from there on in this batch was never even
+        attempted. The caller MUST treat this the same as a fatal
+        ``destination.load()`` failure — stop the run, don't trust any
+        cursor value tracked from rows this batch never actually
+        resolved — not just skip the batch and continue. Otherwise a
+        confirmed-loadable prefix can load successfully, the run reports
+        success, and the batch's already-tracked max cursor (computed
+        *before* lookups ran, over every row including the ones dropped
+        here) gets persisted — permanently excluding the dropped rows.
+        Always False when ``on_error == "skip"``: a lookup miss under
+        skip semantics is a legitimate, non-fatal per-row outcome.
     """
     enriched: list[dict[str, Any]] = []
     errors: list[RowError] = []
@@ -191,7 +205,7 @@ def apply_lookups(
 
         if fail:
             if on_error == "fail":
-                return enriched, errors
+                return enriched, errors, True
             continue
         if skip:
             continue
@@ -213,4 +227,4 @@ def apply_lookups(
 
         enriched.append(record)
 
-    return enriched, errors
+    return enriched, errors, False

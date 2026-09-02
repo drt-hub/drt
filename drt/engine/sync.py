@@ -669,16 +669,38 @@ def _run_sync_body(
                             new_cursor_value = str_val
 
             # Apply destination lookups (FK resolution)
+            lookup_fatal = False
             if lookup_maps:
                 batch_len_before = len(record_batch)
-                record_batch, lookup_errors = apply_lookups(
+                record_batch, lookup_errors, lookup_fatal = apply_lookups(
                     record_batch,
                     lookup_maps,
                     sync.sync.on_error,
                 )
                 total_result.row_errors.extend(lookup_errors)
                 total_result.skipped += batch_len_before - len(record_batch)
+                if lookup_fatal:
+                    # A fatal (on_miss: fail) lookup miss under on_error:
+                    # fail (#1084 / #1074 / #1083 review): apply_lookups
+                    # stopped enriching immediately, so record_batch is
+                    # only the prefix before the miss. Same watermark-
+                    # safety hazard as a fatal destination.load() —
+                    # cursor tracking above already covers every row in
+                    # this batch, including the ones dropped here — so
+                    # this counts as a failure and reverts the cursor
+                    # the same way, whether or not any prefix survives to
+                    # load. Watermark handling only, though: unlike a
+                    # destination.load() failure, this RowError never
+                    # becomes a DeadLetter (that conversion below is
+                    # built from the destination's own result.row_errors,
+                    # not total_result.row_errors), so the missed row
+                    # doesn't reach the DLQ / `drt retry` — it comes back
+                    # only via re-extraction once the watermark reverts.
+                    total_result.failed += 1
                 if not record_batch:
+                    if lookup_fatal:
+                        new_cursor_value = durable_cursor_value
+                        break
                     continue
 
             # Declarative derived columns (#763). First of the three payload
@@ -805,6 +827,16 @@ def _run_sync_body(
                     # failure (caught in Codex review on #1083).
                     new_cursor_value = durable_cursor_value
                     break
+
+            if lookup_fatal:
+                # The (possibly empty) prefix apply_lookups() salvaged was
+                # already loaded normally above like any other batch —
+                # those rows really did succeed. But this batch also hit a
+                # fatal lookup miss, so the run as a whole must still stop
+                # and revert, whether or not destination.load() itself
+                # reported any failure for the prefix it did see.
+                new_cursor_value = durable_cursor_value
+                break
 
             batches_processed += 1
     finally:
