@@ -630,6 +630,14 @@ def _run_sync_body(
 
             total_result.rows_extracted += len(record_batch)
 
+            # Snapshot before this batch's cursor tracking so a failed load
+            # below (on_error="fail") can roll the watermark back to here —
+            # the last point every row was confirmed loaded (#1074). Without
+            # this, new_cursor_value already includes rows from the very
+            # batch whose load just failed, so the failed rows would never
+            # be re-extracted on retry.
+            cursor_value_before_batch = new_cursor_value
+
             # Track max cursor value seen across all batches.
             # Stringify with tz-naive UTC normalization for tz-aware datetimes
             # to avoid #475 (re-emit-at-boundary when user SQL is tz-naive).
@@ -751,6 +759,11 @@ def _run_sync_body(
                         observer.on_records_failed(sync.name, dead_letters)
 
                 if sync.sync.on_error == "fail" and result.failed > 0:
+                    # Roll back to the last confirmed-loaded cursor (#1074) —
+                    # this batch's rows were tracked into new_cursor_value
+                    # above but destination.load() just reported failures
+                    # for it, so persisting past it would skip them forever.
+                    new_cursor_value = cursor_value_before_batch
                     break
 
             batches_processed += 1

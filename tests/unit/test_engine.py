@@ -270,6 +270,111 @@ def test_incremental_saves_max_cursor(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Watermark safety on partial failure (#1074)
+# ---------------------------------------------------------------------------
+
+
+def test_incremental_on_error_fail_does_not_advance_past_failed_batch(
+    tmp_path: Path,
+) -> None:
+    """Regression test (#1074): the cursor tracked a batch's rows before
+    destination.load() ran, so a failed load under on_error="fail" still
+    persisted a watermark past rows that were never actually loaded — the
+    next incremental run would then skip them forever. The persisted
+    cursor must stop at the last batch that was confirmed loaded."""
+    from drt.state.manager import StateManager
+
+    rows = [
+        {"id": 1, "updated_at": "2024-01-01"},
+        {"id": 2, "updated_at": "2024-01-02"},
+        {"id": 3, "updated_at": "2024-01-05"},  # first row of the failing batch
+        {"id": 4, "updated_at": "2024-01-06"},
+    ]
+    source = FakeSource(rows)
+    dest = FakeDestination(fail_indices={2})  # id=3, second batch
+    sync = SyncConfig.model_validate(
+        {
+            "name": "inc_sync",
+            "model": "ref('events')",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {
+                "mode": "incremental",
+                "cursor_field": "updated_at",
+                "batch_size": 2,
+                "on_error": "fail",
+            },
+        }
+    )
+    state_mgr = StateManager(tmp_path)
+
+    result = run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
+
+    assert result.failed > 0
+    assert len(dest.calls) == 2  # second batch attempted, then break
+
+    state = state_mgr.get_last_sync("inc_sync")
+    assert state is not None
+    # Rolled back to the first (fully-succeeded) batch's max cursor — NOT
+    # the failing batch's rows, which were tracked but never loaded.
+    assert state.last_cursor_value == "2024-01-02"
+
+
+def test_incremental_on_error_skip_still_advances_cursor(tmp_path: Path) -> None:
+    """The #1074 rollback is scoped to on_error="fail" — a skip-mode sync
+    with row failures must keep advancing the watermark as before, or
+    every sync with any bad row would stall forever."""
+    from drt.state.manager import StateManager
+
+    rows = [
+        {"id": 1, "updated_at": "2024-01-01"},
+        {"id": 2, "updated_at": "2024-01-02"},
+        {"id": 3, "updated_at": "2024-01-05"},
+        {"id": 4, "updated_at": "2024-01-06"},
+    ]
+    source = FakeSource(rows)
+    dest = FakeDestination(fail_indices={2})
+    sync = SyncConfig.model_validate(
+        {
+            "name": "inc_sync",
+            "model": "ref('events')",
+            "destination": {"type": "rest_api", "url": "https://example.com"},
+            "sync": {
+                "mode": "incremental",
+                "cursor_field": "updated_at",
+                "batch_size": 2,
+                "on_error": "skip",
+            },
+        }
+    )
+    state_mgr = StateManager(tmp_path)
+
+    result = run_sync(
+        sync,
+        source,
+        dest,
+        _make_profile(),
+        tmp_path,
+        state_manager=state_mgr,
+        observer=StatePersistingObserver(state_mgr, None),
+    )
+
+    assert result.failed == 1
+    assert len(dest.calls) == 2  # both batches processed despite the failure
+
+    state = state_mgr.get_last_sync("inc_sync")
+    assert state is not None
+    assert state.last_cursor_value == "2024-01-06"
+
+
+# ---------------------------------------------------------------------------
 # Cursor value stringification (#475)
 # ---------------------------------------------------------------------------
 
