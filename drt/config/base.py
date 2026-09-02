@@ -392,6 +392,28 @@ class RateLimitConfig(BaseModel):
 #
 # Names drt-core itself reads off a destination config are refused on that
 # fallback path rather than absorbed — see `_reject_reserved_extras`.
+def _registered_plugin_destination_type_schema() -> JsonSchemaValue:
+    """Schema for destination types supplied by live connector plugins.
+
+    Shared by :class:`GenericDestinationConfig`'s pydantic hook and drt's
+    top-level schema generator. The latter reapplies it after generation
+    because pydantic 2.5--2.10 can silently discard the hook when it is
+    composed with this model's wrap validator (#1081).
+    """
+    from drt.config.sync_options import _BUILTIN_DESTINATION_TAGS
+    from drt.connectors.registry import registered_destination_types
+
+    plugin_types = sorted(set(registered_destination_types()) - _BUILTIN_DESTINATION_TAGS)
+    return {
+        "description": (
+            "Connector type registered by a third-party package. Built-in "
+            "types are validated against their own schema instead."
+        ),
+        "enum": plugin_types,
+        "type": "string",
+    }
+
+
 class GenericDestinationConfig(DescribableConfig):
     """A destination type provided by a third-party connector package."""
 
@@ -515,16 +537,5 @@ class GenericDestinationConfig(DescribableConfig):
         this module.
         """
         schema = handler(core_schema)
-        from drt.config.sync_options import _BUILTIN_DESTINATION_TAGS
-        from drt.connectors.registry import registered_destination_types
-
-        plugin_types = sorted(set(registered_destination_types()) - _BUILTIN_DESTINATION_TAGS)
-        schema.setdefault("properties", {})["type"] = {
-            "type": "string",
-            "enum": plugin_types,
-            "description": (
-                "Connector type registered by a third-party package. Built-in "
-                "types are validated against their own schema instead."
-            ),
-        }
+        schema.setdefault("properties", {})["type"] = _registered_plugin_destination_type_schema()
         return schema
