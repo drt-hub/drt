@@ -520,8 +520,16 @@ def _run_sync_body(
     # back years (caught in Codex review on #1083). When no override is in
     # play, last_cursor_value already IS the durable value, so no extra read
     # is needed.
+    # dry_run never persists (StatePersistingObserver.on_sync_completed
+    # returns immediately on result.dry_run — #978), so this value is never
+    # actually used for one; skip the read entirely rather than making a
+    # preview depend on a remote watermark backend being reachable (round
+    # 6, Codex review — a backfill/recovery *preview* using --cursor-value
+    # previously needed no durable-storage access at all, and shouldn't
+    # start needing it just because #1083 added a fallback target that a
+    # dry run will never reach).
     durable_cursor_value: str | None
-    if cursor_field and cursor_value_override is not None:
+    if cursor_field and cursor_value_override is not None and not dry_run:
         durable_cursor_value = None
         if watermark_storage:
             durable_cursor_value = watermark_storage.get(sync.name)

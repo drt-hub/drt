@@ -273,20 +273,38 @@ class StatePersistingObserver:
             try:
                 # Never regress an already-persisted watermark (#1074
                 # round 5, Codex review on #1083): a #1074 rollback can
-                # hand this observer an older cursor than what's already
-                # stored, and — independent of #1074 — so can an ordinary
-                # race between two runs of the same sync. Reading the
-                # current value first and refusing to move it backward is
-                # the cheap, single-process-safe half of that; true
-                # cross-process atomicity needs a CAS/generation-token
-                # primitive the StateStore Protocol doesn't have yet
-                # (that's #756's scope, not this fix's).
-                if persist_cursor_value is not None:
+                # hand this observer an older (or, on a from-scratch
+                # revert, a None) cursor than what's already stored, and —
+                # independent of #1074 — so can an ordinary race between
+                # two runs of the same sync. Reading the current value
+                # first and refusing to move it backward is the cheap,
+                # single-process-safe half of that; true cross-process
+                # atomicity needs a CAS/generation-token primitive the
+                # StateStore Protocol doesn't have yet (that's #756's
+                # scope, not this fix's) — a run that reads here, loses a
+                # race to a concurrent writer, and then writes anyway can
+                # still regress the cursor in the narrow window between
+                # this read and the save_sync() call below.
+                #
+                # persist_cursor_value being None must NOT short-circuit
+                # this check (round 6, Codex review): a from-scratch
+                # revert legitimately has nothing of its own to persist,
+                # but that must mean "leave the existing cursor alone",
+                # never "overwrite it with None" — round 5's fix only
+                # skipped the read (and so the guard) when the proposed
+                # value was already None, which reintroduced exactly the
+                # unconditional-None-wipe failure mode this whole fix
+                # exists to close, just gated on a race instead of on
+                # every failed run.
+                if cursor_field:
                     current = self._state_manager.get_last_sync(sync_name)
                     if (
                         current is not None
                         and current.last_cursor_value is not None
-                        and not cursor_gt(persist_cursor_value, current.last_cursor_value)
+                        and (
+                            persist_cursor_value is None
+                            or not cursor_gt(persist_cursor_value, current.last_cursor_value)
+                        )
                     ):
                         persist_cursor_value = current.last_cursor_value
                 self._state_manager.save_sync(
