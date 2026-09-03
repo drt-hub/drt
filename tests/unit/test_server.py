@@ -18,7 +18,13 @@ from typing import Any
 import pytest
 
 from drt import __version__
-from drt.cli.server import AuthConfig, SyncScheduler, make_handler
+from drt.cli.server import (
+    AuthConfig,
+    SyncScheduler,
+    _verify_hmac,
+    _verify_stripe_hmac,
+    make_handler,
+)
 
 _SUCCESS_RESULT = {
     "sync_name": "s",
@@ -624,3 +630,183 @@ def test_wait_true_while_busy_coalesces_and_blocks_until_done() -> None:
     finally:
         runner.release.set()
         server.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Stripe timestamped signatures (#969)
+
+
+def _stripe_header(secret: str, body: bytes, *, at: int, extra: str = "") -> str:
+    signature = hmac.new(secret.encode(), f"{at}.".encode() + body, hashlib.sha256).hexdigest()
+    return f"t={at},v1={signature}{extra}"
+
+
+def test_stripe_valid_signature_accepted() -> None:
+    secret, payload = "whsec_topsecret", b'{"id": "evt_1", "type": "charge.succeeded"}'
+    now = int(time.time())
+    server, _, port = _run_server(
+        auth=AuthConfig(
+            scheme="hmac",
+            hmac_secret=secret,
+            hmac_scheme="stripe",
+            hmac_header="Stripe-Signature",
+        )
+    )
+    try:
+        status, body = _post(
+            f"http://127.0.0.1:{port}/sync/my_sync",
+            body=payload,
+            headers={"Stripe-Signature": _stripe_header(secret, payload, at=now)},
+        )
+        assert status == 202
+        assert body["run_id"]
+    finally:
+        server.shutdown()
+
+
+def test_stripe_signature_covers_the_body() -> None:
+    """The signature is over ``t.body``; swapping the body must fail."""
+    secret = "whsec_topsecret"
+    now = int(time.time())
+    header = _stripe_header(secret, b'{"amount": 100}', at=now)
+    server, _, port = _run_server(
+        auth=AuthConfig(
+            scheme="hmac", hmac_secret=secret, hmac_scheme="stripe", hmac_header="Stripe-Signature"
+        )
+    )
+    try:
+        status, _ = _post(
+            f"http://127.0.0.1:{port}/sync/my_sync",
+            body=b'{"amount": 999999}',
+            headers={"Stripe-Signature": header},
+        )
+        assert status == 401
+    finally:
+        server.shutdown()
+
+
+def test_stripe_stale_timestamp_rejected() -> None:
+    """A replayed delivery outside the window is refused even though it signs."""
+    secret, payload = "whsec_topsecret", b"{}"
+    stale = int(time.time()) - 601
+    server, _, port = _run_server(
+        auth=AuthConfig(
+            scheme="hmac",
+            hmac_secret=secret,
+            hmac_scheme="stripe",
+            hmac_header="Stripe-Signature",
+            hmac_tolerance=300,
+        )
+    )
+    try:
+        status, _ = _post(
+            f"http://127.0.0.1:{port}/sync/my_sync",
+            body=payload,
+            headers={"Stripe-Signature": _stripe_header(secret, payload, at=stale)},
+        )
+        assert status == 401
+    finally:
+        server.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        # A fake v0 rides along with real events; it must be ignored, not fail the request.
+        ("with_v0", True),
+        # Rolling an endpoint secret leaves two live, and Stripe signs once per secret.
+        ("rotation", True),
+        # "Ignore all schemes that aren't v1" — a v0-only header is a downgrade attempt.
+        ("v0_only", False),
+        ("no_timestamp", False),
+        ("bad_timestamp", False),
+        ("duplicate_timestamp", False),
+        # Malformed input is unauthenticated and attacker-chosen, so it has to
+        # return False rather than raise out of the verifier and take the
+        # connection down with a traceback. Both of these used to raise:
+        # compare_digest refuses non-ASCII str operands (TypeError), and an
+        # arbitrary-precision int overflows on the float comparison
+        # (OverflowError) despite parsing cleanly.
+        ("non_ascii_signature", False),
+        ("oversized_timestamp", False),
+    ],
+)
+def test_stripe_header_parsing_edge_cases(header: str, expected: bool) -> None:
+    secret, payload = "whsec_topsecret", b'{"id": "evt_1"}'
+    now = int(time.time())
+    good = hmac.new(secret.encode(), f"{now}.".encode() + payload, hashlib.sha256).hexdigest()
+    headers = {
+        "with_v0": f"t={now},v1={good},v0=deadbeef",
+        "rotation": f"t={now},v1={'0' * 64},v1={good}",
+        "v0_only": f"t={now},v0={good}",
+        "no_timestamp": f"v1={good}",
+        "bad_timestamp": f"t=not-a-number,v1={good}",
+        "duplicate_timestamp": f"t={now},t={now},v1={good}",
+        "non_ascii_signature": f"t={now},v1=\u00e9",
+        "oversized_timestamp": f"t={'9' * 400},v1={good}",
+    }
+    assert _verify_stripe_hmac(payload, headers[header], secret, 300) is expected
+
+
+def test_stripe_replay_window_is_symmetric() -> None:
+    """A far-future timestamp is as suspect as a stale one.
+
+    Stripe's own libraries only reject stale timestamps, which leaves a
+    future-dated signature valid indefinitely.
+    """
+    secret, payload = "whsec_topsecret", b"{}"
+    base = 1_700_000_000
+    header = _stripe_header(secret, payload, at=base)
+    assert _verify_stripe_hmac(payload, header, secret, 300, now=base) is True
+    assert _verify_stripe_hmac(payload, header, secret, 300, now=base + 301) is False
+    assert _verify_stripe_hmac(payload, header, secret, 300, now=base - 301) is False
+
+
+def test_stripe_scheme_does_not_accept_a_plain_body_signature() -> None:
+    """The generic and Stripe schemes must not silently accept each other."""
+    secret, payload = "whsec_topsecret", b"{}"
+    plain = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
+    assert _verify_stripe_hmac(payload, f"sha256={plain}", secret, 300) is False
+    assert _verify_hmac(payload, _stripe_header(secret, payload, at=int(time.time())), secret) is (
+        False
+    )
+
+
+def test_stripe_scheme_rejects_get_regardless_of_signature() -> None:
+    """`--hmac-scheme stripe` is POST-only, so a GET is 401 even if it signs.
+
+    Stripe never sends a GET, so there is no header shape it defines for one.
+    Falling through to the generic path would be worse than a flat rejection:
+    a Stripe signature over the empty body carries no path, so one captured
+    header would read any run id for the whole tolerance window — exactly the
+    replay #998 closed for the generic scheme.
+    """
+    secret = "whsec_topsecret"
+    now = int(time.time())
+    server, _, port = _run_server(
+        auth=AuthConfig(
+            scheme="hmac",
+            hmac_secret=secret,
+            hmac_scheme="stripe",
+            hmac_header="Stripe-Signature",
+        )
+    )
+    try:
+        # /health stays exempt, so a probe still works without a credential.
+        assert _get(f"http://127.0.0.1:{port}/health")[0] == 200
+        # A correctly signed empty body — the closest thing to a valid GET
+        # signature this scheme could have — is still refused.
+        status, _ = _get(
+            f"http://127.0.0.1:{port}/runs/whatever",
+            headers={"Stripe-Signature": _stripe_header(secret, b"", at=now)},
+        )
+        assert status == 401
+    finally:
+        server.shutdown()
+
+
+def test_auth_config_rejects_bad_hmac_scheme_and_tolerance() -> None:
+    with pytest.raises(ValueError, match="unknown hmac scheme"):
+        AuthConfig(scheme="hmac", hmac_secret="s", hmac_scheme="paypal")
+    with pytest.raises(ValueError, match="tolerance must be a positive"):
+        AuthConfig(scheme="hmac", hmac_secret="s", hmac_scheme="stripe", hmac_tolerance=0)

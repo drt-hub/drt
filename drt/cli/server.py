@@ -33,9 +33,15 @@ not change, only the id's durability.
 Auth (``--auth`` on ``drt serve``):
     none    unauthenticated (local dev only)
     bearer  static token compared with ``secrets.compare_digest``
-    hmac    HMAC-SHA256 of the raw request body, GitHub-style
-            (``X-Hub-Signature-256: sha256=<hex>``; bare hex and base64 digests
-            are also accepted, which covers Shopify's header format)
+    hmac    a request signature, in one of two shapes selected by
+            ``--hmac-scheme``:
+              generic  HMAC-SHA256 of the raw body, GitHub-style
+                       (``X-Hub-Signature-256: sha256=<hex>``; bare hex and
+                       base64 digests are also accepted, covering Shopify)
+              stripe   ``Stripe-Signature: t=<ts>,v1=<hex>`` over ``<ts>.<body>``
+                       with a replay window (#969). POST only — Stripe never
+                       sends a GET, so ``GET /runs/<id>`` has no signature to
+                       verify under this scheme.
 
 Every route except ``GET /health`` is authenticated. ``GET /runs/<id>`` returns
 the SyncResult and any error text, so it is not exempt: the run id is a uuid4,
@@ -57,6 +63,7 @@ import itertools
 import json
 import secrets
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -93,6 +100,16 @@ class AuthConfig:
     token: str | None = None
     hmac_secret: str | None = None
     hmac_header: str = "X-Hub-Signature-256"
+    # Which signature *shape* the hmac scheme expects (#969). "generic" is the
+    # #854 behaviour verbatim — a digest of the body in any of three encodings,
+    # which covers GitHub, Shopify and bare-hex senders. "stripe" is a different
+    # construction, not another encoding of the same one, so it is a separate
+    # verifier rather than a fourth candidate in the same tuple.
+    hmac_scheme: str = "generic"  # "generic" | "stripe"
+    # Replay window for timestamped schemes, in seconds. Stripe's own libraries
+    # default to five minutes; their docs warn against 0, which turns the
+    # recency check off entirely rather than making it strict.
+    hmac_tolerance: int = 300
 
     def __post_init__(self) -> None:
         if self.scheme not in ("none", "bearer", "hmac"):
@@ -101,6 +118,13 @@ class AuthConfig:
             raise ValueError("auth scheme 'bearer' requires a token")
         if self.scheme == "hmac" and not self.hmac_secret:
             raise ValueError("auth scheme 'hmac' requires a secret")
+        if self.hmac_scheme not in ("generic", "stripe"):
+            raise ValueError(f"unknown hmac scheme: {self.hmac_scheme!r}")
+        if self.hmac_tolerance <= 0:
+            raise ValueError(
+                "hmac tolerance must be a positive number of seconds; 0 would disable "
+                "the replay-window check rather than tighten it"
+            )
 
 
 def _verify_bearer(header_value: str, token: str) -> bool:
@@ -132,8 +156,9 @@ def _verify_hmac(body: bytes, header_value: str, secret: str, *, path: str | Non
 
     GitHub sends ``sha256=<hex>``, Shopify sends base64, and a hand-rolled
     sender may send bare hex — all three are digests of the same bytes, so
-    accepting each costs nothing. Stripe's timestamped ``t=...,v1=...`` scheme
-    is genuinely different (replay tolerance) and is not covered here.
+    accepting each costs nothing. Stripe signs something else entirely — a
+    timestamped ``t=...,v1=...`` construction with a replay window; see
+    :func:`_verify_stripe_hmac`.
 
     ``path`` is passed for GET only, and switches the signature to cover the
     request path under :func:`_derive_get_key` instead of the body. It is keyed
@@ -152,6 +177,76 @@ def _verify_hmac(body: bytes, header_value: str, secret: str, *, path: str | Non
     )
     got = header_value.encode()
     return any(secrets.compare_digest(got, candidate.encode()) for candidate in accepted)
+
+
+def _verify_stripe_hmac(
+    body: bytes, header_value: str, secret: str, tolerance: int, now: float | None = None
+) -> bool:
+    """Verify a Stripe ``Stripe-Signature`` header (#969).
+
+    Stripe's scheme differs from GitHub/Shopify in three ways that each matter:
+
+    * the signed payload is ``f"{t}.{body}"``, not the body alone, so the
+      timestamp is covered by the signature and cannot be edited by a replayer;
+    * the header carries several comma-separated ``prefix=value`` elements, and
+      **more than one may be ``v1``** — rolling an endpoint secret leaves the
+      old one live for up to 24h and Stripe signs once per active secret, so
+      rejecting on the first mismatch breaks every rotation;
+    * a signature is only fresh for a window. Stripe's libraries default to five
+      minutes.
+
+    Only ``v1`` is verified. Stripe attaches a deliberately fake ``v0`` to test
+    events and its docs are explicit — "to prevent downgrade attacks, ignore all
+    schemes that aren't v1" — so accepting any ``v*`` that happens to match
+    would be a real vulnerability, not a convenience.
+
+    ``now`` is injectable purely so the replay window can be tested without
+    sleeping or freezing the process clock.
+    """
+    timestamp: str | None = None
+    signatures: list[str] = []
+    for element in header_value.split(","):
+        prefix, _, value = element.strip().partition("=")
+        if prefix == "t":
+            # A second `t=` would make "which timestamp was signed?" ambiguous;
+            # Stripe sends exactly one, so treat anything else as malformed.
+            if timestamp is not None:
+                return False
+            timestamp = value
+        elif prefix == "v1":
+            signatures.append(value)
+
+    if timestamp is None or not signatures:
+        return False
+
+    # Symmetric window. Stripe's own libraries only reject *stale* timestamps,
+    # which leaves a far-future one valid indefinitely; bounding both directions
+    # costs nothing and clock skew is bidirectional anyway.
+    #
+    # The arithmetic is inside the `try`, not just the parse: Python ints are
+    # arbitrary precision, so `t=<400 digits>` parses fine and then raises
+    # OverflowError on the float comparison. Every input here is attacker-chosen
+    # and unauthenticated, so a malformed one must return False, never raise.
+    try:
+        signed_at = int(timestamp)
+        current = time.time() if now is None else now
+        if abs(current - signed_at) > tolerance:
+            return False
+    except (ValueError, OverflowError):
+        return False
+
+    expected = (
+        hmac.new(secret.encode(), f"{timestamp}.".encode() + body, hashlib.sha256)
+        .hexdigest()
+        .encode()
+    )
+    # Compared as bytes, matching `_verify_hmac`: `secrets.compare_digest` rejects
+    # non-ASCII `str` operands with a TypeError, and `v1=<non-ascii>` is free for
+    # an unauthenticated client to send.
+    #
+    # Every candidate is compared even after a match: `any()` would short-circuit
+    # and leak, through timing, how many signatures were tried.
+    return sum(secrets.compare_digest(expected, candidate.encode()) for candidate in signatures) > 0
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +435,20 @@ def make_handler(
                 return _verify_bearer(self.headers.get("Authorization", ""), auth.token)
             assert auth.hmac_secret is not None
             signature = self.headers.get(auth.hmac_header, "")
-            return bool(signature) and _verify_hmac(body, signature, auth.hmac_secret, path=path)
+            if not signature:
+                return False
+            if auth.hmac_scheme == "stripe":
+                # POST only, by design (#969). Stripe never sends a GET, so
+                # there is no Stripe-Signature to verify on one and no payload
+                # shape Stripe would define for it. Verifying a GET against the
+                # empty body would also hand back exactly what #998 removed: a
+                # signature that is independent of the path it was issued for,
+                # and so replayable across run ids for the whole tolerance
+                # window. Reject rather than invent a convention.
+                if path is not None:
+                    return False
+                return _verify_stripe_hmac(body, signature, auth.hmac_secret, auth.hmac_tolerance)
+            return _verify_hmac(body, signature, auth.hmac_secret, path=path)
 
         def do_GET(self) -> None:  # noqa: N802
             # /health answers before the auth check so a load-balancer probe
@@ -442,6 +550,8 @@ def serve(
     auth_scheme: str = "auto",
     hmac_secret: str | None = None,
     hmac_header: str = "X-Hub-Signature-256",
+    hmac_scheme: str = "generic",
+    hmac_tolerance: int = 300,
 ) -> None:
     """Start the webhook server (blocking).
 
@@ -461,6 +571,8 @@ def serve(
         token=token,
         hmac_secret=hmac_secret,
         hmac_header=hmac_header,
+        hmac_scheme=hmac_scheme,
+        hmac_tolerance=hmac_tolerance,
     )
 
     project_path = Path(project_dir)
@@ -492,7 +604,11 @@ def serve(
     auth_note = {
         "none": "[yellow]without auth (local dev only)[/yellow]",
         "bearer": "with bearer token auth",
-        "hmac": f"with HMAC auth ({auth.hmac_header})",
+        "hmac": (
+            f"with Stripe signature auth ({auth.hmac_header}, {auth.hmac_tolerance}s window)"
+            if auth.hmac_scheme == "stripe"
+            else f"with HMAC auth ({auth.hmac_header})"
+        ),
     }[auth.scheme]
     from drt.cli.output import console
 
