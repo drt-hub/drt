@@ -883,14 +883,34 @@ class StagedUploadDestinationConfig(BaseModel):
         return self.describe()  # detail is object identity only (#696)
 
     def rate_limit_key(self) -> str:
-        """Per trigger host (#769). A staged upload talks to several URLs, but
-        the stage step is usually a one-shot presigned URL on a storage host
-        while the trigger is the vendor API that actually publishes a quota — so
-        the trigger's ``netloc`` is the endpoint worth pacing.
+        """Per polling host when configured, else per trigger host (#769, #1068).
+        A staged upload talks to several URLs, but the stage step is usually a
+        one-shot presigned URL on a storage host, so it's excluded either way.
+        When a ``poll`` phase is configured, it's the one that's actually hit
+        repeatedly (a wait loop), so its host — not the trigger's — is the one
+        whose real-world rate limit matters; ``poll.url`` is independently
+        configurable and can differ from the trigger's host. In the common
+        case where they share a host, this resolves to the exact same key as
+        before, so no behavior change there.
+
+        ``rate_limit_key()`` is a config-only, no-argument method (the shared
+        contract every destination in the union implements, consulted by
+        :func:`resolve_rate_limiter` before any HTTP phase runs) — it cannot
+        see the ``response_extract`` context a templated URL renders against.
+        ``poll.url`` is usually static, or templates only a path segment onto
+        a static host (e.g. a job id), which parses correctly even
+        unrendered. If it's instead templated as a *whole* URL supplied by
+        the trigger response (e.g. ``poll.url: "{{ status_url }}"``), the
+        unrendered string has no parseable host at all — falling back to the
+        trigger host here avoids collapsing every such destination onto one
+        shared, empty-host limiter bucket, at the cost of not knowing the
+        real poll host ahead of time in that specific case.
         ``describe()`` is the bare constant ``"staged_upload"``.
         (``BaseModel``-direct config.)
         """
-        return f"{self.type}:{urlparse(self.trigger.url).netloc}"
+        poll_host = urlparse(self.poll.url).netloc if self.poll is not None else ""
+        host = poll_host or urlparse(self.trigger.url).netloc
+        return f"{self.type}:{host}"
 
 
 class SalesforceBulkDestinationConfig(BaseModel):

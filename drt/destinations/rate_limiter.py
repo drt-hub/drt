@@ -302,6 +302,7 @@ def resolve_rate_limiter(
     sync_options: SyncOptions,
     max_requests_per_second: float | None = None,
     limiter_factory: LimiterFactory | None = None,
+    key_override: str | None = None,
 ) -> RateLimiterBackend:
     """Return the shared limiter for this destination's endpoint (#769).
 
@@ -359,9 +360,19 @@ def resolve_rate_limiter(
     The returned key is process-local. Do not log or serialize it: it may embed
     an env-var name or a credential digest, and the #696 review rejected
     published digests as brute-forceable.
+
+    ``key_override`` bypasses ``config.rate_limit_key()`` entirely when given
+    (#1068). ``RateLimitKeyed.rate_limit_key()`` is deliberately a static,
+    no-argument method — every other destination's endpoint identity is fully
+    known from config alone — but ``staged_upload``'s ``poll`` phase can hit a
+    URL a template renders from the *trigger response* at runtime (e.g. a
+    vendor-returned status URL), which the config alone cannot resolve. Rather
+    than growing the frozen ``RateLimitKeyed`` Protocol (ADR 0007) a context
+    parameter every other implementer would have to ignore, the one caller
+    that actually has a better answer at hand supplies it directly.
     """
     resolved = resolve_rate_limit(getattr(config, "rate_limit", None), sync_options)
-    key = config.rate_limit_key()
+    key = key_override if key_override is not None else config.rate_limit_key()
 
     rps = resolved.requests_per_second
     if max_requests_per_second is not None and rps > max_requests_per_second:
