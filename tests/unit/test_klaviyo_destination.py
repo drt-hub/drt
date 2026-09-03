@@ -245,23 +245,47 @@ class TestKlaviyoLoad:
         }
         json.dumps(body)  # httpx's json= encoding must accept the final payload.
 
-    def test_properties_preserves_decimal_precision_beyond_float_range(self) -> None:
+    @pytest.mark.parametrize(
+        "bad_decimal",
+        [
+            Decimal("9007199254740993"),  # not exactly representable as float
+            Decimal("NaN"),
+            Decimal("Infinity"),
+        ],
+    )
+    def test_properties_rejects_decimal_that_would_lose_precision(
+        self, bad_decimal: Decimal
+    ) -> None:
+        # A value one Decimal column can't always represent exactly as a JSON
+        # number is rejected as a row error rather than silently emitted as a
+        # string — which would make the same column mix JSON number/string
+        # types depending on the row and could corrupt Klaviyo segmentation.
+        client = MagicMock()
+        with _patch_client(client):
+            result = KlaviyoDestination().load(
+                [{"email": "a@x.com", "amount": bad_decimal}],
+                _config(),
+                _options(on_error="skip"),
+            )
+        assert result.failed == 1
+        assert "precision" in result.row_errors[0].error_message.lower() or (
+            "not finite" in result.row_errors[0].error_message.lower()
+        )
+        client.post.assert_not_called()
+
+    def test_properties_keeps_decimal_as_a_consistent_json_number_type(self) -> None:
+        # Whole-number and fractional Decimals from the same column both come
+        # out as JSON numbers (float), never a mix of number and string.
         client = MagicMock()
         client.post.return_value = _resp(201, {"data": {"id": "P1"}})
-        record = {
-            "email": "a@x.com",
-            "big_int": Decimal("9007199254740993"),  # not exactly representable as float
-            "nan_value": Decimal("NaN"),
-        }
+        record = {"email": "a@x.com", "whole": Decimal("10.00"), "fractional": Decimal("12.34")}
         with _patch_client(client):
             result = KlaviyoDestination().load([record], _config(), _options())
         assert result.success == 1
-        body = client.post.call_args.kwargs["json"]
-        properties = body["data"]["attributes"]["properties"]
-        assert properties["big_int"] == 9007199254740993
-        assert isinstance(properties["big_int"], int)
-        assert properties["nan_value"] == "NaN"
-        json.dumps(body)
+        properties = client.post.call_args.kwargs["json"]["data"]["attributes"]["properties"]
+        assert properties == {"whole": 10.0, "fractional": 12.34}
+        assert isinstance(properties["whole"], float)
+        assert isinstance(properties["fractional"], float)
 
     def test_properties_template(self) -> None:
         client = MagicMock()

@@ -48,6 +48,7 @@ Example sync YAML — event tracking:
 from __future__ import annotations
 
 import json
+import math
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -337,26 +338,29 @@ class KlaviyoDestination:
             resp.raise_for_status()
 
 
-def _decimal_to_json_safe(value: Decimal) -> Any:
-    """Convert a Decimal to JSON without silently losing precision.
+def _decimal_to_json_safe(value: Decimal) -> float:
+    """Convert a Decimal to a JSON number without silently losing precision.
 
     A blind ``float(value)`` corrupts values a ``float`` can't represent
-    exactly (e.g. large integer-valued Decimals beyond 2**53, or Decimals
-    outside float range becoming +/-inf, which JSON's own spec forbids and
-    which httpx's encoder would otherwise still emit as invalid `Infinity`
-    JSON). Whole numbers go out as ``int`` (JSON has no size limit there);
-    fractional values go out as ``float`` only if that round-trips exactly
-    back to the original Decimal; anything else — including non-finite
-    Decimals — is stringified rather than silently rounded.
+    exactly (e.g. large integer-valued Decimals beyond 2**53) and can
+    overflow extreme Decimals to +/-inf, which JSON's own spec forbids.
+    Falling back to a string representation for those cases was considered
+    and rejected: it would make the *same* warehouse DECIMAL column emit a
+    mix of JSON number and string values depending on the individual row,
+    which can silently change how Klaviyo evaluates that property in
+    segments. Instead, a value that can't round-trip exactly through
+    ``float`` raises, surfacing as a per-row error like any other malformed
+    input rather than silently changing type or precision.
     """
     if not value.is_finite():
-        return str(value)
-    if value == value.to_integral_value():
-        return int(value)
+        raise ValueError(f"Decimal value {value!r} is not finite and cannot be sent to Klaviyo.")
     as_float = float(value)
-    if Decimal(str(as_float)) == value:
-        return as_float
-    return str(value)
+    if math.isinf(as_float) or Decimal(str(as_float)) != value:
+        raise ValueError(
+            f"Decimal value {value!r} cannot be represented exactly as a JSON number "
+            "without precision loss."
+        )
+    return as_float
 
 
 def _json_safe(value: Any) -> Any:
