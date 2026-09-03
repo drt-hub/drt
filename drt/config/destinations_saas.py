@@ -883,14 +883,19 @@ class StagedUploadDestinationConfig(BaseModel):
         return self.describe()  # detail is object identity only (#696)
 
     def rate_limit_key(self) -> str:
-        """Per trigger host (#769). A staged upload talks to several URLs, but
-        the stage step is usually a one-shot presigned URL on a storage host
-        while the trigger is the vendor API that actually publishes a quota — so
-        the trigger's ``netloc`` is the endpoint worth pacing.
-        ``describe()`` is the bare constant ``"staged_upload"``.
-        (``BaseModel``-direct config.)
+        """Per polling host when configured, else per trigger host (#769, #1068).
+        A staged upload talks to several URLs, but the stage step is usually a
+        one-shot presigned URL on a storage host, so it's excluded either way.
+        When a ``poll`` phase is configured, it's the one that's actually hit
+        repeatedly (a wait loop), so its host — not the trigger's — is the one
+        whose real-world rate limit matters; ``poll.url`` is independently
+        configurable and can differ from the trigger's host. In the common
+        case where they share a host, this resolves to the exact same key as
+        before, so no behavior change there. ``describe()`` is the bare
+        constant ``"staged_upload"``. (``BaseModel``-direct config.)
         """
-        return f"{self.type}:{urlparse(self.trigger.url).netloc}"
+        host = urlparse((self.poll or self.trigger).url).netloc
+        return f"{self.type}:{host}"
 
 
 class SalesforceBulkDestinationConfig(BaseModel):

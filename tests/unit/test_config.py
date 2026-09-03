@@ -1252,6 +1252,62 @@ class TestRateLimitKey:
         assert slack.rate_limit_key().startswith("slack:")
         assert airtable.rate_limit_key().startswith("airtable:")
 
+    def test_staged_upload_rate_limit_key_falls_back_to_trigger_without_poll(self) -> None:
+        """No poll phase configured — same key shape as before #1068."""
+        from drt.config.destinations_saas import (
+            StagedUploadDestinationConfig,
+            StagedUploadPhaseConfig,
+        )
+
+        cfg = StagedUploadDestinationConfig(
+            type="staged_upload",
+            stage=StagedUploadPhaseConfig(url="https://storage.example.com/upload"),
+            trigger=StagedUploadPhaseConfig(url="https://api.vendor.com/jobs"),
+        )
+        assert cfg.rate_limit_key() == "staged_upload:api.vendor.com"
+
+    def test_staged_upload_rate_limit_key_prefers_poll_host_when_configured(self) -> None:
+        """#1068: poll is independently configurable and can hit a different
+        host than trigger — that host is what's actually paced by the wait
+        loop, so it must own the limiter identity, not the trigger's."""
+        from drt.config.destinations_saas import (
+            StagedUploadDestinationConfig,
+            StagedUploadPhaseConfig,
+            StagedUploadPollConfig,
+        )
+
+        cfg = StagedUploadDestinationConfig(
+            type="staged_upload",
+            stage=StagedUploadPhaseConfig(url="https://storage.example.com/upload"),
+            trigger=StagedUploadPhaseConfig(url="https://api.vendor.com/jobs"),
+            poll=StagedUploadPollConfig(url="https://poll.vendor.com/jobs/{{ job_id }}"),
+        )
+        assert cfg.rate_limit_key() == "staged_upload:poll.vendor.com"
+
+    def test_staged_upload_rate_limit_key_is_unchanged_when_poll_shares_trigger_host(
+        self,
+    ) -> None:
+        """The common case (poll and trigger on the same host) must resolve to
+        the exact same key as the no-poll case — no behavior change there."""
+        from drt.config.destinations_saas import (
+            StagedUploadDestinationConfig,
+            StagedUploadPhaseConfig,
+            StagedUploadPollConfig,
+        )
+
+        without_poll = StagedUploadDestinationConfig(
+            type="staged_upload",
+            stage=StagedUploadPhaseConfig(url="https://storage.example.com/upload"),
+            trigger=StagedUploadPhaseConfig(url="https://api.vendor.com/jobs"),
+        )
+        with_same_host_poll = StagedUploadDestinationConfig(
+            type="staged_upload",
+            stage=StagedUploadPhaseConfig(url="https://storage.example.com/upload"),
+            trigger=StagedUploadPhaseConfig(url="https://api.vendor.com/jobs"),
+            poll=StagedUploadPollConfig(url="https://api.vendor.com/jobs/{{ job_id }}"),
+        )
+        assert without_poll.rate_limit_key() == with_same_host_poll.rate_limit_key()
+
 
 # ---------------------------------------------------------------------------
 # destination-level rate_limit override (#769)
