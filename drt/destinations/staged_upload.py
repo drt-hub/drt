@@ -50,6 +50,7 @@ import io
 import json
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from jinja2 import BaseLoader, Environment, StrictUndefined
@@ -132,10 +133,24 @@ class StagedUploadDestination:
             # Phase 3: Poll — wait for completion (optional)
             if config.poll is not None:
                 retry_config = resolve_retry(config.retry, sync_options)
-                rate_limiter = resolve_rate_limiter(
-                    config, sync_options, limiter_factory=RateLimiter
+                poll_url = (
+                    _render(config.poll.url, context)
+                    if "{{" in config.poll.url
+                    else config.poll.url
                 )
-                self._poll(config.poll, context, retry_config, rate_limiter)
+                # Render before keying (#1068): poll.url can be templated
+                # entirely from the trigger response (e.g. a vendor-returned
+                # status URL), which the unrendered string — all
+                # config.rate_limit_key() ever sees — has no parseable host
+                # for. Rendering here, once, gives the registry the real
+                # endpoint identity instead of an approximation.
+                rate_limiter = resolve_rate_limiter(
+                    config,
+                    sync_options,
+                    limiter_factory=RateLimiter,
+                    key_override=f"{config.type}:{urlparse(poll_url).netloc}",
+                )
+                self._poll(config.poll, context, retry_config, rate_limiter, url=poll_url)
 
             result.success = record_count
         except Exception as e:
@@ -224,9 +239,15 @@ class StagedUploadDestination:
         context: dict[str, str],
         retry_config: RetryConfig,
         rate_limiter: RateLimiterBackend,
+        url: str,
     ) -> None:
-        """Poll for job completion."""
-        url = _render(poll_config.url, context) if "{{" in poll_config.url else poll_config.url
+        """Poll for job completion.
+
+        ``url`` is already rendered by the caller (#1068) — the rate limiter
+        it acquired from is keyed off this same rendered URL's host, so
+        re-rendering here (Jinja templates are pure, but there's no reason to
+        pay for it twice) would only risk the two silently drifting apart.
+        """
         headers: dict[str, str] = dict(poll_config.headers or {})
         if poll_config.auth:
             headers.update(AuthHandler(poll_config.auth).get_headers())

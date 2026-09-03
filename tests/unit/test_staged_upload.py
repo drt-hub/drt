@@ -274,7 +274,9 @@ def test_post_poll_does_not_retry_transient_failure() -> None:
     ):
         client_class.return_value.__enter__.return_value = client
         with pytest.raises(httpx.HTTPStatusError):
-            StagedUploadDestination()._poll(poll_config, {}, retry_config, limiter)
+            StagedUploadDestination()._poll(
+                poll_config, {}, retry_config, limiter, url=poll_config.url
+            )
 
     retry_call.assert_not_called()
     client.request.assert_called_once_with("POST", poll_config.url, headers={}, timeout=ANY)
@@ -304,7 +306,7 @@ def test_poll_retry_acquires_rate_limiter_per_attempt() -> None:
 
     with patch("drt.destinations.staged_upload.httpx.Client") as client_class:
         client_class.return_value.__enter__.return_value = client
-        StagedUploadDestination()._poll(poll_config, {}, retry_config, limiter)
+        StagedUploadDestination()._poll(poll_config, {}, retry_config, limiter, url=poll_config.url)
 
     assert client.request.call_count == 2
     assert limiter.acquire.call_count == 2
@@ -345,7 +347,9 @@ def test_poll_retry_success_after_deadline_raises_timeout(
     with patch("drt.destinations.staged_upload.httpx.Client") as client_class:
         client_class.return_value.__enter__.return_value = client
         with pytest.raises(TimeoutError, match="Poll timed out after 1s"):
-            StagedUploadDestination()._poll(poll_config, {}, retry_config, limiter)
+            StagedUploadDestination()._poll(
+                poll_config, {}, retry_config, limiter, url=poll_config.url
+            )
 
     assert sleeps == [1.0]
     assert client.request.call_count == 2
@@ -378,7 +382,9 @@ def test_poll_clamps_retry_backoff_to_remaining_timeout() -> None:
         ),
         patch("drt.destinations.staged_upload.with_retry", return_value=response) as retry_call,
     ):
-        StagedUploadDestination()._poll(poll_config, {}, retry_config, MagicMock())
+        StagedUploadDestination()._poll(
+            poll_config, {}, retry_config, MagicMock(), url=poll_config.url
+        )
 
     clamped = retry_call.call_args.args[1]
     assert clamped is not retry_config
@@ -415,7 +421,9 @@ def test_poll_clamps_request_timeout_to_fresh_remaining_budget() -> None:
     ):
         client = client_class.return_value.__enter__.return_value
         client.request.return_value = response
-        StagedUploadDestination()._poll(poll_config, {}, RetryConfig(), MagicMock())
+        StagedUploadDestination()._poll(
+            poll_config, {}, RetryConfig(), MagicMock(), url=poll_config.url
+        )
 
     assert client.request.call_args.kwargs["timeout"] == 3.0
 
@@ -450,7 +458,9 @@ def test_poll_raises_timeout_at_loop_top_without_another_request() -> None:
         client = client_class.return_value.__enter__.return_value
         client.request.return_value = running
         with pytest.raises(TimeoutError, match="Poll timed out after 5s"):
-            StagedUploadDestination()._poll(poll_config, {}, RetryConfig(), MagicMock())
+            StagedUploadDestination()._poll(
+                poll_config, {}, RetryConfig(), MagicMock(), url=poll_config.url
+            )
 
     assert client.request.call_count == 1
 
@@ -508,6 +518,61 @@ def test_finalize_poll_acquires_rate_limiter_per_status_check() -> None:
     assert result.success == 1
     resolve_limiter.assert_called_once()
     assert limiter.acquire.call_count == 2
+
+
+def test_finalize_keys_rate_limiter_by_rendered_poll_host_not_trigger_host() -> None:
+    """#1068: when the vendor's trigger response supplies the *entire* poll
+    URL (not just a path segment appended to a static host), the rendered
+    host — not the trigger's — must own the limiter identity. Two configs
+    with different trigger hosts but the same rendered poll host must
+    resolve to the same key; a config whose rendered poll host differs must
+    resolve to a different one."""
+    limiter = MagicMock()
+
+    def _config(trigger_host: str) -> StagedUploadDestinationConfig:
+        return StagedUploadDestinationConfig(
+            type="staged_upload",
+            stage=StagedUploadPhaseConfig(url="https://storage.example.com/upload"),
+            trigger=StagedUploadPhaseConfig(
+                url=f"https://{trigger_host}/jobs",
+                response_extract={"status_url": "statusUrl"},
+            ),
+            poll=StagedUploadPollConfig(
+                url="{{ status_url }}",
+                interval_seconds=0,
+                timeout_seconds=5,
+            ),
+        )
+
+    def _run(config: StagedUploadDestinationConfig, poll_host: str) -> str:
+        dest = StagedUploadDestination()
+        dest._records = [{"x": 1}]
+        with (
+            patch.object(
+                dest,
+                "_http_phase",
+                side_effect=[{}, {"statusUrl": f"https://{poll_host}/status/abc"}],
+            ),
+            patch("drt.destinations.staged_upload.httpx.Client"),
+            patch(
+                "drt.destinations.staged_upload.resolve_rate_limiter",
+                return_value=limiter,
+            ) as resolve_limiter,
+            patch.object(dest, "_poll"),
+        ):
+            result = dest.finalize(config, _options())
+        assert result.success == 1
+        key_override: str = resolve_limiter.call_args.kwargs["key_override"]
+        return key_override
+
+    same_a = _run(_config("api-a.example.com"), poll_host="poll.example.com")
+    same_b = _run(_config("api-b.example.com"), poll_host="poll.example.com")
+    different = _run(_config("api-a.example.com"), poll_host="poll-other.example.com")
+
+    assert same_a == "staged_upload:poll.example.com"
+    assert same_a == same_b
+    assert different == "staged_upload:poll-other.example.com"
+    assert different != same_a
 
 
 def test_finalize_stage_error(httpserver: HTTPServer) -> None:
