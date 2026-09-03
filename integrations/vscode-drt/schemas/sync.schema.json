@@ -2378,16 +2378,8 @@
           "title": "Event Name"
         },
         "event_time_field": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Event Time Field"
+          "title": "Event Time Field",
+          "type": "string"
         },
         "event_id_field": {
           "anyOf": [
@@ -2527,7 +2519,8 @@
       },
       "required": [
         "type",
-        "pixel_id"
+        "pixel_id",
+        "event_time_field"
       ],
       "title": "MetaConversionsDestinationConfig",
       "type": "object"
