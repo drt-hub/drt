@@ -7,7 +7,7 @@ All ``*DestinationConfig`` here are members of the
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -744,11 +744,12 @@ class MetaConversionsDestinationConfig(BaseModel):
     api_version: str = "v25.0"
     action_source: str = "website"
 
-    # Event fields. Exactly one name source, an event-id mapping, and at least one
-    # customer-information mapping are required; the remaining mappings are optional.
+    # Event fields. Exactly one name source, an event-time mapping, an event-id
+    # mapping, and at least one customer-information mapping are required; the
+    # remaining mappings are optional.
     event_name_field: str | None = None
     event_name: str | None = None
-    event_time_field: str | None = None
+    event_time_field: str
     event_id_field: str | None = None
     event_source_url_field: str | None = None
     email_field: str | None = None
@@ -776,6 +777,23 @@ class MetaConversionsDestinationConfig(BaseModel):
         if self.event_id_field is None:
             raise ValueError("event_id_field is required to deduplicate retried conversions.")
         return self
+
+    @field_validator("event_time_field", mode="before")
+    @classmethod
+    def _require_event_time_field(cls, value: Any) -> Any:
+        # mode="before" so this also rejects an explicit null/empty/whitespace
+        # value, not just an omitted key — a plausible YAML authoring mistake,
+        # not just a missing one. Runs ahead of the plain `str` type check.
+        if isinstance(value, str):
+            value = value.strip()
+        if not value:
+            raise ValueError(
+                "event_time_field is required — without it, every row is sent with the "
+                "current sync time rather than its real transaction time, silently "
+                "corrupting Meta's attribution/optimization data on any backfill, "
+                "delayed batch, or replay."
+            )
+        return value
 
     @model_validator(mode="after")
     def _check_website_fields(self) -> MetaConversionsDestinationConfig:

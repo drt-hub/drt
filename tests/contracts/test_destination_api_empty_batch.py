@@ -235,6 +235,7 @@ API_DESTINATIONS: list[Any] = [
             type="meta_conversions",
             pixel_id="123456789",
             event_name="Purchase",
+            event_time_field="occurred_at",
             event_id_field="event_id",
             email_field="email",
             event_source_url_field="page_url",

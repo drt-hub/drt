@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -32,6 +33,7 @@ def _config(**overrides: object) -> MetaConversionsDestinationConfig:
         "pixel_id": "123456789",
         "access_token": "meta-token",
         "event_name": "Purchase",
+        "event_time_field": "occurred_at",
         "event_id_field": "event_id",
         "event_source_url_field": "page_url",
         "client_user_agent_field": "user_agent",
@@ -43,6 +45,7 @@ def _config(**overrides: object) -> MetaConversionsDestinationConfig:
 
 def _record(**overrides: object) -> dict[str, object]:
     values: dict[str, object] = {
+        "occurred_at": int(time.time()),
         "event_id": "conversion-1",
         "page_url": "https://example.com/products/1",
         "user_agent": "test browser",
@@ -288,21 +291,39 @@ def test_rate_limit_key_is_shared_per_pixel_without_token_material() -> None:
     assert "first" not in first.rate_limit_key()
 
 
-def test_event_time_defaults_to_current_unix_seconds() -> None:
-    response = httpx.Response(
-        200,
-        json={"events_received": 1},
-        request=httpx.Request("POST", "https://graph.facebook.com/events"),
-    )
-    with (
-        patch("drt.destinations.meta_conversions.time.time", return_value=1_700_000_000.9),
-        patch("drt.destinations.meta_conversions.httpx.Client") as client_class,
-    ):
-        client = client_class.return_value.__enter__.return_value
-        client.post.return_value = response
-        MetaConversionsDestination().load([_record()], _config(), SyncOptions())
+@pytest.mark.parametrize("value", [None, "", "   "], ids=["null", "empty", "blank"])
+def test_event_time_field_rejects_null_empty_and_blank(value: str | None) -> None:
+    # Without an explicit mapping, every row would silently be stamped with
+    # the current sync time instead of its real transaction time — corrupting
+    # Meta's attribution/optimization data on any backfill, delayed batch, or
+    # replay (#1077). There is no compatibility default.
+    with pytest.raises(ValidationError, match="event_time_field is required"):
+        _config(event_time_field=value)
 
-    assert client.post.call_args.kwargs["json"]["data"][0]["event_time"] == 1_700_000_000
+
+def test_event_time_field_is_required_when_omitted() -> None:
+    values = {
+        "type": "meta_conversions",
+        "pixel_id": "123456789",
+        "access_token": "meta-token",
+        "event_name": "Purchase",
+        "event_id_field": "event_id",
+        "event_source_url_field": "page_url",
+        "client_user_agent_field": "user_agent",
+        "email_field": "email",
+    }
+    with pytest.raises(ValidationError, match="event_time_field"):
+        MetaConversionsDestinationConfig.model_validate(values)
+
+
+def test_event_time_field_is_stripped() -> None:
+    assert _config(event_time_field="  occurred_at  ").event_time_field == "occurred_at"
+
+
+def test_event_time_field_is_required_in_generated_json_schema() -> None:
+    schema = MetaConversionsDestinationConfig.model_json_schema()
+    assert "event_time_field" in schema["required"]
+    assert schema["properties"]["event_time_field"]["type"] == "string"
 
 
 def test_batches_at_most_1000_events_per_request() -> None:
@@ -554,6 +575,7 @@ def test_event_id_field_is_required_for_retry_deduplication() -> None:
     ids=["missing", "null", "empty", "blank"],
 )
 def test_event_id_field_must_resolve_for_each_row(record: dict[str, object]) -> None:
+    record = {"occurred_at": int(time.time()), **record}
     result = MetaConversionsDestination().load([record], _config(), SyncOptions())
 
     assert result.success == 0

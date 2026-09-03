@@ -100,6 +100,7 @@ _URI = "aws-sm://prod/drt/credentials#value"
                 type="meta_conversions",
                 pixel_id="123",
                 event_name="Purchase",
+                event_time_field="occurred_at",
                 event_id_field="event_id",
                 event_source_url_field="page_url",
                 client_user_agent_field="user_agent",

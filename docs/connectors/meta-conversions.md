@@ -12,7 +12,7 @@ destination:
   api_version: v25.0
   action_source: website
   event_name: Purchase          # or event_name_field: event_name
-  event_time_field: occurred_at # Unix seconds; current time when unset
+  event_time_field: occurred_at # required: Unix seconds, the row's real transaction time
   event_id_field: event_id      # required: retries need a stable deduplication id
   event_source_url_field: page_url # required when action_source is website
   email_field: email
@@ -36,7 +36,7 @@ destination:
 | `action_source` | string | `"website"` | Meta event origin. Common values include `website`, `app`, `phone_call`, `chat`, `email`, `physical_store`, `system_generated`, and `other`. |
 | `event_name` | string \| null | null | Fixed Meta standard/custom event name. Exactly one of this and `event_name_field` is required. |
 | `event_name_field` | string \| null | null | Row field containing the event name. Exactly one of this and `event_name` is required. |
-| `event_time_field` | string \| null | null | Row field containing a Unix timestamp in seconds. When unset, drt uses the current time. Meta accepts times up to seven days old. |
+| `event_time_field` | string | — | Row field containing a Unix timestamp in seconds — the row's real transaction time. **Required**: without an explicit mapping, every row would silently be stamped with the current sync time instead, corrupting Meta's attribution/optimization data on any backfill, delayed batch, or replay. Meta accepts times up to seven days old. |
 | `event_id_field` | string | — | Row field containing a stable conversion id. **Required** so Meta can deduplicate a retry when the first response is lost. Use the browser Pixel event id for Pixel + Conversions API deduplication. |
 | `event_source_url_field` | string \| null | null | Row field containing the page URL where the event occurred. **Required when `action_source` is `website` (including its default), and every website-event row must resolve it to a non-empty value.** Optional for other action sources. |
 | `email_field` | string \| null | null | Row field mapped to hashed `user_data.em`. At least one of the six customer-information mappings (`email_field` through `fbp_field`) must be configured, and every row must resolve at least one mapping to a non-empty value. |
@@ -101,6 +101,7 @@ destination:
   type: meta_conversions
   pixel_id: "123456789012345"
   event_name: Purchase
+  event_time_field: occurred_at
   event_id_field: event_id
   event_source_url_field: page_url
   client_user_agent_field: user_agent

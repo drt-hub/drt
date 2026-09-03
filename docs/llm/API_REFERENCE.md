@@ -1076,7 +1076,7 @@ destination:
   action_source: website               # default: website
   event_name: Purchase                  # exactly one of fixed/field name
   # event_name_field: event_name
-  event_time_field: occurred_at         # optional Unix-seconds row field
+  event_time_field: occurred_at         # required: Unix-seconds row field, real transaction time
   event_id_field: event_id              # required: stable retry dedup id
   event_source_url_field: page_url
   email_field: email                    # normalized + SHA-256 → user_data.em[]

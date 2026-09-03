@@ -15,6 +15,10 @@ drt-core version its bundled schemas were generated from.
   the `meta_conversions` connector for batched Meta Conversions API events,
   including field mappings, hashing inputs, retry, and rate-limit configuration
   (drt-hub/drt#1054).
+- Bundled JSON Schemas regenerated from drt-core: `meta_conversions.event_time_field`
+  is now required (previously optional and nullable) — without an explicit
+  mapping, every row was silently stamped with the current sync time instead of
+  its real transaction time (drt-hub/drt#1077).
 - Bundled JSON Schemas regenerated from drt-core: `staged_upload` and
   `salesforce_bulk` destinations now validate destination-level `retry` and
   `rate_limit` overrides, matching every other rate-limited destination type

@@ -10,6 +10,7 @@ Example::
       type: meta_conversions
       pixel_id: "123456789012345"
       event_name: Purchase
+      event_time_field: occurred_at  # Required — the row's real transaction time.
       event_id_field: event_id  # Required so retries can be deduplicated.
       event_source_url_field: page_url  # Required for website events.
       client_user_agent_field: user_agent  # Required for website events.
@@ -284,15 +285,13 @@ def _is_meta_transient_error(exc: Exception) -> bool:
 
 def _event_time(record: dict[str, Any], config: MetaConversionsDestinationConfig) -> int:
     current_time = time.time()
-    if config.event_time_field is None:
-        timestamp = int(current_time)
-    else:
-        value = record.get(config.event_time_field)
-        if value is None:
-            raise ValueError(f"Row missing event time field {config.event_time_field!r}.")
-        timestamp = int(value)
-        if isinstance(value, float) and not value.is_integer():
-            raise ValueError("event_time must be a Unix timestamp in whole seconds.")
+    event_time_field = config.event_time_field
+    value = record.get(event_time_field)
+    if value is None:
+        raise ValueError(f"Row missing event time field {event_time_field!r}.")
+    timestamp = int(value)
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError("event_time must be a Unix timestamp in whole seconds.")
 
     cutoff = current_time - _MAX_EVENT_AGE_SECONDS
     if timestamp < cutoff:
