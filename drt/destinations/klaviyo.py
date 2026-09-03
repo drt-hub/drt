@@ -48,7 +48,9 @@ Example sync YAML — event tracking:
 from __future__ import annotations
 
 import json
-from datetime import date, datetime
+import math
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -305,7 +307,21 @@ class KlaviyoDestination:
             ):
                 if field:
                     excluded_fields.add(field)
-        return {k: v for k, v in record.items() if k not in excluded_fields and v is not None}
+        properties = {
+            k: _json_safe(v)
+            for k, v in record.items()
+            if k not in excluded_fields and v is not None
+        }
+        # Defensive backstop: normalize the known warehouse-driver types
+        # above, but also verify the *result* against the exact encoder
+        # httpx uses (allow_nan=False) rather than trusting that list is
+        # exhaustive — an unhandled type surfaces here as a clear per-row
+        # error instead of a cryptic failure deep inside request encoding.
+        try:
+            json.dumps(properties, allow_nan=False)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"Klaviyo properties are not JSON-serializable: {e}") from e
+        return properties
 
     def test_connection(self, config: DestinationConfig) -> None:
         """Test whether Klaviyo accepts the configured private API key.
@@ -330,6 +346,63 @@ class KlaviyoDestination:
             if resp.status_code == 403 and _permission_denied(resp):
                 return
             resp.raise_for_status()
+
+
+def _decimal_to_json_safe(value: Decimal) -> float:
+    """Convert a Decimal to a JSON number without silently losing precision.
+
+    A blind ``float(value)`` corrupts values a ``float`` can't represent
+    exactly (e.g. large integer-valued Decimals beyond 2**53) and can
+    overflow extreme Decimals to +/-inf, which JSON's own spec forbids.
+    Falling back to a string representation for those cases was considered
+    and rejected: it would make the *same* warehouse DECIMAL column emit a
+    mix of JSON number and string values depending on the individual row,
+    which can silently change how Klaviyo evaluates that property in
+    segments. Instead, a value that can't round-trip exactly through
+    ``float`` raises, surfacing as a per-row error like any other malformed
+    input rather than silently changing type or precision.
+    """
+    if not value.is_finite():
+        raise ValueError(f"Decimal value {value!r} is not finite and cannot be sent to Klaviyo.")
+    as_float = float(value)
+    if math.isinf(as_float) or Decimal(str(as_float)) != value:
+        raise ValueError(
+            f"Decimal value {value!r} cannot be represented exactly as a JSON number "
+            "without precision loss."
+        )
+    return as_float
+
+
+def _json_safe(value: Any) -> Any:
+    """Recursively coerce a warehouse-driver value into a JSON-serializable one.
+
+    Common driver return types (``Decimal``, ``date``/``datetime``/``time``,
+    non-finite ``float``) aren't JSON-serializable — or, for NaN/infinity,
+    are only serializable via a non-standard extension `httpx` explicitly
+    disables (``allow_nan=False``) — and any of these can appear nested
+    inside dict/list-typed columns (e.g. JSON/STRUCT columns), not just at
+    the top level.
+    """
+    if isinstance(value, Decimal):
+        return _decimal_to_json_safe(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, time):
+        return value.isoformat()
+    if isinstance(value, timedelta):
+        # e.g. PyMySQL returns MySQL TIME columns as timedelta (which can be
+        # negative or exceed 24h) rather than time — total_seconds() keeps
+        # sign and sub-second precision without an arbitrary string format.
+        return value.total_seconds()
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"Float value {value!r} is not finite and cannot be sent to Klaviyo.")
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
 
 
 def _permission_denied(resp: httpx.Response) -> bool:

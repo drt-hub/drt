@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -222,6 +222,152 @@ class TestKlaviyoLoad:
         assert result.failed == 1  # stopped after the first
         assert client.post.call_count == 1
 
+    def test_properties_normalizes_decimal_date_datetime_in_default_copy_path(self) -> None:
+        client = MagicMock()
+        client.post.return_value = _resp(201, {"data": {"id": "P1"}})
+        record = {
+            "email": "a@x.com",
+            "ltv": Decimal("199.99"),
+            "signup_date": date(2024, 1, 15),
+            "last_seen": datetime(2024, 6, 1, 12, 30, tzinfo=timezone.utc),
+            "tags": {"score": Decimal("4.5"), "history": [date(2024, 1, 1)]},
+        }
+        with _patch_client(client):
+            result = KlaviyoDestination().load([record], _config(), _options())
+        assert result.success == 1
+        body = client.post.call_args.kwargs["json"]
+        properties = body["data"]["attributes"]["properties"]
+        assert properties == {
+            "ltv": 199.99,
+            "signup_date": "2024-01-15",
+            "last_seen": "2024-06-01T12:30:00+00:00",
+            "tags": {"score": 4.5, "history": ["2024-01-01"]},
+        }
+        json.dumps(body)  # httpx's json= encoding must accept the final payload.
+
+    @pytest.mark.parametrize(
+        "bad_decimal",
+        [
+            Decimal("9007199254740993"),  # not exactly representable as float
+            Decimal("NaN"),
+            Decimal("Infinity"),
+        ],
+    )
+    def test_properties_rejects_decimal_that_would_lose_precision(
+        self, bad_decimal: Decimal
+    ) -> None:
+        # A value one Decimal column can't always represent exactly as a JSON
+        # number is rejected as a row error rather than silently emitted as a
+        # string — which would make the same column mix JSON number/string
+        # types depending on the row and could corrupt Klaviyo segmentation.
+        client = MagicMock()
+        with _patch_client(client):
+            result = KlaviyoDestination().load(
+                [{"email": "a@x.com", "amount": bad_decimal}],
+                _config(),
+                _options(on_error="skip"),
+            )
+        assert result.failed == 1
+        assert "precision" in result.row_errors[0].error_message.lower() or (
+            "not finite" in result.row_errors[0].error_message.lower()
+        )
+        client.post.assert_not_called()
+
+    def test_properties_normalizes_time_at_top_level_and_nested(self) -> None:
+        client = MagicMock()
+        client.post.return_value = _resp(201, {"data": {"id": "P1"}})
+        record = {
+            "email": "a@x.com",
+            "checkin_time": time(9, 30, 0),
+            "schedule": {"opens": time(8, 0, 0)},
+        }
+        with _patch_client(client):
+            result = KlaviyoDestination().load([record], _config(), _options())
+        assert result.success == 1
+        body = client.post.call_args.kwargs["json"]
+        properties = body["data"]["attributes"]["properties"]
+        assert properties == {
+            "checkin_time": "09:30:00",
+            "schedule": {"opens": "08:00:00"},
+        }
+        json.dumps(body)
+
+    @pytest.mark.parametrize("bad_float", [float("nan"), float("inf"), float("-inf")])
+    def test_properties_rejects_non_finite_float_at_top_level_and_nested(
+        self, bad_float: float
+    ) -> None:
+        client = MagicMock()
+        with _patch_client(client):
+            result = KlaviyoDestination().load(
+                [{"email": "a@x.com", "score": bad_float}],
+                _config(),
+                _options(on_error="skip"),
+            )
+        assert result.failed == 1
+        assert "not finite" in result.row_errors[0].error_message.lower()
+        client.post.assert_not_called()
+
+        with _patch_client(client):
+            result = KlaviyoDestination().load(
+                [{"email": "a@x.com", "nested": {"score": bad_float}}],
+                _config(),
+                _options(on_error="skip"),
+            )
+        assert result.failed == 1
+        assert "not finite" in result.row_errors[0].error_message.lower()
+
+    def test_properties_normalizes_timedelta_at_top_level_and_nested(self) -> None:
+        # e.g. PyMySQL returns MySQL TIME columns as timedelta, including
+        # negative values and durations over 24 hours.
+        client = MagicMock()
+        client.post.return_value = _resp(201, {"data": {"id": "P1"}})
+        record = {
+            "email": "a@x.com",
+            "duration": timedelta(hours=26, minutes=3, seconds=4, microseconds=500000),
+            "delay": timedelta(hours=-1, minutes=-30),
+            "nested": {"wait": timedelta(seconds=90)},
+        }
+        with _patch_client(client):
+            result = KlaviyoDestination().load([record], _config(), _options())
+        assert result.success == 1
+        body = client.post.call_args.kwargs["json"]
+        properties = body["data"]["attributes"]["properties"]
+        assert properties == {
+            "duration": 26 * 3600 + 3 * 60 + 4.5,
+            "delay": -5400.0,
+            "nested": {"wait": 90.0},
+        }
+        json.dumps(body)
+
+    def test_properties_rejects_unhandled_type_with_a_clear_error(self) -> None:
+        # A defensive backstop: any type this module hasn't special-cased
+        # still surfaces as a clear per-row error instead of a cryptic
+        # failure deep inside httpx's request encoding.
+        client = MagicMock()
+        with _patch_client(client):
+            result = KlaviyoDestination().load(
+                [{"email": "a@x.com", "payload": b"raw-bytes"}],
+                _config(),
+                _options(on_error="skip"),
+            )
+        assert result.failed == 1
+        assert "not json-serializable" in result.row_errors[0].error_message.lower()
+        client.post.assert_not_called()
+
+    def test_properties_keeps_decimal_as_a_consistent_json_number_type(self) -> None:
+        # Whole-number and fractional Decimals from the same column both come
+        # out as JSON numbers (float), never a mix of number and string.
+        client = MagicMock()
+        client.post.return_value = _resp(201, {"data": {"id": "P1"}})
+        record = {"email": "a@x.com", "whole": Decimal("10.00"), "fractional": Decimal("12.34")}
+        with _patch_client(client):
+            result = KlaviyoDestination().load([record], _config(), _options())
+        assert result.success == 1
+        properties = client.post.call_args.kwargs["json"]["data"]["attributes"]["properties"]
+        assert properties == {"whole": 10.0, "fractional": 12.34}
+        assert isinstance(properties["whole"], float)
+        assert isinstance(properties["fractional"], float)
+
     def test_properties_template(self) -> None:
         client = MagicMock()
         client.post.return_value = _resp(201, {"data": {"id": "P1"}})
@@ -366,6 +512,33 @@ class TestKlaviyoEventLoad:
         assert attributes["value"] == 12.34
         assert attributes["unique_id"] == "123"
         assert attributes["properties"] == {"plan": "pro"}
+        json.dumps(body)  # httpx's json= encoding must accept the final payload.
+
+    def test_event_default_properties_normalizes_nested_decimal_date_datetime(self) -> None:
+        client = MagicMock()
+        client.post.return_value = _resp(202)
+        config = _config(
+            endpoint="event",
+            metric_name="Placed Order",
+            unique_id_field="event_id",
+        )
+        record = {
+            "email": "a@x.com",
+            "event_id": "evt-123",
+            "order_total": Decimal("42.50"),
+            "line_items": [{"price": Decimal("10.00"), "shipped_on": date(2024, 3, 1)}],
+        }
+
+        with _patch_client(client):
+            result = KlaviyoDestination().load([record], config, _options())
+
+        assert result.success == 1
+        body = client.post.call_args.kwargs["json"]
+        properties = body["data"]["attributes"]["properties"]
+        assert properties == {
+            "order_total": 42.50,
+            "line_items": [{"price": 10.00, "shipped_on": "2024-03-01"}],
+        }
         json.dumps(body)  # httpx's json= encoding must accept the final payload.
 
     def test_event_rejects_date_only_time_field(self) -> None:
