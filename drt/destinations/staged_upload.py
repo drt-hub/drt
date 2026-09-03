@@ -143,7 +143,13 @@ class StagedUploadDestination:
                 # status URL), which the unrendered string — all
                 # config.rate_limit_key() ever sees — has no parseable host
                 # for. Rendering here, once, gives the registry the real
-                # endpoint identity instead of an approximation.
+                # endpoint identity instead of an approximation. Known
+                # tradeoff: the limiter registry never evicts, so this
+                # assumes the rendered host is stable per vendor in practice
+                # (varies by job path, not by job host) — a vendor issuing a
+                # genuinely per-job *hostname* would register one limiter per
+                # job in a long-lived process. True multi-tenant quota
+                # identity (an explicit override field) is tracked separately.
                 rate_limiter = resolve_rate_limiter(
                     config,
                     sync_options,
