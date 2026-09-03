@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -315,6 +315,44 @@ class TestKlaviyoLoad:
             )
         assert result.failed == 1
         assert "not finite" in result.row_errors[0].error_message.lower()
+
+    def test_properties_normalizes_timedelta_at_top_level_and_nested(self) -> None:
+        # e.g. PyMySQL returns MySQL TIME columns as timedelta, including
+        # negative values and durations over 24 hours.
+        client = MagicMock()
+        client.post.return_value = _resp(201, {"data": {"id": "P1"}})
+        record = {
+            "email": "a@x.com",
+            "duration": timedelta(hours=26, minutes=3, seconds=4, microseconds=500000),
+            "delay": timedelta(hours=-1, minutes=-30),
+            "nested": {"wait": timedelta(seconds=90)},
+        }
+        with _patch_client(client):
+            result = KlaviyoDestination().load([record], _config(), _options())
+        assert result.success == 1
+        body = client.post.call_args.kwargs["json"]
+        properties = body["data"]["attributes"]["properties"]
+        assert properties == {
+            "duration": 26 * 3600 + 3 * 60 + 4.5,
+            "delay": -5400.0,
+            "nested": {"wait": 90.0},
+        }
+        json.dumps(body)
+
+    def test_properties_rejects_unhandled_type_with_a_clear_error(self) -> None:
+        # A defensive backstop: any type this module hasn't special-cased
+        # still surfaces as a clear per-row error instead of a cryptic
+        # failure deep inside httpx's request encoding.
+        client = MagicMock()
+        with _patch_client(client):
+            result = KlaviyoDestination().load(
+                [{"email": "a@x.com", "payload": b"raw-bytes"}],
+                _config(),
+                _options(on_error="skip"),
+            )
+        assert result.failed == 1
+        assert "not json-serializable" in result.row_errors[0].error_message.lower()
+        client.post.assert_not_called()
 
     def test_properties_keeps_decimal_as_a_consistent_json_number_type(self) -> None:
         # Whole-number and fractional Decimals from the same column both come

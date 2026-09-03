@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -307,11 +307,21 @@ class KlaviyoDestination:
             ):
                 if field:
                     excluded_fields.add(field)
-        return {
+        properties = {
             k: _json_safe(v)
             for k, v in record.items()
             if k not in excluded_fields and v is not None
         }
+        # Defensive backstop: normalize the known warehouse-driver types
+        # above, but also verify the *result* against the exact encoder
+        # httpx uses (allow_nan=False) rather than trusting that list is
+        # exhaustive — an unhandled type surfaces here as a clear per-row
+        # error instead of a cryptic failure deep inside request encoding.
+        try:
+            json.dumps(properties, allow_nan=False)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"Klaviyo properties are not JSON-serializable: {e}") from e
+        return properties
 
     def test_connection(self, config: DestinationConfig) -> None:
         """Test whether Klaviyo accepts the configured private API key.
@@ -381,6 +391,11 @@ def _json_safe(value: Any) -> Any:
         return value.isoformat()
     if isinstance(value, time):
         return value.isoformat()
+    if isinstance(value, timedelta):
+        # e.g. PyMySQL returns MySQL TIME columns as timedelta (which can be
+        # negative or exceed 24h) rather than time — total_seconds() keeps
+        # sign and sub-second precision without an arbitrary string format.
+        return value.total_seconds()
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError(f"Float value {value!r} is not finite and cannot be sent to Klaviyo.")
     if isinstance(value, dict):
