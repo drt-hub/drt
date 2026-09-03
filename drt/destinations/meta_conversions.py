@@ -286,7 +286,6 @@ def _is_meta_transient_error(exc: Exception) -> bool:
 def _event_time(record: dict[str, Any], config: MetaConversionsDestinationConfig) -> int:
     current_time = time.time()
     event_time_field = config.event_time_field
-    assert event_time_field is not None
     value = record.get(event_time_field)
     if value is None:
         raise ValueError(f"Row missing event time field {event_time_field!r}.")

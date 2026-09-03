@@ -291,13 +291,39 @@ def test_rate_limit_key_is_shared_per_pixel_without_token_material() -> None:
     assert "first" not in first.rate_limit_key()
 
 
-def test_event_time_field_is_required() -> None:
+@pytest.mark.parametrize("value", [None, "", "   "], ids=["null", "empty", "blank"])
+def test_event_time_field_rejects_null_empty_and_blank(value: str | None) -> None:
     # Without an explicit mapping, every row would silently be stamped with
     # the current sync time instead of its real transaction time — corrupting
     # Meta's attribution/optimization data on any backfill, delayed batch, or
     # replay (#1077). There is no compatibility default.
     with pytest.raises(ValidationError, match="event_time_field is required"):
-        _config(event_time_field=None)
+        _config(event_time_field=value)
+
+
+def test_event_time_field_is_required_when_omitted() -> None:
+    values = {
+        "type": "meta_conversions",
+        "pixel_id": "123456789",
+        "access_token": "meta-token",
+        "event_name": "Purchase",
+        "event_id_field": "event_id",
+        "event_source_url_field": "page_url",
+        "client_user_agent_field": "user_agent",
+        "email_field": "email",
+    }
+    with pytest.raises(ValidationError, match="event_time_field"):
+        MetaConversionsDestinationConfig.model_validate(values)
+
+
+def test_event_time_field_is_stripped() -> None:
+    assert _config(event_time_field="  occurred_at  ").event_time_field == "occurred_at"
+
+
+def test_event_time_field_is_required_in_generated_json_schema() -> None:
+    schema = MetaConversionsDestinationConfig.model_json_schema()
+    assert "event_time_field" in schema["required"]
+    assert schema["properties"]["event_time_field"]["type"] == "string"
 
 
 def test_batches_at_most_1000_events_per_request() -> None:
