@@ -1308,6 +1308,29 @@ class TestRateLimitKey:
         )
         assert without_poll.rate_limit_key() == with_same_host_poll.rate_limit_key()
 
+    def test_staged_upload_rate_limit_key_falls_back_when_poll_url_is_fully_templated(
+        self,
+    ) -> None:
+        """A poll URL supplied entirely by the trigger response (e.g. a vendor
+        that returns a status URL to poll) has no parseable host until it's
+        rendered against runtime context, which this config-only, no-argument
+        method never sees. Falling back to the trigger host avoids every such
+        destination colliding onto one shared empty-host bucket (caught in
+        Codex adversarial review on #1068)."""
+        from drt.config.destinations_saas import (
+            StagedUploadDestinationConfig,
+            StagedUploadPhaseConfig,
+            StagedUploadPollConfig,
+        )
+
+        cfg = StagedUploadDestinationConfig(
+            type="staged_upload",
+            stage=StagedUploadPhaseConfig(url="https://storage.example.com/upload"),
+            trigger=StagedUploadPhaseConfig(url="https://api.vendor.com/jobs"),
+            poll=StagedUploadPollConfig(url="{{ status_url }}"),
+        )
+        assert cfg.rate_limit_key() == "staged_upload:api.vendor.com"
+
 
 # ---------------------------------------------------------------------------
 # destination-level rate_limit override (#769)

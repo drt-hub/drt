@@ -891,10 +891,25 @@ class StagedUploadDestinationConfig(BaseModel):
         whose real-world rate limit matters; ``poll.url`` is independently
         configurable and can differ from the trigger's host. In the common
         case where they share a host, this resolves to the exact same key as
-        before, so no behavior change there. ``describe()`` is the bare
-        constant ``"staged_upload"``. (``BaseModel``-direct config.)
+        before, so no behavior change there.
+
+        ``rate_limit_key()`` is a config-only, no-argument method (the shared
+        contract every destination in the union implements, consulted by
+        :func:`resolve_rate_limiter` before any HTTP phase runs) — it cannot
+        see the ``response_extract`` context a templated URL renders against.
+        ``poll.url`` is usually static, or templates only a path segment onto
+        a static host (e.g. a job id), which parses correctly even
+        unrendered. If it's instead templated as a *whole* URL supplied by
+        the trigger response (e.g. ``poll.url: "{{ status_url }}"``), the
+        unrendered string has no parseable host at all — falling back to the
+        trigger host here avoids collapsing every such destination onto one
+        shared, empty-host limiter bucket, at the cost of not knowing the
+        real poll host ahead of time in that specific case.
+        ``describe()`` is the bare constant ``"staged_upload"``.
+        (``BaseModel``-direct config.)
         """
-        host = urlparse((self.poll or self.trigger).url).netloc
+        poll_host = urlparse(self.poll.url).netloc if self.poll is not None else ""
+        host = poll_host or urlparse(self.trigger.url).netloc
         return f"{self.type}:{host}"
 
 
