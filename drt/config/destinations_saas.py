@@ -778,6 +778,17 @@ class MetaConversionsDestinationConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _check_event_time_field(self) -> MetaConversionsDestinationConfig:
+        if self.event_time_field is None:
+            raise ValueError(
+                "event_time_field is required — without it, every row is sent with the "
+                "current sync time rather than its real transaction time, silently "
+                "corrupting Meta's attribution/optimization data on any backfill, "
+                "delayed batch, or replay."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _check_website_fields(self) -> MetaConversionsDestinationConfig:
         if self.action_source == "website" and not all(
             field is not None and field.strip()
