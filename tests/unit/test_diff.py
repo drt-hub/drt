@@ -396,6 +396,49 @@ class TestComputeDiffKeyedFetch:
         assert result.added == []
         assert len(result.updated) == 1
 
+    def test_compute_diff_replace_mode_snowflake_reconciles_non_key_column_casing(
+        self,
+    ) -> None:
+        """#1064: an unreconciled *non-key* column casing mismatch made
+        changed_fields() see the destination's folded 'PLAYERSCORE' -> lowered
+        to 'playerscore' and the source's 'PlayerScore' as two different
+        columns, so every identical row was misreported as updated. field_hint
+        now covers the full source field set, not just upsert_key, so an
+        unchanged row must report no update."""
+        cursor = MagicMock()
+        cursor.description = [("ID", None), ("PLAYERSCORE", None)]
+        cursor.fetchall.return_value = [(1, 42), (2, 7)]
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        sf_config = SnowflakeDestinationConfig(
+            type="snowflake",
+            account_env="SF_ACCOUNT",
+            user_env="SF_USER",
+            password_env="SF_PASSWORD",
+            database="ANALYTICS",
+            schema="PUBLIC",
+            table="USERS",
+            warehouse="COMPUTE_WH",
+            upsert_key=["id"],
+        )
+        # id unchanged, PlayerScore unchanged for id=1; genuinely changed for id=2.
+        records = [{"id": 1, "PlayerScore": 42}, {"id": 2, "PlayerScore": 99}]
+
+        with patch(
+            "drt.destinations.snowflake.SnowflakeDestination._connect",
+            return_value=conn,
+        ):
+            result = compute_diff(records, sf_config, _options("replace"), limit=20)
+
+        assert result.deleted == []
+        assert result.added == []
+        assert len(result.updated) == 1
+        old, new = result.updated[0]
+        assert new["id"] == 2
+        assert result.changed_fields(old, new) == {"PlayerScore": (7, 99)}
+
     @patch("drt.engine.diff.fetch_rows")
     @patch("drt.engine.diff.fetch_rows_by_keys")
     def test_compute_diff_clickhouse_falls_back_to_full_scan(

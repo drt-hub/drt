@@ -323,6 +323,12 @@ def compute_diff(
     # complement (mode != "replace") and there are records to key on (we read
     # the column set from records[0]).
     use_keyed_fetch = sync_options.mode != "replace" and bool(records)
+    # #1064: hint every known source field, not just upsert_key — a
+    # non-key column can suffer the identical case-folding collapse as a
+    # key column on the dialects fetch_rows() reconciles for (Snowflake).
+    # Falls back to upsert_key alone when there are no records to read a
+    # field set from (an empty-source replace-mode preview).
+    field_hint = list(records[0].keys()) if records else upsert_key
     try:
         if use_keyed_fetch:
             # Explicit columns avoid metadata introspection on the keyed path.
@@ -338,10 +344,10 @@ def compute_diff(
                 # ClickHouse (different paramstyle) — fall back to full scan.
                 # keyed fetch is an optimisation, never a correctness need.
                 select_query = f"SELECT * FROM {table}"  # noqa: S608 — table from trusted config
-                dest_rows = fetch_rows(config, select_query, columns=[], key_hint=upsert_key)
+                dest_rows = fetch_rows(config, select_query, columns=[], field_hint=field_hint)
         else:
             select_query = f"SELECT * FROM {table}"  # noqa: S608 — table from trusted config
-            dest_rows = fetch_rows(config, select_query, columns=[], key_hint=upsert_key)
+            dest_rows = fetch_rows(config, select_query, columns=[], field_hint=field_hint)
     except Exception as e:
         return DiffResult(
             sample=list(records[:limit]),
