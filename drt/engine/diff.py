@@ -326,9 +326,14 @@ def compute_diff(
     # #1064: hint every known source field, not just upsert_key — a
     # non-key column can suffer the identical case-folding collapse as a
     # key column on the dialects fetch_rows() reconciles for (Snowflake).
-    # Falls back to upsert_key alone when there are no records to read a
-    # field set from (an empty-source replace-mode preview).
-    field_hint = list(records[0].keys()) if records else upsert_key
+    # Built from every record's keys, not just records[0] (caught in Codex
+    # review): dry_run_records accumulates across the whole run, and source
+    # rows can legitimately have heterogeneous optional fields, so an
+    # earlier version that only read records[0] missed a field that first
+    # appeared in a later row — always includes upsert_key too, so an
+    # uppercase-configured key is hinted even if the very first record
+    # happened to omit it.
+    field_hint = sorted({*upsert_key, *(k for record in records for k in record)})
     try:
         if use_keyed_fetch:
             # Explicit columns avoid metadata introspection on the keyed path.

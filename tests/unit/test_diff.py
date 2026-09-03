@@ -439,6 +439,88 @@ class TestComputeDiffKeyedFetch:
         assert new["id"] == 2
         assert result.changed_fields(old, new) == {"PlayerScore": (7, 99)}
 
+    def test_compute_diff_replace_mode_snowflake_field_hint_covers_later_batch_fields(
+        self,
+    ) -> None:
+        """Caught in Codex adversarial review: field_hint built only from
+        records[0] misses a field that first appears in a later record.
+        dry_run_records accumulates across the whole run (potentially many
+        batches), and source rows can legitimately have heterogeneous
+        optional fields, so the hint must be the union across all records,
+        not just the first one."""
+        cursor = MagicMock()
+        cursor.description = [("ID", None), ("PLAYERSCORE", None)]
+        cursor.fetchall.return_value = [(1, None), (2, 42)]
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        sf_config = SnowflakeDestinationConfig(
+            type="snowflake",
+            account_env="SF_ACCOUNT",
+            user_env="SF_USER",
+            password_env="SF_PASSWORD",
+            database="ANALYTICS",
+            schema="PUBLIC",
+            table="USERS",
+            warehouse="COMPUTE_WH",
+            upsert_key=["id"],
+        )
+        # records[0] has no PlayerScore at all; it first appears in records[1].
+        records = [{"id": 1}, {"id": 2, "PlayerScore": 42}]
+
+        with patch(
+            "drt.destinations.snowflake.SnowflakeDestination._connect",
+            return_value=conn,
+        ):
+            result = compute_diff(records, sf_config, _options("replace"), limit=20)
+
+        assert result.deleted == []
+        assert result.added == []
+        assert result.updated == []
+
+    def test_compute_diff_snowflake_field_hint_includes_upsert_key_even_if_first_record_omits_it(
+        self,
+    ) -> None:
+        """Caught in Codex adversarial review: if the first record happens to
+        omit an uppercase-configured upsert key, the key hint must still be
+        present — upsert_key is unioned into field_hint unconditionally, not
+        read off records[0] alone."""
+        cursor = MagicMock()
+        cursor.description = [("ID", None)]
+        cursor.fetchall.return_value = [(1,), (2,)]
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        sf_config = SnowflakeDestinationConfig(
+            type="snowflake",
+            account_env="SF_ACCOUNT",
+            user_env="SF_USER",
+            password_env="SF_PASSWORD",
+            database="ANALYTICS",
+            schema="PUBLIC",
+            table="USERS",
+            warehouse="COMPUTE_WH",
+            upsert_key=["ID"],
+        )
+        # records[0] is missing the "ID" key entirely (an unrelated data
+        # gap); records[1] has it. The hint must still preserve "ID"'s
+        # configured uppercase casing regardless of which record supplied it.
+        records = [{"other": "x"}, {"ID": 2}]
+
+        with patch(
+            "drt.destinations.snowflake.SnowflakeDestination._connect",
+            return_value=conn,
+        ):
+            result = compute_diff(records, sf_config, _options("replace"), limit=20)
+
+        # If "ID" had collapsed to lowercase "id", every destination row
+        # would key on None and collapse into one keyless deleted entry
+        # instead of the correct one (id=1, absent from source).
+        assert len(result.deleted) == 1
+        assert result.deleted[0]["ID"] == 1
+
     @patch("drt.engine.diff.fetch_rows")
     @patch("drt.engine.diff.fetch_rows_by_keys")
     def test_compute_diff_clickhouse_falls_back_to_full_scan(
