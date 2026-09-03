@@ -290,6 +290,49 @@ class TestComputeDiffKeyedFetch:
 
     @patch("drt.engine.diff.fetch_rows")
     @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_compute_diff_keyed_fetch_columns_cover_fields_first_seen_in_later_records(
+        self, mock_fetch_keys: Any, mock_fetch: Any
+    ) -> None:
+        """Caught in Codex adversarial review: the keyed-fetch column list
+        was built from records[0] alone, so a field first appearing in a
+        later record was never fetched from the destination at all — a real
+        ``SELECT`` that omits a column simply never returns it. Worse than a
+        false "changed": when the later source value is also null, the
+        never-fetched destination value and the source's null compare equal,
+        silently hiding a real update the actual run would make. The mock
+        below filters by the requested ``columns``, the way a real SELECT
+        would, rather than returning a fixed dict regardless of what was
+        asked for."""
+        dest_row_by_id = {
+            1: {"id": 1, "score": 0.5},  # no destination value for 'note'
+            2: {"id": 2, "score": 0.9, "note": "existing"},
+        }
+
+        def _fetch(
+            config: Any, key_cols: Any, key_tuples: Any, columns: list[str]
+        ) -> list[dict[str, Any]]:
+            return [
+                {c: dest_row_by_id[key[0]].get(c) for c in columns} for key in key_tuples
+            ]
+
+        mock_fetch_keys.side_effect = _fetch
+        records = [
+            {"id": 1, "score": 0.5},  # 'note' not mentioned at all in this record
+            {"id": 2, "score": 0.9, "note": None},  # 'note' first appears here, null
+        ]
+
+        result = compute_diff(records, _pg_config(), _options("full"), limit=20)
+
+        call = mock_fetch_keys.call_args
+        assert set(call.kwargs["columns"]) == {"id", "score", "note"}
+
+        assert len(result.updated) == 1
+        old, new = result.updated[0]
+        assert new["id"] == 2
+        assert result.changed_fields(old, new) == {"note": ("existing", None)}
+
+    @patch("drt.engine.diff.fetch_rows")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
     def test_compute_diff_replace_mode_still_full_scans(
         self, mock_fetch_keys: Any, mock_fetch: Any
     ) -> None:

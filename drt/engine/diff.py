@@ -337,7 +337,17 @@ def compute_diff(
     try:
         if use_keyed_fetch:
             # Explicit columns avoid metadata introspection on the keyed path.
-            columns = list(records[0].keys())
+            # field_hint (the union across all records) here too (#1064,
+            # caught in Codex review): records[0] alone missed a field that
+            # first appeared in a later record, so the keyed SELECT never
+            # fetched that column's current destination value at all — not
+            # just a case-folding gap, since this path runs unconditionally
+            # for every non-replace mode on every dialect. Worse than a
+            # false "changed": a field missing from the fetch compares as
+            # None on both sides whenever the later source value is also
+            # None, silently reporting no update while the real run would
+            # overwrite a non-null destination value.
+            columns = field_hint
             try:
                 dest_rows = fetch_rows_by_keys(
                     config,
