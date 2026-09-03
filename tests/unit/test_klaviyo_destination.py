@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -272,6 +272,49 @@ class TestKlaviyoLoad:
             "not finite" in result.row_errors[0].error_message.lower()
         )
         client.post.assert_not_called()
+
+    def test_properties_normalizes_time_at_top_level_and_nested(self) -> None:
+        client = MagicMock()
+        client.post.return_value = _resp(201, {"data": {"id": "P1"}})
+        record = {
+            "email": "a@x.com",
+            "checkin_time": time(9, 30, 0),
+            "schedule": {"opens": time(8, 0, 0)},
+        }
+        with _patch_client(client):
+            result = KlaviyoDestination().load([record], _config(), _options())
+        assert result.success == 1
+        body = client.post.call_args.kwargs["json"]
+        properties = body["data"]["attributes"]["properties"]
+        assert properties == {
+            "checkin_time": "09:30:00",
+            "schedule": {"opens": "08:00:00"},
+        }
+        json.dumps(body)
+
+    @pytest.mark.parametrize("bad_float", [float("nan"), float("inf"), float("-inf")])
+    def test_properties_rejects_non_finite_float_at_top_level_and_nested(
+        self, bad_float: float
+    ) -> None:
+        client = MagicMock()
+        with _patch_client(client):
+            result = KlaviyoDestination().load(
+                [{"email": "a@x.com", "score": bad_float}],
+                _config(),
+                _options(on_error="skip"),
+            )
+        assert result.failed == 1
+        assert "not finite" in result.row_errors[0].error_message.lower()
+        client.post.assert_not_called()
+
+        with _patch_client(client):
+            result = KlaviyoDestination().load(
+                [{"email": "a@x.com", "nested": {"score": bad_float}}],
+                _config(),
+                _options(on_error="skip"),
+            )
+        assert result.failed == 1
+        assert "not finite" in result.row_errors[0].error_message.lower()
 
     def test_properties_keeps_decimal_as_a_consistent_json_number_type(self) -> None:
         # Whole-number and fractional Decimals from the same column both come

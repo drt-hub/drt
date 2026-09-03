@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
 
@@ -366,9 +366,12 @@ def _decimal_to_json_safe(value: Decimal) -> float:
 def _json_safe(value: Any) -> Any:
     """Recursively coerce a warehouse-driver value into a JSON-serializable one.
 
-    Common driver return types (``Decimal``, ``date``, ``datetime``) aren't
-    JSON-serializable and can appear nested inside dict/list-typed columns
-    (e.g. JSON/STRUCT columns), not just at the top level.
+    Common driver return types (``Decimal``, ``date``/``datetime``/``time``,
+    non-finite ``float``) aren't JSON-serializable — or, for NaN/infinity,
+    are only serializable via a non-standard extension `httpx` explicitly
+    disables (``allow_nan=False``) — and any of these can appear nested
+    inside dict/list-typed columns (e.g. JSON/STRUCT columns), not just at
+    the top level.
     """
     if isinstance(value, Decimal):
         return _decimal_to_json_safe(value)
@@ -376,6 +379,10 @@ def _json_safe(value: Any) -> Any:
         return value.isoformat()
     if isinstance(value, date):
         return value.isoformat()
+    if isinstance(value, time):
+        return value.isoformat()
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"Float value {value!r} is not finite and cannot be sent to Klaviyo.")
     if isinstance(value, dict):
         return {k: _json_safe(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
