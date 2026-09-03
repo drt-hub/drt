@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -305,7 +306,11 @@ class KlaviyoDestination:
             ):
                 if field:
                     excluded_fields.add(field)
-        return {k: v for k, v in record.items() if k not in excluded_fields and v is not None}
+        return {
+            k: _json_safe(v)
+            for k, v in record.items()
+            if k not in excluded_fields and v is not None
+        }
 
     def test_connection(self, config: DestinationConfig) -> None:
         """Test whether Klaviyo accepts the configured private API key.
@@ -330,6 +335,26 @@ class KlaviyoDestination:
             if resp.status_code == 403 and _permission_denied(resp):
                 return
             resp.raise_for_status()
+
+
+def _json_safe(value: Any) -> Any:
+    """Recursively coerce a warehouse-driver value into a JSON-serializable one.
+
+    Common driver return types (``Decimal``, ``date``, ``datetime``) aren't
+    JSON-serializable and can appear nested inside dict/list-typed columns
+    (e.g. JSON/STRUCT columns), not just at the top level.
+    """
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
 
 
 def _permission_denied(resp: httpx.Response) -> bool:

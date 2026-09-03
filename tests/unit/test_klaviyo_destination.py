@@ -222,6 +222,29 @@ class TestKlaviyoLoad:
         assert result.failed == 1  # stopped after the first
         assert client.post.call_count == 1
 
+    def test_properties_normalizes_decimal_date_datetime_in_default_copy_path(self) -> None:
+        client = MagicMock()
+        client.post.return_value = _resp(201, {"data": {"id": "P1"}})
+        record = {
+            "email": "a@x.com",
+            "ltv": Decimal("199.99"),
+            "signup_date": date(2024, 1, 15),
+            "last_seen": datetime(2024, 6, 1, 12, 30, tzinfo=timezone.utc),
+            "tags": {"score": Decimal("4.5"), "history": [date(2024, 1, 1)]},
+        }
+        with _patch_client(client):
+            result = KlaviyoDestination().load([record], _config(), _options())
+        assert result.success == 1
+        body = client.post.call_args.kwargs["json"]
+        properties = body["data"]["attributes"]["properties"]
+        assert properties == {
+            "ltv": 199.99,
+            "signup_date": "2024-01-15",
+            "last_seen": "2024-06-01T12:30:00+00:00",
+            "tags": {"score": 4.5, "history": ["2024-01-01"]},
+        }
+        json.dumps(body)  # httpx's json= encoding must accept the final payload.
+
     def test_properties_template(self) -> None:
         client = MagicMock()
         client.post.return_value = _resp(201, {"data": {"id": "P1"}})
@@ -366,6 +389,33 @@ class TestKlaviyoEventLoad:
         assert attributes["value"] == 12.34
         assert attributes["unique_id"] == "123"
         assert attributes["properties"] == {"plan": "pro"}
+        json.dumps(body)  # httpx's json= encoding must accept the final payload.
+
+    def test_event_default_properties_normalizes_nested_decimal_date_datetime(self) -> None:
+        client = MagicMock()
+        client.post.return_value = _resp(202)
+        config = _config(
+            endpoint="event",
+            metric_name="Placed Order",
+            unique_id_field="event_id",
+        )
+        record = {
+            "email": "a@x.com",
+            "event_id": "evt-123",
+            "order_total": Decimal("42.50"),
+            "line_items": [{"price": Decimal("10.00"), "shipped_on": date(2024, 3, 1)}],
+        }
+
+        with _patch_client(client):
+            result = KlaviyoDestination().load([record], config, _options())
+
+        assert result.success == 1
+        body = client.post.call_args.kwargs["json"]
+        properties = body["data"]["attributes"]["properties"]
+        assert properties == {
+            "order_total": 42.50,
+            "line_items": [{"price": 10.00, "shipped_on": "2024-03-01"}],
+        }
         json.dumps(body)  # httpx's json= encoding must accept the final payload.
 
     def test_event_rejects_date_only_time_field(self) -> None:
