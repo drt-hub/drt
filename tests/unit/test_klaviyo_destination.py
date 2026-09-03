@@ -245,6 +245,24 @@ class TestKlaviyoLoad:
         }
         json.dumps(body)  # httpx's json= encoding must accept the final payload.
 
+    def test_properties_preserves_decimal_precision_beyond_float_range(self) -> None:
+        client = MagicMock()
+        client.post.return_value = _resp(201, {"data": {"id": "P1"}})
+        record = {
+            "email": "a@x.com",
+            "big_int": Decimal("9007199254740993"),  # not exactly representable as float
+            "nan_value": Decimal("NaN"),
+        }
+        with _patch_client(client):
+            result = KlaviyoDestination().load([record], _config(), _options())
+        assert result.success == 1
+        body = client.post.call_args.kwargs["json"]
+        properties = body["data"]["attributes"]["properties"]
+        assert properties["big_int"] == 9007199254740993
+        assert isinstance(properties["big_int"], int)
+        assert properties["nan_value"] == "NaN"
+        json.dumps(body)
+
     def test_properties_template(self) -> None:
         client = MagicMock()
         client.post.return_value = _resp(201, {"data": {"id": "P1"}})

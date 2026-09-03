@@ -337,6 +337,28 @@ class KlaviyoDestination:
             resp.raise_for_status()
 
 
+def _decimal_to_json_safe(value: Decimal) -> Any:
+    """Convert a Decimal to JSON without silently losing precision.
+
+    A blind ``float(value)`` corrupts values a ``float`` can't represent
+    exactly (e.g. large integer-valued Decimals beyond 2**53, or Decimals
+    outside float range becoming +/-inf, which JSON's own spec forbids and
+    which httpx's encoder would otherwise still emit as invalid `Infinity`
+    JSON). Whole numbers go out as ``int`` (JSON has no size limit there);
+    fractional values go out as ``float`` only if that round-trips exactly
+    back to the original Decimal; anything else — including non-finite
+    Decimals — is stringified rather than silently rounded.
+    """
+    if not value.is_finite():
+        return str(value)
+    if value == value.to_integral_value():
+        return int(value)
+    as_float = float(value)
+    if Decimal(str(as_float)) == value:
+        return as_float
+    return str(value)
+
+
 def _json_safe(value: Any) -> Any:
     """Recursively coerce a warehouse-driver value into a JSON-serializable one.
 
@@ -345,7 +367,7 @@ def _json_safe(value: Any) -> Any:
     (e.g. JSON/STRUCT columns), not just at the top level.
     """
     if isinstance(value, Decimal):
-        return float(value)
+        return _decimal_to_json_safe(value)
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, date):
