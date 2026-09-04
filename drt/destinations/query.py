@@ -293,9 +293,7 @@ def _fetch_rows_snowflake(
     try:
         with conn.cursor() as cur:
             cur.execute(query)
-            cols = columns or _reconcile_column_case(
-                [d[0] for d in cur.description], field_hint
-            )
+            cols = columns or _reconcile_column_case([d[0] for d in cur.description], field_hint)
             return [dict(zip(cols, row)) for row in cur.fetchall()]
     finally:
         conn.close()
