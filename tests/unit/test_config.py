@@ -8,7 +8,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from drt.config.credentials import BigQueryProfile, load_profile, save_profile
+from drt.config.credentials import BigQueryProfile, SnowflakeProfile, load_profile, save_profile
 from drt.config.models import (
     ApiKeyAuth,
     BasicAuth,
@@ -354,6 +354,50 @@ def test_load_profile_missing_key(tmp_path: Path) -> None:
     (tmp_path / "profiles.yml").write_text("prod:\n  type: bigquery\n  project: x\n  dataset: y\n")
     with pytest.raises(KeyError, match="Profile 'dev' not found"):
         load_profile("dev", config_dir=tmp_path)
+
+
+def test_load_profile_snowflake_private_key_env(tmp_path: Path) -> None:
+    """docs/connectors/snowflake.md:67 documents private_key_env /
+    private_key_passphrase_env as applying to the source profile in
+    ~/.drt/profiles.yml (#737's key-pair auth, the recommended path since
+    MFA-enforcing Snowflake accounts reject password sign-in). load_profile()'s
+    snowflake branch never read either field from the raw YAML mapping, so a
+    profile configured exactly as documented silently connects with no
+    credential at all instead of the configured key pair."""
+    (tmp_path / "profiles.yml").write_text(
+        "sf:\n"
+        "  type: snowflake\n"
+        "  account: myaccount\n"
+        "  user: svc_user\n"
+        "  private_key_env: SF_PRIVATE_KEY\n"
+        "  private_key_passphrase_env: SF_PRIVATE_KEY_PASSPHRASE\n"
+        "  database: MYDB\n"
+        "  schema: PUBLIC\n"
+        "  warehouse: WH\n"
+    )
+    loaded = load_profile("sf", config_dir=tmp_path)
+    assert loaded.private_key_env == "SF_PRIVATE_KEY"
+    assert loaded.private_key_passphrase_env == "SF_PRIVATE_KEY_PASSPHRASE"
+
+
+def test_save_profile_snowflake_private_key_env_roundtrip(tmp_path: Path) -> None:
+    """save_profile() must persist private_key_env / private_key_passphrase_env
+    too, or a profile round-tripped through the typed path (save then load)
+    loses key-pair auth even once load_profile() can read it."""
+    profile = SnowflakeProfile(
+        type="snowflake",
+        account="myaccount",
+        user="svc_user",
+        private_key_env="SF_PRIVATE_KEY",
+        private_key_passphrase_env="SF_PRIVATE_KEY_PASSPHRASE",
+        database="MYDB",
+        schema="PUBLIC",
+        warehouse="WH",
+    )
+    save_profile("sf", profile, config_dir=tmp_path)
+    loaded = load_profile("sf", config_dir=tmp_path)
+    assert loaded.private_key_env == "SF_PRIVATE_KEY"
+    assert loaded.private_key_passphrase_env == "SF_PRIVATE_KEY_PASSPHRASE"
 
 
 def test_save_profile_appends(tmp_path: Path) -> None:

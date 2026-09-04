@@ -364,6 +364,8 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             user=raw.get("user", ""),
             password_env=raw.get("password_env"),
             password=raw.get("password"),
+            private_key_env=raw.get("private_key_env"),
+            private_key_passphrase_env=raw.get("private_key_passphrase_env"),
             database=_db,
             schema=raw.get("schema") or "PUBLIC",
             warehouse=raw.get("warehouse", ""),
@@ -634,6 +636,10 @@ def save_profile(
         }
         if profile.password_env:
             entry["password_env"] = profile.password_env
+        if profile.private_key_env:
+            entry["private_key_env"] = profile.private_key_env
+        if profile.private_key_passphrase_env:
+            entry["private_key_passphrase_env"] = profile.private_key_passphrase_env
         if profile.role:
             entry["role"] = profile.role
     elif isinstance(profile, SQLServerProfile):
