@@ -323,9 +323,28 @@ def compute_diff(
     # complement (mode != "replace") and there are records to key on (we read
     # the column set from records[0]).
     use_keyed_fetch = sync_options.mode != "replace" and bool(records)
+    # #1064: hint every known source field, not just upsert_key — a
+    # non-key column can suffer the identical case-folding collapse as a
+    # key column on the dialects fetch_rows() reconciles for (Snowflake).
+    # Built from every record's keys, not just records[0] (caught in Codex
+    # review): dry_run_records accumulates across the whole run, and source
+    # rows can legitimately have heterogeneous optional fields, so an
+    # earlier version that only read records[0] missed a field that first
+    # appeared in a later row — always includes upsert_key too, so an
+    # uppercase-configured key is hinted even if the very first record
+    # happened to omit it.
+    field_hint = sorted({*upsert_key, *(k for record in records for k in record)})
     try:
         if use_keyed_fetch:
-            # Explicit columns avoid metadata introspection on the keyed path.
+            # Explicit columns avoid metadata introspection on the keyed
+            # path. Deliberately records[0].keys(), not field_hint's
+            # cross-record union: the real write (BaseSqlDestination.load(),
+            # sql_base.py) derives each batch's column list the same way,
+            # from the first record only, so mirroring that here is what
+            # keeps the preview honest about what the real run will write —
+            # a union would fetch (and could report a phantom diff on)
+            # fields the real write silently drops on a heterogeneous
+            # batch. That drop is itself tracked separately (#1064 follow-up).
             columns = list(records[0].keys())
             try:
                 dest_rows = fetch_rows_by_keys(
@@ -338,10 +357,10 @@ def compute_diff(
                 # ClickHouse (different paramstyle) — fall back to full scan.
                 # keyed fetch is an optimisation, never a correctness need.
                 select_query = f"SELECT * FROM {table}"  # noqa: S608 — table from trusted config
-                dest_rows = fetch_rows(config, select_query, columns=[], key_hint=upsert_key)
+                dest_rows = fetch_rows(config, select_query, columns=[], field_hint=field_hint)
         else:
             select_query = f"SELECT * FROM {table}"  # noqa: S608 — table from trusted config
-            dest_rows = fetch_rows(config, select_query, columns=[], key_hint=upsert_key)
+            dest_rows = fetch_rows(config, select_query, columns=[], field_hint=field_hint)
     except Exception as e:
         return DiffResult(
             sample=list(records[:limit]),
