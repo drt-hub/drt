@@ -336,18 +336,16 @@ def compute_diff(
     field_hint = sorted({*upsert_key, *(k for record in records for k in record)})
     try:
         if use_keyed_fetch:
-            # Explicit columns avoid metadata introspection on the keyed path.
-            # field_hint (the union across all records) here too (#1064,
-            # caught in Codex review): records[0] alone missed a field that
-            # first appeared in a later record, so the keyed SELECT never
-            # fetched that column's current destination value at all — not
-            # just a case-folding gap, since this path runs unconditionally
-            # for every non-replace mode on every dialect. Worse than a
-            # false "changed": a field missing from the fetch compares as
-            # None on both sides whenever the later source value is also
-            # None, silently reporting no update while the real run would
-            # overwrite a non-null destination value.
-            columns = field_hint
+            # Explicit columns avoid metadata introspection on the keyed
+            # path. Deliberately records[0].keys(), not field_hint's
+            # cross-record union: the real write (BaseSqlDestination.load(),
+            # sql_base.py) derives each batch's column list the same way,
+            # from the first record only, so mirroring that here is what
+            # keeps the preview honest about what the real run will write —
+            # a union would fetch (and could report a phantom diff on)
+            # fields the real write silently drops on a heterogeneous
+            # batch. That drop is itself tracked separately (#1064 follow-up).
+            columns = list(records[0].keys())
             try:
                 dest_rows = fetch_rows_by_keys(
                     config,
