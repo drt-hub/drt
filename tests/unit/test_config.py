@@ -8,7 +8,23 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from drt.config.credentials import BigQueryProfile, SnowflakeProfile, load_profile, save_profile
+from drt.config.credentials import (
+    BigQueryProfile,
+    ClickHouseProfile,
+    DatabricksProfile,
+    DeltaLakeProfile,
+    DuckDBProfile,
+    IcebergProfile,
+    MySQLProfile,
+    PostgresProfile,
+    RedshiftProfile,
+    RestApiProfile,
+    SnowflakeProfile,
+    SQLiteProfile,
+    SQLServerProfile,
+    load_profile,
+    save_profile,
+)
 from drt.config.models import (
     ApiKeyAuth,
     BasicAuth,
@@ -354,6 +370,126 @@ def test_load_profile_missing_key(tmp_path: Path) -> None:
     (tmp_path / "profiles.yml").write_text("prod:\n  type: bigquery\n  project: x\n  dataset: y\n")
     with pytest.raises(KeyError, match="Profile 'dev' not found"):
         load_profile("dev", config_dir=tmp_path)
+
+
+# One representative instance per built-in profile type (#402 refactor
+# baseline), populated with non-default values wherever the type has one so a
+# round trip actually exercises every optional field save_profile() knows how
+# to write, not just the dataclass defaults.
+_ALL_BUILTIN_PROFILES: list[object] = [
+    # location intentionally left at its default ("US"): save_profile() has a
+    # pre-existing, out-of-scope bug where it never writes a non-default
+    # location back (tracked as #1096) — asserting it here would freeze that
+    # bug into this refactor's baseline instead of just preserving it.
+    BigQueryProfile(
+        type="bigquery",
+        project="my-project",
+        dataset="my_dataset",
+        method="keyfile",
+        keyfile="/path/to/key.json",
+    ),
+    DuckDBProfile(type="duckdb", database="./data/warehouse.duckdb"),
+    SQLiteProfile(type="sqlite", database="./data/app.sqlite"),
+    PostgresProfile(
+        type="postgres",
+        host="db.example.com",
+        port=5433,
+        dbname="analytics",
+        user="analyst",
+        password_env="PG_PASSWORD",
+    ),
+    RedshiftProfile(
+        type="redshift",
+        host="cluster.example.com",
+        port=5440,
+        dbname="analytics",
+        user="analyst",
+        password_env="RS_PASSWORD",
+        schema="reporting",
+    ),
+    ClickHouseProfile(
+        type="clickhouse",
+        host="ch.example.com",
+        port=8443,
+        database="events",
+        user="ingest",
+        password_env="CH_PASSWORD",
+    ),
+    MySQLProfile(
+        type="mysql",
+        host="mysql.example.com",
+        port=3307,
+        dbname="app",
+        user="app_user",
+        password_env="MYSQL_PASSWORD",
+    ),
+    SnowflakeProfile(
+        type="snowflake",
+        account="myaccount",
+        user="svc_user",
+        password_env="SF_PASSWORD",
+        private_key_env="SF_PRIVATE_KEY",
+        private_key_passphrase_env="SF_PRIVATE_KEY_PASSPHRASE",
+        database="MYDB",
+        schema="PUBLIC",
+        warehouse="WH",
+        role="ANALYST_ROLE",
+    ),
+    SQLServerProfile(
+        type="sqlserver",
+        host="sql.example.com",
+        port=1434,
+        database="analytics",
+        user="app_user",
+        password_env="SQLSERVER_PASSWORD",
+        schema="reporting",
+    ),
+    DatabricksProfile(
+        type="databricks",
+        server_hostname="dbc-abc.cloud.databricks.com",
+        http_path="/sql/1.0/warehouses/xxxxxx",
+        access_token_env="DATABRICKS_TOKEN",
+        catalog="main",
+        schema="analytics",
+    ),
+    DeltaLakeProfile(
+        type="deltalake",
+        location="s3://bucket/table",
+        table="events",
+        storage_options={"AWS_ACCESS_KEY_ID": "AKIA..."},
+    ),
+    IcebergProfile(
+        type="iceberg",
+        table="namespace.table",
+        catalog_uri="https://catalog.example.com",
+        warehouse="s3://bucket/warehouse",
+        catalog_name="prod",
+        properties={"io-impl": "org.apache.iceberg.aws.s3.S3FileIO"},
+    ),
+    RestApiProfile(
+        type="rest_api",
+        url="https://api.example.com/v1",
+        auth={"type": "bearer", "token_env": "API_TOKEN"},
+        pagination={"type": "cursor", "cursor_param": "next"},
+        result_path="data.items",
+        incremental={"start_param": "updated_since"},
+    ),
+]
+
+
+@pytest.mark.parametrize("profile", _ALL_BUILTIN_PROFILES, ids=lambda p: p.type)
+def test_save_profile_load_profile_roundtrip_all_builtin_types(
+    tmp_path: Path, profile: object
+) -> None:
+    """#402 refactor baseline: every built-in profile type must survive a
+    save_profile() -> load_profile() round trip with every field save_profile()
+    persists intact. Written before the registry-based refactor so a
+    regression in per-type load/save logic (defaults, required-field checks,
+    optional-field omission) is caught regardless of how load_profile() /
+    save_profile() are internally structured afterward."""
+    save_profile("p", profile, config_dir=tmp_path)  # type: ignore[arg-type]
+    loaded = load_profile("p", config_dir=tmp_path)
+    assert loaded == profile
 
 
 def test_load_profile_snowflake_private_key_env(tmp_path: Path) -> None:

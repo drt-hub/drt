@@ -27,6 +27,7 @@ Example ~/.drt/profiles.yml:
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import asdict, is_dataclass
 from inspect import signature
 from pathlib import Path
@@ -235,29 +236,395 @@ def load_observability_config(config_dir: Path | None = None) -> ObservabilityCo
 # ---------------------------------------------------------------------------
 
 
-_DISPATCHED_SOURCE_TYPES: frozenset[str] = frozenset(
-    {
-        "bigquery",
-        "duckdb",
-        "sqlite",
-        "postgres",
-        "redshift",
-        "clickhouse",
-        "mysql",
-        "snowflake",
-        "databricks",
-        "sqlserver",
-        "deltalake",
-        "iceberg",
-        "rest_api",
+# ---------------------------------------------------------------------------
+# Per-type load/save (#402): a spec table replaces what was a hand-written
+# if/elif chain in each of load_profile()/save_profile(). Each built-in type
+# keeps its own construction quirks (per-field defaults, int() coercion,
+# required-field checks, terse-write conditionals) as a small loader/dumper
+# function pair — this is a lookup-table refactor, not a shared schema, since
+# the per-type differences are load-bearing (see individual functions).
+# ---------------------------------------------------------------------------
+
+
+def _load_bigquery(raw: dict[str, Any]) -> BigQueryProfile:
+    return BigQueryProfile(
+        type="bigquery",
+        project=raw["project"],
+        dataset=raw["dataset"],
+        method=raw.get("method", "application_default"),
+        keyfile=raw.get("keyfile"),
+        location=raw.get("location", "US"),
+    )
+
+
+def _dump_bigquery(profile: BigQueryProfile, profile_name: str) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "type": "bigquery",
+        "project": profile.project,
+        "dataset": profile.dataset,
+        "method": profile.method,
     }
-)
+    if profile.keyfile:
+        entry["keyfile"] = profile.keyfile
+    return entry
+
+
+def _load_duckdb(raw: dict[str, Any]) -> DuckDBProfile:
+    return DuckDBProfile(type="duckdb", database=raw.get("database", ":memory:"))
+
+
+def _dump_duckdb(profile: DuckDBProfile, profile_name: str) -> dict[str, Any]:
+    return {"type": "duckdb", "database": profile.database}
+
+
+def _load_sqlite(raw: dict[str, Any]) -> SQLiteProfile:
+    return SQLiteProfile(type="sqlite", database=raw.get("database", ":memory:"))
+
+
+def _dump_sqlite(profile: SQLiteProfile, profile_name: str) -> dict[str, Any]:
+    return {"type": "sqlite", "database": profile.database}
+
+
+def _load_postgres(raw: dict[str, Any]) -> PostgresProfile:
+    return PostgresProfile(
+        type="postgres",
+        host=raw.get("host", "localhost"),
+        port=int(raw.get("port", 5432)),
+        dbname=raw.get("dbname", ""),
+        user=raw.get("user", ""),
+        password_env=raw.get("password_env"),
+        password=raw.get("password"),
+    )
+
+
+def _dump_postgres(profile: PostgresProfile, profile_name: str) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "type": "postgres",
+        "host": profile.host,
+        "port": profile.port,
+        "dbname": profile.dbname,
+        "user": profile.user,
+    }
+    if profile.password_env:
+        entry["password_env"] = profile.password_env
+    return entry
+
+
+def _load_redshift(raw: dict[str, Any]) -> RedshiftProfile:
+    return RedshiftProfile(
+        type="redshift",
+        host=raw.get("host", ""),
+        port=int(raw.get("port", 5439)),
+        dbname=raw.get("dbname", ""),
+        user=raw.get("user", ""),
+        password_env=raw.get("password_env"),
+        password=raw.get("password"),
+        schema=raw.get("schema", "public"),
+    )
+
+
+def _dump_redshift(profile: RedshiftProfile, profile_name: str) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "type": "redshift",
+        "host": profile.host,
+        "port": profile.port,
+        "dbname": profile.dbname,
+        "user": profile.user,
+        "schema": profile.schema,
+    }
+    if profile.password_env:
+        entry["password_env"] = profile.password_env
+    return entry
+
+
+def _load_clickhouse(raw: dict[str, Any]) -> ClickHouseProfile:
+    return ClickHouseProfile(
+        type="clickhouse",
+        host=raw.get("host", "localhost"),
+        port=int(raw.get("port", 8123)),
+        database=raw.get("database", "default"),
+        user=raw.get("user", "default"),
+        password_env=raw.get("password_env"),
+        password=raw.get("password"),
+    )
+
+
+def _dump_clickhouse(profile: ClickHouseProfile, profile_name: str) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "type": "clickhouse",
+        "host": profile.host,
+        "port": profile.port,
+        "database": profile.database,
+        "user": profile.user,
+    }
+    if profile.password_env:
+        entry["password_env"] = profile.password_env
+    return entry
+
+
+def _load_mysql(raw: dict[str, Any]) -> MySQLProfile:
+    return MySQLProfile(
+        type="mysql",
+        host=raw.get("host", "localhost"),
+        port=int(raw.get("port", 3306)),
+        dbname=raw.get("dbname", ""),
+        user=raw.get("user", ""),
+        password_env=raw.get("password_env"),
+        password=raw.get("password"),
+    )
+
+
+def _dump_mysql(profile: MySQLProfile, profile_name: str) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "type": "mysql",
+        "host": profile.host,
+        "port": profile.port,
+        "dbname": profile.dbname,
+        "user": profile.user,
+    }
+    if profile.password_env:
+        entry["password_env"] = profile.password_env
+    return entry
+
+
+def _load_snowflake(raw: dict[str, Any]) -> SnowflakeProfile:
+    _db = raw.get("database", "")
+    if not _db:
+        raise ValueError(
+            "Snowflake profile requires 'database'. "
+            "Add database: YOUR_DB to your profile in ~/.drt/profiles.yml"
+        )
+    return SnowflakeProfile(
+        type="snowflake",
+        account=raw.get("account", ""),
+        user=raw.get("user", ""),
+        password_env=raw.get("password_env"),
+        password=raw.get("password"),
+        private_key_env=raw.get("private_key_env"),
+        private_key_passphrase_env=raw.get("private_key_passphrase_env"),
+        database=_db,
+        schema=raw.get("schema") or "PUBLIC",
+        warehouse=raw.get("warehouse", ""),
+        role=raw.get("role"),
+    )
+
+
+def _dump_snowflake(profile: SnowflakeProfile, profile_name: str) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "type": "snowflake",
+        "account": profile.account,
+        "user": profile.user,
+        "database": profile.database,
+        "schema": profile.schema,
+        "warehouse": profile.warehouse,
+    }
+    if profile.password_env:
+        entry["password_env"] = profile.password_env
+    if profile.private_key_env:
+        entry["private_key_env"] = profile.private_key_env
+    if profile.private_key_passphrase_env:
+        entry["private_key_passphrase_env"] = profile.private_key_passphrase_env
+    if profile.role:
+        entry["role"] = profile.role
+    return entry
+
+
+def _load_sqlserver(raw: dict[str, Any]) -> SQLServerProfile:
+    _db = raw.get("database", "")
+    if not _db:
+        raise ValueError("SQL Server profile requires 'database'.")
+    return SQLServerProfile(
+        type="sqlserver",
+        host=raw.get("host", ""),
+        port=int(raw.get("port", 1433)),
+        database=_db,
+        user=raw.get("user", ""),
+        password_env=raw.get("password_env"),
+        password=raw.get("password"),
+        schema=raw.get("schema") or "dbo",
+    )
+
+
+def _dump_sqlserver(profile: SQLServerProfile, profile_name: str) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "type": "sqlserver",
+        "host": profile.host,
+        "port": profile.port,
+        "database": profile.database,
+        "user": profile.user,
+        "schema": profile.schema,
+    }
+    if profile.password_env:
+        entry["password_env"] = profile.password_env
+    return entry
+
+
+def _load_databricks(raw: dict[str, Any]) -> DatabricksProfile:
+    _host = raw.get("server_hostname", "")
+    _path = raw.get("http_path", "")
+    if not _host or not _path:
+        raise ValueError("Databricks profile requires 'server_hostname' and 'http_path'.")
+    return DatabricksProfile(
+        type="databricks",
+        server_hostname=_host,
+        http_path=_path,
+        access_token_env=raw.get("access_token_env"),
+        access_token=raw.get("access_token"),
+        catalog=raw.get("catalog"),
+        schema=raw.get("schema") or "default",
+    )
+
+
+def _dump_databricks(profile: DatabricksProfile, profile_name: str) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "type": "databricks",
+        "server_hostname": profile.server_hostname,
+        "http_path": profile.http_path,
+        "schema": profile.schema,
+    }
+    if profile.access_token_env:
+        entry["access_token_env"] = profile.access_token_env
+    if profile.catalog:
+        entry["catalog"] = profile.catalog
+    return entry
+
+
+def _load_deltalake(raw: dict[str, Any]) -> DeltaLakeProfile:
+    location = raw.get("location", "")
+    if not location:
+        raise ValueError("Delta Lake profile requires 'location'.")
+    return DeltaLakeProfile(
+        type="deltalake",
+        location=location,
+        table=raw.get("table"),
+        storage_options=raw.get("storage_options") or {},
+    )
+
+
+def _dump_deltalake(profile: DeltaLakeProfile, profile_name: str) -> dict[str, Any]:
+    entry: dict[str, Any] = {"type": "deltalake", "location": profile.location}
+    if profile.table:
+        entry["table"] = profile.table
+    if profile.storage_options:
+        entry["storage_options"] = profile.storage_options
+    return entry
+
+
+def _load_rest_api(raw: dict[str, Any]) -> RestApiProfile:
+    url = raw.get("url", "")
+    if not url:
+        raise ValueError("REST API profile requires 'url'.")
+    return RestApiProfile(
+        type="rest_api",
+        url=url,
+        auth=raw.get("auth"),
+        pagination=raw.get("pagination"),
+        result_path=raw.get("result_path"),
+        incremental=raw.get("incremental"),
+    )
+
+
+def _dump_rest_api(profile: RestApiProfile, profile_name: str) -> dict[str, Any]:
+    # rest_api must stay on the *_env-only path every other built-in uses:
+    # `auth` is a free-form dict that may legitimately carry a literal token,
+    # so it is written only when it names env vars — anything else is dropped
+    # with a pointer, rather than landing verbatim in profiles.yml (which is
+    # what the generic dataclass fallback did once #997 gave it one).
+    entry: dict[str, Any] = {"type": "rest_api", "url": profile.url}
+    if profile.auth:
+        literals = sorted(
+            key
+            for key, value in profile.auth.items()
+            if key != "type" and isinstance(value, str) and not key.endswith("_env")
+        )
+        if literals:
+            raise ValueError(
+                f"Refusing to write profile '{profile_name}': its auth block sets "
+                f"{', '.join(literals)} to a literal value. profiles.yml stores env var "
+                "names, not secrets — use the matching *_env key instead."
+            )
+        entry["auth"] = profile.auth
+    for field_name in ("pagination", "result_path", "incremental"):
+        value = getattr(profile, field_name, None)
+        if value:
+            entry[field_name] = value
+    return entry
+
+
+def _load_iceberg(raw: dict[str, Any]) -> IcebergProfile:
+    table = raw.get("table", "")
+    if not table:
+        raise ValueError("Iceberg profile requires 'table' (namespace.table).")
+    return IcebergProfile(
+        type="iceberg",
+        table=table,
+        catalog_uri=raw.get("catalog_uri"),
+        warehouse=raw.get("warehouse"),
+        catalog_name=raw.get("catalog_name") or "default",
+        properties=raw.get("properties") or {},
+    )
+
+
+def _dump_iceberg(profile: IcebergProfile, profile_name: str) -> dict[str, Any]:
+    entry: dict[str, Any] = {"type": "iceberg", "table": profile.table}
+    if profile.catalog_uri:
+        entry["catalog_uri"] = profile.catalog_uri
+    if profile.warehouse:
+        entry["warehouse"] = profile.warehouse
+    if profile.catalog_name and profile.catalog_name != "default":
+        entry["catalog_name"] = profile.catalog_name
+    if profile.properties:
+        entry["properties"] = profile.properties
+    return entry
+
+
+_ProfileLoader = Callable[[dict[str, Any]], ProfileConfigLike]
+_ProfileDumper = Callable[[Any, str], dict[str, Any]]
+
+# Keyed on the `type:` string from profiles.yml — matches _DISPATCHED_SOURCE_TYPES.
+_PROFILE_LOADERS: dict[str, _ProfileLoader] = {
+    "bigquery": _load_bigquery,
+    "duckdb": _load_duckdb,
+    "sqlite": _load_sqlite,
+    "postgres": _load_postgres,
+    "redshift": _load_redshift,
+    "clickhouse": _load_clickhouse,
+    "mysql": _load_mysql,
+    "snowflake": _load_snowflake,
+    "sqlserver": _load_sqlserver,
+    "databricks": _load_databricks,
+    "deltalake": _load_deltalake,
+    "rest_api": _load_rest_api,
+    "iceberg": _load_iceberg,
+}
+
+# Keyed on the concrete dataclass, mirroring the original isinstance() chain
+# (dispatch by exact type, not by a `.type` string — a profile object's own
+# `type` field is user/plugin-controlled data, not a safe dispatch key here).
+_PROFILE_DUMPERS: dict[type, _ProfileDumper] = {
+    BigQueryProfile: _dump_bigquery,
+    DuckDBProfile: _dump_duckdb,
+    SQLiteProfile: _dump_sqlite,
+    PostgresProfile: _dump_postgres,
+    RedshiftProfile: _dump_redshift,
+    ClickHouseProfile: _dump_clickhouse,
+    MySQLProfile: _dump_mysql,
+    SnowflakeProfile: _dump_snowflake,
+    SQLServerProfile: _dump_sqlserver,
+    DatabricksProfile: _dump_databricks,
+    DeltaLakeProfile: _dump_deltalake,
+    RestApiProfile: _dump_rest_api,
+    IcebergProfile: _dump_iceberg,
+}
+
+_DISPATCHED_SOURCE_TYPES: frozenset[str] = frozenset(_PROFILE_LOADERS)
 """Source types :func:`load_profile` constructs itself (#997).
 
-Data, not a slice of the error sentence: the "Also registered" line is derived
-from this, so reflowing the message must not change which types drt reports as
-supported. ``tests/unit/test_plugin_config_extensibility.py`` pins it against
-the ``if source_type == ...`` chain and against the connector registry.
+Derived from ``_PROFILE_LOADERS`` so it cannot drift from the table by
+construction. Data, not a slice of the error sentence: the "Also registered"
+line is derived from this, so reflowing the message must not change which
+types drt reports as supported. ``tests/unit/test_plugin_config_extensibility.py``
+pins it against the connector registry.
 """
 
 
@@ -286,158 +653,9 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
     raw = profiles[profile_name]
     source_type = raw.get("type")
 
-    if source_type == "bigquery":
-        return BigQueryProfile(
-            type="bigquery",
-            project=raw["project"],
-            dataset=raw["dataset"],
-            method=raw.get("method", "application_default"),
-            keyfile=raw.get("keyfile"),
-            location=raw.get("location", "US"),
-        )
-    if source_type == "duckdb":
-        return DuckDBProfile(
-            type="duckdb",
-            database=raw.get("database", ":memory:"),
-        )
-
-    if source_type == "sqlite":
-        return SQLiteProfile(
-            type="sqlite",
-            database=raw.get("database", ":memory:"),
-        )
-    if source_type == "postgres":
-        return PostgresProfile(
-            type="postgres",
-            host=raw.get("host", "localhost"),
-            port=int(raw.get("port", 5432)),
-            dbname=raw.get("dbname", ""),
-            user=raw.get("user", ""),
-            password_env=raw.get("password_env"),
-            password=raw.get("password"),
-        )
-
-    if source_type == "redshift":
-        return RedshiftProfile(
-            type="redshift",
-            host=raw.get("host", ""),
-            port=int(raw.get("port", 5439)),
-            dbname=raw.get("dbname", ""),
-            user=raw.get("user", ""),
-            password_env=raw.get("password_env"),
-            password=raw.get("password"),
-            schema=raw.get("schema", "public"),
-        )
-
-    if source_type == "clickhouse":
-        return ClickHouseProfile(
-            type="clickhouse",
-            host=raw.get("host", "localhost"),
-            port=int(raw.get("port", 8123)),
-            database=raw.get("database", "default"),
-            user=raw.get("user", "default"),
-            password_env=raw.get("password_env"),
-            password=raw.get("password"),
-        )
-
-    if source_type == "mysql":
-        return MySQLProfile(
-            type="mysql",
-            host=raw.get("host", "localhost"),
-            port=int(raw.get("port", 3306)),
-            dbname=raw.get("dbname", ""),
-            user=raw.get("user", ""),
-            password_env=raw.get("password_env"),
-            password=raw.get("password"),
-        )
-
-    if source_type == "snowflake":
-        _db = raw.get("database", "")
-        if not _db:
-            raise ValueError(
-                "Snowflake profile requires 'database'. "
-                "Add database: YOUR_DB to your profile in ~/.drt/profiles.yml"
-            )
-        return SnowflakeProfile(
-            type="snowflake",
-            account=raw.get("account", ""),
-            user=raw.get("user", ""),
-            password_env=raw.get("password_env"),
-            password=raw.get("password"),
-            private_key_env=raw.get("private_key_env"),
-            private_key_passphrase_env=raw.get("private_key_passphrase_env"),
-            database=_db,
-            schema=raw.get("schema") or "PUBLIC",
-            warehouse=raw.get("warehouse", ""),
-            role=raw.get("role"),
-        )
-
-    if source_type == "sqlserver":
-        _db = raw.get("database", "")
-        if not _db:
-            raise ValueError("SQL Server profile requires 'database'.")
-        return SQLServerProfile(
-            type="sqlserver",
-            host=raw.get("host", ""),
-            port=int(raw.get("port", 1433)),
-            database=_db,
-            user=raw.get("user", ""),
-            password_env=raw.get("password_env"),
-            password=raw.get("password"),
-            schema=raw.get("schema") or "dbo",
-        )
-
-    if source_type == "databricks":
-        _host = raw.get("server_hostname", "")
-        _path = raw.get("http_path", "")
-        if not _host or not _path:
-            raise ValueError("Databricks profile requires 'server_hostname' and 'http_path'.")
-        return DatabricksProfile(
-            type="databricks",
-            server_hostname=_host,
-            http_path=_path,
-            access_token_env=raw.get("access_token_env"),
-            access_token=raw.get("access_token"),
-            catalog=raw.get("catalog"),
-            schema=raw.get("schema") or "default",
-        )
-
-    if source_type == "deltalake":
-        location = raw.get("location", "")
-        if not location:
-            raise ValueError("Delta Lake profile requires 'location'.")
-        return DeltaLakeProfile(
-            type="deltalake",
-            location=location,
-            table=raw.get("table"),
-            storage_options=raw.get("storage_options") or {},
-        )
-
-    if source_type == "rest_api":
-        url = raw.get("url", "")
-        if not url:
-            raise ValueError("REST API profile requires 'url'.")
-        return RestApiProfile(
-            type="rest_api",
-            url=url,
-            auth=raw.get("auth"),
-            pagination=raw.get("pagination"),
-            result_path=raw.get("result_path"),
-            incremental=raw.get("incremental"),
-        )
-
-    if source_type == "iceberg":
-        table = raw.get("table", "")
-        if not table:
-            raise ValueError("Iceberg profile requires 'table' (namespace.table).")
-        return IcebergProfile(
-            type="iceberg",
-            table=table,
-            catalog_uri=raw.get("catalog_uri"),
-            warehouse=raw.get("warehouse"),
-            catalog_name=raw.get("catalog_name") or "default",
-            properties=raw.get("properties") or {},
-        )
+    loader = _PROFILE_LOADERS.get(source_type) if isinstance(source_type, str) else None
+    if loader is not None:
+        return loader(raw)
 
     # Imported inside the function: drt.connectors.registry imports the source
     # and destination implementations, which import this module back.
@@ -445,12 +663,12 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
 
     # Past the built-ins: ask the connector registry before giving up (#997).
     #
-    # The source-side half of ADR 0009's blocker. Everything above is a closed,
-    # hand-written dispatch chain, so a third-party source could register itself
-    # and still never be loadable from profiles.yml. Deliberately placed *after*
-    # the chain rather than replacing it: every built-in keeps its exact
-    # construction, including per-type defaults and the required-field checks
-    # above, and a plugin cannot shadow a built-in type.
+    # The source-side half of ADR 0009's blocker. _PROFILE_LOADERS is a closed
+    # table, so a third-party source could register itself and still never be
+    # loadable from profiles.yml. Deliberately placed *after* the table lookup
+    # rather than folded into it: every built-in keeps its exact construction,
+    # including per-type defaults and the required-field checks in its own
+    # loader function, and a plugin cannot shadow a built-in type.
     #
     # Profiles are plain dataclasses, not pydantic models, so there is no
     # validator to hook and no generic fallback model — the registered profile
@@ -571,148 +789,16 @@ def save_profile(
         data["observability"] = observability
     data["profiles"] = profiles
 
-    if isinstance(profile, BigQueryProfile):
-        entry: dict[str, Any] = {
-            "type": "bigquery",
-            "project": profile.project,
-            "dataset": profile.dataset,
-            "method": profile.method,
-        }
-        if profile.keyfile:
-            entry["keyfile"] = profile.keyfile
-    elif isinstance(profile, DuckDBProfile):
-        entry = {"type": "duckdb", "database": profile.database}
-    elif isinstance(profile, SQLiteProfile):
-        entry = {"type": "sqlite", "database": profile.database}
-    elif isinstance(profile, PostgresProfile):
-        entry = {
-            "type": "postgres",
-            "host": profile.host,
-            "port": profile.port,
-            "dbname": profile.dbname,
-            "user": profile.user,
-        }
-        if profile.password_env:
-            entry["password_env"] = profile.password_env
-    elif isinstance(profile, RedshiftProfile):
-        entry = {
-            "type": "redshift",
-            "host": profile.host,
-            "port": profile.port,
-            "dbname": profile.dbname,
-            "user": profile.user,
-            "schema": profile.schema,
-        }
-        if profile.password_env:
-            entry["password_env"] = profile.password_env
-    elif isinstance(profile, ClickHouseProfile):
-        entry = {
-            "type": "clickhouse",
-            "host": profile.host,
-            "port": profile.port,
-            "database": profile.database,
-            "user": profile.user,
-        }
-        if profile.password_env:
-            entry["password_env"] = profile.password_env
-    elif isinstance(profile, MySQLProfile):
-        entry = {
-            "type": "mysql",
-            "host": profile.host,
-            "port": profile.port,
-            "dbname": profile.dbname,
-            "user": profile.user,
-        }
-        if profile.password_env:
-            entry["password_env"] = profile.password_env
-    elif isinstance(profile, SnowflakeProfile):
-        entry = {
-            "type": "snowflake",
-            "account": profile.account,
-            "user": profile.user,
-            "database": profile.database,
-            "schema": profile.schema,
-            "warehouse": profile.warehouse,
-        }
-        if profile.password_env:
-            entry["password_env"] = profile.password_env
-        if profile.private_key_env:
-            entry["private_key_env"] = profile.private_key_env
-        if profile.private_key_passphrase_env:
-            entry["private_key_passphrase_env"] = profile.private_key_passphrase_env
-        if profile.role:
-            entry["role"] = profile.role
-    elif isinstance(profile, SQLServerProfile):
-        entry = {
-            "type": "sqlserver",
-            "host": profile.host,
-            "port": profile.port,
-            "database": profile.database,
-            "user": profile.user,
-            "schema": profile.schema,
-        }
-        if profile.password_env:
-            entry["password_env"] = profile.password_env
-    elif isinstance(profile, DatabricksProfile):
-        entry = {
-            "type": "databricks",
-            "server_hostname": profile.server_hostname,
-            "http_path": profile.http_path,
-            "schema": profile.schema,
-        }
-        if profile.access_token_env:
-            entry["access_token_env"] = profile.access_token_env
-        if profile.catalog:
-            entry["catalog"] = profile.catalog
-    elif isinstance(profile, DeltaLakeProfile):
-        entry = {"type": "deltalake", "location": profile.location}
-        if profile.table:
-            entry["table"] = profile.table
-        if profile.storage_options:
-            entry["storage_options"] = profile.storage_options
-    elif isinstance(profile, IcebergProfile):
-        entry = {"type": "iceberg", "table": profile.table}
-        if profile.catalog_uri:
-            entry["catalog_uri"] = profile.catalog_uri
-        if profile.warehouse:
-            entry["warehouse"] = profile.warehouse
-        if profile.catalog_name and profile.catalog_name != "default":
-            entry["catalog_name"] = profile.catalog_name
-        if profile.properties:
-            entry["properties"] = profile.properties
-    elif isinstance(profile, RestApiProfile):
-        # Explicit, ahead of the dataclass fallback below. rest_api is a
-        # built-in and must stay on the same path as every other built-in
-        # branch: persist the shape, never a resolved secret. `auth` is a
-        # free-form dict that may legitimately carry a literal token, so it is
-        # written only when it names env vars — anything else is dropped with a
-        # pointer, rather than landing verbatim in profiles.yml (which is what
-        # the generic dataclass fallback did once #997 gave it one).
-        entry = {"type": "rest_api", "url": profile.url}
-        if profile.auth:
-            literals = sorted(
-                key
-                for key, value in profile.auth.items()
-                if key != "type" and isinstance(value, str) and not key.endswith("_env")
-            )
-            if literals:
-                raise ValueError(
-                    f"Refusing to write profile '{profile_name}': its auth block sets "
-                    f"{', '.join(literals)} to a literal value. profiles.yml stores env var "
-                    "names, not secrets — use the matching *_env key instead."
-                )
-            entry["auth"] = profile.auth
-        for field_name in ("pagination", "result_path", "incremental"):
-            value = getattr(profile, field_name, None)
-            if value:
-                entry[field_name] = value
+    dumper = _PROFILE_DUMPERS.get(type(profile))
+    if dumper is not None:
+        entry = dumper(profile, profile_name)
     elif is_dataclass(profile) and not isinstance(profile, type):
         # A profile from the connector registry (#997). load_profile() gained a
         # registry fallback; without the same here drt could read a plugin
         # profile it was unable to write back, which breaks `drt init`'s wizard
         # for any plugin source. asdict() round-trips the dataclass the fallback
         # constructed, dropping empty optionals so the file stays as terse as
-        # the hand-written branches above.
+        # the built-in dumpers above.
         entry = {
             key: value for key, value in asdict(profile).items() if value not in (None, {}, [])
         }
