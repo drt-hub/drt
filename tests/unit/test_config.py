@@ -492,6 +492,36 @@ def test_save_profile_load_profile_roundtrip_all_builtin_types(
     assert loaded == profile
 
 
+def test_save_profile_dispatches_subclasses_of_builtin_profiles_to_their_dumper(
+    tmp_path: Path,
+) -> None:
+    """Caught in Codex adversarial review of #402's refactor: an exact
+    type(profile) dict lookup (rather than isinstance()) missed a subclass of
+    a built-in profile, silently falling through to the generic asdict()
+    fallback meant for plugin profiles. For RestApiProfile that skips the
+    literal-auth-token rejection entirely; for Postgres/Snowflake/etc. it
+    would write `password`/`access_token` straight into profiles.yml instead
+    of respecting each dumper's *_env-only convention. Live-reproduced with a
+    RestApiProfile subclass before fixing (a literal token was written to
+    disk with no error)."""
+    from dataclasses import dataclass
+
+    @dataclass
+    class _RestApiSubclass(RestApiProfile):
+        pass
+
+    with pytest.raises(ValueError, match="stores env var names, not secrets"):
+        save_profile(
+            "p",
+            _RestApiSubclass(
+                type="rest_api",
+                url="https://api.example.com",
+                auth={"type": "bearer", "token": "sk-live-SECRET"},
+            ),
+            config_dir=tmp_path,
+        )
+
+
 def test_load_profile_snowflake_private_key_env(tmp_path: Path) -> None:
     """docs/connectors/snowflake.md:67 documents private_key_env /
     private_key_passphrase_env as applying to the source profile in

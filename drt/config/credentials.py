@@ -598,9 +598,17 @@ _PROFILE_LOADERS: dict[str, _ProfileLoader] = {
     "iceberg": _load_iceberg,
 }
 
-# Keyed on the concrete dataclass, mirroring the original isinstance() chain
-# (dispatch by exact type, not by a `.type` string — a profile object's own
-# `type` field is user/plugin-controlled data, not a safe dispatch key here).
+# Keyed on the dataclass, dispatched by isinstance() (not by a `.type` string
+# — a profile object's own `type` field is user/plugin-controlled data, not a
+# safe dispatch key here). isinstance(), not exact type(): the original
+# hand-written isinstance() chain matched a *subclass* of a built-in profile
+# to its built-in dumper too, and a subclass satisfies ProfileConfigLike just
+# as well as the built-in itself. An exact-type dict lookup would miss that
+# and fall through to the generic asdict() fallback below — which for
+# RestApiProfile skips the literal-token rejection entirely, and for
+# Postgres/Snowflake/etc. would write `password`/`access_token` fields
+# straight into profiles.yml. Caught in Codex adversarial review before merge
+# (#402), live-reproduced with a RestApiProfile subclass before fixing.
 _PROFILE_DUMPERS: dict[type, _ProfileDumper] = {
     BigQueryProfile: _dump_bigquery,
     DuckDBProfile: _dump_duckdb,
@@ -616,6 +624,15 @@ _PROFILE_DUMPERS: dict[type, _ProfileDumper] = {
     RestApiProfile: _dump_rest_api,
     IcebergProfile: _dump_iceberg,
 }
+
+
+def _dumper_for(profile: ProfileConfigLike) -> _ProfileDumper | None:
+    """Find the dumper for ``profile``'s type, by isinstance (see above)."""
+    for profile_class, dumper in _PROFILE_DUMPERS.items():
+        if isinstance(profile, profile_class):
+            return dumper
+    return None
+
 
 _DISPATCHED_SOURCE_TYPES: frozenset[str] = frozenset(_PROFILE_LOADERS)
 """Source types :func:`load_profile` constructs itself (#997).
@@ -789,7 +806,7 @@ def save_profile(
         data["observability"] = observability
     data["profiles"] = profiles
 
-    dumper = _PROFILE_DUMPERS.get(type(profile))
+    dumper = _dumper_for(profile)
     if dumper is not None:
         entry = dumper(profile, profile_name)
     elif is_dataclass(profile) and not isinstance(profile, type):
