@@ -99,7 +99,7 @@
       "type": "object"
     },
     "StateConfig": {
-      "description": "State-backend selection and backend-specific settings (#756).\n\nThis mirrors :class:`~drt.config.sync_options.WatermarkConfig`'s shape:\none discriminating backend field plus optional fields validated against\nthat choice. GCS and S3 use ``bucket`` plus an optional object-key\n``prefix``. S3's authentication and endpoint fields deliberately match\n:class:`~drt.config.destinations_storage.S3DestinationConfig`, so state\nstorage follows the same boto3 credential chain and override vocabulary.\nLocal state continues to reject every remote-only field.",
+      "description": "State-backend selection and backend-specific settings (#756).\n\nThis mirrors :class:`~drt.config.sync_options.WatermarkConfig`'s shape:\none discriminating backend field plus optional fields validated against\nthat choice. GCS and S3 use ``bucket`` plus an optional object-key\n``prefix``. S3's authentication and endpoint fields deliberately match\n:class:`~drt.config.destinations_storage.S3DestinationConfig`, so state\nstorage follows the same boto3 credential chain and override vocabulary.\nLocal state continues to reject every remote-only field.\n\n``profile`` is reserved for a ``warehouse`` backend (#920, ADR 0005 step\n4) that does not exist yet \u2014 it will name an existing ``profiles.yml``\nentry to reuse as the warehouse connection, rather than duplicating\n``gcs``/``s3``'s own connection-field set. Deliberately added to the model\nnow but rejected unconditionally below, the same way ``bucket``/``prefix``\nexisted on this model (rejected whenever ``backend`` was still only\n``\"local\"``) before #756's own GCS PR widened ``backend`` to accept them.\n``backend`` stays ``Literal[\"local\", \"gcs\", \"s3\"]`` here on purpose \u2014 widening it\nto include ``\"warehouse\"`` before an implementation exists would make a\nschema-valid config deterministically crash at runtime (caught in Codex\nreview on this PR); that widening lands together with the Postgres\nbackend implementation in the next PR of this stack, mirroring exactly\nhow ``\"gcs\"`` was added to this Literal in the same PR as the GCS backend\nitself, not before it.",
       "properties": {
         "backend": {
           "default": "local",
@@ -206,6 +206,18 @@
           ],
           "default": null,
           "title": "Endpoint Url"
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Profile"
         }
       },
       "title": "StateConfig",
