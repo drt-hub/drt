@@ -130,6 +130,20 @@ class ManagedTableCapable(Protocol):
     audience (user data tables, not drt's own bookkeeping) and depends only
     on the already-shipped ``introspect_schema()`` (#317), not on this
     Protocol.
+
+    **Naming convention across dialects**, documented once here so a future
+    Snowflake/Databricks/BigQuery implementation doesn't drift: each source
+    profile's own field for the managed-schema name is called
+    ``managed_schema`` (``PostgresProfile.managed_schema``,
+    ``drt/config/profiles.py``) — never reused from an existing
+    ``schema``-named field (Snowflake/Databricks already have one, meaning
+    their query-execution default schema, a different concept this
+    deliberately avoids colliding with). The default value is never
+    ``public`` (or a dialect's equivalent catch-all default) — every
+    reverse-ETL vendor researched for ADR 0005's 2026-09 amendment
+    (RudderStack's ``_rudderstack``, Segment's ``__segment_reverse_etl``,
+    Hightouch's ``hightouch_planner``) isolates its bookkeeping tables from
+    user data for exactly this blast-radius reason.
     """
 
     def ensure_managed_schema(self, config: ProfileConfigLike) -> None:

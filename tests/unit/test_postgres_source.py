@@ -372,7 +372,8 @@ class TestManagedTableCapable:
         conn = MagicMock()
         cur = MagicMock()
         # First fetchone() call is the existence probe; its return shape
-        # depends on which method is under test (schemata row vs. to_regclass).
+        # depends on which method is under test (schemata row vs.
+        # information_schema.tables row).
         cur.fetchone.return_value = (1,) if schema_exists else None
         conn.cursor.return_value = cur
         return conn
@@ -402,26 +403,35 @@ class TestManagedTableCapable:
 
     def test_managed_table_exists_true(self) -> None:
         conn = self._mock_ddl_conn()
-        conn.cursor.return_value.fetchone.return_value = ("some_oid",)
+        conn.cursor.return_value.fetchone.return_value = (1,)
         with patch.object(PostgresSource, "_connect", return_value=conn):
             assert PostgresSource().managed_table_exists(_profile(), "_drt_snapshots") is True
 
     def test_managed_table_exists_false(self) -> None:
         conn = self._mock_ddl_conn()
-        conn.cursor.return_value.fetchone.return_value = (None,)
+        conn.cursor.return_value.fetchone.return_value = None
         with patch.object(PostgresSource, "_connect", return_value=conn):
             assert PostgresSource().managed_table_exists(_profile(), "_drt_snapshots") is False
 
     def test_managed_table_exists_probes_the_configured_schema(self) -> None:
+        """Schema and table are bound as separate parameters to a plain
+        information_schema.tables lookup — not formatted into one string and
+        handed to to_regclass(), which parses its argument as an identifier
+        and silently lowercases an unquoted mixed-case schema name, causing
+        a false negative against a schema ensure_managed_schema() actually
+        created case-sensitively via Identifier(). Live-reproduced against a
+        real Postgres before this fix; see
+        tests/integration/local_sql/test_managed_table_primitive_smoke.py."""
         conn = self._mock_ddl_conn()
-        conn.cursor.return_value.fetchone.return_value = (None,)
+        conn.cursor.return_value.fetchone.return_value = None
         with patch.object(PostgresSource, "_connect", return_value=conn):
             PostgresSource().managed_table_exists(
                 _profile(managed_schema="custom_schema"), "_drt_snapshots"
             )
 
-        params = conn.cursor.return_value.execute.call_args.args[1]
-        assert params == ("custom_schema._drt_snapshots",)
+        sql, params = conn.cursor.return_value.execute.call_args.args
+        assert "information_schema.tables" in str(sql)
+        assert params == ("custom_schema", "_drt_snapshots")
 
     def test_drop_managed_table_issues_drop_if_exists(self) -> None:
         conn = self._mock_ddl_conn()

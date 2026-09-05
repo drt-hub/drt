@@ -129,3 +129,49 @@ def test_create_use_drop_is_a_clean_reversible_cycle() -> None:
                 assert cur.fetchone() is not None
         finally:
             admin.close()
+
+
+def test_managed_table_exists_is_case_sensitive_for_a_mixed_case_schema() -> None:
+    """ensure_managed_schema() creates the schema case-sensitively via
+    Identifier() — managed_table_exists() must resolve a mixed-case
+    managed_schema the same way, not silently fold it to lowercase.
+
+    A regression guard: an earlier implementation probed via
+    ``to_regclass('schema.table')``, which parses its argument as an
+    identifier and lowercases the unquoted schema name, so it never found a
+    table in a mixed-case schema that had genuinely been created."""
+    require_docker()
+    postgres_container = testcontainers_postgres.PostgresContainer
+
+    with postgres_container(
+        "postgres:16-alpine",
+        username="admin",
+        password="adminpass",
+        dbname="testdb",
+        driver=None,
+    ) as postgres:
+        host = postgres.get_container_host_ip()
+        port = int(postgres.get_exposed_port(5432))
+        config = PostgresProfile(
+            type="postgres",
+            host=host,
+            port=port,
+            dbname="testdb",
+            user="admin",
+            password="adminpass",
+            managed_schema="DrtManaged",
+        )
+        source = PostgresSource()
+        source.ensure_managed_schema(config)
+
+        admin = psycopg2.connect(
+            host=host, port=port, dbname="testdb", user="admin", password="adminpass"
+        )
+        try:
+            with admin.cursor() as cur:
+                cur.execute('CREATE TABLE "DrtManaged"._drt_probe (id INTEGER PRIMARY KEY)')
+            admin.commit()
+        finally:
+            admin.close()
+
+        assert source.managed_table_exists(config, "_drt_probe") is True
