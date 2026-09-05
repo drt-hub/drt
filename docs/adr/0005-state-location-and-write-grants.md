@@ -9,6 +9,35 @@
   corrections listed under [Follow-up issues](#follow-up-issues).
 - **Issues:** [#755](https://github.com/drt-hub/drt/issues/755),
   [#756](https://github.com/drt-hub/drt/issues/756)
+- **Amended:** 2026-09-05 — competitive research into how Hightouch, Segment,
+  RudderStack, Census, Polytomic, Rivery, dlt, and Meltano handle
+  warehouse-write opt-ins confirmed this ADR's core positions rather than
+  changing them: the tiered, reversible, non-paywalled design (Decisions 1 and
+  4) has no equivalent among the reverse-ETL vendors researched — Hightouch's
+  Basic→Lightning upgrade is explicitly one-way, and Segment/RudderStack
+  require write access unconditionally with no tiering at all. Two corrections
+  and one addition: (1) #755's and #920's core mechanisms (warehouse
+  snapshot-diff, SQL-queryable sync history) are **already shipped** by
+  Hightouch/Segment/RudderStack and Census/Hightouch respectively — they
+  should be scheduled and described as closing a table-stakes gap, not as
+  differentiation, correcting this ADR's original "none is warranted on this
+  axis" framing to be more precise: the *axis* was right, but #755/#920
+  specifically are catch-up, not the exception. (2) Genuine, currently
+  unclaimed differentiation exists one layer up the same write-access stack:
+  a warehouse-backed idempotency ledger for fire-and-forget destinations
+  ([#1099](https://github.com/drt-hub/drt/issues/1099), no researched vendor
+  offers this) and a compliance audit trail with owned retention/purge
+  ([#1100](https://github.com/drt-hub/drt/issues/1100) — Hightouch has the
+  same table shape in `hightouch_audit.Changelog` but frames unmanaged PII
+  retention as the *customer's* problem, which is exactly the gap #1100
+  closes as a product feature instead). (3) Postgres logical replication's
+  publication+slot create/drop symmetry is adopted as the concrete
+  reversibility precedent for Decision 4 — cleaner than anything found in the
+  reverse-ETL space itself, where scoped-schema designs (RudderStack,
+  Segment) isolate blast radius but ship no downgrade path at all. Full
+  research and issue-by-issue notes: [#755](https://github.com/drt-hub/drt/issues/755#issuecomment-5551408063),
+  [#920](https://github.com/drt-hub/drt/issues/920#issuecomment-5551408667),
+  [#960](https://github.com/drt-hub/drt/issues/960#issuecomment-5551409522).
 - **Relates to:** [ADR 0004](0004-streaming-and-event-triggered-syncs.md) — whose
   Tier 2 gate is #756, and whose #769 amendment this ADR corrects.
 - **Implementation:** none directly. This ADR sets the ordering and the
@@ -233,3 +262,8 @@ check this in, since it is the topology the failure mode targets.
    goal, so neither is quietly lost during implementation.
 4. **Re-scope the #769 cross-process residual** out of #756 per the correction
    above, and amend ADR 0004's gate table accordingly.
+5. **New issues from the 2026-09-05 amendment**: [#1099](https://github.com/drt-hub/drt/issues/1099)
+   (warehouse idempotency ledger) and [#1100](https://github.com/drt-hub/drt/issues/1100)
+   (compliance audit trail) — both gated on #960, both flagged as the
+   genuinely-unclaimed differentiation this ADR's "none is warranted" framing
+   didn't anticipate finding one layer up the stack.
