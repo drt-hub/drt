@@ -12,15 +12,15 @@
   "15 public/frozen Protocols all `@runtime_checkable`" premise does not yet
   hold. Land #992 before (or in the same merge window as) this ADR.
 - **Implementation:** none directly. This ADR sets the policy #304 enforces
-  and the freeze-scope call each of the 22 Protocols below needs.
+  and the freeze-scope call each of the 23 Protocols below needs.
 
 ## Context
 
-drt has 22 `typing.Protocol` interfaces spanning destinations (`Destination`,
+drt has 23 `typing.Protocol` interfaces spanning destinations (`Destination`,
 `ConnectionTestable`, `MatchPolicyCapable`, `ModeCapable`, `StagedDestination`,
 `OrphanCleanup`, `QueryableDestination`, `RowCountable`, `RateLimitKeyed`,
 `RateLimiterBackend`, `LimiterFactory`), sources
-(`Source`, `IncrementalSource`), state (`StateStore`, `HistoryStore`,
+(`Source`, `IncrementalSource`, `ManagedTableCapable`), state (`StateStore`, `HistoryStore`,
 `DlqBackend`, `WatermarkStorage`, `ObjectClient`), secrets (`SecretProvider`),
 the engine (`SyncObserver`), security (`PermissionChecker`), and observability
 (`AuditLogger`). #304 commits drt to freezing three of these
@@ -64,7 +64,7 @@ unsafe once implementers are accounted for, not just callers.
 
 **The rule instead: treat any change to an already-shipped Protocol
 method's signature — parameters or return type, narrowing or widening — as
-breaking.** For any of the 22 Protocols:
+breaking.** For any of the 23 Protocols:
 
 | Change | Breaking? |
 |---|---|
@@ -78,10 +78,10 @@ breaking.** For any of the 22 Protocols:
 
 ## The sanctioned extension mechanism
 
-7 of the 22 Protocols already exist specifically to route around the
+8 of the 23 Protocols already exist specifically to route around the
 no-default-method problem: `ConnectionTestable`, `MatchPolicyCapable`,
 `ModeCapable`, `StagedDestination`, `OrphanCleanup`, `QueryableDestination`
-(destinations), and `IncrementalSource` (sources). Each is checked structurally —
+(destinations), and `IncrementalSource`, `ManagedTableCapable` (sources). Each is checked structurally —
 `isinstance(dest, MatchPolicyCapable)` — rather than being a required part of
 `Destination`/`Source`. A destination that doesn't implement the capability
 is simply not that shape; the engine branches on it rather than requiring it.
@@ -156,6 +156,7 @@ One is explicitly internal:
 |---|---|---|
 | `Source` | `drt/sources/base.py` | **Public, frozen** (#304 names it explicitly) |
 | `IncrementalSource` | `drt/sources/base.py` | Public, frozen (optional-capability extension of `Source`) |
+| `ManagedTableCapable` | `drt/sources/base.py` | Public, **not yet frozen** — new in #960 (ADR 0005 step 3), pending the same freeze-scope review the other 22 Protocols already went through |
 | `Destination` | `drt/destinations/base.py` | **Public, frozen** (#304 names it explicitly) |
 | `ConnectionTestable` | `drt/destinations/base.py` | Public, frozen (optional-capability) |
 | `MatchPolicyCapable` | `drt/destinations/base.py` | Public, frozen (optional-capability) |
@@ -183,6 +184,15 @@ freeze-scope table drift identified by [#304](https://github.com/drt-hub/drt/iss
 The `ModeCapable` row was added retroactively on 2026-08-31 when
 [#1042](https://github.com/drt-hub/drt/issues/1042) shipped it — caught by
 Codex review on that PR as a repeat of the same drift.
+The `ManagedTableCapable` row was added on 2026-09-05 when #960 shipped it —
+same drift, caught by Codex review on that PR before merge this time. Unlike
+the other optional-capability Protocols in this table it is deliberately
+listed **not yet frozen**: it has one implementer (`PostgresSource`) and no
+consumer yet (#755/#920/#1099/#1100 are its first intended callers), so its
+method set has not been exercised against a second dialect or a real caller.
+Freeze it the same way `QueryableDestination` was — once #304's freeze-scope
+review reaches it, or once a second implementation lands, whichever is
+first.
 
 ## Known asymmetry, frozen as-is
 

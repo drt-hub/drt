@@ -188,3 +188,78 @@ class PostgresSource:
             user=config.user,
             password=password,
         )
+
+    # --- ManagedTableCapable (#960, ADR 0005 step 3) ------------------------
+    #
+    # Uses its own plain cursor + explicit commit() — deliberately not the
+    # named (server-side) cursor extract() uses, since a named cursor cannot
+    # run DDL (see extract()'s docstring), and nothing on this connection
+    # sets autocommit.
+
+    def ensure_managed_schema(self, config: ProfileConfigLike) -> None:
+        assert isinstance(config, PostgresProfile)
+        from psycopg2 import sql as _pgsql
+
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            # Probe first (#695 discipline): a locked-down user with no
+            # CREATE privilege, but an admin-pre-provisioned schema, must
+            # never have the CREATE statement issued at all.
+            cur.execute(
+                "SELECT 1 FROM information_schema.schemata WHERE schema_name = %s",
+                (config.managed_schema,),
+            )
+            if cur.fetchone() is not None:
+                return
+            cur.execute(
+                _pgsql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                    _pgsql.Identifier(config.managed_schema)
+                )
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def managed_table_exists(self, config: ProfileConfigLike, table_name: str) -> bool:
+        assert isinstance(config, PostgresProfile)
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            # Not to_regclass(%s) with a formatted "schema.table" string: it
+            # parses its argument as an identifier, so an unquoted mixed-case
+            # managed_schema (e.g. "DrtManaged") gets folded to lowercase and
+            # never matches the case-sensitive schema ensure_managed_schema()
+            # actually created via Identifier(). Binding schema and table as
+            # separate parameters here does no identifier parsing at all.
+            # table_type = 'BASE TABLE' excludes views and foreign tables,
+            # which information_schema.tables otherwise also lists here —
+            # same distinction the destination catalog query already makes
+            # (drt/destinations/postgres.py). A same-named view would
+            # otherwise read back as "exists" and later fail on DROP TABLE
+            # (a view needs DROP VIEW). Partitioned tables still report as
+            # 'BASE TABLE' here, so this doesn't exclude them.
+            cur.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = %s AND table_name = %s AND table_type = 'BASE TABLE'",
+                (config.managed_schema, table_name),
+            )
+            return cur.fetchone() is not None
+        finally:
+            conn.close()
+
+    def drop_managed_table(self, config: ProfileConfigLike, table_name: str) -> None:
+        assert isinstance(config, PostgresProfile)
+        from psycopg2 import sql as _pgsql
+
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                _pgsql.SQL("DROP TABLE IF EXISTS {}").format(
+                    _pgsql.Identifier(config.managed_schema, table_name)
+                )
+            )
+            conn.commit()
+        finally:
+            conn.close()

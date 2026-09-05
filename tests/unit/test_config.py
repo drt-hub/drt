@@ -8,7 +8,13 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from drt.config.credentials import BigQueryProfile, SnowflakeProfile, load_profile, save_profile
+from drt.config.credentials import (
+    BigQueryProfile,
+    PostgresProfile,
+    SnowflakeProfile,
+    load_profile,
+    save_profile,
+)
 from drt.config.models import (
     ApiKeyAuth,
     BasicAuth,
@@ -329,6 +335,51 @@ def test_save_and_load_profile(tmp_path: Path) -> None:
     assert loaded.project == "my-project"
     assert loaded.dataset == "my_dataset"
     assert loaded.method == "application_default"
+
+
+def test_load_profile_postgres_managed_schema(tmp_path: Path) -> None:
+    """#960: managed_schema names where drt's own bookkeeping tables live,
+    distinct from any schema an extraction query happens to reference."""
+    (tmp_path / "profiles.yml").write_text(
+        "pg:\n"
+        "  type: postgres\n"
+        "  host: db.example\n"
+        "  dbname: analytics\n"
+        "  user: analyst\n"
+        "  managed_schema: drt_managed\n"
+    )
+    loaded = load_profile("pg", config_dir=tmp_path)
+    assert loaded.managed_schema == "drt_managed"
+
+
+def test_load_profile_postgres_managed_schema_default(tmp_path: Path) -> None:
+    (tmp_path / "profiles.yml").write_text(
+        "pg:\n  type: postgres\n  host: db.example\n  dbname: analytics\n  user: analyst\n"
+    )
+    loaded = load_profile("pg", config_dir=tmp_path)
+    assert loaded.managed_schema == "_drt"
+
+
+def test_save_profile_postgres_managed_schema_roundtrip(tmp_path: Path) -> None:
+    profile = PostgresProfile(
+        type="postgres",
+        host="db.example",
+        dbname="analytics",
+        user="analyst",
+        managed_schema="drt_managed",
+    )
+    save_profile("pg", profile, config_dir=tmp_path)
+    loaded = load_profile("pg", config_dir=tmp_path)
+    assert loaded.managed_schema == "drt_managed"
+
+
+def test_save_profile_postgres_omits_default_managed_schema(tmp_path: Path) -> None:
+    profile = PostgresProfile(
+        type="postgres", host="db.example", dbname="analytics", user="analyst"
+    )
+    save_profile("pg", profile, config_dir=tmp_path)
+    written = (tmp_path / "profiles.yml").read_text()
+    assert "managed_schema" not in written
 
 
 def test_load_profile_bigquery_location(tmp_path: Path) -> None:
