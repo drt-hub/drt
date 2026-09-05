@@ -175,3 +175,46 @@ def test_managed_table_exists_is_case_sensitive_for_a_mixed_case_schema() -> Non
             admin.close()
 
         assert source.managed_table_exists(config, "_drt_probe") is True
+
+
+def test_managed_table_exists_excludes_views() -> None:
+    """information_schema.tables lists views alongside base tables — a view
+    sharing a future bookkeeping table's name must not read back as
+    "exists", since a consumer would then skip table creation and a
+    subsequent DROP TABLE would fail (a view needs DROP VIEW). Matches the
+    table_type = 'BASE TABLE' filter drt's own destination catalog query
+    already uses (drt/destinations/postgres.py)."""
+    require_docker()
+    postgres_container = testcontainers_postgres.PostgresContainer
+
+    with postgres_container(
+        "postgres:16-alpine",
+        username="admin",
+        password="adminpass",
+        dbname="testdb",
+        driver=None,
+    ) as postgres:
+        host = postgres.get_container_host_ip()
+        port = int(postgres.get_exposed_port(5432))
+        config = PostgresProfile(
+            type="postgres",
+            host=host,
+            port=port,
+            dbname="testdb",
+            user="admin",
+            password="adminpass",
+        )
+        source = PostgresSource()
+        source.ensure_managed_schema(config)
+
+        admin = psycopg2.connect(
+            host=host, port=port, dbname="testdb", user="admin", password="adminpass"
+        )
+        try:
+            with admin.cursor() as cur:
+                cur.execute("CREATE VIEW _drt._drt_probe AS SELECT 1 AS id")
+            admin.commit()
+        finally:
+            admin.close()
+
+        assert source.managed_table_exists(config, "_drt_probe") is False

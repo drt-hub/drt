@@ -232,9 +232,16 @@ class PostgresSource:
             # never matches the case-sensitive schema ensure_managed_schema()
             # actually created via Identifier(). Binding schema and table as
             # separate parameters here does no identifier parsing at all.
+            # table_type = 'BASE TABLE' excludes views and foreign tables,
+            # which information_schema.tables otherwise also lists here —
+            # same distinction the destination catalog query already makes
+            # (drt/destinations/postgres.py). A same-named view would
+            # otherwise read back as "exists" and later fail on DROP TABLE
+            # (a view needs DROP VIEW). Partitioned tables still report as
+            # 'BASE TABLE' here, so this doesn't exclude them.
             cur.execute(
                 "SELECT 1 FROM information_schema.tables "
-                "WHERE table_schema = %s AND table_name = %s",
+                "WHERE table_schema = %s AND table_name = %s AND table_type = 'BASE TABLE'",
                 (config.managed_schema, table_name),
             )
             return cur.fetchone() is not None
