@@ -226,11 +226,18 @@ class PostgresSource:
         conn = self._connect(config)
         try:
             cur = conn.cursor()
+            # Not to_regclass(%s) with a formatted "schema.table" string: it
+            # parses its argument as an identifier, so an unquoted mixed-case
+            # managed_schema (e.g. "DrtManaged") gets folded to lowercase and
+            # never matches the case-sensitive schema ensure_managed_schema()
+            # actually created via Identifier(). Binding schema and table as
+            # separate parameters here does no identifier parsing at all.
             cur.execute(
-                "SELECT to_regclass(%s)",
-                (f"{config.managed_schema}.{table_name}",),
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = %s AND table_name = %s",
+                (config.managed_schema, table_name),
             )
-            return cur.fetchone()[0] is not None
+            return cur.fetchone() is not None
         finally:
             conn.close()
 
