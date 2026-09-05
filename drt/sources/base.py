@@ -95,3 +95,81 @@ class IncrementalSource(Protocol):
                 contract.
         """
         ...
+
+
+@runtime_checkable
+class ManagedTableCapable(Protocol):
+    """Optional source capability: create-if-absent drt-owned bookkeeping
+    tables in the source warehouse (#960, ADR 0005 step 3).
+
+    A new, separate Protocol rather than an addition to ``Source`` itself —
+    per ADR 0007, adding a required method to an already-shipped Protocol
+    breaks every existing implementer, so new capability goes here instead
+    (same pattern as ``IncrementalSource`` above and
+    ``destinations.base.QueryableDestination``).
+
+    Stability: New in #960 — not yet frozen. Will be reviewed for stability
+    at the same time as the rest of the Protocol surface (ADR 0007's
+    two-minor deprecation window applies once this is declared stable).
+
+    **Scope note, deliberately narrow.** This Protocol owns only the
+    namespace-and-table *existence* half — locating drt's managed schema,
+    checking whether a specific table already exists in it, and dropping one
+    cleanly. It does **not** own DDL bodies (column definitions, types,
+    indexes): each consumer (#755, #920, #1099, #1100) creates its own
+    table's exact schema when it lands, using ``ensure_managed_schema``'s
+    result. Caller-supplied column definitions were deliberately rejected —
+    interpolating caller-controlled column names into DDL text is exactly
+    the unquoted-identifier surface #1064/#1090 found and fixed on the
+    diff-preview read path; keeping DDL bodies hardcoded per dialect (the
+    same choice tracked mirror's ``_create_state_table`` hook already makes,
+    ``destinations/sql_base.py``) keeps that fix's guarantee intact here too.
+
+    A destination-side equivalent is intentionally out of scope: #760
+    (managed *destination* tables) is a different feature with a different
+    audience (user data tables, not drt's own bookkeeping) and depends only
+    on the already-shipped ``introspect_schema()`` (#317), not on this
+    Protocol.
+    """
+
+    def ensure_managed_schema(self, config: ProfileConfigLike) -> None:
+        """Create drt's managed schema if it does not already exist.
+
+        A no-op when the schema is already present — including when an
+        operator pre-provisioned it by hand and granted the sync user no
+        CREATE privilege at all (the escape hatch tracked mirror's own
+        ``docs/connectors/postgres.md`` documents; #960 follows the same
+        probe-before-DDL discipline, never skipping the existence check).
+
+        Raises:
+            Exception: connection failure, or a CREATE attempt that fails
+                for a reason other than "already exists" (e.g. genuinely no
+                CREATE privilege and no pre-provisioned schema either) —
+                propagates so the caller can degrade or fail loudly rather
+                than silently proceeding without the schema it needs.
+        """
+        ...
+
+    def managed_table_exists(self, config: ProfileConfigLike, table_name: str) -> bool:
+        """Does ``table_name`` already exist in the managed schema?
+
+        Pure probe, no side effect — mirrors tracked mirror's
+        ``_state_table_exists`` hook. Callers use this before issuing their
+        own ``CREATE TABLE IF NOT EXISTS`` for whichever table they own.
+        """
+        ...
+
+    def drop_managed_table(self, config: ProfileConfigLike, table_name: str) -> None:
+        """Drop ``table_name`` from the managed schema if present.
+
+        A no-op if the table does not exist. This is the reversibility half
+        of ADR 0005 Decision 4 — turning a warehouse-backed feature back off
+        must be a clean, symmetric undo of whatever ``ensure_managed_schema``
+        plus a consumer's own ``CREATE TABLE`` did, not a one-way migration.
+        Does **not** drop the managed schema itself, even if this was the
+        last table in it — multiple #960 consumers can share one schema, and
+        dropping it out from under another feature's table would silently
+        break that feature. Schema-level cleanup, if ever wanted, is a
+        separate, explicit operation.
+        """
+        ...

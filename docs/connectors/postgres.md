@@ -303,6 +303,47 @@ an idle-session reaper or a failover mid-load (that failure is *not* retried, pe
 above), and long-running syncs hold a Postgres backend for their duration. If your server enforces
 a short `idle_in_transaction_session_timeout`, a slow destination can now trip it.
 
+## As a source — drt's own managed bookkeeping schema ([#960](https://github.com/drt-hub/drt/issues/960))
+
+Some opt-in source-side features (diff-based incremental, warehouse-backed sync history,
+compliance audit trails — none shipped yet) need drt to create and own a small schema of its
+own tables in your source warehouse. `managed_schema` names where those tables live:
+
+```yaml
+# ~/.drt/profiles.yml
+pg:
+  type: postgres
+  host: localhost
+  dbname: analytics
+  user: analyst
+  password_env: PG_PASSWORD
+  managed_schema: _drt      # default: "_drt" — never "public"
+```
+
+Nothing in drt-core reads or writes this schema yet — no feature currently uses it. It exists
+now so a source profile has somewhere to name it once a consuming feature lands, without a
+config-shape change at that point.
+
+The default is a dedicated schema, not `public` — every reverse-ETL vendor whose approach was
+researched for this design (RudderStack's `_rudderstack`, Segment's `__segment_reverse_etl`,
+Hightouch's `hightouch_planner`) isolates its bookkeeping tables from user data for the same
+blast-radius reason.
+
+**Escape hatch, same discipline as tracked mirror's `_drt_synced_keys`:** an admin can
+pre-create the schema and grant the sync user no `CREATE` privilege at all — drt detects an
+existing schema and never issues the `CREATE SCHEMA` statement in that case:
+
+```sql
+CREATE SCHEMA _drt;
+GRANT USAGE ON SCHEMA _drt TO retl_user;
+-- Grant table-level privileges on specific tables as each feature that
+-- uses this schema documents them.
+```
+
+**Reversible by design ([ADR 0005](../adr/0005-state-location-and-write-grants.md) Decision
+4):** every table a feature creates in this schema can be dropped independently, and dropping
+the last table in the schema never drops the schema itself — other features may share it.
+
 ## Notes
 
 - Requires `pip install drt-core[postgres]` (uses `psycopg2`)
