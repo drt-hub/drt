@@ -345,6 +345,29 @@ def test_load_profile_bigquery_location_default(tmp_path: Path) -> None:
     assert loaded.location == "US"
 
 
+def test_save_profile_bigquery_location_round_trips(tmp_path: Path) -> None:
+    """A non-default location survived load but was dropped on save."""
+    save_profile(
+        "dev",
+        BigQueryProfile(
+            type="bigquery", project="p", dataset="d", location="asia-northeast1"
+        ),
+        config_dir=tmp_path,
+    )
+    assert load_profile("dev", config_dir=tmp_path).location == "asia-northeast1"
+
+
+def test_save_profile_bigquery_omits_the_default_location(tmp_path: Path) -> None:
+    """The default is written by load, so save leaves it out of the file."""
+    save_profile(
+        "dev",
+        BigQueryProfile(type="bigquery", project="p", dataset="d"),
+        config_dir=tmp_path,
+    )
+    assert "location" not in (tmp_path / "profiles.yml").read_text()
+    assert load_profile("dev", config_dir=tmp_path).location == "US"
+
+
 def test_load_profile_missing_file(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="profiles.yml not found"):
         load_profile("dev", config_dir=tmp_path)

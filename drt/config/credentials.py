@@ -580,6 +580,10 @@ def save_profile(
         }
         if profile.keyfile:
             entry["keyfile"] = profile.keyfile
+        # load_profile defaults this to "US", so writing it only when it differs
+        # keeps existing files byte-identical while still surviving the round trip.
+        if profile.location != "US":
+            entry["location"] = profile.location
     elif isinstance(profile, DuckDBProfile):
         entry = {"type": "duckdb", "database": profile.database}
     elif isinstance(profile, SQLiteProfile):
