@@ -23,6 +23,10 @@ drt-core version its bundled schemas were generated from.
   `salesforce_bulk` destinations now validate destination-level `retry` and
   `rate_limit` overrides, matching every other rate-limited destination type
   (drt-hub/drt#1048).
+- Bundled JSON Schemas regenerated from drt-core: `StateConfig` gains a new
+  `state.profile` field, reserved for a future `warehouse` state backend
+  (drt-hub/drt#920) — currently rejected in every configuration, since
+  `state.backend`'s enum does not accept `warehouse` yet.
 - Bundled JSON Schemas regenerated: the `destination` union's schema also picked
   up the #997 callable-discriminator shape (a flat `oneOf` list including
   `GenericDestinationConfig`, no `discriminator`/`mapping` block) — the

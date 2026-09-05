@@ -167,3 +167,23 @@ def test_bypassed_unknown_backend_fails_explicitly(tmp_path: Path) -> None:
 
     with pytest.raises(NotImplementedError, match="future.*#756"):
         build_state_bundle(project, tmp_path)
+
+
+def test_warehouse_is_not_yet_a_valid_backend_value() -> None:
+    """Deliberately NOT accepted yet (#920): widening this Literal ahead of
+    an actual warehouse backend would let a schema-valid config deterministically
+    crash at runtime (caught in Codex review). It lands together with the
+    Postgres implementation in the next PR of this stack, matching how
+    "gcs" was added to this Literal in the same PR as the GCS backend
+    itself, not before it."""
+    with pytest.raises(ValidationError, match="backend"):
+        StateConfig(backend="warehouse")
+
+
+def test_profile_field_is_reserved_and_always_rejected_today() -> None:
+    """#920's profile field exists on the model already (so the next PR in
+    the stack only needs to widen `backend`, not touch the model shape
+    again) but is unconditionally rejected until a "warehouse" backend
+    value actually exists to use it."""
+    with pytest.raises(ValidationError, match="state.profile is reserved.*#920"):
+        StateConfig(backend="local", profile="pg_main")

@@ -208,6 +208,21 @@ class StateConfig(BaseModel):
     :class:`~drt.config.destinations_storage.S3DestinationConfig`, so state
     storage follows the same boto3 credential chain and override vocabulary.
     Local state continues to reject every remote-only field.
+
+    ``profile`` is reserved for a ``warehouse`` backend (#920, ADR 0005 step
+    4) that does not exist yet — it will name an existing ``profiles.yml``
+    entry to reuse as the warehouse connection, rather than duplicating
+    ``gcs``/``s3``'s own connection-field set. Deliberately added to the model
+    now but rejected unconditionally below, the same way ``bucket``/``prefix``
+    existed on this model (rejected whenever ``backend`` was still only
+    ``"local"``) before #756's own GCS PR widened ``backend`` to accept them.
+    ``backend`` stays ``Literal["local", "gcs", "s3"]`` here on purpose — widening it
+    to include ``"warehouse"`` before an implementation exists would make a
+    schema-valid config deterministically crash at runtime (caught in Codex
+    review on this PR); that widening lands together with the Postgres
+    backend implementation in the next PR of this stack, mirroring exactly
+    how ``"gcs"`` was added to this Literal in the same PR as the GCS backend
+    itself, not before it.
     """
 
     backend: Literal["local", "gcs", "s3"] = "local"
@@ -219,6 +234,9 @@ class StateConfig(BaseModel):
     aws_secret_access_key_env: str | None = None
     aws_session_token_env: str | None = None
     endpoint_url: str | None = None
+    #: Reserved for the warehouse backend (#920) — see the class docstring.
+    #: Always rejected today, since no current backend value uses it.
+    profile: str | None = None
 
     @model_validator(mode="after")
     def _check_backend_fields(self) -> StateConfig:
@@ -244,6 +262,10 @@ class StateConfig(BaseModel):
             raise ValueError(f"{names} are only valid when backend is 's3'.")
         if self.backend == "s3" and not self.bucket:
             raise ValueError("state.bucket is required when backend is 's3'.")
+        if self.profile is not None:
+            raise ValueError(
+                "state.profile is reserved for the warehouse backend (#920), not yet implemented."
+            )
         return self
 
 
