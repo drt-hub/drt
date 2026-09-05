@@ -188,3 +188,64 @@ class PostgresSource:
             user=config.user,
             password=password,
         )
+
+    # --- ManagedTableCapable (#960, ADR 0005 step 3) ------------------------
+    #
+    # Uses its own plain cursor + explicit commit() — deliberately not the
+    # named (server-side) cursor extract() uses, since a named cursor cannot
+    # run DDL (see extract()'s docstring), and nothing on this connection
+    # sets autocommit.
+
+    def ensure_managed_schema(self, config: ProfileConfigLike) -> None:
+        assert isinstance(config, PostgresProfile)
+        from psycopg2 import sql as _pgsql
+
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            # Probe first (#695 discipline): a locked-down user with no
+            # CREATE privilege, but an admin-pre-provisioned schema, must
+            # never have the CREATE statement issued at all.
+            cur.execute(
+                "SELECT 1 FROM information_schema.schemata WHERE schema_name = %s",
+                (config.managed_schema,),
+            )
+            if cur.fetchone() is not None:
+                return
+            cur.execute(
+                _pgsql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                    _pgsql.Identifier(config.managed_schema)
+                )
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def managed_table_exists(self, config: ProfileConfigLike, table_name: str) -> bool:
+        assert isinstance(config, PostgresProfile)
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT to_regclass(%s)",
+                (f"{config.managed_schema}.{table_name}",),
+            )
+            return cur.fetchone()[0] is not None
+        finally:
+            conn.close()
+
+    def drop_managed_table(self, config: ProfileConfigLike, table_name: str) -> None:
+        assert isinstance(config, PostgresProfile)
+        from psycopg2 import sql as _pgsql
+
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                _pgsql.SQL("DROP TABLE IF EXISTS {}").format(
+                    _pgsql.Identifier(config.managed_schema, table_name)
+                )
+            )
+            conn.commit()
+        finally:
+            conn.close()

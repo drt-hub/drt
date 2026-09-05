@@ -315,6 +315,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             user=raw.get("user", ""),
             password_env=raw.get("password_env"),
             password=raw.get("password"),
+            managed_schema=raw.get("managed_schema", "_drt"),
         )
 
     if source_type == "redshift":
@@ -594,6 +595,8 @@ def save_profile(
         }
         if profile.password_env:
             entry["password_env"] = profile.password_env
+        if profile.managed_schema != "_drt":
+            entry["managed_schema"] = profile.managed_schema
     elif isinstance(profile, RedshiftProfile):
         entry = {
             "type": "redshift",

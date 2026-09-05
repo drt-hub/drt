@@ -363,4 +363,77 @@ class TestStreamingExtraction:
 
         assert len(conns) == 2
         conns[0].close.assert_called_once(), "failed attempt leaked its connection"
-        conns[1].close.assert_called_once()
+
+
+class TestManagedTableCapable:
+    """#960 — ManagedTableCapable's create-if-absent + escape-hatch contract."""
+
+    def _mock_ddl_conn(self, *, schema_exists: bool = False) -> MagicMock:
+        conn = MagicMock()
+        cur = MagicMock()
+        # First fetchone() call is the existence probe; its return shape
+        # depends on which method is under test (schemata row vs. to_regclass).
+        cur.fetchone.return_value = (1,) if schema_exists else None
+        conn.cursor.return_value = cur
+        return conn
+
+    def test_ensure_managed_schema_creates_when_absent(self) -> None:
+        conn = self._mock_ddl_conn(schema_exists=False)
+        with patch.object(PostgresSource, "_connect", return_value=conn):
+            PostgresSource().ensure_managed_schema(_profile())
+
+        executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
+        assert any("information_schema.schemata" in sql for sql in executed)
+        assert any("CREATE SCHEMA" in sql for sql in executed)
+        conn.commit.assert_called_once()
+        conn.close.assert_called_once()
+
+    def test_ensure_managed_schema_skips_create_when_present(self) -> None:
+        """The escape hatch: a pre-provisioned schema must never see the
+        CREATE statement, so a no-CREATE-privilege user can still run."""
+        conn = self._mock_ddl_conn(schema_exists=True)
+        with patch.object(PostgresSource, "_connect", return_value=conn):
+            PostgresSource().ensure_managed_schema(_profile())
+
+        executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
+        assert not any("CREATE SCHEMA" in sql for sql in executed)
+        conn.commit.assert_not_called()
+        conn.close.assert_called_once()
+
+    def test_managed_table_exists_true(self) -> None:
+        conn = self._mock_ddl_conn()
+        conn.cursor.return_value.fetchone.return_value = ("some_oid",)
+        with patch.object(PostgresSource, "_connect", return_value=conn):
+            assert PostgresSource().managed_table_exists(_profile(), "_drt_snapshots") is True
+
+    def test_managed_table_exists_false(self) -> None:
+        conn = self._mock_ddl_conn()
+        conn.cursor.return_value.fetchone.return_value = (None,)
+        with patch.object(PostgresSource, "_connect", return_value=conn):
+            assert PostgresSource().managed_table_exists(_profile(), "_drt_snapshots") is False
+
+    def test_managed_table_exists_probes_the_configured_schema(self) -> None:
+        conn = self._mock_ddl_conn()
+        conn.cursor.return_value.fetchone.return_value = (None,)
+        with patch.object(PostgresSource, "_connect", return_value=conn):
+            PostgresSource().managed_table_exists(
+                _profile(managed_schema="custom_schema"), "_drt_snapshots"
+            )
+
+        params = conn.cursor.return_value.execute.call_args.args[1]
+        assert params == ("custom_schema._drt_snapshots",)
+
+    def test_drop_managed_table_issues_drop_if_exists(self) -> None:
+        conn = self._mock_ddl_conn()
+        with patch.object(PostgresSource, "_connect", return_value=conn):
+            PostgresSource().drop_managed_table(_profile(), "_drt_snapshots")
+
+        executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
+        assert any("DROP TABLE IF EXISTS" in sql for sql in executed)
+        conn.commit.assert_called_once()
+        conn.close.assert_called_once()
+
+    def test_managed_table_capable_protocol_satisfied(self) -> None:
+        from drt.sources.base import ManagedTableCapable
+
+        assert isinstance(PostgresSource(), ManagedTableCapable)
