@@ -36,6 +36,7 @@ import yaml
 from pydantic import BaseModel, Field
 
 from drt.config.profiles import (
+    DEFAULT_FETCH_SIZE,
     BigQueryProfile,
     ClickHouseProfile,
     DatabricksProfile,
@@ -299,12 +300,14 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
         return DuckDBProfile(
             type="duckdb",
             database=raw.get("database", ":memory:"),
+            fetch_size=int(raw.get("fetch_size", DEFAULT_FETCH_SIZE)),
         )
 
     if source_type == "sqlite":
         return SQLiteProfile(
             type="sqlite",
             database=raw.get("database", ":memory:"),
+            fetch_size=int(raw.get("fetch_size", DEFAULT_FETCH_SIZE)),
         )
     if source_type == "postgres":
         return PostgresProfile(
@@ -315,6 +318,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             user=raw.get("user", ""),
             password_env=raw.get("password_env"),
             password=raw.get("password"),
+            fetch_size=int(raw.get("fetch_size", DEFAULT_FETCH_SIZE)),
         )
 
     if source_type == "redshift":
@@ -327,6 +331,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             password_env=raw.get("password_env"),
             password=raw.get("password"),
             schema=raw.get("schema", "public"),
+            fetch_size=int(raw.get("fetch_size", DEFAULT_FETCH_SIZE)),
         )
 
     if source_type == "clickhouse":
@@ -370,6 +375,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             schema=raw.get("schema") or "PUBLIC",
             warehouse=raw.get("warehouse", ""),
             role=raw.get("role"),
+            fetch_size=int(raw.get("fetch_size", DEFAULT_FETCH_SIZE)),
         )
 
     if source_type == "sqlserver":
@@ -385,6 +391,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             password_env=raw.get("password_env"),
             password=raw.get("password"),
             schema=raw.get("schema") or "dbo",
+            fetch_size=int(raw.get("fetch_size", DEFAULT_FETCH_SIZE)),
         )
 
     if source_type == "databricks":
@@ -582,8 +589,12 @@ def save_profile(
             entry["keyfile"] = profile.keyfile
     elif isinstance(profile, DuckDBProfile):
         entry = {"type": "duckdb", "database": profile.database}
+        if profile.fetch_size != DEFAULT_FETCH_SIZE:
+            entry["fetch_size"] = profile.fetch_size
     elif isinstance(profile, SQLiteProfile):
         entry = {"type": "sqlite", "database": profile.database}
+        if profile.fetch_size != DEFAULT_FETCH_SIZE:
+            entry["fetch_size"] = profile.fetch_size
     elif isinstance(profile, PostgresProfile):
         entry = {
             "type": "postgres",
@@ -594,6 +605,8 @@ def save_profile(
         }
         if profile.password_env:
             entry["password_env"] = profile.password_env
+        if profile.fetch_size != DEFAULT_FETCH_SIZE:
+            entry["fetch_size"] = profile.fetch_size
     elif isinstance(profile, RedshiftProfile):
         entry = {
             "type": "redshift",
@@ -605,6 +618,8 @@ def save_profile(
         }
         if profile.password_env:
             entry["password_env"] = profile.password_env
+        if profile.fetch_size != DEFAULT_FETCH_SIZE:
+            entry["fetch_size"] = profile.fetch_size
     elif isinstance(profile, ClickHouseProfile):
         entry = {
             "type": "clickhouse",
@@ -642,6 +657,8 @@ def save_profile(
             entry["private_key_passphrase_env"] = profile.private_key_passphrase_env
         if profile.role:
             entry["role"] = profile.role
+        if profile.fetch_size != DEFAULT_FETCH_SIZE:
+            entry["fetch_size"] = profile.fetch_size
     elif isinstance(profile, SQLServerProfile):
         entry = {
             "type": "sqlserver",
@@ -653,6 +670,8 @@ def save_profile(
         }
         if profile.password_env:
             entry["password_env"] = profile.password_env
+        if profile.fetch_size != DEFAULT_FETCH_SIZE:
+            entry["fetch_size"] = profile.fetch_size
     elif isinstance(profile, DatabricksProfile):
         entry = {
             "type": "databricks",
