@@ -181,6 +181,14 @@ class MirrorConfig(BaseModel):
       table in the destination. Safe on tables the application also
       writes to (Census-style semantics: first run baselines without
       deleting; lost state re-baselines with a warning).
+    - ``strategy: diff`` (#1110) — DELETE exactly the keys
+      ``sync.incremental_strategy: diff`` (#755) classified as removed this
+      run, instead of scanning the whole destination (``destination``) or
+      maintaining separate tracked-key state (``tracked``). Requires
+      ``incremental_strategy: diff`` — meaningless (and rejected) otherwise.
+      ``scope`` is also rejected with this strategy: the removed-key list is
+      already exact, row-level output of the source-side diff, so a scope
+      restriction on top of it has nothing left to narrow.
     - ``scope`` (#687) — restrict deletes to rows whose scope-column values
       appeared in this run's source. The fit for 1:N regeneration (parent +
       child link rows): stale children under observed parents are deleted,
@@ -199,7 +207,7 @@ class MirrorConfig(BaseModel):
     migration story for tables created before #694) is needed.
     """
 
-    strategy: Literal["destination", "tracked"] = "destination"
+    strategy: Literal["destination", "tracked", "diff"] = "destination"
     scope: list[str] | None = Field(default=None, min_length=1)
 
 
@@ -390,6 +398,14 @@ class SyncOptions(BaseModel):
     # into a SQL comment / native tag; see ``drt.config.query_tags``.
     _query_tags: dict[str, str] | None = PrivateAttr(default=None)
 
+    # sync.incremental_strategy: diff's removed-key list (#755), injected by
+    # the engine at run time (not a YAML field) — same smuggling pattern as
+    # ``_sync_name``/``_query_tags`` above. ``mirror.strategy: diff`` (#1110)
+    # reads this in ``BaseSqlDestination._finalize_mirror_diff`` instead of
+    # the engine widening ``finalize_sync()``'s signature, which every
+    # dialect's duck-typed hook would otherwise have to accept unchanged.
+    _diff_removed_keys: list[dict[str, Any]] | None = PrivateAttr(default=None)
+
     @model_validator(mode="after")
     def _check_incremental_cursor(self) -> SyncOptions:
         if self.mode == "incremental" and not self.cursor_field:
@@ -452,6 +468,19 @@ class SyncOptions(BaseModel):
     def _check_mirror_config(self) -> SyncOptions:
         if self.mirror is not None and self.mode != "mirror":
             raise ValueError("sync.mirror requires mode='mirror'.")
+        if self.mirror is not None and self.mirror.strategy == "diff":
+            if self.incremental_strategy != "diff":
+                raise ValueError(
+                    "sync.mirror.strategy: diff requires "
+                    "sync.incremental_strategy: diff — it deletes exactly "
+                    "the keys that strategy classified as removed."
+                )
+            if self.mirror.scope is not None:
+                raise ValueError(
+                    "sync.mirror.strategy: diff does not accept sync.mirror.scope "
+                    "— the removed-key list is already exact, row-level output "
+                    "of the source-side diff, with nothing left to narrow."
+                )
         return self
 
     @model_validator(mode="after")

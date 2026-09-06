@@ -733,6 +733,12 @@ def _run_sync_body(
             # leak its raw value through the removed-keys result while the
             # main added/changed record_batch masks the same column.
             diff_removed_keys = apply_mask(list(diff_result.removed_keys), sync.sync.mask)
+            # Smuggled to the destination side the same way _query_tags/
+            # _sync_name already are (#1110) — mirror.strategy: diff reads
+            # this in BaseSqlDestination._finalize_mirror_diff instead of
+            # finalize_sync()'s duck-typed signature growing a parameter
+            # every other dialect's implementation would have to ignore.
+            sync.sync._diff_removed_keys = diff_removed_keys
         records_iter = _wrap_stage_ctx(chain(diff_result.added, diff_result.changed), "source")
     else:
         records_iter = _staged_source_iter(
