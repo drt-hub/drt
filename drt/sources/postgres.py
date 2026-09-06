@@ -448,9 +448,7 @@ class PostgresSource:
                     "SELECT {key_list} FROM {current} c LEFT JOIN {scratch} s ON {join_cond} "
                     "WHERE {probe} IS NULL"
                 ).format(
-                    key_list=_pgsql.SQL(", ").join(
-                        _pgsql.Identifier("c", k) for k in key_columns
-                    ),
+                    key_list=_pgsql.SQL(", ").join(_pgsql.Identifier("c", k) for k in key_columns),
                     current=_pgsql.Identifier(schema, current_table),
                     scratch=_pgsql.Identifier(schema, scratch_table),
                     join_cond=_key_join_condition(key_columns, "c", "s"),

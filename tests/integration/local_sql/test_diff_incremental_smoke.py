@@ -45,8 +45,12 @@ def test_diff_incremental_round_trip() -> None:
         host = postgres.get_container_host_ip()
         port = int(postgres.get_exposed_port(5432))
         config = PostgresProfile(
-            type="postgres", host=host, port=port, dbname="testdb",
-            user="admin", password="adminpass",
+            type="postgres",
+            host=host,
+            port=port,
+            dbname="testdb",
+            user="admin",
+            password="adminpass",
         )
         source = PostgresSource()
         admin = psycopg2.connect(
@@ -63,8 +67,11 @@ def test_diff_incremental_round_trip() -> None:
 
             # --- Run 1: first run, nothing to diff against yet. ---
             result = source.extract_snapshot_diff(
-                query, config, sync_name="users_sync",
-                key_columns=["id"], hash_columns="all",
+                query,
+                config,
+                sync_name="users_sync",
+                key_columns=["id"],
+                hash_columns="all",
             )
             added = list(result.added)
             assert result.is_first_run is True
@@ -83,8 +90,11 @@ def test_diff_incremental_round_trip() -> None:
 
             # --- Run 2: classify against run 1's committed baseline. ---
             result = source.extract_snapshot_diff(
-                query, config, sync_name="users_sync",
-                key_columns=["id"], hash_columns="all",
+                query,
+                config,
+                sync_name="users_sync",
+                key_columns=["id"],
+                hash_columns="all",
             )
             assert result.is_first_run is False
             added = list(result.added)
@@ -98,8 +108,11 @@ def test_diff_incremental_round_trip() -> None:
 
             # --- Run 3: no edits since the last commit — nothing to report. ---
             result = source.extract_snapshot_diff(
-                query, config, sync_name="users_sync",
-                key_columns=["id"], hash_columns="all",
+                query,
+                config,
+                sync_name="users_sync",
+                key_columns=["id"],
+                hash_columns="all",
             )
             assert list(result.added) == []
             assert list(result.changed) == []
@@ -126,8 +139,12 @@ def test_uncommitted_run_rediffs_against_the_same_stale_baseline() -> None:
         host = postgres.get_container_host_ip()
         port = int(postgres.get_exposed_port(5432))
         config = PostgresProfile(
-            type="postgres", host=host, port=port, dbname="testdb",
-            user="admin", password="adminpass",
+            type="postgres",
+            host=host,
+            port=port,
+            dbname="testdb",
+            user="admin",
+            password="adminpass",
         )
         source = PostgresSource()
         admin = psycopg2.connect(
@@ -184,8 +201,12 @@ def test_null_to_empty_string_transition_is_detected_as_changed() -> None:
         host = postgres.get_container_host_ip()
         port = int(postgres.get_exposed_port(5432))
         config = PostgresProfile(
-            type="postgres", host=host, port=port, dbname="testdb",
-            user="admin", password="adminpass",
+            type="postgres",
+            host=host,
+            port=port,
+            dbname="testdb",
+            user="admin",
+            password="adminpass",
         )
         source = PostgresSource()
         admin = psycopg2.connect(
@@ -194,8 +215,7 @@ def test_null_to_empty_string_transition_is_detected_as_changed() -> None:
         try:
             _seed(
                 admin,
-                "CREATE TABLE users (id INTEGER, note TEXT); "
-                "INSERT INTO users VALUES (1, NULL)",
+                "CREATE TABLE users (id INTEGER, note TEXT); INSERT INTO users VALUES (1, NULL)",
             )
             query = "SELECT id, note FROM users"
             result = source.extract_snapshot_diff(
@@ -230,8 +250,12 @@ def test_explicit_hash_columns_ignores_columns_outside_the_list() -> None:
         host = postgres.get_container_host_ip()
         port = int(postgres.get_exposed_port(5432))
         config = PostgresProfile(
-            type="postgres", host=host, port=port, dbname="testdb",
-            user="admin", password="adminpass",
+            type="postgres",
+            host=host,
+            port=port,
+            dbname="testdb",
+            user="admin",
+            password="adminpass",
         )
         source = PostgresSource()
         admin = psycopg2.connect(
@@ -286,8 +310,12 @@ def test_hash_columns_typo_raises_loudly() -> None:
         host = postgres.get_container_host_ip()
         port = int(postgres.get_exposed_port(5432))
         config = PostgresProfile(
-            type="postgres", host=host, port=port, dbname="testdb",
-            user="admin", password="adminpass",
+            type="postgres",
+            host=host,
+            port=port,
+            dbname="testdb",
+            user="admin",
+            password="adminpass",
         )
         source = PostgresSource()
         admin = psycopg2.connect(
@@ -321,8 +349,12 @@ def test_missing_key_column_raises_loudly() -> None:
         host = postgres.get_container_host_ip()
         port = int(postgres.get_exposed_port(5432))
         config = PostgresProfile(
-            type="postgres", host=host, port=port, dbname="testdb",
-            user="admin", password="adminpass",
+            type="postgres",
+            host=host,
+            port=port,
+            dbname="testdb",
+            user="admin",
+            password="adminpass",
         )
         source = PostgresSource()
         admin = psycopg2.connect(
@@ -356,8 +388,12 @@ def test_commit_without_extract_is_a_noop() -> None:
         host = postgres.get_container_host_ip()
         port = int(postgres.get_exposed_port(5432))
         config = PostgresProfile(
-            type="postgres", host=host, port=port, dbname="testdb",
-            user="admin", password="adminpass",
+            type="postgres",
+            host=host,
+            port=port,
+            dbname="testdb",
+            user="admin",
+            password="adminpass",
         )
         source = PostgresSource()
         # Never called extract_snapshot_diff for this sync_name — must not raise.

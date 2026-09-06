@@ -249,9 +249,7 @@ def _staged_source_iter(
             yield from source.extract(query, profile, query_tags=query_tags)
 
 
-def _wrap_stage_ctx(
-    it: Iterator[dict[str, Any]], stage: str
-) -> Iterator[dict[str, Any]]:
+def _wrap_stage_ctx(it: Iterator[dict[str, Any]], stage: str) -> Iterator[dict[str, Any]]:
     """Tag exceptions raised during ``it``'s iteration with ``stage`` (#544).
 
     Same purpose as ``_staged_source_iter`` above, generalized for
@@ -644,9 +642,7 @@ def _run_sync_body(
                 query_tags=query_tags,
             )
             diff_removed_keys = list(diff_result.removed_keys)
-        records_iter = _wrap_stage_ctx(
-            chain(diff_result.added, diff_result.changed), "source"
-        )
+        records_iter = _wrap_stage_ctx(chain(diff_result.added, diff_result.changed), "source")
     else:
         records_iter = _staged_source_iter(
             source,
