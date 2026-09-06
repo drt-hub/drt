@@ -509,6 +509,16 @@ class PostgresWarehouseDlqBackend:
             conn.close()
 
     def replace(self, sync_name: str, entries: list[DeadLetter]) -> None:
+        """Wholesale-replace the queue in one transaction.
+
+        Deliberately does NOT delete-then-call ``append()`` on a second
+        connection: that would commit the delete before the insert even
+        starts, so a connection drop, permission error, or process crash
+        between the two calls would permanently erase the queue without
+        ever writing the replacement — caught in Codex review on this PR.
+        One connection, one commit: either the whole replacement lands or
+        none of it does.
+        """
         from psycopg2 import sql as _pgsql
 
         conn = _connect(self._profile)
@@ -521,11 +531,27 @@ class PostgresWarehouseDlqBackend:
                 ),
                 (sync_name,),
             )
+            for entry in entries:
+                cur.execute(
+                    _pgsql.SQL(
+                        "INSERT INTO {} (id, sync_name, record, error_message, "
+                        "http_status, ts, attempts, sync_run_id) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+                    ).format(_qualified(self._profile, _DLQ_TABLE)),
+                    (
+                        entry.id,
+                        sync_name,
+                        json.dumps(entry.record),
+                        entry.error_message,
+                        entry.http_status,
+                        entry.timestamp,
+                        entry.attempts,
+                        entry.sync_run_id,
+                    ),
+                )
             conn.commit()
         finally:
             conn.close()
-        if entries:
-            self.append(sync_name, entries, max_records=0)
 
     def clear(self, sync_name: str) -> None:
         self.replace(sync_name, [])

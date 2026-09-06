@@ -317,3 +317,34 @@ def test_writes_succeed_with_preprovisioned_tables_and_no_create_privilege() -> 
             assert PostgresWarehouseDlqBackend(config).depth("s") == 1
         finally:
             admin.close()
+
+
+def test_dlq_replace_is_atomic_and_leaves_old_queue_intact_on_failure(
+    pg_profile: PostgresProfile,
+) -> None:
+    """Codex review: an earlier version deleted on one connection, then
+    called append() on a second one -- a failure between the two would
+    permanently erase the queue. Proves the fix (one transaction, one
+    commit) with a duplicate id in the replacement batch: a plain INSERT
+    (no ON CONFLICT, unlike append()'s upsert) genuinely violates the
+    PRIMARY KEY, and the surrounding transaction must roll the DELETE
+    back with it -- the OLD queue must survive completely untouched,
+    exactly as if replace() were never called."""
+    dlq = PostgresWarehouseDlqBackend(pg_profile)
+
+    original = [DeadLetter(record={"n": 1}, error_message="orig", id="keep-1")]
+    dlq.append("orders", original)
+    assert dlq.depth("orders") == 1
+
+    broken_replacement = [
+        DeadLetter(record={"n": 2}, error_message="new", id="new-1"),
+        DeadLetter(record={"n": 3}, error_message="new", id="new-1"),  # duplicate id
+    ]
+    with pytest.raises(psycopg2.errors.UniqueViolation):
+        dlq.replace("orders", broken_replacement)
+
+    # The DELETE half of the failed transaction must have rolled back too --
+    # the original entry is still exactly there, not gone and not doubled.
+    survivors = dlq.read("orders")
+    assert [e.id for e in survivors] == ["keep-1"]
+    assert survivors[0].error_message == "orig"
