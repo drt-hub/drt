@@ -219,3 +219,101 @@ def test_dlq_and_state_share_the_same_managed_schema(pg_profile: PostgresProfile
         admin.close()
 
     assert {"_drt_runs", "_drt_dlq"}.issubset(tables)
+
+
+def test_writes_succeed_with_preprovisioned_tables_and_no_create_privilege() -> None:
+    """The escape hatch, live (#960/#695 discipline, caught missing in Codex
+    review on this PR): an admin pre-creates the managed schema AND all three
+    tables, then grants the sync role neither schema- nor table-level CREATE
+    at all. Every write path must still succeed by detecting the table
+    already exists via managed_table_exists(), never attempting CREATE
+    TABLE — even the harmless-looking IF NOT EXISTS form."""
+    require_docker()
+    postgres_container = testcontainers_postgres.PostgresContainer
+
+    with postgres_container(
+        "postgres:16-alpine",
+        username="admin",
+        password="adminpass",
+        dbname="testdb",
+        driver=None,
+    ) as postgres:
+        host = postgres.get_container_host_ip()
+        port = int(postgres.get_exposed_port(5432))
+        admin = psycopg2.connect(
+            host=host, port=port, dbname="testdb", user="admin", password="adminpass"
+        )
+        try:
+            with admin.cursor() as cur:
+                cur.execute("CREATE SCHEMA _drt")
+                cur.execute(
+                    "CREATE TABLE _drt._drt_runs (sync_name TEXT PRIMARY KEY, "
+                    "last_run_at TEXT NOT NULL, records_synced BIGINT NOT NULL, "
+                    "status TEXT NOT NULL, error TEXT, last_cursor_value TEXT)"
+                )
+                cur.execute(
+                    "CREATE TABLE _drt._drt_history ("
+                    "sync_name TEXT NOT NULL, started_at TEXT NOT NULL, "
+                    "completed_at TEXT NOT NULL, duration_seconds DOUBLE PRECISION NOT NULL, "
+                    "status TEXT NOT NULL, records_synced BIGINT NOT NULL, "
+                    "records_failed BIGINT NOT NULL, errors JSONB NOT NULL DEFAULT '[]', "
+                    "cursor_value_used TEXT, dry_run BOOLEAN NOT NULL DEFAULT FALSE, "
+                    "run_id TEXT, sync_run_id TEXT)"
+                )
+                cur.execute(
+                    "CREATE TABLE _drt._drt_dlq (id TEXT PRIMARY KEY, "
+                    "sync_name TEXT NOT NULL, record JSONB NOT NULL, "
+                    "error_message TEXT NOT NULL, http_status INTEGER, ts TEXT NOT NULL, "
+                    "attempts INTEGER NOT NULL, sync_run_id TEXT)"
+                )
+                cur.execute("CREATE USER retl_user WITH PASSWORD 'retlpass'")
+                cur.execute("REVOKE CREATE ON DATABASE testdb FROM PUBLIC")
+                cur.execute("GRANT USAGE ON SCHEMA _drt TO retl_user")
+                cur.execute(
+                    "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA _drt TO retl_user"
+                )
+                # Prove the privilege really is absent, not just untested.
+                cur.execute("SELECT has_database_privilege('retl_user', 'testdb', 'CREATE')")
+                assert cur.fetchone() == (False,)
+                cur.execute("SELECT has_schema_privilege('retl_user', '_drt', 'CREATE')")
+                assert cur.fetchone() == (False,)
+            admin.commit()
+
+            config = PostgresProfile(
+                type="postgres",
+                host=host,
+                port=port,
+                dbname="testdb",
+                user="retl_user",
+                password="retlpass",
+            )
+
+            # Would raise InsufficientPrivilege if any CREATE statement were
+            # ever actually issued against this role.
+            PostgresWarehouseStateStore(config).save_sync(
+                SyncState(sync_name="s", last_run_at="t", records_synced=1, status="success")
+            )
+            assert PostgresWarehouseStateStore(config).get_last_sync("s") is not None
+
+            # append() is best-effort and swallows failures (per the
+            # HistoryStore Protocol) -- a broken escape hatch would NOT
+            # raise here, so read the row back to prove it actually landed.
+            PostgresWarehouseHistoryStore(config).append(
+                HistoryEntry(
+                    sync_name="s",
+                    started_at="t0",
+                    completed_at="t1",
+                    duration_seconds=1.0,
+                    status="success",
+                    records_synced=1,
+                    records_failed=0,
+                )
+            )
+            assert PostgresWarehouseHistoryStore(config).read("s") != []
+
+            PostgresWarehouseDlqBackend(config).append(
+                "s", [DeadLetter(record={}, error_message="x", id="id-1")]
+            )
+            assert PostgresWarehouseDlqBackend(config).depth("s") == 1
+        finally:
+            admin.close()

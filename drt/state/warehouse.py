@@ -30,6 +30,35 @@ atomically server-side.
 Each method opens and closes its own connection, matching
 ``ManagedTableCapable``'s own style — state operations are not a hot path
 (at most once per sync, per batch, or per CLI invocation).
+
+**Two known, cross-backend limitations raised in Codex review, checked
+against existing precedent rather than fixed here:**
+
+- **No enforced per-project namespace.** Rows are keyed by ``sync_name``
+  alone, so two drt projects sharing one ``connection_profile`` +
+  ``managed_schema`` and a common sync name will collide. This is not novel
+  to this backend: ``gcs``/``s3`` have the identical property today —
+  ``state.prefix`` is an optional, undocumented-as-required operator
+  convention for exactly this isolation (``docs/guides/remote-state.md``'s
+  own examples use a project-specific prefix like
+  ``production/customer-activation``), not an enforced tenant key. The
+  warehouse backend's equivalent knob is ``PostgresProfile.managed_schema``
+  itself, already settable per profile since #960 — operators sharing one
+  Postgres database across projects should give each project's profile a
+  distinct ``managed_schema``, the same convention as a distinct ``prefix``.
+- **Concurrent runs of the *same* sync can move a cursor backward.** A
+  slower run's ``INSERT ... ON CONFLICT DO UPDATE`` can commit after a
+  faster, newer run's — the ``ON CONFLICT`` clause is atomic per statement
+  but still last-writer-wins across statements, with no ordering guarantee
+  between them. This is also not novel: ``drt/engine/observer.py``'s own
+  ``on_sync_completed`` comment already documents this exact race as an
+  accepted, cross-backend gap ("true cross-process atomicity needs a
+  CAS/generation-token primitive the StateStore Protocol doesn't have yet
+  ... a run that reads here, loses a race to a concurrent writer, and then
+  writes anyway can still regress the cursor") — local/gcs/s3 share the
+  identical exposure today. Closing it needs a StateStore Protocol change
+  (a compare-and-set primitive all four backends would implement), not a
+  per-backend fix here.
 """
 
 from __future__ import annotations
@@ -83,7 +112,14 @@ class PostgresWarehouseStateStore:
     def _ensure_table(self, conn: Any) -> None:
         from psycopg2 import sql as _pgsql
 
-        PostgresSource().ensure_managed_schema(self._profile)
+        source = PostgresSource()
+        source.ensure_managed_schema(self._profile)
+        # Probe first (#695/#960 discipline): a pre-provisioned table and a
+        # role with no CREATE privilege on tables in this schema must never
+        # see the CREATE statement at all, exactly like ensure_managed_schema()
+        # itself never issues CREATE SCHEMA once the schema already exists.
+        if source.managed_table_exists(self._profile, _RUNS_TABLE):
+            return
         cur = conn.cursor()
         cur.execute(
             _pgsql.SQL(
@@ -229,12 +265,22 @@ class PostgresWarehouseHistoryStore:
     def _ensure_table(self, conn: Any) -> None:
         from psycopg2 import sql as _pgsql
 
-        PostgresSource().ensure_managed_schema(self._profile)
+        source = PostgresSource()
+        source.ensure_managed_schema(self._profile)
+        if source.managed_table_exists(self._profile, _HISTORY_TABLE):
+            return
         cur = conn.cursor()
         cur.execute(
             _pgsql.SQL(
+                # No serial/identity primary key: HistoryEntry has no id
+                # concept of its own (unlike DeadLetter), and a BIGSERIAL
+                # column's implicit sequence needs its own GRANT USAGE,
+                # which the escape hatch's plain table-privilege grants
+                # (SELECT/INSERT/UPDATE/DELETE) don't cover — caught live
+                # by test_writes_succeed_with_preprovisioned_tables_and_no_
+                # create_privilege failing with "permission denied for
+                # sequence" before this fix.
                 "CREATE TABLE IF NOT EXISTS {} ("
-                "id BIGSERIAL PRIMARY KEY, "
                 "sync_name TEXT NOT NULL, "
                 "started_at TEXT NOT NULL, "
                 "completed_at TEXT NOT NULL, "
@@ -389,14 +435,21 @@ class PostgresWarehouseDlqBackend:
     def _ensure_table(self, conn: Any) -> None:
         from psycopg2 import sql as _pgsql
 
-        PostgresSource().ensure_managed_schema(self._profile)
+        source = PostgresSource()
+        source.ensure_managed_schema(self._profile)
+        if source.managed_table_exists(self._profile, _DLQ_TABLE):
+            return
         cur = conn.cursor()
         cur.execute(
+            # No BIGSERIAL "seq" column: its implicit sequence needs its own
+            # GRANT USAGE the escape hatch's plain table-privilege grants
+            # don't cover (same issue _drt_history's id column had — see
+            # that table's comment). FIFO ordering instead uses (ts, id),
+            # both already-present columns with no sequence dependency.
             _pgsql.SQL(
                 "CREATE TABLE IF NOT EXISTS {} ("
                 "id TEXT PRIMARY KEY, "
                 "sync_name TEXT NOT NULL, "
-                "seq BIGSERIAL, "
                 "record JSONB NOT NULL, "
                 "error_message TEXT NOT NULL, "
                 "http_status INTEGER, "
@@ -446,7 +499,7 @@ class PostgresWarehouseDlqBackend:
                     _pgsql.SQL(
                         "DELETE FROM {t} WHERE sync_name = %s AND id NOT IN ("
                         "SELECT id FROM {t} WHERE sync_name = %s "
-                        "ORDER BY seq DESC LIMIT %s)"
+                        "ORDER BY ts DESC, id DESC LIMIT %s)"
                     ).format(t=_qualified(self._profile, _DLQ_TABLE)),
                     (sync_name, sync_name, max_records),
                 )
@@ -488,7 +541,7 @@ class PostgresWarehouseDlqBackend:
                     _pgsql.SQL(
                         "SELECT id, record, error_message, http_status, ts, "
                         "attempts, sync_run_id FROM {} WHERE sync_name = %s "
-                        "ORDER BY seq ASC"
+                        "ORDER BY ts ASC, id ASC"
                     ).format(_qualified(self._profile, _DLQ_TABLE)),
                     (sync_name,),
                 )

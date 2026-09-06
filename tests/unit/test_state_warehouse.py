@@ -88,6 +88,9 @@ class TestPostgresWarehouseStateStore:
         with (
             patch("drt.state.warehouse._connect", return_value=conn),
             patch("drt.sources.postgres.PostgresSource.ensure_managed_schema") as ensure_schema,
+            patch(
+                "drt.sources.postgres.PostgresSource.managed_table_exists", return_value=False
+            ) as table_exists,
         ):
             PostgresWarehouseStateStore(_profile()).save_sync(
                 SyncState(
@@ -99,9 +102,27 @@ class TestPostgresWarehouseStateStore:
             )
 
         ensure_schema.assert_called_once()
+        table_exists.assert_called_once()
         conn.commit.assert_called()
         executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
         assert any("ON CONFLICT" in sql for sql in executed)
+
+    def test_save_sync_skips_create_table_when_preprovisioned(self) -> None:
+        """The escape hatch (#960/#695 discipline): a pre-provisioned table
+        must never see the CREATE statement, even the IF NOT EXISTS form —
+        caught missing in Codex review on this PR."""
+        conn = _mock_conn()
+        with (
+            patch("drt.state.warehouse._connect", return_value=conn),
+            patch("drt.sources.postgres.PostgresSource.ensure_managed_schema"),
+            patch("drt.sources.postgres.PostgresSource.managed_table_exists", return_value=True),
+        ):
+            PostgresWarehouseStateStore(_profile()).save_sync(
+                SyncState(sync_name="s", last_run_at="t", records_synced=1, status="success")
+            )
+
+        executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
+        assert not any("CREATE TABLE" in sql for sql in executed)
 
 
 class TestPostgresWarehouseHistoryStore:
