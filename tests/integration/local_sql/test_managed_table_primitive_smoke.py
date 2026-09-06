@@ -218,3 +218,46 @@ def test_managed_table_exists_excludes_views() -> None:
             admin.close()
 
         assert source.managed_table_exists(config, "_drt_probe") is False
+
+
+def test_ensure_managed_schema_survives_concurrent_first_use() -> None:
+    """Self-review finding (Codex hit its usage limit mid-review on #920,
+    the first real consumer of this primitive): CREATE SCHEMA IF NOT
+    EXISTS is not atomic across sessions in Postgres. Two sessions can
+    both pass the existence probe (schema doesn't exist yet) and both
+    attempt the CREATE — the loser gets a catalog UniqueViolation
+    (pg_namespace_nspname_index), not a graceful no-op. Reproduced with 8
+    concurrent first calls: every run raised on at least one thread
+    before this fix."""
+    require_docker()
+    import concurrent.futures
+
+    postgres_container = testcontainers_postgres.PostgresContainer
+
+    with postgres_container(
+        "postgres:16-alpine",
+        username="admin",
+        password="adminpass",
+        dbname="testdb",
+        driver=None,
+    ) as postgres:
+        config = PostgresProfile(
+            type="postgres",
+            host=postgres.get_container_host_ip(),
+            port=int(postgres.get_exposed_port(5432)),
+            dbname="testdb",
+            user="admin",
+            password="adminpass",
+        )
+
+        errors: list[BaseException] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [
+                executor.submit(PostgresSource().ensure_managed_schema, config) for _ in range(8)
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                exc = future.exception()
+                if exc is not None:
+                    errors.append(exc)
+
+        assert not errors, f"concurrent ensure_managed_schema() raised: {errors}"

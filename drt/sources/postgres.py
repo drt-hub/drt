@@ -197,27 +197,54 @@ class PostgresSource:
     # sets autocommit.
 
     def ensure_managed_schema(self, config: ProfileConfigLike) -> None:
+        """Create ``config.managed_schema`` if it does not already exist.
+
+        Two race conditions this specifically guards, both confirmed live
+        (self-review after a Codex review pass on #920, the first real
+        consumer of this method, hit its usage limit mid-review):
+
+        1. **The escape hatch** (#695 discipline): probe first — a
+           locked-down user with no ``CREATE`` privilege, but an
+           admin-pre-provisioned schema, must never have the ``CREATE``
+           statement issued at all.
+        2. **Concurrent first use.** ``CREATE SCHEMA IF NOT EXISTS`` is NOT
+           atomic across sessions in Postgres: two sessions can both pass
+           the probe above (schema doesn't exist yet) and both attempt the
+           ``CREATE`` — the loser gets a catalog ``UniqueViolation``
+           (``pg_namespace_nspname_index``), not a graceful no-op.
+           Reproduced live with 8 concurrent first writes through #920's
+           warehouse backend, all racing this method for the very first
+           time. If the schema exists after the error, the other session
+           won the race; anything else re-raises.
+        """
         assert isinstance(config, PostgresProfile)
         from psycopg2 import sql as _pgsql
 
         conn = self._connect(config)
         try:
             cur = conn.cursor()
-            # Probe first (#695 discipline): a locked-down user with no
-            # CREATE privilege, but an admin-pre-provisioned schema, must
-            # never have the CREATE statement issued at all.
             cur.execute(
                 "SELECT 1 FROM information_schema.schemata WHERE schema_name = %s",
                 (config.managed_schema,),
             )
             if cur.fetchone() is not None:
                 return
-            cur.execute(
-                _pgsql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
-                    _pgsql.Identifier(config.managed_schema)
+            try:
+                cur.execute(
+                    _pgsql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                        _pgsql.Identifier(config.managed_schema)
+                    )
                 )
-            )
-            conn.commit()
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT 1 FROM information_schema.schemata WHERE schema_name = %s",
+                    (config.managed_schema,),
+                )
+                if cur.fetchone() is None:
+                    raise
         finally:
             conn.close()
 
