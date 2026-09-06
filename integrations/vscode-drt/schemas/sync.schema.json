@@ -4772,6 +4772,18 @@
             }
           ],
           "default": null
+        },
+        "idempotency_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Idempotency Key"
         }
       },
       "title": "SyncOptions",

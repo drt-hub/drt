@@ -990,6 +990,49 @@ class TestSyncOptions:
         assert error["ctx"] == {"gt": 0}
 
 
+class TestIdempotencyKeyConfig:
+    """``sync.idempotency_key`` — the dedup key template for #1099's
+    warehouse-backed idempotency ledger."""
+
+    def test_defaults_to_none(self) -> None:
+        assert SyncOptions().idempotency_key is None
+
+    def test_accepts_a_jinja_template(self) -> None:
+        opts = SyncOptions(idempotency_key="{{ row.id }}")
+        assert opts.idempotency_key == "{{ row.id }}"
+
+    def test_is_independent_of_mode(self) -> None:
+        # Deliberately no mode restriction, unlike match_policy — the
+        # ledger is a generically useful dedup layer, not tied to any one
+        # write strategy.
+        for mode in ("full", "incremental", "upsert", "replace", "mirror"):
+            kwargs = {"mode": mode, "idempotency_key": "{{ row.id }}"}
+            if mode == "incremental":
+                kwargs["cursor_field"] = "updated_at"
+            SyncOptions(**kwargs)
+
+
+class TestStateIdempotencyConfig:
+    """``state.idempotency`` — opt-in ledger on top of the warehouse backend."""
+
+    def test_defaults_to_false(self) -> None:
+        from drt.config.base import StateConfig
+
+        assert StateConfig().idempotency is False
+
+    def test_requires_warehouse_backend(self) -> None:
+        from drt.config.base import StateConfig
+
+        with pytest.raises(ValidationError, match="idempotency is only valid.*warehouse"):
+            StateConfig(backend="local", idempotency=True)
+
+    def test_accepted_on_warehouse_backend(self) -> None:
+        from drt.config.base import StateConfig
+
+        config = StateConfig(backend="warehouse", connection_profile="pg", idempotency=True)
+        assert config.idempotency is True
+
+
 # ---------------------------------------------------------------------------
 # Replace strategy (zero-downtime swap — #338)
 # ---------------------------------------------------------------------------

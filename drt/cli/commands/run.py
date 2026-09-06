@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from drt.sources.base import Source
     from drt.state.dlq import DlqBackend
     from drt.state.history import HistoryStore
+    from drt.state.idempotency import IdempotencyLedger
     from drt.state.manager import StateStore
 
 
@@ -135,6 +136,9 @@ class _RunContext:
     # a default — every real construction site sets it explicitly.
     # See drt._identifiers.
     run_id: str = ""
+    # Warehouse-backed idempotency ledger (#1099) — None unless
+    # state.backend: warehouse and state.idempotency: true.
+    idempotency_ledger: IdempotencyLedger | None = None
 
 
 def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
@@ -222,6 +226,7 @@ def _run_one(
                 vars=ctx.vars,
                 query_tagging=ctx.query_tagging,
                 run_id=ctx.run_id,
+                idempotency_ledger=ctx.idempotency_ledger,
             )
         except Exception as e:
             from drt.cli.errors import format_error, render_to_console
@@ -835,6 +840,7 @@ def run(
         vars=project_vars,
         query_tagging=project.query_tagging,
         run_id=new_run_id(),
+        idempotency_ledger=state_bundle.ledger,
     )
 
     # Execute syncs — parallel if threads > 1, sequential otherwise

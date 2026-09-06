@@ -358,6 +358,25 @@ class SyncOptions(BaseModel):
     dlq: DLQConfig | None = None
     # Mirror-mode delete behaviour (#686). None = destination strategy (#340).
     mirror: MirrorConfig | None = None
+    # Per-record dedup key for the warehouse-backed idempotency ledger
+    # (#1099), Jinja template read against the record as it reaches the
+    # destination (after field_mappings/mask, same seam as metadata_columns
+    # — so a template referencing a renamed column sees the renamed name).
+    # Only has an effect when the project sets `state.idempotency: true`
+    # (state.backend: warehouse); with no ledger configured this field is
+    # inert, matching #897's "no native mechanism -> no-op" contract rather
+    # than erroring. This is the same reusable "compute a stable per-row
+    # key" surface #897 proposes for its destination-native-mechanism
+    # pass-through — deliberately not placed on `destination:` like #897's
+    # field, since this ledger check runs entirely in the engine and never
+    # touches the destination. When unset, the engine falls back to
+    # `{{ row[upsert_key[0]] }}` (joined on ":" for a composite key) if the
+    # destination config has one — this field's explicit value always wins.
+    # Deliberately excludes `run_id` from any default: the whole point of a
+    # warehouse-persisted ledger is to recognize a duplicate *across*
+    # separate `drt run` invocations (a retry tomorrow of a row sent today),
+    # and folding run_id into the key would make every run's rows look new.
+    idempotency_key: str | None = None
 
     # The owning sync's name, injected by SyncConfig after validation (not a
     # YAML field). Tracked mirror (#686) uses it to scope the per-sync key

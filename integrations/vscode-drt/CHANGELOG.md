@@ -10,6 +10,11 @@ drt-core version its bundled schemas were generated from.
   `incremental_strategy: cursor | diff` (default `cursor`, unchanged) and a
   `diff` block (`hash_columns`) for warehouse-side snapshot-diff incremental
   extraction on models with no cursor column (drt-hub/drt#755).
+- Bundled JSON Schemas regenerated from drt-core: `syncs/*.yml` now validates
+  `sync.idempotency_key` (a Jinja template for the warehouse-backed
+  idempotency ledger's per-record dedup key) and `drt_project.yml`'s `state`
+  block gains an `idempotency` boolean, opt-in on top of
+  `state.backend: warehouse` (drt-hub/drt#1099).
 - Bundled JSON Schemas regenerated from drt-core: the `klaviyo` destination
   gains an `endpoint: profile | event` mode plus `metric_name`,
   `metric_name_field`, `time_field`, `value_field`, and `unique_id_field` for

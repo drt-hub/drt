@@ -45,8 +45,10 @@ from drt.observability import build_status, get_tracer
 from drt.sources.base import IncrementalSource, SnapshotDiffSource, Source
 from drt.state.dlq import DeadLetter
 from drt.state.history import HistoryEntry, HistoryStore
+from drt.state.idempotency import IdempotencyLedger
 from drt.state.manager import StateStore
 from drt.state.watermark import WatermarkStorage
+from drt.templates.renderer import render_value
 
 
 def _stringify_cursor_value(val: Any) -> str:
@@ -158,6 +160,38 @@ def _check_mode_supported(mode: str, destination: Destination | StagedDestinatio
             "replace / mirror currently ship on the Postgres, MySQL, Snowflake, "
             "Databricks, and ClickHouse destinations (#1042)."
         )
+
+
+def _resolve_idempotency_key_template(sync: SyncConfig) -> str | None:
+    """Effective Jinja template for #1099's per-record dedup key, or ``None``.
+
+    Explicit ``sync.idempotency_key`` always wins. Otherwise falls back to
+    the destination's ``upsert_key`` when present (joined on ``":"`` for a
+    composite key) — never to ``run_id``, see ``SyncOptions.idempotency_key``'s
+    docstring for why that default would silently defeat cross-run dedup.
+    ``None`` means this sync has no way to compute a key, so the ledger (even
+    if configured) has no effect for it — not an error, matching #897's own
+    "no-op, not a failure" contract for an unresolvable idempotency setting.
+    """
+    if sync.sync.idempotency_key:
+        return sync.sync.idempotency_key
+    upsert_key = getattr(sync.destination, "upsert_key", None)
+    if upsert_key:
+        return ":".join(f"{{{{ row['{col}'] }}}}" for col in upsert_key)
+    return None
+
+
+def _compute_idempotency_key(template: str, record: dict[str, Any]) -> str | None:
+    """Render ``template`` against one record; ``None`` on template failure.
+
+    Best-effort by design (see ``IdempotencyLedger``'s module docstring):
+    the ledger is an opt-in protective layer, so a broken template disables
+    dedup for that one row rather than failing the whole batch or sync.
+    """
+    try:
+        return str(render_value(template, record))
+    except Exception:
+        return None
 
 
 def batch(iterable: Iterator[Any], size: int) -> Iterator[list[Any]]:
@@ -282,6 +316,7 @@ def run_sync(
     vars: dict[str, Any] | None = None,
     query_tagging: QueryTaggingConfig | None = None,
     run_id: str | None = None,
+    idempotency_ledger: IdempotencyLedger | None = None,
 ) -> SyncResult:
     """Run a single sync: extract from source, load to destination.
 
@@ -321,6 +356,16 @@ def run_sync(
             own ``sync_run_id`` (always generated, regardless of ``run_id``)
             is what ties its own history/DLQ/alert/span records together
             either way. See ``drt._identifiers``.
+        idempotency_ledger: Warehouse-backed dedup ledger (#1099), from
+            ``StateBundle.ledger`` — ``None`` unless the project sets
+            ``state.backend: warehouse`` and ``state.idempotency: true``.
+            Read (never write) happens directly in the batch loop, same as
+            an ``IncrementalSource`` capability call; the write
+            (``mark_delivered``) only happens after a successful
+            ``destination.load()`` — see ``drt.state.idempotency`` for the
+            full write-path contract. Has no effect on a sync with no
+            resolvable key (see ``_resolve_idempotency_key_template``) or
+            during a dry run.
 
     Returns:
         Aggregated SyncResult across all batches, with ``run_id`` and
@@ -384,6 +429,7 @@ def run_sync(
                     extract_limit=extract_limit,
                     vars=vars,
                     query_tagging=query_tagging,
+                    idempotency_ledger=idempotency_ledger,
                 )
             except BaseException as exc:
                 raised = exc
@@ -448,6 +494,20 @@ def run_sync(
             except Exception as exc:  # noqa: BLE001 — best-effort
                 observer.on_warning(sync.name, f"History append outer failure: {exc}")
 
+        # Idempotency ledger retention (#1099) — unlike history, an unbounded
+        # ledger isn't just noisy, it's a per-delivered-row-forever table, so
+        # every non-dry-run sync prunes it, mirroring history_manager.prune
+        # above. Hardcoded 7-day TTL for the first cut rather than a second
+        # config knob (`state.idempotency` is a bool, not yet a nested
+        # config block) — same scope-narrowing call made on #755; a
+        # configurable retention is a defensible follow-up, not a gap that
+        # needs solving now.
+        if not dry_run and idempotency_ledger is not None:
+            try:
+                idempotency_ledger.prune(sync.name, retention_days=7)
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                observer.on_warning(sync.name, f"Idempotency ledger prune failure: {exc}")
+
         # Guaranteed final flush point — fires on every exit path (success,
         # exception, interruption), unlike on_sync_completed which only fires
         # on the normal-return path. Observers that buffer writes in memory
@@ -481,6 +541,7 @@ def _run_sync_body(
     extract_limit: int | None = None,
     vars: dict[str, Any] | None = None,
     query_tagging: QueryTaggingConfig | None = None,
+    idempotency_ledger: IdempotencyLedger | None = None,
 ) -> SyncResult:
     """Inner body of run_sync. Mutates `total_result` in place so the outer
     finally-block can read partial results when an exception propagates.
@@ -671,6 +732,16 @@ def _run_sync_body(
     # the diff engine after extraction completes (#413).
     dry_run_records: list[dict[str, Any]] = []
 
+    # Idempotency ledger (#1099) — resolve the dedup key template once, not
+    # per batch. `is_staged` destinations are out of scope for the first cut
+    # (their "success" is determined at finalize(), not per stage() call,
+    # which doesn't fit this per-record check/mark shape).
+    idempotency_key_template: str | None = (
+        _resolve_idempotency_key_template(sync)
+        if idempotency_ledger is not None and not is_staged
+        else None
+    )
+
     # Build lookup maps (one query per lookup, before the batch loop).
     # The build_lookup_map() call hits the destination, so tag failures
     # accordingly (#544).
@@ -805,6 +876,36 @@ def _run_sync_body(
                     dry_run_records.extend(record_batch)
                 continue
 
+            # Warehouse-backed idempotency ledger (#1099) — check-then-mark,
+            # never claim-then-send: filter out already-delivered records
+            # *before* the destination call below, and only mark the ones
+            # that were part of a *successful* load, further down. Marking
+            # before sending would leave a transient destination failure
+            # permanently "delivered" in the ledger — silently skipped by
+            # every future retry. See drt.state.idempotency for the full
+            # contract. A read, not a mutation, so it's called directly here
+            # like an IncrementalSource capability, not routed through an
+            # observer.
+            batch_idempotency_keys: list[str | None] = []
+            if idempotency_key_template is not None and idempotency_ledger is not None:
+                batch_len_before = len(record_batch)
+                keyed_batch = [
+                    (row, _compute_idempotency_key(idempotency_key_template, row))
+                    for row in record_batch
+                ]
+                candidate_keys = {key for _, key in keyed_batch if key is not None}
+                already: set[str] = set()
+                if candidate_keys:
+                    with _stage_ctx("state"):
+                        already = idempotency_ledger.already_delivered(sync.name, candidate_keys)
+                kept = [(row, key) for row, key in keyed_batch if key is None or key not in already]
+                record_batch = [row for row, _ in kept]
+                batch_idempotency_keys = [key for _, key in kept]
+                total_result.skipped += batch_len_before - len(record_batch)
+                total_result.skipped_duplicate += batch_len_before - len(record_batch)
+                if not record_batch:
+                    continue
+
             if is_staged:
                 assert isinstance(destination, StagedDestination)
                 with _stage_ctx("destination"):
@@ -831,6 +932,36 @@ def _run_sync_body(
                 total_result.skipped_no_match += result.skipped_no_match
                 total_result.errors.extend(result.errors)
                 total_result.row_errors.extend(getattr(result, "row_errors", []))
+
+                # Idempotency ledger mark (#1099) — only for records this
+                # load() call actually reported success for. `result.
+                # row_errors[*].batch_index` indexes into the `record_batch`
+                # just sent, so excluding those indices is the same
+                # correlation `DeadLetter` construction below already relies
+                # on. Marking here (not deferred to sync end) keeps the
+                # crash-loses-dedup-info window scoped to one batch, not the
+                # whole run — this fires on the common/success path, unlike
+                # DLQ's rare-path buffering.
+                if idempotency_ledger is not None and any(
+                    key is not None for key in batch_idempotency_keys
+                ):
+                    failed_indices = {
+                        err.batch_index
+                        for err in result.row_errors
+                        if 0 <= err.batch_index < len(record_batch)
+                    }
+                    delivered_keys = [
+                        key
+                        for i, key in enumerate(batch_idempotency_keys)
+                        if key is not None and i not in failed_indices
+                    ]
+                    if delivered_keys:
+                        with _stage_ctx("state"):
+                            idempotency_ledger.mark_delivered(
+                                sync.name,
+                                delivered_keys,
+                                datetime.now(timezone.utc).isoformat(),
+                            )
 
                 # Dead Letter Queue (#278): hand the engine's full failed records
                 # to the observer so a DlqObserver can persist them for `drt

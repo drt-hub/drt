@@ -246,6 +246,16 @@ class StateConfig(BaseModel):
     #: connection (#920). Required, and only meaningful, when backend is
     #: "warehouse".
     connection_profile: str | None = None
+    #: Opt-in warehouse-backed idempotency ledger (#1099, ADR 0005 step 5).
+    #: Only meaningful when backend is "warehouse" — a per-record dedup
+    #: ledger needs the same atomic-upsert guarantee the warehouse backend
+    #: itself relies on (see ``drt/state/warehouse.py``'s module docstring);
+    #: local/gcs/s3 have no equivalent primitive at per-row scale. A sync
+    #: only actually gets ledger protection once it also resolves a key via
+    #: ``sync.idempotency_key`` (or its ``upsert_key`` default) — this flag
+    #: alone just makes the ledger available, matching how ``backend:
+    #: warehouse`` alone doesn't require every sync to use it.
+    idempotency: bool = False
 
     @model_validator(mode="after")
     def _check_backend_fields(self) -> StateConfig:
@@ -286,6 +296,8 @@ class StateConfig(BaseModel):
                 )
         elif self.connection_profile is not None:
             raise ValueError("state.connection_profile is only valid when backend is 'warehouse'.")
+        if self.idempotency and self.backend != "warehouse":
+            raise ValueError("state.idempotency is only valid when backend is 'warehouse'.")
         return self
 
 
