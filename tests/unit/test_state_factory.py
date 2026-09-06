@@ -165,5 +165,66 @@ def test_bypassed_unknown_backend_fails_explicitly(tmp_path: Path) -> None:
     state = StateConfig.model_construct(backend="future")
     project = ProjectConfig(name="test", state=state)
 
-    with pytest.raises(NotImplementedError, match="future.*#756"):
+    with pytest.raises(NotImplementedError, match="future.*#756.*#920"):
+        build_state_bundle(project, tmp_path)
+
+
+def test_warehouse_backend_requires_connection_profile() -> None:
+    with pytest.raises(ValidationError, match="state.connection_profile is required.*warehouse"):
+        StateConfig(backend="warehouse")
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["bucket", "prefix", "region", "aws_profile", "endpoint_url"],
+)
+def test_warehouse_backend_rejects_object_store_fields(field: str) -> None:
+    with pytest.raises(ValidationError, match="not valid when backend is 'warehouse'"):
+        StateConfig(backend="warehouse", connection_profile="pg_main", **{field: "configured"})
+
+
+def test_connection_profile_field_rejected_outside_warehouse_backend() -> None:
+    with pytest.raises(ValidationError, match="state.connection_profile is only valid.*warehouse"):
+        StateConfig(backend="local", connection_profile="pg_main")
+
+
+def test_warehouse_backend_builds_postgres_bundle(tmp_path: Path, monkeypatch) -> None:
+    from drt.config.credentials import PostgresProfile
+    from drt.state.warehouse import (
+        PostgresWarehouseDlqBackend,
+        PostgresWarehouseHistoryStore,
+        PostgresWarehouseStateStore,
+    )
+
+    profile = PostgresProfile(type="postgres", host="h", dbname="d", user="u")
+    monkeypatch.setattr(
+        "drt.config.credentials.load_profile", lambda name, config_dir=None: profile
+    )
+
+    project = ProjectConfig(
+        name="test",
+        state=StateConfig(backend="warehouse", connection_profile="pg_main"),
+    )
+    bundle = build_state_bundle(project, tmp_path)
+
+    assert isinstance(bundle.state, PostgresWarehouseStateStore)
+    assert isinstance(bundle.history, PostgresWarehouseHistoryStore)
+    assert isinstance(bundle.dlq, PostgresWarehouseDlqBackend)
+    assert bundle.state._profile is profile
+
+
+def test_warehouse_backend_rejects_non_postgres_profiles(tmp_path: Path, monkeypatch) -> None:
+    from drt.config.credentials import SnowflakeProfile
+
+    profile = SnowflakeProfile(type="snowflake", account="a", user="u", database="d")
+    monkeypatch.setattr(
+        "drt.config.credentials.load_profile", lambda name, config_dir=None: profile
+    )
+
+    project = ProjectConfig(
+        name="test",
+        state=StateConfig(backend="warehouse", connection_profile="sf_main"),
+    )
+
+    with pytest.raises(NotImplementedError, match="only supports Postgres.*snowflake"):
         build_state_bundle(project, tmp_path)

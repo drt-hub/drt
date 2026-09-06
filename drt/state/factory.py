@@ -11,6 +11,8 @@ from drt.state.dlq import DlqBackend, LocalDlqStore
 from drt.state.history import HistoryStore, LocalHistoryManager
 from drt.state.manager import LocalStateManager, StateStore
 
+_SUPPORTED_BACKENDS = {"local", "gcs", "s3", "warehouse"}
+
 
 @dataclass(frozen=True)
 class StateBundle:
@@ -24,6 +26,7 @@ class StateBundle:
 _CacheKey = tuple[
     Path,
     str,
+    str | None,
     str | None,
     str | None,
     str | None,
@@ -53,10 +56,10 @@ def build_state_bundle(project: ProjectConfig, project_dir: Path) -> StateBundle
     handle independent processes.
     """
     backend = project.state.backend
-    if backend not in {"local", "gcs", "s3"}:
+    if backend not in _SUPPORTED_BACKENDS:
         raise NotImplementedError(
             f"State backend '{backend}' is not implemented; supported backends "
-            "for this stage of #756 are 'local', 'gcs', and 's3'."
+            "are 'local', 'gcs', 's3' (#756), and 'warehouse' (#920)."
         )
 
     resolved_dir = project_dir.resolve()
@@ -71,6 +74,7 @@ def build_state_bundle(project: ProjectConfig, project_dir: Path) -> StateBundle
         project.state.aws_access_key_id_env,
         project.state.aws_secret_access_key_env,
         project.state.aws_session_token_env,
+        project.state.connection_profile,
         project.history.max_entries,
     )
     with _bundle_lock:
@@ -81,6 +85,29 @@ def build_state_bundle(project: ProjectConfig, project_dir: Path) -> StateBundle
                     state=LocalStateManager(resolved_dir),
                     history=LocalHistoryManager(resolved_dir),
                     dlq=LocalDlqStore(resolved_dir),
+                )
+            elif backend == "warehouse":
+                from drt.config.credentials import PostgresProfile, load_profile
+                from drt.state.warehouse import (
+                    PostgresWarehouseDlqBackend,
+                    PostgresWarehouseHistoryStore,
+                    PostgresWarehouseStateStore,
+                )
+
+                # Pydantic's validator guarantees this for real configs.
+                assert project.state.connection_profile is not None
+                profile = load_profile(project.state.connection_profile)
+                if not isinstance(profile, PostgresProfile):
+                    raise NotImplementedError(
+                        f"state.backend: warehouse only supports Postgres profiles "
+                        f"today (#920); '{project.state.connection_profile}' is a "
+                        f"{profile.type} profile. Other dialects are tracked as "
+                        "follow-up issues once this one is verified."
+                    )
+                bundle = StateBundle(
+                    state=PostgresWarehouseStateStore(profile),
+                    history=PostgresWarehouseHistoryStore(profile),
+                    dlq=PostgresWarehouseDlqBackend(profile),
                 )
             else:
                 from drt.state._objectstore import (

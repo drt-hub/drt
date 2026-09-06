@@ -23,6 +23,10 @@ drt-core version its bundled schemas were generated from.
   `salesforce_bulk` destinations now validate destination-level `retry` and
   `rate_limit` overrides, matching every other rate-limited destination type
   (drt-hub/drt#1048).
+- Bundled JSON Schemas regenerated from drt-core: `state.backend` gains a new
+  `warehouse` enum value (Postgres-first) plus `state.connection_profile`,
+  naming an existing `profiles.yml` entry to reuse as the warehouse
+  connection instead of a bucket (drt-hub/drt#920).
 - Bundled JSON Schemas regenerated: the `destination` union's schema also picked
   up the #997 callable-discriminator shape (a flat `oneOf` list including
   `GenericDestinationConfig`, no `discriminator`/`mapping` block) — the

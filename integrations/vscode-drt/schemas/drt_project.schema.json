@@ -99,14 +99,15 @@
       "type": "object"
     },
     "StateConfig": {
-      "description": "State-backend selection and backend-specific settings (#756).\n\nThis mirrors :class:`~drt.config.sync_options.WatermarkConfig`'s shape:\none discriminating backend field plus optional fields validated against\nthat choice. GCS and S3 use ``bucket`` plus an optional object-key\n``prefix``. S3's authentication and endpoint fields deliberately match\n:class:`~drt.config.destinations_storage.S3DestinationConfig`, so state\nstorage follows the same boto3 credential chain and override vocabulary.\nLocal state continues to reject every remote-only field.",
+      "description": "State-backend selection and backend-specific settings (#756, #920).\n\nThis mirrors :class:`~drt.config.sync_options.WatermarkConfig`'s shape:\none discriminating backend field plus optional fields validated against\nthat choice. GCS and S3 use ``bucket`` plus an optional object-key\n``prefix``. S3's authentication and endpoint fields deliberately match\n:class:`~drt.config.destinations_storage.S3DestinationConfig`, so state\nstorage follows the same boto3 credential chain and override vocabulary.\n\n``warehouse`` (#920, ADR 0005 step 4, Postgres-first \u2014 see\n``drt/state/warehouse.py``) is a different shape from the two\nobject-storage backends: it has no bucket of its own, it reuses an\nexisting connection profile from ``profiles.yml`` instead, named by\n``connection_profile``. Not called ``profile`` \u2014 :class:`ProjectConfig`\nalready has a top-level ``profile`` field meaning \"the project's default\nconnection profile\", a different concept this deliberately avoids\ncolliding with. The managed-schema name for that connection stays on\nthe profile itself (``PostgresProfile.managed_schema``, #960) rather\nthan a second, independent ``state.schema`` knob that could disagree\nwith it.\n\n``backend`` and ``connection_profile`` widen/land together in the same\nPR that carries the warehouse backend implementation \u2014 not before it \u2014\nmatching how ``\"gcs\"`` was added to this ``Literal`` in the same PR as\nthe GCS backend itself (``d58a9c4``), not in the config-only PR that\npreceded it. A schema-valid config that names an unimplemented backend\nwould otherwise crash ``run``/``status``/``retry``/``serve``/MCP state\noperations at runtime \u2014 caught in Codex review on an earlier draft of\nthis change that split config and implementation across two PRs.\n\nLocal state continues to reject every remote-only field, and each\nbackend rejects every other backend's fields.",
       "properties": {
         "backend": {
           "default": "local",
           "enum": [
             "local",
             "gcs",
-            "s3"
+            "s3",
+            "warehouse"
           ],
           "title": "Backend",
           "type": "string"
@@ -206,6 +207,18 @@
           ],
           "default": null,
           "title": "Endpoint Url"
+        },
+        "connection_profile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Connection Profile"
         }
       },
       "title": "StateConfig",
