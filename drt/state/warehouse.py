@@ -103,6 +103,50 @@ def _is_undefined_table(exc: Exception) -> bool:
     return isinstance(exc, psycopg2.errors.UndefinedTable)
 
 
+def _ensure_table_exists(
+    conn: Any, profile: PostgresProfile, table_name: str, column_defs: str
+) -> None:
+    """Create ``table_name`` under ``profile.managed_schema`` if it is absent.
+
+    Two race conditions this specifically guards, both confirmed live
+    (self-review after Codex hit its usage limit mid-review, #920):
+
+    1. **The escape hatch** (#695/#960 discipline): probe via
+       ``managed_table_exists()`` before issuing any ``CREATE`` — a
+       pre-provisioned table and a role with no ``CREATE`` privilege on
+       tables in this schema must never see the statement at all, exactly
+       like ``ensure_managed_schema()`` itself never issues ``CREATE
+       SCHEMA`` once the schema already exists.
+    2. **Concurrent first use.** ``CREATE TABLE IF NOT EXISTS`` is NOT
+       atomic across sessions in Postgres: two sessions can both pass the
+       probe above (table doesn't exist yet) and both attempt the CREATE:
+       the loser gets a catalog ``UniqueViolation``
+       (``pg_type_typname_nsp_index`` or similar), not a graceful no-op.
+       Reproduced with 8 concurrent first writes to the same
+       never-before-existing table — every run raised on at least one
+       thread before this fix. If the table exists after the error, the
+       other session won the race; anything else re-raises.
+    """
+    from psycopg2 import sql as _pgsql
+
+    source = PostgresSource()
+    source.ensure_managed_schema(profile)
+    if source.managed_table_exists(profile, table_name):
+        return
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            _pgsql.SQL(f"CREATE TABLE IF NOT EXISTS {{}} ({column_defs})").format(
+                _qualified(profile, table_name)
+            )
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        if not source.managed_table_exists(profile, table_name):
+            raise
+
+
 class PostgresWarehouseStateStore:
     """``StateStore`` backed by a ``_drt_runs`` row per sync (#920)."""
 
@@ -110,30 +154,17 @@ class PostgresWarehouseStateStore:
         self._profile = profile
 
     def _ensure_table(self, conn: Any) -> None:
-        from psycopg2 import sql as _pgsql
-
-        source = PostgresSource()
-        source.ensure_managed_schema(self._profile)
-        # Probe first (#695/#960 discipline): a pre-provisioned table and a
-        # role with no CREATE privilege on tables in this schema must never
-        # see the CREATE statement at all, exactly like ensure_managed_schema()
-        # itself never issues CREATE SCHEMA once the schema already exists.
-        if source.managed_table_exists(self._profile, _RUNS_TABLE):
-            return
-        cur = conn.cursor()
-        cur.execute(
-            _pgsql.SQL(
-                "CREATE TABLE IF NOT EXISTS {} ("
-                "sync_name TEXT PRIMARY KEY, "
-                "last_run_at TEXT NOT NULL, "
-                "records_synced BIGINT NOT NULL, "
-                "status TEXT NOT NULL, "
-                "error TEXT, "
-                "last_cursor_value TEXT"
-                ")"
-            ).format(_qualified(self._profile, _RUNS_TABLE))
+        _ensure_table_exists(
+            conn,
+            self._profile,
+            _RUNS_TABLE,
+            "sync_name TEXT PRIMARY KEY, "
+            "last_run_at TEXT NOT NULL, "
+            "records_synced BIGINT NOT NULL, "
+            "status TEXT NOT NULL, "
+            "error TEXT, "
+            "last_cursor_value TEXT",
         )
-        conn.commit()
 
     def get_last_sync(self, sync_name: str) -> SyncState | None:
         conn = _connect(self._profile)
@@ -263,40 +294,31 @@ class PostgresWarehouseHistoryStore:
         self._profile = profile
 
     def _ensure_table(self, conn: Any) -> None:
-        from psycopg2 import sql as _pgsql
-
-        source = PostgresSource()
-        source.ensure_managed_schema(self._profile)
-        if source.managed_table_exists(self._profile, _HISTORY_TABLE):
-            return
-        cur = conn.cursor()
-        cur.execute(
-            _pgsql.SQL(
-                # No serial/identity primary key: HistoryEntry has no id
-                # concept of its own (unlike DeadLetter), and a BIGSERIAL
-                # column's implicit sequence needs its own GRANT USAGE,
-                # which the escape hatch's plain table-privilege grants
-                # (SELECT/INSERT/UPDATE/DELETE) don't cover — caught live
-                # by test_writes_succeed_with_preprovisioned_tables_and_no_
-                # create_privilege failing with "permission denied for
-                # sequence" before this fix.
-                "CREATE TABLE IF NOT EXISTS {} ("
-                "sync_name TEXT NOT NULL, "
-                "started_at TEXT NOT NULL, "
-                "completed_at TEXT NOT NULL, "
-                "duration_seconds DOUBLE PRECISION NOT NULL, "
-                "status TEXT NOT NULL, "
-                "records_synced BIGINT NOT NULL, "
-                "records_failed BIGINT NOT NULL, "
-                "errors JSONB NOT NULL DEFAULT '[]', "
-                "cursor_value_used TEXT, "
-                "dry_run BOOLEAN NOT NULL DEFAULT FALSE, "
-                "run_id TEXT, "
-                "sync_run_id TEXT"
-                ")"
-            ).format(_qualified(self._profile, _HISTORY_TABLE))
+        _ensure_table_exists(
+            conn,
+            self._profile,
+            _HISTORY_TABLE,
+            # No serial/identity primary key: HistoryEntry has no id
+            # concept of its own (unlike DeadLetter), and a BIGSERIAL
+            # column's implicit sequence needs its own GRANT USAGE, which
+            # the escape hatch's plain table-privilege grants
+            # (SELECT/INSERT/UPDATE/DELETE) don't cover — caught live by
+            # test_writes_succeed_with_preprovisioned_tables_and_no_create_
+            # privilege failing with "permission denied for sequence"
+            # before this fix.
+            "sync_name TEXT NOT NULL, "
+            "started_at TEXT NOT NULL, "
+            "completed_at TEXT NOT NULL, "
+            "duration_seconds DOUBLE PRECISION NOT NULL, "
+            "status TEXT NOT NULL, "
+            "records_synced BIGINT NOT NULL, "
+            "records_failed BIGINT NOT NULL, "
+            "errors JSONB NOT NULL DEFAULT '[]', "
+            "cursor_value_used TEXT, "
+            "dry_run BOOLEAN NOT NULL DEFAULT FALSE, "
+            "run_id TEXT, "
+            "sync_run_id TEXT",
         )
-        conn.commit()
 
     def append(self, entry: HistoryEntry) -> None:
         """Best-effort, like every other ``HistoryStore`` — see the Protocol."""
@@ -433,33 +455,24 @@ class PostgresWarehouseDlqBackend:
         self._profile = profile
 
     def _ensure_table(self, conn: Any) -> None:
-        from psycopg2 import sql as _pgsql
-
-        source = PostgresSource()
-        source.ensure_managed_schema(self._profile)
-        if source.managed_table_exists(self._profile, _DLQ_TABLE):
-            return
-        cur = conn.cursor()
-        cur.execute(
+        _ensure_table_exists(
+            conn,
+            self._profile,
+            _DLQ_TABLE,
             # No BIGSERIAL "seq" column: its implicit sequence needs its own
             # GRANT USAGE the escape hatch's plain table-privilege grants
             # don't cover (same issue _drt_history's id column had — see
             # that table's comment). FIFO ordering instead uses (ts, id),
             # both already-present columns with no sequence dependency.
-            _pgsql.SQL(
-                "CREATE TABLE IF NOT EXISTS {} ("
-                "id TEXT PRIMARY KEY, "
-                "sync_name TEXT NOT NULL, "
-                "record JSONB NOT NULL, "
-                "error_message TEXT NOT NULL, "
-                "http_status INTEGER, "
-                "ts TEXT NOT NULL, "
-                "attempts INTEGER NOT NULL, "
-                "sync_run_id TEXT"
-                ")"
-            ).format(_qualified(self._profile, _DLQ_TABLE))
+            "id TEXT PRIMARY KEY, "
+            "sync_name TEXT NOT NULL, "
+            "record JSONB NOT NULL, "
+            "error_message TEXT NOT NULL, "
+            "http_status INTEGER, "
+            "ts TEXT NOT NULL, "
+            "attempts INTEGER NOT NULL, "
+            "sync_run_id TEXT",
         )
-        conn.commit()
 
     def append(
         self, sync_name: str, entries: list[DeadLetter], *, max_records: int = 10_000

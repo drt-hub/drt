@@ -348,3 +348,36 @@ def test_dlq_replace_is_atomic_and_leaves_old_queue_intact_on_failure(
     survivors = dlq.read("orders")
     assert [e.id for e in survivors] == ["keep-1"]
     assert survivors[0].error_message == "orig"
+
+
+def test_concurrent_first_writes_survive_table_creation_race(
+    pg_profile: PostgresProfile,
+) -> None:
+    """Self-review finding (Codex hit its usage limit mid-review on this
+    PR, while specifically checking whether table bootstrap is safe under
+    simultaneous first use): CREATE TABLE IF NOT EXISTS is not atomic
+    across Postgres sessions. Two sessions can both pass the
+    managed_table_exists() probe (table doesn't exist yet) and both
+    attempt the CREATE -- the loser gets a catalog UniqueViolation, not a
+    graceful no-op. Reproduced live: 8 concurrent first writes to a
+    never-before-existing _drt_runs table raised on 3+ threads, every run,
+    before this fix."""
+    import concurrent.futures
+
+    def write(i: int) -> None:
+        PostgresWarehouseStateStore(pg_profile).save_sync(
+            SyncState(sync_name=f"sync_{i}", last_run_at="t", records_synced=1, status="success")
+        )
+
+    errors: list[BaseException] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(write, i) for i in range(8)]
+        for future in concurrent.futures.as_completed(futures):
+            exc = future.exception()
+            if exc is not None:
+                errors.append(exc)
+
+    assert not errors, f"concurrent first writes raised: {errors}"
+
+    store = PostgresWarehouseStateStore(pg_profile)
+    assert set(store.get_all().keys()) == {f"sync_{i}" for i in range(8)}
