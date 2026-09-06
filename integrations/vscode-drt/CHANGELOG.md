@@ -6,6 +6,9 @@ drt-core version its bundled schemas were generated from.
 
 ## [0.1.13] - Unreleased
 
+- Bundled JSON Schemas regenerated from drt-core: `sync.mirror.strategy`
+  gains a third `diff` option, deleting exactly the keys
+  `incremental_strategy: diff` classified as removed (drt-hub/drt#1110).
 - Bundled JSON Schemas regenerated from drt-core: `sync` gains
   `incremental_strategy: cursor | diff` (default `cursor`, unchanged) and a
   `diff` block (`hash_columns`) for warehouse-side snapshot-diff incremental
