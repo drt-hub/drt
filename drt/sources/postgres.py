@@ -28,6 +28,40 @@ from drt.sources.base import SnapshotDiffResult
 _DIFF_NULL_SENTINEL = "\x01"
 _DIFF_FIELD_SEP = "\x02"
 
+# SQLSTATEs observed live when two concurrent extract_snapshot_diff calls for
+# the *same* sync_name race the scratch-table rebuild -- confirmed by running
+# 6 concurrent calls repeatedly: unique_violation (pg_type catalog),
+# duplicate_table, duplicate_object, and undefined_table (a second run's
+# rebuild dropping the table a first run's later SELECT is still reading).
+# Not a closed set -- different timing/Postgres versions may raise others in
+# the same family -- so this narrows "was this a concurrent-rebuild race" to
+# a best-effort classification, not a guarantee. What IS guaranteed (live
+# reproduced across repeated runs): every attempt either raises loudly with
+# no destination write, or completes with a correct, uncorrupted result --
+# never a silently mixed/wrong one. Full mutual exclusion (a session-scoped
+# advisory lock spanning extract_snapshot_diff through commit_snapshot_diff)
+# was considered and rejected -- the engine deliberately skips
+# commit_snapshot_diff on any row failure, which would leak a held lock
+# indefinitely rather than self-heal on the next run the way this
+# reclassify-and-fail-loudly approach does.
+_DIFF_CONCURRENT_RACE_PGCODES = frozenset({"23505", "42P07", "42710", "42P01"})
+
+
+def _reraise_diff_concurrency_race(e: BaseException, sync_name: str) -> None:
+    """Reclassify a concurrent scratch-table race (see
+    _DIFF_CONCURRENT_RACE_PGCODES) into a clear, actionable error. Returns
+    normally (does NOT raise) for anything else, so callers always follow
+    this with their own bare ``raise`` to re-propagate the original.
+    """
+    if getattr(e, "pgcode", None) in _DIFF_CONCURRENT_RACE_PGCODES:
+        raise RuntimeError(
+            f"sync.incremental_strategy: diff — another run of sync "
+            f"{sync_name!r} appears to be building the same snapshot table "
+            f"concurrently. diff-strategy syncs must not run concurrently "
+            f"for the same sync — see drt serve's request coalescing (#854) "
+            f"or your scheduler's own overlap protection."
+        ) from e
+
 
 def _key_join_condition(key_columns: list[str], left: str, right: str) -> Any:
     """Compose ``left.k1 = right.k1 AND left.k2 = right.k2 ...`` for a multi-column key."""
@@ -371,18 +405,33 @@ class PostgresSource:
             # Postgres has no such thing for tables) so a crashed prior run's
             # never-promoted scratch can't leak stale columns into this
             # run's introspection below.
-            cur.execute(
-                _pgsql.SQL("DROP TABLE IF EXISTS {}").format(
-                    _pgsql.Identifier(config.managed_schema, scratch_table)
+            try:
+                cur.execute(
+                    _pgsql.SQL("DROP TABLE IF EXISTS {}").format(
+                        _pgsql.Identifier(config.managed_schema, scratch_table)
+                    )
                 )
-            )
-            cur.execute(
-                _pgsql.SQL("CREATE TABLE {} AS {}").format(
-                    _pgsql.Identifier(config.managed_schema, scratch_table),
-                    _pgsql.SQL(query),
+                cur.execute(
+                    _pgsql.SQL("CREATE TABLE {} AS {}").format(
+                        _pgsql.Identifier(config.managed_schema, scratch_table),
+                        _pgsql.SQL(query),
+                    )
                 )
-            )
-            conn.commit()
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                # Confirmed live: two concurrent extract_snapshot_diff calls
+                # for the same sync_name race this DROP+CREATE — Postgres's
+                # own catalog doesn't serialize them into a safe no-op the
+                # way CREATE SCHEMA/TABLE IF NOT EXISTS's existence-probe
+                # pattern lets #960/#920 recover from. Unlike that case, a
+                # concurrent scratch table's *content* isn't fungible with
+                # this run's — silently reusing whichever writer won would
+                # silently mix two different model results into one diff.
+                # So this fails loudly with an actionable message instead of
+                # attempting recovery.
+                _reraise_diff_concurrency_race(e, sync_name)
+                raise
 
             cur.execute(
                 "SELECT column_name FROM information_schema.columns "
@@ -421,6 +470,7 @@ class PostgresSource:
                 _pgsql.SQL("SELECT * FROM {}").format(
                     _pgsql.Identifier(config.managed_schema, scratch_table)
                 ),
+                sync_name=sync_name,
             )
             changed: Iterator[dict[str, Any]] = iter(())
             removed_keys: Iterator[dict[str, Any]] = iter(())
@@ -441,6 +491,7 @@ class PostgresSource:
                     join_cond=join_cond,
                     probe=anti_join_probe,
                 ),
+                sync_name=sync_name,
             )
             removed_keys = self._stream_query(
                 config,
@@ -454,6 +505,7 @@ class PostgresSource:
                     join_cond=_key_join_condition(key_columns, "c", "s"),
                     probe=reverse_anti_join_probe,
                 ),
+                sync_name=sync_name,
             )
             if diff_columns:
                 changed = self._stream_query(
@@ -468,6 +520,7 @@ class PostgresSource:
                         hash_s=_diff_hash_expr(diff_columns, "s"),
                         hash_c=_diff_hash_expr(diff_columns, "c"),
                     ),
+                    sync_name=sync_name,
                 )
             else:
                 # No non-key columns to compare (key_columns covers every
@@ -485,13 +538,27 @@ class PostgresSource:
             is_first_run=is_first_run,
         )
 
-    def _stream_query(self, config: PostgresProfile, composed: Any) -> Iterator[dict[str, Any]]:
+    def _stream_query(
+        self, config: PostgresProfile, composed: Any, *, sync_name: str
+    ) -> Iterator[dict[str, Any]]:
         """Run a composed query on its own connection, streaming rows as dicts.
 
         Own server-side cursor + own connection per call (same discipline as
         ``extract()``) — callers may hold several of these open at once
         (e.g. ``added`` and ``removed_keys`` from the same
         ``extract_snapshot_diff`` call), each against its own connection.
+
+        ``sync_name`` is only used to reclassify a relation-not-found error
+        into the same concurrent-run message ``extract_snapshot_diff``'s own
+        scratch-table create already raises: this method's queries read the
+        scratch/current tables built there, on a fresh connection opened
+        *after* that step returns, so another concurrent run of the same
+        sync racing its own scratch-table rebuild in between can drop the
+        table out from under an in-flight read here too. Confirmed live, and
+        wrapped around BOTH the initial execute (a named/server-side cursor's
+        ``DECLARE`` happens at execute time) and the iteration loop below (its
+        actual ``FETCH`` batches happen lazily, per iteration, so the same
+        race can just as easily land mid-iteration as it can at execute).
         """
 
         def _connect_and_execute() -> tuple[Any, Any]:
@@ -501,17 +568,22 @@ class PostgresSource:
                 cur.itersize = config.fetch_size
                 cur.execute(composed)
                 return conn, cur
-            except BaseException:
+            except BaseException as e:
                 conn.close()
+                _reraise_diff_concurrency_race(e, sync_name)
                 raise
 
         conn, cur = with_retry(_connect_and_execute, RetryConfig(), retry_on=self._is_transient)
         try:
             columns: list[str] = []
-            for row in cur:
-                if not columns:
-                    columns = [desc[0] for desc in cur.description]
-                yield dict(zip(columns, row))
+            try:
+                for row in cur:
+                    if not columns:
+                        columns = [desc[0] for desc in cur.description]
+                    yield dict(zip(columns, row))
+            except BaseException as e:
+                _reraise_diff_concurrency_race(e, sync_name)
+                raise
         finally:
             conn.close()
 

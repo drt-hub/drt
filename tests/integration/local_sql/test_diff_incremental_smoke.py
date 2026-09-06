@@ -398,3 +398,127 @@ def test_commit_without_extract_is_a_noop() -> None:
         source = PostgresSource()
         # Never called extract_snapshot_diff for this sync_name — must not raise.
         source.commit_snapshot_diff(config, "never_run")
+
+
+def test_concurrent_runs_of_the_same_sync_never_corrupt_the_snapshot() -> None:
+    """Two (or more) concurrent extract_snapshot_diff/commit_snapshot_diff
+    calls for the *same* sync_name race Postgres's own catalog on the
+    scratch-table rebuild and the current-table swap — confirmed live, at
+    multiple points (the initial CREATE, a later SELECT if a concurrent
+    rebuild drops the table mid-read, and commit's RENAME swap). This is
+    NOT a supported usage pattern (running the same sync twice concurrently
+    isn't safe anywhere else in drt either — see #854's drt serve
+    coalescing, built specifically to prevent this).
+
+    ``drt/sources/postgres.py`` reclassifies the races it can identify by
+    SQLSTATE into a clear ``RuntimeError`` — but this is deliberately
+    best-effort, not a guarantee: a full guarantee would need a lock held
+    across the entire extract-through-commit lifecycle (spanning separate
+    connections, with a destination write physically in between), and a
+    session-scoped Postgres advisory lock held that long would leak
+    indefinitely in a long-running process (drt serve, dagster-drt) if
+    commit is skipped after a row failure — worse than an occasional
+    unclassified error. So the one guarantee this test actually enforces is
+    the one that matters: no run, however it fails, ever leaves a partial or
+    mixed snapshot behind. Every attempt either raises (cleanly reclassified
+    or not) with zero effect on the persisted snapshot, or completes with a
+    fully correct one. Reproduced by running many concurrent attempts
+    repeatedly, since a single run isn't guaranteed to hit the race at all.
+    """
+    require_docker()
+    postgres_container = testcontainers_postgres.PostgresContainer
+
+    with postgres_container(
+        "postgres:16-alpine",
+        username="admin",
+        password="adminpass",
+        dbname="testdb",
+        driver=None,
+    ) as postgres:
+        host = postgres.get_container_host_ip()
+        port = int(postgres.get_exposed_port(5432))
+        config = PostgresProfile(
+            type="postgres",
+            host=host,
+            port=port,
+            dbname="testdb",
+            user="admin",
+            password="adminpass",
+        )
+        admin = psycopg2.connect(
+            host=host, port=port, dbname="testdb", user="admin", password="adminpass"
+        )
+        # Autocommit: a lingering open transaction from a verification SELECT
+        # below would hold a lock the concurrent worker threads' own ALTER
+        # TABLE (in commit_snapshot_diff's swap) can block on indefinitely --
+        # confirmed live, this is exactly what made an early version of this
+        # test hang rather than fail.
+        admin.autocommit = True
+        try:
+            _seed(
+                admin,
+                "CREATE TABLE users (id INTEGER, email TEXT); "
+                "INSERT INTO users SELECT g, 'u' || g || '@x.com' "
+                "FROM generate_series(1, 50) g",
+            )
+            query = "SELECT id, email FROM users"
+
+            import threading
+
+            for _attempt in range(4):
+                source = PostgresSource()
+                errors: list[BaseException] = []
+                added_counts: list[int] = []
+                lock = threading.Lock()
+
+                def worker() -> None:
+                    try:
+                        result = source.extract_snapshot_diff(
+                            query,
+                            config,
+                            sync_name="dup_sync",
+                            key_columns=["id"],
+                            hash_columns="all",
+                        )
+                        added = list(result.added)
+                        list(result.changed)
+                        list(result.removed_keys)
+                        with lock:
+                            added_counts.append(len(added))
+                        source.commit_snapshot_diff(config, "dup_sync")
+                    except Exception as e:  # noqa: BLE001 - collecting for assertion
+                        with lock:
+                            errors.append(e)
+
+                threads = [threading.Thread(target=worker) for _ in range(6)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+
+                # Best-effort reclassification (see the docstring above):
+                # most races surface as the clear RuntimeError, but a known
+                # residual window can still surface Postgres's own
+                # concurrent-DDL error class directly. Either is acceptable
+                # here; anything else would be a genuinely new failure mode.
+                _KNOWN_RACE_PGCODES = {"23505", "42P07", "42710", "42P01"}
+                for e in errors:
+                    if isinstance(e, RuntimeError) and "another run of sync" in str(e):
+                        continue
+                    pgcode = getattr(e.__cause__, "pgcode", None) or getattr(e, "pgcode", None)
+                    assert pgcode in _KNOWN_RACE_PGCODES, (
+                        f"unexpected failure mode: {type(e).__name__}: {e}"
+                    )
+
+                # No matter how many attempts succeeded, the final snapshot
+                # must reflect exactly one complete generation (50 rows) —
+                # never a partial or double-counted one. (Not asserting on
+                # added_counts itself: only the first attempt is a genuine
+                # first-run/full-send case — the source table is never
+                # mutated between attempts here, so attempts 2+ correctly
+                # diff against an unchanged baseline and report 0 added.)
+                with admin.cursor() as cur:
+                    cur.execute("SELECT count(*) FROM _drt._drt_snapshot_dup_sync")
+                    assert cur.fetchone() == (50,)
+        finally:
+            admin.close()
