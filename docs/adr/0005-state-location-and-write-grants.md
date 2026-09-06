@@ -198,13 +198,21 @@ structurally cannot close it.
 
 **Implementation ordering** follows from the split:
 
-| | | warehouse write |
-|---|---|---|
-| 1 | State-manager Protocols + factory (no behaviour change) | not required |
-| 2 | Object-storage backend for state / history / DLQ | **not required** |
-| 3 | Warehouse managed-table primitive (shared by 4 and 5) | required |
-| 4 | Warehouse state backend (SQL observability) | required |
-| 5 | #755 diff-based incremental | required |
+| | | warehouse write | status |
+|---|---|---|---|
+| 1 | State-manager Protocols + factory (no behaviour change) | not required | Shipped, v0.9.0 (#756) |
+| 2 | Object-storage backend for state / history / DLQ | **not required** | Shipped, v0.9.0 (#756) |
+| 3 | Warehouse managed-table primitive (shared by 4 and 5) | required | Postgres-only, [#960](https://github.com/drt-hub/drt/issues/960) — [#1103](https://github.com/drt-hub/drt/pull/1103) |
+| 4 | Warehouse state backend (SQL observability) | required | Postgres-only, [#920](https://github.com/drt-hub/drt/issues/920) — [#1104](https://github.com/drt-hub/drt/pull/1104) |
+| 5 | #755 diff-based incremental | required | Not started |
+
+Steps 3 and 4 are Postgres-first, matching this ADR's own emphasis on landing what's
+live-verifiable rather than shipping multiple dialects behind mock-cursor tests alone. Snowflake,
+BigQuery, and Databricks are tracked as immediate follow-ups
+([#1106](https://github.com/drt-hub/drt/issues/1106),
+[#1107](https://github.com/drt-hub/drt/issues/1107),
+[#1108](https://github.com/drt-hub/drt/issues/1108)), each blocked on live-verifiable
+credentials in the implementing environment rather than deferred indefinitely.
 
 The operator-visible payoff of #756 lands at step 2, before any permission
 conversation. Step 1 is a prerequisite regardless of this ADR's outcome: the

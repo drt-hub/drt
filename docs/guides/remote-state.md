@@ -304,8 +304,10 @@ and migrate each concern explicitly.
 
 - **Not a warehouse-queryable observability layer.** GCS/S3 make operational
   files durable and shared; they do not turn history into SQL tables. That
-  separate tier is [#920](https://github.com/drt-hub/drt/issues/920), split
-  from #756 by [ADR 0005](../adr/0005-state-location-and-write-grants.md).
+  separate tier is `state.backend: warehouse`
+  ([#920](https://github.com/drt-hub/drt/issues/920), split from #756 by
+  [ADR 0005](../adr/0005-state-location-and-write-grants.md)) — see
+  [Warehouse-backed state, history, and DLQ](warehouse-state.md).
 - **Not object encryption managed by drt.** Use the bucket provider's
   server-side encryption, key-management, and IAM controls. drt does not
   encrypt the payload before upload.
@@ -315,6 +317,7 @@ and migrate each concern explicitly.
 ## See also
 
 - [ADR 0005 — Where drt's state lives, and what it costs the operator](../adr/0005-state-location-and-write-grants.md)
+- [Warehouse-backed state, history, and DLQ](warehouse-state.md)
 - [Sync execution history](sync-history.md)
 - [Dead Letter Queue](dead-letter-queue.md)
 - [Issue #948 — single-object `state.json` layout](https://github.com/drt-hub/drt/issues/948)
