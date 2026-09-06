@@ -203,6 +203,44 @@ class MirrorConfig(BaseModel):
     scope: list[str] | None = Field(default=None, min_length=1)
 
 
+class DiffConfig(BaseModel):
+    """``sync.diff`` — options for ``incremental_strategy: diff`` (#755).
+
+    Warehouse-side snapshot diff: each run's full model result is snapshotted
+    into a drt-managed table in the *source* warehouse and compared against
+    the previous run's snapshot via a server-side SQL JOIN, classifying every
+    row as added / changed / removed. The fit for curated marts with no
+    ``updated_at`` column (no cursor to filter on) and no way for
+    cursor-based incremental to ever detect a delete.
+
+    Deliberately no ``schema`` field here — the managed schema name is the
+    source profile's own ``managed_schema`` (#960, ``PostgresProfile``), not
+    a second, independently-settable knob that could disagree with it.
+    Likewise no ``state`` field: the snapshot always lives in the source
+    warehouse (the only warehouse #960's ``ManagedTableCapable`` primitive
+    can reach) — there is nowhere else for it to live until a destination-side
+    managed-table primitive exists, which is out of scope (see #960's own
+    docstring on why that's a deliberately separate feature).
+    """
+
+    # "all" hashes every non-key column returned by the model query; an
+    # explicit list hashes only those columns (cheaper, and the fit when only
+    # a subset of columns should trigger "changed" — e.g. ignore a
+    # last_login_at column that changes every run without being a
+    # business-meaningful update). Validated against the model's actual
+    # output columns at run time (config time can't see them) — see
+    # PostgresSource.extract_snapshot_diff.
+    hash_columns: Literal["all"] | list[str] = "all"
+
+    @model_validator(mode="after")
+    def _check_hash_columns(self) -> DiffConfig:
+        if isinstance(self.hash_columns, list) and not self.hash_columns:
+            raise ValueError(
+                "sync.diff.hash_columns must be 'all' or a non-empty list of column names."
+            )
+        return self
+
+
 class MetadataColumnsConfig(BaseModel):
     """``sync.metadata_columns`` — opt-in engine-injected bookkeeping columns (#762).
 
@@ -273,6 +311,13 @@ class SyncOptions(BaseModel):
     # MatchPolicyCapable guard). Prior art: Census / Hightouch sync behaviours.
     match_policy: Literal["upsert", "update_only", "create_only"] = "upsert"
     cursor_field: str | None = None  # required when mode=incremental
+    # Incremental strategy (#755): "cursor" (default) filters server-side via
+    # cursor_field/watermark, same as always. "diff" instead snapshots the
+    # full model result each run and classifies rows via a warehouse-side
+    # SQL diff against the previous snapshot — no cursor column required,
+    # and the only strategy that can detect deletes. See DiffConfig.
+    incremental_strategy: Literal["cursor", "diff"] = "cursor"
+    diff: DiffConfig | None = None
     watermark: WatermarkConfig | None = None
     batch_size: int = Field(default=100, gt=0)
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
@@ -330,6 +375,30 @@ class SyncOptions(BaseModel):
     def _check_incremental_cursor(self) -> SyncOptions:
         if self.mode == "incremental" and not self.cursor_field:
             raise ValueError("cursor_field is required when mode is 'incremental'.")
+        return self
+
+    @model_validator(mode="after")
+    def _check_incremental_strategy(self) -> SyncOptions:
+        if self.incremental_strategy == "diff":
+            if self.mode not in ("upsert", "mirror"):
+                raise ValueError(
+                    "sync.incremental_strategy: diff requires mode: upsert or "
+                    "mode: mirror — it classifies every extracted row into "
+                    "added/changed/removed and feeds added+changed through "
+                    "the upsert write path (mode: mirror additionally acts "
+                    "on removed)."
+                )
+            if self.cursor_field is not None:
+                raise ValueError(
+                    "sync.incremental_strategy: diff computes its own "
+                    "row-level delta from a warehouse-side snapshot "
+                    "comparison — cursor_field is for the 'cursor' strategy "
+                    "and does not apply here."
+                )
+            if self.diff is None:
+                self.diff = DiffConfig()
+        elif self.diff is not None:
+            raise ValueError("sync.diff is only valid when incremental_strategy is 'diff'.")
         return self
 
     @model_validator(mode="after")

@@ -5,7 +5,8 @@ Future PyO3 bindings will implement this same protocol.
 """
 
 from collections.abc import Iterator
-from typing import Any, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from drt.config.profiles import ProfileConfigLike
 
@@ -185,5 +186,105 @@ class ManagedTableCapable(Protocol):
         dropping it out from under another feature's table would silently
         break that feature. Schema-level cleanup, if ever wanted, is a
         separate, explicit operation.
+        """
+        ...
+
+
+@dataclass
+class SnapshotDiffResult:
+    """Classification of one run's rows against the previous snapshot (#755).
+
+    ``added``/``changed`` are iterators of full records (streamed, not
+    materialized — same discipline as :meth:`Source.extract`), meant to be
+    chained into the engine's normal upsert write path unchanged.
+    ``removed_keys`` is an iterator of ``{column: value}`` dicts containing
+    only ``key_columns`` — everything a mirror-delete pass needs and nothing
+    more; bounded by the size of the removed set, not the table.
+
+    ``removed_keys`` is exposed today for observability
+    (``SyncResult.diff_removed_keys``) only — no destination consumes it yet.
+    A ``mode: mirror`` integration that deletes these rows directly (instead
+    of ``mirror``'s existing whole-destination-scan or tracked-state passes)
+    is tracked as a follow-up issue; this shape was chosen so that follow-up
+    only has to plumb the value through, not change it.
+    """
+
+    added: Iterator[dict[str, Any]]
+    changed: Iterator[dict[str, Any]]
+    removed_keys: Iterator[dict[str, Any]]
+    is_first_run: bool
+
+
+@runtime_checkable
+class SnapshotDiffSource(Protocol):
+    """Optional source capability: warehouse-side snapshot diff (#755, ADR 0005 step 5).
+
+    An alternative to cursor-based incremental extraction for models with no
+    reliable cursor column (curated marts, aggregations) and no way for a
+    cursor to ever signal a delete. Each run snapshots the full model result
+    into a #960-managed table and diffs it against the previous run's
+    snapshot via a server-side SQL JOIN, classifying every row as added /
+    changed / removed — see :class:`SnapshotDiffResult`.
+
+    A new, separate Protocol per ADR 0007 (same reasoning as
+    ``IncrementalSource``/``ManagedTableCapable`` above) — builds on
+    ``ManagedTableCapable`` (#960) for the managed-schema/table plumbing but
+    owns its own snapshot table's DDL, same scope split #960's docstring
+    describes.
+
+    Stability: New in #755 — not yet frozen (ADR 0007).
+    """
+
+    def extract_snapshot_diff(
+        self,
+        query: str,
+        config: ProfileConfigLike,
+        *,
+        sync_name: str,
+        key_columns: list[str],
+        hash_columns: Literal["all"] | list[str],
+        query_tags: dict[str, str] | None = None,
+    ) -> SnapshotDiffResult:
+        """Snapshot ``query``'s result and diff it against the prior snapshot.
+
+        ``key_columns`` is the destination's ``upsert_key`` — the join key
+        between this run's snapshot and the previous one, and the columns
+        returned in ``removed_keys``. ``hash_columns`` selects which non-key
+        columns determine "changed" (``"all"`` — every other column returned
+        by ``query``, introspected at run time; an explicit list is
+        validated against the query's actual output columns and raises
+        loudly on a typo, since a name that doesn't exist would otherwise
+        silently narrow the hash and hide real changes as unchanged rows).
+
+        No previous snapshot (first run, or after ``drop_managed_table``) —
+        every row is classified ``added``, ``changed``/``removed_keys`` are
+        both empty, and ``is_first_run`` is ``True``.
+
+        Does **not** promote this run's snapshot to be the new baseline —
+        that only happens once the caller confirms delivery, via
+        :meth:`commit_snapshot_diff`. Until that call, the previous
+        snapshot is untouched and a second call to this method (e.g. a
+        retried run) re-diffs against the same unchanged baseline.
+
+        Raises:
+            Exception: connection/query failure, or an explicit
+                ``hash_columns`` entry not present in the query's output
+                columns.
+        """
+        ...
+
+    def commit_snapshot_diff(self, config: ProfileConfigLike, sync_name: str) -> None:
+        """Promote this run's snapshot to be the baseline for the next diff.
+
+        Called by the engine only after a run completes with zero row
+        failures and is not a dry run — see ``drt/engine/sync.py``. On
+        partial failure the baseline is deliberately left unchanged: the
+        same rows are reclassified as added/changed again next run against
+        the still-stale baseline, rather than risking a row that failed to
+        reach the destination being silently treated as delivered. Same
+        conservative "reconcile against a fresh read next time" posture as
+        #920's and #955's fixes.
+
+        A no-op if :meth:`extract_snapshot_diff` was never called this run.
         """
         ...

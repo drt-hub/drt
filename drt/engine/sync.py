@@ -12,7 +12,7 @@ import threading
 import time
 from collections.abc import Iterator
 from datetime import datetime, timezone
-from itertools import islice
+from itertools import chain, islice
 from pathlib import Path
 from typing import Any, Literal
 
@@ -42,7 +42,7 @@ from drt.engine.metadata_columns import apply_metadata_columns
 from drt.engine.observer import NullObserver, SyncObserver
 from drt.engine.resolver import resolve_model_ref
 from drt.observability import build_status, get_tracer
-from drt.sources.base import IncrementalSource, Source
+from drt.sources.base import IncrementalSource, SnapshotDiffSource, Source
 from drt.state.dlq import DeadLetter
 from drt.state.history import HistoryEntry, HistoryStore
 from drt.state.manager import StateStore
@@ -247,6 +247,21 @@ def _staged_source_iter(
             )
         else:
             yield from source.extract(query, profile, query_tags=query_tags)
+
+
+def _wrap_stage_ctx(
+    it: Iterator[dict[str, Any]], stage: str
+) -> Iterator[dict[str, Any]]:
+    """Tag exceptions raised during ``it``'s iteration with ``stage`` (#544).
+
+    Same purpose as ``_staged_source_iter`` above, generalized for
+    ``incremental_strategy: diff`` (#755), whose ``added``/``changed``
+    iterators already come pre-built (chained) from
+    ``SnapshotDiffSource.extract_snapshot_diff`` rather than being
+    constructed from a single ``source.extract`` call here.
+    """
+    with _stage_ctx(stage):
+        yield from it
 
 
 def run_sync(
@@ -593,14 +608,54 @@ def _run_sync_body(
     # during iteration (not just the initial call) carry stage="source" (#544).
     # IncrementalSource capability (#767) receives the same lag-adjusted
     # cursor (#759) the SQL predicate uses — one effective read window.
-    records_iter = _staged_source_iter(
-        source,
-        query,
-        profile,
-        cursor_value=effective_cursor_value,
-        incremental=cursor_field is not None,
-        query_tags=query_tags,
-    )
+    #
+    # incremental_strategy: diff (#755) takes a structurally different path:
+    # SnapshotDiffSource.extract_snapshot_diff() classifies rows up front
+    # instead of the engine filtering a single stream by cursor. added +
+    # changed are chained into one flat iterator so everything below this
+    # point (batching, transforms, load) is unchanged; removed_keys is
+    # drained eagerly (bounded by the removed set, not the table — see
+    # SnapshotDiffResult) for SyncResult.diff_removed_keys, since a
+    # mirror-delete consumer doesn't exist yet (tracked as a follow-up).
+    diff_removed_keys: list[dict[str, Any]] | None = None
+    if sync.sync.incremental_strategy == "diff":
+        if not isinstance(source, SnapshotDiffSource):
+            raise NotImplementedError(
+                f"sync.incremental_strategy: diff is not supported by "
+                f"{type(source).__name__} — Postgres only today (#755). "
+                "Other dialects are tracked as follow-up issues once this "
+                "is verified, same as #960/#920's rollout."
+            )
+        key_columns = getattr(sync.destination, "upsert_key", None)
+        if not key_columns:
+            raise ValueError(
+                "sync.incremental_strategy: diff requires destination.upsert_key "
+                "— it's the join key between this run's snapshot and the "
+                "previous one, and the columns reported in diff_removed_keys."
+            )
+        assert sync.sync.diff is not None  # guaranteed by SyncOptions' validator
+        with _stage_ctx("source"):
+            diff_result = source.extract_snapshot_diff(
+                query,
+                profile,
+                sync_name=sync.name,
+                key_columns=key_columns,
+                hash_columns=sync.sync.diff.hash_columns,
+                query_tags=query_tags,
+            )
+            diff_removed_keys = list(diff_result.removed_keys)
+        records_iter = _wrap_stage_ctx(
+            chain(diff_result.added, diff_result.changed), "source"
+        )
+    else:
+        records_iter = _staged_source_iter(
+            source,
+            query,
+            profile,
+            cursor_value=effective_cursor_value,
+            incremental=cursor_field is not None,
+            query_tags=query_tags,
+        )
     # Sampling (#774): cap extraction engine-side — dialect-agnostic (works
     # for REST/file sources and avoids per-dialect LIMIT/TOP SQL rendering).
     if extract_limit is not None:
@@ -884,6 +939,24 @@ def _run_sync_body(
                 total_result.failed += finalize_result.failed
                 total_result.errors.extend(finalize_result.errors)
                 total_result.row_errors.extend(getattr(finalize_result, "row_errors", []))
+
+    total_result.diff_removed_keys = diff_removed_keys
+
+    # Promote this run's snapshot to be the next diff's baseline (#755) —
+    # only after a run with zero row failures across extraction and any
+    # destination finalize step above, and never for a dry run. On partial
+    # failure the baseline is deliberately left stale, so the same rows are
+    # reclassified as added/changed again next run rather than risking a
+    # row that never reached the destination being treated as delivered —
+    # same conservative posture as #920's/#955's reconcile-on-next-run fixes.
+    if (
+        sync.sync.incremental_strategy == "diff"
+        and not dry_run
+        and total_result.failed == 0
+        and isinstance(source, SnapshotDiffSource)
+    ):
+        with _stage_ctx("source"):
+            source.commit_snapshot_diff(profile, sync.name)
 
     # Compute the record-level diff after extraction completes (#413).
     # Only meaningful when dry_run is set; the engine collected all

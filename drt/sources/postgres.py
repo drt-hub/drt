@@ -15,11 +15,51 @@ Example ~/.drt/profiles.yml:
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, Literal
 
 from drt.config.credentials import PostgresProfile, ProfileConfigLike, resolve_env
 from drt.config.models import RetryConfig
 from drt.destinations.retry import with_retry
+from drt.sources.base import SnapshotDiffResult
+
+# Sentinels for the #755 diff-hash concatenation (see extract_snapshot_diff).
+# Control characters, not printable text, so no real column value collides
+# with them by accident.
+_DIFF_NULL_SENTINEL = "\x01"
+_DIFF_FIELD_SEP = "\x02"
+
+
+def _key_join_condition(key_columns: list[str], left: str, right: str) -> Any:
+    """Compose ``left.k1 = right.k1 AND left.k2 = right.k2 ...`` for a multi-column key."""
+    from psycopg2 import sql as _pgsql
+
+    parts = [
+        _pgsql.SQL("{} = {}").format(_pgsql.Identifier(left, k), _pgsql.Identifier(right, k))
+        for k in key_columns
+    ]
+    return _pgsql.SQL(" AND ").join(parts)
+
+
+def _diff_hash_expr(columns: list[str], alias: str) -> Any:
+    """Compose a NULL-safe row hash over ``columns``, immune to ``ROW(...)::text``'s
+    documented NULL-vs-empty-string ambiguity (verified live — see
+    ``test_diff_changed_detects_null_to_empty_string_transition``): each
+    column is cast to text, NULLs replaced with a sentinel byte no real
+    value collides with, then joined with a separator byte before hashing —
+    so ``NULL`` and ``''`` in the same column produce different hashes.
+    """
+    from psycopg2 import sql as _pgsql
+
+    parts: list[Any] = []
+    for i, c in enumerate(columns):
+        if i > 0:
+            parts.append(_pgsql.SQL(" || {} || ").format(_pgsql.Literal(_DIFF_FIELD_SEP)))
+        parts.append(
+            _pgsql.SQL("coalesce({}::text, {})").format(
+                _pgsql.Identifier(alias, c), _pgsql.Literal(_DIFF_NULL_SENTINEL)
+            )
+        )
+    return _pgsql.SQL("md5({})").format(_pgsql.SQL("").join(parts))
 
 
 class PostgresSource:
@@ -285,6 +325,236 @@ class PostgresSource:
             cur.execute(
                 _pgsql.SQL("DROP TABLE IF EXISTS {}").format(
                     _pgsql.Identifier(config.managed_schema, table_name)
+                )
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    # --- SnapshotDiffSource (#755, ADR 0005 step 5) --------------------------
+    #
+    # Builds on ManagedTableCapable above for the schema; owns its own
+    # snapshot table naming and DDL (same scope split #960's docstring
+    # describes). Table names: "_drt_snapshot_<sync_name>" (the persisted
+    # baseline) and "..._scratch" (this run's fresh extract, promoted to the
+    # baseline by commit_snapshot_diff — never read directly by a caller).
+
+    def _snapshot_table_names(self, sync_name: str) -> tuple[str, str]:
+        return f"_drt_snapshot_{sync_name}", f"_drt_snapshot_{sync_name}_scratch"
+
+    def extract_snapshot_diff(
+        self,
+        query: str,
+        config: ProfileConfigLike,
+        *,
+        sync_name: str,
+        key_columns: list[str],
+        hash_columns: Literal["all"] | list[str],
+        query_tags: dict[str, str] | None = None,
+    ) -> SnapshotDiffResult:
+        """See ``SnapshotDiffSource.extract_snapshot_diff``.
+
+        ``query_tags`` is unused for the same reason as ``extract()`` —
+        Postgres has no session/job-level tagging primitive; the SQL comment
+        is already baked into ``query``.
+        """
+        assert isinstance(config, PostgresProfile)
+        from psycopg2 import sql as _pgsql
+
+        self.ensure_managed_schema(config)
+        current_table, scratch_table = self._snapshot_table_names(sync_name)
+
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            # Fresh scratch every call. DROP first (not CREATE OR REPLACE —
+            # Postgres has no such thing for tables) so a crashed prior run's
+            # never-promoted scratch can't leak stale columns into this
+            # run's introspection below.
+            cur.execute(
+                _pgsql.SQL("DROP TABLE IF EXISTS {}").format(
+                    _pgsql.Identifier(config.managed_schema, scratch_table)
+                )
+            )
+            cur.execute(
+                _pgsql.SQL("CREATE TABLE {} AS {}").format(
+                    _pgsql.Identifier(config.managed_schema, scratch_table),
+                    _pgsql.SQL(query),
+                )
+            )
+            conn.commit()
+
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = %s "
+                "ORDER BY ordinal_position",
+                (config.managed_schema, scratch_table),
+            )
+            all_columns = [row[0] for row in cur.fetchall()]
+
+            missing_keys = [k for k in key_columns if k not in all_columns]
+            if missing_keys:
+                raise ValueError(
+                    f"sync.incremental_strategy: diff — destination "
+                    f"upsert_key column(s) {missing_keys} not found in the "
+                    f"model's output columns {all_columns}."
+                )
+            if hash_columns == "all":
+                diff_columns = [c for c in all_columns if c not in key_columns]
+            else:
+                missing_hash = [c for c in hash_columns if c not in all_columns]
+                if missing_hash:
+                    raise ValueError(
+                        f"sync.diff.hash_columns: column(s) {missing_hash} "
+                        f"not found in the model's output columns "
+                        f"{all_columns} — check for a typo."
+                    )
+                diff_columns = list(hash_columns)
+
+            is_first_run = not self.managed_table_exists(config, current_table)
+        finally:
+            conn.close()
+
+        if is_first_run:
+            added = self._stream_query(
+                config,
+                _pgsql.SQL("SELECT * FROM {}").format(
+                    _pgsql.Identifier(config.managed_schema, scratch_table)
+                ),
+            )
+            changed: Iterator[dict[str, Any]] = iter(())
+            removed_keys: Iterator[dict[str, Any]] = iter(())
+        else:
+            schema = config.managed_schema
+            join_cond = _key_join_condition(key_columns, "s", "c")
+            anti_join_probe = _pgsql.Identifier("c", key_columns[0])
+            reverse_anti_join_probe = _pgsql.Identifier("s", key_columns[0])
+
+            added = self._stream_query(
+                config,
+                _pgsql.SQL(
+                    "SELECT s.* FROM {scratch} s LEFT JOIN {current} c ON {join_cond} "
+                    "WHERE {probe} IS NULL"
+                ).format(
+                    scratch=_pgsql.Identifier(schema, scratch_table),
+                    current=_pgsql.Identifier(schema, current_table),
+                    join_cond=join_cond,
+                    probe=anti_join_probe,
+                ),
+            )
+            removed_keys = self._stream_query(
+                config,
+                _pgsql.SQL(
+                    "SELECT {key_list} FROM {current} c LEFT JOIN {scratch} s ON {join_cond} "
+                    "WHERE {probe} IS NULL"
+                ).format(
+                    key_list=_pgsql.SQL(", ").join(
+                        _pgsql.Identifier("c", k) for k in key_columns
+                    ),
+                    current=_pgsql.Identifier(schema, current_table),
+                    scratch=_pgsql.Identifier(schema, scratch_table),
+                    join_cond=_key_join_condition(key_columns, "c", "s"),
+                    probe=reverse_anti_join_probe,
+                ),
+            )
+            if diff_columns:
+                changed = self._stream_query(
+                    config,
+                    _pgsql.SQL(
+                        "SELECT s.* FROM {scratch} s JOIN {current} c ON {join_cond} "
+                        "WHERE {hash_s} IS DISTINCT FROM {hash_c}"
+                    ).format(
+                        scratch=_pgsql.Identifier(schema, scratch_table),
+                        current=_pgsql.Identifier(schema, current_table),
+                        join_cond=join_cond,
+                        hash_s=_diff_hash_expr(diff_columns, "s"),
+                        hash_c=_diff_hash_expr(diff_columns, "c"),
+                    ),
+                )
+            else:
+                # No non-key columns to compare (key_columns covers every
+                # returned column, or an explicit hash_columns list somehow
+                # resolved empty — rejected earlier by DiffConfig for the
+                # config-level case, but "all" minus every key column can
+                # still legitimately land here). A row that matches on key
+                # can never be "changed" with nothing left to differ on.
+                changed = iter(())
+
+        return SnapshotDiffResult(
+            added=added,
+            changed=changed,
+            removed_keys=removed_keys,
+            is_first_run=is_first_run,
+        )
+
+    def _stream_query(self, config: PostgresProfile, composed: Any) -> Iterator[dict[str, Any]]:
+        """Run a composed query on its own connection, streaming rows as dicts.
+
+        Own server-side cursor + own connection per call (same discipline as
+        ``extract()``) — callers may hold several of these open at once
+        (e.g. ``added`` and ``removed_keys`` from the same
+        ``extract_snapshot_diff`` call), each against its own connection.
+        """
+
+        def _connect_and_execute() -> tuple[Any, Any]:
+            conn = self._connect(config)
+            try:
+                cur = conn.cursor(name="drt_snapshot_diff")
+                cur.itersize = config.fetch_size
+                cur.execute(composed)
+                return conn, cur
+            except BaseException:
+                conn.close()
+                raise
+
+        conn, cur = with_retry(_connect_and_execute, RetryConfig(), retry_on=self._is_transient)
+        try:
+            columns: list[str] = []
+            for row in cur:
+                if not columns:
+                    columns = [desc[0] for desc in cur.description]
+                yield dict(zip(columns, row))
+        finally:
+            conn.close()
+
+    def commit_snapshot_diff(self, config: ProfileConfigLike, sync_name: str) -> None:
+        """See ``SnapshotDiffSource.commit_snapshot_diff``.
+
+        Three-step swap — rename current -> current_old, scratch -> current
+        (one transaction/commit), then drop current_old in a separate
+        transaction — matching the destination-side ``replace_strategy:
+        swap`` idiom already established in ``drt/destinations/postgres.py``
+        (``_complete_swap``): a failure dropping the old table doesn't
+        unwind an already-completed, already-committed swap.
+        """
+        assert isinstance(config, PostgresProfile)
+        from psycopg2 import sql as _pgsql
+
+        current_table, scratch_table = self._snapshot_table_names(sync_name)
+        if not self.managed_table_exists(config, scratch_table):
+            return  # extract_snapshot_diff was never called this run
+        old_table = f"{current_table}_old"
+
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            if self.managed_table_exists(config, current_table):
+                cur.execute(
+                    _pgsql.SQL("ALTER TABLE {} RENAME TO {}").format(
+                        _pgsql.Identifier(config.managed_schema, current_table),
+                        _pgsql.Identifier(old_table),
+                    )
+                )
+            cur.execute(
+                _pgsql.SQL("ALTER TABLE {} RENAME TO {}").format(
+                    _pgsql.Identifier(config.managed_schema, scratch_table),
+                    _pgsql.Identifier(current_table),
+                )
+            )
+            conn.commit()
+            cur.execute(
+                _pgsql.SQL("DROP TABLE IF EXISTS {}").format(
+                    _pgsql.Identifier(config.managed_schema, old_table)
                 )
             )
             conn.commit()
