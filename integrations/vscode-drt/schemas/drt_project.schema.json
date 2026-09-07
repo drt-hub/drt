@@ -219,6 +219,11 @@
           ],
           "default": null,
           "title": "Connection Profile"
+        },
+        "idempotency": {
+          "default": false,
+          "title": "Idempotency",
+          "type": "boolean"
         }
       },
       "title": "StateConfig",

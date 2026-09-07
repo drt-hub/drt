@@ -11,11 +11,14 @@ probe-before-DDL / pre-provisioned-schema escape hatch discipline.
 **Table DDL lives here, not on the primitive** — #960's `ManagedTableCapable`
 deliberately owns only schema/table *existence* checking, not column
 definitions (see its docstring), so each consumer hardcodes its own tables.
-Three tables, one per Protocol:
+Four tables, one per Protocol:
 
 - ``_drt_runs`` — one row per sync, upserted (:class:`PostgresWarehouseStateStore`).
 - ``_drt_history`` — one row per run, append-only (:class:`PostgresWarehouseHistoryStore`).
 - ``_drt_dlq`` — one row per dead-letter entry, keyed by id (:class:`PostgresWarehouseDlqBackend`).
+- ``_drt_idempotency`` — one row per delivered record, keyed by
+  ``(sync_name, idempotency_key)`` (:class:`PostgresWarehouseIdempotencyLedger`,
+  #1099). Opt-in via ``state.idempotency: true`` on top of this backend.
 
 **No retry/precondition machinery, unlike the object-store backends**
 (``drt/state/_objectstore.py``). A warehouse ``INSERT ... ON CONFLICT DO
@@ -80,6 +83,7 @@ logger = logging.getLogger(__name__)
 _RUNS_TABLE = "_drt_runs"
 _HISTORY_TABLE = "_drt_history"
 _DLQ_TABLE = "_drt_dlq"
+_IDEMPOTENCY_TABLE = "_drt_idempotency"
 
 
 def _connect(profile: PostgresProfile) -> Any:
@@ -690,3 +694,101 @@ def _row_to_dead_letter(row: tuple[Any, ...]) -> DeadLetter:
         sync_run_id=sync_run_id,
         id=entry_id,
     )
+
+
+class PostgresWarehouseIdempotencyLedger:
+    """``IdempotencyLedger`` backed by a ``_drt_idempotency`` row per delivered
+    record, keyed by ``(sync_name, idempotency_key)`` (#1099).
+
+    See ``drt/state/idempotency.py``'s module docstring for the write-path
+    contract this implements (check-then-send-then-mark) and why marking is
+    a separate, later call from checking rather than one atomic claim.
+    """
+
+    def __init__(self, profile: PostgresProfile) -> None:
+        self._profile = profile
+
+    def _ensure_table(self, conn: Any) -> None:
+        _ensure_table_exists(
+            conn,
+            self._profile,
+            _IDEMPOTENCY_TABLE,
+            "sync_name TEXT NOT NULL, "
+            "idempotency_key TEXT NOT NULL, "
+            "delivered_at TEXT NOT NULL, "
+            "PRIMARY KEY (sync_name, idempotency_key)",
+        )
+
+    def already_delivered(self, sync_name: str, keys: Collection[str]) -> set[str]:
+        from psycopg2 import sql as _pgsql
+
+        keys = list(keys)
+        if not keys:
+            return set()
+        conn = _connect(self._profile)
+        try:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    _pgsql.SQL(
+                        "SELECT idempotency_key FROM {} "
+                        "WHERE sync_name = %s AND idempotency_key = ANY(%s)"
+                    ).format(_qualified(self._profile, _IDEMPOTENCY_TABLE)),
+                    (sync_name, keys),
+                )
+            except Exception as exc:
+                if _is_undefined_table(exc):
+                    return set()
+                raise
+            return {row[0] for row in cur.fetchall()}
+        finally:
+            conn.close()
+
+    def mark_delivered(self, sync_name: str, keys: Collection[str], delivered_at: str) -> None:
+        """Best-effort, like ``HistoryStore.append`` — see the Protocol."""
+        from psycopg2 import sql as _pgsql
+
+        keys = list(keys)
+        if not keys:
+            return
+        try:
+            conn = _connect(self._profile)
+            try:
+                self._ensure_table(conn)
+                cur = conn.cursor()
+                cur.executemany(
+                    _pgsql.SQL(
+                        "INSERT INTO {} (sync_name, idempotency_key, delivered_at) "
+                        "VALUES (%s, %s, %s) ON CONFLICT (sync_name, idempotency_key) DO NOTHING"
+                    ).format(_qualified(self._profile, _IDEMPOTENCY_TABLE)),
+                    [(sync_name, key, delivered_at) for key in keys],
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:  # noqa: BLE001 - best-effort, see Protocol docstring
+            logger.warning("idempotency ledger mark failed for sync=%s: %s", sync_name, exc)
+
+    def prune(self, sync_name: str, retention_days: int) -> int:
+        from psycopg2 import sql as _pgsql
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
+        conn = _connect(self._profile)
+        try:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    _pgsql.SQL("DELETE FROM {} WHERE sync_name = %s AND delivered_at < %s").format(
+                        _qualified(self._profile, _IDEMPOTENCY_TABLE)
+                    ),
+                    (sync_name, cutoff),
+                )
+            except Exception as exc:
+                if _is_undefined_table(exc):
+                    return 0
+                raise
+            removed = int(cur.rowcount)
+            conn.commit()
+            return removed
+        finally:
+            conn.close()

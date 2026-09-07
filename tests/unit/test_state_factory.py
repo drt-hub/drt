@@ -211,6 +211,62 @@ def test_warehouse_backend_builds_postgres_bundle(tmp_path: Path, monkeypatch) -
     assert isinstance(bundle.history, PostgresWarehouseHistoryStore)
     assert isinstance(bundle.dlq, PostgresWarehouseDlqBackend)
     assert bundle.state._profile is profile
+    assert bundle.ledger is None
+
+
+def test_idempotency_requires_warehouse_backend() -> None:
+    with pytest.raises(ValidationError, match="state.idempotency is only valid.*warehouse"):
+        StateConfig(backend="local", idempotency=True)
+
+
+def test_warehouse_backend_with_idempotency_builds_ledger(tmp_path: Path, monkeypatch) -> None:
+    from drt.config.credentials import PostgresProfile
+    from drt.state.warehouse import PostgresWarehouseIdempotencyLedger
+
+    profile = PostgresProfile(type="postgres", host="h", dbname="d", user="u")
+    monkeypatch.setattr(
+        "drt.config.credentials.load_profile", lambda name, config_dir=None: profile
+    )
+
+    project = ProjectConfig(
+        name="test",
+        state=StateConfig(backend="warehouse", connection_profile="pg_main", idempotency=True),
+    )
+    bundle = build_state_bundle(project, tmp_path)
+
+    assert isinstance(bundle.ledger, PostgresWarehouseIdempotencyLedger)
+    assert bundle.ledger._profile is profile
+
+
+def test_idempotency_flag_differentiates_cache_key(tmp_path: Path, monkeypatch) -> None:
+    """Two projects differing only in state.idempotency must not share a
+    cached bundle — otherwise whichever built the bundle first silently
+    decides `.ledger` for every later caller with the same connection
+    profile, regardless of what its own config actually says."""
+    from drt.config.credentials import PostgresProfile
+
+    profile = PostgresProfile(type="postgres", host="h", dbname="d", user="u")
+    monkeypatch.setattr(
+        "drt.config.credentials.load_profile", lambda name, config_dir=None: profile
+    )
+
+    without = build_state_bundle(
+        ProjectConfig(
+            name="test",
+            state=StateConfig(backend="warehouse", connection_profile="pg_main"),
+        ),
+        tmp_path,
+    )
+    with_ledger = build_state_bundle(
+        ProjectConfig(
+            name="test",
+            state=StateConfig(backend="warehouse", connection_profile="pg_main", idempotency=True),
+        ),
+        tmp_path,
+    )
+
+    assert without.ledger is None
+    assert with_ledger.ledger is not None
 
 
 def test_warehouse_backend_rejects_non_postgres_profiles(tmp_path: Path, monkeypatch) -> None:

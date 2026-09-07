@@ -25,6 +25,7 @@ from drt.state.manager import SyncState
 from drt.state.warehouse import (
     PostgresWarehouseDlqBackend,
     PostgresWarehouseHistoryStore,
+    PostgresWarehouseIdempotencyLedger,
     PostgresWarehouseStateStore,
 )
 
@@ -219,3 +220,78 @@ class TestPostgresWarehouseDlqBackend:
                 id="id-1",
             )
         ]
+
+
+class TestPostgresWarehouseIdempotencyLedger:
+    def test_already_delivered_returns_empty_before_any_table_exists(self) -> None:
+        conn = _undefined_table_conn()
+        with patch("drt.state.warehouse._connect", return_value=conn):
+            result = PostgresWarehouseIdempotencyLedger(_profile()).already_delivered(
+                "s", ["k1", "k2"]
+            )
+        assert result == set()
+
+    def test_already_delivered_skips_query_for_empty_keys(self) -> None:
+        conn = _mock_conn()
+        with patch("drt.state.warehouse._connect", return_value=conn) as connect:
+            result = PostgresWarehouseIdempotencyLedger(_profile()).already_delivered("s", [])
+        assert result == set()
+        connect.assert_not_called()
+
+    def test_already_delivered_returns_matched_keys(self) -> None:
+        conn = _mock_conn(fetchall=[("k1",), ("k2",)])
+        with patch("drt.state.warehouse._connect", return_value=conn):
+            result = PostgresWarehouseIdempotencyLedger(_profile()).already_delivered(
+                "s", ["k1", "k2", "k3"]
+            )
+        assert result == {"k1", "k2"}
+        executed = conn.cursor.return_value.execute.call_args
+        assert executed.args[1] == ("s", ["k1", "k2", "k3"])
+
+    def test_mark_delivered_ensures_schema_and_inserts_each_key(self) -> None:
+        conn = _mock_conn()
+        with (
+            patch("drt.state.warehouse._connect", return_value=conn),
+            patch("drt.sources.postgres.PostgresSource.ensure_managed_schema") as ensure_schema,
+            patch(
+                "drt.sources.postgres.PostgresSource.managed_table_exists", return_value=False
+            ) as table_exists,
+        ):
+            PostgresWarehouseIdempotencyLedger(_profile()).mark_delivered(
+                "s", ["k1", "k2"], "2026-09-06T00:00:00+00:00"
+            )
+
+        ensure_schema.assert_called_once()
+        table_exists.assert_called_once()
+        conn.commit.assert_called()
+        executemany = conn.cursor.return_value.executemany.call_args
+        assert executemany.args[1] == [
+            ("s", "k1", "2026-09-06T00:00:00+00:00"),
+            ("s", "k2", "2026-09-06T00:00:00+00:00"),
+        ]
+        assert "ON CONFLICT" in str(executemany.args[0])
+
+    def test_mark_delivered_is_a_noop_for_empty_keys(self) -> None:
+        conn = _mock_conn()
+        with patch("drt.state.warehouse._connect", return_value=conn) as connect:
+            PostgresWarehouseIdempotencyLedger(_profile()).mark_delivered("s", [], "t")
+        connect.assert_not_called()
+
+    def test_mark_delivered_swallows_connection_failure(self) -> None:
+        """Best-effort, like HistoryStore.append — a ledger write failure
+        must never propagate and fail an otherwise-successful sync."""
+        with patch("drt.state.warehouse._connect", side_effect=RuntimeError("boom")):
+            PostgresWarehouseIdempotencyLedger(_profile()).mark_delivered("s", ["k1"], "t")
+
+    def test_prune_returns_zero_before_any_table_exists(self) -> None:
+        conn = _undefined_table_conn()
+        with patch("drt.state.warehouse._connect", return_value=conn):
+            removed = PostgresWarehouseIdempotencyLedger(_profile()).prune("s", 7)
+        assert removed == 0
+
+    def test_prune_deletes_and_returns_rowcount(self) -> None:
+        conn = _mock_conn(rowcount=3)
+        with patch("drt.state.warehouse._connect", return_value=conn):
+            removed = PostgresWarehouseIdempotencyLedger(_profile()).prune("s", 7)
+        assert removed == 3
+        conn.commit.assert_called()

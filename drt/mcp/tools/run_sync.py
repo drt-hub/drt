@@ -74,7 +74,8 @@ def run_sync(
 
     source = _get_source(profile)
     dest = _get_destination(sync)
-    state_mgr = build_state_bundle(project, ctx.project_dir).state
+    bundle = build_state_bundle(project, ctx.project_dir)
+    state_mgr = bundle.state
 
     if full_refresh and not dry_run:
         # Clear both watermark sources, mirroring `drt run --full-refresh`.
@@ -106,6 +107,7 @@ def run_sync(
         diff_limit=diff_limit,
         extract_limit=limit,
         vars=resolved_vars,
+        idempotency_ledger=bundle.ledger,
     )
 
     response: dict[str, Any] = {

@@ -9,6 +9,7 @@ from pathlib import Path
 from drt.config.base import ProjectConfig
 from drt.state.dlq import DlqBackend, LocalDlqStore
 from drt.state.history import HistoryStore, LocalHistoryManager
+from drt.state.idempotency import IdempotencyLedger
 from drt.state.manager import LocalStateManager, StateStore
 
 _SUPPORTED_BACKENDS = {"local", "gcs", "s3", "warehouse"}
@@ -16,11 +17,18 @@ _SUPPORTED_BACKENDS = {"local", "gcs", "s3", "warehouse"}
 
 @dataclass(frozen=True)
 class StateBundle:
-    """The three persistence surfaces selected by ``project.state``."""
+    """The persistence surfaces selected by ``project.state``.
+
+    ``ledger`` (#1099) is ``None`` for every backend except ``warehouse``
+    with ``state.idempotency: true`` — every other configuration has no
+    idempotency ledger available, matching how ``history`` is already
+    ``None``-able per ``history.enabled`` at call sites.
+    """
 
     state: StateStore
     history: HistoryStore
     dlq: DlqBackend
+    ledger: IdempotencyLedger | None = None
 
 
 _CacheKey = tuple[
@@ -36,6 +44,7 @@ _CacheKey = tuple[
     str | None,
     str | None,
     int,
+    bool,
 ]
 _bundle_cache: dict[_CacheKey, StateBundle] = {}
 _bundle_lock = threading.Lock()
@@ -76,6 +85,7 @@ def build_state_bundle(project: ProjectConfig, project_dir: Path) -> StateBundle
         project.state.aws_session_token_env,
         project.state.connection_profile,
         project.history.max_entries,
+        project.state.idempotency,
     )
     with _bundle_lock:
         bundle = _bundle_cache.get(key)
@@ -91,6 +101,7 @@ def build_state_bundle(project: ProjectConfig, project_dir: Path) -> StateBundle
                 from drt.state.warehouse import (
                     PostgresWarehouseDlqBackend,
                     PostgresWarehouseHistoryStore,
+                    PostgresWarehouseIdempotencyLedger,
                     PostgresWarehouseStateStore,
                 )
 
@@ -108,6 +119,11 @@ def build_state_bundle(project: ProjectConfig, project_dir: Path) -> StateBundle
                     state=PostgresWarehouseStateStore(profile),
                     history=PostgresWarehouseHistoryStore(profile),
                     dlq=PostgresWarehouseDlqBackend(profile),
+                    ledger=(
+                        PostgresWarehouseIdempotencyLedger(profile)
+                        if project.state.idempotency
+                        else None
+                    ),
                 )
             else:
                 from drt.state._objectstore import (

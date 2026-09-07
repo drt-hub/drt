@@ -76,6 +76,13 @@ class SyncResult:
     # None outside the diff strategy, and on a diff run's first-ever
     # execution (nothing to compare against yet).
     diff_removed_keys: list[dict[str, Any]] | None = None
+    # Subset of ``skipped`` (same accounting shape as ``skipped_no_match``):
+    # rows the engine filtered out *before* calling destination.load() at all
+    # because the warehouse-backed idempotency ledger (#1099) already had a
+    # `mark_delivered` row for their computed key. Set by run_sync(), not by
+    # any Destination implementation — unlike skipped_no_match, this
+    # decision never reaches the destination.
+    skipped_duplicate: int = 0
 
     @property
     def total(self) -> int:
