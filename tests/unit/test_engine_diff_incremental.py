@@ -96,7 +96,9 @@ def _make_profile() -> BigQueryProfile:
     return BigQueryProfile(type="bigquery", project="p", dataset="d")
 
 
-def _make_diff_sync(mode: str = "upsert", batch_size: int = 10) -> SyncConfig:
+def _make_diff_sync(
+    mode: str = "upsert", batch_size: int = 10, mask: dict[str, Any] | None = None
+) -> SyncConfig:
     return SyncConfig.model_validate(
         {
             "name": "diff_sync",
@@ -115,6 +117,7 @@ def _make_diff_sync(mode: str = "upsert", batch_size: int = 10) -> SyncConfig:
                 "incremental_strategy": "diff",
                 "batch_size": batch_size,
                 **({"mirror": {"strategy": "destination"}} if mode == "mirror" else {}),
+                **({"mask": mask} if mask else {}),
             },
         }
     )
@@ -135,6 +138,24 @@ def test_diff_strategy_chains_added_and_changed_into_the_load_path(tmp_path: Pat
     assert {r["id"] for r in all_sent} == {1, 2, 3}
     assert result.success == 3
     assert result.diff_removed_keys == [{"id": 4}]
+
+
+def test_diff_removed_keys_are_masked_like_the_main_record_batch(tmp_path: Path) -> None:
+    """upsert_key columns under sync.mask must be masked in
+    SyncResult.diff_removed_keys the same way they're masked in the
+    added/changed record_batch — otherwise a masked key's raw value leaks
+    through the removed-keys result."""
+    source = FakeSnapshotDiffSource(
+        added=[{"id": 1}],
+        changed=[],
+        removed_keys=[{"id": 4}],
+    )
+    dest = FakeDestination()
+    sync = _make_diff_sync(mask={"id": "redact"})
+
+    result = run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+    assert result.diff_removed_keys == [{"id": "[REDACTED]"}]
 
 
 def test_diff_strategy_commits_snapshot_on_success(tmp_path: Path) -> None:

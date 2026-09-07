@@ -400,6 +400,74 @@ def test_commit_without_extract_is_a_noop() -> None:
         source.commit_snapshot_diff(config, "never_run")
 
 
+def test_commit_recovers_from_a_crash_left_old_table() -> None:
+    """A prior run that died between the rename-commit and the drop-commit
+    inside commit_snapshot_diff leaves ``<current>_old`` behind. The next
+    run's commit must still succeed (DROP TABLE IF EXISTS <old> before the
+    rename) rather than fail with duplicate_table forever."""
+    require_docker()
+    postgres_container = testcontainers_postgres.PostgresContainer
+
+    with postgres_container(
+        "postgres:16-alpine",
+        username="admin",
+        password="adminpass",
+        dbname="testdb",
+        driver=None,
+    ) as postgres:
+        host = postgres.get_container_host_ip()
+        port = int(postgres.get_exposed_port(5432))
+        config = PostgresProfile(
+            type="postgres",
+            host=host,
+            port=port,
+            dbname="testdb",
+            user="admin",
+            password="adminpass",
+        )
+        source = PostgresSource()
+        admin = psycopg2.connect(
+            host=host, port=port, dbname="testdb", user="admin", password="adminpass"
+        )
+        schema = config.managed_schema
+        try:
+            _seed(
+                admin,
+                "CREATE TABLE users (id INTEGER, email TEXT); "
+                "INSERT INTO users VALUES (1, 'a@x.com')",
+            )
+            query = "SELECT id, email FROM users"
+
+            source.extract_snapshot_diff(
+                query, config, sync_name="s", key_columns=["id"], hash_columns="all"
+            )
+            source.commit_snapshot_diff(config, "s")
+
+            # Simulate a crash right after the rename-commit, before the
+            # drop-commit: leave an orphaned "_drt_snapshot_s_old" behind, in
+            # the same managed schema commit_snapshot_diff itself operates in
+            # (not "public" — the default managed_schema is "_drt").
+            _seed(admin, f'CREATE TABLE "{schema}"._drt_snapshot_s_old (id INTEGER)')
+
+            _seed(admin, "INSERT INTO users VALUES (2, 'b@x.com')")
+            source.extract_snapshot_diff(
+                query, config, sync_name="s", key_columns=["id"], hash_columns="all"
+            )
+            # Before the fix, this raised psycopg2.errors.DuplicateTable
+            # because the orphaned old table already occupied that name.
+            source.commit_snapshot_diff(config, "s")
+
+            with admin.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema = %s AND table_name = %s",
+                    (schema, "_drt_snapshot_s_old"),
+                )
+                assert cur.fetchone() is None
+        finally:
+            admin.close()
+
+
 def test_concurrent_runs_of_the_same_sync_never_corrupt_the_snapshot() -> None:
     """Two (or more) concurrent extract_snapshot_diff/commit_snapshot_diff
     calls for the *same* sync_name race Postgres's own catalog on the

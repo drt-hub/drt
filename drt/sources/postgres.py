@@ -608,6 +608,16 @@ class PostgresSource:
         conn = self._connect(config)
         try:
             cur = conn.cursor()
+            # A prior run that crashed between the rename commit and the
+            # drop commit below leaves old_table behind — drop it first so
+            # this run's rename doesn't fail with duplicate_table (same
+            # crash-recovery idiom as extract_snapshot_diff's scratch-table
+            # DROP TABLE IF EXISTS before CREATE).
+            cur.execute(
+                _pgsql.SQL("DROP TABLE IF EXISTS {}").format(
+                    _pgsql.Identifier(config.managed_schema, old_table)
+                )
+            )
             if self.managed_table_exists(config, current_table):
                 cur.execute(
                     _pgsql.SQL("ALTER TABLE {} RENAME TO {}").format(

@@ -641,7 +641,11 @@ def _run_sync_body(
                 hash_columns=sync.sync.diff.hash_columns,
                 query_tags=query_tags,
             )
-            diff_removed_keys = list(diff_result.removed_keys)
+            # Masked before SyncResult.diff_removed_keys is populated below —
+            # otherwise an upsert_key column configured under sync.mask would
+            # leak its raw value through the removed-keys result while the
+            # main added/changed record_batch masks the same column.
+            diff_removed_keys = apply_mask(list(diff_result.removed_keys), sync.sync.mask)
         records_iter = _wrap_stage_ctx(chain(diff_result.added, diff_result.changed), "source")
     else:
         records_iter = _staged_source_iter(
