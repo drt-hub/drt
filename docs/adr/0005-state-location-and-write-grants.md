@@ -198,24 +198,33 @@ structurally cannot close it.
 
 **Implementation ordering** follows from the split:
 
-| | | warehouse write |
-|---|---|---|
-| 1 | State-manager Protocols + factory (no behaviour change) | not required |
-| 2 | Object-storage backend for state / history / DLQ | **not required** |
-| 3 | Warehouse managed-table primitive (shared by 4 and 5) | required |
-| 4 | Warehouse state backend (SQL observability) | required |
-| 5 | #755 diff-based incremental | required |
+| | | warehouse write | status |
+|---|---|---|---|
+| 1 | State-manager Protocols + factory (no behaviour change) | not required | Shipped, v0.9.0 (#756) |
+| 2 | Object-storage backend for state / history / DLQ | **not required** | Shipped, v0.9.0 (#756) |
+| 3 | Warehouse managed-table primitive (shared by 4 and 5) | required | Postgres-only, [#960](https://github.com/drt-hub/drt/issues/960) — [#1103](https://github.com/drt-hub/drt/pull/1103) |
+| 4 | Warehouse state backend (SQL observability) | required | Postgres-only, [#920](https://github.com/drt-hub/drt/issues/920) — [#1104](https://github.com/drt-hub/drt/pull/1104) |
+| 5 | #755 diff-based incremental | required | Not started |
+
+Steps 3 and 4 are Postgres-first, matching this ADR's own emphasis on landing what's
+live-verifiable rather than shipping multiple dialects behind mock-cursor tests alone. Snowflake,
+BigQuery, and Databricks are tracked as immediate follow-ups
+([#1106](https://github.com/drt-hub/drt/issues/1106),
+[#1107](https://github.com/drt-hub/drt/issues/1107),
+[#1108](https://github.com/drt-hub/drt/issues/1108)), each blocked on live-verifiable
+credentials in the implementing environment rather than deferred indefinitely.
 
 The operator-visible payoff of #756 lands at step 2, before any permission
-conversation. Step 1 is a prerequisite regardless of this ADR's outcome: the
-three managers are constructed directly at roughly fourteen call sites with no
-factory, so no backend selection can be honoured until that is centralised.
-*(Half-landed already: #900, merged the day after this ADR was opened,
-extracted the `StateStore` / `HistoryStore` / `DlqBackend` Protocols with
-back-compat aliases and a set-equality drift test against each local
-implementation's public API. The factory half — routing a backend choice to
-a concrete implementation at the roughly fourteen call sites above — is still
-open; `drt/state/manager.py:150` carries the placeholder comment for it.)*
+conversation. Step 1 was a prerequisite regardless of this ADR's outcome: the
+three managers had been constructed directly at roughly fourteen call sites
+with no factory, so no backend selection could be honoured until that was
+centralised. *(#900, merged the day after this ADR was opened, extracted the
+`StateStore` / `HistoryStore` / `DlqBackend` Protocols with back-compat
+aliases and a set-equality drift test against each local implementation's
+public API. The factory half — routing a backend choice to a concrete
+implementation at those call sites — shipped alongside step 2 in #756;
+`drt/state/factory.py`'s `build_state_bundle()` is now the single
+construction point every call site uses.)*
 
 **The Protocol freeze (#304 / v0.10) inherits whatever step 1 produces.**
 #900's Protocols are what it inherits from; #297's third-party plugin system
