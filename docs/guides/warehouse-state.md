@@ -39,6 +39,13 @@ connection fields (no `host`/`user`/`password` under `state:`) the way `gcs`/`s3
 `bucket`. It reuses whatever connection that profile already resolves to, whether or not that
 same profile is also used as a sync's source.
 
+Install the matching extra before running drt — a base `drt-core` install does not pull in
+`psycopg2`:
+
+```bash
+pip install 'drt-core[postgres]'
+```
+
 ## Configuration reference
 
 | Field | Default | Required | Meaning |
@@ -121,9 +128,21 @@ shape was settled on. `_drt_history` needs no id column at all; `_drt_dlq` order
 `(ts, id)` instead of a sequence.
 
 Reversible by design ([ADR 0005](../adr/0005-state-location-and-write-grants.md#decision)
-Decision 4): switch `state.backend` back to `local`/`gcs`/`s3` at any time — the three tables are
-simply no longer read or written, and `DROP TABLE`/`DROP SCHEMA` when convenient (or leave them,
-harmlessly idle) is entirely operator-driven. No code path deletes them automatically.
+Decision 4): switch `state.backend` back to `local`/`gcs`/`s3` — the three tables are simply no
+longer read or written, and `DROP TABLE`/`DROP SCHEMA` when convenient (or leave them, harmlessly
+idle) is entirely operator-driven. No code path deletes them automatically.
+
+**One case needs care before switching.** `state.backend` and `sync.watermark.storage` are
+independent scopes (see [Project state and sync watermarks are
+independent](remote-state.md#project-state-and-sync-watermarks-are-independent)) — except for an
+incremental sync that leaves `sync.watermark.storage` unset. That sync falls back to reading its
+cursor from the project's own `StateStore` (`_drt_runs` here), so switching `state.backend` away
+from `warehouse` mid-flight points that fallback at a *different*, empty store: the next run has
+no stored cursor and will either replay from the beginning or, with `watermark.default_value`
+set, resume from that default rather than where the warehouse-backed run actually left off.
+Syncs with an explicit `sync.watermark.storage` are unaffected. Reseed the new store's cursor
+(`drt run --cursor-value <value>` once) or copy `_drt_runs`' `last_cursor_value` for the affected
+syncs before switching.
 
 ## Concurrency and known limitations
 

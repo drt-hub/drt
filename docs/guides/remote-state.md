@@ -78,7 +78,7 @@ rejected rather than silently ignored.
 
 | Field | Backend | Default | Required | Meaning |
 |---|---|---|---|---|
-| `backend` | all | `local` | no | `local`, `gcs`, or `s3`. Omitting the whole `state:` block preserves local behavior. |
+| `backend` | all | `local` | no | `local`, `gcs`, `s3`, or `warehouse`. Omitting the whole `state:` block preserves local behavior. This page covers `gcs`/`s3`; see [Warehouse-backed state, history, and DLQ](warehouse-state.md) for `warehouse` and its `connection_profile` field. |
 | `bucket` | GCS, S3 | `null` | yes for GCS/S3 | Bucket containing the state objects. Rejected with `backend: local`. |
 | `prefix` | GCS, S3 | `null` | no | Object-key prefix. Leading and trailing `/` characters are normalized away; an empty value writes at the bucket root. |
 | `region` | S3 | `null` | no | AWS region passed to the boto3 session; otherwise boto3 resolves its default region. |

@@ -215,15 +215,16 @@ BigQuery, and Databricks are tracked as immediate follow-ups
 credentials in the implementing environment rather than deferred indefinitely.
 
 The operator-visible payoff of #756 lands at step 2, before any permission
-conversation. Step 1 is a prerequisite regardless of this ADR's outcome: the
-three managers are constructed directly at roughly fourteen call sites with no
-factory, so no backend selection can be honoured until that is centralised.
-*(Half-landed already: #900, merged the day after this ADR was opened,
-extracted the `StateStore` / `HistoryStore` / `DlqBackend` Protocols with
-back-compat aliases and a set-equality drift test against each local
-implementation's public API. The factory half — routing a backend choice to
-a concrete implementation at the roughly fourteen call sites above — is still
-open; `drt/state/manager.py:150` carries the placeholder comment for it.)*
+conversation. Step 1 was a prerequisite regardless of this ADR's outcome: the
+three managers had been constructed directly at roughly fourteen call sites
+with no factory, so no backend selection could be honoured until that was
+centralised. *(#900, merged the day after this ADR was opened, extracted the
+`StateStore` / `HistoryStore` / `DlqBackend` Protocols with back-compat
+aliases and a set-equality drift test against each local implementation's
+public API. The factory half — routing a backend choice to a concrete
+implementation at those call sites — shipped alongside step 2 in #756;
+`drt/state/factory.py`'s `build_state_bundle()` is now the single
+construction point every call site uses.)*
 
 **The Protocol freeze (#304 / v0.10) inherits whatever step 1 produces.**
 #900's Protocols are what it inherits from; #297's third-party plugin system
