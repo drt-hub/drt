@@ -106,40 +106,68 @@ def build_state_bundle(project: ProjectConfig, project_dir: Path) -> StateBundle
                     dlq=LocalDlqStore(resolved_dir),
                 )
             elif backend == "warehouse":
-                from drt.config.credentials import PostgresProfile, load_profile
-                from drt.state.warehouse import (
-                    PostgresComplianceAuditTrail,
-                    PostgresWarehouseDlqBackend,
-                    PostgresWarehouseHistoryStore,
-                    PostgresWarehouseIdempotencyLedger,
-                    PostgresWarehouseStateStore,
-                )
+                from drt.config.credentials import PostgresProfile, SnowflakeProfile, load_profile
 
                 # Pydantic's validator guarantees this for real configs.
                 assert project.state.connection_profile is not None
                 profile = load_profile(project.state.connection_profile)
-                if not isinstance(profile, PostgresProfile):
-                    raise NotImplementedError(
-                        f"state.backend: warehouse only supports Postgres profiles "
-                        f"today (#920); '{project.state.connection_profile}' is a "
-                        f"{profile.type} profile. Other dialects are tracked as "
-                        "follow-up issues once this one is verified."
+                if isinstance(profile, PostgresProfile):
+                    from drt.state.warehouse import (
+                        PostgresComplianceAuditTrail,
+                        PostgresWarehouseDlqBackend,
+                        PostgresWarehouseHistoryStore,
+                        PostgresWarehouseIdempotencyLedger,
+                        PostgresWarehouseStateStore,
                     )
-                bundle = StateBundle(
-                    state=PostgresWarehouseStateStore(profile),
-                    history=PostgresWarehouseHistoryStore(profile),
-                    dlq=PostgresWarehouseDlqBackend(profile),
-                    ledger=(
-                        PostgresWarehouseIdempotencyLedger(profile)
-                        if project.state.idempotency
-                        else None
-                    ),
-                    audit_trail=(
-                        PostgresComplianceAuditTrail(profile)
-                        if project.state.audit_trail.enabled
-                        else None
-                    ),
-                )
+
+                    bundle = StateBundle(
+                        state=PostgresWarehouseStateStore(profile),
+                        history=PostgresWarehouseHistoryStore(profile),
+                        dlq=PostgresWarehouseDlqBackend(profile),
+                        ledger=(
+                            PostgresWarehouseIdempotencyLedger(profile)
+                            if project.state.idempotency
+                            else None
+                        ),
+                        audit_trail=(
+                            PostgresComplianceAuditTrail(profile)
+                            if project.state.audit_trail.enabled
+                            else None
+                        ),
+                    )
+                elif isinstance(profile, SnowflakeProfile):
+                    if project.state.idempotency:
+                        raise NotImplementedError(
+                            "state.idempotency: true is not yet supported on the "
+                            "Snowflake warehouse backend (#1106) — Postgres only "
+                            "today. Set state.idempotency: false or use a Postgres "
+                            "connection_profile."
+                        )
+                    if project.state.audit_trail.enabled:
+                        raise NotImplementedError(
+                            "state.audit_trail.enabled: true is not yet supported "
+                            "on the Snowflake warehouse backend (#1106) — Postgres "
+                            "only today. Set state.audit_trail.enabled: false or "
+                            "use a Postgres connection_profile."
+                        )
+                    from drt.state.warehouse_snowflake import (
+                        SnowflakeWarehouseDlqBackend,
+                        SnowflakeWarehouseHistoryStore,
+                        SnowflakeWarehouseStateStore,
+                    )
+
+                    bundle = StateBundle(
+                        state=SnowflakeWarehouseStateStore(profile),
+                        history=SnowflakeWarehouseHistoryStore(profile),
+                        dlq=SnowflakeWarehouseDlqBackend(profile),
+                    )
+                else:
+                    raise NotImplementedError(
+                        f"state.backend: warehouse only supports Postgres (#920) and "
+                        f"Snowflake (#1106) profiles today; "
+                        f"'{project.state.connection_profile}' is a {profile.type} "
+                        "profile. Other dialects are tracked as follow-up issues."
+                    )
             else:
                 from drt.state._objectstore import (
                     ObjectClient,
