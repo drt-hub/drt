@@ -377,6 +377,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             warehouse=raw.get("warehouse", ""),
             role=raw.get("role"),
             fetch_size=int(raw.get("fetch_size", DEFAULT_FETCH_SIZE)),
+            managed_schema=raw.get("managed_schema", "_drt"),
         )
 
     if source_type == "sqlserver":
@@ -666,6 +667,8 @@ def save_profile(
             entry["role"] = profile.role
         if profile.fetch_size != DEFAULT_FETCH_SIZE:
             entry["fetch_size"] = profile.fetch_size
+        if profile.managed_schema != "_drt":
+            entry["managed_schema"] = profile.managed_schema
     elif isinstance(profile, SQLServerProfile):
         entry = {
             "type": "sqlserver",

@@ -199,6 +199,16 @@ class SnowflakeProfile:
     role: str | None = None
     #: Rows per server round trip when streaming (#765). See DEFAULT_FETCH_SIZE.
     fetch_size: int = DEFAULT_FETCH_SIZE
+    #: Schema for drt's own bookkeeping tables (#960/#1106) — see
+    #: PostgresProfile.managed_schema's docstring for the full naming
+    #: rationale (deliberately distinct from `schema` above, which is the
+    #: query-execution default, a different concept). Lives inside
+    #: `database` above rather than a separate managed-database field.
+    #: Created/probed unquoted — Snowflake folds it to uppercase, matching
+    #: this connector's existing `_drt_synced_keys` bookkeeping table
+    #: convention (`destinations/snowflake.py`) rather than introducing a
+    #: second, quoted-identifier convention alongside it.
+    managed_schema: str = "_drt"
 
     def describe(self) -> str:
         return f"{self.type} ({self.account}/{self.database}.{self.schema})"
