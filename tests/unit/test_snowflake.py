@@ -459,6 +459,38 @@ class TestManagedTableCapable:
         assert not any("CREATE SCHEMA" in sql for sql in executed)
         conn.close.assert_called_once()
 
+    def test_ensure_managed_schema_swallows_the_concurrent_create_race(self) -> None:
+        """Two sessions can both pass the initial probe and both attempt
+        CREATE; the loser's CREATE raises, and re-probing finds the schema
+        already exists (the other session won) — must swallow, not raise."""
+        conn = MagicMock()
+        probe_cur = MagicMock()
+        probe_cur.fetchone.return_value = None  # initial probe: doesn't exist yet
+        probe_cur.execute.side_effect = [None, Exception("concurrent create race")]
+        reprobe_cur = MagicMock()
+        reprobe_cur.fetchone.return_value = (1,)  # now exists -- the other session won
+        conn.cursor.side_effect = [probe_cur, reprobe_cur]
+
+        with patch.object(SnowflakeSource, "_connect", return_value=conn):
+            SnowflakeSource().ensure_managed_schema(_config())  # must not raise
+
+        conn.close.assert_called_once()
+
+    def test_ensure_managed_schema_reraises_when_still_absent_after_create_fails(self) -> None:
+        """A CREATE failure that is NOT a lost concurrent race (e.g. a
+        genuine permission error) must propagate, not be swallowed."""
+        conn = MagicMock()
+        probe_cur = MagicMock()
+        probe_cur.fetchone.return_value = None
+        probe_cur.execute.side_effect = [None, Exception("insufficient privileges")]
+        reprobe_cur = MagicMock()
+        reprobe_cur.fetchone.return_value = None  # still absent
+        conn.cursor.side_effect = [probe_cur, reprobe_cur]
+
+        with patch.object(SnowflakeSource, "_connect", return_value=conn):
+            with pytest.raises(Exception, match="insufficient privileges"):
+                SnowflakeSource().ensure_managed_schema(_config())
+
     def test_ensure_managed_schema_probe_is_upper_normalized_and_database_scoped(self) -> None:
         """Unquoted identifiers fold to uppercase in Snowflake — the probe
         must UPPER()-normalize both sides rather than comparing the raw
