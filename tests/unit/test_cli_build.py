@@ -161,6 +161,40 @@ def test_build_wires_the_idempotency_ledger_into_run_sync(
     )
 
 
+def test_build_wires_the_audit_trail_into_run_sync(
+    project: Path, patched_runtime: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same gap, same fix, for #1100's own compliance audit trail: `drt
+    build` never passed state_bundle.audit_trail / the configured fields /
+    retain_days through to run_sync() either."""
+    from drt.config.base import AuditTrailConfig
+    from drt.state import factory as factory_module
+    from drt.state.factory import StateBundle
+
+    sentinel_audit = object()
+    real_build_state_bundle = factory_module.build_state_bundle
+
+    def fake_build_state_bundle(project_cfg, project_dir):
+        bundle = real_build_state_bundle(project_cfg, project_dir)
+        project_cfg.state.audit_trail = AuditTrailConfig(
+            enabled=True, retain_days=45, fields=["email"]
+        )
+        return StateBundle(
+            state=bundle.state, history=bundle.history, dlq=bundle.dlq, audit_trail=sentinel_audit
+        )
+
+    monkeypatch.setattr(factory_module, "build_state_bundle", fake_build_state_bundle)
+
+    result = runner.invoke(app, ["build", "--output", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert patched_runtime["run_kwargs"]
+    for kwargs in patched_runtime["run_kwargs"]:
+        assert kwargs.get("audit_trail") is sentinel_audit
+        assert kwargs.get("audit_fields") == ["email"]
+        assert kwargs.get("audit_retain_days") == 45
+
+
 def test_build_select_state_modified_runs_only_changed_sync(
     project: Path, patched_runtime: dict[str, Any]
 ) -> None:

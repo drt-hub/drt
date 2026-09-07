@@ -19,10 +19,12 @@ pytest.importorskip("psycopg2")
 import psycopg2
 
 from drt.config.credentials import PostgresProfile
+from drt.state.audit_trail import AuditEntry
 from drt.state.dlq import DeadLetter
 from drt.state.history import HistoryEntry
 from drt.state.manager import SyncState
 from drt.state.warehouse import (
+    PostgresComplianceAuditTrail,
     PostgresWarehouseDlqBackend,
     PostgresWarehouseHistoryStore,
     PostgresWarehouseIdempotencyLedger,
@@ -294,4 +296,103 @@ class TestPostgresWarehouseIdempotencyLedger:
         with patch("drt.state.warehouse._connect", return_value=conn):
             removed = PostgresWarehouseIdempotencyLedger(_profile()).prune("s", 7)
         assert removed == 3
+        conn.commit.assert_called()
+
+
+class TestPostgresComplianceAuditTrail:
+    def test_log_delivered_is_a_noop_for_empty_entries(self) -> None:
+        conn = _mock_conn()
+        with patch("drt.state.warehouse._connect", return_value=conn) as connect:
+            PostgresComplianceAuditTrail(_profile()).log_delivered(
+                "s", "r1", "sr1", "slack", [], "t"
+            )
+        connect.assert_not_called()
+
+    def test_log_delivered_ensures_schema_and_inserts_each_entry(self) -> None:
+        conn = _mock_conn()
+        with (
+            patch("drt.state.warehouse._connect", return_value=conn),
+            patch("drt.sources.postgres.PostgresSource.ensure_managed_schema") as ensure_schema,
+            patch(
+                "drt.sources.postgres.PostgresSource.managed_table_exists", return_value=False
+            ) as table_exists,
+        ):
+            PostgresComplianceAuditTrail(_profile()).log_delivered(
+                "orders",
+                "run-1",
+                "sync-run-1",
+                "slack",
+                [
+                    AuditEntry(record_key="a@example.com", fields={"email": "a@example.com"}),
+                    AuditEntry(record_key="b@example.com", fields={"email": "b@example.com"}),
+                ],
+                "2026-09-07T00:00:00+00:00",
+            )
+
+        ensure_schema.assert_called_once()
+        table_exists.assert_called_once()
+        conn.commit.assert_called()
+        executemany = conn.cursor.return_value.executemany.call_args
+        assert executemany.args[1] == [
+            (
+                "orders",
+                "run-1",
+                "sync-run-1",
+                "a@example.com",
+                '{"email": "a@example.com"}',
+                "slack",
+                "2026-09-07T00:00:00+00:00",
+            ),
+            (
+                "orders",
+                "run-1",
+                "sync-run-1",
+                "b@example.com",
+                '{"email": "b@example.com"}',
+                "slack",
+                "2026-09-07T00:00:00+00:00",
+            ),
+        ]
+
+    def test_log_delivered_accepts_a_none_run_id_and_sync_run_id(self) -> None:
+        """run_id is None for library callers; sync_run_id is typed
+        optional to match SyncResult's own honest nullability (not
+        asserted non-null) -- neither should raise or be coerced."""
+        conn = _mock_conn()
+        with (
+            patch("drt.state.warehouse._connect", return_value=conn),
+            patch("drt.sources.postgres.PostgresSource.ensure_managed_schema"),
+            patch("drt.sources.postgres.PostgresSource.managed_table_exists", return_value=True),
+        ):
+            PostgresComplianceAuditTrail(_profile()).log_delivered(
+                "orders",
+                None,
+                None,
+                "slack",
+                [AuditEntry(record_key="k", fields={})],
+                "t",
+            )
+
+        executemany = conn.cursor.return_value.executemany.call_args
+        assert executemany.args[1] == [("orders", None, None, "k", "{}", "slack", "t")]
+
+    def test_log_delivered_swallows_connection_failure(self) -> None:
+        """Best-effort, like HistoryStore.append — an audit write failure
+        must never propagate and fail an otherwise-successful sync."""
+        with patch("drt.state.warehouse._connect", side_effect=RuntimeError("boom")):
+            PostgresComplianceAuditTrail(_profile()).log_delivered(
+                "s", "r", "sr", "slack", [AuditEntry(record_key="k", fields={})], "t"
+            )
+
+    def test_prune_returns_zero_before_any_table_exists(self) -> None:
+        conn = _undefined_table_conn()
+        with patch("drt.state.warehouse._connect", return_value=conn):
+            removed = PostgresComplianceAuditTrail(_profile()).prune("s", 30)
+        assert removed == 0
+
+    def test_prune_deletes_and_returns_rowcount(self) -> None:
+        conn = _mock_conn(rowcount=5)
+        with patch("drt.state.warehouse._connect", return_value=conn):
+            removed = PostgresComplianceAuditTrail(_profile()).prune("s", 30)
+        assert removed == 5
         conn.commit.assert_called()

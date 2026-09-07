@@ -269,6 +269,83 @@ def test_idempotency_flag_differentiates_cache_key(tmp_path: Path, monkeypatch) 
     assert with_ledger.ledger is not None
 
 
+def test_warehouse_backend_with_audit_trail_builds_it(tmp_path: Path, monkeypatch) -> None:
+    from drt.config.base import AuditTrailConfig
+    from drt.config.credentials import PostgresProfile
+    from drt.state.warehouse import PostgresComplianceAuditTrail
+
+    profile = PostgresProfile(type="postgres", host="h", dbname="d", user="u")
+    monkeypatch.setattr(
+        "drt.config.credentials.load_profile", lambda name, config_dir=None: profile
+    )
+
+    project = ProjectConfig(
+        name="test",
+        state=StateConfig(
+            backend="warehouse",
+            connection_profile="pg_main",
+            audit_trail=AuditTrailConfig(enabled=True, retain_days=30, fields=["email"]),
+        ),
+    )
+    bundle = build_state_bundle(project, tmp_path)
+
+    assert isinstance(bundle.audit_trail, PostgresComplianceAuditTrail)
+    assert bundle.audit_trail._profile is profile
+
+
+def test_audit_trail_disabled_by_default(tmp_path: Path, monkeypatch) -> None:
+    from drt.config.credentials import PostgresProfile
+
+    profile = PostgresProfile(type="postgres", host="h", dbname="d", user="u")
+    monkeypatch.setattr(
+        "drt.config.credentials.load_profile", lambda name, config_dir=None: profile
+    )
+
+    project = ProjectConfig(
+        name="test",
+        state=StateConfig(backend="warehouse", connection_profile="pg_main"),
+    )
+    bundle = build_state_bundle(project, tmp_path)
+
+    assert bundle.audit_trail is None
+
+
+def test_audit_trail_config_differentiates_cache_key(tmp_path: Path, monkeypatch) -> None:
+    """Same non-novel gap as the idempotency-flag cache key test above:
+    two projects differing only in state.audit_trail must not share a
+    cached bundle, or one project's compliance policy silently applies (or
+    fails to apply) to another's runs."""
+    from drt.config.base import AuditTrailConfig
+    from drt.config.credentials import PostgresProfile
+
+    profile = PostgresProfile(type="postgres", host="h", dbname="d", user="u")
+    monkeypatch.setattr(
+        "drt.config.credentials.load_profile", lambda name, config_dir=None: profile
+    )
+
+    without = build_state_bundle(
+        ProjectConfig(
+            name="test",
+            state=StateConfig(backend="warehouse", connection_profile="pg_main"),
+        ),
+        tmp_path,
+    )
+    with_audit = build_state_bundle(
+        ProjectConfig(
+            name="test",
+            state=StateConfig(
+                backend="warehouse",
+                connection_profile="pg_main",
+                audit_trail=AuditTrailConfig(enabled=True, retain_days=30, fields=["email"]),
+            ),
+        ),
+        tmp_path,
+    )
+
+    assert without.audit_trail is None
+    assert with_audit.audit_trail is not None
+
+
 def test_warehouse_backend_rejects_non_postgres_profiles(tmp_path: Path, monkeypatch) -> None:
     from drt.config.credentials import SnowflakeProfile
 

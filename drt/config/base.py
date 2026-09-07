@@ -198,6 +198,62 @@ class HistoryConfig(BaseModel):
     max_entries: int = Field(default=500, ge=1)
 
 
+class AuditTrailConfig(BaseModel):
+    """Compliance delivery log — "which record went where, and when" (#1100).
+
+    Project-wide, not per-sync: a compliance policy shouldn't be something
+    an individual sync author can quietly opt out of once the project has
+    turned it on — the opposite scoping from #1099's `sync.idempotency_key`,
+    which is a per-sync technical knob. Every sync in the project that
+    successfully delivers a record gets an audit row for it while enabled.
+
+    ``fields`` names columns to log **after** ``sync.mask`` (#427) has
+    already run, on whichever destination-facing (post-rename) names that
+    sync produces — the same pipeline position ``sync.mask``'s own keys
+    reference. This is deliberate, not incidental: logging the pre-mask
+    value would recreate the exact PII liability ``sync.mask`` exists to
+    prevent, in a second table nobody thought to protect the same way, and
+    would contradict this feature's own purpose (the destination never
+    received that value, so it isn't part of "what went where"). Note the
+    inverse is equally true and equally deliberate: a sync with no
+    ``sync.mask`` configured at all logs whatever raw values ``fields``
+    names, for the full ``retain_days`` window — enabling this on a field
+    the operator hasn't separately decided to mask is a real PII-retention
+    choice, not a free compliance win.
+
+    Different syncs have different schemas, so a configured field absent
+    from a given sync's records is simply omitted from that record's logged
+    JSON rather than raising — this table is necessarily one shared shape
+    across every sync in the project.
+
+    ``retain_days`` is required (not optional-defaulting-to-forever) the
+    moment ``enabled`` is true — the gap this issue exists to close in
+    Hightouch's `Changelog` precedent, which leaves retention entirely to
+    the customer. Purge runs once per non-dry-run sync, the same call site
+    #1099's ``IdempotencyLedger.prune`` already uses (mirrors
+    ``HistoryStore.prune``) — no separate CLI surface.
+    """
+
+    enabled: bool = False
+    retain_days: int | None = Field(default=None, gt=0)
+    fields: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_enabled_requirements(self) -> AuditTrailConfig:
+        if self.enabled:
+            if self.retain_days is None:
+                raise ValueError(
+                    "state.audit_trail.retain_days is required when "
+                    "state.audit_trail.enabled is true — no unbounded-retention default."
+                )
+            if not self.fields:
+                raise ValueError(
+                    "state.audit_trail.fields must be non-empty when "
+                    "state.audit_trail.enabled is true."
+                )
+        return self
+
+
 class StateConfig(BaseModel):
     """State-backend selection and backend-specific settings (#756, #920).
 
@@ -256,6 +312,9 @@ class StateConfig(BaseModel):
     #: alone just makes the ledger available, matching how ``backend:
     #: warehouse`` alone doesn't require every sync to use it.
     idempotency: bool = False
+    #: Compliance delivery log (#1100), opt-in on top of the warehouse
+    #: backend like ``idempotency`` above — see :class:`AuditTrailConfig`.
+    audit_trail: AuditTrailConfig = Field(default_factory=AuditTrailConfig)
 
     @model_validator(mode="after")
     def _check_backend_fields(self) -> StateConfig:
@@ -298,6 +357,8 @@ class StateConfig(BaseModel):
             raise ValueError("state.connection_profile is only valid when backend is 'warehouse'.")
         if self.idempotency and self.backend != "warehouse":
             raise ValueError("state.idempotency is only valid when backend is 'warehouse'.")
+        if self.audit_trail.enabled and self.backend != "warehouse":
+            raise ValueError("state.audit_trail is only valid when backend is 'warehouse'.")
         return self
 
 
