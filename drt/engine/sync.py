@@ -7,6 +7,7 @@ CLI owns all console output; engine only returns SyncResult.
 
 from __future__ import annotations
 
+import math
 import re
 import threading
 import time
@@ -43,6 +44,7 @@ from drt.engine.observer import NullObserver, SyncObserver
 from drt.engine.resolver import resolve_model_ref
 from drt.observability import build_status, get_tracer
 from drt.sources.base import IncrementalSource, SnapshotDiffSource, Source
+from drt.state.audit_trail import AuditEntry, ComplianceAuditTrail
 from drt.state.dlq import DeadLetter
 from drt.state.history import HistoryEntry, HistoryStore
 from drt.state.idempotency import IdempotencyLedger
@@ -211,6 +213,11 @@ def _successful_indices(record_batch: list[dict[str, Any]], result: SyncResult) 
     of), this returns an empty set rather than guess — fail closed, not
     open: missing one batch's dedup/audit protection is a far smaller cost
     than permanently marking a never-delivered record as delivered.
+
+    Shared by #1099's ``mark_delivered`` filtering and #1100's audit log
+    write, which both need the same "which of these did the destination
+    confirm" computation the DLQ's dead-letter pairing below also relies
+    on — one bounds-checked computation instead of drifting copies.
     """
     if result.skipped > 0:
         return set()
@@ -218,6 +225,62 @@ def _successful_indices(record_batch: list[dict[str, Any]], result: SyncResult) 
         err.batch_index for err in result.row_errors if 0 <= err.batch_index < len(record_batch)
     }
     return {i for i in range(len(record_batch)) if i not in failed_indices}
+
+
+def _json_safe_audit_value(value: Any) -> Any:
+    """Recursively coerce a warehouse-driver value into a JSON-serializable
+    one for the compliance audit log (#1100).
+
+    Common driver return types (``Decimal``, ``date``/``datetime``/``time``,
+    ``UUID``, non-finite ``float``) aren't accepted by ``json.dumps`` — a
+    plain ``json.dumps(entry.fields)`` raises ``TypeError`` on any of them
+    (caught in Codex review), and since the warehouse write is wrapped in a
+    best-effort try/except, that exception would silently drop the whole
+    batch's audit rows despite a successful delivery. Unlike Klaviyo's own
+    ``_json_safe`` (which raises on values that can't round-trip exactly,
+    appropriate for data actually sent to a vendor API), this degrades to a
+    string representation instead: the audit log is a compliance record,
+    not a numeric input to a downstream consumer, so preserving type
+    fidelity matters far less than never losing the row.
+    """
+    if isinstance(value, dict):
+        return {k: _json_safe_audit_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_audit_value(v) for v in value]
+    if isinstance(value, (str, int, bool)) or value is None:
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    # Decimal, date, datetime, time, timedelta, UUID, and anything else
+    # json.dumps doesn't natively accept.
+    return str(value)
+
+
+def _build_audit_entries(
+    record_batch: list[dict[str, Any]], successful_indices: set[int], fields: list[str]
+) -> list[AuditEntry]:
+    """One ``AuditEntry`` per successfully-delivered record (#1100).
+
+    ``fields`` is read from the record as it reaches the destination —
+    after ``sync.mask`` — so the audit log reflects what was actually
+    delivered, never a pre-mask value the destination never received (see
+    ``ComplianceAuditTrail``'s module docstring). A configured field absent
+    from this particular record (different syncs have different schemas)
+    is simply omitted rather than null-padded; ``record_key`` joins
+    whichever configured fields were present, in configured order. Values
+    are normalized to JSON-safe types (see ``_json_safe_audit_value``)
+    before being stored on the entry, not left for the warehouse write to
+    discover the hard way.
+    """
+    entries: list[AuditEntry] = []
+    for i in range(len(record_batch)):
+        if i not in successful_indices:
+            continue
+        row = record_batch[i]
+        present = {f: _json_safe_audit_value(row[f]) for f in fields if f in row}
+        record_key = ":".join(str(row[f]) for f in fields if f in row)
+        entries.append(AuditEntry(record_key=record_key, fields=present))
+    return entries
 
 
 def batch(iterable: Iterator[Any], size: int) -> Iterator[list[Any]]:
@@ -343,6 +406,9 @@ def run_sync(
     query_tagging: QueryTaggingConfig | None = None,
     run_id: str | None = None,
     idempotency_ledger: IdempotencyLedger | None = None,
+    audit_trail: ComplianceAuditTrail | None = None,
+    audit_fields: list[str] | None = None,
+    audit_retain_days: int = 30,
 ) -> SyncResult:
     """Run a single sync: extract from source, load to destination.
 
@@ -392,6 +458,20 @@ def run_sync(
             full write-path contract. Has no effect on a sync with no
             resolvable key (see ``_resolve_idempotency_key_template``) or
             during a dry run.
+        audit_trail: Warehouse-backed compliance delivery log (#1100), from
+            ``StateBundle.audit_trail`` — ``None`` unless the project sets
+            ``state.backend: warehouse`` and ``state.audit_trail.enabled:
+            true``. Project-wide, not resolved per-sync like
+            ``idempotency_ledger``: every sync logs the same configured
+            ``audit_fields`` for every record its ``destination.load()``
+            calls report successful. No effect during a dry run.
+        audit_fields: Field names to log per delivered record (#1100),
+            from ``state.audit_trail.fields`` — read from the record
+            **after** ``sync.mask``, so the log reflects what was actually
+            delivered. Ignored when ``audit_trail`` is ``None``.
+        audit_retain_days: Purge window for the audit log (#1100), from
+            ``state.audit_trail.retain_days``. Ignored when ``audit_trail``
+            is ``None``.
 
     Returns:
         Aggregated SyncResult across all batches, with ``run_id`` and
@@ -456,6 +536,8 @@ def run_sync(
                     vars=vars,
                     query_tagging=query_tagging,
                     idempotency_ledger=idempotency_ledger,
+                    audit_trail=audit_trail,
+                    audit_fields=audit_fields,
                 )
             except BaseException as exc:
                 raised = exc
@@ -534,6 +616,20 @@ def run_sync(
             except Exception as exc:  # noqa: BLE001 — best-effort
                 observer.on_warning(sync.name, f"Idempotency ledger prune failure: {exc}")
 
+        # Compliance audit log retention (#1100) — same per-sync prune call
+        # site as the idempotency ledger above, answering the issue's own
+        # open question about where purge is triggered from with the
+        # precedent already shipped for #1099. Unlike the ledger's
+        # hardcoded 7 days, `audit_retain_days` is a required, explicit
+        # config value (`state.audit_trail.retain_days`) — no silent
+        # unbounded-retention default, per the issue's own differentiation
+        # from Hightouch's customer-managed purge.
+        if not dry_run and audit_trail is not None:
+            try:
+                audit_trail.prune(sync.name, audit_retain_days)
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                observer.on_warning(sync.name, f"Compliance audit log prune failure: {exc}")
+
         # Guaranteed final flush point — fires on every exit path (success,
         # exception, interruption), unlike on_sync_completed which only fires
         # on the normal-return path. Observers that buffer writes in memory
@@ -568,6 +664,8 @@ def _run_sync_body(
     vars: dict[str, Any] | None = None,
     query_tagging: QueryTaggingConfig | None = None,
     idempotency_ledger: IdempotencyLedger | None = None,
+    audit_trail: ComplianceAuditTrail | None = None,
+    audit_fields: list[str] | None = None,
 ) -> SyncResult:
     """Inner body of run_sync. Mutates `total_result` in place so the outer
     finally-block can read partial results when an exception propagates.
@@ -777,6 +875,14 @@ def _run_sync_body(
         else None
     )
 
+    # Compliance audit trail (#1100) — same exclusions as the ledger above,
+    # for the same reason: a batch's reported success under `is_staged` or
+    # swap-mode replace isn't the same thing as "actually delivered", and
+    # this table's whole purpose is an accurate delivery record.
+    _audit_enabled = (
+        audit_trail is not None and bool(audit_fields) and not is_staged and not _swap_mode
+    )
+
     # Build lookup maps (one query per lookup, before the batch loop).
     # The build_lookup_map() call hits the destination, so tag failures
     # accordingly (#544).
@@ -968,28 +1074,51 @@ def _run_sync_body(
                 total_result.errors.extend(result.errors)
                 total_result.row_errors.extend(getattr(result, "row_errors", []))
 
-                # Idempotency ledger mark (#1099) — only for records this
-                # load() call actually reported success for. Marking here
-                # (not deferred to sync end) keeps the crash-loses-dedup-
-                # info window scoped to one batch, not the whole run — this
-                # fires on the common/success path, unlike DLQ's rare-path
+                # Idempotency ledger mark (#1099) + compliance audit log
+                # (#1100) — both only for records this load() call actually
+                # reported success for. `_successful_indices` is the same
+                # correlation `DeadLetter` construction below already
+                # relies on (result.row_errors[*].batch_index indexes into
+                # the record_batch just sent). Both writes happen here (not
+                # deferred to sync end) to keep the crash-loses-data window
+                # scoped to one batch, not the whole run — this fires on
+                # the common/success path, unlike DLQ's rare-path
                 # buffering.
-                if idempotency_ledger is not None and any(
-                    key is not None for key in batch_idempotency_keys
-                ):
+                needs_delivered_at = (
+                    idempotency_ledger is not None
+                    and any(k is not None for k in batch_idempotency_keys)
+                ) or _audit_enabled
+                if needs_delivered_at:
                     successful_indices = _successful_indices(record_batch, result)
-                    delivered_keys = [
-                        key
-                        for i, key in enumerate(batch_idempotency_keys)
-                        if key is not None and i in successful_indices
-                    ]
-                    if delivered_keys:
-                        with _stage_ctx("state"):
-                            idempotency_ledger.mark_delivered(
-                                sync.name,
-                                delivered_keys,
-                                datetime.now(timezone.utc).isoformat(),
-                            )
+                    delivered_at = datetime.now(timezone.utc).isoformat()
+
+                    if idempotency_ledger is not None:
+                        delivered_keys = [
+                            key
+                            for i, key in enumerate(batch_idempotency_keys)
+                            if key is not None and i in successful_indices
+                        ]
+                        if delivered_keys:
+                            with _stage_ctx("state"):
+                                idempotency_ledger.mark_delivered(
+                                    sync.name, delivered_keys, delivered_at
+                                )
+
+                    if _audit_enabled:
+                        assert audit_trail is not None and audit_fields is not None
+                        audit_entries = _build_audit_entries(
+                            record_batch, successful_indices, audit_fields
+                        )
+                        if audit_entries:
+                            with _stage_ctx("state"):
+                                audit_trail.log_delivered(
+                                    sync.name,
+                                    total_result.run_id,
+                                    total_result.sync_run_id,
+                                    sync.destination.type,
+                                    audit_entries,
+                                    delivered_at,
+                                )
 
                 # Dead Letter Queue (#278): hand the engine's full failed records
                 # to the observer so a DlqObserver can persist them for `drt

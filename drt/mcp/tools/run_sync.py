@@ -108,6 +108,9 @@ def run_sync(
         extract_limit=limit,
         vars=resolved_vars,
         idempotency_ledger=bundle.ledger,
+        audit_trail=bundle.audit_trail,
+        audit_fields=project.state.audit_trail.fields,
+        audit_retain_days=project.state.audit_trail.retain_days or 30,
     )
 
     response: dict[str, Any] = {

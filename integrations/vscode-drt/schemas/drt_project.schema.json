@@ -1,5 +1,37 @@
 {
   "$defs": {
+    "AuditTrailConfig": {
+      "description": "Compliance delivery log \u2014 \"which record went where, and when\" (#1100).\n\nProject-wide, not per-sync: a compliance policy shouldn't be something\nan individual sync author can quietly opt out of once the project has\nturned it on \u2014 the opposite scoping from #1099's `sync.idempotency_key`,\nwhich is a per-sync technical knob. Every sync in the project that\nsuccessfully delivers a record gets an audit row for it while enabled.\n\n``fields`` names columns to log **after** ``sync.mask`` (#427) has\nalready run, on whichever destination-facing (post-rename) names that\nsync produces \u2014 the same pipeline position ``sync.mask``'s own keys\nreference. This is deliberate, not incidental: logging the pre-mask\nvalue would recreate the exact PII liability ``sync.mask`` exists to\nprevent, in a second table nobody thought to protect the same way, and\nwould contradict this feature's own purpose (the destination never\nreceived that value, so it isn't part of \"what went where\"). Note the\ninverse is equally true and equally deliberate: a sync with no\n``sync.mask`` configured at all logs whatever raw values ``fields``\nnames, for the full ``retain_days`` window \u2014 enabling this on a field\nthe operator hasn't separately decided to mask is a real PII-retention\nchoice, not a free compliance win.\n\nDifferent syncs have different schemas, so a configured field absent\nfrom a given sync's records is simply omitted from that record's logged\nJSON rather than raising \u2014 this table is necessarily one shared shape\nacross every sync in the project.\n\n``retain_days`` is required (not optional-defaulting-to-forever) the\nmoment ``enabled`` is true \u2014 the gap this issue exists to close in\nHightouch's `Changelog` precedent, which leaves retention entirely to\nthe customer. Purge runs once per non-dry-run sync, the same call site\n#1099's ``IdempotencyLedger.prune`` already uses (mirrors\n``HistoryStore.prune``) \u2014 no separate CLI surface.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "retain_days": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Retain Days"
+        },
+        "fields": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Fields",
+          "type": "array"
+        }
+      },
+      "title": "AuditTrailConfig",
+      "type": "object"
+    },
     "HistoryConfig": {
       "description": "Sync execution history retention (#276).\n\nLocal history keeps every entry inside ``retention_days``. Remote object\nstores additionally retain only the newest ``max_entries`` per sync, which\nbounds the object downloaded and rewritten by each conditional update.",
       "properties": {
@@ -224,6 +256,9 @@
           "default": false,
           "title": "Idempotency",
           "type": "boolean"
+        },
+        "audit_trail": {
+          "$ref": "#/$defs/AuditTrailConfig"
         }
       },
       "title": "StateConfig",

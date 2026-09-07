@@ -1077,6 +1077,69 @@ class TestStateIdempotencyConfig:
         assert config.idempotency is True
 
 
+class TestAuditTrailConfig:
+    """``state.audit_trail`` — compliance delivery log with required retention (#1100)."""
+
+    def test_defaults_to_disabled(self) -> None:
+        from drt.config.base import AuditTrailConfig
+
+        config = AuditTrailConfig()
+        assert config.enabled is False
+        assert config.retain_days is None
+        assert config.fields == []
+
+    def test_retain_days_required_when_enabled(self) -> None:
+        from drt.config.base import AuditTrailConfig
+
+        with pytest.raises(ValidationError, match="retain_days is required.*enabled is true"):
+            AuditTrailConfig(enabled=True, fields=["email"])
+
+    def test_fields_required_when_enabled(self) -> None:
+        from drt.config.base import AuditTrailConfig
+
+        with pytest.raises(ValidationError, match="fields must be non-empty.*enabled is true"):
+            AuditTrailConfig(enabled=True, retain_days=30)
+
+    def test_retain_days_must_be_positive(self) -> None:
+        from drt.config.base import AuditTrailConfig
+
+        with pytest.raises(ValidationError, match="greater than 0"):
+            AuditTrailConfig(enabled=True, retain_days=0, fields=["email"])
+
+    def test_valid_config_accepted(self) -> None:
+        from drt.config.base import AuditTrailConfig
+
+        config = AuditTrailConfig(enabled=True, retain_days=30, fields=["email", "user_id"])
+        assert config.retain_days == 30
+        assert config.fields == ["email", "user_id"]
+
+    def test_disabled_config_ignores_missing_retain_days_and_fields(self) -> None:
+        """enabled=False (the default) must not trip the enabled-only checks —
+        a project can leave state.audit_trail entirely unset."""
+        from drt.config.base import AuditTrailConfig
+
+        AuditTrailConfig(enabled=False)  # must not raise
+
+    def test_requires_warehouse_backend(self) -> None:
+        from drt.config.base import AuditTrailConfig, StateConfig
+
+        with pytest.raises(ValidationError, match="audit_trail is only valid.*warehouse"):
+            StateConfig(
+                backend="local",
+                audit_trail=AuditTrailConfig(enabled=True, retain_days=30, fields=["email"]),
+            )
+
+    def test_accepted_on_warehouse_backend(self) -> None:
+        from drt.config.base import AuditTrailConfig, StateConfig
+
+        config = StateConfig(
+            backend="warehouse",
+            connection_profile="pg",
+            audit_trail=AuditTrailConfig(enabled=True, retain_days=30, fields=["email"]),
+        )
+        assert config.audit_trail.enabled is True
+
+
 # ---------------------------------------------------------------------------
 # Replace strategy (zero-downtime swap — #338)
 # ---------------------------------------------------------------------------

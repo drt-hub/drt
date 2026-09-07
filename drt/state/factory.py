@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from drt.config.base import ProjectConfig
+from drt.state.audit_trail import ComplianceAuditTrail
 from drt.state.dlq import DlqBackend, LocalDlqStore
 from drt.state.history import HistoryStore, LocalHistoryManager
 from drt.state.idempotency import IdempotencyLedger
@@ -19,16 +20,18 @@ _SUPPORTED_BACKENDS = {"local", "gcs", "s3", "warehouse"}
 class StateBundle:
     """The persistence surfaces selected by ``project.state``.
 
-    ``ledger`` (#1099) is ``None`` for every backend except ``warehouse``
-    with ``state.idempotency: true`` — every other configuration has no
-    idempotency ledger available, matching how ``history`` is already
-    ``None``-able per ``history.enabled`` at call sites.
+    ``ledger`` (#1099) and ``audit_trail`` (#1100) are ``None`` for every
+    backend except ``warehouse`` with, respectively, ``state.idempotency:
+    true`` / ``state.audit_trail.enabled: true`` — every other
+    configuration has neither available, matching how ``history`` is
+    already ``None``-able per ``history.enabled`` at call sites.
     """
 
     state: StateStore
     history: HistoryStore
     dlq: DlqBackend
     ledger: IdempotencyLedger | None = None
+    audit_trail: ComplianceAuditTrail | None = None
 
 
 _CacheKey = tuple[
@@ -45,6 +48,9 @@ _CacheKey = tuple[
     str | None,
     int,
     bool,
+    bool,
+    int | None,
+    tuple[str, ...],
 ]
 _bundle_cache: dict[_CacheKey, StateBundle] = {}
 _bundle_lock = threading.Lock()
@@ -86,6 +92,9 @@ def build_state_bundle(project: ProjectConfig, project_dir: Path) -> StateBundle
         project.state.connection_profile,
         project.history.max_entries,
         project.state.idempotency,
+        project.state.audit_trail.enabled,
+        project.state.audit_trail.retain_days,
+        tuple(project.state.audit_trail.fields),
     )
     with _bundle_lock:
         bundle = _bundle_cache.get(key)
@@ -99,6 +108,7 @@ def build_state_bundle(project: ProjectConfig, project_dir: Path) -> StateBundle
             elif backend == "warehouse":
                 from drt.config.credentials import PostgresProfile, load_profile
                 from drt.state.warehouse import (
+                    PostgresComplianceAuditTrail,
                     PostgresWarehouseDlqBackend,
                     PostgresWarehouseHistoryStore,
                     PostgresWarehouseIdempotencyLedger,
@@ -122,6 +132,11 @@ def build_state_bundle(project: ProjectConfig, project_dir: Path) -> StateBundle
                     ledger=(
                         PostgresWarehouseIdempotencyLedger(profile)
                         if project.state.idempotency
+                        else None
+                    ),
+                    audit_trail=(
+                        PostgresComplianceAuditTrail(profile)
+                        if project.state.audit_trail.enabled
                         else None
                     ),
                 )
