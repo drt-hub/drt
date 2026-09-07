@@ -1242,6 +1242,34 @@ class TestDiffIncrementalStrategy:
             )
 
 
+class TestMirrorDiffStrategy:
+    """``sync.mirror.strategy: diff`` (#1110) — a third mirror-delete strategy
+    consuming #755's removed-key list directly."""
+
+    def test_diff_strategy_requires_diff_incremental_strategy(self) -> None:
+        with pytest.raises(ValueError, match="requires sync.incremental_strategy: diff"):
+            SyncOptions(mode="mirror", mirror={"strategy": "diff"})
+
+    def test_diff_strategy_accepted_with_diff_incremental_strategy(self) -> None:
+        opts = SyncOptions(mode="mirror", incremental_strategy="diff", mirror={"strategy": "diff"})
+        assert opts.mirror is not None
+        assert opts.mirror.strategy == "diff"
+
+    def test_diff_strategy_rejects_scope(self) -> None:
+        with pytest.raises(ValueError, match="does not accept sync.mirror.scope"):
+            SyncOptions(
+                mode="mirror",
+                incremental_strategy="diff",
+                mirror={"strategy": "diff", "scope": ["tenant_id"]},
+            )
+
+    def test_destination_strategy_unaffected_by_diff_incremental_strategy(self) -> None:
+        """Existing strategies keep working unchanged when incremental_strategy
+        is diff — mirror.strategy: diff is opt-in, not implied."""
+        opts = SyncOptions(mode="mirror", incremental_strategy="diff")
+        assert opts.mirror is None
+
+
 class TestSnowflakeKeyPairAuth:
     """Snowflake key-pair auth config surface (#737)."""
 

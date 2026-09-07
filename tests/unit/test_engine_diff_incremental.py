@@ -99,6 +99,14 @@ def _make_profile() -> BigQueryProfile:
 def _make_diff_sync(
     mode: str = "upsert", batch_size: int = 10, mask: dict[str, Any] | None = None
 ) -> SyncConfig:
+    sync_opts: dict[str, Any] = {
+        "mode": mode,
+        "incremental_strategy": "diff",
+        "batch_size": batch_size,
+        **({"mirror": {"strategy": "destination"}} if mode == "mirror" else {}),
+    }
+    if mask:
+        sync_opts["mask"] = mask
     return SyncConfig.model_validate(
         {
             "name": "diff_sync",
@@ -112,13 +120,7 @@ def _make_diff_sync(
                 "table": "public.scores",
                 "upsert_key": ["id"],
             },
-            "sync": {
-                "mode": mode,
-                "incremental_strategy": "diff",
-                "batch_size": batch_size,
-                **({"mirror": {"strategy": "destination"}} if mode == "mirror" else {}),
-                **({"mask": mask} if mask else {}),
-            },
+            "sync": sync_opts,
         }
     )
 
@@ -141,21 +143,31 @@ def test_diff_strategy_chains_added_and_changed_into_the_load_path(tmp_path: Pat
 
 
 def test_diff_removed_keys_are_masked_like_the_main_record_batch(tmp_path: Path) -> None:
-    """upsert_key columns under sync.mask must be masked in
-    SyncResult.diff_removed_keys the same way they're masked in the
-    added/changed record_batch — otherwise a masked key's raw value leaks
-    through the removed-keys result."""
+    """Regression for a Codex-review finding on #1110:
+    _finalize_mirror_diff deletes destination rows using these exact key
+    values. If `upsert_key` is also a masked column, the destination stores
+    the *masked* value (mask applies to every batch before load()), so an
+    unmasked delete key would never match the row actually sitting there —
+    permanently stranding it. Removed keys must go through the same mask
+    transform the main record_batch does."""
     source = FakeSnapshotDiffSource(
-        added=[{"id": 1}],
+        added=[],
         changed=[],
-        removed_keys=[{"id": 4}],
+        removed_keys=[{"id": "alice@example.com"}],
     )
     dest = FakeDestination()
-    sync = _make_diff_sync(mask={"id": "redact"})
+    sync = _make_diff_sync(mask={"id": "hash"})
 
     result = run_sync(sync, source, dest, _make_profile(), tmp_path)
 
-    assert result.diff_removed_keys == [{"id": "[REDACTED]"}]
+    assert result.diff_removed_keys is not None
+    assert result.diff_removed_keys[0]["id"] != "alice@example.com"
+    # hash strategy is deterministic -- same value, hashed the same way
+    # apply_mask would hash it directly, proven by re-running it.
+    from drt.engine.masking import apply_mask
+
+    expected = apply_mask([{"id": "alice@example.com"}], {"id": "hash"})
+    assert result.diff_removed_keys == expected
 
 
 def test_diff_strategy_commits_snapshot_on_success(tmp_path: Path) -> None:

@@ -1237,6 +1237,94 @@ class TestComputeDiffMirrorDestination:
 
 
 # ---------------------------------------------------------------------------
+# Mirror mode: strategy: diff (#1110)
+# ---------------------------------------------------------------------------
+
+
+def _mirror_diff_options(diff_removed_keys: list[dict[str, Any]] | None) -> SyncOptions:
+    options = SyncOptions(
+        mode="mirror",
+        incremental_strategy="diff",
+        mirror={"strategy": "diff"},  # type: ignore[arg-type]
+    )
+    # Smuggled onto the instance the same way the engine does at run time
+    # (drt/engine/sync.py) — SyncOptions._diff_removed_keys, not a YAML field.
+    options._diff_removed_keys = diff_removed_keys
+    return options
+
+
+class TestComputeDiffMirrorDiffStrategy:
+    """Regression for a Codex-review finding on #1110: the dry-run preview
+    never had a branch for ``mirror.strategy: diff`` at all, so it silently
+    reported zero deletions regardless of what the real run would delete —
+    contradicting the real ``_finalize_mirror_diff`` behavior."""
+
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_previews_diff_strategy_deletes_from_removed_keys(self, mock_fetch_keys: Any) -> None:
+        mock_fetch_keys.return_value = [{"id": "a", "score": 0.9}]
+
+        result = compute_diff(
+            [{"id": "a", "score": 0.9}],
+            _pg_config(),
+            _mirror_diff_options([{"id": "c"}]),
+            limit=20,
+        )
+
+        assert result.supported
+        assert result.deleted == [{"id": "c"}]
+        assert result.delete_reason == "mirror"
+
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_no_destination_read_needed_for_the_delete_half(self, mock_fetch_keys: Any) -> None:
+        """Unlike tracked/destination, the diff strategy's delete set comes
+        entirely from the engine-computed removed-key list -- no additional
+        destination fetch beyond the ordinary add/update keyed lookup."""
+        mock_fetch_keys.return_value = []
+
+        compute_diff(
+            [{"id": "a"}],
+            _pg_config(),
+            _mirror_diff_options([{"id": "c"}]),
+            limit=20,
+        )
+
+        mock_fetch_keys.assert_called_once()
+
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_empty_removed_keys_previews_no_deletions(self, mock_fetch_keys: Any) -> None:
+        mock_fetch_keys.return_value = []
+
+        result = compute_diff(
+            [{"id": "a"}],
+            _pg_config(),
+            _mirror_diff_options([]),
+            limit=20,
+        )
+
+        assert result.deleted == []
+        assert result.delete_reason is None
+
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_missing_diff_removed_keys_attribute_previews_no_deletions(
+        self, mock_fetch_keys: Any
+    ) -> None:
+        """A dry run that never actually extracted (e.g. an error before
+        this point) must degrade to "nothing to preview", not crash on a
+        missing private attribute."""
+        mock_fetch_keys.return_value = []
+
+        result = compute_diff(
+            [{"id": "a"}],
+            _pg_config(),
+            _mirror_diff_options(None),
+            limit=20,
+        )
+
+        assert result.deleted == []
+        assert result.delete_reason is None
+
+
+# ---------------------------------------------------------------------------
 # DiffResult helpers
 # ---------------------------------------------------------------------------
 

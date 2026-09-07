@@ -199,6 +199,14 @@ class BaseSqlDestination:
         pymysql needs an explicit ``%s`` list) — comes from the
         ``_build_mirror_delete`` hook.
         """
+        # mirror.strategy: diff (#1110) — exact removed-key list from #755's
+        # source-side snapshot diff, independent of self._mirror_keys (a run
+        # that added/changed nothing this batch cycle can still have rows to
+        # delete, and vice versa) — checked before the empty-keys guard below,
+        # which is specific to the destination/tracked anti-join strategies.
+        if sync_options.mirror is not None and sync_options.mirror.strategy == "diff":
+            return self._finalize_mirror_diff(config, sync_options)
+
         if not self._mirror_keys:
             return None
 
@@ -238,6 +246,41 @@ class BaseSqlDestination:
         # SyncResult has no dedicated `deleted` field; future work tracks
         # this separately. Returning a bare SyncResult signals "finalize
         # ran successfully" to the engine without inflating success/failed.
+        return SyncResult()
+
+    def _finalize_mirror_diff(self, config: Any, sync_options: SyncOptions) -> SyncResult | None:
+        """``mirror.strategy: diff`` (#1110) — DELETE exactly the keys
+        ``sync.incremental_strategy: diff`` (#755) classified as removed.
+
+        Reuses ``_build_mirror_delete`` with ``negate=False`` — the same
+        "delete exactly these keys" form ``_finalize_mirror_tracked`` already
+        uses, just fed from the engine-smuggled ``_diff_removed_keys``
+        (``SyncOptions``, see ``drt/engine/sync.py``) instead of a
+        destination-side tracked-key state table. No new dialect code: every
+        dialect implementing ``_build_mirror_delete`` gets this strategy for
+        free.
+
+        Returns ``None`` (no DELETE issued) when nothing was removed this
+        run — covers both "no previous snapshot to diff against" (first
+        run) and "diff ran, found no removed rows".
+        """
+        removed_keys = getattr(sync_options, "_diff_removed_keys", None)
+        if not removed_keys:
+            return None
+        upsert_cols = config.upsert_key
+        keys = [tuple(row[col] for col in upsert_cols) for row in removed_keys]
+
+        conn = self._dialect_connect(config, getattr(sync_options, "_query_tags", None))
+        try:
+            cur = _tagged_cursor(conn.cursor(), sync_options)
+            stmt, params = self._build_mirror_delete(
+                self._mirror_table_ident(config), upsert_cols, keys, negate=False
+            )
+            cur.execute(stmt, params)
+            self._commit_mirror(conn)
+        finally:
+            conn.close()
+
         return SyncResult()
 
     def _resolve_schema(self, config: Any) -> dict[str, str] | None:

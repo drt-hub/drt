@@ -728,11 +728,27 @@ def _run_sync_body(
                 hash_columns=sync.sync.diff.hash_columns,
                 query_tags=query_tags,
             )
-            # Masked before SyncResult.diff_removed_keys is populated below —
-            # otherwise an upsert_key column configured under sync.mask would
-            # leak its raw value through the removed-keys result while the
-            # main added/changed record_batch masks the same column.
+            # Masked before SyncResult.diff_removed_keys is populated below,
+            # and before the _diff_removed_keys smuggle just underneath —
+            # both the removed-keys observability result and
+            # _finalize_mirror_diff's destination-side DELETE need the
+            # masked value: mask (e.g. `upsert_key: [email]` + `mask: {email:
+            # hash}`) means the destination stores the *masked* value for
+            # that column, not the raw one these dicts come with straight
+            # from the source snapshot comparison — deleting with the raw
+            # value would never match the masked row actually sitting there,
+            # permanently stranding it. field_mappings intentionally isn't
+            # applied here: `key_columns` above is already `upsert_key`
+            # (destination-facing) passed straight into the *source* query,
+            # so a field_mappings rename of an upsert_key column doesn't fit
+            # this strategy's extraction step either, independent of this.
             diff_removed_keys = apply_mask(list(diff_result.removed_keys), sync.sync.mask)
+            # Smuggled to the destination side the same way _query_tags/
+            # _sync_name already are (#1110) — mirror.strategy: diff reads
+            # this in BaseSqlDestination._finalize_mirror_diff instead of
+            # finalize_sync()'s duck-typed signature growing a parameter
+            # every other dialect's implementation would have to ignore.
+            sync.sync._diff_removed_keys = diff_removed_keys
         records_iter = _wrap_stage_ctx(chain(diff_result.added, diff_result.changed), "source")
     else:
         records_iter = _staged_source_iter(

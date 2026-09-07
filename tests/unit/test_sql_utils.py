@@ -13,6 +13,7 @@ from drt.destinations.sql_utils import (
     check_mirror_supported,
     check_scope_subset_of_upsert_key,
     get_row_count_for_destination,
+    unsupported_diff_strategy_msg,
     unsupported_tracked_scope_msg,
 )
 
@@ -127,6 +128,36 @@ def test_check_mirror_supported_rejects_tracked_and_scope() -> None:
         check_mirror_supported(cfg, _mirror_opts(strategy="tracked"), "newdialect")
     with pytest.raises(ValueError, match="not yet supported on newdialect"):
         check_mirror_supported(cfg, _mirror_opts(scope=["parent_id"]), "newdialect")
+
+
+def test_unsupported_diff_strategy_message_names_dialect() -> None:
+    msg = unsupported_diff_strategy_msg("clickhouse")
+    assert msg == (
+        "mirror.strategy: diff is not supported on clickhouse — its own "
+        "_finalize_mirror() does not implement it (supported: postgres, mysql, "
+        "snowflake)."
+    )
+
+
+def test_check_mirror_supported_rejects_diff_by_default() -> None:
+    """Regression for a Codex-review finding on #1110: ClickHouse and
+    Databricks each carry their own _finalize_mirror() that has no concept
+    of mirror.strategy: diff — reaching it with delta-only keys would run
+    the wrong deletion algorithm rather than erroring. Both call
+    check_mirror_supported without supports_diff_strategy, so they get this
+    rejection for free; exercised directly here with a placeholder dialect."""
+    cfg = SimpleNamespace(upsert_key=["id"])
+    with pytest.raises(ValueError, match="not supported on newdialect"):
+        check_mirror_supported(cfg, _mirror_opts(strategy="diff"), "newdialect")
+
+
+def test_check_mirror_supported_allows_diff_when_dialect_opts_in() -> None:
+    """Snowflake inherits BaseSqlDestination._finalize_mirror(), which does
+    implement diff — its call site passes supports_diff_strategy=True."""
+    cfg = SimpleNamespace(upsert_key=["id"])
+    check_mirror_supported(
+        cfg, _mirror_opts(strategy="diff"), "snowflake", supports_diff_strategy=True
+    )
 
 
 def test_check_mirror_supported_ok_for_plain_mirror() -> None:
