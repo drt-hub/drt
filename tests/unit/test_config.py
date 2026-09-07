@@ -1084,6 +1084,77 @@ class TestMirrorScope:
             SyncOptions(mode="mirror", mirror={"scope": []})
 
 
+class TestDiffIncrementalStrategy:
+    """``sync.incremental_strategy: diff`` + ``sync.diff`` (#755)."""
+
+    def test_default_strategy_is_cursor(self) -> None:
+        opts = SyncOptions(mode="upsert")
+        assert opts.incremental_strategy == "cursor"
+        assert opts.diff is None
+
+    def test_diff_requires_upsert_or_mirror_mode(self) -> None:
+        with pytest.raises(ValueError, match="requires mode: upsert or mode: mirror"):
+            SyncOptions(mode="full", incremental_strategy="diff")
+
+    def test_diff_rejected_with_incremental_mode(self) -> None:
+        with pytest.raises(ValueError, match="requires mode: upsert or mode: mirror"):
+            SyncOptions(
+                mode="incremental",
+                cursor_field="updated_at",
+                incremental_strategy="diff",
+            )
+
+    def test_diff_rejected_with_replace_mode(self) -> None:
+        with pytest.raises(ValueError, match="requires mode: upsert or mode: mirror"):
+            SyncOptions(mode="replace", incremental_strategy="diff")
+
+    def test_diff_accepted_with_upsert_mode(self) -> None:
+        opts = SyncOptions(mode="upsert", incremental_strategy="diff")
+        assert opts.diff is not None
+        assert opts.diff.hash_columns == "all"
+
+    def test_diff_accepted_with_mirror_mode(self) -> None:
+        opts = SyncOptions(mode="mirror", incremental_strategy="diff")
+        assert opts.diff is not None
+
+    def test_diff_rejects_cursor_field(self) -> None:
+        with pytest.raises(ValueError, match="cursor_field is for the 'cursor' strategy"):
+            SyncOptions(
+                mode="upsert",
+                incremental_strategy="diff",
+                cursor_field="updated_at",
+            )
+
+    def test_diff_block_defaults_when_omitted(self) -> None:
+        """diff defaults to DiffConfig() so downstream code never has to
+        fall back to None — see the engine's ``assert sync.sync.diff is not
+        None`` right before it reads ``diff.hash_columns``."""
+        opts = SyncOptions(mode="upsert", incremental_strategy="diff")
+        assert opts.diff is not None
+        assert opts.diff.hash_columns == "all"
+
+    def test_diff_block_requires_diff_strategy(self) -> None:
+        with pytest.raises(ValueError, match="sync.diff is only valid"):
+            SyncOptions(mode="upsert", diff={"hash_columns": "all"})
+
+    def test_explicit_hash_columns_accepted(self) -> None:
+        opts = SyncOptions(
+            mode="upsert",
+            incremental_strategy="diff",
+            diff={"hash_columns": ["email", "plan"]},
+        )
+        assert opts.diff is not None
+        assert opts.diff.hash_columns == ["email", "plan"]
+
+    def test_empty_hash_columns_list_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            SyncOptions(
+                mode="upsert",
+                incremental_strategy="diff",
+                diff={"hash_columns": []},
+            )
+
+
 class TestSnowflakeKeyPairAuth:
     """Snowflake key-pair auth config surface (#737)."""
 

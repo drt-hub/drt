@@ -1018,6 +1018,29 @@
       "title": "DegradedConditions",
       "type": "object"
     },
+    "DiffConfig": {
+      "description": "``sync.diff`` \u2014 options for ``incremental_strategy: diff`` (#755).\n\nWarehouse-side snapshot diff: each run's full model result is snapshotted\ninto a drt-managed table in the *source* warehouse and compared against\nthe previous run's snapshot via a server-side SQL JOIN, classifying every\nrow as added / changed / removed. The fit for curated marts with no\n``updated_at`` column (no cursor to filter on) and no way for\ncursor-based incremental to ever detect a delete.\n\nDeliberately no ``schema`` field here \u2014 the managed schema name is the\nsource profile's own ``managed_schema`` (#960, ``PostgresProfile``), not\na second, independently-settable knob that could disagree with it.\nLikewise no ``state`` field: the snapshot always lives in the source\nwarehouse (the only warehouse #960's ``ManagedTableCapable`` primitive\ncan reach) \u2014 there is nowhere else for it to live until a destination-side\nmanaged-table primitive exists, which is out of scope (see #960's own\ndocstring on why that's a deliberately separate feature).",
+      "properties": {
+        "hash_columns": {
+          "anyOf": [
+            {
+              "const": "all",
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "default": "all",
+          "title": "Hash Columns"
+        }
+      },
+      "title": "DiffConfig",
+      "type": "object"
+    },
     "DiscordDestinationConfig": {
       "properties": {
         "type": {
@@ -4608,6 +4631,26 @@
           ],
           "default": null,
           "title": "Cursor Field"
+        },
+        "incremental_strategy": {
+          "default": "cursor",
+          "enum": [
+            "cursor",
+            "diff"
+          ],
+          "title": "Incremental Strategy",
+          "type": "string"
+        },
+        "diff": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DiffConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "watermark": {
           "anyOf": [

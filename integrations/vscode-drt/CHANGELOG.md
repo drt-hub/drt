@@ -6,6 +6,10 @@ drt-core version its bundled schemas were generated from.
 
 ## [0.1.13] - Unreleased
 
+- Bundled JSON Schemas regenerated from drt-core: `sync` gains
+  `incremental_strategy: cursor | diff` (default `cursor`, unchanged) and a
+  `diff` block (`hash_columns`) for warehouse-side snapshot-diff incremental
+  extraction on models with no cursor column (drt-hub/drt#755).
 - Bundled JSON Schemas regenerated from drt-core: the `klaviyo` destination
   gains an `endpoint: profile | event` mode plus `metric_name`,
   `metric_name_field`, `time_field`, `value_field`, and `unique_id_field` for
