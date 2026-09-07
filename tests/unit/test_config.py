@@ -34,7 +34,6 @@ from drt.config.parser import expand_env_vars, load_project, load_syncs
 from drt.config.profiles import (
     DEFAULT_FETCH_SIZE,
     DuckDBProfile,
-    PostgresProfile,
     RedshiftProfile,
     SQLiteProfile,
     SQLServerProfile,
