@@ -149,6 +149,7 @@ def build(
         log_json=False,
         cursor_value=None,
         run_id=new_run_id(),
+        idempotency_ledger=state_bundle.ledger,
     )
 
     entries: list[dict[str, object]] = []

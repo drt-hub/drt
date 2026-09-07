@@ -194,6 +194,32 @@ def _compute_idempotency_key(template: str, record: dict[str, Any]) -> str | Non
         return None
 
 
+def _successful_indices(record_batch: list[dict[str, Any]], result: SyncResult) -> set[int]:
+    """Indices into ``record_batch`` this ``load()`` call actually reported
+    success for, or an empty set when that can't be determined safely.
+
+    Every ``RowError.batch_index`` is excluded (a positive, per-row
+    failure signal). But some destinations skip a row *without* recording
+    a ``RowError`` — ``match_policy: update_only``/``create_only``'s
+    ``skipped_no_match`` (#757) is a bare counter with no per-row index at
+    all. Treating "not in row_errors" as "therefore delivered" would
+    wrongly mark a skipped-no-match row as successfully delivered (caught
+    in Codex review on #1100, which shares this helper): a real, silent
+    compliance/idempotency-ledger false positive, since a skip is neither
+    a failure nor a delivery. So whenever this batch reports *any* skip
+    (``result.skipped``, which ``skipped_no_match`` is a documented subset
+    of), this returns an empty set rather than guess — fail closed, not
+    open: missing one batch's dedup/audit protection is a far smaller cost
+    than permanently marking a never-delivered record as delivered.
+    """
+    if result.skipped > 0:
+        return set()
+    failed_indices = {
+        err.batch_index for err in result.row_errors if 0 <= err.batch_index < len(record_batch)
+    }
+    return {i for i in range(len(record_batch)) if i not in failed_indices}
+
+
 def batch(iterable: Iterator[Any], size: int) -> Iterator[list[Any]]:
     """Yield successive batches of `size` from an iterator."""
     chunk: list[Any] = []
@@ -733,12 +759,21 @@ def _run_sync_body(
     dry_run_records: list[dict[str, Any]] = []
 
     # Idempotency ledger (#1099) — resolve the dedup key template once, not
-    # per batch. `is_staged` destinations are out of scope for the first cut
-    # (their "success" is determined at finalize(), not per stage() call,
-    # which doesn't fit this per-record check/mark shape).
+    # per batch. Two destination shapes are out of scope for the first cut,
+    # both because a batch's reported success there isn't the same thing as
+    # "actually delivered":
+    #  - `is_staged` destinations: success is determined at finalize(), not
+    #    per stage() call.
+    #  - `mode: replace, replace_strategy: swap`: each batch's SQL writes to
+    #    a shadow table (BaseSqlDestination._load_replace_swap), and the
+    #    real cutover only happens in a *separate*, later finalize_sync()
+    #    rename/swap call. Marking here would claim delivery for rows a
+    #    failed rename never actually put in the real target table (caught
+    #    in Codex review on #1100, which shares this gate).
+    _swap_mode = sync.sync.mode == "replace" and sync.sync.replace_strategy == "swap"
     idempotency_key_template: str | None = (
         _resolve_idempotency_key_template(sync)
-        if idempotency_ledger is not None and not is_staged
+        if idempotency_ledger is not None and not is_staged and not _swap_mode
         else None
     )
 
@@ -934,26 +969,19 @@ def _run_sync_body(
                 total_result.row_errors.extend(getattr(result, "row_errors", []))
 
                 # Idempotency ledger mark (#1099) — only for records this
-                # load() call actually reported success for. `result.
-                # row_errors[*].batch_index` indexes into the `record_batch`
-                # just sent, so excluding those indices is the same
-                # correlation `DeadLetter` construction below already relies
-                # on. Marking here (not deferred to sync end) keeps the
-                # crash-loses-dedup-info window scoped to one batch, not the
-                # whole run — this fires on the common/success path, unlike
-                # DLQ's rare-path buffering.
+                # load() call actually reported success for. Marking here
+                # (not deferred to sync end) keeps the crash-loses-dedup-
+                # info window scoped to one batch, not the whole run — this
+                # fires on the common/success path, unlike DLQ's rare-path
+                # buffering.
                 if idempotency_ledger is not None and any(
                     key is not None for key in batch_idempotency_keys
                 ):
-                    failed_indices = {
-                        err.batch_index
-                        for err in result.row_errors
-                        if 0 <= err.batch_index < len(record_batch)
-                    }
+                    successful_indices = _successful_indices(record_batch, result)
                     delivered_keys = [
                         key
                         for i, key in enumerate(batch_idempotency_keys)
-                        if key is not None and i not in failed_indices
+                        if key is not None and i in successful_indices
                     ]
                     if delivered_keys:
                         with _stage_ctx("state"):

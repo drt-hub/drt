@@ -77,6 +77,40 @@ class PartialFailureDestination:
         return result
 
 
+class SkippedNoMatchDestination:
+    """Reports one row as `skipped_no_match` (#757's match_policy skip) with
+    NO corresponding RowError — the exact shape a bare counter with no
+    per-row index produces. Every other row succeeds."""
+
+    def __init__(self, skip_index: int) -> None:
+        self.skip_index = skip_index
+        self.calls: list[list[dict]] = []
+
+    def load(
+        self, records: list[dict], config: DestinationConfig, sync_options: SyncOptions
+    ) -> SyncResult:
+        self.calls.append(records)
+        result = SyncResult()
+        result.success = len(records) - 1
+        result.skipped = 1
+        result.skipped_no_match = 1
+        return result
+
+
+class ReplaceCapableDestination:
+    """Declares ModeCapable(replace) so `mode: replace, replace_strategy:
+    swap` clears the engine's fail-fast mode check — every batch reports
+    success, mirroring the real dialects' shadow-table write."""
+
+    def supported_modes(self) -> frozenset[str]:
+        return frozenset({"replace"})
+
+    def load(
+        self, records: list[dict], config: DestinationConfig, sync_options: SyncOptions
+    ) -> SyncResult:
+        return SyncResult(success=len(records))
+
+
 class RaisingDestination:
     """Raises instead of returning a SyncResult — the whole-batch failure
     case where nothing was ever confirmed successful."""
@@ -247,6 +281,67 @@ def test_mark_delivered_excludes_rows_load_reported_as_failed(tmp_path: Path) ->
     mark_calls = [call for call in ledger.calls if call[0] == "mark_delivered"]
     assert len(mark_calls) == 1
     assert mark_calls[0][2] == ("2",)  # id=1 failed and must not be marked
+
+
+def test_mark_delivered_never_fires_for_a_batch_containing_an_unattributed_skip(
+    tmp_path: Path,
+) -> None:
+    """Regression for a Codex-review finding on #1100 (shared via
+    _successful_indices, so it applies here too): match_policy's
+    skipped_no_match (#757) is a bare counter with no per-row batch_index,
+    unlike a RowError. Treating "not in row_errors" as "therefore
+    delivered" would wrongly mark the skipped row as delivered forever.
+    The fix fails closed for the WHOLE batch when any unattributed skip is
+    present, rather than guessing which index it was."""
+    ledger = FakeLedger()
+    dest = SkippedNoMatchDestination(skip_index=0)
+
+    run_sync(
+        _make_sync(idempotency_key="{{ row.id }}"),
+        FakeSource([{"id": 1}, {"id": 2}]),
+        dest,
+        _make_profile(),
+        tmp_path,
+        idempotency_ledger=ledger,
+    )
+
+    assert not any(call[0] == "mark_delivered" for call in ledger.calls)
+
+
+def test_swap_mode_replace_never_uses_the_ledger(tmp_path: Path) -> None:
+    """`mode: replace, replace_strategy: swap` writes each batch to a
+    shadow table (BaseSqlDestination._load_replace_swap); the real cutover
+    only happens in a later, separate finalize_sync() rename. Marking
+    delivery per-batch here would claim success for rows a failed rename
+    never actually put in the real target table (Codex review on #1100,
+    which shares this gate)."""
+    ledger = FakeLedger()
+    dest = ReplaceCapableDestination()
+    sync = SyncConfig.model_validate(
+        {
+            "name": "test_sync",
+            "model": "ref('table')",
+            "destination": {
+                "type": "postgres",
+                "host": "h",
+                "dbname": "d",
+                "table": "t",
+                "upsert_key": ["id"],
+            },
+            "sync": {"batch_size": 10, "mode": "replace", "replace_strategy": "swap"},
+        }
+    )
+
+    run_sync(
+        sync,
+        FakeSource([{"id": 1}]),
+        dest,
+        _make_profile(),
+        tmp_path,
+        idempotency_ledger=ledger,
+    )
+
+    assert not any(call[0] in ("already_delivered", "mark_delivered") for call in ledger.calls)
 
 
 def test_mark_delivered_never_called_when_load_raises(tmp_path: Path) -> None:
