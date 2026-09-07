@@ -94,6 +94,28 @@ def unsupported_tracked_scope_msg(dialect: str) -> str:
     )
 
 
+def unsupported_diff_strategy_msg(dialect: str) -> str:
+    """Message for ``mirror.strategy: diff`` (#1110) on a destination whose
+    ``_finalize_mirror()`` doesn't go through ``BaseSqlDestination``'s shared
+    implementation.
+
+    ClickHouse and Databricks each carry their own bespoke ``_finalize_mirror()``
+    (mutation-based / staged-key deletion respectively, #720) that has no
+    concept of ``mirror.strategy: diff`` at all — reaching it with delta
+    (added+changed-only) keys as though they were the complete source would
+    silently run the wrong deletion algorithm (caught in Codex review: a
+    ``destination``-strategy whole-table `NOT IN` delete against a partial
+    key list deletes unchanged rows, or a removal-only run deletes nothing).
+    Postgres/MySQL/Snowflake all inherit the shared finalizer and support
+    ``diff`` from day one, so this only fires for the two dialects with their
+    own finalizer — never a config error on the other three."""
+    return (
+        f"mirror.strategy: diff is not supported on {dialect} — its own "
+        "_finalize_mirror() does not implement it (supported: postgres, mysql, "
+        "snowflake)."
+    )
+
+
 def scope_not_subset_of_upsert_key_msg(scope: list[str], upsert_key: list[str] | None) -> str:
     return (
         "mirror.scope columns must be part of destination.upsert_key when combined "
@@ -125,7 +147,12 @@ def check_scope_subset_of_upsert_key(config: Any, sync_options: Any) -> None:
 
 
 def check_mirror_supported(
-    config: Any, sync_options: Any, dialect: str, *, supports_tracked_scope: bool = False
+    config: Any,
+    sync_options: Any,
+    dialect: str,
+    *,
+    supports_tracked_scope: bool = False,
+    supports_diff_strategy: bool = False,
 ) -> None:
     """Fail fast on a ``sync.mode: mirror`` config a SQL destination can't serve.
 
@@ -133,6 +160,12 @@ def check_mirror_supported(
     - ``mirror.strategy: tracked`` / ``mirror.scope`` are opt-in per dialect
       (``supports_tracked_scope``) — reject them where unsupported rather
       than silently falling back to the (co-writer-unsafe) destination diff.
+    - ``mirror.strategy: diff`` (#1110) is opt-in per dialect too
+      (``supports_diff_strategy``) — reject it where the dialect's
+      ``_finalize_mirror()`` doesn't go through the shared base
+      implementation that knows about it (caught in Codex review: reaching
+      an incompatible finalizer with delta-only keys runs the wrong
+      deletion algorithm rather than erroring).
     - where supported, ``scope`` + ``strategy: tracked`` additionally requires
       ``scope ⊆ upsert_key`` (#694).
 
@@ -150,6 +183,12 @@ def check_mirror_supported(
         and (sync_options.mirror.strategy == "tracked" or sync_options.mirror.scope)
     ):
         raise ValueError(unsupported_tracked_scope_msg(dialect))
+    if (
+        not supports_diff_strategy
+        and sync_options.mirror is not None
+        and sync_options.mirror.strategy == "diff"
+    ):
+        raise ValueError(unsupported_diff_strategy_msg(dialect))
     check_scope_subset_of_upsert_key(config, sync_options)
 
 

@@ -284,6 +284,27 @@ def test_mirror_raises_when_upsert_key_missing() -> None:
     client.insert.assert_not_called()
 
 
+def test_mirror_raises_for_diff_strategy() -> None:
+    """Regression for a Codex-review finding on #1110: ClickHouse's own
+    ``finalize_sync``/mirror-delete implementation (ALTER TABLE ... DELETE
+    mutation, this module's whole subject) has no concept of
+    ``mirror.strategy: diff`` — it only knows ``destination``/``tracked``.
+    Reaching it with delta-only (added+changed) keys instead of the full
+    source would run its whole-table ``NOT IN`` delete against a partial
+    key list, deleting unchanged destination rows. Must fail fast at
+    load(), before any INSERT."""
+    dest = ClickHouseDestination()
+    client = _fake_client()
+    config = _config()
+    opts = _options(incremental_strategy="diff", mirror={"strategy": "diff"})
+
+    with patch.object(ClickHouseDestination, "_connect", return_value=client):
+        with pytest.raises(ValueError, match="mirror.strategy: diff is not supported"):
+            dest.load([{"id": 1, "score": 100}], config, opts)
+
+    client.insert.assert_not_called()
+
+
 def test_mirror_excludes_failed_record_keys_from_accumulation() -> None:
     """Records whose batch_index appears in row_errors are skipped from ``_mirror_keys``.
 
