@@ -319,6 +319,7 @@ def load_profile(profile_name: str, config_dir: Path | None = None) -> ProfileCo
             password_env=raw.get("password_env"),
             password=raw.get("password"),
             fetch_size=int(raw.get("fetch_size", DEFAULT_FETCH_SIZE)),
+            managed_schema=raw.get("managed_schema", "_drt"),
         )
 
     if source_type == "redshift":
@@ -611,6 +612,8 @@ def save_profile(
             entry["password_env"] = profile.password_env
         if profile.fetch_size != DEFAULT_FETCH_SIZE:
             entry["fetch_size"] = profile.fetch_size
+        if profile.managed_schema != "_drt":
+            entry["managed_schema"] = profile.managed_schema
     elif isinstance(profile, RedshiftProfile):
         entry = {
             "type": "redshift",
