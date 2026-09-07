@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -29,7 +30,6 @@ from drt.config.profiles import (
     DuckDBProfile,
     PostgresProfile,
     RedshiftProfile,
-    SnowflakeProfile,
     SQLiteProfile,
     SQLServerProfile,
 )
@@ -462,17 +462,20 @@ def test_load_profile_fetch_size_default(tmp_path: Path, profile) -> None:
     assert loaded.fetch_size == DEFAULT_FETCH_SIZE
 
 
-def test_save_profile_writes_fetch_size_only_when_non_default(tmp_path: Path) -> None:
-    save_profile(
-        "custom",
-        PostgresProfile(type="postgres", host="h", dbname="d", user="u", fetch_size=2500),
-        config_dir=tmp_path,
-    )
-    save_profile(
-        "defaulted",
+@pytest.mark.parametrize(
+    "profile",
+    [
+        DuckDBProfile(type="duckdb", database=":memory:"),
+        SQLiteProfile(type="sqlite", database=":memory:"),
         PostgresProfile(type="postgres", host="h", dbname="d", user="u"),
-        config_dir=tmp_path,
-    )
+        RedshiftProfile(type="redshift", host="h", dbname="d", user="u"),
+        SnowflakeProfile(type="snowflake", account="a", user="u", database="d"),
+        SQLServerProfile(type="sqlserver", host="h", database="d", user="u"),
+    ],
+)
+def test_save_profile_writes_fetch_size_only_when_non_default(tmp_path: Path, profile) -> None:
+    save_profile("custom", replace(profile, fetch_size=2500), config_dir=tmp_path)
+    save_profile("defaulted", profile, config_dir=tmp_path)
     data = yaml.safe_load((tmp_path / "profiles.yml").read_text())
     profiles = data["profiles"]
     assert profiles["custom"]["fetch_size"] == 2500
