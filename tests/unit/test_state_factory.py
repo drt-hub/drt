@@ -346,8 +346,13 @@ def test_audit_trail_config_differentiates_cache_key(tmp_path: Path, monkeypatch
     assert with_audit.audit_trail is not None
 
 
-def test_warehouse_backend_rejects_non_postgres_profiles(tmp_path: Path, monkeypatch) -> None:
+def test_warehouse_backend_builds_snowflake_bundle(tmp_path: Path, monkeypatch) -> None:
     from drt.config.credentials import SnowflakeProfile
+    from drt.state.warehouse_snowflake import (
+        SnowflakeWarehouseDlqBackend,
+        SnowflakeWarehouseHistoryStore,
+        SnowflakeWarehouseStateStore,
+    )
 
     profile = SnowflakeProfile(type="snowflake", account="a", user="u", database="d")
     monkeypatch.setattr(
@@ -358,6 +363,51 @@ def test_warehouse_backend_rejects_non_postgres_profiles(tmp_path: Path, monkeyp
         name="test",
         state=StateConfig(backend="warehouse", connection_profile="sf_main"),
     )
+    bundle = build_state_bundle(project, tmp_path)
 
-    with pytest.raises(NotImplementedError, match="only supports Postgres.*snowflake"):
+    assert isinstance(bundle.state, SnowflakeWarehouseStateStore)
+    assert isinstance(bundle.history, SnowflakeWarehouseHistoryStore)
+    assert isinstance(bundle.dlq, SnowflakeWarehouseDlqBackend)
+    assert bundle.state._profile is profile
+    assert bundle.ledger is None
+
+
+def test_warehouse_backend_rejects_snowflake_idempotency(tmp_path: Path, monkeypatch) -> None:
+    """#1099's idempotency ledger has no Snowflake implementation yet (#1106
+    only ships state/history/DLQ) -- state.idempotency: true must fail loudly
+    rather than silently building a bundle with ledger=None."""
+    from drt.config.credentials import SnowflakeProfile
+
+    profile = SnowflakeProfile(type="snowflake", account="a", user="u", database="d")
+    monkeypatch.setattr(
+        "drt.config.credentials.load_profile", lambda name, config_dir=None: profile
+    )
+
+    project = ProjectConfig(
+        name="test",
+        state=StateConfig(
+            backend="warehouse", connection_profile="sf_main", idempotency=True
+        ),
+    )
+
+    with pytest.raises(NotImplementedError, match="idempotency.*not yet supported.*Snowflake"):
+        build_state_bundle(project, tmp_path)
+
+
+def test_warehouse_backend_rejects_unsupported_dialect_profiles(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from drt.config.credentials import MySQLProfile
+
+    profile = MySQLProfile(type="mysql", host="h", dbname="d", user="u")
+    monkeypatch.setattr(
+        "drt.config.credentials.load_profile", lambda name, config_dir=None: profile
+    )
+
+    project = ProjectConfig(
+        name="test",
+        state=StateConfig(backend="warehouse", connection_profile="mysql_main"),
+    )
+
+    with pytest.raises(NotImplementedError, match="only supports Postgres.*Snowflake.*mysql"):
         build_state_bundle(project, tmp_path)
