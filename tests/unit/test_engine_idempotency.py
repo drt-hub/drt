@@ -160,6 +160,56 @@ def test_already_delivered_records_are_filtered_before_load(tmp_path: Path) -> N
     assert dest.calls == [[{"id": 2}]]
 
 
+def test_whole_batch_of_duplicates_never_reaches_the_destination(tmp_path: Path) -> None:
+    """Every record in the batch already delivered -- the filtered
+    record_batch is empty, so the batch loop must `continue` without
+    calling destination.load() at all (not call it with an empty list)."""
+    ledger = FakeLedger(pre_delivered={"1", "2"})
+    dest = FakeDestination()
+
+    result = run_sync(
+        _make_sync(idempotency_key="{{ row.id }}"),
+        FakeSource([{"id": 1}, {"id": 2}]),
+        dest,
+        _make_profile(),
+        tmp_path,
+        idempotency_ledger=ledger,
+    )
+
+    assert result.skipped_duplicate == 2
+    assert result.success == 0
+    assert dest.calls == []
+
+
+def test_a_broken_key_template_disables_dedup_for_that_row_without_failing_it(
+    tmp_path: Path,
+) -> None:
+    """`_compute_idempotency_key` is best-effort by design (see its
+    docstring): a template referencing a column the row doesn't have must
+    disable ledger protection for that one row, not drop it or fail the
+    sync. render_value raises ValueError on a missing attribute (Jinja's
+    StrictUndefined, per computed_fields' own docstring) -- proving the
+    except-and-return-None path actually degrades gracefully rather than
+    just existing in the source."""
+    ledger = FakeLedger()
+    dest = FakeDestination()
+
+    result = run_sync(
+        _make_sync(idempotency_key="{{ row.does_not_exist }}"),
+        FakeSource([{"id": 1}]),
+        dest,
+        _make_profile(),
+        tmp_path,
+        idempotency_ledger=ledger,
+    )
+
+    assert result.success == 1
+    assert result.skipped_duplicate == 0
+    assert dest.calls == [[{"id": 1}]]
+    # No key was ever computable, so the ledger never sees this record.
+    assert not any(call[0] in ("already_delivered", "mark_delivered") for call in ledger.calls)
+
+
 def test_mark_delivered_never_called_before_load(tmp_path: Path) -> None:
     """Regression for the claim-before-send design bug caught before
     implementation (see #1099's issue comment): already_delivered (a read)
