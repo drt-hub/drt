@@ -58,6 +58,17 @@ Cross-dialect limitations documented on `warehouse.py` (no enforced
 per-project namespace; concurrent runs of the same sync can move a cursor
 backward under last-writer-wins) apply identically here — see that module's
 docstring rather than repeating it.
+
+**One more, raised in Codex review and checked against precedent rather than
+fixed here:** `DlqBackend.append`/`.replace()`/`.reconcile()` issue one
+`MERGE`/`INSERT`/`UPDATE` per dead-letter entry rather than a bounded
+multi-row batch — a sync producing thousands of dead letters means
+thousands of round trips. This is not a Snowflake-specific regression:
+`warehouse.py`'s Postgres implementation has the identical one-statement-
+per-entry loop today. Batching either dialect is a genuine improvement
+worth making, but doing it only for Snowflake here would leave the two
+implementations with different write-volume characteristics for no
+principled reason — tracked as a follow-up applying to both (#1121).
 """
 
 from __future__ import annotations

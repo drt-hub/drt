@@ -160,11 +160,18 @@ def test_state_store_upsert_read_and_reset_round_trip() -> None:
 
 
 def test_history_store_append_read_and_prune() -> None:
+    """Codex review: a hard-coded "recent" timestamp eventually ages past
+    any fixed retention_days, pruning both entries instead of one. The
+    surviving entry's timestamp is derived from the test's own current UTC
+    time instead, so this stays correct indefinitely."""
+    from datetime import datetime, timezone
+
     creds = _require_creds()
     profile = _profile(creds)
     history = SnowflakeWarehouseHistoryStore(profile)
     sync_a = f"orders_{uuid.uuid4().hex[:8]}"
     sync_b = f"customers_{uuid.uuid4().hex[:8]}"
+    recent = datetime.now(timezone.utc).isoformat()
 
     history.append(
         HistoryEntry(
@@ -181,8 +188,8 @@ def test_history_store_append_read_and_prune() -> None:
     history.append(
         HistoryEntry(
             sync_name=sync_a,
-            started_at="2026-09-06T00:00:00+00:00",
-            completed_at="2026-09-06T00:01:00+00:00",
+            started_at=recent,
+            completed_at=recent,
             duration_seconds=30.0,
             status="failed",
             records_synced=0,
@@ -194,8 +201,8 @@ def test_history_store_append_read_and_prune() -> None:
     history.append(
         HistoryEntry(
             sync_name=sync_b,
-            started_at="2026-09-06T00:00:00+00:00",
-            completed_at="2026-09-06T00:01:00+00:00",
+            started_at=recent,
+            completed_at=recent,
             duration_seconds=5.0,
             status="success",
             records_synced=2,
@@ -211,42 +218,53 @@ def test_history_store_append_read_and_prune() -> None:
     assert only_orders[0].run_id == "run-1"
 
     # 2020 entry is older than any real retention window -- gets pruned;
-    # the 2026 entry survives.
+    # the just-appended entry survives.
     removed = history.prune(sync_a, retention_days=30)
     assert removed == 1
-    assert [e.started_at for e in history.read(sync_a)] == ["2026-09-06T00:00:00+00:00"]
+    assert [e.started_at for e in history.read(sync_a)] == [recent]
 
 
 def test_dlq_backend_fifo_reconcile_and_clear() -> None:
+    """Codex review: the DLQ MERGEs globally on ``id`` and does not update
+    ``sync_name`` on a match (same as Postgres's own ``ON CONFLICT (id) DO
+    UPDATE`` — this is a shared, pre-existing property, not new here). A
+    fixed literal id would collide with a leftover row from a prior run
+    against this same persistent account and silently attribute to the
+    wrong sync_name. Per-run-unique ids sidestep that regardless."""
     creds = _require_creds()
     profile = _profile(creds)
     dlq = SnowflakeWarehouseDlqBackend(profile)
     sync_name = f"orders_{uuid.uuid4().hex[:8]}"
+    run = uuid.uuid4().hex[:8]
 
-    assert dlq.read(sync_name) == []
-    assert dlq.depth(sync_name) == 0
+    def _id(i: int) -> str:
+        return f"id-{run}-{i}"
 
-    entries = [DeadLetter(record={"id": i}, error_message="boom", id=f"id-{i}") for i in range(5)]
-    depth = dlq.append(sync_name, entries, max_records=3)
-    assert depth == 3  # FIFO-capped: oldest 2 dropped
+    try:
+        assert dlq.read(sync_name) == []
+        assert dlq.depth(sync_name) == 0
 
-    remaining = dlq.read(sync_name)
-    assert [e.record["id"] for e in remaining] == [2, 3, 4]
-    # Proves PARSE_JSON/VARIANT round-tripped a real dict, not a raw string.
-    assert isinstance(remaining[0].record, dict)
-    assert dlq.all_depths().get(sync_name) == 3
+        entries = [DeadLetter(record={"id": i}, error_message="boom", id=_id(i)) for i in range(5)]
+        depth = dlq.append(sync_name, entries, max_records=3)
+        assert depth == 3  # FIFO-capped: oldest 2 dropped
 
-    # reconcile: remove one, update another's attempts/error, leave the rest.
-    updated_entry = DeadLetter(
-        record={"id": 3}, error_message="still failing", attempts=2, id="id-3"
-    )
-    result = dlq.reconcile(sync_name, remove_ids=["id-2"], updates={"id-3": updated_entry})
-    assert {e.id for e in result} == {"id-3", "id-4"}
-    reconciled = {e.id: e for e in result}
-    assert reconciled["id-3"].attempts == 2
-    assert reconciled["id-3"].error_message == "still failing"
+        remaining = dlq.read(sync_name)
+        assert [e.record["id"] for e in remaining] == [2, 3, 4]
+        # Proves PARSE_JSON/VARIANT round-tripped a real dict, not a raw string.
+        assert isinstance(remaining[0].record, dict)
+        assert dlq.all_depths().get(sync_name) == 3
 
-    dlq.clear(sync_name)
+        # reconcile: remove one, update another's attempts/error, leave the rest.
+        updated_entry = DeadLetter(
+            record={"id": 3}, error_message="still failing", attempts=2, id=_id(3)
+        )
+        result = dlq.reconcile(sync_name, remove_ids=[_id(2)], updates={_id(3): updated_entry})
+        assert {e.id for e in result} == {_id(3), _id(4)}
+        reconciled = {e.id: e for e in result}
+        assert reconciled[_id(3)].attempts == 2
+        assert reconciled[_id(3)].error_message == "still failing"
+    finally:
+        dlq.clear(sync_name)
     assert dlq.read(sync_name) == []
 
 
@@ -263,23 +281,29 @@ def test_dlq_replace_is_atomic_and_leaves_old_queue_intact_on_failure() -> None:
     profile = _profile(creds)
     dlq = SnowflakeWarehouseDlqBackend(profile)
     sync_name = f"orders_{uuid.uuid4().hex[:8]}"
+    run = uuid.uuid4().hex[:8]
+    keep_id, new_id_1, new_id_2 = f"keep-{run}", f"new-{run}-1", f"new-{run}-2"
 
-    original = [DeadLetter(record={"n": 1}, error_message="orig", id="keep-1")]
-    dlq.append(sync_name, original)
-    assert dlq.depth(sync_name) == 1
+    try:
+        original = [DeadLetter(record={"n": 1}, error_message="orig", id=keep_id)]
+        dlq.append(sync_name, original)
+        assert dlq.depth(sync_name) == 1
 
-    broken_replacement = [
-        DeadLetter(record={"n": 2}, error_message="new", id="new-1"),
-        DeadLetter(record={"n": 3}, error_message=None, id="new-2"),  # type: ignore[arg-type]
-    ]
-    with pytest.raises(Exception, match="(?i)null"):
-        dlq.replace(sync_name, broken_replacement)
+        broken_replacement = [
+            DeadLetter(record={"n": 2}, error_message="new", id=new_id_1),
+            DeadLetter(record={"n": 3}, error_message=None, id=new_id_2),  # type: ignore[arg-type]
+        ]
+        with pytest.raises(Exception, match="(?i)null"):
+            dlq.replace(sync_name, broken_replacement)
 
-    # The DELETE half of the failed transaction must have rolled back too --
-    # the original entry is still exactly there, not gone and not doubled.
-    survivors = dlq.read(sync_name)
-    assert [e.id for e in survivors] == ["keep-1"]
-    assert survivors[0].error_message == "orig"
+        # The DELETE half of the failed transaction must have rolled back
+        # too -- the original entry is still exactly there, not gone and
+        # not doubled.
+        survivors = dlq.read(sync_name)
+        assert [e.id for e in survivors] == [keep_id]
+        assert survivors[0].error_message == "orig"
+    finally:
+        dlq.clear(sync_name)
 
 
 def test_writes_succeed_with_a_preexisting_schema_and_no_create_schema_privilege() -> None:
@@ -310,10 +334,12 @@ def test_writes_succeed_with_a_preexisting_schema_and_no_create_schema_privilege
     )
     assert SnowflakeWarehouseHistoryStore(profile).read(sync_name) != []
 
-    SnowflakeWarehouseDlqBackend(profile).append(
-        sync_name, [DeadLetter(record={}, error_message="x", id="id-1")]
-    )
-    assert SnowflakeWarehouseDlqBackend(profile).depth(sync_name) == 1
+    dlq = SnowflakeWarehouseDlqBackend(profile)
+    try:
+        dlq.append(sync_name, [DeadLetter(record={}, error_message="x", id=f"id-{sync_name}")])
+        assert dlq.depth(sync_name) == 1
+    finally:
+        dlq.clear(sync_name)
 
 
 def _require_create_schema_grant() -> None:

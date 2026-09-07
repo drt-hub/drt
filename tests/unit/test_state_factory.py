@@ -385,9 +385,7 @@ def test_warehouse_backend_rejects_snowflake_idempotency(tmp_path: Path, monkeyp
 
     project = ProjectConfig(
         name="test",
-        state=StateConfig(
-            backend="warehouse", connection_profile="sf_main", idempotency=True
-        ),
+        state=StateConfig(backend="warehouse", connection_profile="sf_main", idempotency=True),
     )
 
     with pytest.raises(NotImplementedError, match="idempotency.*not yet supported.*Snowflake"):
