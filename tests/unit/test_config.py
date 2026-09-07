@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,14 @@ from drt.config.models import (
     SyncOptions,
 )
 from drt.config.parser import expand_env_vars, load_project, load_syncs
+from drt.config.profiles import (
+    DEFAULT_FETCH_SIZE,
+    DuckDBProfile,
+    PostgresProfile,
+    RedshiftProfile,
+    SQLiteProfile,
+    SQLServerProfile,
+)
 
 # ---------------------------------------------------------------------------
 # Auth model discrimination
@@ -433,6 +442,72 @@ def test_save_profile_appends(tmp_path: Path) -> None:
     assert "profiles" in data
     assert "dev" in data["profiles"]
     assert "prod" in data["profiles"]
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        DuckDBProfile(type="duckdb", database=":memory:"),
+        SQLiteProfile(type="sqlite", database=":memory:"),
+        PostgresProfile(type="postgres", host="localhost", dbname="d", user="u"),
+        RedshiftProfile(type="redshift", host="h", dbname="d", user="u"),
+        SnowflakeProfile(type="snowflake", account="a", user="u", database="d"),
+        SQLServerProfile(type="sqlserver", host="h", database="d", user="u"),
+    ],
+)
+def test_load_profile_fetch_size_from_yaml(tmp_path: Path, profile) -> None:
+    (tmp_path / "profiles.yml").write_text(
+        f"dev:\n  type: {profile.type}\n  database: d\n  host: h\n  user: u\n"
+        "  account: a\n  fetch_size: 2500\n"
+    )
+    loaded = load_profile("dev", config_dir=tmp_path)
+    assert loaded.fetch_size == 2500
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        DuckDBProfile(type="duckdb", database=":memory:"),
+        SQLiteProfile(type="sqlite", database=":memory:"),
+        PostgresProfile(type="postgres", host="localhost", dbname="d", user="u"),
+        RedshiftProfile(type="redshift", host="h", dbname="d", user="u"),
+        SnowflakeProfile(type="snowflake", account="a", user="u", database="d"),
+        SQLServerProfile(type="sqlserver", host="h", database="d", user="u"),
+    ],
+)
+def test_load_profile_fetch_size_default(tmp_path: Path, profile) -> None:
+    (tmp_path / "profiles.yml").write_text(
+        f"dev:\n  type: {profile.type}\n  database: d\n  host: h\n  user: u\n  account: a\n"
+    )
+    loaded = load_profile("dev", config_dir=tmp_path)
+    assert loaded.fetch_size == DEFAULT_FETCH_SIZE
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        DuckDBProfile(type="duckdb", database=":memory:"),
+        SQLiteProfile(type="sqlite", database=":memory:"),
+        PostgresProfile(type="postgres", host="h", dbname="d", user="u"),
+        RedshiftProfile(type="redshift", host="h", dbname="d", user="u"),
+        SnowflakeProfile(type="snowflake", account="a", user="u", database="d"),
+        SQLServerProfile(type="sqlserver", host="h", database="d", user="u"),
+    ],
+)
+def test_save_profile_writes_fetch_size_only_when_non_default(tmp_path: Path, profile) -> None:
+    save_profile("custom", replace(profile, fetch_size=2500), config_dir=tmp_path)
+    save_profile("defaulted", profile, config_dir=tmp_path)
+    data = yaml.safe_load((tmp_path / "profiles.yml").read_text())
+    profiles = data["profiles"]
+    assert profiles["custom"]["fetch_size"] == 2500
+    assert "fetch_size" not in profiles["defaulted"]
+
+
+def test_save_and_load_profile_fetch_size_roundtrip(tmp_path: Path) -> None:
+    profile = DuckDBProfile(type="duckdb", database=":memory:", fetch_size=1234)
+    save_profile("dev", profile, config_dir=tmp_path)
+    loaded = load_profile("dev", config_dir=tmp_path)
+    assert loaded.fetch_size == 1234
 
 
 # ---------------------------------------------------------------------------
