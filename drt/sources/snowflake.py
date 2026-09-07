@@ -184,3 +184,97 @@ class SnowflakeSource:
             connect_args["role"] = config.role
 
         return snowflake.connector.connect(**connect_args)
+
+    # --- ManagedTableCapable (#960/#1106, ADR 0005 step 3) ------------------
+    #
+    # Identifiers here are deliberately unquoted, unlike the Postgres
+    # implementation's psycopg2.sql.Identifier() (which preserves exact
+    # case). This connector has no quoting helper of its own — the existing
+    # tracked-mirror bookkeeping table (destinations/snowflake.py's
+    # _create_state_table/_mirror_table_ident) already builds fully-
+    # qualified names via plain f-string interpolation and compares them
+    # back with .upper() (_state_scope_columns_exist) — so unquoted DDL +
+    # UPPER()-normalized probes matches that existing convention instead of
+    # introducing a second, quoted-identifier one. Snowflake folds an
+    # unquoted CREATE to uppercase; probing with UPPER() on both sides keeps
+    # the create path, the probe path, and an admin's escape-hatch
+    # CREATE SCHEMA (following the provisioning docs, also unquoted) all in
+    # agreement regardless of the case actually typed in config.
+
+    def ensure_managed_schema(self, config: ProfileConfigLike) -> None:
+        """Create ``config.managed_schema`` inside ``config.database`` if it
+        does not already exist.
+
+        Same two-part discipline as the Postgres implementation
+        (``drt/sources/postgres.py``):
+
+        1. **The escape hatch**: probe first — a locked-down role with no
+           ``CREATE SCHEMA`` privilege, but an admin-pre-provisioned schema,
+           must never have the ``CREATE`` statement issued at all.
+        2. **Concurrent first use**: on any exception from the ``CREATE``,
+           re-probe rather than assuming failure — if the schema exists now,
+           another session won a first-use race; anything else re-raises.
+           Unlike Postgres, there is no ``conn.rollback()`` here: Snowflake
+           DDL autocommits and has no savepoints (see the three existing
+           comments to this effect in ``destinations/snowflake.py``), so a
+           failed ``CREATE`` leaves nothing open to roll back. Whether
+           Snowflake's ``CREATE SCHEMA IF NOT EXISTS`` actually races the
+           same ungraceful way Postgres's does is unverified by prior art —
+           this guard is defensive either way, confirmed empirically by a
+           live concurrent-first-caller smoke test.
+        """
+        assert isinstance(config, SnowflakeProfile)
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                f"SELECT 1 FROM {config.database}.information_schema.schemata "
+                "WHERE UPPER(schema_name) = UPPER(%s)",
+                (config.managed_schema,),
+            )
+            if cur.fetchone() is not None:
+                return
+            try:
+                cur.execute(
+                    f"CREATE SCHEMA IF NOT EXISTS {config.database}.{config.managed_schema}"
+                )
+            except Exception:
+                cur = conn.cursor()
+                cur.execute(
+                    f"SELECT 1 FROM {config.database}.information_schema.schemata "
+                    "WHERE UPPER(schema_name) = UPPER(%s)",
+                    (config.managed_schema,),
+                )
+                if cur.fetchone() is None:
+                    raise
+        finally:
+            conn.close()
+
+    def managed_table_exists(self, config: ProfileConfigLike, table_name: str) -> bool:
+        assert isinstance(config, SnowflakeProfile)
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            # table_type = 'BASE TABLE' excludes views, same distinction the
+            # Postgres implementation makes — a same-named view would
+            # otherwise read back as "exists" and later fail on DROP TABLE.
+            cur.execute(
+                f"SELECT 1 FROM {config.database}.information_schema.tables "
+                "WHERE UPPER(table_schema) = UPPER(%s) AND UPPER(table_name) = UPPER(%s) "
+                "AND table_type = 'BASE TABLE'",
+                (config.managed_schema, table_name),
+            )
+            return cur.fetchone() is not None
+        finally:
+            conn.close()
+
+    def drop_managed_table(self, config: ProfileConfigLike, table_name: str) -> None:
+        assert isinstance(config, SnowflakeProfile)
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                f"DROP TABLE IF EXISTS {config.database}.{config.managed_schema}.{table_name}"
+            )
+        finally:
+            conn.close()

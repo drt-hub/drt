@@ -390,6 +390,50 @@ def test_save_profile_postgres_omits_default_managed_schema(tmp_path: Path) -> N
     assert "managed_schema" not in written
 
 
+def test_load_profile_snowflake_managed_schema(tmp_path: Path) -> None:
+    """#1106: Snowflake leg of #960's managed_schema field."""
+    (tmp_path / "profiles.yml").write_text(
+        "sf:\n"
+        "  type: snowflake\n"
+        "  account: xy12345\n"
+        "  user: analyst\n"
+        "  database: ANALYTICS\n"
+        "  managed_schema: drt_managed\n"
+    )
+    loaded = load_profile("sf", config_dir=tmp_path)
+    assert loaded.managed_schema == "drt_managed"
+
+
+def test_load_profile_snowflake_managed_schema_default(tmp_path: Path) -> None:
+    (tmp_path / "profiles.yml").write_text(
+        "sf:\n  type: snowflake\n  account: xy12345\n  user: analyst\n  database: ANALYTICS\n"
+    )
+    loaded = load_profile("sf", config_dir=tmp_path)
+    assert loaded.managed_schema == "_drt"
+
+
+def test_save_profile_snowflake_managed_schema_roundtrip(tmp_path: Path) -> None:
+    profile = SnowflakeProfile(
+        type="snowflake",
+        account="xy12345",
+        user="analyst",
+        database="ANALYTICS",
+        managed_schema="drt_managed",
+    )
+    save_profile("sf", profile, config_dir=tmp_path)
+    loaded = load_profile("sf", config_dir=tmp_path)
+    assert loaded.managed_schema == "drt_managed"
+
+
+def test_save_profile_snowflake_omits_default_managed_schema(tmp_path: Path) -> None:
+    profile = SnowflakeProfile(
+        type="snowflake", account="xy12345", user="analyst", database="ANALYTICS"
+    )
+    save_profile("sf", profile, config_dir=tmp_path)
+    written = (tmp_path / "profiles.yml").read_text()
+    assert "managed_schema" not in written
+
+
 def test_load_profile_bigquery_location(tmp_path: Path) -> None:
     (tmp_path / "profiles.yml").write_text(
         "dev:\n  type: bigquery\n  project: p\n  dataset: d\n  location: asia-northeast1\n"

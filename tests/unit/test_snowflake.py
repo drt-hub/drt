@@ -421,3 +421,93 @@ class TestSnowflakeStreamingExtraction:
         conn = _streaming_conn([], description=[("id",)])
         with patch.object(SnowflakeSource, "_connect", return_value=conn):
             assert list(SnowflakeSource().extract("SELECT 1", _config())) == []
+
+
+class TestManagedTableCapable:
+    """#960/#1106 — ManagedTableCapable's create-if-absent + escape-hatch
+    contract, ported from Postgres's own test_postgres_source.py suite.
+
+    Unlike Postgres, no conn.commit()/rollback() calls are expected anywhere
+    here: Snowflake DDL autocommits and has no savepoints (see the module
+    docstring on drt/sources/snowflake.py's ManagedTableCapable methods)."""
+
+    def _mock_ddl_conn(self, *, schema_exists: bool = False) -> MagicMock:
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.fetchone.return_value = (1,) if schema_exists else None
+        conn.cursor.return_value = cur
+        return conn
+
+    def test_ensure_managed_schema_creates_when_absent(self) -> None:
+        conn = self._mock_ddl_conn(schema_exists=False)
+        with patch.object(SnowflakeSource, "_connect", return_value=conn):
+            SnowflakeSource().ensure_managed_schema(_config())
+
+        executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
+        assert any("information_schema.schemata" in sql for sql in executed)
+        assert any("CREATE SCHEMA" in sql for sql in executed)
+        conn.close.assert_called_once()
+
+    def test_ensure_managed_schema_skips_create_when_present(self) -> None:
+        """The escape hatch: a pre-provisioned schema must never see the
+        CREATE statement, so a no-CREATE-privilege role can still run."""
+        conn = self._mock_ddl_conn(schema_exists=True)
+        with patch.object(SnowflakeSource, "_connect", return_value=conn):
+            SnowflakeSource().ensure_managed_schema(_config())
+
+        executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
+        assert not any("CREATE SCHEMA" in sql for sql in executed)
+        conn.close.assert_called_once()
+
+    def test_ensure_managed_schema_probe_is_upper_normalized_and_database_scoped(self) -> None:
+        """Unquoted identifiers fold to uppercase in Snowflake — the probe
+        must UPPER()-normalize both sides rather than comparing the raw
+        config string byte-for-byte, and must be scoped to config.database
+        (Snowflake's information_schema is per-database, not global)."""
+        conn = self._mock_ddl_conn(schema_exists=True)
+        with patch.object(SnowflakeSource, "_connect", return_value=conn):
+            SnowflakeSource().ensure_managed_schema(_config(managed_schema="custom_schema"))
+
+        sql, params = conn.cursor.return_value.execute.call_args.args
+        assert "ANALYTICS.information_schema.schemata" in sql
+        assert "UPPER(schema_name) = UPPER(%s)" in sql
+        assert params == ("custom_schema",)
+
+    def test_managed_table_exists_true(self) -> None:
+        conn = self._mock_ddl_conn()
+        conn.cursor.return_value.fetchone.return_value = (1,)
+        with patch.object(SnowflakeSource, "_connect", return_value=conn):
+            assert SnowflakeSource().managed_table_exists(_config(), "_drt_runs") is True
+
+    def test_managed_table_exists_false(self) -> None:
+        conn = self._mock_ddl_conn()
+        conn.cursor.return_value.fetchone.return_value = None
+        with patch.object(SnowflakeSource, "_connect", return_value=conn):
+            assert SnowflakeSource().managed_table_exists(_config(), "_drt_runs") is False
+
+    def test_managed_table_exists_probes_the_configured_schema(self) -> None:
+        conn = self._mock_ddl_conn()
+        conn.cursor.return_value.fetchone.return_value = None
+        with patch.object(SnowflakeSource, "_connect", return_value=conn):
+            SnowflakeSource().managed_table_exists(
+                _config(managed_schema="custom_schema"), "_drt_runs"
+            )
+
+        sql, params = conn.cursor.return_value.execute.call_args.args
+        assert "information_schema.tables" in sql
+        assert "table_type = 'BASE TABLE'" in sql
+        assert params == ("custom_schema", "_drt_runs")
+
+    def test_drop_managed_table_issues_drop_if_exists(self) -> None:
+        conn = self._mock_ddl_conn()
+        with patch.object(SnowflakeSource, "_connect", return_value=conn):
+            SnowflakeSource().drop_managed_table(_config(), "_drt_runs")
+
+        executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
+        assert any("DROP TABLE IF EXISTS" in sql for sql in executed)
+        conn.close.assert_called_once()
+
+    def test_managed_table_capable_protocol_satisfied(self) -> None:
+        from drt.sources.base import ManagedTableCapable
+
+        assert isinstance(SnowflakeSource(), ManagedTableCapable)
