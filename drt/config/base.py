@@ -199,7 +199,7 @@ class HistoryConfig(BaseModel):
 
 
 class StateConfig(BaseModel):
-    """State-backend selection and backend-specific settings (#756).
+    """State-backend selection and backend-specific settings (#756, #920).
 
     This mirrors :class:`~drt.config.sync_options.WatermarkConfig`'s shape:
     one discriminating backend field plus optional fields validated against
@@ -207,10 +207,33 @@ class StateConfig(BaseModel):
     ``prefix``. S3's authentication and endpoint fields deliberately match
     :class:`~drt.config.destinations_storage.S3DestinationConfig`, so state
     storage follows the same boto3 credential chain and override vocabulary.
-    Local state continues to reject every remote-only field.
+
+    ``warehouse`` (#920, ADR 0005 step 4, Postgres-first — see
+    ``drt/state/warehouse.py``) is a different shape from the two
+    object-storage backends: it has no bucket of its own, it reuses an
+    existing connection profile from ``profiles.yml`` instead, named by
+    ``connection_profile``. Not called ``profile`` — :class:`ProjectConfig`
+    already has a top-level ``profile`` field meaning "the project's default
+    connection profile", a different concept this deliberately avoids
+    colliding with. The managed-schema name for that connection stays on
+    the profile itself (``PostgresProfile.managed_schema``, #960) rather
+    than a second, independent ``state.schema`` knob that could disagree
+    with it.
+
+    ``backend`` and ``connection_profile`` widen/land together in the same
+    PR that carries the warehouse backend implementation — not before it —
+    matching how ``"gcs"`` was added to this ``Literal`` in the same PR as
+    the GCS backend itself (``d58a9c4``), not in the config-only PR that
+    preceded it. A schema-valid config that names an unimplemented backend
+    would otherwise crash ``run``/``status``/``retry``/``serve``/MCP state
+    operations at runtime — caught in Codex review on an earlier draft of
+    this change that split config and implementation across two PRs.
+
+    Local state continues to reject every remote-only field, and each
+    backend rejects every other backend's fields.
     """
 
-    backend: Literal["local", "gcs", "s3"] = "local"
+    backend: Literal["local", "gcs", "s3", "warehouse"] = "local"
     bucket: str | None = None
     prefix: str | None = None
     region: str | None = None
@@ -219,6 +242,10 @@ class StateConfig(BaseModel):
     aws_secret_access_key_env: str | None = None
     aws_session_token_env: str | None = None
     endpoint_url: str | None = None
+    #: Name of a profile in profiles.yml to reuse as the warehouse
+    #: connection (#920). Required, and only meaningful, when backend is
+    #: "warehouse".
+    connection_profile: str | None = None
 
     @model_validator(mode="after")
     def _check_backend_fields(self) -> StateConfig:
@@ -233,9 +260,10 @@ class StateConfig(BaseModel):
         configured_s3_fields = [
             field for field in s3_only_fields if getattr(self, field) is not None
         ]
-        if self.backend == "local" and (
+        object_store_fields_configured = (
             self.bucket is not None or self.prefix is not None or configured_s3_fields
-        ):
+        )
+        if self.backend == "local" and object_store_fields_configured:
             raise ValueError("Remote state fields are not valid when backend is 'local'.")
         if self.backend == "gcs" and not self.bucket:
             raise ValueError("state.bucket is required when backend is 'gcs'.")
@@ -244,6 +272,20 @@ class StateConfig(BaseModel):
             raise ValueError(f"{names} are only valid when backend is 's3'.")
         if self.backend == "s3" and not self.bucket:
             raise ValueError("state.bucket is required when backend is 's3'.")
+        if self.backend == "warehouse":
+            if not self.connection_profile:
+                raise ValueError(
+                    "state.connection_profile is required when backend is 'warehouse'."
+                )
+            if object_store_fields_configured:
+                raise ValueError(
+                    "Object-storage state fields (bucket, prefix, region, "
+                    "aws_*, endpoint_url) are not valid when backend is "
+                    "'warehouse' — it reuses state.connection_profile's "
+                    "connection instead."
+                )
+        elif self.connection_profile is not None:
+            raise ValueError("state.connection_profile is only valid when backend is 'warehouse'.")
         return self
 
 
