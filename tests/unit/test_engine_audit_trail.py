@@ -83,6 +83,34 @@ class RaisingDestination:
         raise RuntimeError("destination unreachable")
 
 
+class SkippedNoMatchDestination:
+    """Reports one row as `skipped_no_match` with no corresponding
+    RowError -- same shape as test_engine_idempotency.py's own fake."""
+
+    def load(
+        self, records: list[dict], config: DestinationConfig, sync_options: SyncOptions
+    ) -> SyncResult:
+        result = SyncResult()
+        result.success = len(records) - 1
+        result.skipped = 1
+        result.skipped_no_match = 1
+        return result
+
+
+class ReplaceCapableDestination:
+    """Declares ModeCapable(replace) so `mode: replace, replace_strategy:
+    swap` clears the engine's fail-fast mode check. Mirrors
+    test_engine_idempotency.py's own fake."""
+
+    def supported_modes(self) -> frozenset[str]:
+        return frozenset({"replace"})
+
+    def load(
+        self, records: list[dict], config: DestinationConfig, sync_options: SyncOptions
+    ) -> SyncResult:
+        return SyncResult(success=len(records))
+
+
 def _make_profile() -> BigQueryProfile:
     return BigQueryProfile(type="bigquery", project="p", dataset="d")
 
@@ -369,3 +397,97 @@ def test_run_id_is_none_for_a_library_caller_that_never_set_one(tmp_path: Path) 
 
     log_call = next(c for c in audit.calls if c[0] == "log_delivered")
     assert log_call[2] is None  # run_id
+
+
+def test_values_are_normalized_to_json_safe_types(tmp_path: Path) -> None:
+    """Regression for a Codex-review finding: a plain json.dumps on a
+    Decimal/datetime/UUID-valued field raises TypeError inside the
+    warehouse write's best-effort try/except, silently dropping the whole
+    batch's audit rows despite a successful delivery. Values must be
+    normalized before ever reaching AuditEntry.fields."""
+    import uuid
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    audit = FakeAuditTrail()
+    dest = FakeDestination()
+    record_id = uuid.uuid4()
+
+    run_sync(
+        _make_sync(),
+        FakeSource(
+            [
+                {
+                    "id": record_id,
+                    "amount": Decimal("19.99"),
+                    "created_at": datetime(2026, 9, 7, tzinfo=timezone.utc),
+                }
+            ]
+        ),
+        dest,
+        _make_profile(),
+        tmp_path,
+        audit_trail=audit,
+        audit_fields=["id", "amount", "created_at"],
+    )
+
+    assert len(audit.logged) == 1
+    fields = audit.logged[0].fields
+    assert fields["id"] == str(record_id)
+    assert fields["amount"] == "19.99"
+    assert fields["created_at"] == "2026-09-07T00:00:00+00:00"
+
+
+def test_a_batch_with_an_unattributed_skip_is_never_audited(tmp_path: Path) -> None:
+    """Same fail-closed fix as #1099's identical regression: a
+    skipped_no_match row (no per-row index) must not be misclassified as
+    delivered and logged to the compliance trail."""
+    audit = FakeAuditTrail()
+    dest = SkippedNoMatchDestination()
+
+    run_sync(
+        _make_sync(),
+        FakeSource([{"id": 1, "email": "a@example.com"}, {"id": 2, "email": "b@example.com"}]),
+        dest,
+        _make_profile(),
+        tmp_path,
+        audit_trail=audit,
+        audit_fields=["email"],
+    )
+
+    assert audit.logged == []
+
+
+def test_swap_mode_replace_is_never_audited(tmp_path: Path) -> None:
+    """Same fail-closed fix as #1099's identical regression: `mode:
+    replace, replace_strategy: swap` reports batch success against a
+    shadow table, with the real cutover deferred to a later finalize_sync()
+    call this test never even reaches."""
+    audit = FakeAuditTrail()
+    dest = ReplaceCapableDestination()
+    sync = SyncConfig.model_validate(
+        {
+            "name": "test_sync",
+            "model": "ref('table')",
+            "destination": {
+                "type": "postgres",
+                "host": "h",
+                "dbname": "d",
+                "table": "t",
+                "upsert_key": ["id"],
+            },
+            "sync": {"batch_size": 10, "mode": "replace", "replace_strategy": "swap"},
+        }
+    )
+
+    run_sync(
+        sync,
+        FakeSource([{"id": 1, "email": "a@example.com"}]),
+        dest,
+        _make_profile(),
+        tmp_path,
+        audit_trail=audit,
+        audit_fields=["email"],
+    )
+
+    assert not any(call[0] == "log_delivered" for call in audit.calls)

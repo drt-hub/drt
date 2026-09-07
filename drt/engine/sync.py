@@ -12,7 +12,8 @@ import re
 import threading
 import time
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from datetime import time as dt_time
 from itertools import chain, islice
 from pathlib import Path
 from typing import Any, Literal
@@ -251,8 +252,10 @@ def _json_safe_audit_value(value: Any) -> Any:
         return value
     if isinstance(value, float):
         return value if math.isfinite(value) else str(value)
-    # Decimal, date, datetime, time, timedelta, UUID, and anything else
-    # json.dumps doesn't natively accept.
+    if isinstance(value, (datetime, date, dt_time)):
+        return value.isoformat()
+    # Decimal, timedelta, UUID, and anything else json.dumps doesn't
+    # natively accept.
     return str(value)
 
 
