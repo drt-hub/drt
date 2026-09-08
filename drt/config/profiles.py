@@ -51,6 +51,19 @@ class BigQueryProfile:
     method: Literal["application_default", "keyfile"] = "application_default"
     keyfile: str | None = None
     location: str = "US"  # e.g. "US", "EU", "asia-northeast1"
+    #: Dataset for drt's own bookkeeping tables (#960/#1107) — see
+    #: PostgresProfile.managed_schema's docstring for the full naming
+    #: rationale. BigQuery's own per-dialect field above is called `dataset`,
+    #: not `schema`, so there is no name collision to avoid here the way
+    #: Snowflake/Databricks have — `managed_schema` is still used for this
+    #: field, matching the cross-dialect naming convention
+    #: ManagedTableCapable's docstring documents once for every
+    #: implementation rather than letting each dialect drift to its own
+    #: locally-obvious name. Lives inside `project` above (BigQuery has no
+    #: catalog/database level above a dataset), created/probed via the
+    #: `google-cloud-bigquery` client API rather than SQL DDL — see
+    #: `BigQuerySource.ensure_managed_schema()`.
+    managed_schema: str = "_drt"
 
     def describe(self) -> str:
         return f"{self.type} ({self.project}.{self.dataset})"
