@@ -519,24 +519,53 @@ class TestManagedTableCapable:
         (sql,) = conn.cursor.return_value.execute.call_args.args
         assert sql == "SHOW SCHEMAS IN main LIKE 'custom_schema'"
 
+    def _mock_table_probe_conn(
+        self, *, schema_exists: bool, table_exists: bool = False
+    ) -> MagicMock:
+        conn = MagicMock()
+        cur = MagicMock()
+        schema_result = [("main", "custom_schema")] if schema_exists else []
+        table_result = [("s", "n", False)] if table_exists else []
+        cur.fetchall.side_effect = [schema_result, table_result]
+        conn.cursor.return_value = cur
+        return conn
+
     def test_managed_table_exists_true(self) -> None:
-        conn = self._mock_ddl_conn(exists=True)
+        conn = self._mock_table_probe_conn(schema_exists=True, table_exists=True)
         with patch.object(DatabricksSource, "_connect", return_value=conn):
             assert (
                 DatabricksSource().managed_table_exists(_profile(catalog="main"), "_drt_runs")
                 is True
             )
 
-    def test_managed_table_exists_false(self) -> None:
-        conn = self._mock_ddl_conn(exists=False)
+    def test_managed_table_exists_false_when_table_absent_but_schema_present(self) -> None:
+        conn = self._mock_table_probe_conn(schema_exists=True, table_exists=False)
         with patch.object(DatabricksSource, "_connect", return_value=conn):
             assert (
                 DatabricksSource().managed_table_exists(_profile(catalog="main"), "_drt_runs")
                 is False
             )
+        executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
+        assert any(sql.startswith("SHOW TABLES IN") for sql in executed)
+
+    def test_managed_table_exists_false_when_schema_itself_is_absent(self) -> None:
+        """Normal first-use state: the managed schema hasn't been created
+        yet. SHOW TABLES IN a nonexistent schema raises on Databricks
+        (SCHEMA_NOT_FOUND) rather than returning no rows, unlike a
+        Postgres/Snowflake information_schema query — so the schema's own
+        existence is probed first and this must short-circuit to False
+        without ever issuing the SHOW TABLES query (caught in review)."""
+        conn = self._mock_table_probe_conn(schema_exists=False)
+        with patch.object(DatabricksSource, "_connect", return_value=conn):
+            assert (
+                DatabricksSource().managed_table_exists(_profile(catalog="main"), "_drt_runs")
+                is False
+            )
+        executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
+        assert not any(sql.startswith("SHOW TABLES IN") for sql in executed)
 
     def test_managed_table_exists_probes_the_configured_schema(self) -> None:
-        conn = self._mock_ddl_conn(exists=False)
+        conn = self._mock_table_probe_conn(schema_exists=True, table_exists=False)
         with patch.object(DatabricksSource, "_connect", return_value=conn):
             DatabricksSource().managed_table_exists(
                 _profile(catalog="main", managed_schema="custom_schema"), "_drt_runs"

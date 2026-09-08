@@ -263,6 +263,18 @@ class DatabricksSource:
         conn = self._connect(config)
         try:
             cur = conn.cursor()
+            # Schema existence is probed first: SHOW TABLES IN a schema that
+            # does not exist yet raises (SCHEMA_NOT_FOUND) rather than
+            # returning no rows, unlike a Postgres/Snowflake information_schema
+            # query, which is always queryable regardless of whether the
+            # referenced schema exists. Without this guard, every read-path
+            # caller (managed table not yet created — the normal first-use
+            # state) would raise instead of getting a clean "doesn't exist"
+            # (caught in review — #1108's warehouse-state backend calls this
+            # on every read before ever calling ensure_managed_schema()).
+            cur.execute(f"SHOW SCHEMAS IN {catalog} LIKE '{config.managed_schema}'")
+            if not cur.fetchall():
+                return False
             # SHOW TABLES ... LIKE, matching destinations/databricks.py's
             # _target_exists exactly — not information_schema. Unlike the
             # Postgres/Snowflake legs, this does not exclude views (no
