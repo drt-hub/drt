@@ -392,6 +392,84 @@ def test_warehouse_backend_rejects_snowflake_idempotency(tmp_path: Path, monkeyp
         build_state_bundle(project, tmp_path)
 
 
+def test_warehouse_backend_builds_databricks_bundle(tmp_path: Path, monkeypatch) -> None:
+    from drt.config.credentials import DatabricksProfile
+    from drt.state.warehouse_databricks import (
+        DatabricksWarehouseDlqBackend,
+        DatabricksWarehouseHistoryStore,
+        DatabricksWarehouseStateStore,
+    )
+
+    profile = DatabricksProfile(
+        type="databricks", server_hostname="h", http_path="/p", catalog="main"
+    )
+    monkeypatch.setattr(
+        "drt.config.credentials.load_profile", lambda name, config_dir=None: profile
+    )
+
+    project = ProjectConfig(
+        name="test",
+        state=StateConfig(backend="warehouse", connection_profile="dbx_main"),
+    )
+    bundle = build_state_bundle(project, tmp_path)
+
+    assert isinstance(bundle.state, DatabricksWarehouseStateStore)
+    assert isinstance(bundle.history, DatabricksWarehouseHistoryStore)
+    assert isinstance(bundle.dlq, DatabricksWarehouseDlqBackend)
+    assert bundle.state._profile is profile
+    assert bundle.ledger is None
+    assert bundle.audit_trail is None
+
+
+def test_warehouse_backend_rejects_databricks_idempotency(tmp_path: Path, monkeypatch) -> None:
+    """#1099's idempotency ledger has no Databricks implementation yet (#1108
+    only ships state/history/DLQ) -- state.idempotency: true must fail loudly
+    rather than silently building a bundle with ledger=None."""
+    from drt.config.credentials import DatabricksProfile
+
+    profile = DatabricksProfile(
+        type="databricks", server_hostname="h", http_path="/p", catalog="main"
+    )
+    monkeypatch.setattr(
+        "drt.config.credentials.load_profile", lambda name, config_dir=None: profile
+    )
+
+    project = ProjectConfig(
+        name="test",
+        state=StateConfig(backend="warehouse", connection_profile="dbx_main", idempotency=True),
+    )
+
+    with pytest.raises(NotImplementedError, match="idempotency.*not yet supported.*Databricks"):
+        build_state_bundle(project, tmp_path)
+
+
+def test_warehouse_backend_rejects_databricks_audit_trail(tmp_path: Path, monkeypatch) -> None:
+    """#1100's compliance audit trail has no Databricks implementation yet --
+    state.audit_trail.enabled: true must fail loudly rather than silently
+    building a bundle with audit_trail=None."""
+    from drt.config.base import AuditTrailConfig
+    from drt.config.credentials import DatabricksProfile
+
+    profile = DatabricksProfile(
+        type="databricks", server_hostname="h", http_path="/p", catalog="main"
+    )
+    monkeypatch.setattr(
+        "drt.config.credentials.load_profile", lambda name, config_dir=None: profile
+    )
+
+    project = ProjectConfig(
+        name="test",
+        state=StateConfig(
+            backend="warehouse",
+            connection_profile="dbx_main",
+            audit_trail=AuditTrailConfig(enabled=True, retain_days=30, fields=["email"]),
+        ),
+    )
+
+    with pytest.raises(NotImplementedError, match="audit_trail.*not yet supported.*Databricks"):
+        build_state_bundle(project, tmp_path)
+
+
 def test_warehouse_backend_rejects_unsupported_dialect_profiles(
     tmp_path: Path, monkeypatch
 ) -> None:
