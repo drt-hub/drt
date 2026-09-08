@@ -57,6 +57,10 @@ jobs:
       DRT_SMOKE_SNOWFLAKE_DATABASE: ${{ secrets.SMOKE_SNOWFLAKE_DATABASE }}
       DRT_SMOKE_SNOWFLAKE_SCHEMA: ${{ secrets.SMOKE_SNOWFLAKE_SCHEMA }}
       DRT_SMOKE_SNOWFLAKE_WAREHOUSE: ${{ secrets.SMOKE_SNOWFLAKE_WAREHOUSE }}
+      # Manual opt-in (#1106) -- set as a repo *variable* (not a secret; it's
+      # not sensitive) once an operator has run provisioning/snowflake.sql's
+      # GRANT CREATE SCHEMA ON DATABASE against the real smoke account.
+      DRT_SMOKE_SNOWFLAKE_HAS_CREATE_SCHEMA_GRANT: ${{ vars.SMOKE_SNOWFLAKE_HAS_CREATE_SCHEMA_GRANT }}
     steps:
       - uses: actions/checkout@v7
       - name: Check credentials
@@ -81,7 +85,16 @@ jobs:
         run: uv pip install --system -e ".[dev,duckdb,snowflake]"
       - name: Run Snowflake smoke
         if: steps.creds.outputs.has_creds == 'true'
-        run: pytest -m dwh_smoke tests/integration/dwh/test_snowflake_smoke.py -v
+        # #1106's managed-table and warehouse-state-backend smoke suites were
+        # added to tests/integration/dwh/ but never wired into this job's
+        # command (each job here names its files explicitly, not the whole
+        # directory) -- silently never ran on any schedule until this fix.
+        run: |
+          pytest -m dwh_smoke \
+            tests/integration/dwh/test_snowflake_smoke.py \
+            tests/integration/dwh/test_snowflake_managed_table_smoke.py \
+            tests/integration/dwh/test_snowflake_warehouse_state_smoke.py \
+            -v
 
   databricks:
     name: Databricks smoke
@@ -93,6 +106,10 @@ jobs:
       DRT_SMOKE_DATABRICKS_TOKEN: ${{ secrets.SMOKE_DATABRICKS_TOKEN }}
       DRT_SMOKE_DATABRICKS_CATALOG: ${{ secrets.SMOKE_DATABRICKS_CATALOG }}
       DRT_SMOKE_DATABRICKS_SCHEMA: ${{ secrets.SMOKE_DATABRICKS_SCHEMA }}
+      # Manual opt-in (#1108) -- set as a repo *variable* (not a secret; it's
+      # not sensitive) once an operator has run provisioning/databricks.sql's
+      # GRANT CREATE SCHEMA ON CATALOG against the real smoke account.
+      DRT_SMOKE_DATABRICKS_HAS_CREATE_SCHEMA_GRANT: ${{ vars.SMOKE_DATABRICKS_HAS_CREATE_SCHEMA_GRANT }}
     steps:
       - uses: actions/checkout@v7
       - name: Check credentials
@@ -198,7 +215,16 @@ jobs:
           echo "Warehouse is running."
       - name: Run Databricks smoke
         if: steps.creds.outputs.has_creds == 'true'
-        run: pytest -m dwh_smoke tests/integration/dwh/test_databricks_smoke.py -v
+        # #1108's managed-table and warehouse-state-backend smoke suites live
+        # in tests/integration/dwh/ alongside test_databricks_smoke.py -- each
+        # job here names its files explicitly, not the whole directory, so
+        # they must be listed or they silently never run.
+        run: |
+          pytest -m dwh_smoke \
+            tests/integration/dwh/test_databricks_smoke.py \
+            tests/integration/dwh/test_databricks_managed_table_smoke.py \
+            tests/integration/dwh/test_databricks_warehouse_state_smoke.py \
+            -v
 
   bigquery:
     name: BigQuery smoke

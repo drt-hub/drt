@@ -153,7 +153,7 @@ class TestDatabricksWarehouseStateStore:
         ):
             assert DatabricksWarehouseStateStore(_profile()).get_last_sync("never_run") is None
 
-    def test_save_sync_ensures_schema_and_merges_via_inline_source(self) -> None:
+    def test_save_sync_ensures_schema_and_merges_via_a_staged_upsert(self) -> None:
         conn = _mock_conn()
         with (
             patch("drt.state.warehouse_databricks._connect", return_value=conn),
@@ -176,10 +176,14 @@ class TestDatabricksWarehouseStateStore:
         ensure_schema.assert_called_once()
         table_exists.assert_called_once()
         executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
+        assert any(sql.startswith("CREATE OR REPLACE TABLE") for sql in executed)
         assert any(
-            "MERGE INTO" in sql and "USING (SELECT" in sql and "WHEN MATCHED" in sql
+            sql.startswith("INSERT INTO") and "VALUES (?, ?, ?, ?, ?, ?)" in sql
             for sql in executed
         )
+        merge_sql = next(sql for sql in executed if sql.startswith("MERGE INTO"))
+        assert "USING" in merge_sql and "WHEN MATCHED" in merge_sql and "?" not in merge_sql
+        assert any(sql.startswith("DROP TABLE IF EXISTS") for sql in executed)
 
     def test_save_sync_skips_create_table_when_preprovisioned(self) -> None:
         """The escape hatch: a pre-provisioned table must never see the
@@ -347,7 +351,7 @@ class TestDatabricksWarehouseDlqBackend:
         ):
             assert DatabricksWarehouseDlqBackend(_profile()).append("s", []) == 0
 
-    def test_append_merges_each_entry_via_inline_source(self) -> None:
+    def test_append_stages_entries_and_merges_once(self) -> None:
         conn = _mock_conn(fetchone=(1,))
         with (
             patch("drt.state.warehouse_databricks._connect", return_value=conn),
@@ -372,8 +376,20 @@ class TestDatabricksWarehouseDlqBackend:
             )
 
         executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
-        assert any("MERGE INTO" in sql and "USING (SELECT" in sql for sql in executed)
-        assert any("parse_json(?)" in sql for sql in executed)
+        assert any(
+            sql.startswith("CREATE OR REPLACE TABLE") and "__drt_dlq_append_" in sql
+            for sql in executed
+        )
+        assert any(
+            sql.startswith("INSERT INTO") and "parse_json(?)" in sql and "SELECT" in sql
+            for sql in executed
+        )
+        merge_calls = [sql for sql in executed if sql.startswith("MERGE INTO")]
+        assert len(merge_calls) == 1
+        assert "WHEN MATCHED THEN UPDATE" in merge_calls[0]
+        assert "WHEN NOT MATCHED THEN INSERT" in merge_calls[0]
+        assert "WHEN NOT MATCHED BY SOURCE" not in merge_calls[0]  # upsert only, no delete
+        assert any(sql.startswith("DROP TABLE IF EXISTS") for sql in executed)
 
     def test_replace_with_entries_stages_and_merges_atomically(self) -> None:
         """The #955 failure class this guards against, closed via a single
