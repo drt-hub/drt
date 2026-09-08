@@ -1,12 +1,14 @@
 """Unit tests for the Databricks-backed warehouse state/history/DLQ stores (#1108).
 
 Mock-based, like tests/unit/test_state_warehouse_snowflake.py's Snowflake
-counterpart: proves dispatch, parameter shape, the inline-derived-table MERGE
-translation, and `replace()`'s staged-MERGE atomicity strategy (Delta has no
-multi-statement transactions at all, so this dialect cannot wrap
-DELETE-then-INSERT the way Snowflake does). Real round-trip behavior is
-proven live in tests/integration/dwh/test_databricks_warehouse_state_smoke.py
-— a mock cursor can't validate the SQL itself (#908's lesson).
+counterpart: proves dispatch, parameter shape, the staged-upsert MERGE
+translation (a real scratch table + MERGE, not an inline derived-table
+source — see warehouse_databricks.py's module docstring for why), and
+`replace()`'s staged-MERGE atomicity strategy (Delta has no multi-statement
+transactions at all, so this dialect cannot wrap DELETE-then-INSERT the way
+Snowflake does). Real round-trip behavior is proven live in
+tests/integration/dwh/test_databricks_warehouse_state_smoke.py — a mock
+cursor can't validate the SQL itself (#908's lesson).
 """
 
 from __future__ import annotations
@@ -157,9 +159,7 @@ class TestDatabricksWarehouseStateStore:
         conn = _mock_conn()
         with (
             patch("drt.state.warehouse_databricks._connect", return_value=conn),
-            patch(
-                "drt.sources.databricks.DatabricksSource.ensure_managed_schema"
-            ) as ensure_schema,
+            patch("drt.sources.databricks.DatabricksSource.ensure_managed_schema") as ensure_schema,
             patch(
                 "drt.sources.databricks.DatabricksSource.managed_table_exists", return_value=False
             ) as table_exists,
@@ -178,8 +178,7 @@ class TestDatabricksWarehouseStateStore:
         executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
         assert any(sql.startswith("CREATE OR REPLACE TABLE") for sql in executed)
         assert any(
-            sql.startswith("INSERT INTO") and "VALUES (?, ?, ?, ?, ?, ?)" in sql
-            for sql in executed
+            sql.startswith("INSERT INTO") and "VALUES (?, ?, ?, ?, ?, ?)" in sql for sql in executed
         )
         merge_sql = next(sql for sql in executed if sql.startswith("MERGE INTO"))
         assert "USING" in merge_sql and "WHEN MATCHED" in merge_sql and "?" not in merge_sql

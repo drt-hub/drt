@@ -587,8 +587,7 @@ class DatabricksWarehouseDlqBackend:
         try:
             cur = conn.cursor()
             cur.execute(
-                f"SELECT COUNT(*) FROM {_qualified(self._profile, _DLQ_TABLE)} "
-                "WHERE sync_name = ?",
+                f"SELECT COUNT(*) FROM {_qualified(self._profile, _DLQ_TABLE)} WHERE sync_name = ?",
                 [sync_name],
             )
             row = cur.fetchone()
