@@ -62,15 +62,16 @@ def _require_create_schema_grant() -> None:
 
 
 def _profile(creds: dict[str, str], **overrides: object) -> DatabricksProfile:
-    return DatabricksProfile(
-        type="databricks",
-        server_hostname=creds[HOST_ENV],
-        http_path=creds[HTTP_PATH_ENV],
-        access_token=creds[TOKEN_ENV],
-        catalog=creds[CATALOG_ENV],
-        schema=creds[SCHEMA_ENV],
-        **overrides,  # type: ignore[arg-type]
-    )
+    defaults: dict[str, object] = {
+        "type": "databricks",
+        "server_hostname": creds[HOST_ENV],
+        "http_path": creds[HTTP_PATH_ENV],
+        "access_token": creds[TOKEN_ENV],
+        "catalog": creds[CATALOG_ENV],
+        "schema": creds[SCHEMA_ENV],
+    }
+    defaults.update(overrides)
+    return DatabricksProfile(**defaults)
 
 
 def _admin_connect(creds: dict[str, str]):
