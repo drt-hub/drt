@@ -195,7 +195,7 @@ class TestManagedTableCapable:
 
     def test_managed_table_exists_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
         client = MagicMock()
-        client.get_table.return_value = MagicMock()
+        client.get_table.return_value = MagicMock(table_type="TABLE")
         _install_client(monkeypatch, client)
 
         assert BigQuerySource().managed_table_exists(_config(), "_drt_runs") is True
@@ -213,13 +213,51 @@ class TestManagedTableCapable:
 
         assert BigQuerySource().managed_table_exists(_config(), "_drt_runs") is False
 
-    def test_drop_managed_table_is_not_found_ok(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_managed_table_exists_false_for_a_same_named_view(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A view sharing this name isn't a managed table this capability
+        owns — must not be reported as existing (Codex review)."""
         client = MagicMock()
+        client.get_table.return_value = MagicMock(table_type="VIEW")
+        _install_client(monkeypatch, client)
+
+        assert BigQuerySource().managed_table_exists(_config(), "_drt_runs") is False
+
+    def test_drop_managed_table_deletes_a_plain_table(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = MagicMock()
+        client.get_table.return_value = MagicMock(table_type="TABLE")
         _install_client(monkeypatch, client)
 
         BigQuerySource().drop_managed_table(_config(), "_drt_runs")
 
-        client.delete_table.assert_called_once_with("my-proj._drt._drt_runs", not_found_ok=True)
+        client.delete_table.assert_called_once_with("my-proj._drt._drt_runs")
+
+    def test_drop_managed_table_is_a_noop_when_absent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = MagicMock()
+        client.get_table.side_effect = _NotFound("nope")
+        _install_client(monkeypatch, client)
+
+        BigQuerySource().drop_managed_table(_config(), "_drt_runs")  # must not raise
+
+        client.delete_table.assert_not_called()
+
+    def test_drop_managed_table_never_deletes_a_same_named_view(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Must not delete a resource this capability doesn't own just
+        because the name matches (Codex review)."""
+        client = MagicMock()
+        client.get_table.return_value = MagicMock(table_type="VIEW")
+        _install_client(monkeypatch, client)
+
+        BigQuerySource().drop_managed_table(_config(), "_drt_runs")
+
+        client.delete_table.assert_not_called()
 
     def test_managed_table_capable_protocol_satisfied(self) -> None:
         from drt.sources.base import ManagedTableCapable
