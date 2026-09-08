@@ -62,22 +62,28 @@ def _require_creds() -> dict[str, str]:
 
 
 def _profile(creds: dict[str, str], **overrides: object) -> SnowflakeProfile:
-    auth: dict[str, object] = {}
-    if os.environ.get(KEY_ENV):
-        auth["private_key_env"] = KEY_ENV
-    else:
-        auth["password_env"] = PASSWORD_ENV
-    return SnowflakeProfile(
-        type="snowflake",
-        account=creds[ACCOUNT_ENV],
-        user=creds[USER_ENV],
-        database=creds["DRT_SMOKE_SNOWFLAKE_DATABASE"],
-        warehouse=creds["DRT_SMOKE_SNOWFLAKE_WAREHOUSE"],
+    """``overrides`` (e.g. the concurrent-race test's ``managed_schema=
+    schema_name``) must win over the defaults below — merged via a plain
+    dict update rather than passed alongside them as separate kwargs, which
+    silently dropped every caller's override until caught in review (the
+    nightly workflow never actually ran this suite until #1108 wired it in,
+    so nothing had exercised this path before)."""
+    defaults: dict[str, object] = {
+        "type": "snowflake",
+        "account": creds[ACCOUNT_ENV],
+        "user": creds[USER_ENV],
+        "database": creds["DRT_SMOKE_SNOWFLAKE_DATABASE"],
+        "warehouse": creds["DRT_SMOKE_SNOWFLAKE_WAREHOUSE"],
         # Reuses the role's already-granted schema as managed_schema -- no
         # new CREATE SCHEMA grant needed for the round-trip tests below.
-        managed_schema=creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"],
-        **auth,  # type: ignore[arg-type]
-    )
+        "managed_schema": creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"],
+    }
+    if os.environ.get(KEY_ENV):
+        defaults["private_key_env"] = KEY_ENV
+    else:
+        defaults["password_env"] = PASSWORD_ENV
+    defaults.update(overrides)
+    return SnowflakeProfile(**defaults)  # type: ignore[arg-type]
 
 
 def _admin_connect(creds: dict[str, str]):

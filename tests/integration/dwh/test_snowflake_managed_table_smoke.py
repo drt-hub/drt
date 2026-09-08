@@ -69,20 +69,26 @@ def _require_create_schema_grant() -> None:
 
 
 def _profile(creds: dict[str, str], **overrides: object) -> SnowflakeProfile:
-    auth: dict[str, object] = {}
+    """``overrides`` (e.g. ``managed_schema=...``) must win over the
+    defaults below — merged via a plain dict update rather than passed
+    alongside them as separate kwargs, which silently dropped every caller's
+    override until caught in review (the nightly workflow never actually
+    ran this suite until #1108 wired it in, so nothing had exercised this
+    path before)."""
+    defaults: dict[str, object] = {
+        "type": "snowflake",
+        "account": creds[ACCOUNT_ENV],
+        "user": creds[USER_ENV],
+        "database": creds["DRT_SMOKE_SNOWFLAKE_DATABASE"],
+        "schema": creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"],
+        "warehouse": creds["DRT_SMOKE_SNOWFLAKE_WAREHOUSE"],
+    }
     if os.environ.get(KEY_ENV):
-        auth["private_key_env"] = KEY_ENV
+        defaults["private_key_env"] = KEY_ENV
     else:
-        auth["password_env"] = PASSWORD_ENV
-    return SnowflakeProfile(
-        type="snowflake",
-        account=creds[ACCOUNT_ENV],
-        user=creds[USER_ENV],
-        database=creds["DRT_SMOKE_SNOWFLAKE_DATABASE"],
-        schema=creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"],
-        warehouse=creds["DRT_SMOKE_SNOWFLAKE_WAREHOUSE"],
-        **auth,  # type: ignore[arg-type]
-    )
+        defaults["password_env"] = PASSWORD_ENV
+    defaults.update(overrides)
+    return SnowflakeProfile(**defaults)  # type: ignore[arg-type]
 
 
 def _admin_connect(creds: dict[str, str]):

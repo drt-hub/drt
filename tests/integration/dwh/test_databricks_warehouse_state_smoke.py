@@ -22,6 +22,7 @@ from __future__ import annotations
 import concurrent.futures
 import os
 import uuid
+from typing import Any
 
 import pytest
 
@@ -54,17 +55,24 @@ def _require_creds() -> dict[str, str]:
 
 
 def _profile(creds: dict[str, str], **overrides: object) -> DatabricksProfile:
-    return DatabricksProfile(
-        type="databricks",
-        server_hostname=creds[HOST_ENV],
-        http_path=creds[HTTP_PATH_ENV],
-        access_token=creds[TOKEN_ENV],
-        catalog=creds[CATALOG_ENV],
+    """``overrides`` (e.g. the concurrent-race test's ``managed_schema=
+    schema_name``) must win over the defaults below — merged via a plain
+    dict update rather than passed alongside them as separate kwargs, which
+    raises ``TypeError: got multiple values for keyword argument
+    'managed_schema'`` the moment any caller overrides it (caught in
+    review)."""
+    defaults: dict[str, object] = {
+        "type": "databricks",
+        "server_hostname": creds[HOST_ENV],
+        "http_path": creds[HTTP_PATH_ENV],
+        "access_token": creds[TOKEN_ENV],
+        "catalog": creds[CATALOG_ENV],
         # Reuses the principal's already-granted schema as managed_schema --
         # no new CREATE SCHEMA grant needed for the round-trip tests below.
-        managed_schema=creds[SCHEMA_ENV],
-        **overrides,  # type: ignore[arg-type]
-    )
+        "managed_schema": creds[SCHEMA_ENV],
+    }
+    defaults.update(overrides)
+    return DatabricksProfile(**defaults)  # type: ignore[arg-type]
 
 
 def _admin_connect(creds: dict[str, str]):
@@ -292,9 +300,14 @@ def test_dlq_replace_chunk_failure_leaves_the_queue_intact_not_partially_applied
         dlq.append(sync_name, [DeadLetter(record={"n": 1}, error_message="orig", id=keep_id)])
         assert dlq.depth(sync_name) == 1
 
+        # Deliberately invalid error_message (None) to force the real
+        # table's NOT NULL violation below -- built via an Any-typed kwargs
+        # dict rather than a `type: ignore` on this project-owned dataclass
+        # (AGENTS.md: type: ignore is reserved for external library issues).
+        bad_kwargs: dict[str, Any] = {"record": {"n": 2}, "error_message": None, "id": bad_id}
         broken_replacement = [
             DeadLetter(record={"n": 1}, error_message="updated", id=keep_id),
-            DeadLetter(record={"n": 2}, error_message=None, id=bad_id),  # type: ignore[arg-type]
+            DeadLetter(**bad_kwargs),
         ]
         with pytest.raises(Exception, match="(?i)null"):
             dlq.replace(sync_name, broken_replacement)

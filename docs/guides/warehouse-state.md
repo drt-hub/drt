@@ -162,11 +162,19 @@ Postgres/Snowflake preserve). `replace()` instead deletes ids absent from the ne
 id and upserts the rest via a `MERGE` sourced from a `VALUES` table constructor, chunked to a
 parameter budget — a single chunk is one atomic Delta commit, but a `replace()` spanning more than
 one chunk is not atomic as a whole. What's still guaranteed: a crash mid-`replace()` never leaves
-the queue empty or destroys entries outside the chunk that failed. In every case, unlike the
-[GCS/S3 backends](remote-state.md), there is no client-side read-modify-write cycle to retry, so
-this backend **never raises `StateContentionError`** — the failure class that error exists to
-prevent (two writers silently clobbering each other's read-modify-write) cannot happen when the
-database does the read-modify-write atomically server-side.
+the queue empty or destroys entries outside the chunk that failed. Databricks' `save_sync()` and
+`DlqBackend.append()` are the one place this backend's usual guarantee narrows: with no `MERGE`
+available under the documented escape hatch (see above) and no unique constraint Delta enforces,
+these do a client-side probe (`SELECT` for existence) followed by `UPDATE` or `INSERT` rather than
+one atomic statement — two concurrent writers touching the *same* `sync_name`/DLQ `id`
+simultaneously can both observe absence and both insert, producing a duplicate row (mirroring the
+already-accepted "concurrent runs of the same sync" limitation below, not a new failure class).
+Every other write on every dialect — Postgres's `ON CONFLICT`, Snowflake's `MERGE`/transaction,
+Databricks' `replace()`/`reconcile()` — is atomic per statement with no such window. Across all of
+this, unlike the [GCS/S3 backends](remote-state.md), there is no client-side read-modify-write
+*retry* cycle, so this backend **never raises `StateContentionError`** — the failure class that
+error exists to prevent (a writer silently clobbering another's read-modify-write and getting no
+signal) does not apply here, whether or not a given write is itself atomic.
 
 Two limitations are shared with every other state backend, not unique to `warehouse` — checked
 against `gcs`/`s3`'s own behavior rather than solved here:
