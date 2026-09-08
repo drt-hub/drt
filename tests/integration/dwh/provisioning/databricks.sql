@@ -27,6 +27,14 @@ GRANT USE SCHEMA       ON SCHEMA  drt_smoke.smoke  TO `<SMOKE_PRINCIPAL>`;
 GRANT CREATE TABLE     ON SCHEMA  drt_smoke.smoke  TO `<SMOKE_PRINCIPAL>`;
 GRANT MODIFY           ON SCHEMA  drt_smoke.smoke  TO `<SMOKE_PRINCIPAL>`;
 
+-- ── 2b. CREATE SCHEMA at the catalog level (#1108) ─────────────────────────
+-- Needed only for the ManagedTableCapable positive-create-path and
+-- concurrent-first-use smoke tests (test_databricks_managed_table_smoke.py)
+-- — everything else above already covers the escape-hatch (pre-existing
+-- schema) path via drt_smoke.smoke. Run this manually against the real
+-- account; those two tests skip cleanly (not fail) until it's granted.
+GRANT CREATE SCHEMA    ON CATALOG drt_smoke        TO `<SMOKE_PRINCIPAL>`;
+
 -- ── Secret mapping (register as SMOKE_DATABRICKS_* repo secrets) ────────────
 --   SMOKE_DATABRICKS_HOST      = <workspace host, e.g. dbc-xxxx.cloud.databricks.com>
 --   SMOKE_DATABRICKS_HTTP_PATH = <SQL warehouse HTTP path, from its Connection details>

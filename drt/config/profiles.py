@@ -244,6 +244,25 @@ class DatabricksProfile:
     access_token: str | None = None
     catalog: str | None = None  # Unity Catalog (optional)
     schema: str = "default"
+    #: Schema for drt's own bookkeeping tables (#960/#1108) — see
+    #: PostgresProfile.managed_schema's docstring for the full naming
+    #: rationale (deliberately distinct from `schema` above, which is the
+    #: query-execution default, a different concept). Lives inside `catalog`
+    #: above (Unity Catalog's existing three-level namespace), matching how
+    #: this connector's existing `_drt_synced_keys` tracked-mirror table
+    #: already scopes itself to `catalog.schema`, rather than introducing a
+    #: separate managed-catalog field. `catalog` is required (not optional)
+    #: for every `ManagedTableCapable` operation — Unity Catalog has no
+    #: reliable implicit "current catalog" to fall back on — even though the
+    #: field itself stays optional for plain extraction queries, which don't
+    #: need one. Created/probed unquoted, matching this connector's existing
+    #: `SHOW TABLES ... LIKE` convention (`destinations/databricks.py`)
+    #: rather than introducing a second, quoted-identifier one. Unlike
+    #: Snowflake, no case-folding normalization is needed: Unity Catalog is
+    #: case-preserving (not case-folding) for unquoted identifiers, so a
+    #: plain, un-normalized comparison already matches consistently between
+    #: what drt creates and what it later probes for.
+    managed_schema: str = "_drt"
 
     def describe(self) -> str:
         path = f"{self.catalog}.{self.schema}" if self.catalog else self.schema

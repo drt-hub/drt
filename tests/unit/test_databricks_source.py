@@ -429,3 +429,140 @@ class TestStreamingExtraction:
         conn = _streaming_conn([], description=[("id",)])
         with patch.object(DatabricksSource, "_connect", return_value=conn):
             assert list(DatabricksSource().extract("SELECT 1", _profile())) == []
+
+
+class TestManagedTableCapable:
+    """#960/#1108 — ManagedTableCapable's create-if-absent + escape-hatch
+    contract, ported from the Snowflake leg's own test_snowflake.py suite.
+
+    No conn.commit()/rollback() calls are expected anywhere here: Delta Lake
+    has no multi-statement transactions at all (see the module docstring on
+    drt/sources/databricks.py's ManagedTableCapable methods) — an even
+    stronger constraint than Snowflake's merely-autocommit-by-default.
+
+    Probes use `fetchall()` truthiness (`SHOW SCHEMAS`/`SHOW TABLES ... LIKE`
+    return a result set, not a single EXISTS row), unlike Snowflake's
+    `fetchone()`-against-information_schema shape.
+    """
+
+    def _mock_ddl_conn(self, *, exists: bool = False) -> MagicMock:
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.fetchall.return_value = [("s", "n", False)] if exists else []
+        conn.cursor.return_value = cur
+        return conn
+
+    def test_ensure_managed_schema_creates_when_absent(self) -> None:
+        conn = self._mock_ddl_conn(exists=False)
+        with patch.object(DatabricksSource, "_connect", return_value=conn):
+            DatabricksSource().ensure_managed_schema(_profile(catalog="main"))
+
+        executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
+        assert any("SHOW SCHEMAS IN main" in sql for sql in executed)
+        assert any("CREATE SCHEMA IF NOT EXISTS main._drt" in sql for sql in executed)
+        conn.close.assert_called_once()
+
+    def test_ensure_managed_schema_skips_create_when_present(self) -> None:
+        """The escape hatch: a pre-provisioned schema must never see the
+        CREATE statement, so a no-CREATE-privilege principal can still run."""
+        conn = self._mock_ddl_conn(exists=True)
+        with patch.object(DatabricksSource, "_connect", return_value=conn):
+            DatabricksSource().ensure_managed_schema(_profile(catalog="main"))
+
+        executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
+        assert not any("CREATE SCHEMA" in sql for sql in executed)
+        conn.close.assert_called_once()
+
+    def test_ensure_managed_schema_swallows_the_concurrent_create_race(self) -> None:
+        """Two sessions can both pass the initial probe and both attempt
+        CREATE; the loser's CREATE raises, and re-probing finds the schema
+        already exists (the other session won) — must swallow, not raise."""
+        conn = MagicMock()
+        probe_cur = MagicMock()
+        probe_cur.fetchall.return_value = []  # initial probe: doesn't exist yet
+        probe_cur.execute.side_effect = [None, Exception("concurrent create race")]
+        reprobe_cur = MagicMock()
+        reprobe_cur.fetchall.return_value = [("s", "n", False)]  # now exists
+        conn.cursor.side_effect = [probe_cur, reprobe_cur]
+
+        with patch.object(DatabricksSource, "_connect", return_value=conn):
+            DatabricksSource().ensure_managed_schema(_profile(catalog="main"))  # must not raise
+
+        conn.close.assert_called_once()
+
+    def test_ensure_managed_schema_reraises_when_still_absent_after_create_fails(self) -> None:
+        """A CREATE failure that is NOT a lost concurrent race (e.g. a
+        genuine permission error) must propagate, not be swallowed."""
+        conn = MagicMock()
+        probe_cur = MagicMock()
+        probe_cur.fetchall.return_value = []
+        probe_cur.execute.side_effect = [None, Exception("insufficient privileges")]
+        reprobe_cur = MagicMock()
+        reprobe_cur.fetchall.return_value = []  # still absent
+        conn.cursor.side_effect = [probe_cur, reprobe_cur]
+
+        with patch.object(DatabricksSource, "_connect", return_value=conn):
+            with pytest.raises(Exception, match="insufficient privileges"):
+                DatabricksSource().ensure_managed_schema(_profile(catalog="main"))
+
+    def test_ensure_managed_schema_requires_catalog(self) -> None:
+        with pytest.raises(ValueError, match="catalog"):
+            DatabricksSource().ensure_managed_schema(_profile())
+
+    def test_ensure_managed_schema_probes_the_configured_catalog_and_schema(self) -> None:
+        conn = self._mock_ddl_conn(exists=True)
+        with patch.object(DatabricksSource, "_connect", return_value=conn):
+            DatabricksSource().ensure_managed_schema(
+                _profile(catalog="main", managed_schema="custom_schema")
+            )
+
+        (sql,) = conn.cursor.return_value.execute.call_args.args
+        assert sql == "SHOW SCHEMAS IN main LIKE 'custom_schema'"
+
+    def test_managed_table_exists_true(self) -> None:
+        conn = self._mock_ddl_conn(exists=True)
+        with patch.object(DatabricksSource, "_connect", return_value=conn):
+            assert (
+                DatabricksSource().managed_table_exists(_profile(catalog="main"), "_drt_runs")
+                is True
+            )
+
+    def test_managed_table_exists_false(self) -> None:
+        conn = self._mock_ddl_conn(exists=False)
+        with patch.object(DatabricksSource, "_connect", return_value=conn):
+            assert (
+                DatabricksSource().managed_table_exists(_profile(catalog="main"), "_drt_runs")
+                is False
+            )
+
+    def test_managed_table_exists_probes_the_configured_schema(self) -> None:
+        conn = self._mock_ddl_conn(exists=False)
+        with patch.object(DatabricksSource, "_connect", return_value=conn):
+            DatabricksSource().managed_table_exists(
+                _profile(catalog="main", managed_schema="custom_schema"), "_drt_runs"
+            )
+
+        (sql,) = conn.cursor.return_value.execute.call_args.args
+        assert sql == "SHOW TABLES IN main.custom_schema LIKE '_drt_runs'"
+
+    def test_managed_table_exists_requires_catalog(self) -> None:
+        with pytest.raises(ValueError, match="catalog"):
+            DatabricksSource().managed_table_exists(_profile(), "_drt_runs")
+
+    def test_drop_managed_table_issues_drop_if_exists(self) -> None:
+        conn = self._mock_ddl_conn()
+        with patch.object(DatabricksSource, "_connect", return_value=conn):
+            DatabricksSource().drop_managed_table(_profile(catalog="main"), "_drt_runs")
+
+        executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
+        assert any("DROP TABLE IF EXISTS main._drt._drt_runs" in sql for sql in executed)
+        conn.close.assert_called_once()
+
+    def test_drop_managed_table_requires_catalog(self) -> None:
+        with pytest.raises(ValueError, match="catalog"):
+            DatabricksSource().drop_managed_table(_profile(), "_drt_runs")
+
+    def test_managed_table_capable_protocol_satisfied(self) -> None:
+        from drt.sources.base import ManagedTableCapable
+
+        assert isinstance(DatabricksSource(), ManagedTableCapable)
