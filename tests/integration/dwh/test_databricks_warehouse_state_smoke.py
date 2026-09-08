@@ -317,8 +317,9 @@ def test_dlq_replace_with_empty_list_clears_the_queue() -> None:
     profile = _profile(creds)
     dlq = DatabricksWarehouseDlqBackend(profile)
     sync_name = f"orders_{uuid.uuid4().hex[:8]}"
+    entry_id = f"id-{uuid.uuid4().hex[:8]}"
 
-    dlq.append(sync_name, [DeadLetter(record={"n": 1}, error_message="x", id="id-1")])
+    dlq.append(sync_name, [DeadLetter(record={"n": 1}, error_message="x", id=entry_id)])
     assert dlq.depth(sync_name) == 1
 
     dlq.replace(sync_name, [])

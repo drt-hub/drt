@@ -48,22 +48,27 @@ before merge — see below):
 - **`DlqBackend.replace()`'s atomicity (the #955 failure class) is closed
   without a scratch table and without `WHEN NOT MATCHED BY SOURCE`:**
   existing ids for `sync_name` are read first (`SELECT id FROM t WHERE
-  sync_name = ?`), the ids absent from the new `entries` are deleted by
+  sync_name = ?`) to compute which are absent from the new `entries`
+  (stale), the new entries are upserted **first** via a chunked
+  `MERGE INTO t USING (VALUES (?, ?, ...), ...) AS s(id, sync_name, record,
+  ...) ON t.id = s.id WHEN MATCHED THEN UPDATE / WHEN NOT MATCHED THEN
+  INSERT` (`_rows_per_chunk` from `drt/destinations/databricks.py`, reused
+  rather than a second copy of the same 255-marker budget), and only
+  **after every upsert chunk has succeeded** are the stale ids deleted by
   explicit id (`DELETE ... WHERE id IN (...)`, chunked like `reconcile()`'s
   `remove_ids` — safe to split across statements, since each chunk deletes a
-  disjoint subset of the same stale-id set), and the new entries are
-  upserted via a chunked `MERGE INTO t USING (VALUES (?, ?, ...), ...) AS
-  s(id, sync_name, record, ...) ON t.id = s.id WHEN MATCHED THEN UPDATE /
-  WHEN NOT MATCHED THEN INSERT` (`_rows_per_chunk` from
-  `drt/destinations/databricks.py`, reused rather than a second copy of the
-  same 255-marker budget). A single chunk's `MERGE` is one atomic Delta
+  disjoint subset of the same stale-id set). This upsert-then-delete order
+  is deliberate, not incidental: deleting stale ids *before* the upsert
+  (an earlier draft's order) means a crash or a failed merge partway through
+  leaves the queue with the old rows already gone and the new ones not yet
+  landed — an empty queue, exactly the failure this method exists to
+  prevent (caught in review). A single chunk's `MERGE` is one atomic Delta
   commit; a multi-chunk `replace()` is **not** fully atomic across chunks —
   say so plainly rather than overclaiming. What *is* still guaranteed: the
-  queue is never left empty or destroyed by a crash mid-`replace()`, only
-  entries that had *already* landed plus some not-yet-applied — a crash
-  after the delete phase but before every upsert chunk lands leaves the
-  surviving old entries alongside whichever new entries already landed,
-  never nothing. An earlier draft used a single `MERGE` with `WHEN NOT
+  queue is never left empty or destroyed by a crash mid-`replace()` — a
+  crash before every upsert chunk lands leaves the old queue untouched
+  (stale-delete never ran) plus whichever new entries already landed, never
+  nothing. An earlier draft used a single `MERGE` with `WHEN NOT
   MATCHED BY SOURCE AND t.sync_name = ? THEN DELETE` (mirroring the anti-join
   shape `_delete_via_staged_keys` already uses for mirror deletes, #692/#908)
   — Codex review found two problems with it: it required the scratch table
@@ -517,7 +522,14 @@ class DatabricksWarehouseDlqBackend:
     ) -> int:
         """Per-entry probe-then-``UPDATE``-or-``INSERT`` — see module
         docstring for why (no scratch table, matches every other dialect's
-        one-statement-per-entry shape, #1121 tracks batching separately)."""
+        one-statement-per-entry shape, #1121 tracks batching separately).
+
+        The ``UPDATE`` branch does not touch ``sync_name`` on a match,
+        matching Postgres's/Snowflake's own DLQ upsert precedent (this is a
+        shared, pre-existing property across every dialect, not new here):
+        matching globally on ``id`` and reassigning ``sync_name`` on match
+        would let one sync's ``append()`` silently move another sync's row
+        into its own queue on an id collision."""
         if not entries:
             return self.depth(sync_name)
         conn = _connect(self._profile)
@@ -530,11 +542,10 @@ class DatabricksWarehouseDlqBackend:
                 exists = cur.fetchone() is not None
                 if exists:
                     cur.execute(
-                        f"UPDATE {t} SET sync_name = ?, record = parse_json(?), "
+                        f"UPDATE {t} SET record = parse_json(?), "
                         "error_message = ?, http_status = ?, ts = ?, attempts = ?, "
                         "sync_run_id = ? WHERE id = ?",
                         [
-                            sync_name,
                             json.dumps(entry.record),
                             entry.error_message,
                             entry.http_status,
@@ -569,12 +580,22 @@ class DatabricksWarehouseDlqBackend:
         documented escape hatch and got Databricks' ``MERGE`` clause order
         wrong; Codex review caught both before merge).
 
-        Stale ids (existing but absent from ``entries``) are deleted by
-        explicit id, chunked; new/changed entries are upserted via a chunked
-        ``MERGE ... USING (VALUES ...) AS s(...)``. Not atomic across
-        chunks — the queue is never left empty or destroyed by a crash
-        mid-call, but is not guaranteed to reach the new state in one commit
-        when `entries` needs more than one chunk.
+        New/changed entries are upserted **first**, via a chunked
+        ``MERGE ... USING (VALUES ...) AS s(...)``; stale ids (existing but
+        absent from ``entries``) are only deleted, by explicit id and
+        chunked, **after every upsert chunk has succeeded**. This order
+        matters for crash-safety, not just final correctness: deleting stale
+        ids before the upsert would mean a crash or a failed merge (e.g. a
+        constraint violation partway through) leaves the queue with the old
+        rows already gone and the new ones not yet landed — an empty queue,
+        exactly the #955 failure class this method exists to prevent (caught
+        in review; an earlier draft had this order reversed). With upserts
+        first, a crash before every chunk lands leaves the old queue
+        untouched (stale-delete never ran) plus whichever new entries did
+        land — never nothing. Not atomic across chunks — the queue is never
+        left empty or destroyed by a crash mid-call, but is not guaranteed to
+        reach the new state in one commit when `entries` needs more than one
+        chunk.
         """
         conn = _connect(self._profile)
         try:
@@ -589,15 +610,6 @@ class DatabricksWarehouseDlqBackend:
             existing_ids = {row[0] for row in cur.fetchall()}
             new_ids = {entry.id for entry in entries}
             stale_ids = list(existing_ids - new_ids)
-            if stale_ids:
-                chunk_size = _NATIVE_PARAM_LIMIT - 1  # one slot for sync_name
-                for start in range(0, len(stale_ids), chunk_size):
-                    chunk = stale_ids[start : start + chunk_size]
-                    placeholders = ", ".join(["?"] * len(chunk))
-                    cur.execute(
-                        f"DELETE FROM {t} WHERE sync_name = ? AND id IN ({placeholders})",
-                        [sync_name, *chunk],
-                    )
 
             rows_per_chunk = _rows_per_chunk(len(_DLQ_COLUMNS))
             for start in range(0, len(entries), rows_per_chunk):
@@ -619,6 +631,16 @@ class DatabricksWarehouseDlqBackend:
                     "s.attempts, s.sync_run_id)",
                     params,
                 )
+
+            if stale_ids:
+                chunk_size = _NATIVE_PARAM_LIMIT - 1  # one slot for sync_name
+                for start in range(0, len(stale_ids), chunk_size):
+                    chunk = stale_ids[start : start + chunk_size]
+                    placeholders = ", ".join(["?"] * len(chunk))
+                    cur.execute(
+                        f"DELETE FROM {t} WHERE sync_name = ? AND id IN ({placeholders})",
+                        [sync_name, *chunk],
+                    )
         finally:
             conn.close()
 

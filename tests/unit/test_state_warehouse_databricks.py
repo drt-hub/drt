@@ -440,6 +440,10 @@ class TestDatabricksWarehouseDlqBackend:
         assert not any("MERGE" in sql or "CREATE OR REPLACE" in sql for sql in executed)
 
     def test_append_updates_existing_entry_via_probe_then_update(self) -> None:
+        """The UPDATE branch must not touch sync_name -- matching every
+        other dialect's DLQ upsert precedent (see append()'s docstring):
+        reassigning sync_name on an id match would let one sync's append()
+        silently move another sync's row into its own queue."""
         conn = _sequenced_conn(fetchone_sequence=[(1,), (1,)])  # probe exists, then depth()
         with (
             patch("drt.state.warehouse_databricks._connect", return_value=conn),
@@ -451,7 +455,9 @@ class TestDatabricksWarehouseDlqBackend:
             DatabricksWarehouseDlqBackend(_profile()).append("s", [_dead_letter()])
 
         executed = [str(c.args[0]) for c in conn.cursor.return_value.execute.call_args_list]
-        assert any(sql.startswith("UPDATE") and "parse_json(?)" in sql for sql in executed)
+        update_sql = next(sql for sql in executed if sql.startswith("UPDATE"))
+        assert "parse_json(?)" in update_sql
+        assert "sync_name" not in update_sql
         assert not any(sql.startswith("INSERT INTO") for sql in executed)
 
     def test_replace_upserts_via_values_merge_in_databricks_clause_order(self) -> None:
@@ -500,6 +506,28 @@ class TestDatabricksWarehouseDlqBackend:
         sql, params = delete_call.args
         assert "IN (?)" in sql
         assert params == ["s", "stale-1"]
+
+    def test_replace_upserts_before_deleting_stale_ids(self) -> None:
+        """Ordering matters for crash-safety, not just final correctness
+        (see module docstring): deleting stale ids before the upsert would
+        mean a crash or a failed merge partway through leaves the queue with
+        the old rows already gone and the new ones not yet landed."""
+        conn = _mock_conn(fetchall=[("stale-1",)])
+        with (
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+            patch("drt.sources.databricks.DatabricksSource.ensure_managed_schema"),
+            patch(
+                "drt.sources.databricks.DatabricksSource.managed_table_exists", return_value=True
+            ),
+        ):
+            DatabricksWarehouseDlqBackend(_profile()).replace("s", [_dead_letter(id="new-1")])
+
+        calls = conn.cursor.return_value.execute.call_args_list
+        merge_index = next(i for i, c in enumerate(calls) if str(c.args[0]).startswith("MERGE"))
+        delete_index = next(
+            i for i, c in enumerate(calls) if str(c.args[0]).startswith("DELETE FROM")
+        )
+        assert merge_index < delete_index
 
     def test_replace_chunks_many_entries_across_multiple_merge_statements(self) -> None:
         """31 rows fit per MERGE at 8 columns under the native 255-marker
