@@ -1,12 +1,13 @@
 """Unit tests for the Databricks-backed warehouse state/history/DLQ stores (#1108).
 
 Mock-based, like tests/unit/test_state_warehouse_snowflake.py's Snowflake
-counterpart: proves dispatch, parameter shape, the staged-upsert MERGE
-translation (a real scratch table + MERGE, not an inline derived-table
-source — see warehouse_databricks.py's module docstring for why), and
-`replace()`'s staged-MERGE atomicity strategy (Delta has no multi-statement
-transactions at all, so this dialect cannot wrap DELETE-then-INSERT the way
-Snowflake does). Real round-trip behavior is proven live in
+counterpart: proves dispatch, parameter shape, the probe-then-UPDATE-or-INSERT
+translation for single-row upserts, and `replace()`'s scratch-table-free
+stale-id-delete + chunked VALUES-MERGE design (see warehouse_databricks.py's
+module docstring for the full history — an earlier scratch-table draft was
+caught by Codex review breaking the documented escape hatch and getting
+Databricks' MERGE clause order wrong before this shape was settled on). Real
+round-trip behavior is proven live in
 tests/integration/dwh/test_databricks_warehouse_state_smoke.py — a mock
 cursor can't validate the SQL itself (#908's lesson).
 """
@@ -37,12 +38,25 @@ def _profile(**overrides: object) -> DatabricksProfile:
     return DatabricksProfile(**defaults)
 
 
-def _mock_conn(*, fetchone=None, fetchall=None, rowcount: int = 0) -> MagicMock:
+def _mock_conn(*, fetchone=None, fetchall=None) -> MagicMock:
     conn = MagicMock()
     cur = MagicMock()
     cur.fetchone.return_value = fetchone
     cur.fetchall.return_value = fetchall or []
-    cur.rowcount = rowcount
+    conn.cursor.return_value = cur
+    return conn
+
+
+def _sequenced_conn(*, fetchone_sequence=None, fetchall=None) -> MagicMock:
+    """A mock connection whose cursor's fetchone() returns a different value
+    on each call -- needed for tests where one method call issues more than
+    one probe (e.g. append()'s per-row existence check followed by depth()'s
+    final COUNT)."""
+    conn = MagicMock()
+    cur = MagicMock()
+    if fetchone_sequence is not None:
+        cur.fetchone.side_effect = fetchone_sequence
+    cur.fetchall.return_value = fetchall or []
     conn.cursor.return_value = cur
     return conn
 
@@ -116,14 +130,28 @@ class TestDatabricksWarehouseStateStore:
             assert DatabricksWarehouseStateStore(_profile()).reset("s") is False
 
     def test_reset_deletes_and_returns_true_when_a_row_existed(self) -> None:
-        conn = _mock_conn(rowcount=1)
+        """Existence is probed before DELETE rather than trusting
+        cursor.rowcount afterward -- see module docstring for why."""
+        conn = _mock_conn(fetchone=(1,))
         with (
             patch("drt.state.warehouse_databricks._table_exists", return_value=True),
             patch("drt.state.warehouse_databricks._connect", return_value=conn),
         ):
             assert DatabricksWarehouseStateStore(_profile()).reset("s") is True
-        sql = str(conn.cursor.return_value.execute.call_args.args[0])
-        assert sql.startswith("DELETE FROM")
+        executed = [str(c.args[0]) for c in conn.cursor.return_value.execute.call_args_list]
+        assert any(sql.startswith("SELECT 1 FROM") for sql in executed)
+        assert any(sql.startswith("DELETE FROM") for sql in executed)
+
+    def test_reset_returns_false_when_row_absent_even_though_table_exists(self) -> None:
+        conn = _mock_conn(fetchone=None)
+        with (
+            patch("drt.state.warehouse_databricks._table_exists", return_value=True),
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+        ):
+            assert DatabricksWarehouseStateStore(_profile()).reset("s") is False
+        # DELETE still runs unconditionally -- idempotent no-op when absent.
+        executed = [str(c.args[0]) for c in conn.cursor.return_value.execute.call_args_list]
+        assert any(sql.startswith("DELETE FROM") for sql in executed)
 
     def test_now_returns_an_iso_timestamp(self) -> None:
         from datetime import datetime
@@ -155,8 +183,8 @@ class TestDatabricksWarehouseStateStore:
         ):
             assert DatabricksWarehouseStateStore(_profile()).get_last_sync("never_run") is None
 
-    def test_save_sync_ensures_schema_and_merges_via_a_staged_upsert(self) -> None:
-        conn = _mock_conn()
+    def test_save_sync_ensures_schema_and_inserts_when_absent(self) -> None:
+        conn = _mock_conn(fetchone=None)  # row probe: absent
         with (
             patch("drt.state.warehouse_databricks._connect", return_value=conn),
             patch("drt.sources.databricks.DatabricksSource.ensure_managed_schema") as ensure_schema,
@@ -165,28 +193,41 @@ class TestDatabricksWarehouseStateStore:
             ) as table_exists,
         ):
             DatabricksWarehouseStateStore(_profile()).save_sync(
-                SyncState(
-                    sync_name="s",
-                    last_run_at="t",
-                    records_synced=1,
-                    status="success",
-                )
+                SyncState(sync_name="s", last_run_at="t", records_synced=1, status="success")
             )
 
         ensure_schema.assert_called_once()
         table_exists.assert_called_once()
         executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
-        assert any(sql.startswith("CREATE OR REPLACE TABLE") for sql in executed)
+        assert any(sql.startswith("SELECT 1 FROM") for sql in executed)
         assert any(
             sql.startswith("INSERT INTO") and "VALUES (?, ?, ?, ?, ?, ?)" in sql for sql in executed
         )
-        merge_sql = next(sql for sql in executed if sql.startswith("MERGE INTO"))
-        assert "USING" in merge_sql and "WHEN MATCHED" in merge_sql and "?" not in merge_sql
-        assert any(sql.startswith("DROP TABLE IF EXISTS") for sql in executed)
+        assert not any(sql.startswith("UPDATE") for sql in executed)
+        assert not any("MERGE" in sql or "CREATE OR REPLACE" in sql for sql in executed)
+
+    def test_save_sync_updates_when_present(self) -> None:
+        conn = _mock_conn(fetchone=(1,))  # row probe: exists
+        with (
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+            patch("drt.sources.databricks.DatabricksSource.ensure_managed_schema"),
+            patch(
+                "drt.sources.databricks.DatabricksSource.managed_table_exists", return_value=True
+            ),
+        ):
+            DatabricksWarehouseStateStore(_profile()).save_sync(
+                SyncState(sync_name="s", last_run_at="t", records_synced=1, status="success")
+            )
+
+        executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
+        assert any(sql.startswith("UPDATE") for sql in executed)
+        assert not any(sql.startswith("INSERT INTO") for sql in executed)
 
     def test_save_sync_skips_create_table_when_preprovisioned(self) -> None:
         """The escape hatch: a pre-provisioned table must never see the
-        CREATE statement, even the IF NOT EXISTS form."""
+        CREATE statement, even the IF NOT EXISTS form -- and (unlike an
+        earlier draft) no scratch table CREATE either, since save_sync now
+        issues only SELECT/UPDATE/INSERT against the real table."""
         conn = _mock_conn()
         with (
             patch("drt.state.warehouse_databricks._connect", return_value=conn),
@@ -200,7 +241,7 @@ class TestDatabricksWarehouseStateStore:
             )
 
         executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
-        assert not any("CREATE TABLE" in sql for sql in executed)
+        assert not any("CREATE" in sql for sql in executed)
 
 
 class TestDatabricksWarehouseHistoryStore:
@@ -225,15 +266,28 @@ class TestDatabricksWarehouseHistoryStore:
         with patch("drt.state.warehouse_databricks._table_exists", return_value=False):
             assert DatabricksWarehouseHistoryStore(_profile()).prune("s", 30) == 0
 
-    def test_prune_deletes_and_returns_the_removed_count(self) -> None:
-        conn = _mock_conn(rowcount=3)
+    def test_prune_counts_then_deletes_and_returns_the_count(self) -> None:
+        """Counted before DELETE rather than trusting cursor.rowcount
+        afterward -- see module docstring for why."""
+        conn = _mock_conn(fetchone=(3,))
         with (
             patch("drt.state.warehouse_databricks._table_exists", return_value=True),
             patch("drt.state.warehouse_databricks._connect", return_value=conn),
         ):
             assert DatabricksWarehouseHistoryStore(_profile()).prune("s", 30) == 3
-        sql = str(conn.cursor.return_value.execute.call_args.args[0])
-        assert sql.startswith("DELETE FROM")
+        executed = [str(c.args[0]) for c in conn.cursor.return_value.execute.call_args_list]
+        assert any(sql.startswith("SELECT COUNT(*)") for sql in executed)
+        assert any(sql.startswith("DELETE FROM") for sql in executed)
+
+    def test_prune_skips_delete_when_nothing_matches(self) -> None:
+        conn = _mock_conn(fetchone=(0,))
+        with (
+            patch("drt.state.warehouse_databricks._table_exists", return_value=True),
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+        ):
+            assert DatabricksWarehouseHistoryStore(_profile()).prune("s", 30) == 0
+        executed = [str(c.args[0]) for c in conn.cursor.return_value.execute.call_args_list]
+        assert not any(sql.startswith("DELETE FROM") for sql in executed)
 
     def test_append_is_best_effort_and_never_raises(self) -> None:
         with patch(
@@ -321,6 +375,20 @@ class TestDatabricksWarehouseHistoryStore:
         assert entries[0].errors == []
 
 
+def _dead_letter(**overrides: object) -> DeadLetter:
+    defaults: dict = {
+        "record": {"a": 1},
+        "error_message": "boom",
+        "http_status": 500,
+        "timestamp": "t0",
+        "attempts": 1,
+        "sync_run_id": "run-1",
+        "id": "id-1",
+    }
+    defaults.update(overrides)
+    return DeadLetter(**defaults)
+
+
 class TestDatabricksWarehouseDlqBackend:
     def test_read_returns_empty_before_any_table_exists(self) -> None:
         with patch("drt.state.warehouse_databricks._table_exists", return_value=False):
@@ -350,8 +418,11 @@ class TestDatabricksWarehouseDlqBackend:
         ):
             assert DatabricksWarehouseDlqBackend(_profile()).append("s", []) == 0
 
-    def test_append_stages_entries_and_merges_once(self) -> None:
-        conn = _mock_conn(fetchone=(1,))
+    def test_append_inserts_new_entry_via_probe_then_insert(self) -> None:
+        """No scratch table, no MERGE -- see module docstring for why an
+        earlier scratch-table + MERGE draft broke the documented escape
+        hatch and was replaced with this per-entry probe."""
+        conn = _sequenced_conn(fetchone_sequence=[None, (1,)])  # probe absent, then depth()
         with (
             patch("drt.state.warehouse_databricks._connect", return_value=conn),
             patch("drt.sources.databricks.DatabricksSource.ensure_managed_schema"),
@@ -359,43 +430,17 @@ class TestDatabricksWarehouseDlqBackend:
                 "drt.sources.databricks.DatabricksSource.managed_table_exists", return_value=True
             ),
         ):
-            DatabricksWarehouseDlqBackend(_profile()).append(
-                "s",
-                [
-                    DeadLetter(
-                        record={"a": 1},
-                        error_message="boom",
-                        http_status=500,
-                        timestamp="t0",
-                        attempts=1,
-                        sync_run_id="run-1",
-                        id="id-1",
-                    )
-                ],
-            )
+            depth = DatabricksWarehouseDlqBackend(_profile()).append("s", [_dead_letter()])
 
-        executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
-        assert any(
-            sql.startswith("CREATE OR REPLACE TABLE") and "__drt_dlq_append_" in sql
-            for sql in executed
-        )
-        assert any(
-            sql.startswith("INSERT INTO") and "parse_json(?)" in sql and "SELECT" in sql
-            for sql in executed
-        )
-        merge_calls = [sql for sql in executed if sql.startswith("MERGE INTO")]
-        assert len(merge_calls) == 1
-        assert "WHEN MATCHED THEN UPDATE" in merge_calls[0]
-        assert "WHEN NOT MATCHED THEN INSERT" in merge_calls[0]
-        assert "WHEN NOT MATCHED BY SOURCE" not in merge_calls[0]  # upsert only, no delete
-        assert any(sql.startswith("DROP TABLE IF EXISTS") for sql in executed)
+        assert depth == 1
+        executed = [str(c.args[0]) for c in conn.cursor.return_value.execute.call_args_list]
+        assert any(sql.startswith("SELECT 1 FROM") for sql in executed)
+        assert any(sql.startswith("INSERT INTO") and "parse_json(?)" in sql for sql in executed)
+        assert not any(sql.startswith("UPDATE") for sql in executed)
+        assert not any("MERGE" in sql or "CREATE OR REPLACE" in sql for sql in executed)
 
-    def test_replace_with_entries_stages_and_merges_atomically(self) -> None:
-        """The #955 failure class this guards against, closed via a single
-        atomic MERGE rather than an explicit transaction (Delta has none):
-        the queue is staged into a scratch table, then one MERGE deletes
-        stale rows / updates matches / inserts new rows in one Delta commit."""
-        conn = _mock_conn()
+    def test_append_updates_existing_entry_via_probe_then_update(self) -> None:
+        conn = _sequenced_conn(fetchone_sequence=[(1,), (1,)])  # probe exists, then depth()
         with (
             patch("drt.state.warehouse_databricks._connect", return_value=conn),
             patch("drt.sources.databricks.DatabricksSource.ensure_managed_schema"),
@@ -403,37 +448,86 @@ class TestDatabricksWarehouseDlqBackend:
                 "drt.sources.databricks.DatabricksSource.managed_table_exists", return_value=True
             ),
         ):
-            DatabricksWarehouseDlqBackend(_profile()).replace(
-                "s",
-                [
-                    DeadLetter(
-                        record={"a": 1},
-                        error_message="boom",
-                        http_status=500,
-                        timestamp="t0",
-                        attempts=1,
-                        sync_run_id="run-1",
-                        id="id-1",
-                    )
-                ],
-            )
+            DatabricksWarehouseDlqBackend(_profile()).append("s", [_dead_letter()])
 
-        executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
-        assert any(sql.startswith("CREATE OR REPLACE TABLE") for sql in executed)
-        assert any(
-            "INSERT INTO" in sql and "parse_json(?)" in sql and "__drt_dlq_replace_" in sql
-            for sql in executed
-        )
+        executed = [str(c.args[0]) for c in conn.cursor.return_value.execute.call_args_list]
+        assert any(sql.startswith("UPDATE") and "parse_json(?)" in sql for sql in executed)
+        assert not any(sql.startswith("INSERT INTO") for sql in executed)
+
+    def test_replace_upserts_via_values_merge_in_databricks_clause_order(self) -> None:
+        """The #955 failure class this guards against, closed without a
+        scratch table or an explicit transaction (Delta has neither
+        available under the documented escape hatch / at all, respectively)
+        -- see module docstring for the full design history."""
+        conn = _mock_conn(fetchall=[])  # no existing ids -> nothing stale
+        with (
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+            patch("drt.sources.databricks.DatabricksSource.ensure_managed_schema"),
+            patch(
+                "drt.sources.databricks.DatabricksSource.managed_table_exists", return_value=True
+            ),
+        ):
+            DatabricksWarehouseDlqBackend(_profile()).replace("s", [_dead_letter()])
+
+        executed = [str(c.args[0]) for c in conn.cursor.return_value.execute.call_args_list]
+        assert any(sql.startswith("SELECT id FROM") for sql in executed)
+        assert not any(sql.startswith("DELETE FROM") for sql in executed)
+        assert not any("CREATE" in sql for sql in executed)
         merge_sql = next(sql for sql in executed if sql.startswith("MERGE INTO"))
-        assert "WHEN NOT MATCHED BY SOURCE AND t.sync_name = ?" in merge_sql
-        assert "WHEN MATCHED THEN UPDATE" in merge_sql
-        assert "WHEN NOT MATCHED THEN INSERT" in merge_sql
-        assert any(sql.startswith("DROP TABLE IF EXISTS") for sql in executed)
+        assert "USING (VALUES" in merge_sql
+        assert "parse_json(s.record)" in merge_sql
+        # Databricks MERGE grammar: WHEN MATCHED before WHEN NOT MATCHED,
+        # and no WHEN NOT MATCHED BY SOURCE at all in this design.
+        assert merge_sql.index("WHEN MATCHED") < merge_sql.index("WHEN NOT MATCHED THEN")
+        assert "WHEN NOT MATCHED BY SOURCE" not in merge_sql
+
+    def test_replace_deletes_stale_ids_absent_from_new_entries(self) -> None:
+        conn = _mock_conn(fetchall=[("keep-1",), ("stale-1",)])
+        with (
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+            patch("drt.sources.databricks.DatabricksSource.ensure_managed_schema"),
+            patch(
+                "drt.sources.databricks.DatabricksSource.managed_table_exists", return_value=True
+            ),
+        ):
+            DatabricksWarehouseDlqBackend(_profile()).replace("s", [_dead_letter(id="keep-1")])
+
+        delete_call = next(
+            c
+            for c in conn.cursor.return_value.execute.call_args_list
+            if str(c.args[0]).startswith("DELETE FROM")
+        )
+        sql, params = delete_call.args
+        assert "IN (?)" in sql
+        assert params == ["s", "stale-1"]
+
+    def test_replace_chunks_many_entries_across_multiple_merge_statements(self) -> None:
+        """31 rows fit per MERGE at 8 columns under the native 255-marker
+        limit (#734's _rows_per_chunk, reused rather than re-derived) -- 40
+        entries need two chunks, and the whole operation is only atomic
+        within a chunk, not across them (see module docstring)."""
+        conn = _mock_conn(fetchall=[])
+        entries = [_dead_letter(id=f"id-{i}", record={"n": i}) for i in range(40)]
+        with (
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+            patch("drt.sources.databricks.DatabricksSource.ensure_managed_schema"),
+            patch(
+                "drt.sources.databricks.DatabricksSource.managed_table_exists", return_value=True
+            ),
+        ):
+            DatabricksWarehouseDlqBackend(_profile()).replace("s", entries)
+
+        merge_calls = [
+            c
+            for c in conn.cursor.return_value.execute.call_args_list
+            if str(c.args[0]).startswith("MERGE INTO")
+        ]
+        assert len(merge_calls) == 2
+        assert sum(len(c.args[1]) // 8 for c in merge_calls) == 40
 
     def test_replace_with_empty_list_deletes_directly_not_via_merge(self) -> None:
-        """Empty-source MERGE semantics on Delta are unverified by any prior
-        art in this codebase — clear() must go through a plain DELETE
-        instead of trusting a zero-row MERGE source."""
+        """clear() must go through a plain DELETE rather than trusting a
+        zero-row MERGE source's semantics on this platform."""
         conn = _mock_conn()
         with (
             patch("drt.state.warehouse_databricks._connect", return_value=conn),
@@ -447,7 +541,7 @@ class TestDatabricksWarehouseDlqBackend:
         executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
         assert any(sql.startswith("DELETE FROM") for sql in executed)
         assert not any("MERGE INTO" in sql for sql in executed)
-        assert not any("CREATE OR REPLACE TABLE" in sql for sql in executed)
+        assert not any("CREATE" in sql for sql in executed)
 
     def test_clear_deletes_with_an_empty_list(self) -> None:
         conn = _mock_conn()
@@ -518,14 +612,12 @@ class TestDatabricksWarehouseDlqBackend:
             DatabricksWarehouseDlqBackend(_profile()).reconcile(
                 "s",
                 updates={
-                    "id-1": DeadLetter(
+                    "id-1": _dead_letter(
                         record={"a": 2},
                         error_message="still failing",
-                        http_status=500,
                         timestamp="t1",
                         attempts=3,
                         sync_run_id="run-2",
-                        id="id-1",
                     )
                 },
             )

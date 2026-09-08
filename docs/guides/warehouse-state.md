@@ -156,9 +156,13 @@ lock, and `DlqBackend.replace()` wraps its delete-and-replace in one transaction
 `ON CONFLICT`, so writes use `MERGE` instead, and `replace()` wraps its `DELETE`-then-`INSERT` in
 an explicit transaction (`conn.autocommit(False)`) since this connector otherwise autocommits each
 statement individually. Databricks/Delta Lake has **no multi-statement transactions at all** — a
-stronger constraint than Snowflake's autocommit default — so `replace()` instead stages the new
-entries and applies them via a single atomic `MERGE` (one Delta commit covering the delete, update,
-and insert together) rather than an explicit transaction. In every case, unlike the
+stronger constraint than Snowflake's autocommit default, and one with no scratch-table workaround
+either (an operator may pre-provision the three tables and grant only DML, the same escape hatch
+Postgres/Snowflake preserve). `replace()` instead deletes ids absent from the new set by explicit
+id and upserts the rest via a `MERGE` sourced from a `VALUES` table constructor, chunked to a
+parameter budget — a single chunk is one atomic Delta commit, but a `replace()` spanning more than
+one chunk is not atomic as a whole. What's still guaranteed: a crash mid-`replace()` never leaves
+the queue empty or destroys entries outside the chunk that failed. In every case, unlike the
 [GCS/S3 backends](remote-state.md), there is no client-side read-modify-write cycle to retry, so
 this backend **never raises `StateContentionError`** — the failure class that error exists to
 prevent (two writers silently clobbering each other's read-modify-write) cannot happen when the

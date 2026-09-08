@@ -8,7 +8,8 @@ mirroring how ``drt/sources/postgres.py``/``snowflake.py``/``databricks.py``
 are already split one file per dialect.
 
 **Design decisions specific to this dialect** (posted to #1108 before
-implementation):
+implementation, revised after Codex review caught a real design defect
+before merge — see below):
 
 - **Delta Lake has no multi-statement transactions at all** — a stronger
   constraint than Snowflake's merely-autocommit-by-default (which at least
@@ -16,52 +17,92 @@ implementation):
   This is already documented as a platform limitation in this codebase's own
   ``_finalize_mirror_tracked`` docstring (``drt/destinations/databricks.py``),
   not something a method here could work around with connection settings.
-- **`DlqBackend.replace()`'s atomicity (the #955 failure class) is closed via
-  a single atomic `MERGE`, not a transaction.** A crash between an unwrapped
-  DELETE-then-INSERT would permanently erase the queue — the same failure
-  Snowflake closed by wrapping both statements in one explicit transaction.
-  Databricks cannot do that, so this reuses the anti-join `MERGE` shape
-  `_delete_via_staged_keys` already established for mirror deletes (#692/#908):
-  stage the new entries into a scratch table, then one
-  `MERGE ... WHEN NOT MATCHED BY SOURCE AND t.sync_name = ? THEN DELETE /
-  WHEN MATCHED THEN UPDATE / WHEN NOT MATCHED THEN INSERT` — one Delta commit,
-  all-or-nothing. `replace(sync_name, [])` (i.e. `clear()`) is special-cased
-  as a plain `DELETE` instead: whether an empty-source `MERGE` actually
-  deletes every unmatched target row, or short-circuits to a no-op on this
-  platform, is unverified by any prior art in this codebase — a mock cursor
-  cannot prove it either way, so this is pinned down by this leg's own live
-  smoke test rather than assumed.
-- **Every upsert (`save_sync`, `DlqBackend.append`) stages into a real
-  scratch table and `MERGE`s from it — the same call shape this connector's
-  existing bulk-load `MERGE` sites already use (`_load_upsert`, mirror
-  finalize)**, not an inline derived-table `MERGE ... USING (SELECT ? AS
-  col, ...) AS s` the way `warehouse_snowflake.py` does with `%s` markers.
-  An inline subquery source would work as *documented* Delta `MERGE INTO`
-  syntax, but whether native `?` parameter binding resolves correctly inside
-  one on this exact call shape has no precedent in this codebase to build on
-  with confidence — and getting it wrong would break `save_sync` on every
-  single warehouse-backed Databricks run, not some edge path (the #908
-  lesson: a mock cursor accepts any SQL text, live behavior is the only
-  proof). `save_sync` stages its one row and `append()` stages all of
-  `entries` (one `INSERT ... SELECT ... parse_json(?)` per row, since VARIANT
-  forces that regardless) before a single closing `MERGE` applies them all —
-  a few extra statements on a path that is not a hot path (state reads/writes
-  are not, per `warehouse.py`'s own docstring), in exchange for reusing an
-  already-live-verified pattern instead of staking correctness on an
-  unverified one.
-- **`DlqBackend.append()`'s one final `MERGE` covers the whole batch**,
-  falling out of the staged-upsert design above rather than being a
-  deliberately built guarantee — batching *across dialects* is still tracked
-  separately as follow-up work (#1121), since Postgres/Snowflake still write
-  one statement per entry. The individual staging inserts above are not
-  atomic with each other, but a partial staging table is disposable; the
-  real table only ever sees the one all-or-nothing final `MERGE`.
+- **No runtime DDL outside `_ensure_table_exists`, anywhere in this module.**
+  An earlier draft staged every upsert (`save_sync`, `DlqBackend.append`)
+  into a scratch table via `CREATE OR REPLACE TABLE` before `MERGE`-ing from
+  it. Codex review (twice, independently) caught that this breaks the
+  documented escape hatch: an operator who pre-provisions the three managed
+  tables and grants only DML (no `CREATE TABLE`) — the same escape hatch
+  `docs/guides/warehouse-state.md` documents and Postgres/Snowflake's own
+  legs preserve — would have every write fail, since the scratch table's
+  `CREATE` still needs a privilege the pre-provisioned-tables path
+  deliberately has none of. Every method here now does DML only
+  (`SELECT`/`UPDATE`/`INSERT`/`DELETE`/`MERGE` against the three real
+  tables), never a scratch table.
+- **`save_sync` and `DlqBackend.append` are probe-then-`UPDATE`-or-`INSERT`**,
+  not `MERGE`: `SELECT 1 FROM t WHERE <key> = ? LIMIT`-style existence check,
+  then the matching statement — the same probe-before-act discipline
+  `ensure_managed_schema`/`_ensure_table_exists` already use, one level
+  deeper (per-row instead of per-table). This has a check-then-act window
+  for two concurrent writers touching the *same* `sync_name`/`id`
+  simultaneously — where a single-statement `MERGE` would guarantee no
+  duplicate row, this can produce one. That is a real, accepted trade-off,
+  not an oversight: it is strictly milder than the scratch-table design's
+  actual failure mode (one writer's `CREATE OR REPLACE` could destroy or
+  corrupt a concurrent writer's staged data outright), and concurrent runs
+  of the *same* sync are already out of scope per `warehouse.py`'s own
+  documented cross-dialect limitations. `DlqBackend.append()` is therefore a
+  per-entry loop like every other dialect (matching `warehouse_snowflake.py`
+  and the already-tracked #1121 batching follow-up), not a batched
+  operation of any kind.
+- **`DlqBackend.replace()`'s atomicity (the #955 failure class) is closed
+  without a scratch table and without `WHEN NOT MATCHED BY SOURCE`:**
+  existing ids for `sync_name` are read first (`SELECT id FROM t WHERE
+  sync_name = ?`), the ids absent from the new `entries` are deleted by
+  explicit id (`DELETE ... WHERE id IN (...)`, chunked like `reconcile()`'s
+  `remove_ids` — safe to split across statements, since each chunk deletes a
+  disjoint subset of the same stale-id set), and the new entries are
+  upserted via a chunked `MERGE INTO t USING (VALUES (?, ?, ...), ...) AS
+  s(id, sync_name, record, ...) ON t.id = s.id WHEN MATCHED THEN UPDATE /
+  WHEN NOT MATCHED THEN INSERT` (`_rows_per_chunk` from
+  `drt/destinations/databricks.py`, reused rather than a second copy of the
+  same 255-marker budget). A single chunk's `MERGE` is one atomic Delta
+  commit; a multi-chunk `replace()` is **not** fully atomic across chunks —
+  say so plainly rather than overclaiming. What *is* still guaranteed: the
+  queue is never left empty or destroyed by a crash mid-`replace()`, only
+  entries that had *already* landed plus some not-yet-applied — a crash
+  after the delete phase but before every upsert chunk lands leaves the
+  surviving old entries alongside whichever new entries already landed,
+  never nothing. An earlier draft used a single `MERGE` with `WHEN NOT
+  MATCHED BY SOURCE AND t.sync_name = ? THEN DELETE` (mirroring the anti-join
+  shape `_delete_via_staged_keys` already uses for mirror deletes, #692/#908)
+  — Codex review found two problems with it: it required the scratch table
+  this rewrite removes, and Databricks' `MERGE` grammar requires `WHEN
+  MATCHED` clauses before `WHEN NOT MATCHED`, before `WHEN NOT MATCHED BY
+  SOURCE` (doc-derived, not precedent-derived — no call site in this repo
+  combines more than one clause type in a single `MERGE`, so there was no
+  existing example to check the ordering against before this review caught
+  it). The `VALUES`-derived-table `MERGE` source is the same native `?`
+  binding inside a `VALUES` clause already proven nightly by #734's
+  multi-row `INSERT` batching — a much shorter extrapolation than either the
+  removed scratch table or a `FROM`-less `SELECT ? AS x` derived table.
+  `replace(sync_name, [])` (`clear()`) is special-cased as a plain `DELETE`
+  — no entries means every existing id is "stale", so the id-diffing path
+  above degenerates to it anyway, and it avoids depending on whatever this
+  platform does with a zero-row `VALUES` source.
+- **`reset()` and `HistoryStore.prune()` do not trust `cursor.rowcount`.**
+  Codex review, reading the installed `databricks-sql-connector` source
+  directly, found that `rowcount` is left at the PEP 249 sentinel `-1` on
+  connector/server combinations that do not report affected-row counts for
+  `DELETE` — within the range this package already declares support for.
+  Trusting it would make `reset()` report "nothing existed" after
+  successfully deleting a row, and `prune()` return `-1` instead of a count.
+  Both instead determine the answer before deleting: `reset()` probes
+  existence (`SELECT 1 ... LIMIT`-style) and returns that; `prune()` counts
+  matching rows (`SELECT COUNT(*) ...`) and returns that count, only
+  executing the `DELETE` if the count is nonzero.
 - **`errors`/`record` are `VARIANT`, not `JSONB`.** Already an established
   write category on this connector (Layer 3, #317) and exercised nightly by
   the existing smoke suite, so this is reuse, not new platform risk. Databricks
   disallows function calls (`parse_json`) in a `VALUES` literal list exactly
-  like Snowflake disallows `PARSE_JSON` there, so every write touching one of
-  these columns uses the `INSERT ... SELECT` form instead. Reading back,
+  like Snowflake disallows `PARSE_JSON` there — this applies to `HistoryStore
+  .append()`'s single-row `INSERT ... SELECT` (the `VALUES` clause itself
+  never carries `parse_json(?)` there) and to `replace()`'s `VALUES`-sourced
+  `MERGE` (the `VALUES` constructor carries `record` as a plain bound
+  string; `parse_json(s.record)` is only called in the `MERGE`'s `UPDATE
+  SET`/`INSERT VALUES` expressions, a different grammar position the
+  restriction does not reach — the same reasoning `_value_clause` documents
+  for why a bulk `INSERT` switches to the `SELECT` form). Reading back,
   whether the connector hands a VARIANT column back as an already-parsed
   Python object or a JSON-encoded string is unverified by any prior art in
   this codebase (same open question Snowflake's leg noted) — `_json_or_parsed`
@@ -89,7 +130,6 @@ docstring rather than repeating it.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from collections.abc import Collection, Mapping
@@ -97,7 +137,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from drt.config.credentials import DatabricksProfile
-from drt.destinations.databricks import _NATIVE_PARAM_LIMIT
+from drt.destinations.databricks import _NATIVE_PARAM_LIMIT, _rows_per_chunk
 from drt.sources.databricks import DatabricksSource
 from drt.state.dlq import DeadLetter
 from drt.state.history import HistoryEntry
@@ -108,6 +148,16 @@ logger = logging.getLogger(__name__)
 _RUNS_TABLE = "_drt_runs"
 _HISTORY_TABLE = "_drt_history"
 _DLQ_TABLE = "_drt_dlq"
+_DLQ_COLUMNS = (
+    "id",
+    "sync_name",
+    "record",
+    "error_message",
+    "http_status",
+    "ts",
+    "attempts",
+    "sync_run_id",
+)
 
 
 def _connect(profile: DatabricksProfile) -> Any:
@@ -125,22 +175,6 @@ def _table_exists(profile: DatabricksProfile, table_name: str) -> bool:
     return DatabricksSource().managed_table_exists(profile, table_name)
 
 
-def _staging_table(profile: DatabricksProfile, kind: str, discriminator: str) -> str:
-    """A per-call scratch table name for a staged upsert MERGE.
-
-    ``discriminator`` (typically ``sync_name``) is hashed rather than used as
-    a sanitized substring: sync names are developer-controlled slugs, not
-    guaranteed identifier-safe (spaces, dots), and hashing sidesteps that
-    without needing a sanitizer. Suffixing by it at all (not one shared
-    scratch name per ``kind``) avoids the exact concurrent-writer race #692's
-    review caught for the mirror finalizer's own scratch table — two
-    `--threads N>1` syncs writing different sync_names' rows around the same
-    time must not share one scratch table.
-    """
-    digest = hashlib.sha256(discriminator.encode()).hexdigest()[:16]
-    return f"{profile.catalog}.{profile.managed_schema}.__drt_{kind}_{digest}"
-
-
 def _ensure_table_exists(
     conn: Any, profile: DatabricksProfile, table_name: str, column_defs: str
 ) -> None:
@@ -151,7 +185,8 @@ def _ensure_table_exists(
     ``CREATE``, and on a ``CREATE`` failure, re-probe rather than assume —
     swallow if another session won the race, re-raise otherwise. No
     ``conn.rollback()``: Delta has no multi-statement transactions or
-    savepoints at all.
+    savepoints at all. The only ``CREATE`` in this whole module — every
+    other method is DML-only (see module docstring).
     """
     source = DatabricksSource()
     source.ensure_managed_schema(profile)
@@ -227,23 +262,35 @@ class DatabricksWarehouseStateStore:
             conn.close()
 
     def save_sync(self, state: SyncState) -> None:
-        """Upsert via a staged ``MERGE`` — see module docstring: single-row
-        upserts here stage into a real scratch table and MERGE from it,
-        matching this connector's existing proven ``_load_upsert`` shape,
-        rather than an inline derived-table ``MERGE ... USING (SELECT ...)``
-        source whose native ``?`` parameter binding on this exact call shape
-        has no precedent in this codebase to build on with confidence."""
+        """Probe-then-``UPDATE``-or-``INSERT`` — see module docstring for
+        why this isn't a ``MERGE`` (no scratch table, so no source relation
+        without a `?`-in-`VALUES`/derived-table shape unverified for a
+        single row) and isn't decided from ``cursor.rowcount`` (unreliable
+        on this connector, see module docstring)."""
         conn = _connect(self._profile)
         try:
             self._ensure_table(conn)
             t = _qualified(self._profile, _RUNS_TABLE)
             cur = conn.cursor()
-            staging_table = _staging_table(self._profile, "runs_save", state.sync_name)
-            cur.execute(f"CREATE OR REPLACE TABLE {staging_table} AS SELECT * FROM {t} WHERE 1=0")
-            try:
+            cur.execute(f"SELECT 1 FROM {t} WHERE sync_name = ?", [state.sync_name])
+            exists = cur.fetchone() is not None
+            if exists:
                 cur.execute(
-                    f"INSERT INTO {staging_table} (sync_name, last_run_at, records_synced, "
-                    "status, error, last_cursor_value) VALUES (?, ?, ?, ?, ?, ?)",
+                    f"UPDATE {t} SET last_run_at = ?, records_synced = ?, status = ?, "
+                    "error = ?, last_cursor_value = ? WHERE sync_name = ?",
+                    [
+                        state.last_run_at,
+                        state.records_synced,
+                        state.status,
+                        state.error,
+                        state.last_cursor_value,
+                        state.sync_name,
+                    ],
+                )
+            else:
+                cur.execute(
+                    f"INSERT INTO {t} (sync_name, last_run_at, records_synced, status, "
+                    "error, last_cursor_value) VALUES (?, ?, ?, ?, ?, ?)",
                     [
                         state.sync_name,
                         state.last_run_at,
@@ -253,18 +300,6 @@ class DatabricksWarehouseStateStore:
                         state.last_cursor_value,
                     ],
                 )
-                cur.execute(
-                    f"MERGE INTO {t} AS t USING {staging_table} AS s "
-                    "ON t.sync_name = s.sync_name "
-                    "WHEN MATCHED THEN UPDATE SET last_run_at = s.last_run_at, "
-                    "records_synced = s.records_synced, status = s.status, error = s.error, "
-                    "last_cursor_value = s.last_cursor_value "
-                    "WHEN NOT MATCHED THEN INSERT (sync_name, last_run_at, records_synced, "
-                    "status, error, last_cursor_value) VALUES (s.sync_name, s.last_run_at, "
-                    "s.records_synced, s.status, s.error, s.last_cursor_value)"
-                )
-            finally:
-                cur.execute(f"DROP TABLE IF EXISTS {staging_table}")
         finally:
             conn.close()
 
@@ -273,12 +308,14 @@ class DatabricksWarehouseStateStore:
             return False
         conn = _connect(self._profile)
         try:
+            t = _qualified(self._profile, _RUNS_TABLE)
             cur = conn.cursor()
-            cur.execute(
-                f"DELETE FROM {_qualified(self._profile, _RUNS_TABLE)} WHERE sync_name = ?",
-                [sync_name],
-            )
-            return bool(cur.rowcount and cur.rowcount > 0)
+            # Probed before DELETE rather than trusting cursor.rowcount
+            # afterward — see module docstring.
+            cur.execute(f"SELECT 1 FROM {t} WHERE sync_name = ?", [sync_name])
+            existed = cur.fetchone() is not None
+            cur.execute(f"DELETE FROM {t} WHERE sync_name = ?", [sync_name])
+            return existed
         finally:
             conn.close()
 
@@ -324,7 +361,9 @@ class DatabricksWarehouseHistoryStore:
         )
 
     def append(self, entry: HistoryEntry) -> None:
-        """Best-effort, like every other ``HistoryStore`` — see the Protocol."""
+        """Best-effort, like every other ``HistoryStore`` — see the Protocol.
+        Pure append (no upsert semantics needed), so this is a single
+        ``INSERT`` with no scratch table involved either way."""
         try:
             conn = _connect(self._profile)
             try:
@@ -388,13 +427,22 @@ class DatabricksWarehouseHistoryStore:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
         conn = _connect(self._profile)
         try:
+            t = _qualified(self._profile, _HISTORY_TABLE)
             cur = conn.cursor()
+            # Counted before DELETE rather than trusting cursor.rowcount
+            # afterward — see module docstring.
             cur.execute(
-                f"DELETE FROM {_qualified(self._profile, _HISTORY_TABLE)} "
-                "WHERE sync_name = ? AND started_at < ?",
+                f"SELECT COUNT(*) FROM {t} WHERE sync_name = ? AND started_at < ?",
                 [sync_name, cutoff],
             )
-            return int(cur.rowcount or 0)
+            row = cur.fetchone()
+            count = int(row[0]) if row else 0
+            if count:
+                cur.execute(
+                    f"DELETE FROM {t} WHERE sync_name = ? AND started_at < ?",
+                    [sync_name, cutoff],
+                )
+            return count
         finally:
             conn.close()
 
@@ -430,6 +478,19 @@ def _row_to_history_entry(row: tuple[Any, ...]) -> HistoryEntry:
     )
 
 
+def _dlq_merge_values_params(sync_name: str, entry: DeadLetter) -> list[Any]:
+    return [
+        entry.id,
+        sync_name,
+        json.dumps(entry.record),
+        entry.error_message,
+        entry.http_status,
+        entry.timestamp,
+        entry.attempts,
+        entry.sync_run_id,
+    ]
+
+
 class DatabricksWarehouseDlqBackend:
     """``DlqBackend`` backed by a ``_drt_dlq`` row per dead-letter entry (#1108)."""
 
@@ -454,13 +515,9 @@ class DatabricksWarehouseDlqBackend:
     def append(
         self, sync_name: str, entries: list[DeadLetter], *, max_records: int = 10_000
     ) -> int:
-        """Stage ``entries`` into a scratch table, then upsert all of them in
-        one ``MERGE`` (no delete clause) — the same staged-upsert shape
-        ``save_sync`` uses, not the batched-atomicity apparatus the module
-        docstring explicitly declines to build. The individual staging
-        inserts are not atomic with each other, but that only risks a
-        partial *scratch* table (dropped either way); the real table only
-        ever sees the one all-or-nothing final ``MERGE``."""
+        """Per-entry probe-then-``UPDATE``-or-``INSERT`` — see module
+        docstring for why (no scratch table, matches every other dialect's
+        one-statement-per-entry shape, #1121 tracks batching separately)."""
         if not entries:
             return self.depth(sync_name)
         conn = _connect(self._profile)
@@ -468,16 +525,15 @@ class DatabricksWarehouseDlqBackend:
             self._ensure_table(conn)
             t = _qualified(self._profile, _DLQ_TABLE)
             cur = conn.cursor()
-            staging_table = _staging_table(self._profile, "dlq_append", sync_name)
-            cur.execute(f"CREATE OR REPLACE TABLE {staging_table} AS SELECT * FROM {t} WHERE 1=0")
-            try:
-                for entry in entries:
+            for entry in entries:
+                cur.execute(f"SELECT 1 FROM {t} WHERE id = ?", [entry.id])
+                exists = cur.fetchone() is not None
+                if exists:
                     cur.execute(
-                        f"INSERT INTO {staging_table} (id, sync_name, record, error_message, "
-                        "http_status, ts, attempts, sync_run_id) "
-                        "SELECT ?, ?, parse_json(?), ?, ?, ?, ?, ?",
+                        f"UPDATE {t} SET sync_name = ?, record = parse_json(?), "
+                        "error_message = ?, http_status = ?, ts = ?, attempts = ?, "
+                        "sync_run_id = ? WHERE id = ?",
                         [
-                            entry.id,
                             sync_name,
                             json.dumps(entry.record),
                             entry.error_message,
@@ -485,21 +541,16 @@ class DatabricksWarehouseDlqBackend:
                             entry.timestamp,
                             entry.attempts,
                             entry.sync_run_id,
+                            entry.id,
                         ],
                     )
-                cur.execute(
-                    f"MERGE INTO {t} AS t USING {staging_table} AS s "
-                    "ON t.id = s.id "
-                    "WHEN MATCHED THEN UPDATE SET record = s.record, "
-                    "error_message = s.error_message, http_status = s.http_status, "
-                    "ts = s.ts, attempts = s.attempts, sync_run_id = s.sync_run_id "
-                    "WHEN NOT MATCHED THEN INSERT (id, sync_name, record, error_message, "
-                    "http_status, ts, attempts, sync_run_id) VALUES (s.id, s.sync_name, "
-                    "s.record, s.error_message, s.http_status, s.ts, s.attempts, "
-                    "s.sync_run_id)"
-                )
-            finally:
-                cur.execute(f"DROP TABLE IF EXISTS {staging_table}")
+                else:
+                    cur.execute(
+                        f"INSERT INTO {t} (id, sync_name, record, error_message, "
+                        "http_status, ts, attempts, sync_run_id) "
+                        "SELECT ?, ?, parse_json(?), ?, ?, ?, ?, ?",
+                        _dlq_merge_values_params(sync_name, entry),
+                    )
             if max_records > 0:
                 cur.execute(
                     f"DELETE FROM {t} WHERE sync_name = ? AND id NOT IN ("
@@ -512,10 +563,19 @@ class DatabricksWarehouseDlqBackend:
             conn.close()
 
     def replace(self, sync_name: str, entries: list[DeadLetter]) -> None:
-        """Wholesale-replace the queue via one atomic ``MERGE`` (see module
-        docstring for why a Snowflake-style explicit transaction is not an
-        option on this dialect, and why the empty-``entries`` case is
-        special-cased rather than routed through the same ``MERGE``)."""
+        """Wholesale-replace the queue without a scratch table or an
+        explicit transaction — see module docstring for the full design
+        history (an earlier scratch-table + single-``MERGE`` draft broke the
+        documented escape hatch and got Databricks' ``MERGE`` clause order
+        wrong; Codex review caught both before merge).
+
+        Stale ids (existing but absent from ``entries``) are deleted by
+        explicit id, chunked; new/changed entries are upserted via a chunked
+        ``MERGE ... USING (VALUES ...) AS s(...)``. Not atomic across
+        chunks — the queue is never left empty or destroyed by a crash
+        mid-call, but is not guaranteed to reach the new state in one commit
+        when `entries` needs more than one chunk.
+        """
         conn = _connect(self._profile)
         try:
             self._ensure_table(conn)
@@ -524,40 +584,41 @@ class DatabricksWarehouseDlqBackend:
             if not entries:
                 cur.execute(f"DELETE FROM {t} WHERE sync_name = ?", [sync_name])
                 return
-            staging_table = _staging_table(self._profile, "dlq_replace", sync_name)
-            cur.execute(f"CREATE OR REPLACE TABLE {staging_table} AS SELECT * FROM {t} WHERE 1=0")
-            try:
-                for entry in entries:
+
+            cur.execute(f"SELECT id FROM {t} WHERE sync_name = ?", [sync_name])
+            existing_ids = {row[0] for row in cur.fetchall()}
+            new_ids = {entry.id for entry in entries}
+            stale_ids = list(existing_ids - new_ids)
+            if stale_ids:
+                chunk_size = _NATIVE_PARAM_LIMIT - 1  # one slot for sync_name
+                for start in range(0, len(stale_ids), chunk_size):
+                    chunk = stale_ids[start : start + chunk_size]
+                    placeholders = ", ".join(["?"] * len(chunk))
                     cur.execute(
-                        f"INSERT INTO {staging_table} (id, sync_name, record, error_message, "
-                        "http_status, ts, attempts, sync_run_id) "
-                        "SELECT ?, ?, parse_json(?), ?, ?, ?, ?, ?",
-                        [
-                            entry.id,
-                            sync_name,
-                            json.dumps(entry.record),
-                            entry.error_message,
-                            entry.http_status,
-                            entry.timestamp,
-                            entry.attempts,
-                            entry.sync_run_id,
-                        ],
+                        f"DELETE FROM {t} WHERE sync_name = ? AND id IN ({placeholders})",
+                        [sync_name, *chunk],
                     )
+
+            rows_per_chunk = _rows_per_chunk(len(_DLQ_COLUMNS))
+            for start in range(0, len(entries), rows_per_chunk):
+                chunk_entries = entries[start : start + rows_per_chunk]
+                values_sql = ", ".join(["(?, ?, ?, ?, ?, ?, ?, ?)"] * len(chunk_entries))
+                params: list[Any] = []
+                for entry in chunk_entries:
+                    params.extend(_dlq_merge_values_params(sync_name, entry))
                 cur.execute(
-                    f"MERGE INTO {t} AS t USING {staging_table} AS s "
+                    f"MERGE INTO {t} AS t USING (VALUES {values_sql}) AS "
+                    f"s({', '.join(_DLQ_COLUMNS)}) "
                     "ON t.id = s.id "
-                    "WHEN NOT MATCHED BY SOURCE AND t.sync_name = ? THEN DELETE "
-                    "WHEN MATCHED THEN UPDATE SET record = s.record, "
+                    "WHEN MATCHED THEN UPDATE SET record = parse_json(s.record), "
                     "error_message = s.error_message, http_status = s.http_status, "
                     "ts = s.ts, attempts = s.attempts, sync_run_id = s.sync_run_id "
                     "WHEN NOT MATCHED THEN INSERT (id, sync_name, record, error_message, "
                     "http_status, ts, attempts, sync_run_id) VALUES (s.id, s.sync_name, "
-                    "s.record, s.error_message, s.http_status, s.ts, s.attempts, "
-                    "s.sync_run_id)",
-                    [sync_name],
+                    "parse_json(s.record), s.error_message, s.http_status, s.ts, "
+                    "s.attempts, s.sync_run_id)",
+                    params,
                 )
-            finally:
-                cur.execute(f"DROP TABLE IF EXISTS {staging_table}")
         finally:
             conn.close()
 

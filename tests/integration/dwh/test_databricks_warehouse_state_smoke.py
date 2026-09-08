@@ -1,11 +1,13 @@
 """Warehouse-backed state/history/DLQ stores against a real Databricks account (#1108).
 
 A mock cursor can prove the right SQL text is *issued*, not that MERGE
-actually upserts correctly, that parse_json round-trips a VARIANT column, or
-that the staged-MERGE `replace()` genuinely leaves the original queue intact
-on a failed merge — exactly what tests/unit/test_state_warehouse_databricks.py
-cannot prove, same lesson tests/integration/dwh/test_snowflake_warehouse_state_smoke.py
-already established for the Snowflake leg this mirrors.
+actually upserts correctly against a `VALUES`-derived-table source, that
+parse_json round-trips a VARIANT column, or that a failed chunk of
+`replace()`'s upsert genuinely leaves the existing entries in that chunk
+untouched rather than partially applied — exactly what
+tests/unit/test_state_warehouse_databricks.py cannot prove, same lesson
+tests/integration/dwh/test_snowflake_warehouse_state_smoke.py already
+established for the Snowflake leg this mirrors.
 
 Runs only when ``DRT_SMOKE_DATABRICKS_*`` secrets are present. Most tests use
 the smoke principal's already-granted ``drt_smoke.smoke`` schema as
@@ -235,37 +237,71 @@ def test_dlq_backend_fifo_reconcile_and_clear() -> None:
     assert dlq.read(sync_name) == []
 
 
-def test_dlq_replace_is_atomic_and_leaves_old_queue_intact_on_failure() -> None:
-    """The #955 failure class this backend's staged single-``MERGE`` (see
-    warehouse_databricks.py's module docstring) exists to prevent — closed
-    without an explicit transaction, since Delta has none. A deliberately
-    null ``error_message`` violates the real table's ``NOT NULL`` column
-    only at the final MERGE step (Delta's ``CREATE TABLE ... AS SELECT``
-    does not carry the constraint onto the scratch staging table), so the
-    staging phase succeeds and the MERGE itself is what must fail atomically
-    — proving the original queue survives untouched rather than partially
-    replaced."""
+def test_dlq_replace_drops_ids_not_in_the_new_set() -> None:
+    """replace()'s core contract: an id present before but absent from the
+    new ``entries`` is deleted (via the explicit stale-id DELETE, not a
+    MERGE anti-join -- see module docstring for why), while an id present in
+    both is updated in place."""
     creds = _require_creds()
     profile = _profile(creds)
     dlq = DatabricksWarehouseDlqBackend(profile)
     sync_name = f"orders_{uuid.uuid4().hex[:8]}"
     run = uuid.uuid4().hex[:8]
-    keep_id, new_id_1, new_id_2 = f"keep-{run}", f"new-{run}-1", f"new-{run}-2"
+    keep_id, drop_id, new_id = f"keep-{run}", f"drop-{run}", f"new-{run}"
 
     try:
-        original = [DeadLetter(record={"n": 1}, error_message="orig", id=keep_id)]
-        dlq.append(sync_name, original)
+        dlq.append(
+            sync_name,
+            [
+                DeadLetter(record={"n": 1}, error_message="orig", id=keep_id),
+                DeadLetter(record={"n": 2}, error_message="orig", id=drop_id),
+            ],
+        )
+        assert dlq.depth(sync_name) == 2
+
+        dlq.replace(
+            sync_name,
+            [
+                DeadLetter(record={"n": 1}, error_message="updated", id=keep_id),
+                DeadLetter(record={"n": 3}, error_message="orig", id=new_id),
+            ],
+        )
+
+        survivors = {e.id: e for e in dlq.read(sync_name)}
+        assert set(survivors) == {keep_id, new_id}
+        assert survivors[keep_id].error_message == "updated"
+    finally:
+        dlq.clear(sync_name)
+
+
+def test_dlq_replace_chunk_failure_leaves_the_queue_intact_not_partially_applied() -> None:
+    """A single chunk's ``MERGE`` is one atomic Delta commit (see module
+    docstring: no scratch table, no explicit transaction, but a chunk that
+    fits in one ``MERGE`` is still all-or-nothing). Pairing a valid update to
+    an existing entry with an invalid new entry in the *same* chunk proves a
+    failed ``MERGE`` applies neither half -- the existing entry keeps its old
+    value rather than landing the update partially."""
+    creds = _require_creds()
+    profile = _profile(creds)
+    dlq = DatabricksWarehouseDlqBackend(profile)
+    sync_name = f"orders_{uuid.uuid4().hex[:8]}"
+    run = uuid.uuid4().hex[:8]
+    keep_id, bad_id = f"keep-{run}", f"bad-{run}"
+
+    try:
+        dlq.append(sync_name, [DeadLetter(record={"n": 1}, error_message="orig", id=keep_id)])
         assert dlq.depth(sync_name) == 1
 
         broken_replacement = [
-            DeadLetter(record={"n": 2}, error_message="new", id=new_id_1),
-            DeadLetter(record={"n": 3}, error_message=None, id=new_id_2),  # type: ignore[arg-type]
+            DeadLetter(record={"n": 1}, error_message="updated", id=keep_id),
+            DeadLetter(record={"n": 2}, error_message=None, id=bad_id),  # type: ignore[arg-type]
         ]
         with pytest.raises(Exception, match="(?i)null"):
             dlq.replace(sync_name, broken_replacement)
 
-        # The MERGE must have failed as a whole -- the original entry is
-        # still exactly there, not gone and not doubled.
+        # keep_id was in the new entry set (not stale), so it was never
+        # deleted -- and its update lived in the same failed MERGE as
+        # bad_id's insert, so it never landed either.
         survivors = dlq.read(sync_name)
         assert [e.id for e in survivors] == [keep_id]
         assert survivors[0].error_message == "orig"
