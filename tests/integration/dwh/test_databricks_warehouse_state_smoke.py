@@ -1,18 +1,20 @@
-"""Warehouse-backed state/history/DLQ stores against a real Snowflake account (#1106).
+"""Warehouse-backed state/history/DLQ stores against a real Databricks account (#1108).
 
 A mock cursor can prove the right SQL text is *issued*, not that MERGE
-actually upserts correctly, that PARSE_JSON round-trips a VARIANT column, or
-that an explicit transaction genuinely rolls back a partial write — exactly
-what tests/unit/test_state_warehouse_snowflake.py cannot prove, same lesson
-tests/integration/local_sql/test_warehouse_state_backend_smoke.py already
-established for the Postgres leg this mirrors.
+actually upserts correctly against a `VALUES`-derived-table source, that
+parse_json round-trips a VARIANT column, or that a failed chunk of
+`replace()`'s upsert genuinely leaves the existing entries in that chunk
+untouched rather than partially applied — exactly what
+tests/unit/test_state_warehouse_databricks.py cannot prove, same lesson
+tests/integration/dwh/test_snowflake_warehouse_state_smoke.py already
+established for the Snowflake leg this mirrors.
 
-Runs only when ``DRT_SMOKE_SNOWFLAKE_*`` secrets are present. Most tests use
-the smoke role's already-granted ``DRT_SMOKE.PUBLIC`` schema as
+Runs only when ``DRT_SMOKE_DATABRICKS_*`` secrets are present. Most tests use
+the smoke principal's already-granted ``drt_smoke.smoke`` schema as
 ``managed_schema`` — no new grant needed, since these tables land inside an
 already-usable schema. Only the concurrent-first-write-race test needs a
-brand-new schema (the #1106 ``CREATE SCHEMA`` grant), gated the same way as
-``test_snowflake_managed_table_smoke.py``.
+brand-new schema (the #1108 ``CREATE SCHEMA`` grant), gated the same way as
+``test_databricks_managed_table_smoke.py``.
 """
 
 from __future__ import annotations
@@ -20,97 +22,73 @@ from __future__ import annotations
 import concurrent.futures
 import os
 import uuid
+from typing import Any
 
 import pytest
 
-from drt.config.credentials import SnowflakeProfile
+from drt.config.credentials import DatabricksProfile
 from drt.state.dlq import DeadLetter
 from drt.state.history import HistoryEntry
 from drt.state.manager import SyncState
-from drt.state.warehouse_snowflake import (
-    SnowflakeWarehouseDlqBackend,
-    SnowflakeWarehouseHistoryStore,
-    SnowflakeWarehouseStateStore,
+from drt.state.warehouse_databricks import (
+    DatabricksWarehouseDlqBackend,
+    DatabricksWarehouseHistoryStore,
+    DatabricksWarehouseStateStore,
 )
 
 from .conftest import require_env
 
 pytestmark = pytest.mark.dwh_smoke
 
-snowflake_connector = pytest.importorskip("snowflake.connector")
+dbsql = pytest.importorskip("databricks.sql")
 
-ACCOUNT_ENV = "DRT_SMOKE_SNOWFLAKE_ACCOUNT"
-USER_ENV = "DRT_SMOKE_SNOWFLAKE_USER"
-PASSWORD_ENV = "DRT_SMOKE_SNOWFLAKE_PASSWORD"
-KEY_ENV = "DRT_SMOKE_SNOWFLAKE_PRIVATE_KEY"
-_HAS_CREATE_SCHEMA_GRANT_ENV = "DRT_SMOKE_SNOWFLAKE_HAS_CREATE_SCHEMA_GRANT"
+HOST_ENV = "DRT_SMOKE_DATABRICKS_HOST"
+HTTP_PATH_ENV = "DRT_SMOKE_DATABRICKS_HTTP_PATH"
+TOKEN_ENV = "DRT_SMOKE_DATABRICKS_TOKEN"
+CATALOG_ENV = "DRT_SMOKE_DATABRICKS_CATALOG"
+SCHEMA_ENV = "DRT_SMOKE_DATABRICKS_SCHEMA"
+_HAS_CREATE_SCHEMA_GRANT_ENV = "DRT_SMOKE_DATABRICKS_HAS_CREATE_SCHEMA_GRANT"
 
 
 def _require_creds() -> dict[str, str]:
-    if not os.environ.get(KEY_ENV) and not os.environ.get(PASSWORD_ENV):
-        pytest.skip(
-            "Snowflake smoke auth not set: need DRT_SMOKE_SNOWFLAKE_PRIVATE_KEY "
-            "(preferred) or DRT_SMOKE_SNOWFLAKE_PASSWORD."
-        )
-    return require_env(
-        ACCOUNT_ENV,
-        USER_ENV,
-        "DRT_SMOKE_SNOWFLAKE_DATABASE",
-        "DRT_SMOKE_SNOWFLAKE_SCHEMA",
-        "DRT_SMOKE_SNOWFLAKE_WAREHOUSE",
-    )
+    return require_env(HOST_ENV, HTTP_PATH_ENV, TOKEN_ENV, CATALOG_ENV, SCHEMA_ENV)
 
 
-def _profile(creds: dict[str, str], **overrides: object) -> SnowflakeProfile:
+def _profile(creds: dict[str, str], **overrides: object) -> DatabricksProfile:
     """``overrides`` (e.g. the concurrent-race test's ``managed_schema=
     schema_name``) must win over the defaults below — merged via a plain
     dict update rather than passed alongside them as separate kwargs, which
-    silently dropped every caller's override until caught in review (the
-    nightly workflow never actually ran this suite until #1108 wired it in,
-    so nothing had exercised this path before)."""
+    raises ``TypeError: got multiple values for keyword argument
+    'managed_schema'`` the moment any caller overrides it (caught in
+    review)."""
     defaults: dict[str, object] = {
-        "type": "snowflake",
-        "account": creds[ACCOUNT_ENV],
-        "user": creds[USER_ENV],
-        "database": creds["DRT_SMOKE_SNOWFLAKE_DATABASE"],
-        "warehouse": creds["DRT_SMOKE_SNOWFLAKE_WAREHOUSE"],
-        # Reuses the role's already-granted schema as managed_schema -- no
-        # new CREATE SCHEMA grant needed for the round-trip tests below.
-        "managed_schema": creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"],
+        "type": "databricks",
+        "server_hostname": creds[HOST_ENV],
+        "http_path": creds[HTTP_PATH_ENV],
+        "access_token": creds[TOKEN_ENV],
+        "catalog": creds[CATALOG_ENV],
+        # Reuses the principal's already-granted schema as managed_schema --
+        # no new CREATE SCHEMA grant needed for the round-trip tests below.
+        "managed_schema": creds[SCHEMA_ENV],
     }
-    if os.environ.get(KEY_ENV):
-        defaults["private_key_env"] = KEY_ENV
-    else:
-        defaults["password_env"] = PASSWORD_ENV
     defaults.update(overrides)
-    return SnowflakeProfile(**defaults)  # type: ignore[arg-type]
+    return DatabricksProfile(**defaults)  # type: ignore[arg-type]
 
 
 def _admin_connect(creds: dict[str, str]):
-    auth: dict[str, object] = {}
-    pem = os.environ.get(KEY_ENV)
-    if pem:
-        from drt.config.credentials import load_snowflake_private_key
-
-        auth["private_key"] = load_snowflake_private_key(pem)
-    else:
-        auth["password"] = os.environ[PASSWORD_ENV]
-    return snowflake_connector.connect(
-        account=creds[ACCOUNT_ENV],
-        user=creds[USER_ENV],
-        warehouse=creds["DRT_SMOKE_SNOWFLAKE_WAREHOUSE"],
-        database=creds["DRT_SMOKE_SNOWFLAKE_DATABASE"],
-        schema=creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"],
-        **auth,
+    return dbsql.connect(
+        server_hostname=creds[HOST_ENV],
+        http_path=creds[HTTP_PATH_ENV],
+        access_token=creds[TOKEN_ENV],
     )
 
 
 def test_state_store_upsert_read_and_reset_round_trip() -> None:
     creds = _require_creds()
-    profile = _profile(creds, managed_schema=f"{creds['DRT_SMOKE_SNOWFLAKE_SCHEMA']}")
+    profile = _profile(creds)
     sync_a = f"orders_{uuid.uuid4().hex[:8]}"
     sync_b = f"customers_{uuid.uuid4().hex[:8]}"
-    store = SnowflakeWarehouseStateStore(profile)
+    store = DatabricksWarehouseStateStore(profile)
     try:
         assert store.get_last_sync(sync_a) is None
         assert store.get_all().get(sync_a) is None
@@ -166,15 +144,11 @@ def test_state_store_upsert_read_and_reset_round_trip() -> None:
 
 
 def test_history_store_append_read_and_prune() -> None:
-    """Codex review: a hard-coded "recent" timestamp eventually ages past
-    any fixed retention_days, pruning both entries instead of one. The
-    surviving entry's timestamp is derived from the test's own current UTC
-    time instead, so this stays correct indefinitely."""
     from datetime import datetime, timezone
 
     creds = _require_creds()
     profile = _profile(creds)
-    history = SnowflakeWarehouseHistoryStore(profile)
+    history = DatabricksWarehouseHistoryStore(profile)
     sync_a = f"orders_{uuid.uuid4().hex[:8]}"
     sync_b = f"customers_{uuid.uuid4().hex[:8]}"
     recent = datetime.now(timezone.utc).isoformat()
@@ -218,7 +192,7 @@ def test_history_store_append_read_and_prune() -> None:
 
     only_orders = history.read(sync_a)
     assert [e.status for e in only_orders] == ["failed", "success"]  # newest first
-    # Proves PARSE_JSON/VARIANT round-tripped a real list, not a raw string.
+    # Proves parse_json/VARIANT round-tripped a real list, not a raw string.
     assert only_orders[0].errors == ["boom"]
     assert isinstance(only_orders[0].errors, list)
     assert only_orders[0].run_id == "run-1"
@@ -231,15 +205,12 @@ def test_history_store_append_read_and_prune() -> None:
 
 
 def test_dlq_backend_fifo_reconcile_and_clear() -> None:
-    """Codex review: the DLQ MERGEs globally on ``id`` and does not update
-    ``sync_name`` on a match (same as Postgres's own ``ON CONFLICT (id) DO
-    UPDATE`` — this is a shared, pre-existing property, not new here). A
-    fixed literal id would collide with a leftover row from a prior run
-    against this same persistent account and silently attribute to the
-    wrong sync_name. Per-run-unique ids sidestep that regardless."""
+    """Per-run-unique ids sidestep a leftover row from a prior run against
+    this same persistent account silently attributing to the wrong
+    sync_name — same reasoning as the Snowflake leg's equivalent test."""
     creds = _require_creds()
     profile = _profile(creds)
-    dlq = SnowflakeWarehouseDlqBackend(profile)
+    dlq = DatabricksWarehouseDlqBackend(profile)
     sync_name = f"orders_{uuid.uuid4().hex[:8]}"
     run = uuid.uuid4().hex[:8]
 
@@ -256,7 +227,7 @@ def test_dlq_backend_fifo_reconcile_and_clear() -> None:
 
         remaining = dlq.read(sync_name)
         assert [e.record["id"] for e in remaining] == [2, 3, 4]
-        # Proves PARSE_JSON/VARIANT round-tripped a real dict, not a raw string.
+        # Proves parse_json/VARIANT round-tripped a real dict, not a raw string.
         assert isinstance(remaining[0].record, dict)
         assert dlq.all_depths().get(sync_name) == 3
 
@@ -274,37 +245,76 @@ def test_dlq_backend_fifo_reconcile_and_clear() -> None:
     assert dlq.read(sync_name) == []
 
 
-def test_dlq_replace_is_atomic_and_leaves_old_queue_intact_on_failure() -> None:
-    """The #955 failure class this backend's explicit transaction (see
-    warehouse_snowflake.py's module docstring) exists to prevent: a crash
-    partway through DELETE-then-INSERT under Snowflake's default
-    per-statement autocommit would permanently erase the queue. Snowflake
-    doesn't enforce PRIMARY KEY (unlike Postgres, where the equivalent test
-    forces a duplicate-id UniqueViolation) -- NOT NULL *is* enforced, so a
-    deliberately-null error_message forces a real mid-transaction failure
-    instead."""
+def test_dlq_replace_drops_ids_not_in_the_new_set() -> None:
+    """replace()'s core contract: an id present before but absent from the
+    new ``entries`` is deleted (via the explicit stale-id DELETE, not a
+    MERGE anti-join -- see module docstring for why), while an id present in
+    both is updated in place."""
     creds = _require_creds()
     profile = _profile(creds)
-    dlq = SnowflakeWarehouseDlqBackend(profile)
+    dlq = DatabricksWarehouseDlqBackend(profile)
     sync_name = f"orders_{uuid.uuid4().hex[:8]}"
     run = uuid.uuid4().hex[:8]
-    keep_id, new_id_1, new_id_2 = f"keep-{run}", f"new-{run}-1", f"new-{run}-2"
+    keep_id, drop_id, new_id = f"keep-{run}", f"drop-{run}", f"new-{run}"
 
     try:
-        original = [DeadLetter(record={"n": 1}, error_message="orig", id=keep_id)]
-        dlq.append(sync_name, original)
+        dlq.append(
+            sync_name,
+            [
+                DeadLetter(record={"n": 1}, error_message="orig", id=keep_id),
+                DeadLetter(record={"n": 2}, error_message="orig", id=drop_id),
+            ],
+        )
+        assert dlq.depth(sync_name) == 2
+
+        dlq.replace(
+            sync_name,
+            [
+                DeadLetter(record={"n": 1}, error_message="updated", id=keep_id),
+                DeadLetter(record={"n": 3}, error_message="orig", id=new_id),
+            ],
+        )
+
+        survivors = {e.id: e for e in dlq.read(sync_name)}
+        assert set(survivors) == {keep_id, new_id}
+        assert survivors[keep_id].error_message == "updated"
+    finally:
+        dlq.clear(sync_name)
+
+
+def test_dlq_replace_chunk_failure_leaves_the_queue_intact_not_partially_applied() -> None:
+    """A single chunk's ``MERGE`` is one atomic Delta commit (see module
+    docstring: no scratch table, no explicit transaction, but a chunk that
+    fits in one ``MERGE`` is still all-or-nothing). Pairing a valid update to
+    an existing entry with an invalid new entry in the *same* chunk proves a
+    failed ``MERGE`` applies neither half -- the existing entry keeps its old
+    value rather than landing the update partially."""
+    creds = _require_creds()
+    profile = _profile(creds)
+    dlq = DatabricksWarehouseDlqBackend(profile)
+    sync_name = f"orders_{uuid.uuid4().hex[:8]}"
+    run = uuid.uuid4().hex[:8]
+    keep_id, bad_id = f"keep-{run}", f"bad-{run}"
+
+    try:
+        dlq.append(sync_name, [DeadLetter(record={"n": 1}, error_message="orig", id=keep_id)])
         assert dlq.depth(sync_name) == 1
 
+        # Deliberately invalid error_message (None) to force the real
+        # table's NOT NULL violation below -- built via an Any-typed kwargs
+        # dict rather than a `type: ignore` on this project-owned dataclass
+        # (AGENTS.md: type: ignore is reserved for external library issues).
+        bad_kwargs: dict[str, Any] = {"record": {"n": 2}, "error_message": None, "id": bad_id}
         broken_replacement = [
-            DeadLetter(record={"n": 2}, error_message="new", id=new_id_1),
-            DeadLetter(record={"n": 3}, error_message=None, id=new_id_2),  # type: ignore[arg-type]
+            DeadLetter(record={"n": 1}, error_message="updated", id=keep_id),
+            DeadLetter(**bad_kwargs),
         ]
         with pytest.raises(Exception, match="(?i)null"):
             dlq.replace(sync_name, broken_replacement)
 
-        # The DELETE half of the failed transaction must have rolled back
-        # too -- the original entry is still exactly there, not gone and
-        # not doubled.
+        # keep_id was in the new entry set (not stale), so it was never
+        # deleted -- and its update lived in the same failed MERGE as
+        # bad_id's insert, so it never landed either.
         survivors = dlq.read(sync_name)
         assert [e.id for e in survivors] == [keep_id]
         assert survivors[0].error_message == "orig"
@@ -312,22 +322,40 @@ def test_dlq_replace_is_atomic_and_leaves_old_queue_intact_on_failure() -> None:
         dlq.clear(sync_name)
 
 
+def test_dlq_replace_with_empty_list_clears_the_queue() -> None:
+    """clear()/replace(sync_name, []) goes through a plain DELETE rather than
+    an empty-source MERGE (see module docstring) -- proves that path
+    actually empties the queue live, not just that it avoids the MERGE."""
+    creds = _require_creds()
+    profile = _profile(creds)
+    dlq = DatabricksWarehouseDlqBackend(profile)
+    sync_name = f"orders_{uuid.uuid4().hex[:8]}"
+    entry_id = f"id-{uuid.uuid4().hex[:8]}"
+
+    dlq.append(sync_name, [DeadLetter(record={"n": 1}, error_message="x", id=entry_id)])
+    assert dlq.depth(sync_name) == 1
+
+    dlq.replace(sync_name, [])
+    assert dlq.read(sync_name) == []
+    assert dlq.depth(sync_name) == 0
+
+
 def test_writes_succeed_with_a_preexisting_schema_and_no_create_schema_privilege() -> None:
-    """The escape hatch, live: managed_schema points at the role's
-    already-granted DRT_SMOKE.PUBLIC schema (no CREATE SCHEMA grant needed —
-    see test_snowflake_managed_table_smoke.py's equivalent test for why).
-    Every write path must succeed without ever needing to CREATE the
-    schema, only its own tables inside it."""
+    """The escape hatch, live: managed_schema points at the principal's
+    already-granted smoke schema (no CREATE SCHEMA grant needed — see
+    test_databricks_managed_table_smoke.py's equivalent test for why). Every
+    write path must succeed without ever needing to CREATE the schema, only
+    its own tables inside it."""
     creds = _require_creds()
     profile = _profile(creds)
     sync_name = f"escape_hatch_{uuid.uuid4().hex[:8]}"
 
-    SnowflakeWarehouseStateStore(profile).save_sync(
+    DatabricksWarehouseStateStore(profile).save_sync(
         SyncState(sync_name=sync_name, last_run_at="t", records_synced=1, status="success")
     )
-    assert SnowflakeWarehouseStateStore(profile).get_last_sync(sync_name) is not None
+    assert DatabricksWarehouseStateStore(profile).get_last_sync(sync_name) is not None
 
-    SnowflakeWarehouseHistoryStore(profile).append(
+    DatabricksWarehouseHistoryStore(profile).append(
         HistoryEntry(
             sync_name=sync_name,
             started_at="t0",
@@ -338,9 +366,9 @@ def test_writes_succeed_with_a_preexisting_schema_and_no_create_schema_privilege
             records_failed=0,
         )
     )
-    assert SnowflakeWarehouseHistoryStore(profile).read(sync_name) != []
+    assert DatabricksWarehouseHistoryStore(profile).read(sync_name) != []
 
-    dlq = SnowflakeWarehouseDlqBackend(profile)
+    dlq = DatabricksWarehouseDlqBackend(profile)
     try:
         dlq.append(sync_name, [DeadLetter(record={}, error_message="x", id=f"id-{sync_name}")])
         assert dlq.depth(sync_name) == 1
@@ -351,23 +379,24 @@ def test_writes_succeed_with_a_preexisting_schema_and_no_create_schema_privilege
 def _require_create_schema_grant() -> None:
     if not os.environ.get(_HAS_CREATE_SCHEMA_GRANT_ENV):
         pytest.skip(
-            f"{_HAS_CREATE_SCHEMA_GRANT_ENV} not set — run provisioning/snowflake.sql "
-            "section 4b (GRANT CREATE SCHEMA ON DATABASE) against the real smoke "
-            "account first, then set this env var to enable this test."
+            f"{_HAS_CREATE_SCHEMA_GRANT_ENV} not set — run provisioning/databricks.sql's "
+            "GRANT CREATE SCHEMA ON CATALOG against the real smoke account first, then "
+            "set this env var to enable this test."
         )
 
 
 def test_concurrent_first_writes_survive_table_creation_race() -> None:
-    """Mirrors the Postgres leg's concurrent-first-use finding: CREATE TABLE
-    IF NOT EXISTS is not guaranteed atomic across sessions. 8 threads race
-    save_sync() for a never-before-seen managed schema; none may raise."""
+    """Mirrors the Postgres/Snowflake legs' concurrent-first-use finding:
+    CREATE TABLE IF NOT EXISTS is not guaranteed atomic across sessions. 8
+    threads race save_sync() for a never-before-seen managed schema; none
+    may raise."""
     creds = _require_creds()
     _require_create_schema_grant()
     schema_name = f"drt_smoke_{uuid.uuid4().hex[:10]}"
     profile = _profile(creds, managed_schema=schema_name)
 
     def write(i: int) -> None:
-        SnowflakeWarehouseStateStore(profile).save_sync(
+        DatabricksWarehouseStateStore(profile).save_sync(
             SyncState(sync_name=f"sync_{i}", last_run_at="t", records_synced=1, status="success")
         )
 
@@ -382,14 +411,12 @@ def test_concurrent_first_writes_survive_table_creation_race() -> None:
 
         assert not errors, f"concurrent first writes raised: {errors}"
 
-        store = SnowflakeWarehouseStateStore(profile)
+        store = DatabricksWarehouseStateStore(profile)
         assert set(store.get_all().keys()) == {f"sync_{i}" for i in range(8)}
     finally:
         conn = _admin_connect(creds)
         try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"DROP SCHEMA IF EXISTS {creds['DRT_SMOKE_SNOWFLAKE_DATABASE']}.{schema_name}"
-                )
+            cur = conn.cursor()
+            cur.execute(f"DROP SCHEMA IF EXISTS {creds[CATALOG_ENV]}.{schema_name} CASCADE")
         finally:
             conn.close()

@@ -56,6 +56,27 @@ _bundle_cache: dict[_CacheKey, StateBundle] = {}
 _bundle_lock = threading.Lock()
 
 
+def _reject_unsupported_ledger_and_audit_trail(
+    project: ProjectConfig, dialect_name: str, issue_ref: str
+) -> None:
+    """Fail loudly rather than silently build a bundle with ``ledger=None``/
+    ``audit_trail=None`` for a dialect that hasn't implemented them yet
+    (currently every warehouse dialect except Postgres, #1099/#1100)."""
+    if project.state.idempotency:
+        raise NotImplementedError(
+            f"state.idempotency: true is not yet supported on the {dialect_name} "
+            f"warehouse backend ({issue_ref}) — Postgres only today. Set "
+            "state.idempotency: false or use a Postgres connection_profile."
+        )
+    if project.state.audit_trail.enabled:
+        raise NotImplementedError(
+            "state.audit_trail.enabled: true is not yet supported on the "
+            f"{dialect_name} warehouse backend ({issue_ref}) — Postgres only "
+            "today. Set state.audit_trail.enabled: false or use a Postgres "
+            "connection_profile."
+        )
+
+
 def build_state_bundle(project: ProjectConfig, project_dir: Path) -> StateBundle:
     """Return the process-shared stores for one project/backend configuration.
 
@@ -106,7 +127,12 @@ def build_state_bundle(project: ProjectConfig, project_dir: Path) -> StateBundle
                     dlq=LocalDlqStore(resolved_dir),
                 )
             elif backend == "warehouse":
-                from drt.config.credentials import PostgresProfile, SnowflakeProfile, load_profile
+                from drt.config.credentials import (
+                    DatabricksProfile,
+                    PostgresProfile,
+                    SnowflakeProfile,
+                    load_profile,
+                )
 
                 # Pydantic's validator guarantees this for real configs.
                 assert project.state.connection_profile is not None
@@ -136,20 +162,7 @@ def build_state_bundle(project: ProjectConfig, project_dir: Path) -> StateBundle
                         ),
                     )
                 elif isinstance(profile, SnowflakeProfile):
-                    if project.state.idempotency:
-                        raise NotImplementedError(
-                            "state.idempotency: true is not yet supported on the "
-                            "Snowflake warehouse backend (#1106) — Postgres only "
-                            "today. Set state.idempotency: false or use a Postgres "
-                            "connection_profile."
-                        )
-                    if project.state.audit_trail.enabled:
-                        raise NotImplementedError(
-                            "state.audit_trail.enabled: true is not yet supported "
-                            "on the Snowflake warehouse backend (#1106) — Postgres "
-                            "only today. Set state.audit_trail.enabled: false or "
-                            "use a Postgres connection_profile."
-                        )
+                    _reject_unsupported_ledger_and_audit_trail(project, "Snowflake", "#1106")
                     from drt.state.warehouse_snowflake import (
                         SnowflakeWarehouseDlqBackend,
                         SnowflakeWarehouseHistoryStore,
@@ -161,10 +174,23 @@ def build_state_bundle(project: ProjectConfig, project_dir: Path) -> StateBundle
                         history=SnowflakeWarehouseHistoryStore(profile),
                         dlq=SnowflakeWarehouseDlqBackend(profile),
                     )
+                elif isinstance(profile, DatabricksProfile):
+                    _reject_unsupported_ledger_and_audit_trail(project, "Databricks", "#1108")
+                    from drt.state.warehouse_databricks import (
+                        DatabricksWarehouseDlqBackend,
+                        DatabricksWarehouseHistoryStore,
+                        DatabricksWarehouseStateStore,
+                    )
+
+                    bundle = StateBundle(
+                        state=DatabricksWarehouseStateStore(profile),
+                        history=DatabricksWarehouseHistoryStore(profile),
+                        dlq=DatabricksWarehouseDlqBackend(profile),
+                    )
                 else:
                     raise NotImplementedError(
-                        f"state.backend: warehouse only supports Postgres (#920) and "
-                        f"Snowflake (#1106) profiles today; "
+                        f"state.backend: warehouse only supports Postgres (#920), "
+                        f"Snowflake (#1106), and Databricks (#1108) profiles today; "
                         f"'{project.state.connection_profile}' is a {profile.type} "
                         "profile. Other dialects are tracked as follow-up issues."
                     )
