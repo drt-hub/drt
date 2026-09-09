@@ -177,10 +177,10 @@ CREATE TABLE DRT_DB._drt._drt_dlq (
 );
 GRANT USAGE ON DATABASE DRT_DB TO ROLE retl_role;
 GRANT USAGE ON SCHEMA DRT_DB._drt TO ROLE retl_role;
-GRANT SELECT, INSERT, UPDATE, DELETE
-  ON DRT_DB._drt._drt_runs, DRT_DB._drt._drt_history, DRT_DB._drt._drt_dlq
-  TO ROLE retl_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA DRT_DB._drt TO ROLE retl_role;
 ```
+
+Unlike Postgres, Snowflake's `GRANT` does not accept a comma-separated list of table names — it takes exactly one `ON TABLE <name>` or the whole-schema form above. `_drt` holding only these three drt-managed tables is what makes the whole-schema grant equivalent to naming them individually.
 
 `errors`/`record` are `VARIANT`, not a JSON-typed text column — Snowflake's write path
 (`PARSE_JSON(...)`) and read path both expect this type; a plain `TEXT` column here breaks the
