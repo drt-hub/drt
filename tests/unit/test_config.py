@@ -438,6 +438,56 @@ def test_save_profile_snowflake_omits_default_managed_schema(tmp_path: Path) -> 
     assert "managed_schema" not in written
 
 
+def test_load_profile_databricks_managed_schema(tmp_path: Path) -> None:
+    """#1108: Databricks leg of #960's managed_schema field."""
+    (tmp_path / "profiles.yml").write_text(
+        "dbx:\n"
+        "  type: databricks\n"
+        "  server_hostname: dbc-xxx.cloud.databricks.com\n"
+        "  http_path: /sql/1.0/warehouses/abc\n"
+        "  catalog: main\n"
+        "  managed_schema: drt_managed\n"
+    )
+    loaded = load_profile("dbx", config_dir=tmp_path)
+    assert loaded.managed_schema == "drt_managed"
+
+
+def test_load_profile_databricks_managed_schema_default(tmp_path: Path) -> None:
+    (tmp_path / "profiles.yml").write_text(
+        "dbx:\n"
+        "  type: databricks\n"
+        "  server_hostname: dbc-xxx.cloud.databricks.com\n"
+        "  http_path: /sql/1.0/warehouses/abc\n"
+    )
+    loaded = load_profile("dbx", config_dir=tmp_path)
+    assert loaded.managed_schema == "_drt"
+
+
+def test_save_profile_databricks_managed_schema_roundtrip(tmp_path: Path) -> None:
+    profile = DatabricksProfile(
+        type="databricks",
+        server_hostname="dbc-xxx.cloud.databricks.com",
+        http_path="/sql/1.0/warehouses/abc",
+        catalog="main",
+        managed_schema="drt_managed",
+    )
+    save_profile("dbx", profile, config_dir=tmp_path)
+    loaded = load_profile("dbx", config_dir=tmp_path)
+    assert loaded.managed_schema == "drt_managed"
+
+
+def test_save_profile_databricks_omits_default_managed_schema(tmp_path: Path) -> None:
+    profile = DatabricksProfile(
+        type="databricks",
+        server_hostname="dbc-xxx.cloud.databricks.com",
+        http_path="/sql/1.0/warehouses/abc",
+        catalog="main",
+    )
+    save_profile("dbx", profile, config_dir=tmp_path)
+    written = (tmp_path / "profiles.yml").read_text()
+    assert "managed_schema" not in written
+
+
 def test_load_profile_bigquery_location(tmp_path: Path) -> None:
     (tmp_path / "profiles.yml").write_text(
         "dev:\n  type: bigquery\n  project: p\n  dataset: d\n  location: asia-northeast1\n"

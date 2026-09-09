@@ -194,3 +194,105 @@ class DatabricksSource:
             connect_args["query_tags"] = query_tags
 
         return sql.connect(**connect_args)
+
+    # --- ManagedTableCapable (#960/#1108, ADR 0005 step 3) ------------------
+    #
+    # Identifiers here are deliberately unquoted, matching this connector's
+    # existing tracked-mirror bookkeeping table convention
+    # (destinations/databricks.py's `_target_exists`/`_create_state_table`,
+    # which builds fully-qualified names via plain f-string interpolation and
+    # probes existence with `SHOW TABLES ... LIKE`, not `information_schema`).
+    # Unlike the Snowflake leg (#1106), there is no UPPER()-normalization
+    # here: Unity Catalog is case-preserving, not case-folding, for unquoted
+    # identifiers, so a plain probe already agrees with what an unquoted
+    # CREATE produced, regardless of the case actually typed in config.
+    #
+    # `catalog` is required for every method here even though the profile
+    # field itself is optional (plain extraction queries can omit it) —
+    # Unity Catalog has no reliable implicit "current catalog" to create a
+    # schema or table against, so a missing value must raise loudly here
+    # rather than resolve to some ambient default.
+
+    def _require_catalog(self, config: DatabricksProfile) -> str:
+        if not config.catalog:
+            raise ValueError(
+                "ManagedTableCapable requires DatabricksProfile.catalog to be set "
+                "(the Unity Catalog namespace for drt's managed schema) — add "
+                "'catalog: <name>' to this profile in profiles.yml."
+            )
+        return config.catalog
+
+    def ensure_managed_schema(self, config: ProfileConfigLike) -> None:
+        """Create ``config.managed_schema`` inside ``config.catalog`` if it
+        does not already exist.
+
+        Same two-part discipline as the Postgres/Snowflake implementations:
+
+        1. **The escape hatch**: probe first — a locked-down principal with
+           no ``CREATE SCHEMA`` privilege, but an admin-pre-provisioned
+           schema, must never have the ``CREATE`` statement issued at all.
+        2. **Concurrent first use**: on any exception from the ``CREATE``,
+           re-probe rather than assuming failure — if the schema exists now,
+           another session won a first-use race; anything else re-raises.
+           No ``conn.rollback()``: Delta Lake has no multi-statement
+           transactions at all (stronger than Snowflake's autocommit-by-
+           default — there is no session state here to roll back), so a
+           failed ``CREATE`` leaves nothing open to undo.
+        """
+        assert isinstance(config, DatabricksProfile)
+        catalog = self._require_catalog(config)
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            cur.execute(f"SHOW SCHEMAS IN {catalog} LIKE '{config.managed_schema}'")
+            if cur.fetchall():
+                return
+            try:
+                cur.execute(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{config.managed_schema}")
+            except Exception:
+                cur = conn.cursor()
+                cur.execute(f"SHOW SCHEMAS IN {catalog} LIKE '{config.managed_schema}'")
+                if not cur.fetchall():
+                    raise
+        finally:
+            conn.close()
+
+    def managed_table_exists(self, config: ProfileConfigLike, table_name: str) -> bool:
+        assert isinstance(config, DatabricksProfile)
+        catalog = self._require_catalog(config)
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            # Schema existence is probed first: SHOW TABLES IN a schema that
+            # does not exist yet raises (SCHEMA_NOT_FOUND) rather than
+            # returning no rows, unlike a Postgres/Snowflake information_schema
+            # query, which is always queryable regardless of whether the
+            # referenced schema exists. Without this guard, every read-path
+            # caller (managed table not yet created — the normal first-use
+            # state) would raise instead of getting a clean "doesn't exist"
+            # (caught in review — #1108's warehouse-state backend calls this
+            # on every read before ever calling ensure_managed_schema()).
+            cur.execute(f"SHOW SCHEMAS IN {catalog} LIKE '{config.managed_schema}'")
+            if not cur.fetchall():
+                return False
+            # SHOW TABLES ... LIKE, matching destinations/databricks.py's
+            # _target_exists exactly — not information_schema. Unlike the
+            # Postgres/Snowflake legs, this does not exclude views (no
+            # table_type predicate is available on this probe shape); the
+            # existing tracked-mirror table uses the identical probe without
+            # one, so this stays consistent rather than introducing a new
+            # existence-check shape for #960 alone.
+            cur.execute(f"SHOW TABLES IN {catalog}.{config.managed_schema} LIKE '{table_name}'")
+            return bool(cur.fetchall())
+        finally:
+            conn.close()
+
+    def drop_managed_table(self, config: ProfileConfigLike, table_name: str) -> None:
+        assert isinstance(config, DatabricksProfile)
+        catalog = self._require_catalog(config)
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            cur.execute(f"DROP TABLE IF EXISTS {catalog}.{config.managed_schema}.{table_name}")
+        finally:
+            conn.close()

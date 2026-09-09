@@ -509,6 +509,7 @@ def _load_databricks(raw: dict[str, Any]) -> DatabricksProfile:
         access_token=raw.get("access_token"),
         catalog=raw.get("catalog"),
         schema=raw.get("schema") or "default",
+        managed_schema=raw.get("managed_schema", "_drt"),
     )
 
 
@@ -523,6 +524,8 @@ def _dump_databricks(profile: DatabricksProfile, profile_name: str) -> dict[str,
         entry["access_token_env"] = profile.access_token_env
     if profile.catalog:
         entry["catalog"] = profile.catalog
+    if profile.managed_schema != "_drt":
+        entry["managed_schema"] = profile.managed_schema
     return entry
 
 
