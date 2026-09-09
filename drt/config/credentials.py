@@ -255,6 +255,7 @@ def _load_bigquery(raw: dict[str, Any]) -> BigQueryProfile:
         method=raw.get("method", "application_default"),
         keyfile=raw.get("keyfile"),
         location=raw.get("location", "US"),
+        managed_schema=raw.get("managed_schema", "_drt"),
     )
 
 
@@ -271,6 +272,8 @@ def _dump_bigquery(profile: BigQueryProfile, profile_name: str) -> dict[str, Any
     # keeps existing files byte-identical while still surviving the round trip.
     if profile.location != "US":
         entry["location"] = profile.location
+    if profile.managed_schema != "_drt":
+        entry["managed_schema"] = profile.managed_schema
     return entry
 
 

@@ -523,6 +523,37 @@ def test_save_profile_bigquery_omits_the_default_location(tmp_path: Path) -> Non
     assert load_profile("dev", config_dir=tmp_path).location == "US"
 
 
+def test_load_profile_bigquery_managed_schema(tmp_path: Path) -> None:
+    """#1107: BigQuery leg of #960's managed_schema field."""
+    (tmp_path / "profiles.yml").write_text(
+        "dev:\n  type: bigquery\n  project: p\n  dataset: d\n  managed_schema: drt_managed\n"
+    )
+    loaded = load_profile("dev", config_dir=tmp_path)
+    assert loaded.managed_schema == "drt_managed"
+
+
+def test_load_profile_bigquery_managed_schema_default(tmp_path: Path) -> None:
+    (tmp_path / "profiles.yml").write_text("dev:\n  type: bigquery\n  project: p\n  dataset: d\n")
+    loaded = load_profile("dev", config_dir=tmp_path)
+    assert loaded.managed_schema == "_drt"
+
+
+def test_save_profile_bigquery_managed_schema_roundtrip(tmp_path: Path) -> None:
+    profile = BigQueryProfile(
+        type="bigquery", project="p", dataset="d", managed_schema="drt_managed"
+    )
+    save_profile("dev", profile, config_dir=tmp_path)
+    loaded = load_profile("dev", config_dir=tmp_path)
+    assert loaded.managed_schema == "drt_managed"
+
+
+def test_save_profile_bigquery_omits_default_managed_schema(tmp_path: Path) -> None:
+    profile = BigQueryProfile(type="bigquery", project="p", dataset="d")
+    save_profile("dev", profile, config_dir=tmp_path)
+    written = (tmp_path / "profiles.yml").read_text()
+    assert "managed_schema" not in written
+
+
 def test_load_profile_missing_file(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="profiles.yml not found"):
         load_profile("dev", config_dir=tmp_path)
