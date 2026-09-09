@@ -198,8 +198,64 @@ class HistoryConfig(BaseModel):
     max_entries: int = Field(default=500, ge=1)
 
 
+class AuditTrailConfig(BaseModel):
+    """Compliance delivery log — "which record went where, and when" (#1100).
+
+    Project-wide, not per-sync: a compliance policy shouldn't be something
+    an individual sync author can quietly opt out of once the project has
+    turned it on — the opposite scoping from #1099's `sync.idempotency_key`,
+    which is a per-sync technical knob. Every sync in the project that
+    successfully delivers a record gets an audit row for it while enabled.
+
+    ``fields`` names columns to log **after** ``sync.mask`` (#427) has
+    already run, on whichever destination-facing (post-rename) names that
+    sync produces — the same pipeline position ``sync.mask``'s own keys
+    reference. This is deliberate, not incidental: logging the pre-mask
+    value would recreate the exact PII liability ``sync.mask`` exists to
+    prevent, in a second table nobody thought to protect the same way, and
+    would contradict this feature's own purpose (the destination never
+    received that value, so it isn't part of "what went where"). Note the
+    inverse is equally true and equally deliberate: a sync with no
+    ``sync.mask`` configured at all logs whatever raw values ``fields``
+    names, for the full ``retain_days`` window — enabling this on a field
+    the operator hasn't separately decided to mask is a real PII-retention
+    choice, not a free compliance win.
+
+    Different syncs have different schemas, so a configured field absent
+    from a given sync's records is simply omitted from that record's logged
+    JSON rather than raising — this table is necessarily one shared shape
+    across every sync in the project.
+
+    ``retain_days`` is required (not optional-defaulting-to-forever) the
+    moment ``enabled`` is true — the gap this issue exists to close in
+    Hightouch's `Changelog` precedent, which leaves retention entirely to
+    the customer. Purge runs once per non-dry-run sync, the same call site
+    #1099's ``IdempotencyLedger.prune`` already uses (mirrors
+    ``HistoryStore.prune``) — no separate CLI surface.
+    """
+
+    enabled: bool = False
+    retain_days: int | None = Field(default=None, gt=0)
+    fields: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_enabled_requirements(self) -> AuditTrailConfig:
+        if self.enabled:
+            if self.retain_days is None:
+                raise ValueError(
+                    "state.audit_trail.retain_days is required when "
+                    "state.audit_trail.enabled is true — no unbounded-retention default."
+                )
+            if not self.fields:
+                raise ValueError(
+                    "state.audit_trail.fields must be non-empty when "
+                    "state.audit_trail.enabled is true."
+                )
+        return self
+
+
 class StateConfig(BaseModel):
-    """State-backend selection and backend-specific settings (#756).
+    """State-backend selection and backend-specific settings (#756, #920).
 
     This mirrors :class:`~drt.config.sync_options.WatermarkConfig`'s shape:
     one discriminating backend field plus optional fields validated against
@@ -207,10 +263,33 @@ class StateConfig(BaseModel):
     ``prefix``. S3's authentication and endpoint fields deliberately match
     :class:`~drt.config.destinations_storage.S3DestinationConfig`, so state
     storage follows the same boto3 credential chain and override vocabulary.
-    Local state continues to reject every remote-only field.
+
+    ``warehouse`` (#920, ADR 0005 step 4, Postgres-first — see
+    ``drt/state/warehouse.py``) is a different shape from the two
+    object-storage backends: it has no bucket of its own, it reuses an
+    existing connection profile from ``profiles.yml`` instead, named by
+    ``connection_profile``. Not called ``profile`` — :class:`ProjectConfig`
+    already has a top-level ``profile`` field meaning "the project's default
+    connection profile", a different concept this deliberately avoids
+    colliding with. The managed-schema name for that connection stays on
+    the profile itself (``PostgresProfile.managed_schema``, #960) rather
+    than a second, independent ``state.schema`` knob that could disagree
+    with it.
+
+    ``backend`` and ``connection_profile`` widen/land together in the same
+    PR that carries the warehouse backend implementation — not before it —
+    matching how ``"gcs"`` was added to this ``Literal`` in the same PR as
+    the GCS backend itself (``d58a9c4``), not in the config-only PR that
+    preceded it. A schema-valid config that names an unimplemented backend
+    would otherwise crash ``run``/``status``/``retry``/``serve``/MCP state
+    operations at runtime — caught in Codex review on an earlier draft of
+    this change that split config and implementation across two PRs.
+
+    Local state continues to reject every remote-only field, and each
+    backend rejects every other backend's fields.
     """
 
-    backend: Literal["local", "gcs", "s3"] = "local"
+    backend: Literal["local", "gcs", "s3", "warehouse"] = "local"
     bucket: str | None = None
     prefix: str | None = None
     region: str | None = None
@@ -219,6 +298,23 @@ class StateConfig(BaseModel):
     aws_secret_access_key_env: str | None = None
     aws_session_token_env: str | None = None
     endpoint_url: str | None = None
+    #: Name of a profile in profiles.yml to reuse as the warehouse
+    #: connection (#920). Required, and only meaningful, when backend is
+    #: "warehouse".
+    connection_profile: str | None = None
+    #: Opt-in warehouse-backed idempotency ledger (#1099, ADR 0005 step 5).
+    #: Only meaningful when backend is "warehouse" — a per-record dedup
+    #: ledger needs the same atomic-upsert guarantee the warehouse backend
+    #: itself relies on (see ``drt/state/warehouse.py``'s module docstring);
+    #: local/gcs/s3 have no equivalent primitive at per-row scale. A sync
+    #: only actually gets ledger protection once it also resolves a key via
+    #: ``sync.idempotency_key`` (or its ``upsert_key`` default) — this flag
+    #: alone just makes the ledger available, matching how ``backend:
+    #: warehouse`` alone doesn't require every sync to use it.
+    idempotency: bool = False
+    #: Compliance delivery log (#1100), opt-in on top of the warehouse
+    #: backend like ``idempotency`` above — see :class:`AuditTrailConfig`.
+    audit_trail: AuditTrailConfig = Field(default_factory=AuditTrailConfig)
 
     @model_validator(mode="after")
     def _check_backend_fields(self) -> StateConfig:
@@ -233,9 +329,10 @@ class StateConfig(BaseModel):
         configured_s3_fields = [
             field for field in s3_only_fields if getattr(self, field) is not None
         ]
-        if self.backend == "local" and (
+        object_store_fields_configured = (
             self.bucket is not None or self.prefix is not None or configured_s3_fields
-        ):
+        )
+        if self.backend == "local" and object_store_fields_configured:
             raise ValueError("Remote state fields are not valid when backend is 'local'.")
         if self.backend == "gcs" and not self.bucket:
             raise ValueError("state.bucket is required when backend is 'gcs'.")
@@ -244,6 +341,24 @@ class StateConfig(BaseModel):
             raise ValueError(f"{names} are only valid when backend is 's3'.")
         if self.backend == "s3" and not self.bucket:
             raise ValueError("state.bucket is required when backend is 's3'.")
+        if self.backend == "warehouse":
+            if not self.connection_profile:
+                raise ValueError(
+                    "state.connection_profile is required when backend is 'warehouse'."
+                )
+            if object_store_fields_configured:
+                raise ValueError(
+                    "Object-storage state fields (bucket, prefix, region, "
+                    "aws_*, endpoint_url) are not valid when backend is "
+                    "'warehouse' — it reuses state.connection_profile's "
+                    "connection instead."
+                )
+        elif self.connection_profile is not None:
+            raise ValueError("state.connection_profile is only valid when backend is 'warehouse'.")
+        if self.idempotency and self.backend != "warehouse":
+            raise ValueError("state.idempotency is only valid when backend is 'warehouse'.")
+        if self.audit_trail.enabled and self.backend != "warehouse":
+            raise ValueError("state.audit_trail is only valid when backend is 'warehouse'.")
         return self
 
 

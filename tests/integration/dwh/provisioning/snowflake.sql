@@ -44,6 +44,14 @@ GRANT USAGE        ON DATABASE  DRT_SMOKE        TO ROLE DRT_SMOKE_ROLE;
 GRANT USAGE        ON SCHEMA    DRT_SMOKE.PUBLIC TO ROLE DRT_SMOKE_ROLE;
 GRANT CREATE TABLE ON SCHEMA    DRT_SMOKE.PUBLIC TO ROLE DRT_SMOKE_ROLE;
 
+-- ── 4b. CREATE SCHEMA at the database level (#1106) ────────────────────────
+-- Needed only for the ManagedTableCapable positive-create-path and
+-- concurrent-first-use smoke tests (test_snowflake_managed_table_smoke.py) —
+-- everything else above already covers the escape-hatch (pre-existing
+-- schema) path via DRT_SMOKE.PUBLIC. Run this manually against the real
+-- account; those two tests skip cleanly (not fail) until it's granted.
+GRANT CREATE SCHEMA ON DATABASE DRT_SMOKE TO ROLE DRT_SMOKE_ROLE;
+
 -- ── 5. Programmatic user (fill in a strong password) ───────────────────────
 CREATE USER IF NOT EXISTS DRT_SMOKE_USER
   PASSWORD             = '<SET-A-STRONG-PASSWORD>'

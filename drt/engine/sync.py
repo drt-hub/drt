@@ -7,12 +7,14 @@ CLI owns all console output; engine only returns SyncResult.
 
 from __future__ import annotations
 
+import math
 import re
 import threading
 import time
 from collections.abc import Iterator
-from datetime import datetime, timezone
-from itertools import islice
+from datetime import date, datetime, timezone
+from datetime import time as dt_time
+from itertools import chain, islice
 from pathlib import Path
 from typing import Any, Literal
 
@@ -42,11 +44,14 @@ from drt.engine.metadata_columns import apply_metadata_columns
 from drt.engine.observer import NullObserver, SyncObserver
 from drt.engine.resolver import resolve_model_ref
 from drt.observability import build_status, get_tracer
-from drt.sources.base import IncrementalSource, Source
+from drt.sources.base import IncrementalSource, SnapshotDiffSource, Source
+from drt.state.audit_trail import AuditEntry, ComplianceAuditTrail
 from drt.state.dlq import DeadLetter
 from drt.state.history import HistoryEntry, HistoryStore
+from drt.state.idempotency import IdempotencyLedger
 from drt.state.manager import StateStore
 from drt.state.watermark import WatermarkStorage
+from drt.templates.renderer import render_value
 
 
 def _stringify_cursor_value(val: Any) -> str:
@@ -160,6 +165,127 @@ def _check_mode_supported(mode: str, destination: Destination | StagedDestinatio
         )
 
 
+def _resolve_idempotency_key_template(sync: SyncConfig) -> str | None:
+    """Effective Jinja template for #1099's per-record dedup key, or ``None``.
+
+    Explicit ``sync.idempotency_key`` always wins. Otherwise falls back to
+    the destination's ``upsert_key`` when present (joined on ``":"`` for a
+    composite key) — never to ``run_id``, see ``SyncOptions.idempotency_key``'s
+    docstring for why that default would silently defeat cross-run dedup.
+    ``None`` means this sync has no way to compute a key, so the ledger (even
+    if configured) has no effect for it — not an error, matching #897's own
+    "no-op, not a failure" contract for an unresolvable idempotency setting.
+    """
+    if sync.sync.idempotency_key:
+        return sync.sync.idempotency_key
+    upsert_key = getattr(sync.destination, "upsert_key", None)
+    if upsert_key:
+        return ":".join(f"{{{{ row['{col}'] }}}}" for col in upsert_key)
+    return None
+
+
+def _compute_idempotency_key(template: str, record: dict[str, Any]) -> str | None:
+    """Render ``template`` against one record; ``None`` on template failure.
+
+    Best-effort by design (see ``IdempotencyLedger``'s module docstring):
+    the ledger is an opt-in protective layer, so a broken template disables
+    dedup for that one row rather than failing the whole batch or sync.
+    """
+    try:
+        return str(render_value(template, record))
+    except Exception:
+        return None
+
+
+def _successful_indices(record_batch: list[dict[str, Any]], result: SyncResult) -> set[int]:
+    """Indices into ``record_batch`` this ``load()`` call actually reported
+    success for, or an empty set when that can't be determined safely.
+
+    Every ``RowError.batch_index`` is excluded (a positive, per-row
+    failure signal). But some destinations skip a row *without* recording
+    a ``RowError`` — ``match_policy: update_only``/``create_only``'s
+    ``skipped_no_match`` (#757) is a bare counter with no per-row index at
+    all. Treating "not in row_errors" as "therefore delivered" would
+    wrongly mark a skipped-no-match row as successfully delivered (caught
+    in Codex review on #1100, which shares this helper): a real, silent
+    compliance/idempotency-ledger false positive, since a skip is neither
+    a failure nor a delivery. So whenever this batch reports *any* skip
+    (``result.skipped``, which ``skipped_no_match`` is a documented subset
+    of), this returns an empty set rather than guess — fail closed, not
+    open: missing one batch's dedup/audit protection is a far smaller cost
+    than permanently marking a never-delivered record as delivered.
+
+    Shared by #1099's ``mark_delivered`` filtering and #1100's audit log
+    write, which both need the same "which of these did the destination
+    confirm" computation the DLQ's dead-letter pairing below also relies
+    on — one bounds-checked computation instead of drifting copies.
+    """
+    if result.skipped > 0:
+        return set()
+    failed_indices = {
+        err.batch_index for err in result.row_errors if 0 <= err.batch_index < len(record_batch)
+    }
+    return {i for i in range(len(record_batch)) if i not in failed_indices}
+
+
+def _json_safe_audit_value(value: Any) -> Any:
+    """Recursively coerce a warehouse-driver value into a JSON-serializable
+    one for the compliance audit log (#1100).
+
+    Common driver return types (``Decimal``, ``date``/``datetime``/``time``,
+    ``UUID``, non-finite ``float``) aren't accepted by ``json.dumps`` — a
+    plain ``json.dumps(entry.fields)`` raises ``TypeError`` on any of them
+    (caught in Codex review), and since the warehouse write is wrapped in a
+    best-effort try/except, that exception would silently drop the whole
+    batch's audit rows despite a successful delivery. Unlike Klaviyo's own
+    ``_json_safe`` (which raises on values that can't round-trip exactly,
+    appropriate for data actually sent to a vendor API), this degrades to a
+    string representation instead: the audit log is a compliance record,
+    not a numeric input to a downstream consumer, so preserving type
+    fidelity matters far less than never losing the row.
+    """
+    if isinstance(value, dict):
+        return {k: _json_safe_audit_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_audit_value(v) for v in value]
+    if isinstance(value, (str, int, bool)) or value is None:
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, (datetime, date, dt_time)):
+        return value.isoformat()
+    # Decimal, timedelta, UUID, and anything else json.dumps doesn't
+    # natively accept.
+    return str(value)
+
+
+def _build_audit_entries(
+    record_batch: list[dict[str, Any]], successful_indices: set[int], fields: list[str]
+) -> list[AuditEntry]:
+    """One ``AuditEntry`` per successfully-delivered record (#1100).
+
+    ``fields`` is read from the record as it reaches the destination —
+    after ``sync.mask`` — so the audit log reflects what was actually
+    delivered, never a pre-mask value the destination never received (see
+    ``ComplianceAuditTrail``'s module docstring). A configured field absent
+    from this particular record (different syncs have different schemas)
+    is simply omitted rather than null-padded; ``record_key`` joins
+    whichever configured fields were present, in configured order. Values
+    are normalized to JSON-safe types (see ``_json_safe_audit_value``)
+    before being stored on the entry, not left for the warehouse write to
+    discover the hard way.
+    """
+    entries: list[AuditEntry] = []
+    for i in range(len(record_batch)):
+        if i not in successful_indices:
+            continue
+        row = record_batch[i]
+        present = {f: _json_safe_audit_value(row[f]) for f in fields if f in row}
+        record_key = ":".join(str(row[f]) for f in fields if f in row)
+        entries.append(AuditEntry(record_key=record_key, fields=present))
+    return entries
+
+
 def batch(iterable: Iterator[Any], size: int) -> Iterator[list[Any]]:
     """Yield successive batches of `size` from an iterator."""
     chunk: list[Any] = []
@@ -249,6 +375,19 @@ def _staged_source_iter(
             yield from source.extract(query, profile, query_tags=query_tags)
 
 
+def _wrap_stage_ctx(it: Iterator[dict[str, Any]], stage: str) -> Iterator[dict[str, Any]]:
+    """Tag exceptions raised during ``it``'s iteration with ``stage`` (#544).
+
+    Same purpose as ``_staged_source_iter`` above, generalized for
+    ``incremental_strategy: diff`` (#755), whose ``added``/``changed``
+    iterators already come pre-built (chained) from
+    ``SnapshotDiffSource.extract_snapshot_diff`` rather than being
+    constructed from a single ``source.extract`` call here.
+    """
+    with _stage_ctx(stage):
+        yield from it
+
+
 def run_sync(
     sync: SyncConfig,
     source: Source,
@@ -269,6 +408,10 @@ def run_sync(
     vars: dict[str, Any] | None = None,
     query_tagging: QueryTaggingConfig | None = None,
     run_id: str | None = None,
+    idempotency_ledger: IdempotencyLedger | None = None,
+    audit_trail: ComplianceAuditTrail | None = None,
+    audit_fields: list[str] | None = None,
+    audit_retain_days: int = 30,
 ) -> SyncResult:
     """Run a single sync: extract from source, load to destination.
 
@@ -308,6 +451,30 @@ def run_sync(
             own ``sync_run_id`` (always generated, regardless of ``run_id``)
             is what ties its own history/DLQ/alert/span records together
             either way. See ``drt._identifiers``.
+        idempotency_ledger: Warehouse-backed dedup ledger (#1099), from
+            ``StateBundle.ledger`` — ``None`` unless the project sets
+            ``state.backend: warehouse`` and ``state.idempotency: true``.
+            Read (never write) happens directly in the batch loop, same as
+            an ``IncrementalSource`` capability call; the write
+            (``mark_delivered``) only happens after a successful
+            ``destination.load()`` — see ``drt.state.idempotency`` for the
+            full write-path contract. Has no effect on a sync with no
+            resolvable key (see ``_resolve_idempotency_key_template``) or
+            during a dry run.
+        audit_trail: Warehouse-backed compliance delivery log (#1100), from
+            ``StateBundle.audit_trail`` — ``None`` unless the project sets
+            ``state.backend: warehouse`` and ``state.audit_trail.enabled:
+            true``. Project-wide, not resolved per-sync like
+            ``idempotency_ledger``: every sync logs the same configured
+            ``audit_fields`` for every record its ``destination.load()``
+            calls report successful. No effect during a dry run.
+        audit_fields: Field names to log per delivered record (#1100),
+            from ``state.audit_trail.fields`` — read from the record
+            **after** ``sync.mask``, so the log reflects what was actually
+            delivered. Ignored when ``audit_trail`` is ``None``.
+        audit_retain_days: Purge window for the audit log (#1100), from
+            ``state.audit_trail.retain_days``. Ignored when ``audit_trail``
+            is ``None``.
 
     Returns:
         Aggregated SyncResult across all batches, with ``run_id`` and
@@ -371,6 +538,9 @@ def run_sync(
                     extract_limit=extract_limit,
                     vars=vars,
                     query_tagging=query_tagging,
+                    idempotency_ledger=idempotency_ledger,
+                    audit_trail=audit_trail,
+                    audit_fields=audit_fields,
                 )
             except BaseException as exc:
                 raised = exc
@@ -435,6 +605,34 @@ def run_sync(
             except Exception as exc:  # noqa: BLE001 — best-effort
                 observer.on_warning(sync.name, f"History append outer failure: {exc}")
 
+        # Idempotency ledger retention (#1099) — unlike history, an unbounded
+        # ledger isn't just noisy, it's a per-delivered-row-forever table, so
+        # every non-dry-run sync prunes it, mirroring history_manager.prune
+        # above. Hardcoded 7-day TTL for the first cut rather than a second
+        # config knob (`state.idempotency` is a bool, not yet a nested
+        # config block) — same scope-narrowing call made on #755; a
+        # configurable retention is a defensible follow-up, not a gap that
+        # needs solving now.
+        if not dry_run and idempotency_ledger is not None:
+            try:
+                idempotency_ledger.prune(sync.name, retention_days=7)
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                observer.on_warning(sync.name, f"Idempotency ledger prune failure: {exc}")
+
+        # Compliance audit log retention (#1100) — same per-sync prune call
+        # site as the idempotency ledger above, answering the issue's own
+        # open question about where purge is triggered from with the
+        # precedent already shipped for #1099. Unlike the ledger's
+        # hardcoded 7 days, `audit_retain_days` is a required, explicit
+        # config value (`state.audit_trail.retain_days`) — no silent
+        # unbounded-retention default, per the issue's own differentiation
+        # from Hightouch's customer-managed purge.
+        if not dry_run and audit_trail is not None:
+            try:
+                audit_trail.prune(sync.name, audit_retain_days)
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                observer.on_warning(sync.name, f"Compliance audit log prune failure: {exc}")
+
         # Guaranteed final flush point — fires on every exit path (success,
         # exception, interruption), unlike on_sync_completed which only fires
         # on the normal-return path. Observers that buffer writes in memory
@@ -468,6 +666,9 @@ def _run_sync_body(
     extract_limit: int | None = None,
     vars: dict[str, Any] | None = None,
     query_tagging: QueryTaggingConfig | None = None,
+    idempotency_ledger: IdempotencyLedger | None = None,
+    audit_trail: ComplianceAuditTrail | None = None,
+    audit_fields: list[str] | None = None,
 ) -> SyncResult:
     """Inner body of run_sync. Mutates `total_result` in place so the outer
     finally-block can read partial results when an exception propagates.
@@ -593,14 +794,72 @@ def _run_sync_body(
     # during iteration (not just the initial call) carry stage="source" (#544).
     # IncrementalSource capability (#767) receives the same lag-adjusted
     # cursor (#759) the SQL predicate uses — one effective read window.
-    records_iter = _staged_source_iter(
-        source,
-        query,
-        profile,
-        cursor_value=effective_cursor_value,
-        incremental=cursor_field is not None,
-        query_tags=query_tags,
-    )
+    #
+    # incremental_strategy: diff (#755) takes a structurally different path:
+    # SnapshotDiffSource.extract_snapshot_diff() classifies rows up front
+    # instead of the engine filtering a single stream by cursor. added +
+    # changed are chained into one flat iterator so everything below this
+    # point (batching, transforms, load) is unchanged; removed_keys is
+    # drained eagerly (bounded by the removed set, not the table — see
+    # SnapshotDiffResult) for SyncResult.diff_removed_keys, since a
+    # mirror-delete consumer doesn't exist yet (tracked as a follow-up).
+    diff_removed_keys: list[dict[str, Any]] | None = None
+    if sync.sync.incremental_strategy == "diff":
+        if not isinstance(source, SnapshotDiffSource):
+            raise NotImplementedError(
+                f"sync.incremental_strategy: diff is not supported by "
+                f"{type(source).__name__} — Postgres only today (#755). "
+                "Other dialects are tracked as follow-up issues once this "
+                "is verified, same as #960/#920's rollout."
+            )
+        key_columns = getattr(sync.destination, "upsert_key", None)
+        if not key_columns:
+            raise ValueError(
+                "sync.incremental_strategy: diff requires destination.upsert_key "
+                "— it's the join key between this run's snapshot and the "
+                "previous one, and the columns reported in diff_removed_keys."
+            )
+        assert sync.sync.diff is not None  # guaranteed by SyncOptions' validator
+        with _stage_ctx("source"):
+            diff_result = source.extract_snapshot_diff(
+                query,
+                profile,
+                sync_name=sync.name,
+                key_columns=key_columns,
+                hash_columns=sync.sync.diff.hash_columns,
+                query_tags=query_tags,
+            )
+            # Masked before SyncResult.diff_removed_keys is populated below,
+            # and before the _diff_removed_keys smuggle just underneath —
+            # both the removed-keys observability result and
+            # _finalize_mirror_diff's destination-side DELETE need the
+            # masked value: mask (e.g. `upsert_key: [email]` + `mask: {email:
+            # hash}`) means the destination stores the *masked* value for
+            # that column, not the raw one these dicts come with straight
+            # from the source snapshot comparison — deleting with the raw
+            # value would never match the masked row actually sitting there,
+            # permanently stranding it. field_mappings intentionally isn't
+            # applied here: `key_columns` above is already `upsert_key`
+            # (destination-facing) passed straight into the *source* query,
+            # so a field_mappings rename of an upsert_key column doesn't fit
+            # this strategy's extraction step either, independent of this.
+            diff_removed_keys = apply_mask(list(diff_result.removed_keys), sync.sync.mask)
+            # Smuggled to the destination side the same way _query_tags/
+            # _sync_name already are (#1110) — mirror.strategy: diff reads
+            # this in BaseSqlDestination._finalize_mirror_diff instead of
+            # finalize_sync()'s duck-typed signature growing a parameter
+            # every other dialect's implementation would have to ignore.
+            sync.sync._diff_removed_keys = diff_removed_keys
+        records_iter = _wrap_stage_ctx(chain(diff_result.added, diff_result.changed), "source")
+    else:
+        records_iter = _staged_source_iter(
+            source,
+            query,
+            profile,
+            cursor_value=effective_cursor_value,
+            incremental=cursor_field is not None,
+            query_tags=query_tags,
+        )
     # Sampling (#774): cap extraction engine-side — dialect-agnostic (works
     # for REST/file sources and avoids per-dialect LIMIT/TOP SQL rendering).
     if extract_limit is not None:
@@ -615,6 +874,33 @@ def _run_sync_body(
     # When dry_run + compute_diff, accumulate (post-lookup) records to feed
     # the diff engine after extraction completes (#413).
     dry_run_records: list[dict[str, Any]] = []
+
+    # Idempotency ledger (#1099) — resolve the dedup key template once, not
+    # per batch. Two destination shapes are out of scope for the first cut,
+    # both because a batch's reported success there isn't the same thing as
+    # "actually delivered":
+    #  - `is_staged` destinations: success is determined at finalize(), not
+    #    per stage() call.
+    #  - `mode: replace, replace_strategy: swap`: each batch's SQL writes to
+    #    a shadow table (BaseSqlDestination._load_replace_swap), and the
+    #    real cutover only happens in a *separate*, later finalize_sync()
+    #    rename/swap call. Marking here would claim delivery for rows a
+    #    failed rename never actually put in the real target table (caught
+    #    in Codex review on #1100, which shares this gate).
+    _swap_mode = sync.sync.mode == "replace" and sync.sync.replace_strategy == "swap"
+    idempotency_key_template: str | None = (
+        _resolve_idempotency_key_template(sync)
+        if idempotency_ledger is not None and not is_staged and not _swap_mode
+        else None
+    )
+
+    # Compliance audit trail (#1100) — same exclusions as the ledger above,
+    # for the same reason: a batch's reported success under `is_staged` or
+    # swap-mode replace isn't the same thing as "actually delivered", and
+    # this table's whole purpose is an accurate delivery record.
+    _audit_enabled = (
+        audit_trail is not None and bool(audit_fields) and not is_staged and not _swap_mode
+    )
 
     # Build lookup maps (one query per lookup, before the batch loop).
     # The build_lookup_map() call hits the destination, so tag failures
@@ -750,6 +1036,36 @@ def _run_sync_body(
                     dry_run_records.extend(record_batch)
                 continue
 
+            # Warehouse-backed idempotency ledger (#1099) — check-then-mark,
+            # never claim-then-send: filter out already-delivered records
+            # *before* the destination call below, and only mark the ones
+            # that were part of a *successful* load, further down. Marking
+            # before sending would leave a transient destination failure
+            # permanently "delivered" in the ledger — silently skipped by
+            # every future retry. See drt.state.idempotency for the full
+            # contract. A read, not a mutation, so it's called directly here
+            # like an IncrementalSource capability, not routed through an
+            # observer.
+            batch_idempotency_keys: list[str | None] = []
+            if idempotency_key_template is not None and idempotency_ledger is not None:
+                batch_len_before = len(record_batch)
+                keyed_batch = [
+                    (row, _compute_idempotency_key(idempotency_key_template, row))
+                    for row in record_batch
+                ]
+                candidate_keys = {key for _, key in keyed_batch if key is not None}
+                already: set[str] = set()
+                if candidate_keys:
+                    with _stage_ctx("state"):
+                        already = idempotency_ledger.already_delivered(sync.name, candidate_keys)
+                kept = [(row, key) for row, key in keyed_batch if key is None or key not in already]
+                record_batch = [row for row, _ in kept]
+                batch_idempotency_keys = [key for _, key in kept]
+                total_result.skipped += batch_len_before - len(record_batch)
+                total_result.skipped_duplicate += batch_len_before - len(record_batch)
+                if not record_batch:
+                    continue
+
             if is_staged:
                 assert isinstance(destination, StagedDestination)
                 with _stage_ctx("destination"):
@@ -776,6 +1092,52 @@ def _run_sync_body(
                 total_result.skipped_no_match += result.skipped_no_match
                 total_result.errors.extend(result.errors)
                 total_result.row_errors.extend(getattr(result, "row_errors", []))
+
+                # Idempotency ledger mark (#1099) + compliance audit log
+                # (#1100) — both only for records this load() call actually
+                # reported success for. `_successful_indices` is the same
+                # correlation `DeadLetter` construction below already
+                # relies on (result.row_errors[*].batch_index indexes into
+                # the record_batch just sent). Both writes happen here (not
+                # deferred to sync end) to keep the crash-loses-data window
+                # scoped to one batch, not the whole run — this fires on
+                # the common/success path, unlike DLQ's rare-path
+                # buffering.
+                needs_delivered_at = (
+                    idempotency_ledger is not None
+                    and any(k is not None for k in batch_idempotency_keys)
+                ) or _audit_enabled
+                if needs_delivered_at:
+                    successful_indices = _successful_indices(record_batch, result)
+                    delivered_at = datetime.now(timezone.utc).isoformat()
+
+                    if idempotency_ledger is not None:
+                        delivered_keys = [
+                            key
+                            for i, key in enumerate(batch_idempotency_keys)
+                            if key is not None and i in successful_indices
+                        ]
+                        if delivered_keys:
+                            with _stage_ctx("state"):
+                                idempotency_ledger.mark_delivered(
+                                    sync.name, delivered_keys, delivered_at
+                                )
+
+                    if _audit_enabled:
+                        assert audit_trail is not None and audit_fields is not None
+                        audit_entries = _build_audit_entries(
+                            record_batch, successful_indices, audit_fields
+                        )
+                        if audit_entries:
+                            with _stage_ctx("state"):
+                                audit_trail.log_delivered(
+                                    sync.name,
+                                    total_result.run_id,
+                                    total_result.sync_run_id,
+                                    sync.destination.type,
+                                    audit_entries,
+                                    delivered_at,
+                                )
 
                 # Dead Letter Queue (#278): hand the engine's full failed records
                 # to the observer so a DlqObserver can persist them for `drt
@@ -884,6 +1246,24 @@ def _run_sync_body(
                 total_result.failed += finalize_result.failed
                 total_result.errors.extend(finalize_result.errors)
                 total_result.row_errors.extend(getattr(finalize_result, "row_errors", []))
+
+    total_result.diff_removed_keys = diff_removed_keys
+
+    # Promote this run's snapshot to be the next diff's baseline (#755) —
+    # only after a run with zero row failures across extraction and any
+    # destination finalize step above, and never for a dry run. On partial
+    # failure the baseline is deliberately left stale, so the same rows are
+    # reclassified as added/changed again next run rather than risking a
+    # row that never reached the destination being treated as delivered —
+    # same conservative posture as #920's/#955's reconcile-on-next-run fixes.
+    if (
+        sync.sync.incremental_strategy == "diff"
+        and not dry_run
+        and total_result.failed == 0
+        and isinstance(source, SnapshotDiffSource)
+    ):
+        with _stage_ctx("source"):
+            source.commit_snapshot_diff(profile, sync.name)
 
     # Compute the record-level diff after extraction completes (#413).
     # Only meaningful when dry_run is set; the engine collected all

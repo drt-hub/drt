@@ -117,6 +117,10 @@ def run_drt_sync(
         observer=CompositeObserver(observers),
         history_manager=bundle.history if project.history.enabled else None,
         history_retention_days=project.history.retention_days,
+        idempotency_ledger=bundle.ledger,
+        audit_trail=bundle.audit_trail,
+        audit_fields=project.state.audit_trail.fields,
+        audit_retain_days=project.state.audit_trail.retain_days or 30,
     )
 
     status = "success" if result.failed == 0 else "partial" if result.success > 0 else "failed"

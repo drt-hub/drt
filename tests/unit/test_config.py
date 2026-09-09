@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,7 @@ from drt.config.models import (
     SyncOptions,
 )
 from drt.config.parser import expand_env_vars, load_project, load_syncs
+from drt.config.profiles import DEFAULT_FETCH_SIZE
 
 # ---------------------------------------------------------------------------
 # Auth model discrimination
@@ -347,6 +349,95 @@ def test_save_and_load_profile(tmp_path: Path) -> None:
     assert loaded.method == "application_default"
 
 
+def test_load_profile_postgres_managed_schema(tmp_path: Path) -> None:
+    """#960: managed_schema names where drt's own bookkeeping tables live,
+    distinct from any schema an extraction query happens to reference."""
+    (tmp_path / "profiles.yml").write_text(
+        "pg:\n"
+        "  type: postgres\n"
+        "  host: db.example\n"
+        "  dbname: analytics\n"
+        "  user: analyst\n"
+        "  managed_schema: drt_managed\n"
+    )
+    loaded = load_profile("pg", config_dir=tmp_path)
+    assert loaded.managed_schema == "drt_managed"
+
+
+def test_load_profile_postgres_managed_schema_default(tmp_path: Path) -> None:
+    (tmp_path / "profiles.yml").write_text(
+        "pg:\n  type: postgres\n  host: db.example\n  dbname: analytics\n  user: analyst\n"
+    )
+    loaded = load_profile("pg", config_dir=tmp_path)
+    assert loaded.managed_schema == "_drt"
+
+
+def test_save_profile_postgres_managed_schema_roundtrip(tmp_path: Path) -> None:
+    profile = PostgresProfile(
+        type="postgres",
+        host="db.example",
+        dbname="analytics",
+        user="analyst",
+        managed_schema="drt_managed",
+    )
+    save_profile("pg", profile, config_dir=tmp_path)
+    loaded = load_profile("pg", config_dir=tmp_path)
+    assert loaded.managed_schema == "drt_managed"
+
+
+def test_save_profile_postgres_omits_default_managed_schema(tmp_path: Path) -> None:
+    profile = PostgresProfile(
+        type="postgres", host="db.example", dbname="analytics", user="analyst"
+    )
+    save_profile("pg", profile, config_dir=tmp_path)
+    written = (tmp_path / "profiles.yml").read_text()
+    assert "managed_schema" not in written
+
+
+def test_load_profile_snowflake_managed_schema(tmp_path: Path) -> None:
+    """#1106: Snowflake leg of #960's managed_schema field."""
+    (tmp_path / "profiles.yml").write_text(
+        "sf:\n"
+        "  type: snowflake\n"
+        "  account: xy12345\n"
+        "  user: analyst\n"
+        "  database: ANALYTICS\n"
+        "  managed_schema: drt_managed\n"
+    )
+    loaded = load_profile("sf", config_dir=tmp_path)
+    assert loaded.managed_schema == "drt_managed"
+
+
+def test_load_profile_snowflake_managed_schema_default(tmp_path: Path) -> None:
+    (tmp_path / "profiles.yml").write_text(
+        "sf:\n  type: snowflake\n  account: xy12345\n  user: analyst\n  database: ANALYTICS\n"
+    )
+    loaded = load_profile("sf", config_dir=tmp_path)
+    assert loaded.managed_schema == "_drt"
+
+
+def test_save_profile_snowflake_managed_schema_roundtrip(tmp_path: Path) -> None:
+    profile = SnowflakeProfile(
+        type="snowflake",
+        account="xy12345",
+        user="analyst",
+        database="ANALYTICS",
+        managed_schema="drt_managed",
+    )
+    save_profile("sf", profile, config_dir=tmp_path)
+    loaded = load_profile("sf", config_dir=tmp_path)
+    assert loaded.managed_schema == "drt_managed"
+
+
+def test_save_profile_snowflake_omits_default_managed_schema(tmp_path: Path) -> None:
+    profile = SnowflakeProfile(
+        type="snowflake", account="xy12345", user="analyst", database="ANALYTICS"
+    )
+    save_profile("sf", profile, config_dir=tmp_path)
+    written = (tmp_path / "profiles.yml").read_text()
+    assert "managed_schema" not in written
+
+
 def test_load_profile_bigquery_location(tmp_path: Path) -> None:
     (tmp_path / "profiles.yml").write_text(
         "dev:\n  type: bigquery\n  project: p\n  dataset: d\n  location: asia-northeast1\n"
@@ -359,6 +450,27 @@ def test_load_profile_bigquery_location_default(tmp_path: Path) -> None:
     (tmp_path / "profiles.yml").write_text("dev:\n  type: bigquery\n  project: p\n  dataset: d\n")
     loaded = load_profile("dev", config_dir=tmp_path)
     assert loaded.location == "US"
+
+
+def test_save_profile_bigquery_location_round_trips(tmp_path: Path) -> None:
+    """A non-default location survived load but was dropped on save."""
+    save_profile(
+        "dev",
+        BigQueryProfile(type="bigquery", project="p", dataset="d", location="asia-northeast1"),
+        config_dir=tmp_path,
+    )
+    assert load_profile("dev", config_dir=tmp_path).location == "asia-northeast1"
+
+
+def test_save_profile_bigquery_omits_the_default_location(tmp_path: Path) -> None:
+    """The default is written by load, so save leaves it out of the file."""
+    save_profile(
+        "dev",
+        BigQueryProfile(type="bigquery", project="p", dataset="d"),
+        config_dir=tmp_path,
+    )
+    assert "location" not in (tmp_path / "profiles.yml").read_text()
+    assert load_profile("dev", config_dir=tmp_path).location == "US"
 
 
 def test_load_profile_missing_file(tmp_path: Path) -> None:
@@ -578,6 +690,72 @@ def test_save_profile_appends(tmp_path: Path) -> None:
     assert "profiles" in data
     assert "dev" in data["profiles"]
     assert "prod" in data["profiles"]
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        DuckDBProfile(type="duckdb", database=":memory:"),
+        SQLiteProfile(type="sqlite", database=":memory:"),
+        PostgresProfile(type="postgres", host="localhost", dbname="d", user="u"),
+        RedshiftProfile(type="redshift", host="h", dbname="d", user="u"),
+        SnowflakeProfile(type="snowflake", account="a", user="u", database="d"),
+        SQLServerProfile(type="sqlserver", host="h", database="d", user="u"),
+    ],
+)
+def test_load_profile_fetch_size_from_yaml(tmp_path: Path, profile) -> None:
+    (tmp_path / "profiles.yml").write_text(
+        f"dev:\n  type: {profile.type}\n  database: d\n  host: h\n  user: u\n"
+        "  account: a\n  fetch_size: 2500\n"
+    )
+    loaded = load_profile("dev", config_dir=tmp_path)
+    assert loaded.fetch_size == 2500
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        DuckDBProfile(type="duckdb", database=":memory:"),
+        SQLiteProfile(type="sqlite", database=":memory:"),
+        PostgresProfile(type="postgres", host="localhost", dbname="d", user="u"),
+        RedshiftProfile(type="redshift", host="h", dbname="d", user="u"),
+        SnowflakeProfile(type="snowflake", account="a", user="u", database="d"),
+        SQLServerProfile(type="sqlserver", host="h", database="d", user="u"),
+    ],
+)
+def test_load_profile_fetch_size_default(tmp_path: Path, profile) -> None:
+    (tmp_path / "profiles.yml").write_text(
+        f"dev:\n  type: {profile.type}\n  database: d\n  host: h\n  user: u\n  account: a\n"
+    )
+    loaded = load_profile("dev", config_dir=tmp_path)
+    assert loaded.fetch_size == DEFAULT_FETCH_SIZE
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        DuckDBProfile(type="duckdb", database=":memory:"),
+        SQLiteProfile(type="sqlite", database=":memory:"),
+        PostgresProfile(type="postgres", host="h", dbname="d", user="u"),
+        RedshiftProfile(type="redshift", host="h", dbname="d", user="u"),
+        SnowflakeProfile(type="snowflake", account="a", user="u", database="d"),
+        SQLServerProfile(type="sqlserver", host="h", database="d", user="u"),
+    ],
+)
+def test_save_profile_writes_fetch_size_only_when_non_default(tmp_path: Path, profile) -> None:
+    save_profile("custom", replace(profile, fetch_size=2500), config_dir=tmp_path)
+    save_profile("defaulted", profile, config_dir=tmp_path)
+    data = yaml.safe_load((tmp_path / "profiles.yml").read_text())
+    profiles = data["profiles"]
+    assert profiles["custom"]["fetch_size"] == 2500
+    assert "fetch_size" not in profiles["defaulted"]
+
+
+def test_save_and_load_profile_fetch_size_roundtrip(tmp_path: Path) -> None:
+    profile = DuckDBProfile(type="duckdb", database=":memory:", fetch_size=1234)
+    save_profile("dev", profile, config_dir=tmp_path)
+    loaded = load_profile("dev", config_dir=tmp_path)
+    assert loaded.fetch_size == 1234
 
 
 # ---------------------------------------------------------------------------
@@ -1010,6 +1188,112 @@ class TestSyncOptions:
         assert error["ctx"] == {"gt": 0}
 
 
+class TestIdempotencyKeyConfig:
+    """``sync.idempotency_key`` — the dedup key template for #1099's
+    warehouse-backed idempotency ledger."""
+
+    def test_defaults_to_none(self) -> None:
+        assert SyncOptions().idempotency_key is None
+
+    def test_accepts_a_jinja_template(self) -> None:
+        opts = SyncOptions(idempotency_key="{{ row.id }}")
+        assert opts.idempotency_key == "{{ row.id }}"
+
+    def test_is_independent_of_mode(self) -> None:
+        # Deliberately no mode restriction, unlike match_policy — the
+        # ledger is a generically useful dedup layer, not tied to any one
+        # write strategy.
+        for mode in ("full", "incremental", "upsert", "replace", "mirror"):
+            kwargs = {"mode": mode, "idempotency_key": "{{ row.id }}"}
+            if mode == "incremental":
+                kwargs["cursor_field"] = "updated_at"
+            SyncOptions(**kwargs)
+
+
+class TestStateIdempotencyConfig:
+    """``state.idempotency`` — opt-in ledger on top of the warehouse backend."""
+
+    def test_defaults_to_false(self) -> None:
+        from drt.config.base import StateConfig
+
+        assert StateConfig().idempotency is False
+
+    def test_requires_warehouse_backend(self) -> None:
+        from drt.config.base import StateConfig
+
+        with pytest.raises(ValidationError, match="idempotency is only valid.*warehouse"):
+            StateConfig(backend="local", idempotency=True)
+
+    def test_accepted_on_warehouse_backend(self) -> None:
+        from drt.config.base import StateConfig
+
+        config = StateConfig(backend="warehouse", connection_profile="pg", idempotency=True)
+        assert config.idempotency is True
+
+
+class TestAuditTrailConfig:
+    """``state.audit_trail`` — compliance delivery log with required retention (#1100)."""
+
+    def test_defaults_to_disabled(self) -> None:
+        from drt.config.base import AuditTrailConfig
+
+        config = AuditTrailConfig()
+        assert config.enabled is False
+        assert config.retain_days is None
+        assert config.fields == []
+
+    def test_retain_days_required_when_enabled(self) -> None:
+        from drt.config.base import AuditTrailConfig
+
+        with pytest.raises(ValidationError, match="retain_days is required.*enabled is true"):
+            AuditTrailConfig(enabled=True, fields=["email"])
+
+    def test_fields_required_when_enabled(self) -> None:
+        from drt.config.base import AuditTrailConfig
+
+        with pytest.raises(ValidationError, match="fields must be non-empty.*enabled is true"):
+            AuditTrailConfig(enabled=True, retain_days=30)
+
+    def test_retain_days_must_be_positive(self) -> None:
+        from drt.config.base import AuditTrailConfig
+
+        with pytest.raises(ValidationError, match="greater than 0"):
+            AuditTrailConfig(enabled=True, retain_days=0, fields=["email"])
+
+    def test_valid_config_accepted(self) -> None:
+        from drt.config.base import AuditTrailConfig
+
+        config = AuditTrailConfig(enabled=True, retain_days=30, fields=["email", "user_id"])
+        assert config.retain_days == 30
+        assert config.fields == ["email", "user_id"]
+
+    def test_disabled_config_ignores_missing_retain_days_and_fields(self) -> None:
+        """enabled=False (the default) must not trip the enabled-only checks —
+        a project can leave state.audit_trail entirely unset."""
+        from drt.config.base import AuditTrailConfig
+
+        AuditTrailConfig(enabled=False)  # must not raise
+
+    def test_requires_warehouse_backend(self) -> None:
+        from drt.config.base import AuditTrailConfig, StateConfig
+
+        with pytest.raises(ValidationError, match="audit_trail is only valid.*warehouse"):
+            StateConfig(
+                backend="local",
+                audit_trail=AuditTrailConfig(enabled=True, retain_days=30, fields=["email"]),
+            )
+
+    def test_accepted_on_warehouse_backend(self) -> None:
+        from drt.config.base import AuditTrailConfig, StateConfig
+
+        config = StateConfig(
+            backend="warehouse",
+            connection_profile="pg",
+            audit_trail=AuditTrailConfig(enabled=True, retain_days=30, fields=["email"]),
+        )
+        assert config.audit_trail.enabled is True
+
+
 # ---------------------------------------------------------------------------
 # Replace strategy (zero-downtime swap — #338)
 # ---------------------------------------------------------------------------
@@ -1102,6 +1386,105 @@ class TestMirrorScope:
     def test_empty_scope_list_rejected(self) -> None:
         with pytest.raises(ValidationError):
             SyncOptions(mode="mirror", mirror={"scope": []})
+
+
+class TestDiffIncrementalStrategy:
+    """``sync.incremental_strategy: diff`` + ``sync.diff`` (#755)."""
+
+    def test_default_strategy_is_cursor(self) -> None:
+        opts = SyncOptions(mode="upsert")
+        assert opts.incremental_strategy == "cursor"
+        assert opts.diff is None
+
+    def test_diff_requires_upsert_or_mirror_mode(self) -> None:
+        with pytest.raises(ValueError, match="requires mode: upsert or mode: mirror"):
+            SyncOptions(mode="full", incremental_strategy="diff")
+
+    def test_diff_rejected_with_incremental_mode(self) -> None:
+        with pytest.raises(ValueError, match="requires mode: upsert or mode: mirror"):
+            SyncOptions(
+                mode="incremental",
+                cursor_field="updated_at",
+                incremental_strategy="diff",
+            )
+
+    def test_diff_rejected_with_replace_mode(self) -> None:
+        with pytest.raises(ValueError, match="requires mode: upsert or mode: mirror"):
+            SyncOptions(mode="replace", incremental_strategy="diff")
+
+    def test_diff_accepted_with_upsert_mode(self) -> None:
+        opts = SyncOptions(mode="upsert", incremental_strategy="diff")
+        assert opts.diff is not None
+        assert opts.diff.hash_columns == "all"
+
+    def test_diff_accepted_with_mirror_mode(self) -> None:
+        opts = SyncOptions(mode="mirror", incremental_strategy="diff")
+        assert opts.diff is not None
+
+    def test_diff_rejects_cursor_field(self) -> None:
+        with pytest.raises(ValueError, match="cursor_field is for the 'cursor' strategy"):
+            SyncOptions(
+                mode="upsert",
+                incremental_strategy="diff",
+                cursor_field="updated_at",
+            )
+
+    def test_diff_block_defaults_when_omitted(self) -> None:
+        """diff defaults to DiffConfig() so downstream code never has to
+        fall back to None — see the engine's ``assert sync.sync.diff is not
+        None`` right before it reads ``diff.hash_columns``."""
+        opts = SyncOptions(mode="upsert", incremental_strategy="diff")
+        assert opts.diff is not None
+        assert opts.diff.hash_columns == "all"
+
+    def test_diff_block_requires_diff_strategy(self) -> None:
+        with pytest.raises(ValueError, match="sync.diff is only valid"):
+            SyncOptions(mode="upsert", diff={"hash_columns": "all"})
+
+    def test_explicit_hash_columns_accepted(self) -> None:
+        opts = SyncOptions(
+            mode="upsert",
+            incremental_strategy="diff",
+            diff={"hash_columns": ["email", "plan"]},
+        )
+        assert opts.diff is not None
+        assert opts.diff.hash_columns == ["email", "plan"]
+
+    def test_empty_hash_columns_list_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            SyncOptions(
+                mode="upsert",
+                incremental_strategy="diff",
+                diff={"hash_columns": []},
+            )
+
+
+class TestMirrorDiffStrategy:
+    """``sync.mirror.strategy: diff`` (#1110) — a third mirror-delete strategy
+    consuming #755's removed-key list directly."""
+
+    def test_diff_strategy_requires_diff_incremental_strategy(self) -> None:
+        with pytest.raises(ValueError, match="requires sync.incremental_strategy: diff"):
+            SyncOptions(mode="mirror", mirror={"strategy": "diff"})
+
+    def test_diff_strategy_accepted_with_diff_incremental_strategy(self) -> None:
+        opts = SyncOptions(mode="mirror", incremental_strategy="diff", mirror={"strategy": "diff"})
+        assert opts.mirror is not None
+        assert opts.mirror.strategy == "diff"
+
+    def test_diff_strategy_rejects_scope(self) -> None:
+        with pytest.raises(ValueError, match="does not accept sync.mirror.scope"):
+            SyncOptions(
+                mode="mirror",
+                incremental_strategy="diff",
+                mirror={"strategy": "diff", "scope": ["tenant_id"]},
+            )
+
+    def test_destination_strategy_unaffected_by_diff_incremental_strategy(self) -> None:
+        """Existing strategies keep working unchanged when incremental_strategy
+        is diff — mirror.strategy: diff is opt-in, not implied."""
+        opts = SyncOptions(mode="mirror", incremental_strategy="diff")
+        assert opts.mirror is None
 
 
 class TestSnowflakeKeyPairAuth:

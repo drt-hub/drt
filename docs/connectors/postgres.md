@@ -303,6 +303,58 @@ an idle-session reaper or a failover mid-load (that failure is *not* retried, pe
 above), and long-running syncs hold a Postgres backend for their duration. If your server enforces
 a short `idle_in_transaction_session_timeout`, a slow destination can now trip it.
 
+## As a source — drt's own managed bookkeeping schema ([#960](https://github.com/drt-hub/drt/issues/960))
+
+Some opt-in source-side features need drt to create and own a small schema of its own tables in
+your source warehouse. `managed_schema` names where those tables live:
+
+```yaml
+# ~/.drt/profiles.yml
+pg:
+  type: postgres
+  host: localhost
+  dbname: analytics
+  user: analyst
+  password_env: PG_PASSWORD
+  managed_schema: _drt      # default: "_drt" — never "public"
+```
+
+The first consumer is [warehouse-backed state](../guides/warehouse-state.md)
+(`state.backend: warehouse`, [#920](https://github.com/drt-hub/drt/issues/920)) — see that guide
+for the tables it creates here. Diff-based incremental ([#755](https://github.com/drt-hub/drt/issues/755))
+and compliance audit trails ([#1100](https://github.com/drt-hub/drt/issues/1100)) will share this
+same schema once they land.
+
+The default is a dedicated schema, not `public` — every reverse-ETL vendor whose approach was
+researched for this design (RudderStack's `_rudderstack`, Segment's `__segment_reverse_etl`,
+Hightouch's `hightouch_planner`) isolates its bookkeeping tables from user data for the same
+blast-radius reason.
+
+**Escape hatch, same discipline as tracked mirror's `_drt_synced_keys`:** an admin can
+pre-create the schema and grant the sync user no `CREATE` privilege at all — drt detects an
+existing schema and never issues the `CREATE SCHEMA` statement in that case. Pre-creating the
+tables too (also with no `CREATE` privilege on the schema) works the same way — drt probes for
+each table's existence before issuing its own `CREATE TABLE`:
+
+```sql
+CREATE SCHEMA _drt;
+GRANT USAGE ON SCHEMA _drt TO retl_user;
+-- Grant table-level privileges on specific tables as each feature that
+-- uses this schema documents them — see the warehouse-backed state guide
+-- for state.backend: warehouse's exact tables and grants.
+```
+
+**Reversible by design ([ADR 0005](../adr/0005-state-location-and-write-grants.md) Decision
+4):** every table a feature creates in this schema can be dropped independently, and dropping
+the last table in the schema never drops the schema itself — other features may share it.
+
+**Concurrent first use is safe.** Two sync processes touching this schema (or one of its tables)
+for the first time at the same moment can both pass the existence probe and both attempt the
+`CREATE` — Postgres does not make `CREATE SCHEMA`/`CREATE TABLE ... IF NOT EXISTS` atomic across
+sessions, so the loser would otherwise see a raw catalog error instead of the graceful no-op the
+`IF NOT EXISTS` clause implies. drt catches that specific race and re-confirms the object exists
+before treating it as a no-op; confirmed live with 8 concurrent first callers.
+
 ## Notes
 
 - Requires `pip install drt-core[postgres]` (uses `psycopg2`)

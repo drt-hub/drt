@@ -181,6 +181,14 @@ class MirrorConfig(BaseModel):
       table in the destination. Safe on tables the application also
       writes to (Census-style semantics: first run baselines without
       deleting; lost state re-baselines with a warning).
+    - ``strategy: diff`` (#1110) — DELETE exactly the keys
+      ``sync.incremental_strategy: diff`` (#755) classified as removed this
+      run, instead of scanning the whole destination (``destination``) or
+      maintaining separate tracked-key state (``tracked``). Requires
+      ``incremental_strategy: diff`` — meaningless (and rejected) otherwise.
+      ``scope`` is also rejected with this strategy: the removed-key list is
+      already exact, row-level output of the source-side diff, so a scope
+      restriction on top of it has nothing left to narrow.
     - ``scope`` (#687) — restrict deletes to rows whose scope-column values
       appeared in this run's source. The fit for 1:N regeneration (parent +
       child link rows): stale children under observed parents are deleted,
@@ -199,8 +207,46 @@ class MirrorConfig(BaseModel):
     migration story for tables created before #694) is needed.
     """
 
-    strategy: Literal["destination", "tracked"] = "destination"
+    strategy: Literal["destination", "tracked", "diff"] = "destination"
     scope: list[str] | None = Field(default=None, min_length=1)
+
+
+class DiffConfig(BaseModel):
+    """``sync.diff`` — options for ``incremental_strategy: diff`` (#755).
+
+    Warehouse-side snapshot diff: each run's full model result is snapshotted
+    into a drt-managed table in the *source* warehouse and compared against
+    the previous run's snapshot via a server-side SQL JOIN, classifying every
+    row as added / changed / removed. The fit for curated marts with no
+    ``updated_at`` column (no cursor to filter on) and no way for
+    cursor-based incremental to ever detect a delete.
+
+    Deliberately no ``schema`` field here — the managed schema name is the
+    source profile's own ``managed_schema`` (#960, ``PostgresProfile``), not
+    a second, independently-settable knob that could disagree with it.
+    Likewise no ``state`` field: the snapshot always lives in the source
+    warehouse (the only warehouse #960's ``ManagedTableCapable`` primitive
+    can reach) — there is nowhere else for it to live until a destination-side
+    managed-table primitive exists, which is out of scope (see #960's own
+    docstring on why that's a deliberately separate feature).
+    """
+
+    # "all" hashes every non-key column returned by the model query; an
+    # explicit list hashes only those columns (cheaper, and the fit when only
+    # a subset of columns should trigger "changed" — e.g. ignore a
+    # last_login_at column that changes every run without being a
+    # business-meaningful update). Validated against the model's actual
+    # output columns at run time (config time can't see them) — see
+    # PostgresSource.extract_snapshot_diff.
+    hash_columns: Literal["all"] | list[str] = "all"
+
+    @model_validator(mode="after")
+    def _check_hash_columns(self) -> DiffConfig:
+        if isinstance(self.hash_columns, list) and not self.hash_columns:
+            raise ValueError(
+                "sync.diff.hash_columns must be 'all' or a non-empty list of column names."
+            )
+        return self
 
 
 class MetadataColumnsConfig(BaseModel):
@@ -273,6 +319,13 @@ class SyncOptions(BaseModel):
     # MatchPolicyCapable guard). Prior art: Census / Hightouch sync behaviours.
     match_policy: Literal["upsert", "update_only", "create_only"] = "upsert"
     cursor_field: str | None = None  # required when mode=incremental
+    # Incremental strategy (#755): "cursor" (default) filters server-side via
+    # cursor_field/watermark, same as always. "diff" instead snapshots the
+    # full model result each run and classifies rows via a warehouse-side
+    # SQL diff against the previous snapshot — no cursor column required,
+    # and the only strategy that can detect deletes. See DiffConfig.
+    incremental_strategy: Literal["cursor", "diff"] = "cursor"
+    diff: DiffConfig | None = None
     watermark: WatermarkConfig | None = None
     batch_size: int = Field(default=100, gt=0)
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
@@ -313,6 +366,25 @@ class SyncOptions(BaseModel):
     dlq: DLQConfig | None = None
     # Mirror-mode delete behaviour (#686). None = destination strategy (#340).
     mirror: MirrorConfig | None = None
+    # Per-record dedup key for the warehouse-backed idempotency ledger
+    # (#1099), Jinja template read against the record as it reaches the
+    # destination (after field_mappings/mask, same seam as metadata_columns
+    # — so a template referencing a renamed column sees the renamed name).
+    # Only has an effect when the project sets `state.idempotency: true`
+    # (state.backend: warehouse); with no ledger configured this field is
+    # inert, matching #897's "no native mechanism -> no-op" contract rather
+    # than erroring. This is the same reusable "compute a stable per-row
+    # key" surface #897 proposes for its destination-native-mechanism
+    # pass-through — deliberately not placed on `destination:` like #897's
+    # field, since this ledger check runs entirely in the engine and never
+    # touches the destination. When unset, the engine falls back to
+    # `{{ row[upsert_key[0]] }}` (joined on ":" for a composite key) if the
+    # destination config has one — this field's explicit value always wins.
+    # Deliberately excludes `run_id` from any default: the whole point of a
+    # warehouse-persisted ledger is to recognize a duplicate *across*
+    # separate `drt run` invocations (a retry tomorrow of a row sent today),
+    # and folding run_id into the key would make every run's rows look new.
+    idempotency_key: str | None = None
 
     # The owning sync's name, injected by SyncConfig after validation (not a
     # YAML field). Tracked mirror (#686) uses it to scope the per-sync key
@@ -326,10 +398,42 @@ class SyncOptions(BaseModel):
     # into a SQL comment / native tag; see ``drt.config.query_tags``.
     _query_tags: dict[str, str] | None = PrivateAttr(default=None)
 
+    # sync.incremental_strategy: diff's removed-key list (#755), injected by
+    # the engine at run time (not a YAML field) — same smuggling pattern as
+    # ``_sync_name``/``_query_tags`` above. ``mirror.strategy: diff`` (#1110)
+    # reads this in ``BaseSqlDestination._finalize_mirror_diff`` instead of
+    # the engine widening ``finalize_sync()``'s signature, which every
+    # dialect's duck-typed hook would otherwise have to accept unchanged.
+    _diff_removed_keys: list[dict[str, Any]] | None = PrivateAttr(default=None)
+
     @model_validator(mode="after")
     def _check_incremental_cursor(self) -> SyncOptions:
         if self.mode == "incremental" and not self.cursor_field:
             raise ValueError("cursor_field is required when mode is 'incremental'.")
+        return self
+
+    @model_validator(mode="after")
+    def _check_incremental_strategy(self) -> SyncOptions:
+        if self.incremental_strategy == "diff":
+            if self.mode not in ("upsert", "mirror"):
+                raise ValueError(
+                    "sync.incremental_strategy: diff requires mode: upsert or "
+                    "mode: mirror — it classifies every extracted row into "
+                    "added/changed/removed and feeds added+changed through "
+                    "the upsert write path (mode: mirror additionally acts "
+                    "on removed)."
+                )
+            if self.cursor_field is not None:
+                raise ValueError(
+                    "sync.incremental_strategy: diff computes its own "
+                    "row-level delta from a warehouse-side snapshot "
+                    "comparison — cursor_field is for the 'cursor' strategy "
+                    "and does not apply here."
+                )
+            if self.diff is None:
+                self.diff = DiffConfig()
+        elif self.diff is not None:
+            raise ValueError("sync.diff is only valid when incremental_strategy is 'diff'.")
         return self
 
     @model_validator(mode="after")
@@ -364,6 +468,19 @@ class SyncOptions(BaseModel):
     def _check_mirror_config(self) -> SyncOptions:
         if self.mirror is not None and self.mode != "mirror":
             raise ValueError("sync.mirror requires mode='mirror'.")
+        if self.mirror is not None and self.mirror.strategy == "diff":
+            if self.incremental_strategy != "diff":
+                raise ValueError(
+                    "sync.mirror.strategy: diff requires "
+                    "sync.incremental_strategy: diff — it deletes exactly "
+                    "the keys that strategy classified as removed."
+                )
+            if self.mirror.scope is not None:
+                raise ValueError(
+                    "sync.mirror.strategy: diff does not accept sync.mirror.scope "
+                    "— the removed-key list is already exact, row-level output "
+                    "of the source-side diff, with nothing left to narrow."
+                )
         return self
 
     @model_validator(mode="after")

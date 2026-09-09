@@ -443,6 +443,77 @@ def test_engine_routes_history_append_failure_through_observer(tmp_path: Path) -
     )
 
 
+def test_engine_routes_idempotency_ledger_prune_failure_through_observer(tmp_path: Path) -> None:
+    """When the idempotency ledger raises during prune, the engine swallows
+    via observer (#1099) -- same best-effort shape as history append/prune
+    above; a ledger maintenance failure must never fail an otherwise-
+    successful sync."""
+    from tests.unit.test_engine import FakeDestination, FakeSource, _make_profile, _make_sync
+
+    ledger = MagicMock()
+    ledger.already_delivered.return_value = set()
+    ledger.prune.side_effect = RuntimeError("ledger prune down")
+    obs = MagicMock(spec=SyncObserver)
+    sync = _make_sync()
+
+    from drt.engine.sync import run_sync
+
+    result = run_sync(
+        sync,
+        FakeSource([{"id": 1}]),
+        FakeDestination(),
+        _make_profile(),
+        tmp_path,
+        observer=obs,
+        idempotency_ledger=ledger,
+    )
+
+    assert result.failed == 0
+    warning_calls = [
+        c for c in obs.on_warning.call_args_list if "Idempotency ledger prune failure" in c.args[1]
+    ]
+    assert warning_calls, (
+        f"Expected on_warning('Idempotency ledger prune failure'...), "
+        f"got {obs.on_warning.call_args_list}"
+    )
+
+
+def test_engine_routes_audit_trail_prune_failure_through_observer(tmp_path: Path) -> None:
+    """Same best-effort shape as the idempotency ledger prune test above,
+    for #1100's compliance audit log -- a purge failure must never fail an
+    otherwise-successful sync."""
+    from tests.unit.test_engine import FakeDestination, FakeSource, _make_profile, _make_sync
+
+    audit = MagicMock()
+    audit.prune.side_effect = RuntimeError("audit prune down")
+    obs = MagicMock(spec=SyncObserver)
+    sync = _make_sync()
+
+    from drt.engine.sync import run_sync
+
+    result = run_sync(
+        sync,
+        FakeSource([{"id": 1}]),
+        FakeDestination(),
+        _make_profile(),
+        tmp_path,
+        observer=obs,
+        audit_trail=audit,
+        audit_fields=["id"],
+    )
+
+    assert result.failed == 0
+    warning_calls = [
+        c
+        for c in obs.on_warning.call_args_list
+        if "Compliance audit log prune failure" in c.args[1]
+    ]
+    assert warning_calls, (
+        f"Expected on_warning('Compliance audit log prune failure'...), "
+        f"got {obs.on_warning.call_args_list}"
+    )
+
+
 def test_engine_calls_on_sync_ended_on_success(tmp_path: Path) -> None:
     from tests.unit.test_engine import FakeDestination, FakeSource, _make_profile, _make_sync
 

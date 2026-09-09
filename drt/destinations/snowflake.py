@@ -183,6 +183,7 @@ class SnowflakeDestination(BaseSqlDestination):
             sync_options,
             "snowflake",
             supports_tracked_scope=True,
+            supports_diff_strategy=True,
         )
         if (
             sync_options.mode == "mirror"

@@ -9,6 +9,35 @@
   corrections listed under [Follow-up issues](#follow-up-issues).
 - **Issues:** [#755](https://github.com/drt-hub/drt/issues/755),
   [#756](https://github.com/drt-hub/drt/issues/756)
+- **Amended:** 2026-09-05 — competitive research into how Hightouch, Segment,
+  RudderStack, Census, Polytomic, Rivery, dlt, and Meltano handle
+  warehouse-write opt-ins confirmed this ADR's core positions rather than
+  changing them: the tiered, reversible, non-paywalled design (Decisions 1 and
+  4) has no equivalent among the reverse-ETL vendors researched — Hightouch's
+  Basic→Lightning upgrade is explicitly one-way, and Segment/RudderStack
+  require write access unconditionally with no tiering at all. Two corrections
+  and one addition: (1) #755's and #920's core mechanisms (warehouse
+  snapshot-diff, SQL-queryable sync history) are **already shipped** by
+  Hightouch/Segment/RudderStack and Census/Hightouch respectively — they
+  should be scheduled and described as closing a table-stakes gap, not as
+  differentiation, correcting this ADR's original "none is warranted on this
+  axis" framing to be more precise: the *axis* was right, but #755/#920
+  specifically are catch-up, not the exception. (2) Genuine, currently
+  unclaimed differentiation exists one layer up the same write-access stack:
+  a warehouse-backed idempotency ledger for fire-and-forget destinations
+  ([#1099](https://github.com/drt-hub/drt/issues/1099), no researched vendor
+  offers this) and a compliance audit trail with owned retention/purge
+  ([#1100](https://github.com/drt-hub/drt/issues/1100) — Hightouch has the
+  same table shape in `hightouch_audit.Changelog` but frames unmanaged PII
+  retention as the *customer's* problem, which is exactly the gap #1100
+  closes as a product feature instead). (3) Postgres logical replication's
+  publication+slot create/drop symmetry is adopted as the concrete
+  reversibility precedent for Decision 4 — cleaner than anything found in the
+  reverse-ETL space itself, where scoped-schema designs (RudderStack,
+  Segment) isolate blast radius but ship no downgrade path at all. Full
+  research and issue-by-issue notes: [#755](https://github.com/drt-hub/drt/issues/755#issuecomment-5551408063),
+  [#920](https://github.com/drt-hub/drt/issues/920#issuecomment-5551408667),
+  [#960](https://github.com/drt-hub/drt/issues/960#issuecomment-5551409522).
 - **Relates to:** [ADR 0004](0004-streaming-and-event-triggered-syncs.md) — whose
   Tier 2 gate is #756, and whose #769 amendment this ADR corrects.
 - **Implementation:** none directly. This ADR sets the ordering and the
@@ -169,24 +198,33 @@ structurally cannot close it.
 
 **Implementation ordering** follows from the split:
 
-| | | warehouse write |
-|---|---|---|
-| 1 | State-manager Protocols + factory (no behaviour change) | not required |
-| 2 | Object-storage backend for state / history / DLQ | **not required** |
-| 3 | Warehouse managed-table primitive (shared by 4 and 5) | required |
-| 4 | Warehouse state backend (SQL observability) | required |
-| 5 | #755 diff-based incremental | required |
+| | | warehouse write | status |
+|---|---|---|---|
+| 1 | State-manager Protocols + factory (no behaviour change) | not required | Shipped, v0.9.0 (#756) |
+| 2 | Object-storage backend for state / history / DLQ | **not required** | Shipped, v0.9.0 (#756) |
+| 3 | Warehouse managed-table primitive (shared by 4 and 5) | required | Postgres-only, [#960](https://github.com/drt-hub/drt/issues/960) — [#1103](https://github.com/drt-hub/drt/pull/1103) |
+| 4 | Warehouse state backend (SQL observability) | required | Postgres-only, [#920](https://github.com/drt-hub/drt/issues/920) — [#1104](https://github.com/drt-hub/drt/pull/1104) |
+| 5 | #755 diff-based incremental | required | Not started |
+
+Steps 3 and 4 are Postgres-first, matching this ADR's own emphasis on landing what's
+live-verifiable rather than shipping multiple dialects behind mock-cursor tests alone. Snowflake,
+BigQuery, and Databricks are tracked as immediate follow-ups
+([#1106](https://github.com/drt-hub/drt/issues/1106),
+[#1107](https://github.com/drt-hub/drt/issues/1107),
+[#1108](https://github.com/drt-hub/drt/issues/1108)), each blocked on live-verifiable
+credentials in the implementing environment rather than deferred indefinitely.
 
 The operator-visible payoff of #756 lands at step 2, before any permission
-conversation. Step 1 is a prerequisite regardless of this ADR's outcome: the
-three managers are constructed directly at roughly fourteen call sites with no
-factory, so no backend selection can be honoured until that is centralised.
-*(Half-landed already: #900, merged the day after this ADR was opened,
-extracted the `StateStore` / `HistoryStore` / `DlqBackend` Protocols with
-back-compat aliases and a set-equality drift test against each local
-implementation's public API. The factory half — routing a backend choice to
-a concrete implementation at the roughly fourteen call sites above — is still
-open; `drt/state/manager.py:150` carries the placeholder comment for it.)*
+conversation. Step 1 was a prerequisite regardless of this ADR's outcome: the
+three managers had been constructed directly at roughly fourteen call sites
+with no factory, so no backend selection could be honoured until that was
+centralised. *(#900, merged the day after this ADR was opened, extracted the
+`StateStore` / `HistoryStore` / `DlqBackend` Protocols with back-compat
+aliases and a set-equality drift test against each local implementation's
+public API. The factory half — routing a backend choice to a concrete
+implementation at those call sites — shipped alongside step 2 in #756;
+`drt/state/factory.py`'s `build_state_bundle()` is now the single
+construction point every call site uses.)*
 
 **The Protocol freeze (#304 / v0.10) inherits whatever step 1 produces.**
 #900's Protocols are what it inherits from; #297's third-party plugin system
@@ -233,3 +271,8 @@ check this in, since it is the topology the failure mode targets.
    goal, so neither is quietly lost during implementation.
 4. **Re-scope the #769 cross-process residual** out of #756 per the correction
    above, and amend ADR 0004's gate table accordingly.
+5. **New issues from the 2026-09-05 amendment**: [#1099](https://github.com/drt-hub/drt/issues/1099)
+   (warehouse idempotency ledger) and [#1100](https://github.com/drt-hub/drt/issues/1100)
+   (compliance audit trail) — both gated on #960, both flagged as the
+   genuinely-unclaimed differentiation this ADR's "none is warranted" framing
+   didn't anticipate finding one layer up the stack.

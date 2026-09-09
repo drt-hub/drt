@@ -66,6 +66,23 @@ class SyncResult:
     # positional SyncResult(...) construction reaching sync_run_id keeps
     # every existing positional slot's meaning unchanged (Codex review).
     dry_run: bool = False
+    # Populated by run_sync() when sync.incremental_strategy == "diff" (#755)
+    # and a previous snapshot existed to diff against — the key columns
+    # (only) of rows present in the previous snapshot but absent from this
+    # run's. Not consumed by any destination write path yet (mode: mirror
+    # integration is a follow-up); exposed for observability today, e.g. a
+    # persisting SyncObserver or --output json consumer noticing rows
+    # disappeared from a source with no delete mechanism of its own. Always
+    # None outside the diff strategy, and on a diff run's first-ever
+    # execution (nothing to compare against yet).
+    diff_removed_keys: list[dict[str, Any]] | None = None
+    # Subset of ``skipped`` (same accounting shape as ``skipped_no_match``):
+    # rows the engine filtered out *before* calling destination.load() at all
+    # because the warehouse-backed idempotency ledger (#1099) already had a
+    # `mark_delivered` row for their computed key. Set by run_sync(), not by
+    # any Destination implementation — unlike skipped_no_match, this
+    # decision never reaches the destination.
+    skipped_duplicate: int = 0
 
     @property
     def total(self) -> int:

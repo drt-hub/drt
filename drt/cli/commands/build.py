@@ -149,6 +149,10 @@ def build(
         log_json=False,
         cursor_value=None,
         run_id=new_run_id(),
+        idempotency_ledger=state_bundle.ledger,
+        audit_trail=state_bundle.audit_trail,
+        audit_fields=project.state.audit_trail.fields,
+        audit_retain_days=project.state.audit_trail.retain_days or 30,
     )
 
     entries: list[dict[str, object]] = []

@@ -6,6 +6,22 @@ drt-core version its bundled schemas were generated from.
 
 ## [0.1.13] - Unreleased
 
+- Bundled JSON Schemas regenerated from drt-core: `sync.mirror.strategy`
+  gains a third `diff` option, deleting exactly the keys
+  `incremental_strategy: diff` classified as removed (drt-hub/drt#1110).
+- Bundled JSON Schemas regenerated from drt-core: `sync` gains
+  `incremental_strategy: cursor | diff` (default `cursor`, unchanged) and a
+  `diff` block (`hash_columns`) for warehouse-side snapshot-diff incremental
+  extraction on models with no cursor column (drt-hub/drt#755).
+- Bundled JSON Schemas regenerated from drt-core: `drt_project.yml`'s `state`
+  block gains an `audit_trail` object (`enabled`, `retain_days`, `fields`) for
+  the warehouse-backed compliance delivery log, opt-in on top of
+  `state.backend: warehouse` (drt-hub/drt#1100).
+- Bundled JSON Schemas regenerated from drt-core: `syncs/*.yml` now validates
+  `sync.idempotency_key` (a Jinja template for the warehouse-backed
+  idempotency ledger's per-record dedup key) and `drt_project.yml`'s `state`
+  block gains an `idempotency` boolean, opt-in on top of
+  `state.backend: warehouse` (drt-hub/drt#1099).
 - Bundled JSON Schemas regenerated from drt-core: the `klaviyo` destination
   gains an `endpoint: profile | event` mode plus `metric_name`,
   `metric_name_field`, `time_field`, `value_field`, and `unique_id_field` for
@@ -23,6 +39,10 @@ drt-core version its bundled schemas were generated from.
   `salesforce_bulk` destinations now validate destination-level `retry` and
   `rate_limit` overrides, matching every other rate-limited destination type
   (drt-hub/drt#1048).
+- Bundled JSON Schemas regenerated from drt-core: `state.backend` gains a new
+  `warehouse` enum value (Postgres-first) plus `state.connection_profile`,
+  naming an existing `profiles.yml` entry to reuse as the warehouse
+  connection instead of a bucket (drt-hub/drt#920).
 - Bundled JSON Schemas regenerated: the `destination` union's schema also picked
   up the #997 callable-discriminator shape (a flat `oneOf` list including
   `GenericDestinationConfig`, no `discriminator`/`mapping` block) — the

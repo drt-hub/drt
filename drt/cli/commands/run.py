@@ -47,8 +47,10 @@ if TYPE_CHECKING:
     from drt.config.profiles import ProfileConfigLike
     from drt.destinations.base import Destination  # noqa: F401 — _RunContext field
     from drt.sources.base import Source
+    from drt.state.audit_trail import ComplianceAuditTrail
     from drt.state.dlq import DlqBackend
     from drt.state.history import HistoryStore
+    from drt.state.idempotency import IdempotencyLedger
     from drt.state.manager import StateStore
 
 
@@ -135,6 +137,15 @@ class _RunContext:
     # a default — every real construction site sets it explicitly.
     # See drt._identifiers.
     run_id: str = ""
+    # Warehouse-backed idempotency ledger (#1099) — None unless
+    # state.backend: warehouse and state.idempotency: true.
+    idempotency_ledger: IdempotencyLedger | None = None
+    # Compliance audit trail (#1100) — None unless state.backend: warehouse
+    # and state.audit_trail.enabled: true; fields/retain_days come straight
+    # from state.audit_trail, project-wide (not per-sync like the ledger).
+    audit_trail: ComplianceAuditTrail | None = None
+    audit_fields: list[str] | None = None
+    audit_retain_days: int = 30
 
 
 def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
@@ -222,6 +233,10 @@ def _run_one(
                 vars=ctx.vars,
                 query_tagging=ctx.query_tagging,
                 run_id=ctx.run_id,
+                idempotency_ledger=ctx.idempotency_ledger,
+                audit_trail=ctx.audit_trail,
+                audit_fields=ctx.audit_fields,
+                audit_retain_days=ctx.audit_retain_days,
             )
         except Exception as e:
             from drt.cli.errors import format_error, render_to_console
@@ -835,6 +850,10 @@ def run(
         vars=project_vars,
         query_tagging=project.query_tagging,
         run_id=new_run_id(),
+        idempotency_ledger=state_bundle.ledger,
+        audit_trail=state_bundle.audit_trail,
+        audit_fields=project.state.audit_trail.fields,
+        audit_retain_days=project.state.audit_trail.retain_days or 30,
     )
 
     # Execute syncs — parallel if threads > 1, sequential otherwise

@@ -79,12 +79,14 @@ def patched_runtime(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     from drt.engine import sync as sync_module
 
     run_calls: list[str] = []
+    run_kwargs: list[dict[str, Any]] = []
     test_queries: list[str] = []
     fail_runs: set[str] = set()
     null_count = {"value": 0}  # not_null passes when 0
 
     def fake_run_sync(sync, *_a: Any, **_k: Any) -> _FakeResult:
         run_calls.append(sync.name)
+        run_kwargs.append(_k)
         if sync.name in fail_runs:
             return _FakeResult(success=0, failed=1)
         return _FakeResult()
@@ -108,6 +110,7 @@ def patched_runtime(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(query_module, "execute_test_query", fake_execute)
     return {
         "run_calls": run_calls,
+        "run_kwargs": run_kwargs,
         "test_queries": test_queries,
         "fail_runs": fail_runs,
         "null_count": null_count,
@@ -125,6 +128,71 @@ def test_build_runs_syncs_and_their_tests(project: Path, patched_runtime: dict[s
     assert by_name["a_with_tests"]["tests"][0]["passed"] is True
     assert by_name["b_plain"]["tests"] == []  # no tests: defined — stable empty shape
     assert payload["succeeded"] == 2
+
+
+def test_build_wires_the_idempotency_ledger_into_run_sync(
+    project: Path, patched_runtime: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for a Codex-review finding on #1100: `drt build` builds
+    its own `_RunContext` (drt/cli/commands/build.py) rather than reusing
+    `drt run`'s, and had never been updated to pass `state_bundle.ledger`
+    through -- a project with `state.idempotency: true` silently lost that
+    protection specifically under `drt build`, not `drt run`."""
+    from drt.state import factory as factory_module
+    from drt.state.factory import StateBundle
+
+    sentinel_ledger = object()
+    real_build_state_bundle = factory_module.build_state_bundle
+
+    def fake_build_state_bundle(project_cfg, project_dir):
+        bundle = real_build_state_bundle(project_cfg, project_dir)
+        return StateBundle(
+            state=bundle.state, history=bundle.history, dlq=bundle.dlq, ledger=sentinel_ledger
+        )
+
+    monkeypatch.setattr(factory_module, "build_state_bundle", fake_build_state_bundle)
+
+    result = runner.invoke(app, ["build", "--output", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert patched_runtime["run_kwargs"]
+    assert all(
+        k.get("idempotency_ledger") is sentinel_ledger for k in patched_runtime["run_kwargs"]
+    )
+
+
+def test_build_wires_the_audit_trail_into_run_sync(
+    project: Path, patched_runtime: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same gap, same fix, for #1100's own compliance audit trail: `drt
+    build` never passed state_bundle.audit_trail / the configured fields /
+    retain_days through to run_sync() either."""
+    from drt.config.base import AuditTrailConfig
+    from drt.state import factory as factory_module
+    from drt.state.factory import StateBundle
+
+    sentinel_audit = object()
+    real_build_state_bundle = factory_module.build_state_bundle
+
+    def fake_build_state_bundle(project_cfg, project_dir):
+        bundle = real_build_state_bundle(project_cfg, project_dir)
+        project_cfg.state.audit_trail = AuditTrailConfig(
+            enabled=True, retain_days=45, fields=["email"]
+        )
+        return StateBundle(
+            state=bundle.state, history=bundle.history, dlq=bundle.dlq, audit_trail=sentinel_audit
+        )
+
+    monkeypatch.setattr(factory_module, "build_state_bundle", fake_build_state_bundle)
+
+    result = runner.invoke(app, ["build", "--output", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert patched_runtime["run_kwargs"]
+    for kwargs in patched_runtime["run_kwargs"]:
+        assert kwargs.get("audit_trail") is sentinel_audit
+        assert kwargs.get("audit_fields") == ["email"]
+        assert kwargs.get("audit_retain_days") == 45
 
 
 def test_build_select_state_modified_runs_only_changed_sync(

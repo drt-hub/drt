@@ -37,6 +37,7 @@ import yaml
 from pydantic import BaseModel, Field
 
 from drt.config.profiles import (
+    DEFAULT_FETCH_SIZE,
     BigQueryProfile,
     ClickHouseProfile,
     DatabricksProfile,
@@ -266,23 +267,41 @@ def _dump_bigquery(profile: BigQueryProfile, profile_name: str) -> dict[str, Any
     }
     if profile.keyfile:
         entry["keyfile"] = profile.keyfile
+    # load_profile defaults this to "US", so writing it only when it differs
+    # keeps existing files byte-identical while still surviving the round trip.
+    if profile.location != "US":
+        entry["location"] = profile.location
     return entry
 
 
 def _load_duckdb(raw: dict[str, Any]) -> DuckDBProfile:
-    return DuckDBProfile(type="duckdb", database=raw.get("database", ":memory:"))
+    return DuckDBProfile(
+        type="duckdb",
+        database=raw.get("database", ":memory:"),
+        fetch_size=int(raw.get("fetch_size", DEFAULT_FETCH_SIZE)),
+    )
 
 
 def _dump_duckdb(profile: DuckDBProfile, profile_name: str) -> dict[str, Any]:
-    return {"type": "duckdb", "database": profile.database}
+    entry: dict[str, Any] = {"type": "duckdb", "database": profile.database}
+    if profile.fetch_size != DEFAULT_FETCH_SIZE:
+        entry["fetch_size"] = profile.fetch_size
+    return entry
 
 
 def _load_sqlite(raw: dict[str, Any]) -> SQLiteProfile:
-    return SQLiteProfile(type="sqlite", database=raw.get("database", ":memory:"))
+    return SQLiteProfile(
+        type="sqlite",
+        database=raw.get("database", ":memory:"),
+        fetch_size=int(raw.get("fetch_size", DEFAULT_FETCH_SIZE)),
+    )
 
 
 def _dump_sqlite(profile: SQLiteProfile, profile_name: str) -> dict[str, Any]:
-    return {"type": "sqlite", "database": profile.database}
+    entry: dict[str, Any] = {"type": "sqlite", "database": profile.database}
+    if profile.fetch_size != DEFAULT_FETCH_SIZE:
+        entry["fetch_size"] = profile.fetch_size
+    return entry
 
 
 def _load_postgres(raw: dict[str, Any]) -> PostgresProfile:
@@ -294,6 +313,8 @@ def _load_postgres(raw: dict[str, Any]) -> PostgresProfile:
         user=raw.get("user", ""),
         password_env=raw.get("password_env"),
         password=raw.get("password"),
+        fetch_size=int(raw.get("fetch_size", DEFAULT_FETCH_SIZE)),
+        managed_schema=raw.get("managed_schema", "_drt"),
     )
 
 
@@ -307,6 +328,10 @@ def _dump_postgres(profile: PostgresProfile, profile_name: str) -> dict[str, Any
     }
     if profile.password_env:
         entry["password_env"] = profile.password_env
+    if profile.fetch_size != DEFAULT_FETCH_SIZE:
+        entry["fetch_size"] = profile.fetch_size
+    if profile.managed_schema != "_drt":
+        entry["managed_schema"] = profile.managed_schema
     return entry
 
 
@@ -320,6 +345,7 @@ def _load_redshift(raw: dict[str, Any]) -> RedshiftProfile:
         password_env=raw.get("password_env"),
         password=raw.get("password"),
         schema=raw.get("schema", "public"),
+        fetch_size=int(raw.get("fetch_size", DEFAULT_FETCH_SIZE)),
     )
 
 
@@ -334,6 +360,8 @@ def _dump_redshift(profile: RedshiftProfile, profile_name: str) -> dict[str, Any
     }
     if profile.password_env:
         entry["password_env"] = profile.password_env
+    if profile.fetch_size != DEFAULT_FETCH_SIZE:
+        entry["fetch_size"] = profile.fetch_size
     return entry
 
 
@@ -406,6 +434,8 @@ def _load_snowflake(raw: dict[str, Any]) -> SnowflakeProfile:
         schema=raw.get("schema") or "PUBLIC",
         warehouse=raw.get("warehouse", ""),
         role=raw.get("role"),
+        fetch_size=int(raw.get("fetch_size", DEFAULT_FETCH_SIZE)),
+        managed_schema=raw.get("managed_schema", "_drt"),
     )
 
 
@@ -426,6 +456,10 @@ def _dump_snowflake(profile: SnowflakeProfile, profile_name: str) -> dict[str, A
         entry["private_key_passphrase_env"] = profile.private_key_passphrase_env
     if profile.role:
         entry["role"] = profile.role
+    if profile.fetch_size != DEFAULT_FETCH_SIZE:
+        entry["fetch_size"] = profile.fetch_size
+    if profile.managed_schema != "_drt":
+        entry["managed_schema"] = profile.managed_schema
     return entry
 
 
@@ -442,6 +476,7 @@ def _load_sqlserver(raw: dict[str, Any]) -> SQLServerProfile:
         password_env=raw.get("password_env"),
         password=raw.get("password"),
         schema=raw.get("schema") or "dbo",
+        fetch_size=int(raw.get("fetch_size", DEFAULT_FETCH_SIZE)),
     )
 
 
@@ -456,6 +491,8 @@ def _dump_sqlserver(profile: SQLServerProfile, profile_name: str) -> dict[str, A
     }
     if profile.password_env:
         entry["password_env"] = profile.password_env
+    if profile.fetch_size != DEFAULT_FETCH_SIZE:
+        entry["fetch_size"] = profile.fetch_size
     return entry
 
 

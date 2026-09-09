@@ -89,6 +89,18 @@ class PostgresProfile:
     password: str | None = None  # explicit (non-recommended)
     #: Rows per server round trip when streaming (#765). See DEFAULT_FETCH_SIZE.
     fetch_size: int = DEFAULT_FETCH_SIZE
+    #: Schema for drt's own bookkeeping tables (#960) — NOT a default schema
+    #: for extraction queries, which stay raw SQL (`model: SELECT ...`) and
+    #: qualify their own schema when needed. Named distinctly from Snowflake/
+    #: Databricks' `schema` (their query-execution default) to avoid that
+    #: confusion, since Postgres sources have no equivalent concept. Defaults
+    #: to a dedicated schema, not `public` — every reverse-ETL vendor
+    #: researched for ADR 0005's 2026-09 amendment (RudderStack's
+    #: `_rudderstack`, Segment's `__segment_reverse_etl`, Hightouch's
+    #: `hightouch_planner`) isolates its bookkeeping tables from user data for
+    #: exactly this blast-radius reason; `public` is where user data usually
+    #: lives, making it the least conservative choice available.
+    managed_schema: str = "_drt"
 
     def describe(self) -> str:
         return f"{self.type} ({self.host}:{self.port}/{self.dbname})"
@@ -187,6 +199,16 @@ class SnowflakeProfile:
     role: str | None = None
     #: Rows per server round trip when streaming (#765). See DEFAULT_FETCH_SIZE.
     fetch_size: int = DEFAULT_FETCH_SIZE
+    #: Schema for drt's own bookkeeping tables (#960/#1106) — see
+    #: PostgresProfile.managed_schema's docstring for the full naming
+    #: rationale (deliberately distinct from `schema` above, which is the
+    #: query-execution default, a different concept). Lives inside
+    #: `database` above rather than a separate managed-database field.
+    #: Created/probed unquoted — Snowflake folds it to uppercase, matching
+    #: this connector's existing `_drt_synced_keys` bookkeeping table
+    #: convention (`destinations/snowflake.py`) rather than introducing a
+    #: second, quoted-identifier convention alongside it.
+    managed_schema: str = "_drt"
 
     def describe(self) -> str:
         return f"{self.type} ({self.account}/{self.database}.{self.schema})"

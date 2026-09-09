@@ -124,6 +124,22 @@ def _is_destination_mirror(sync_options: SyncOptions) -> bool:
     )
 
 
+def _is_diff_mirror(sync_options: SyncOptions) -> bool:
+    """True for ``mode: mirror`` with ``mirror.strategy: diff`` (#1110).
+
+    Previewable directly from ``sync_options._diff_removed_keys`` — no
+    destination read needed at all, unlike ``tracked``/``destination``: the
+    engine's ``incremental_strategy: diff`` extraction already computed the
+    exact removed-key set before this function ever runs (see
+    ``drt/engine/sync.py``), for both real and dry runs alike.
+    """
+    return (
+        sync_options.mode == "mirror"
+        and sync_options.mirror is not None
+        and sync_options.mirror.strategy == "diff"
+    )
+
+
 def _observed_scopes(records: list[dict[str, Any]], scope_cols: list[str]) -> list[tuple[Any, ...]]:
     """The distinct ``mirror.scope`` value tuples these records would produce.
 
@@ -420,6 +436,15 @@ def compute_diff(
             config, sync_options, upsert_key, source_keys, records
         )
         delete_reason = "mirror_scan"
+    elif _is_diff_mirror(sync_options):
+        # #1110, caught in Codex review: unlike tracked/destination, this
+        # never reads the destination at all — sync.incremental_strategy:
+        # diff already computed the exact removed-row set during extraction
+        # (drt/engine/sync.py smuggles it onto sync_options._diff_removed_keys
+        # the same way for both dry and real runs), so the preview is just
+        # what's already there, not a separate read.
+        deleted = list(getattr(sync_options, "_diff_removed_keys", None) or [])
+        delete_reason = "mirror"
 
     truncated = len(added) > limit or len(updated) > limit or len(deleted) > limit
 

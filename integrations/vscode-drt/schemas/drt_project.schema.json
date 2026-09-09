@@ -1,5 +1,37 @@
 {
   "$defs": {
+    "AuditTrailConfig": {
+      "description": "Compliance delivery log \u2014 \"which record went where, and when\" (#1100).\n\nProject-wide, not per-sync: a compliance policy shouldn't be something\nan individual sync author can quietly opt out of once the project has\nturned it on \u2014 the opposite scoping from #1099's `sync.idempotency_key`,\nwhich is a per-sync technical knob. Every sync in the project that\nsuccessfully delivers a record gets an audit row for it while enabled.\n\n``fields`` names columns to log **after** ``sync.mask`` (#427) has\nalready run, on whichever destination-facing (post-rename) names that\nsync produces \u2014 the same pipeline position ``sync.mask``'s own keys\nreference. This is deliberate, not incidental: logging the pre-mask\nvalue would recreate the exact PII liability ``sync.mask`` exists to\nprevent, in a second table nobody thought to protect the same way, and\nwould contradict this feature's own purpose (the destination never\nreceived that value, so it isn't part of \"what went where\"). Note the\ninverse is equally true and equally deliberate: a sync with no\n``sync.mask`` configured at all logs whatever raw values ``fields``\nnames, for the full ``retain_days`` window \u2014 enabling this on a field\nthe operator hasn't separately decided to mask is a real PII-retention\nchoice, not a free compliance win.\n\nDifferent syncs have different schemas, so a configured field absent\nfrom a given sync's records is simply omitted from that record's logged\nJSON rather than raising \u2014 this table is necessarily one shared shape\nacross every sync in the project.\n\n``retain_days`` is required (not optional-defaulting-to-forever) the\nmoment ``enabled`` is true \u2014 the gap this issue exists to close in\nHightouch's `Changelog` precedent, which leaves retention entirely to\nthe customer. Purge runs once per non-dry-run sync, the same call site\n#1099's ``IdempotencyLedger.prune`` already uses (mirrors\n``HistoryStore.prune``) \u2014 no separate CLI surface.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "retain_days": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Retain Days"
+        },
+        "fields": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Fields",
+          "type": "array"
+        }
+      },
+      "title": "AuditTrailConfig",
+      "type": "object"
+    },
     "HistoryConfig": {
       "description": "Sync execution history retention (#276).\n\nLocal history keeps every entry inside ``retention_days``. Remote object\nstores additionally retain only the newest ``max_entries`` per sync, which\nbounds the object downloaded and rewritten by each conditional update.",
       "properties": {
@@ -99,14 +131,15 @@
       "type": "object"
     },
     "StateConfig": {
-      "description": "State-backend selection and backend-specific settings (#756).\n\nThis mirrors :class:`~drt.config.sync_options.WatermarkConfig`'s shape:\none discriminating backend field plus optional fields validated against\nthat choice. GCS and S3 use ``bucket`` plus an optional object-key\n``prefix``. S3's authentication and endpoint fields deliberately match\n:class:`~drt.config.destinations_storage.S3DestinationConfig`, so state\nstorage follows the same boto3 credential chain and override vocabulary.\nLocal state continues to reject every remote-only field.",
+      "description": "State-backend selection and backend-specific settings (#756, #920).\n\nThis mirrors :class:`~drt.config.sync_options.WatermarkConfig`'s shape:\none discriminating backend field plus optional fields validated against\nthat choice. GCS and S3 use ``bucket`` plus an optional object-key\n``prefix``. S3's authentication and endpoint fields deliberately match\n:class:`~drt.config.destinations_storage.S3DestinationConfig`, so state\nstorage follows the same boto3 credential chain and override vocabulary.\n\n``warehouse`` (#920, ADR 0005 step 4, Postgres-first \u2014 see\n``drt/state/warehouse.py``) is a different shape from the two\nobject-storage backends: it has no bucket of its own, it reuses an\nexisting connection profile from ``profiles.yml`` instead, named by\n``connection_profile``. Not called ``profile`` \u2014 :class:`ProjectConfig`\nalready has a top-level ``profile`` field meaning \"the project's default\nconnection profile\", a different concept this deliberately avoids\ncolliding with. The managed-schema name for that connection stays on\nthe profile itself (``PostgresProfile.managed_schema``, #960) rather\nthan a second, independent ``state.schema`` knob that could disagree\nwith it.\n\n``backend`` and ``connection_profile`` widen/land together in the same\nPR that carries the warehouse backend implementation \u2014 not before it \u2014\nmatching how ``\"gcs\"`` was added to this ``Literal`` in the same PR as\nthe GCS backend itself (``d58a9c4``), not in the config-only PR that\npreceded it. A schema-valid config that names an unimplemented backend\nwould otherwise crash ``run``/``status``/``retry``/``serve``/MCP state\noperations at runtime \u2014 caught in Codex review on an earlier draft of\nthis change that split config and implementation across two PRs.\n\nLocal state continues to reject every remote-only field, and each\nbackend rejects every other backend's fields.",
       "properties": {
         "backend": {
           "default": "local",
           "enum": [
             "local",
             "gcs",
-            "s3"
+            "s3",
+            "warehouse"
           ],
           "title": "Backend",
           "type": "string"
@@ -206,6 +239,26 @@
           ],
           "default": null,
           "title": "Endpoint Url"
+        },
+        "connection_profile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Connection Profile"
+        },
+        "idempotency": {
+          "default": false,
+          "title": "Idempotency",
+          "type": "boolean"
+        },
+        "audit_trail": {
+          "$ref": "#/$defs/AuditTrailConfig"
         }
       },
       "title": "StateConfig",

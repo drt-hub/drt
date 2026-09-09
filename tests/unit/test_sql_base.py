@@ -605,6 +605,78 @@ def test_finalize_mirror_no_mirror_options_means_no_scope() -> None:
     assert "scope=None" in events[1]
 
 
+# ---------------------------------------------------------------------------
+# mirror.strategy: diff (#1110) — exact removed-key delete from #755
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_mirror_diff_dispatches_before_empty_keys_guard() -> None:
+    """A run that added/changed nothing (self._mirror_keys empty) can still
+    have rows to delete under strategy: diff — the dispatch must happen
+    before the destination/tracked-only empty-keys early return."""
+    events: list[str] = []
+    d = _mirror_dest(events)
+    d._mirror_keys = []
+    opts = SimpleNamespace(
+        mode="mirror",
+        mirror=SimpleNamespace(scope=None, strategy="diff"),
+        _diff_removed_keys=[{"id": 5}],
+        _query_tags=None,
+    )
+    result = d._finalize_mirror(SimpleNamespace(table="t", upsert_key=["id"]), opts)
+    assert isinstance(result, SyncResult)
+    assert events == [
+        "connect",
+        "execute:DELETE t ['id'] scope=None negate=False:([(5,)], None)",
+        "commit",
+        "close",
+    ]
+
+
+def test_finalize_mirror_diff_returns_none_when_no_removed_keys() -> None:
+    events: list[str] = []
+    d = _mirror_dest(events)
+    d._mirror_keys = [(1,)]
+    opts = SimpleNamespace(
+        mode="mirror",
+        mirror=SimpleNamespace(scope=None, strategy="diff"),
+        _diff_removed_keys=None,
+        _query_tags=None,
+    )
+    assert d._finalize_mirror(SimpleNamespace(table="t", upsert_key=["id"]), opts) is None
+    opts._diff_removed_keys = []
+    assert d._finalize_mirror(SimpleNamespace(table="t", upsert_key=["id"]), opts) is None
+    assert events == []
+
+
+def test_finalize_mirror_diff_missing_attr_is_treated_as_no_removed_keys() -> None:
+    """A SimpleNamespace (or any sync_options) with no _diff_removed_keys
+    attribute at all — not just None — must degrade the same way."""
+    events: list[str] = []
+    d = _mirror_dest(events)
+    opts = SimpleNamespace(mode="mirror", mirror=SimpleNamespace(scope=None, strategy="diff"))
+    assert d._finalize_mirror(SimpleNamespace(table="t", upsert_key=["id"]), opts) is None
+    assert events == []
+
+
+def test_finalize_mirror_diff_preserves_multi_column_key_order() -> None:
+    events: list[str] = []
+    d = _mirror_dest(events)
+    opts = SimpleNamespace(
+        mode="mirror",
+        mirror=SimpleNamespace(scope=None, strategy="diff"),
+        _diff_removed_keys=[{"tenant_id": "a", "id": 1}, {"tenant_id": "b", "id": 2}],
+        _query_tags=None,
+    )
+    d._finalize_mirror(SimpleNamespace(table="t", upsert_key=["tenant_id", "id"]), opts)
+    assert events == [
+        "connect",
+        "execute:DELETE t ['tenant_id', 'id'] scope=None negate=False:([('a', 1), ('b', 2)], None)",
+        "commit",
+        "close",
+    ]
+
+
 def test_finalize_mirror_closes_connection_when_execute_raises() -> None:
     events: list[str] = []
 
