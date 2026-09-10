@@ -82,9 +82,13 @@ queries. Their exact columns are not a stable public API.
 
 Same discipline as the managed-table primitive underneath this backend
 ([#960](https://github.com/drt-hub/drt/issues/960)): an admin can pre-create the schema and all
-three tables, grant the sync role no `CREATE` privilege at all, and every write still succeeds —
-drt probes for existence before issuing any `CREATE` statement, live-verified with a role that
-has `CREATE` fully revoked.
+three tables, grant the sync role/principal no `CREATE` privilege at all, and every write still
+succeeds — drt probes for existence before issuing any `CREATE` statement, live-verified on every
+shipped dialect with a role/principal that has `CREATE` fully revoked. The DDL is dialect-specific
+(column types, identifier syntax, and the grant vocabulary itself all differ) — pick the block
+below matching your `connection_profile`'s `type`.
+
+### Postgres
 
 ```sql
 CREATE SCHEMA _drt;
@@ -131,6 +135,111 @@ live escape-hatch test caught as a real failure (`permission denied for sequence
 shape was settled on. `_drt_history` needs no id column at all; `_drt_dlq` orders by
 `(ts, id)` instead of a sequence.
 
+### Snowflake
+
+Unquoted identifiers fold to uppercase — the DDL below and drt's own probes agree on this without
+needing to match case. `managed_schema` lives inside `database` (see [Configuration
+reference](#configuration-reference) above), so substitute your own database name for `DRT_DB`.
+
+```sql
+CREATE SCHEMA DRT_DB._drt;
+CREATE TABLE DRT_DB._drt._drt_runs (
+    sync_name TEXT PRIMARY KEY,
+    last_run_at TEXT NOT NULL,
+    records_synced BIGINT NOT NULL,
+    status TEXT NOT NULL,
+    error TEXT,
+    last_cursor_value TEXT
+);
+CREATE TABLE DRT_DB._drt._drt_history (
+    sync_name TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    duration_seconds DOUBLE NOT NULL,
+    status TEXT NOT NULL,
+    records_synced BIGINT NOT NULL,
+    records_failed BIGINT NOT NULL,
+    errors VARIANT NOT NULL DEFAULT PARSE_JSON('[]'),
+    cursor_value_used TEXT,
+    dry_run BOOLEAN NOT NULL DEFAULT FALSE,
+    run_id TEXT,
+    sync_run_id TEXT
+);
+CREATE TABLE DRT_DB._drt._drt_dlq (
+    id TEXT PRIMARY KEY,
+    sync_name TEXT NOT NULL,
+    record VARIANT NOT NULL,
+    error_message TEXT NOT NULL,
+    http_status INTEGER,
+    ts TEXT NOT NULL,
+    attempts INTEGER NOT NULL,
+    sync_run_id TEXT
+);
+GRANT USAGE ON DATABASE DRT_DB TO ROLE retl_role;
+GRANT USAGE ON SCHEMA DRT_DB._drt TO ROLE retl_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA DRT_DB._drt TO ROLE retl_role;
+```
+
+Unlike Postgres, Snowflake's `GRANT` does not accept a comma-separated list of table names — it takes exactly one `ON TABLE <name>` or the whole-schema form above. `_drt` holding only these three drt-managed tables is what makes the whole-schema grant equivalent to naming them individually.
+
+`errors`/`record` are `VARIANT`, not a JSON-typed text column — Snowflake's write path
+(`PARSE_JSON(...)`) and read path both expect this type; a plain `TEXT` column here breaks the
+warehouse-state write, not just narrows a type.
+
+### Databricks
+
+Unquoted identifiers are case-preserving (not case-folding) on Unity Catalog, unlike Snowflake —
+the DDL below just needs to match the literal casing configured in `managed_schema`.
+`managed_schema` lives inside `catalog`; substitute your own catalog for `drt_catalog`. Databricks
+has no single combined DML grant covering `INSERT`/`UPDATE`/`DELETE` — `MODIFY` is Unity Catalog's
+equivalent.
+
+```sql
+CREATE SCHEMA drt_catalog._drt;
+CREATE TABLE drt_catalog._drt._drt_runs (
+    sync_name STRING,
+    last_run_at STRING NOT NULL,
+    records_synced BIGINT NOT NULL,
+    status STRING NOT NULL,
+    error STRING,
+    last_cursor_value STRING
+) USING DELTA;
+CREATE TABLE drt_catalog._drt._drt_history (
+    sync_name STRING NOT NULL,
+    started_at STRING NOT NULL,
+    completed_at STRING NOT NULL,
+    duration_seconds DOUBLE NOT NULL,
+    status STRING NOT NULL,
+    records_synced BIGINT NOT NULL,
+    records_failed BIGINT NOT NULL,
+    errors VARIANT NOT NULL,
+    cursor_value_used STRING,
+    dry_run BOOLEAN NOT NULL,
+    run_id STRING,
+    sync_run_id STRING
+) USING DELTA;
+CREATE TABLE drt_catalog._drt._drt_dlq (
+    id STRING,
+    sync_name STRING NOT NULL,
+    record VARIANT NOT NULL,
+    error_message STRING NOT NULL,
+    http_status INT,
+    ts STRING NOT NULL,
+    attempts INT NOT NULL,
+    sync_run_id STRING
+) USING DELTA;
+GRANT USE CATALOG ON CATALOG drt_catalog TO `retl_principal`;
+GRANT USE SCHEMA ON SCHEMA drt_catalog._drt TO `retl_principal`;
+GRANT SELECT, MODIFY ON SCHEMA drt_catalog._drt TO `retl_principal`;
+```
+
+No `PRIMARY KEY` on `sync_name`/`id` — Delta Lake does not enforce primary-key constraints (an
+informational-only declaration at best, on runtimes that even accept the syntax), so `replace()`/
+`save_sync()`/`append()`'s own probe-before-write logic is what actually prevents duplicate rows,
+not the schema. `errors`/`record` are `VARIANT`, matching Snowflake's shape above, for the same
+reason (drt's write path emits it, a plain `STRING` column breaks the write rather than just
+narrowing a type).
+
 Reversible by design ([ADR 0005](../adr/0005-state-location-and-write-grants.md#decision)
 Decision 4): switch `state.backend` back to `local`/`gcs`/`s3` — the three tables are simply no
 longer read or written, and `DROP TABLE`/`DROP SCHEMA` when convenient (or leave them, harmlessly
@@ -169,6 +278,12 @@ these do a client-side probe (`SELECT` for existence) followed by `UPDATE` or `I
 one atomic statement — two concurrent writers touching the *same* `sync_name`/DLQ `id`
 simultaneously can both observe absence and both insert, producing a duplicate row (mirroring the
 already-accepted "concurrent runs of the same sync" limitation below, not a new failure class).
+The same probe-then-act window has a second, narrower shape for `save_sync()` specifically: if
+`drt state reset` deletes that sync's row between the probe and the `UPDATE`, the `UPDATE` matches
+zero rows and `save_sync()` returns normally — the run appears to have persisted state while the
+row (and its cursor) is actually gone, rather than raising or retrying. This needs a genuinely
+concurrent `reset()` and `save_sync()` against the same `sync_name` to trigger, which is already an
+unusual operational pattern; it's called out here rather than silently left as a surprise.
 Every other write on every dialect — Postgres's `ON CONFLICT`, Snowflake's `MERGE`/transaction,
 Databricks' `replace()`/`reconcile()` — is atomic per statement with no such window. Across all of
 this, unlike the [GCS/S3 backends](remote-state.md), there is no client-side read-modify-write
