@@ -50,6 +50,7 @@ from drt.state.idempotency import (
     IdempotencyLedger,
     compute_idempotency_key,
     resolve_idempotency_key_template,
+    successful_indices,
 )
 from drt.state.manager import StateStore
 from drt.state.watermark import WatermarkStorage
@@ -166,39 +167,8 @@ def _check_mode_supported(mode: str, destination: Destination | StagedDestinatio
         )
 
 
-def _successful_indices(record_batch: list[dict[str, Any]], result: SyncResult) -> set[int]:
-    """Indices into ``record_batch`` this ``load()`` call actually reported
-    success for, or an empty set when that can't be determined safely.
-
-    Every ``RowError.batch_index`` is excluded (a positive, per-row
-    failure signal). But some destinations skip a row *without* recording
-    a ``RowError`` — ``match_policy: update_only``/``create_only``'s
-    ``skipped_no_match`` (#757) is a bare counter with no per-row index at
-    all. Treating "not in row_errors" as "therefore delivered" would
-    wrongly mark a skipped-no-match row as successfully delivered (caught
-    in Codex review on #1100, which shares this helper): a real, silent
-    compliance/idempotency-ledger false positive, since a skip is neither
-    a failure nor a delivery. So whenever this batch reports *any* skip
-    (``result.skipped``, which ``skipped_no_match`` is a documented subset
-    of), this returns an empty set rather than guess — fail closed, not
-    open: missing one batch's dedup/audit protection is a far smaller cost
-    than permanently marking a never-delivered record as delivered.
-
-    Shared by #1099's ``mark_delivered`` filtering and #1100's audit log
-    write, which both need the same "which of these did the destination
-    confirm" computation the DLQ's dead-letter pairing below also relies
-    on — one bounds-checked computation instead of drifting copies.
-    """
-    if result.skipped > 0:
-        return set()
-    failed_indices = {
-        err.batch_index for err in result.row_errors if 0 <= err.batch_index < len(record_batch)
-    }
-    return {i for i in range(len(record_batch)) if i not in failed_indices}
-
-
 def _build_audit_entries(
-    record_batch: list[dict[str, Any]], successful_indices: set[int], fields: list[str]
+    record_batch: list[dict[str, Any]], confirmed_indices: set[int], fields: list[str]
 ) -> list[AuditEntry]:
     """One ``AuditEntry`` per successfully-delivered record (#1100).
 
@@ -215,7 +185,7 @@ def _build_audit_entries(
     """
     entries: list[AuditEntry] = []
     for i in range(len(record_batch)):
-        if i not in successful_indices:
+        if i not in confirmed_indices:
             continue
         row = record_batch[i]
         present = {f: json_safe_audit_value(row[f]) for f in fields if f in row}
@@ -1033,10 +1003,11 @@ def _run_sync_body(
 
                 # Idempotency ledger mark (#1099) + compliance audit log
                 # (#1100) — both only for records this load() call actually
-                # reported success for. `_successful_indices` is the same
-                # correlation `DeadLetter` construction below already
-                # relies on (result.row_errors[*].batch_index indexes into
-                # the record_batch just sent). Both writes happen here (not
+                # reported success for. `successful_indices()`
+                # (drt.state.idempotency) is the same correlation
+                # `DeadLetter` construction below already relies on
+                # (result.row_errors[*].batch_index indexes into the
+                # record_batch just sent). Both writes happen here (not
                 # deferred to sync end) to keep the crash-loses-data window
                 # scoped to one batch, not the whole run — this fires on
                 # the common/success path, unlike DLQ's rare-path
@@ -1046,14 +1017,14 @@ def _run_sync_body(
                     and any(k is not None for k in batch_idempotency_keys)
                 ) or _audit_enabled
                 if needs_delivered_at:
-                    successful_indices = _successful_indices(record_batch, result)
+                    confirmed_indices = successful_indices(record_batch, result)
                     delivered_at = datetime.now(timezone.utc).isoformat()
 
                     if idempotency_ledger is not None:
                         delivered_keys = [
                             key
                             for i, key in enumerate(batch_idempotency_keys)
-                            if key is not None and i in successful_indices
+                            if key is not None and i in confirmed_indices
                         ]
                         if delivered_keys:
                             with _stage_ctx("state"):
@@ -1064,7 +1035,7 @@ def _run_sync_body(
                     if _audit_enabled:
                         assert audit_trail is not None and audit_fields is not None
                         audit_entries = _build_audit_entries(
-                            record_batch, successful_indices, audit_fields
+                            record_batch, confirmed_indices, audit_fields
                         )
                         if audit_entries:
                             with _stage_ctx("state"):

@@ -78,6 +78,26 @@ class _FakeDestination:
         return result
 
 
+class _FakeSkippingDestination:
+    """Reports a ``match_policy``-style skip for ``skip_ids`` — no RowError,
+    no batch_index, just a bare ``skipped``/``skipped_no_match`` counter
+    bump (#757's own shape). Used to prove retry.py's ledger/audit marking
+    fails closed on this exact case, matching ``successful_indices()``."""
+
+    def __init__(self, skip_ids: set[int]) -> None:
+        self.skip_ids = skip_ids
+
+    def load(self, records, config, sync_options):  # type: ignore[no-untyped-def]
+        result = SyncResult()
+        for rec in records:
+            if rec.get("id") in self.skip_ids:
+                result.skipped += 1
+                result.skipped_no_match += 1
+            else:
+                result.success += 1
+        return result
+
+
 class _FakeStagedDestination:
     """Stages every chunk, then attributes configured failures globally."""
 
@@ -308,6 +328,7 @@ def _patch_dest(
     monkeypatch: pytest.MonkeyPatch,
     dest: (
         _FakeDestination
+        | _FakeSkippingDestination
         | _FakeStagedDestination
         | _FakeChunkLocalStagedDestination
         | _FakeSalesforceBulkDestination
@@ -645,6 +666,36 @@ def test_retry_marks_ledger_and_logs_audit_on_success(
     # misattribute the delivery to a run that never actually sent it.
     for sync_name, run_id, sync_run_id, dest_type, _ in audit_trail.logged:
         assert (sync_name, run_id, sync_run_id, dest_type) == ("post_users", None, None, "rest_api")
+
+
+def test_retry_excludes_unattributed_skip_from_ledger_and_audit(
+    ledger_audit_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review finding on #1126: a match_policy-style skip (no RowError,
+    no batch_index — #757's skipped_no_match) must never be marked delivered
+    or audit-logged. Both ids land in the same retry_group (batch_size: 2),
+    so successful_indices() (drt.state.idempotency) fails closed for the
+    *whole* group — id=1's genuine delivery loses ledger/audit protection
+    too, the same conservative trade-off run_sync() already makes. Both
+    records still leave the DLQ (that's the pre-existing, unrelated "don't
+    requeue a skip forever" behavior) — only the ledger/audit write is
+    withheld. Mirrors the run_sync()-side regression already covered in
+    test_engine_idempotency.py."""
+    store = _seed_ledger_audit(ledger_audit_project, [1, 2])
+    dest = _FakeSkippingDestination(skip_ids={2})
+    _patch_dest(monkeypatch, dest)
+    ledger = _FakeLedger()
+    audit_trail = _FakeAuditTrail()
+    _patch_state_bundle(monkeypatch, store, ledger, audit_trail)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    # Both records leave the DLQ (neither is a re-queueable failure) ...
+    assert "2 succeeded, 0 still failing" in result.output
+    # ... but neither reaches the ledger or the audit log.
+    assert ledger.marked == []
+    assert audit_trail.logged == []
 
 
 def test_retry_skips_already_delivered_and_leaves_it_queued(

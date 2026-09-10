@@ -288,7 +288,7 @@ def test_mark_delivered_never_fires_for_a_batch_containing_an_unattributed_skip(
     tmp_path: Path,
 ) -> None:
     """Regression for a Codex-review finding on #1100 (shared via
-    _successful_indices, so it applies here too): match_policy's
+    successful_indices() in drt.state.idempotency, so it applies here too): match_policy's
     skipped_no_match (#757) is a bare counter with no per-row batch_index,
     unlike a RowError. Treating "not in row_errors" as "therefore
     delivered" would wrongly mark the skipped row as delivered forever.

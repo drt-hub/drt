@@ -63,7 +63,11 @@ def replay_dead_letters(
     from drt.state.audit_trail import AuditEntry, json_safe_audit_value
     from drt.state.dlq import DeadLetter
     from drt.state.factory import build_state_bundle
-    from drt.state.idempotency import compute_idempotency_key, resolve_idempotency_key_template
+    from drt.state.idempotency import (
+        compute_idempotency_key,
+        resolve_idempotency_key_template,
+        successful_indices,
+    )
 
     if project is None:
         project = (
@@ -147,6 +151,16 @@ def replay_dead_letters(
                 to_retry = [e for e in to_retry if e.id not in duplicate_ids]
 
     remove_ids: set[str] = set()
+    # Subset of `remove_ids` this retry's own correlation loop can positively
+    # attribute to a *delivery* (not just "not a re-queued failure") — see
+    # successful_indices()'s docstring (drt.state.idempotency): a match_policy
+    # skip (#757) shows up as neither a RowError nor an attributable failure,
+    # so treating "removed from the DLQ" as "therefore delivered" would mark
+    # a skipped row as delivered in the ledger/audit trail (caught in Codex
+    # review on #1126 — the same false-positive class #1100 caught for
+    # run_sync() itself). `delivered_ids` fails closed per retry_group
+    # instead: only fed to mark_delivered()/log_delivered() below.
+    delivered_ids: set[str] = set()
     updates: dict[str, DeadLetter] = {}
     succeeded = 0
     failed_again = 0
@@ -210,9 +224,16 @@ def replay_dead_letters(
         )
 
     for retry_group, result in retry_groups:
+        # Fails closed for the whole group on any unattributed skip — same
+        # contract as run_sync()'s per-batch ledger mark / audit write.
+        confirmed_idx = successful_indices([e.record for e in retry_group], result)
+
         if result.failed == 0:
             succeeded += len(retry_group)
             remove_ids.update(e.id for e in retry_group)
+            delivered_ids.update(
+                entry.id for i, entry in enumerate(retry_group) if i in confirmed_idx
+            )
             continue
 
         # Correlate which records failed again. RowError.batch_index pinpoints
@@ -258,6 +279,8 @@ def replay_dead_letters(
             if pinpointed and i not in failed_idx:
                 succeeded += 1
                 remove_ids.add(entry.id)
+                if i in confirmed_idx:
+                    delivered_ids.add(entry.id)
                 continue
             err = err_by_idx.get(i)
             updates[entry.id] = DeadLetter(
@@ -279,15 +302,17 @@ def replay_dead_letters(
             )
             failed_again += 1
 
-    # Idempotency mark + audit log — only for entries `remove_ids` names,
-    # i.e. this retry's own correlation loop just confirmed delivered.
-    # Pre-filtered duplicates (`duplicate_ids`) never entered that loop, so
-    # they can never end up here — no double-marking, no audit row claiming
-    # a delivery this retry didn't actually make.
-    if remove_ids:
+    # Idempotency mark + audit log — only for entries `delivered_ids` names,
+    # i.e. this retry's own correlation loop positively attributed to a
+    # delivery (not merely "removed from the DLQ" — see `delivered_ids`'
+    # definition above for why the two sets diverge on an unattributed
+    # skip). Pre-filtered duplicates (`duplicate_ids`) never entered that
+    # loop, so they can never end up here either — no double-marking, no
+    # audit row claiming a delivery this retry didn't actually make.
+    if delivered_ids:
         delivered_at = datetime.now(timezone.utc).isoformat()
         if idempotency_ledger is not None:
-            delivered_keys = [key_by_id[eid] for eid in remove_ids if eid in key_by_id]
+            delivered_keys = [key_by_id[eid] for eid in delivered_ids if eid in key_by_id]
             if delivered_keys:
                 idempotency_ledger.mark_delivered(sync.name, delivered_keys, delivered_at)
 
@@ -307,7 +332,7 @@ def replay_dead_letters(
                         if f in entries_by_id[eid].record
                     },
                 )
-                for eid in remove_ids
+                for eid in delivered_ids
                 if eid in entries_by_id
             ]
             if audit_entries:

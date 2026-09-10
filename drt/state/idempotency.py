@@ -39,6 +39,7 @@ from drt.templates.renderer import render_value
 
 if TYPE_CHECKING:
     from drt.config.models import SyncConfig
+    from drt.destinations.base import SyncResult
 
 
 def resolve_idempotency_key_template(sync: SyncConfig) -> str | None:
@@ -79,6 +80,37 @@ def compute_idempotency_key(template: str, record: dict[str, Any]) -> str | None
         return str(render_value(template, record))
     except Exception:
         return None
+
+
+def successful_indices(record_batch: list[dict[str, Any]], result: SyncResult) -> set[int]:
+    """Indices into ``record_batch`` this ``load()`` call actually reported
+    success for, or an empty set when that can't be determined safely.
+
+    Every ``RowError.batch_index`` is excluded (a positive, per-row
+    failure signal). But some destinations skip a row *without* recording
+    a ``RowError`` — ``match_policy: update_only``/``create_only``'s
+    ``skipped_no_match`` (#757) is a bare counter with no per-row index at
+    all. Treating "not in row_errors" as "therefore delivered" would
+    wrongly mark a skipped-no-match row as successfully delivered (caught
+    in Codex review on #1100, which shares this helper): a real, silent
+    compliance/idempotency-ledger false positive, since a skip is neither
+    a failure nor a delivery. So whenever this batch reports *any* skip
+    (``result.skipped``, which ``skipped_no_match`` is a documented subset
+    of), this returns an empty set rather than guess — fail closed, not
+    open: missing one batch's dedup/audit protection is a far smaller cost
+    than permanently marking a never-delivered record as delivered.
+
+    Shared by ``run_sync()``'s per-batch ``mark_delivered``/audit-log write
+    and ``drt retry``'s ``replay_dead_letters()`` (#1118, caught in Codex
+    review on #1126 for the same reason #1100 caught it here first) — both
+    need the same "which of these did the destination confirm" computation.
+    """
+    if result.skipped > 0:
+        return set()
+    failed_indices = {
+        err.batch_index for err in result.row_errors if 0 <= err.batch_index < len(record_batch)
+    }
+    return {i for i in range(len(record_batch)) if i not in failed_indices}
 
 
 @runtime_checkable
