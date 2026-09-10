@@ -44,7 +44,16 @@ jobs:
         run: pytest
 
       - name: Install dagster-drt (editable)
-        run: uv pip install --system -e ./integrations/dagster-drt
+        # Same --no-deps rationale as ci.yml's dagster-drt-test job: this
+        # verify job runs against the editable local drt-core checkout,
+        # whose pyproject.toml version field trails its actual floor
+        # requirement until a real release is tagged (#1118/#1126). The
+        # `publish` job below deliberately does NOT get this treatment — a
+        # real tag-triggered publish must still fail if drt-core's floor
+        # genuinely isn't satisfiable from PyPI.
+        run: |
+          uv pip install --system "dagster>=1.10.18"
+          uv pip install --system --no-deps -e ./integrations/dagster-drt
 
       - name: Lint dagster-drt (ruff)
         run: ruff check integrations/dagster-drt

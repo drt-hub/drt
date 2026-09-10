@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -10,8 +12,10 @@ from typer.testing import CliRunner
 
 import drt.cli._helpers as helpers
 from drt.cli.main import app
+from drt.config.models import DestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
+from drt.state.audit_trail import AuditEntry
 from drt.state.dlq import DeadLetter, DlqStore
 from drt.state.factory import StateBundle
 
@@ -26,14 +30,14 @@ class _FakeLedger:
         self.checked: list[set[str]] = []
         self.marked: list[list[str]] = []
 
-    def already_delivered(self, sync_name, keys):  # type: ignore[no-untyped-def]
+    def already_delivered(self, sync_name: str, keys: Collection[str]) -> set[str]:
         self.checked.append(set(keys))
         return set(keys) & self.already_delivered_keys
 
-    def mark_delivered(self, sync_name, keys, delivered_at):  # type: ignore[no-untyped-def]
+    def mark_delivered(self, sync_name: str, keys: Collection[str], delivered_at: str) -> None:
         self.marked.append(list(keys))
 
-    def prune(self, sync_name, retention_days):  # type: ignore[no-untyped-def]
+    def prune(self, sync_name: str, retention_days: int) -> int:
         return 0
 
 
@@ -41,14 +45,20 @@ class _FakeAuditTrail:
     """Minimal ComplianceAuditTrail fake — records every log_delivered() call."""
 
     def __init__(self) -> None:
-        self.logged: list[tuple] = []
+        self.logged: list[tuple[str, str | None, str | None, str, list[AuditEntry]]] = []
 
-    def log_delivered(  # type: ignore[no-untyped-def]
-        self, sync_name, run_id, sync_run_id, destination_type, entries, delivered_at
-    ):
+    def log_delivered(
+        self,
+        sync_name: str,
+        run_id: str | None,
+        sync_run_id: str | None,
+        destination_type: str,
+        entries: list[AuditEntry],
+        delivered_at: str,
+    ) -> None:
         self.logged.append((sync_name, run_id, sync_run_id, destination_type, entries))
 
-    def prune(self, sync_name, retain_days):  # type: ignore[no-untyped-def]
+    def prune(self, sync_name: str, retain_days: int) -> int:
         return 0
 
 
@@ -57,9 +67,14 @@ class _FakeDestination:
 
     def __init__(self, fail_ids: set[int]) -> None:
         self.fail_ids = fail_ids
-        self.calls: list[list[dict]] = []
+        self.calls: list[list[dict[str, Any]]] = []
 
-    def load(self, records, config, sync_options):  # type: ignore[no-untyped-def]
+    def load(
+        self,
+        records: list[dict[str, Any]],
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
         self.calls.append(records)
         result = SyncResult()
         for i, rec in enumerate(records):
@@ -87,10 +102,51 @@ class _FakeSkippingDestination:
     def __init__(self, skip_ids: set[int]) -> None:
         self.skip_ids = skip_ids
 
-    def load(self, records, config, sync_options):  # type: ignore[no-untyped-def]
+    def load(
+        self,
+        records: list[dict[str, Any]],
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
         result = SyncResult()
         for rec in records:
             if rec.get("id") in self.skip_ids:
+                result.skipped += 1
+                result.skipped_no_match += 1
+            else:
+                result.success += 1
+        return result
+
+
+class _FakeFailAndSkipDestination:
+    """One chunk, three outcomes: a RowError failure, a bare match_policy
+    skip, and a genuine success — exercises the `confirmed_idx` guard inside
+    retry.py's *partial*-failure branch (the full-success shortcut at
+    ``result.failed == 0`` never runs when this chunk also has a failure)."""
+
+    def __init__(self, fail_ids: set[int], skip_ids: set[int]) -> None:
+        self.fail_ids = fail_ids
+        self.skip_ids = skip_ids
+
+    def load(
+        self,
+        records: list[dict[str, Any]],
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        result = SyncResult()
+        for i, rec in enumerate(records):
+            if rec.get("id") in self.fail_ids:
+                result.failed += 1
+                result.row_errors.append(
+                    RowError(
+                        batch_index=i,
+                        record_preview=str(rec)[:200],
+                        http_status=503,
+                        error_message="still failing",
+                    )
+                )
+            elif rec.get("id") in self.skip_ids:
                 result.skipped += 1
                 result.skipped_no_match += 1
             else:
@@ -329,6 +385,7 @@ def _patch_dest(
     dest: (
         _FakeDestination
         | _FakeSkippingDestination
+        | _FakeFailAndSkipDestination
         | _FakeStagedDestination
         | _FakeChunkLocalStagedDestination
         | _FakeSalesforceBulkDestination
@@ -694,6 +751,51 @@ def test_retry_excludes_unattributed_skip_from_ledger_and_audit(
     # Both records leave the DLQ (neither is a re-queueable failure) ...
     assert "2 succeeded, 0 still failing" in result.output
     # ... but neither reaches the ledger or the audit log.
+    assert ledger.marked == []
+    assert audit_trail.logged == []
+
+
+def test_retry_excludes_unattributed_skip_alongside_a_pinpointed_failure(
+    ledger_audit_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same fail-closed contract as the all-succeed case above, but through
+    the *partial*-failure branch: one chunk holds a genuine RowError failure
+    (id=1), an unattributed skip (id=2), and a genuine success (id=3).
+    Pinpointing still correctly identifies id=1 as the only failure — id=2
+    and id=3 both leave the DLQ as before — but the skip means
+    successful_indices() fails closed for the whole chunk, so id=3's
+    otherwise-confirmable delivery is withheld from the ledger/audit log
+    too, same trade-off as the all-succeed case."""
+    (ledger_audit_project / "syncs" / "post_users.yml").write_text(
+        yaml.dump(
+            {
+                "name": "post_users",
+                "model": "ref('users')",
+                "destination": {"type": "rest_api", "url": "https://example.com"},
+                "sync": {
+                    "batch_size": 3,
+                    "dlq": {"enabled": True},
+                    "idempotency_key": "{{ row['id'] }}",
+                },
+            }
+        )
+    )
+    store = _seed_ledger_audit(ledger_audit_project, [1, 2, 3])
+    dest = _FakeFailAndSkipDestination(fail_ids={1}, skip_ids={2})
+    _patch_dest(monkeypatch, dest)
+    ledger = _FakeLedger()
+    audit_trail = _FakeAuditTrail()
+    _patch_state_bundle(monkeypatch, store, ledger, audit_trail)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    assert "2 succeeded, 1 still failing" in result.output
+    # id=1 (the real failure) stays queued; id=2 and id=3 both leave the DLQ.
+    remaining = store.read("post_users")
+    assert [e.record["id"] for e in remaining] == [1]
+    # But neither id=2 (a skip) nor id=3 (a genuine delivery) reaches the
+    # ledger or audit log — the whole chunk fails closed on id=2's skip.
     assert ledger.marked == []
     assert audit_trail.logged == []
 
