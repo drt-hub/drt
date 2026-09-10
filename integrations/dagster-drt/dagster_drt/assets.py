@@ -201,7 +201,8 @@ def drt_assets_legacy(
                 profile = load_profile(project.profile)
                 source = _get_source(profile)
                 destination = _get_destination(_sync_cfg)
-                state_mgr = build_state_bundle(project, project_path).state
+                bundle = build_state_bundle(project, project_path)
+                state_mgr = bundle.state
 
                 # The engine only persists state through an observer
                 # (AGENTS.md: "state persistence... MUST flow through
@@ -219,6 +220,12 @@ def drt_assets_legacy(
                     dry_run=effective_dry_run,
                     state_manager=state_mgr,
                     observer=StatePersistingObserver(state_mgr, None),
+                    # #1118: this legacy path never passed these two through
+                    # either — same gap as resource.py's op/asset path above.
+                    idempotency_ledger=bundle.ledger,
+                    audit_trail=bundle.audit_trail,
+                    audit_fields=project.state.audit_trail.fields,
+                    audit_retain_days=project.state.audit_trail.retain_days or 30,
                 )
 
                 context.log.info(

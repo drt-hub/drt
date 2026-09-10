@@ -218,8 +218,9 @@ def test_whole_batch_of_duplicates_never_reaches_the_destination(tmp_path: Path)
 def test_a_broken_key_template_disables_dedup_for_that_row_without_failing_it(
     tmp_path: Path,
 ) -> None:
-    """`_compute_idempotency_key` is best-effort by design (see its
-    docstring): a template referencing a column the row doesn't have must
+    """`compute_idempotency_key` (drt.state.idempotency) is best-effort by
+    design (see its docstring): a template referencing a column the row
+    doesn't have must
     disable ledger protection for that one row, not drop it or fail the
     sync. render_value raises ValueError on a missing attribute (Jinja's
     StrictUndefined, per computed_fields' own docstring) -- proving the
@@ -287,7 +288,7 @@ def test_mark_delivered_never_fires_for_a_batch_containing_an_unattributed_skip(
     tmp_path: Path,
 ) -> None:
     """Regression for a Codex-review finding on #1100 (shared via
-    _successful_indices, so it applies here too): match_policy's
+    successful_indices() in drt.state.idempotency, so it applies here too): match_policy's
     skipped_no_match (#757) is a bare counter with no per-row batch_index,
     unlike a RowError. Treating "not in row_errors" as "therefore
     delivered" would wrongly mark the skipped row as delivered forever.

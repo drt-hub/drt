@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -10,11 +12,54 @@ from typer.testing import CliRunner
 
 import drt.cli._helpers as helpers
 from drt.cli.main import app
+from drt.config.models import DestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
+from drt.state.audit_trail import AuditEntry
 from drt.state.dlq import DeadLetter, DlqStore
+from drt.state.factory import StateBundle
 
 runner = CliRunner()
+
+
+class _FakeLedger:
+    """Minimal IdempotencyLedger fake — records what was checked/marked."""
+
+    def __init__(self, already_delivered_keys: set[str] | None = None) -> None:
+        self.already_delivered_keys = already_delivered_keys or set()
+        self.checked: list[set[str]] = []
+        self.marked: list[list[str]] = []
+
+    def already_delivered(self, sync_name: str, keys: Collection[str]) -> set[str]:
+        self.checked.append(set(keys))
+        return set(keys) & self.already_delivered_keys
+
+    def mark_delivered(self, sync_name: str, keys: Collection[str], delivered_at: str) -> None:
+        self.marked.append(list(keys))
+
+    def prune(self, sync_name: str, retention_days: int) -> int:
+        return 0
+
+
+class _FakeAuditTrail:
+    """Minimal ComplianceAuditTrail fake — records every log_delivered() call."""
+
+    def __init__(self) -> None:
+        self.logged: list[tuple[str, str | None, str | None, str, list[AuditEntry]]] = []
+
+    def log_delivered(
+        self,
+        sync_name: str,
+        run_id: str | None,
+        sync_run_id: str | None,
+        destination_type: str,
+        entries: list[AuditEntry],
+        delivered_at: str,
+    ) -> None:
+        self.logged.append((sync_name, run_id, sync_run_id, destination_type, entries))
+
+    def prune(self, sync_name: str, retain_days: int) -> int:
+        return 0
 
 
 class _FakeDestination:
@@ -22,9 +67,14 @@ class _FakeDestination:
 
     def __init__(self, fail_ids: set[int]) -> None:
         self.fail_ids = fail_ids
-        self.calls: list[list[dict]] = []
+        self.calls: list[list[dict[str, Any]]] = []
 
-    def load(self, records, config, sync_options):  # type: ignore[no-untyped-def]
+    def load(
+        self,
+        records: list[dict[str, Any]],
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
         self.calls.append(records)
         result = SyncResult()
         for i, rec in enumerate(records):
@@ -38,6 +88,67 @@ class _FakeDestination:
                         error_message="still failing",
                     )
                 )
+            else:
+                result.success += 1
+        return result
+
+
+class _FakeSkippingDestination:
+    """Reports a ``match_policy``-style skip for ``skip_ids`` — no RowError,
+    no batch_index, just a bare ``skipped``/``skipped_no_match`` counter
+    bump (#757's own shape). Used to prove retry.py's ledger/audit marking
+    fails closed on this exact case, matching ``successful_indices()``."""
+
+    def __init__(self, skip_ids: set[int]) -> None:
+        self.skip_ids = skip_ids
+
+    def load(
+        self,
+        records: list[dict[str, Any]],
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        result = SyncResult()
+        for rec in records:
+            if rec.get("id") in self.skip_ids:
+                result.skipped += 1
+                result.skipped_no_match += 1
+            else:
+                result.success += 1
+        return result
+
+
+class _FakeFailAndSkipDestination:
+    """One chunk, three outcomes: a RowError failure, a bare match_policy
+    skip, and a genuine success — exercises the `confirmed_idx` guard inside
+    retry.py's *partial*-failure branch (the full-success shortcut at
+    ``result.failed == 0`` never runs when this chunk also has a failure)."""
+
+    def __init__(self, fail_ids: set[int], skip_ids: set[int]) -> None:
+        self.fail_ids = fail_ids
+        self.skip_ids = skip_ids
+
+    def load(
+        self,
+        records: list[dict[str, Any]],
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        result = SyncResult()
+        for i, rec in enumerate(records):
+            if rec.get("id") in self.fail_ids:
+                result.failed += 1
+                result.row_errors.append(
+                    RowError(
+                        batch_index=i,
+                        record_preview=str(rec)[:200],
+                        http_status=503,
+                        error_message="still failing",
+                    )
+                )
+            elif rec.get("id") in self.skip_ids:
+                result.skipped += 1
+                result.skipped_no_match += 1
             else:
                 result.success += 1
         return result
@@ -174,6 +285,64 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
+@pytest.fixture
+def ledger_audit_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A project with idempotency + audit_trail enabled (#1118) — the
+    ledger/audit_trail instances themselves are injected per-test via
+    ``_patch_state_bundle``, not resolved from ``connection_profile`` (no
+    real warehouse connection needed for these unit tests)."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "drt_project.yml").write_text(
+        yaml.dump(
+            {
+                "name": "t",
+                "version": "0.1",
+                "profile": "default",
+                "state": {
+                    "backend": "warehouse",
+                    "connection_profile": "pg_state",
+                    "idempotency": True,
+                    "audit_trail": {"enabled": True, "retain_days": 30, "fields": ["id"]},
+                },
+            }
+        )
+    )
+    (tmp_path / "syncs").mkdir()
+    (tmp_path / "syncs" / "post_users.yml").write_text(
+        yaml.dump(
+            {
+                "name": "post_users",
+                "model": "ref('users')",
+                "destination": {"type": "rest_api", "url": "https://example.com"},
+                "sync": {
+                    "batch_size": 2,
+                    "dlq": {"enabled": True},
+                    "idempotency_key": "{{ row['id'] }}",
+                },
+            }
+        )
+    )
+    return tmp_path
+
+
+def _patch_state_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+    dlq_store: DlqStore,
+    ledger: _FakeLedger | None,
+    audit_trail: _FakeAuditTrail | None,
+) -> None:
+    # state/history are never touched by replay_dead_letters() (retry only
+    # needs .dlq/.ledger/.audit_trail) — a bare sentinel is enough.
+    bundle = StateBundle(
+        state=object(),
+        history=object(),
+        dlq=dlq_store,
+        ledger=ledger,
+        audit_trail=audit_trail,
+    )
+    monkeypatch.setattr("drt.state.factory.build_state_bundle", lambda project, project_dir: bundle)
+
+
 def _seed(tmp_path: Path, ids: list[int]) -> DlqStore:
     store = DlqStore(tmp_path)
     store.append(
@@ -215,6 +384,8 @@ def _patch_dest(
     monkeypatch: pytest.MonkeyPatch,
     dest: (
         _FakeDestination
+        | _FakeSkippingDestination
+        | _FakeFailAndSkipDestination
         | _FakeStagedDestination
         | _FakeChunkLocalStagedDestination
         | _FakeSalesforceBulkDestination
@@ -517,3 +688,222 @@ def test_retry_survives_concurrent_append(project: Path, monkeypatch: pytest.Mon
     # survives untouched.
     remaining = store.read("post_users")
     assert [e.record["id"] for e in remaining] == [99]
+
+
+def _seed_ledger_audit(tmp_path: Path, ids: list[int]) -> DlqStore:
+    store = DlqStore(tmp_path)
+    store.append(
+        "post_users",
+        [DeadLetter(record={"id": i}, error_message="boom") for i in ids],
+    )
+    return store
+
+
+def test_retry_marks_ledger_and_logs_audit_on_success(
+    ledger_audit_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1118: a successful retry marks the idempotency ledger and logs the
+    compliance audit trail — the two gaps #1099/#1100 left open (retry
+    bypasses run_sync() and its batch loop entirely)."""
+    store = _seed_ledger_audit(ledger_audit_project, [1, 2])
+    dest = _FakeDestination(fail_ids=set())
+    _patch_dest(monkeypatch, dest)
+    ledger = _FakeLedger()
+    audit_trail = _FakeAuditTrail()
+    _patch_state_bundle(monkeypatch, store, ledger, audit_trail)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    assert "2 succeeded, 0 still failing" in result.output
+    assert sorted(sum(ledger.marked, [])) == ["1", "2"]
+    logged_keys = {e.record_key for _, _, _, _, entries in audit_trail.logged for e in entries}
+    assert logged_keys == {"1", "2"}
+    # Retry has no run identity of its own — passing the failing run's would
+    # misattribute the delivery to a run that never actually sent it.
+    for sync_name, run_id, sync_run_id, dest_type, _ in audit_trail.logged:
+        assert (sync_name, run_id, sync_run_id, dest_type) == ("post_users", None, None, "rest_api")
+
+
+def test_retry_excludes_unattributed_skip_from_ledger_and_audit(
+    ledger_audit_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review finding on #1126: a match_policy-style skip (no RowError,
+    no batch_index — #757's skipped_no_match) must never be marked delivered
+    or audit-logged. Both ids land in the same retry_group (batch_size: 2),
+    so successful_indices() (drt.state.idempotency) fails closed for the
+    *whole* group — id=1's genuine delivery loses ledger/audit protection
+    too, the same conservative trade-off run_sync() already makes. Both
+    records still leave the DLQ (that's the pre-existing, unrelated "don't
+    requeue a skip forever" behavior) — only the ledger/audit write is
+    withheld. Mirrors the run_sync()-side regression already covered in
+    test_engine_idempotency.py."""
+    store = _seed_ledger_audit(ledger_audit_project, [1, 2])
+    dest = _FakeSkippingDestination(skip_ids={2})
+    _patch_dest(monkeypatch, dest)
+    ledger = _FakeLedger()
+    audit_trail = _FakeAuditTrail()
+    _patch_state_bundle(monkeypatch, store, ledger, audit_trail)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    # Both records leave the DLQ (neither is a re-queueable failure) ...
+    assert "2 succeeded, 0 still failing" in result.output
+    # ... but neither reaches the ledger or the audit log.
+    assert ledger.marked == []
+    assert audit_trail.logged == []
+
+
+def test_retry_excludes_unattributed_skip_alongside_a_pinpointed_failure(
+    ledger_audit_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same fail-closed contract as the all-succeed case above, but through
+    the *partial*-failure branch: one chunk holds a genuine RowError failure
+    (id=1), an unattributed skip (id=2), and a genuine success (id=3).
+    Pinpointing still correctly identifies id=1 as the only failure — id=2
+    and id=3 both leave the DLQ as before — but the skip means
+    successful_indices() fails closed for the whole chunk, so id=3's
+    otherwise-confirmable delivery is withheld from the ledger/audit log
+    too, same trade-off as the all-succeed case."""
+    (ledger_audit_project / "syncs" / "post_users.yml").write_text(
+        yaml.dump(
+            {
+                "name": "post_users",
+                "model": "ref('users')",
+                "destination": {"type": "rest_api", "url": "https://example.com"},
+                "sync": {
+                    "batch_size": 3,
+                    "dlq": {"enabled": True},
+                    "idempotency_key": "{{ row['id'] }}",
+                },
+            }
+        )
+    )
+    store = _seed_ledger_audit(ledger_audit_project, [1, 2, 3])
+    dest = _FakeFailAndSkipDestination(fail_ids={1}, skip_ids={2})
+    _patch_dest(monkeypatch, dest)
+    ledger = _FakeLedger()
+    audit_trail = _FakeAuditTrail()
+    _patch_state_bundle(monkeypatch, store, ledger, audit_trail)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    assert "2 succeeded, 1 still failing" in result.output
+    # id=1 (the real failure) stays queued; id=2 and id=3 both leave the DLQ.
+    remaining = store.read("post_users")
+    assert [e.record["id"] for e in remaining] == [1]
+    # But neither id=2 (a skip) nor id=3 (a genuine delivery) reaches the
+    # ledger or audit log — the whole chunk fails closed on id=2's skip.
+    assert ledger.marked == []
+    assert audit_trail.logged == []
+
+
+def test_retry_skips_already_delivered_and_leaves_it_queued(
+    ledger_audit_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ledger hit means *some version* of this record was already
+    delivered, not that this exact queued payload was — so it must not be
+    silently deleted (the #955 blast radius). It's skipped this round and
+    left queued instead."""
+    store = _seed_ledger_audit(ledger_audit_project, [1, 2])
+    dest = _FakeDestination(fail_ids=set())
+    _patch_dest(monkeypatch, dest)
+    ledger = _FakeLedger(already_delivered_keys={"1"})
+    audit_trail = _FakeAuditTrail()
+    _patch_state_bundle(monkeypatch, store, ledger, audit_trail)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    assert "1 succeeded, 0 still failing" in result.output
+    assert "1 record(s) skipped (already delivered) and left queued" in result.output
+    # id=1 was never sent at all.
+    assert [rec["id"] for call in dest.calls for rec in call] == [2]
+    remaining = store.read("post_users")
+    assert [e.record["id"] for e in remaining] == [1]
+    # Only the genuinely-delivered id=2 gets marked/logged, never the skip.
+    assert sorted(sum(ledger.marked, [])) == ["2"]
+    logged_keys = {e.record_key for _, _, _, _, entries in audit_trail.logged for e in entries}
+    assert logged_keys == {"2"}
+
+
+def test_retry_staged_destination_excludes_ledger_and_audit(
+    ledger_audit_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrors run_sync()'s own is_staged exclusion: a staged destination's
+    success isn't known until finalize(), so neither feature applies —
+    applying them where the engine itself refuses would be an asymmetry."""
+    store = _seed_ledger_audit(ledger_audit_project, [1, 2])
+    dest = _FakeStagedDestination(fail_ids=set())
+    _patch_dest(monkeypatch, dest)
+    ledger = _FakeLedger()
+    audit_trail = _FakeAuditTrail()
+    _patch_state_bundle(monkeypatch, store, ledger, audit_trail)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    assert "2 succeeded, 0 still failing" in result.output
+    assert store.depth("post_users") == 0
+    assert ledger.checked == []
+    assert ledger.marked == []
+    assert audit_trail.logged == []
+
+
+def test_retry_swap_mode_replace_excludes_ledger_and_audit(
+    ledger_audit_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrors run_sync()'s own _swap_mode exclusion: mode: replace with
+    replace_strategy: swap reports batch success against a shadow table
+    before the real cutover, so neither feature applies here either — even
+    though this destination isn't a StagedDestination."""
+    (ledger_audit_project / "syncs" / "post_users.yml").write_text(
+        yaml.dump(
+            {
+                "name": "post_users",
+                "model": "ref('users')",
+                "destination": {"type": "rest_api", "url": "https://example.com"},
+                "sync": {
+                    "batch_size": 2,
+                    "dlq": {"enabled": True},
+                    "idempotency_key": "{{ row['id'] }}",
+                    "mode": "replace",
+                    "replace_strategy": "swap",
+                },
+            }
+        )
+    )
+    store = _seed_ledger_audit(ledger_audit_project, [1, 2])
+    dest = _FakeDestination(fail_ids=set())
+    _patch_dest(monkeypatch, dest)
+    ledger = _FakeLedger()
+    audit_trail = _FakeAuditTrail()
+    _patch_state_bundle(monkeypatch, store, ledger, audit_trail)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    assert "2 succeeded, 0 still failing" in result.output
+    assert ledger.checked == []
+    assert ledger.marked == []
+    assert audit_trail.logged == []
+
+
+def test_retry_without_ledger_or_audit_is_unaffected(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default project fixture (state.backend: local, no idempotency/
+    audit_trail) must behave exactly as before #1118 — no skipped_duplicate
+    line, no crash from the new code paths being no-ops."""
+    store = _seed(project, [1, 2])
+    dest = _FakeDestination(fail_ids=set())
+    _patch_dest(monkeypatch, dest)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    assert "2 succeeded, 0 still failing" in result.output
+    assert "skipped" not in result.output.lower()
+    assert store.depth("post_users") == 0

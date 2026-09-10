@@ -328,6 +328,43 @@ class TestLegacyDrtAssets:
         assert isinstance(observer, StatePersistingObserver)
         assert observer._state_manager is fake_state_store
 
+    def test_execution_wires_idempotency_ledger_and_audit_trail(self, tmp_path: Path) -> None:
+        """Regression test (#1118): the legacy _asset_fn never passed
+        idempotency_ledger=/audit_trail=/audit_fields=/audit_retain_days=
+        through to run_sync() either — the second of the two dagster-drt
+        call sites #1118 names."""
+        from dagster import build_asset_context
+
+        project = _setup_project(tmp_path)
+        from dagster_drt.assets import DrtConfig, drt_assets_legacy
+
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            assets = drt_assets_legacy(project_dir=project)
+
+        with (
+            patch(_P_LOAD_PROJECT) as mock_proj,
+            patch(_P_LOAD_PROFILE),
+            patch(_P_GET_SOURCE),
+            patch(_P_GET_DEST),
+            patch(_P_RUN_SYNC) as mock_run,
+            patch(_P_BUILD_STATE_BUNDLE) as mock_bundle,
+        ):
+            mock_proj.return_value = MagicMock(profile="local")
+            mock_proj.return_value.state.audit_trail.fields = ["id"]
+            mock_proj.return_value.state.audit_trail.retain_days = 30
+            mock_run.return_value = _FakeSyncResult(success=1)
+            fake_ledger = mock_bundle.return_value.ledger
+            fake_audit_trail = mock_bundle.return_value.audit_trail
+
+            ctx = build_asset_context()
+            assets[0](context=ctx, config=DrtConfig(dry_run=True))
+
+        assert mock_run.call_args.kwargs["idempotency_ledger"] is fake_ledger
+        assert mock_run.call_args.kwargs["audit_trail"] is fake_audit_trail
+        assert mock_run.call_args.kwargs["audit_fields"] == ["id"]
+        assert mock_run.call_args.kwargs["audit_retain_days"] == 30
+
 
 # ===================================================================
 # DrtConfig
@@ -637,6 +674,50 @@ class TestDagsterDrtResourceRun:
             is mock_proj.return_value.history.retention_days
         )
 
+    def test_run_wires_idempotency_ledger_and_audit_trail(self, tmp_path: Path) -> None:
+        """Regression test (#1118): run_sync() must receive
+        idempotency_ledger=/audit_trail=/audit_fields=/audit_retain_days=,
+        or a Dagster-triggered sync silently gets neither feature even when
+        the project has state.idempotency: true / state.audit_trail.enabled:
+        true — same class of gap #980 found and fixed for history_manager."""
+        project = _setup_project(tmp_path)
+        from dagster_drt.assets import drt_assets
+        from dagster_drt.resource import DagsterDrtResource
+
+        @drt_assets(project_dir=project)
+        def my_syncs(context, drt: DagsterDrtResource):
+            yield from drt.run(context=context)
+
+        ctx = _make_mock_context(my_syncs)
+        resource = DagsterDrtResource(project_dir=str(project))
+
+        with (
+            patch(_P_LOAD_PROJECT) as mock_proj,
+            patch(_P_LOAD_PROFILE),
+            patch(_P_GET_SOURCE),
+            patch(_P_GET_DEST),
+            patch(_P_RUN_SYNC) as mock_run,
+            patch(_P_BUILD_STATE_BUNDLE) as mock_bundle,
+            patch(_P_LOAD_SYNCS) as mock_load_syncs,
+        ):
+            mock_proj.return_value = MagicMock(profile="local")
+            mock_proj.return_value.state.audit_trail.fields = ["id"]
+            mock_proj.return_value.state.audit_trail.retain_days = 30
+            mock_sync = MagicMock()
+            mock_sync.name = "test_sync"
+            mock_sync.sync.dlq = None
+            mock_load_syncs.return_value = [mock_sync]
+            mock_run.return_value = _FakeSyncResult(success=1)
+            fake_ledger = mock_bundle.return_value.ledger
+            fake_audit_trail = mock_bundle.return_value.audit_trail
+
+            list(resource.run(context=ctx))
+
+        assert mock_run.call_args.kwargs["idempotency_ledger"] is fake_ledger
+        assert mock_run.call_args.kwargs["audit_trail"] is fake_audit_trail
+        assert mock_run.call_args.kwargs["audit_fields"] == ["id"]
+        assert mock_run.call_args.kwargs["audit_retain_days"] == 30
+
     def test_run_honors_history_disabled(self, tmp_path: Path) -> None:
         """Regression test: history.enabled: false must actually suppress
         history persistence, not just default retention. Caught in Codex
@@ -859,7 +940,9 @@ class TestDagsterDrtResourceRun:
             mock_sync.sync.dlq = None
             mock_load_syncs.return_value = [mock_sync]
             mock_run.return_value = _FakeSyncResult(
-                rows_extracted=100, success=95, failed=5,
+                rows_extracted=100,
+                success=95,
+                failed=5,
             )
 
             results = list(resource.run(context=ctx))
@@ -904,9 +987,7 @@ class TestDagsterDrtResourceRun:
         call_kwargs = mock_run.call_args
         assert "watermark_storage" in call_kwargs.kwargs
 
-    def test_fetch_row_count_requeries_source_for_asset_context(
-        self, tmp_path: Path
-    ) -> None:
+    def test_fetch_row_count_requeries_source_for_asset_context(self, tmp_path: Path) -> None:
         """fetch_row_count() must independently re-run the source model."""
         project = _setup_project(tmp_path)
         from dagster_drt.assets import drt_assets
@@ -961,9 +1042,7 @@ class TestDagsterDrtResourceRun:
             },
         )
 
-    def test_fetch_row_count_uses_sync_cursor_for_incremental_model(
-        self, tmp_path: Path
-    ) -> None:
+    def test_fetch_row_count_uses_sync_cursor_for_incremental_model(self, tmp_path: Path) -> None:
         project = _setup_project(tmp_path)
         from dagster_drt.assets import drt_assets
         from dagster_drt.resource import DagsterDrtResource
@@ -987,18 +1066,11 @@ class TestDagsterDrtResourceRun:
             mock_proj.return_value = MagicMock(profile="local")
             mock_sync = MagicMock()
             mock_sync.name = "test_sync"
-            mock_sync.model = (
-                "SELECT * FROM source_users "
-                "WHERE updated_at > '{{ cursor_value }}'"
-            )
+            mock_sync.model = "SELECT * FROM source_users WHERE updated_at > '{{ cursor_value }}'"
             mock_sync.sync.dlq = None
             mock_load_syncs.return_value = [mock_sync]
-            mock_run.return_value = _FakeSyncResult(
-                cursor_value_used="2026-08-01T00:00:00Z"
-            )
-            mock_get_source.return_value.extract.return_value = iter(
-                [{"id": 1}, {"id": 2}]
-            )
+            mock_run.return_value = _FakeSyncResult(cursor_value_used="2026-08-01T00:00:00Z")
+            mock_get_source.return_value.extract.return_value = iter([{"id": 1}, {"id": 2}])
 
             results = list(resource.run(context=ctx).fetch_row_count())
 
@@ -1006,9 +1078,7 @@ class TestDagsterDrtResourceRun:
         row_count_query = mock_get_source.return_value.extract.call_args.args[0]
         assert "updated_at > '2026-08-01T00:00:00Z'" in row_count_query
 
-    def test_run_from_op_context_yields_asset_materialization(
-        self, tmp_path: Path
-    ) -> None:
+    def test_run_from_op_context_yields_asset_materialization(self, tmp_path: Path) -> None:
         project = _setup_project(tmp_path)
         from dagster_drt.resource import DagsterDrtResource
 
@@ -1033,9 +1103,7 @@ class TestDagsterDrtResourceRun:
             mock_sync.sync.dlq = None
             mock_load_syncs.return_value = [mock_sync]
             mock_run.return_value = _FakeSyncResult(success=50)
-            mock_get_source.return_value.extract.return_value = iter(
-                [{"id": 1}, {"id": 2}]
-            )
+            mock_get_source.return_value.extract.return_value = iter([{"id": 1}, {"id": 2}])
 
             results = list(
                 resource.run(

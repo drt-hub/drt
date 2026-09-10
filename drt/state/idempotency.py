@@ -33,7 +33,84 @@ corrected design posted on #1099 before implementation.
 from __future__ import annotations
 
 from collections.abc import Collection
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+from drt.templates.renderer import render_value
+
+if TYPE_CHECKING:
+    from drt.config.models import SyncConfig
+    from drt.destinations.base import SyncResult
+
+
+def resolve_idempotency_key_template(sync: SyncConfig) -> str | None:
+    """Effective Jinja template for this ledger's per-record dedup key, or
+    ``None``.
+
+    Explicit ``sync.idempotency_key`` always wins. Otherwise falls back to
+    the destination's ``upsert_key`` when present (joined on ``":"`` for a
+    composite key) — never to ``run_id``, see ``SyncOptions.idempotency_key``'s
+    docstring for why that default would silently defeat cross-run dedup.
+    ``None`` means this sync has no way to compute a key, so the ledger (even
+    if configured) has no effect for it — not an error, matching #897's own
+    "no-op, not a failure" contract for an unresolvable idempotency setting.
+
+    Lives here (not ``drt/engine/sync.py``) so both ``run_sync()`` and
+    ``drt retry``'s ``replay_dead_letters()`` (#1118) share one
+    implementation of the contract this module's own docstring documents,
+    without a CLI command reaching into the engine's internals —
+    ``engine/sync.py`` is the Rust-core migration candidate this repo keeps
+    deliberately pure (see ``CLAUDE.md``).
+    """
+    if sync.sync.idempotency_key:
+        return sync.sync.idempotency_key
+    upsert_key = getattr(sync.destination, "upsert_key", None)
+    if upsert_key:
+        return ":".join(f"{{{{ row['{col}'] }}}}" for col in upsert_key)
+    return None
+
+
+def compute_idempotency_key(template: str, record: dict[str, Any]) -> str | None:
+    """Render ``template`` against one record; ``None`` on template failure.
+
+    Best-effort by design (see this module's docstring): the ledger is an
+    opt-in protective layer, so a broken template disables dedup for that
+    one row rather than failing the whole batch or sync.
+    """
+    try:
+        return str(render_value(template, record))
+    except Exception:
+        return None
+
+
+def successful_indices(record_batch: list[dict[str, Any]], result: SyncResult) -> set[int]:
+    """Indices into ``record_batch`` this ``load()`` call actually reported
+    success for, or an empty set when that can't be determined safely.
+
+    Every ``RowError.batch_index`` is excluded (a positive, per-row
+    failure signal). But some destinations skip a row *without* recording
+    a ``RowError`` — ``match_policy: update_only``/``create_only``'s
+    ``skipped_no_match`` (#757) is a bare counter with no per-row index at
+    all. Treating "not in row_errors" as "therefore delivered" would
+    wrongly mark a skipped-no-match row as successfully delivered (caught
+    in Codex review on #1100, which shares this helper): a real, silent
+    compliance/idempotency-ledger false positive, since a skip is neither
+    a failure nor a delivery. So whenever this batch reports *any* skip
+    (``result.skipped``, which ``skipped_no_match`` is a documented subset
+    of), this returns an empty set rather than guess — fail closed, not
+    open: missing one batch's dedup/audit protection is a far smaller cost
+    than permanently marking a never-delivered record as delivered.
+
+    Shared by ``run_sync()``'s per-batch ``mark_delivered``/audit-log write
+    and ``drt retry``'s ``replay_dead_letters()`` (#1118, caught in Codex
+    review on #1126 for the same reason #1100 caught it here first) — both
+    need the same "which of these did the destination confirm" computation.
+    """
+    if result.skipped > 0:
+        return set()
+    failed_indices = {
+        err.batch_index for err in result.row_errors if 0 <= err.batch_index < len(record_batch)
+    }
+    return {i for i in range(len(record_batch)) if i not in failed_indices}
 
 
 @runtime_checkable

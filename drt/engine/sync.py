@@ -7,13 +7,11 @@ CLI owns all console output; engine only returns SyncResult.
 
 from __future__ import annotations
 
-import math
 import re
 import threading
 import time
 from collections.abc import Iterator
-from datetime import date, datetime, timezone
-from datetime import time as dt_time
+from datetime import datetime, timezone
 from itertools import chain, islice
 from pathlib import Path
 from typing import Any, Literal
@@ -45,13 +43,17 @@ from drt.engine.observer import NullObserver, SyncObserver
 from drt.engine.resolver import resolve_model_ref
 from drt.observability import build_status, get_tracer
 from drt.sources.base import IncrementalSource, SnapshotDiffSource, Source
-from drt.state.audit_trail import AuditEntry, ComplianceAuditTrail
+from drt.state.audit_trail import AuditEntry, ComplianceAuditTrail, json_safe_audit_value
 from drt.state.dlq import DeadLetter
 from drt.state.history import HistoryEntry, HistoryStore
-from drt.state.idempotency import IdempotencyLedger
+from drt.state.idempotency import (
+    IdempotencyLedger,
+    compute_idempotency_key,
+    resolve_idempotency_key_template,
+    successful_indices,
+)
 from drt.state.manager import StateStore
 from drt.state.watermark import WatermarkStorage
-from drt.templates.renderer import render_value
 
 
 def _stringify_cursor_value(val: Any) -> str:
@@ -165,102 +167,8 @@ def _check_mode_supported(mode: str, destination: Destination | StagedDestinatio
         )
 
 
-def _resolve_idempotency_key_template(sync: SyncConfig) -> str | None:
-    """Effective Jinja template for #1099's per-record dedup key, or ``None``.
-
-    Explicit ``sync.idempotency_key`` always wins. Otherwise falls back to
-    the destination's ``upsert_key`` when present (joined on ``":"`` for a
-    composite key) — never to ``run_id``, see ``SyncOptions.idempotency_key``'s
-    docstring for why that default would silently defeat cross-run dedup.
-    ``None`` means this sync has no way to compute a key, so the ledger (even
-    if configured) has no effect for it — not an error, matching #897's own
-    "no-op, not a failure" contract for an unresolvable idempotency setting.
-    """
-    if sync.sync.idempotency_key:
-        return sync.sync.idempotency_key
-    upsert_key = getattr(sync.destination, "upsert_key", None)
-    if upsert_key:
-        return ":".join(f"{{{{ row['{col}'] }}}}" for col in upsert_key)
-    return None
-
-
-def _compute_idempotency_key(template: str, record: dict[str, Any]) -> str | None:
-    """Render ``template`` against one record; ``None`` on template failure.
-
-    Best-effort by design (see ``IdempotencyLedger``'s module docstring):
-    the ledger is an opt-in protective layer, so a broken template disables
-    dedup for that one row rather than failing the whole batch or sync.
-    """
-    try:
-        return str(render_value(template, record))
-    except Exception:
-        return None
-
-
-def _successful_indices(record_batch: list[dict[str, Any]], result: SyncResult) -> set[int]:
-    """Indices into ``record_batch`` this ``load()`` call actually reported
-    success for, or an empty set when that can't be determined safely.
-
-    Every ``RowError.batch_index`` is excluded (a positive, per-row
-    failure signal). But some destinations skip a row *without* recording
-    a ``RowError`` — ``match_policy: update_only``/``create_only``'s
-    ``skipped_no_match`` (#757) is a bare counter with no per-row index at
-    all. Treating "not in row_errors" as "therefore delivered" would
-    wrongly mark a skipped-no-match row as successfully delivered (caught
-    in Codex review on #1100, which shares this helper): a real, silent
-    compliance/idempotency-ledger false positive, since a skip is neither
-    a failure nor a delivery. So whenever this batch reports *any* skip
-    (``result.skipped``, which ``skipped_no_match`` is a documented subset
-    of), this returns an empty set rather than guess — fail closed, not
-    open: missing one batch's dedup/audit protection is a far smaller cost
-    than permanently marking a never-delivered record as delivered.
-
-    Shared by #1099's ``mark_delivered`` filtering and #1100's audit log
-    write, which both need the same "which of these did the destination
-    confirm" computation the DLQ's dead-letter pairing below also relies
-    on — one bounds-checked computation instead of drifting copies.
-    """
-    if result.skipped > 0:
-        return set()
-    failed_indices = {
-        err.batch_index for err in result.row_errors if 0 <= err.batch_index < len(record_batch)
-    }
-    return {i for i in range(len(record_batch)) if i not in failed_indices}
-
-
-def _json_safe_audit_value(value: Any) -> Any:
-    """Recursively coerce a warehouse-driver value into a JSON-serializable
-    one for the compliance audit log (#1100).
-
-    Common driver return types (``Decimal``, ``date``/``datetime``/``time``,
-    ``UUID``, non-finite ``float``) aren't accepted by ``json.dumps`` — a
-    plain ``json.dumps(entry.fields)`` raises ``TypeError`` on any of them
-    (caught in Codex review), and since the warehouse write is wrapped in a
-    best-effort try/except, that exception would silently drop the whole
-    batch's audit rows despite a successful delivery. Unlike Klaviyo's own
-    ``_json_safe`` (which raises on values that can't round-trip exactly,
-    appropriate for data actually sent to a vendor API), this degrades to a
-    string representation instead: the audit log is a compliance record,
-    not a numeric input to a downstream consumer, so preserving type
-    fidelity matters far less than never losing the row.
-    """
-    if isinstance(value, dict):
-        return {k: _json_safe_audit_value(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe_audit_value(v) for v in value]
-    if isinstance(value, (str, int, bool)) or value is None:
-        return value
-    if isinstance(value, float):
-        return value if math.isfinite(value) else str(value)
-    if isinstance(value, (datetime, date, dt_time)):
-        return value.isoformat()
-    # Decimal, timedelta, UUID, and anything else json.dumps doesn't
-    # natively accept.
-    return str(value)
-
-
 def _build_audit_entries(
-    record_batch: list[dict[str, Any]], successful_indices: set[int], fields: list[str]
+    record_batch: list[dict[str, Any]], confirmed_indices: set[int], fields: list[str]
 ) -> list[AuditEntry]:
     """One ``AuditEntry`` per successfully-delivered record (#1100).
 
@@ -271,16 +179,16 @@ def _build_audit_entries(
     from this particular record (different syncs have different schemas)
     is simply omitted rather than null-padded; ``record_key`` joins
     whichever configured fields were present, in configured order. Values
-    are normalized to JSON-safe types (see ``_json_safe_audit_value``)
+    are normalized to JSON-safe types (see ``json_safe_audit_value``)
     before being stored on the entry, not left for the warehouse write to
     discover the hard way.
     """
     entries: list[AuditEntry] = []
     for i in range(len(record_batch)):
-        if i not in successful_indices:
+        if i not in confirmed_indices:
             continue
         row = record_batch[i]
-        present = {f: _json_safe_audit_value(row[f]) for f in fields if f in row}
+        present = {f: json_safe_audit_value(row[f]) for f in fields if f in row}
         record_key = ":".join(str(row[f]) for f in fields if f in row)
         entries.append(AuditEntry(record_key=record_key, fields=present))
     return entries
@@ -459,8 +367,8 @@ def run_sync(
             (``mark_delivered``) only happens after a successful
             ``destination.load()`` — see ``drt.state.idempotency`` for the
             full write-path contract. Has no effect on a sync with no
-            resolvable key (see ``_resolve_idempotency_key_template``) or
-            during a dry run.
+            resolvable key (see ``drt.state.idempotency.resolve_idempotency_key_template``)
+            or during a dry run.
         audit_trail: Warehouse-backed compliance delivery log (#1100), from
             ``StateBundle.audit_trail`` — ``None`` unless the project sets
             ``state.backend: warehouse`` and ``state.audit_trail.enabled:
@@ -889,7 +797,7 @@ def _run_sync_body(
     #    in Codex review on #1100, which shares this gate).
     _swap_mode = sync.sync.mode == "replace" and sync.sync.replace_strategy == "swap"
     idempotency_key_template: str | None = (
-        _resolve_idempotency_key_template(sync)
+        resolve_idempotency_key_template(sync)
         if idempotency_ledger is not None and not is_staged and not _swap_mode
         else None
     )
@@ -1050,7 +958,7 @@ def _run_sync_body(
             if idempotency_key_template is not None and idempotency_ledger is not None:
                 batch_len_before = len(record_batch)
                 keyed_batch = [
-                    (row, _compute_idempotency_key(idempotency_key_template, row))
+                    (row, compute_idempotency_key(idempotency_key_template, row))
                     for row in record_batch
                 ]
                 candidate_keys = {key for _, key in keyed_batch if key is not None}
@@ -1095,10 +1003,11 @@ def _run_sync_body(
 
                 # Idempotency ledger mark (#1099) + compliance audit log
                 # (#1100) — both only for records this load() call actually
-                # reported success for. `_successful_indices` is the same
-                # correlation `DeadLetter` construction below already
-                # relies on (result.row_errors[*].batch_index indexes into
-                # the record_batch just sent). Both writes happen here (not
+                # reported success for. `successful_indices()`
+                # (drt.state.idempotency) is the same correlation
+                # `DeadLetter` construction below already relies on
+                # (result.row_errors[*].batch_index indexes into the
+                # record_batch just sent). Both writes happen here (not
                 # deferred to sync end) to keep the crash-loses-data window
                 # scoped to one batch, not the whole run — this fires on
                 # the common/success path, unlike DLQ's rare-path
@@ -1108,14 +1017,14 @@ def _run_sync_body(
                     and any(k is not None for k in batch_idempotency_keys)
                 ) or _audit_enabled
                 if needs_delivered_at:
-                    successful_indices = _successful_indices(record_batch, result)
+                    confirmed_indices = successful_indices(record_batch, result)
                     delivered_at = datetime.now(timezone.utc).isoformat()
 
                     if idempotency_ledger is not None:
                         delivered_keys = [
                             key
                             for i, key in enumerate(batch_idempotency_keys)
-                            if key is not None and i in successful_indices
+                            if key is not None and i in confirmed_indices
                         ]
                         if delivered_keys:
                             with _stage_ctx("state"):
@@ -1126,7 +1035,7 @@ def _run_sync_body(
                     if _audit_enabled:
                         assert audit_trail is not None and audit_fields is not None
                         audit_entries = _build_audit_entries(
-                            record_batch, successful_indices, audit_fields
+                            record_batch, confirmed_indices, audit_fields
                         )
                         if audit_entries:
                             with _stage_ctx("state"):

@@ -171,9 +171,21 @@ jobs:
         run: pip install uv
 
       - name: Install drt-core (editable, dev extra for ruff/mypy/pytest) + dagster-drt
+        # dagster-drt's declared `drt-core` floor is intentionally ahead of
+        # the last tagged release (#1118/#1126 — see the pyproject.toml
+        # comment); that's correct for a real PyPI install but would make
+        # uv's resolver reject the editable drt-core checkout here, since its
+        # own pyproject.toml version field isn't bumped until actual release
+        # (matches this repo's convention of leaving it pinned to the last
+        # tag between releases). `--no-deps` + an explicit `dagster` install
+        # is the monorepo-local equivalent of "trust what's actually
+        # checked out, not its version string" — publish-dagster-drt.yml's
+        # `publish` job deliberately does NOT get this treatment, so a real
+        # release still can't ship until drt-core's floor is truly satisfied.
         run: |
           uv pip install --system -e ".[dev]"
-          uv pip install --system -e ./integrations/dagster-drt
+          uv pip install --system "dagster>=1.10.18"
+          uv pip install --system --no-deps -e ./integrations/dagster-drt
 
       - name: Lint (ruff)
         run: ruff check integrations/dagster-drt
