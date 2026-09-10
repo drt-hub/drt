@@ -13,8 +13,43 @@ from drt.cli.main import app
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 from drt.state.dlq import DeadLetter, DlqStore
+from drt.state.factory import StateBundle
 
 runner = CliRunner()
+
+
+class _FakeLedger:
+    """Minimal IdempotencyLedger fake — records what was checked/marked."""
+
+    def __init__(self, already_delivered_keys: set[str] | None = None) -> None:
+        self.already_delivered_keys = already_delivered_keys or set()
+        self.checked: list[set[str]] = []
+        self.marked: list[list[str]] = []
+
+    def already_delivered(self, sync_name, keys):  # type: ignore[no-untyped-def]
+        self.checked.append(set(keys))
+        return set(keys) & self.already_delivered_keys
+
+    def mark_delivered(self, sync_name, keys, delivered_at):  # type: ignore[no-untyped-def]
+        self.marked.append(list(keys))
+
+    def prune(self, sync_name, retention_days):  # type: ignore[no-untyped-def]
+        return 0
+
+
+class _FakeAuditTrail:
+    """Minimal ComplianceAuditTrail fake — records every log_delivered() call."""
+
+    def __init__(self) -> None:
+        self.logged: list[tuple] = []
+
+    def log_delivered(  # type: ignore[no-untyped-def]
+        self, sync_name, run_id, sync_run_id, destination_type, entries, delivered_at
+    ):
+        self.logged.append((sync_name, run_id, sync_run_id, destination_type, entries))
+
+    def prune(self, sync_name, retain_days):  # type: ignore[no-untyped-def]
+        return 0
 
 
 class _FakeDestination:
@@ -172,6 +207,64 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         )
     )
     return tmp_path
+
+
+@pytest.fixture
+def ledger_audit_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A project with idempotency + audit_trail enabled (#1118) — the
+    ledger/audit_trail instances themselves are injected per-test via
+    ``_patch_state_bundle``, not resolved from ``connection_profile`` (no
+    real warehouse connection needed for these unit tests)."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "drt_project.yml").write_text(
+        yaml.dump(
+            {
+                "name": "t",
+                "version": "0.1",
+                "profile": "default",
+                "state": {
+                    "backend": "warehouse",
+                    "connection_profile": "pg_state",
+                    "idempotency": True,
+                    "audit_trail": {"enabled": True, "retain_days": 30, "fields": ["id"]},
+                },
+            }
+        )
+    )
+    (tmp_path / "syncs").mkdir()
+    (tmp_path / "syncs" / "post_users.yml").write_text(
+        yaml.dump(
+            {
+                "name": "post_users",
+                "model": "ref('users')",
+                "destination": {"type": "rest_api", "url": "https://example.com"},
+                "sync": {
+                    "batch_size": 2,
+                    "dlq": {"enabled": True},
+                    "idempotency_key": "{{ row['id'] }}",
+                },
+            }
+        )
+    )
+    return tmp_path
+
+
+def _patch_state_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+    dlq_store: DlqStore,
+    ledger: _FakeLedger | None,
+    audit_trail: _FakeAuditTrail | None,
+) -> None:
+    # state/history are never touched by replay_dead_letters() (retry only
+    # needs .dlq/.ledger/.audit_trail) — a bare sentinel is enough.
+    bundle = StateBundle(
+        state=object(),
+        history=object(),
+        dlq=dlq_store,
+        ledger=ledger,
+        audit_trail=audit_trail,
+    )
+    monkeypatch.setattr("drt.state.factory.build_state_bundle", lambda project, project_dir: bundle)
 
 
 def _seed(tmp_path: Path, ids: list[int]) -> DlqStore:
@@ -517,3 +610,147 @@ def test_retry_survives_concurrent_append(project: Path, monkeypatch: pytest.Mon
     # survives untouched.
     remaining = store.read("post_users")
     assert [e.record["id"] for e in remaining] == [99]
+
+
+def _seed_ledger_audit(tmp_path: Path, ids: list[int]) -> DlqStore:
+    store = DlqStore(tmp_path)
+    store.append(
+        "post_users",
+        [DeadLetter(record={"id": i}, error_message="boom") for i in ids],
+    )
+    return store
+
+
+def test_retry_marks_ledger_and_logs_audit_on_success(
+    ledger_audit_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1118: a successful retry marks the idempotency ledger and logs the
+    compliance audit trail — the two gaps #1099/#1100 left open (retry
+    bypasses run_sync() and its batch loop entirely)."""
+    store = _seed_ledger_audit(ledger_audit_project, [1, 2])
+    dest = _FakeDestination(fail_ids=set())
+    _patch_dest(monkeypatch, dest)
+    ledger = _FakeLedger()
+    audit_trail = _FakeAuditTrail()
+    _patch_state_bundle(monkeypatch, store, ledger, audit_trail)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    assert "2 succeeded, 0 still failing" in result.output
+    assert sorted(sum(ledger.marked, [])) == ["1", "2"]
+    logged_keys = {e.record_key for _, _, _, _, entries in audit_trail.logged for e in entries}
+    assert logged_keys == {"1", "2"}
+    # Retry has no run identity of its own — passing the failing run's would
+    # misattribute the delivery to a run that never actually sent it.
+    for sync_name, run_id, sync_run_id, dest_type, _ in audit_trail.logged:
+        assert (sync_name, run_id, sync_run_id, dest_type) == ("post_users", None, None, "rest_api")
+
+
+def test_retry_skips_already_delivered_and_leaves_it_queued(
+    ledger_audit_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ledger hit means *some version* of this record was already
+    delivered, not that this exact queued payload was — so it must not be
+    silently deleted (the #955 blast radius). It's skipped this round and
+    left queued instead."""
+    store = _seed_ledger_audit(ledger_audit_project, [1, 2])
+    dest = _FakeDestination(fail_ids=set())
+    _patch_dest(monkeypatch, dest)
+    ledger = _FakeLedger(already_delivered_keys={"1"})
+    audit_trail = _FakeAuditTrail()
+    _patch_state_bundle(monkeypatch, store, ledger, audit_trail)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    assert "1 succeeded, 0 still failing" in result.output
+    assert "1 record(s) skipped (already delivered) and left queued" in result.output
+    # id=1 was never sent at all.
+    assert [rec["id"] for call in dest.calls for rec in call] == [2]
+    remaining = store.read("post_users")
+    assert [e.record["id"] for e in remaining] == [1]
+    # Only the genuinely-delivered id=2 gets marked/logged, never the skip.
+    assert sorted(sum(ledger.marked, [])) == ["2"]
+    logged_keys = {e.record_key for _, _, _, _, entries in audit_trail.logged for e in entries}
+    assert logged_keys == {"2"}
+
+
+def test_retry_staged_destination_excludes_ledger_and_audit(
+    ledger_audit_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrors run_sync()'s own is_staged exclusion: a staged destination's
+    success isn't known until finalize(), so neither feature applies —
+    applying them where the engine itself refuses would be an asymmetry."""
+    store = _seed_ledger_audit(ledger_audit_project, [1, 2])
+    dest = _FakeStagedDestination(fail_ids=set())
+    _patch_dest(monkeypatch, dest)
+    ledger = _FakeLedger()
+    audit_trail = _FakeAuditTrail()
+    _patch_state_bundle(monkeypatch, store, ledger, audit_trail)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    assert "2 succeeded, 0 still failing" in result.output
+    assert store.depth("post_users") == 0
+    assert ledger.checked == []
+    assert ledger.marked == []
+    assert audit_trail.logged == []
+
+
+def test_retry_swap_mode_replace_excludes_ledger_and_audit(
+    ledger_audit_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrors run_sync()'s own _swap_mode exclusion: mode: replace with
+    replace_strategy: swap reports batch success against a shadow table
+    before the real cutover, so neither feature applies here either — even
+    though this destination isn't a StagedDestination."""
+    (ledger_audit_project / "syncs" / "post_users.yml").write_text(
+        yaml.dump(
+            {
+                "name": "post_users",
+                "model": "ref('users')",
+                "destination": {"type": "rest_api", "url": "https://example.com"},
+                "sync": {
+                    "batch_size": 2,
+                    "dlq": {"enabled": True},
+                    "idempotency_key": "{{ row['id'] }}",
+                    "mode": "replace",
+                    "replace_strategy": "swap",
+                },
+            }
+        )
+    )
+    store = _seed_ledger_audit(ledger_audit_project, [1, 2])
+    dest = _FakeDestination(fail_ids=set())
+    _patch_dest(monkeypatch, dest)
+    ledger = _FakeLedger()
+    audit_trail = _FakeAuditTrail()
+    _patch_state_bundle(monkeypatch, store, ledger, audit_trail)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    assert "2 succeeded, 0 still failing" in result.output
+    assert ledger.checked == []
+    assert ledger.marked == []
+    assert audit_trail.logged == []
+
+
+def test_retry_without_ledger_or_audit_is_unaffected(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default project fixture (state.backend: local, no idempotency/
+    audit_trail) must behave exactly as before #1118 — no skipped_duplicate
+    line, no crash from the new code paths being no-ops."""
+    store = _seed(project, [1, 2])
+    dest = _FakeDestination(fail_ids=set())
+    _patch_dest(monkeypatch, dest)
+
+    result = runner.invoke(app, ["retry", "post_users"])
+
+    assert result.exit_code == 0, result.output
+    assert "2 succeeded, 0 still failing" in result.output
+    assert "skipped" not in result.output.lower()
+    assert store.depth("post_users") == 0

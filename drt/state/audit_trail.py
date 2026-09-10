@@ -36,8 +36,48 @@ out of once the project turns it on.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from datetime import date, datetime
+from datetime import time as dt_time
 from typing import Any, Protocol, runtime_checkable
+
+
+def json_safe_audit_value(value: Any) -> Any:
+    """Recursively coerce a warehouse-driver value into a JSON-serializable
+    one for the compliance audit log (#1100).
+
+    Common driver return types (``Decimal``, ``date``/``datetime``/``time``,
+    ``UUID``, non-finite ``float``) aren't accepted by ``json.dumps`` — a
+    plain ``json.dumps(entry.fields)`` raises ``TypeError`` on any of them
+    (caught in Codex review), and since the warehouse write is wrapped in a
+    best-effort try/except, that exception would silently drop the whole
+    batch's audit rows despite a successful delivery. Unlike Klaviyo's own
+    ``_json_safe`` (which raises on values that can't round-trip exactly,
+    appropriate for data actually sent to a vendor API), this degrades to a
+    string representation instead: the audit log is a compliance record,
+    not a numeric input to a downstream consumer, so preserving type
+    fidelity matters far less than never losing the row.
+
+    Lives here (not ``drt/engine/sync.py``) so both ``run_sync()`` and
+    ``drt retry``'s ``replay_dead_letters()`` (#1118) share one
+    implementation, without a CLI command reaching into the engine's
+    internals — ``engine/sync.py`` is the Rust-core migration candidate
+    this repo keeps deliberately pure (see ``CLAUDE.md``).
+    """
+    if isinstance(value, dict):
+        return {k: json_safe_audit_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe_audit_value(v) for v in value]
+    if isinstance(value, (str, int, bool)) or value is None:
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, (datetime, date, dt_time)):
+        return value.isoformat()
+    # Decimal, timedelta, UUID, and anything else json.dumps doesn't
+    # natively accept.
+    return str(value)
 
 
 @dataclass

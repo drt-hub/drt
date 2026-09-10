@@ -12,6 +12,7 @@ replay verbatim) — no source extraction or profile resolution involved.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -23,7 +24,9 @@ from drt.cli.output import console, print_error
 if TYPE_CHECKING:
     from drt.config.models import ProjectConfig, SyncConfig
     from drt.destinations.base import SyncResult
+    from drt.state.audit_trail import ComplianceAuditTrail
     from drt.state.dlq import DeadLetter
+    from drt.state.idempotency import IdempotencyLedger
 
 
 def _chunks(items: list[DeadLetter], size: int) -> list[list[DeadLetter]]:
@@ -57,8 +60,10 @@ def replay_dead_letters(
     from drt.config.base import ProjectConfig
     from drt.config.parser import load_project
     from drt.destinations.base import StagedDestination
+    from drt.state.audit_trail import AuditEntry, json_safe_audit_value
     from drt.state.dlq import DeadLetter
     from drt.state.factory import build_state_bundle
+    from drt.state.idempotency import compute_idempotency_key, resolve_idempotency_key_template
 
     if project is None:
         project = (
@@ -66,7 +71,8 @@ def replay_dead_letters(
             if (project_dir / "drt_project.yml").exists()
             else ProjectConfig(name="drt")
         )
-    store = build_state_bundle(project, project_dir).dlq
+    bundle = build_state_bundle(project, project_dir)
+    store = bundle.dlq
     entries = store.read(sync.name)
     if not entries:
         return {"sync": sync.name, "queued": 0, "status": "empty"}
@@ -93,6 +99,53 @@ def replay_dead_letters(
         }
 
     dest = get_destination(sync)
+
+    # Idempotency ledger + compliance audit log (#1099/#1100 via #1118).
+    # Mirrors run_sync()'s own exclusion (drt/engine/sync.py): a staged
+    # destination's or swap-mode replace's per-call "success" isn't a
+    # trustworthy delivery signal until finalize()/the shadow-table cutover,
+    # so neither feature applies to those destination shapes here either —
+    # applying them where the engine itself refuses would be an asymmetry
+    # baked into audit rows that's much harder to unwind later.
+    _swap_mode = sync.sync.mode == "replace" and sync.sync.replace_strategy == "swap"
+    ledger_audit_applicable = not isinstance(dest, StagedDestination) and not _swap_mode
+    idempotency_ledger: IdempotencyLedger | None = (
+        bundle.ledger if ledger_audit_applicable else None
+    )
+    audit_trail: ComplianceAuditTrail | None = (
+        bundle.audit_trail if ledger_audit_applicable else None
+    )
+    audit_fields = project.state.audit_trail.fields
+    audit_enabled = audit_trail is not None and bool(audit_fields)
+
+    # Check-then-act, same contract as a live run's pre-send filter — but a
+    # hit here does NOT delete the queued entry. The ledger keys on record
+    # identity (usually `upsert_key`), not this exact payload, so a hit only
+    # means "some version of this record was delivered," not "this queued
+    # payload was" — deleting on that basis risks silently discarding a
+    # payload that has since drifted from whatever version actually went
+    # out (the same blast radius #955 exists to prevent). Instead: skip
+    # resending it this round, report it as `skipped_duplicate`, and leave
+    # it queued for an operator to inspect or a future retry to reconsider.
+    key_by_id: dict[str, str] = {}
+    duplicate_ids: set[str] = set()
+    if idempotency_ledger is not None:
+        template = resolve_idempotency_key_template(sync)
+        if template is not None:
+            for entry in to_retry:
+                key = compute_idempotency_key(template, entry.record)
+                if key is not None:
+                    key_by_id[entry.id] = key
+            candidate_keys = set(key_by_id.values())
+            already = (
+                idempotency_ledger.already_delivered(sync.name, candidate_keys)
+                if candidate_keys
+                else set()
+            )
+            duplicate_ids = {eid for eid, key in key_by_id.items() if key in already}
+            if duplicate_ids:
+                to_retry = [e for e in to_retry if e.id not in duplicate_ids]
+
     remove_ids: set[str] = set()
     updates: dict[str, DeadLetter] = {}
     succeeded = 0
@@ -226,12 +279,60 @@ def replay_dead_letters(
             )
             failed_again += 1
 
+    # Idempotency mark + audit log — only for entries `remove_ids` names,
+    # i.e. this retry's own correlation loop just confirmed delivered.
+    # Pre-filtered duplicates (`duplicate_ids`) never entered that loop, so
+    # they can never end up here — no double-marking, no audit row claiming
+    # a delivery this retry didn't actually make.
+    if remove_ids:
+        delivered_at = datetime.now(timezone.utc).isoformat()
+        if idempotency_ledger is not None:
+            delivered_keys = [key_by_id[eid] for eid in remove_ids if eid in key_by_id]
+            if delivered_keys:
+                idempotency_ledger.mark_delivered(sync.name, delivered_keys, delivered_at)
+
+        if audit_enabled:
+            assert audit_trail is not None
+            entries_by_id = {e.id: e for e in to_retry}
+            audit_entries = [
+                AuditEntry(
+                    record_key=":".join(
+                        str(entries_by_id[eid].record[f])
+                        for f in audit_fields
+                        if f in entries_by_id[eid].record
+                    ),
+                    fields={
+                        f: json_safe_audit_value(entries_by_id[eid].record[f])
+                        for f in audit_fields
+                        if f in entries_by_id[eid].record
+                    },
+                )
+                for eid in remove_ids
+                if eid in entries_by_id
+            ]
+            if audit_entries:
+                # No run_id/sync_run_id of retry's own to attach (see the
+                # sync_run_id comment above) — passing the *original*
+                # failing run's id would misattribute this delivery to a
+                # run that never actually sent it successfully. The
+                # Protocol explicitly allows None for library callers with
+                # no invocation-level id (see ComplianceAuditTrail docs).
+                audit_trail.log_delivered(
+                    sync.name,
+                    None,
+                    None,
+                    sync.destination.type,
+                    audit_entries,
+                    delivered_at,
+                )
+
     # reconcile() (#955) re-reads the queue itself rather than trusting the
     # `entries` snapshot read at the top of this function — a concurrent
     # `drt run` append that landed since then survives; only the entries this
     # retry actually touched (succeeded → removed, failed again → updated)
     # are named. `untouched` (beyond --limit) was never touched either way,
-    # so it needs no special handling here anymore.
+    # so it needs no special handling here anymore. `duplicate_ids` entries
+    # are deliberately not named here — they stay queued (see above).
     final = store.reconcile(sync.name, remove_ids=remove_ids, updates=updates)
     return {
         "sync": sync.name,
@@ -239,6 +340,7 @@ def replay_dead_letters(
         "retried": len(to_retry),
         "succeeded": succeeded,
         "still_failing": failed_again,
+        "skipped_duplicate": len(duplicate_ids),
         "remaining_depth": len(final),
         "status": "ok",
     }
@@ -321,5 +423,10 @@ def retry(
         f"[{style}]Retry complete for '{sync_name}': "
         f"{summary['succeeded']} succeeded, {summary['still_failing']} still failing.[/{style}]"
     )
+    if summary.get("skipped_duplicate"):
+        console.print(
+            f"[dim]{summary['skipped_duplicate']} record(s) skipped (already delivered) "
+            "and left queued.[/dim]"
+        )
     if summary["remaining_depth"]:
         console.print(f"[dim]{summary['remaining_depth']} record(s) remain in the queue.[/dim]")

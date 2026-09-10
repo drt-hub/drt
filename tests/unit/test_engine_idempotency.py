@@ -218,8 +218,9 @@ def test_whole_batch_of_duplicates_never_reaches_the_destination(tmp_path: Path)
 def test_a_broken_key_template_disables_dedup_for_that_row_without_failing_it(
     tmp_path: Path,
 ) -> None:
-    """`_compute_idempotency_key` is best-effort by design (see its
-    docstring): a template referencing a column the row doesn't have must
+    """`compute_idempotency_key` (drt.state.idempotency) is best-effort by
+    design (see its docstring): a template referencing a column the row
+    doesn't have must
     disable ledger protection for that one row, not drop it or fail the
     sync. render_value raises ValueError on a missing attribute (Jinja's
     StrictUndefined, per computed_fields' own docstring) -- proving the

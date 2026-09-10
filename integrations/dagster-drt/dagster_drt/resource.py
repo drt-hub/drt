@@ -61,9 +61,7 @@ class DagsterDrtResource(ConfigurableResource["DagsterDrtResource"]):
     project_dir: str = ""
     dry_run: bool = False
 
-    def _resolve_project_dir(
-        self, context: AssetExecutionContext | OpExecutionContext
-    ) -> Path:
+    def _resolve_project_dir(self, context: AssetExecutionContext | OpExecutionContext) -> Path:
         """Resolve project_dir from resource config or asset metadata."""
         if self.project_dir:
             return Path(self.project_dir)
@@ -121,15 +119,8 @@ class DagsterDrtResource(ConfigurableResource["DagsterDrtResource"]):
                 last_cursor_value=row_count_input.cursor_value_used,
             )
             query_tags: dict[str, str] | None = None
-            if (
-                row_count_input.query_tagging is None
-                or row_count_input.query_tagging.enabled
-            ):
-                extra = (
-                    row_count_input.query_tagging.extra
-                    if row_count_input.query_tagging
-                    else {}
-                )
+            if row_count_input.query_tagging is None or row_count_input.query_tagging.enabled:
+                extra = row_count_input.query_tagging.extra if row_count_input.query_tagging else {}
                 query_tags = build_query_tags(
                     row_count_input.sync_config.name,
                     new_run_id(),
@@ -199,9 +190,7 @@ class DagsterDrtResource(ConfigurableResource["DagsterDrtResource"]):
                     continue
                 sync_name = (spec.metadata or {}).get(META_KEY_SYNC_NAME)
                 if sync_name is None or sync_name not in all_syncs:
-                    context.log.warning(
-                        f"No drt sync found for asset key {key}. Skipping."
-                    )
+                    context.log.warning(f"No drt sync found for asset key {key}. Skipping.")
                     continue
                 selected_syncs.append((key, all_syncs[sync_name]))
         elif isinstance(context, OpExecutionContext):
@@ -213,9 +202,7 @@ class DagsterDrtResource(ConfigurableResource["DagsterDrtResource"]):
                 )
             missing_sync_names = [name for name in sync_names if name not in all_syncs]
             if missing_sync_names:
-                raise ValueError(
-                    "Unknown drt sync name(s): " + ", ".join(missing_sync_names)
-                )
+                raise ValueError("Unknown drt sync name(s): " + ", ".join(missing_sync_names))
             translator = DagsterDrtTranslator()
             for sync_name in sync_names:
                 sync_config = all_syncs[sync_name]
@@ -227,9 +214,7 @@ class DagsterDrtResource(ConfigurableResource["DagsterDrtResource"]):
                 ).key
                 selected_syncs.append((key, sync_config))
         else:
-            raise TypeError(
-                "context must be an AssetExecutionContext or OpExecutionContext."
-            )
+            raise TypeError("context must be an AssetExecutionContext or OpExecutionContext.")
 
         for key, sync_config in selected_syncs:
             sync_name = sync_config.name
@@ -265,6 +250,15 @@ class DagsterDrtResource(ConfigurableResource["DagsterDrtResource"]):
                 history_manager=bundle.history if project.history.enabled else None,
                 history_retention_days=project.history.retention_days,
                 query_tagging=project.query_tagging,
+                # #1118: dagster-drt previously never passed these two
+                # through, so a project with state.idempotency: true /
+                # state.audit_trail.enabled: true silently got neither
+                # feature for syncs run through this resource — same class
+                # of gap already fixed for history_manager above.
+                idempotency_ledger=bundle.ledger,
+                audit_trail=bundle.audit_trail,
+                audit_fields=project.state.audit_trail.fields,
+                audit_retain_days=project.state.audit_trail.retain_days or 30,
             )
 
             context.log.info(
