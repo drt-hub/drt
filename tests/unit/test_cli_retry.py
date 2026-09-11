@@ -93,6 +93,31 @@ class _FakeDestination:
         return result
 
 
+class _FakeRaisingDestination:
+    """Succeeds for the first ``succeed_calls`` chunks, then raises — the
+    documented, uncaught ``Destination.load()`` contract (an unrecoverable
+    batch-level failure). Used to prove #1127's fix: an earlier chunk's
+    confirmed delivery must already be durable before a later chunk's
+    exception propagates."""
+
+    def __init__(self, succeed_calls: int) -> None:
+        self.succeed_calls = succeed_calls
+        self.calls = 0
+
+    def load(
+        self,
+        records: list[dict[str, Any]],
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        self.calls += 1
+        if self.calls > self.succeed_calls:
+            raise RuntimeError("boom: connection lost")
+        result = SyncResult()
+        result.success = len(records)
+        return result
+
+
 class _FakeSkippingDestination:
     """Reports a ``match_policy``-style skip for ``skip_ids`` — no RowError,
     no batch_index, just a bare ``skipped``/``skipped_no_match`` counter
@@ -384,6 +409,7 @@ def _patch_dest(
     monkeypatch: pytest.MonkeyPatch,
     dest: (
         _FakeDestination
+        | _FakeRaisingDestination
         | _FakeSkippingDestination
         | _FakeFailAndSkipDestination
         | _FakeStagedDestination
@@ -723,6 +749,54 @@ def test_retry_marks_ledger_and_logs_audit_on_success(
     # misattribute the delivery to a run that never actually sent it.
     for sync_name, run_id, sync_run_id, dest_type, _ in audit_trail.logged:
         assert (sync_name, run_id, sync_run_id, dest_type) == ("post_users", None, None, "rest_api")
+
+
+def test_retry_persists_earlier_chunk_before_a_later_chunk_raises(
+    ledger_audit_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1127: a later chunk's dest.load() raising (the documented, uncaught
+    Destination.load() contract) must not lose an earlier chunk's
+    already-confirmed delivery. batch_size: 1 forces id=1 and id=2 into
+    separate chunks; the fake destination succeeds on the first load() call
+    and raises on the second."""
+    from drt.cli.commands.retry import replay_dead_letters
+    from drt.config.parser import load_syncs
+
+    (ledger_audit_project / "syncs" / "post_users.yml").write_text(
+        yaml.dump(
+            {
+                "name": "post_users",
+                "model": "ref('users')",
+                "destination": {"type": "rest_api", "url": "https://example.com"},
+                "sync": {
+                    "batch_size": 1,
+                    "dlq": {"enabled": True},
+                    "idempotency_key": "{{ row['id'] }}",
+                },
+            }
+        )
+    )
+    store = _seed_ledger_audit(ledger_audit_project, [1, 2])
+    dest = _FakeRaisingDestination(succeed_calls=1)
+    _patch_dest(monkeypatch, dest)
+    ledger = _FakeLedger()
+    audit_trail = _FakeAuditTrail()
+    _patch_state_bundle(monkeypatch, store, ledger, audit_trail)
+    sync = next(s for s in load_syncs(ledger_audit_project) if s.name == "post_users")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        replay_dead_letters(sync, project_dir=ledger_audit_project)
+
+    # Chunk 1 (id=1) was fully persisted before chunk 2's dest.load() raised.
+    assert sorted(sum(ledger.marked, [])) == ["1"]
+    logged_keys = {e.record_key for _, _, _, _, entries in audit_trail.logged for e in entries}
+    assert logged_keys == {"1"}
+    remaining = store.read("post_users")
+    assert [e.record["id"] for e in remaining] == [2]
+    # Chunk 2 never got processed at all — its dest.load() call raised
+    # before any DeadLetter update was built for it, so it must be
+    # untouched: not bumped, not re-timestamped.
+    assert remaining[0].attempts == 1
 
 
 def test_retry_excludes_unattributed_skip_from_ledger_and_audit(
