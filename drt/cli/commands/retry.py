@@ -168,9 +168,9 @@ def replay_dead_letters(
             # never confirmed for any record. Keep every retried entry queued
             # and record the job-level failure against each one.
             error = f"Staged destination finalize failed: {exc}"
-            updates: dict[str, DeadLetter] = {}
+            finalize_updates: dict[str, DeadLetter] = {}
             for entry in to_retry:
-                updates[entry.id] = DeadLetter(
+                finalize_updates[entry.id] = DeadLetter(
                     id=entry.id,
                     record=entry.record,
                     error_message=error,
@@ -178,7 +178,7 @@ def replay_dead_letters(
                     attempts=entry.attempts + 1,
                     sync_run_id=entry.sync_run_id,
                 )
-            final = store.reconcile(sync.name, remove_ids=set(), updates=updates)
+            final = store.reconcile(sync.name, remove_ids=set(), updates=finalize_updates)
             return {
                 "sync": sync.name,
                 "queued": len(entries),
@@ -212,34 +212,49 @@ def replay_dead_letters(
             for chunk in _chunks(to_retry, sync.sync.batch_size)
         )
 
-    # `final_entries` tracks the DLQ's state as of the most recent reconcile()
-    # call below — persisted per retry_group/chunk, not accumulated across
-    # the whole loop and written once at the end (#1127). A non-staged,
+    # Ledger mark + audit log are persisted per retry_group/chunk below (not
+    # accumulated and written once at the end) — #1127. A non-staged,
     # multi-chunk retry calls dest.load() lazily per chunk (see retry_groups
     # above); Destination.load() may raise an unrecoverable, batch-level
     # exception (documented, uncaught contract — drt/destinations/base.py),
     # which propagates straight out of this function. Persisting each
-    # chunk's confirmed work (ledger mark, audit log, DLQ removal/update)
-    # immediately means a later chunk's exception only loses that
-    # *unprocessed* remainder, not an earlier chunk's already-confirmed
-    # deliveries — mirrors run_sync()'s own per-batch persistence
-    # (drt/engine/sync.py), for the same crash-safety reason. No wrapping
-    # try/except here: propagating the exception is the correct, documented
-    # behavior (same as run_sync()) — this fix is only about what's already
-    # durable by the time it propagates.
-    final_entries: list[DeadLetter] | None = None
+    # chunk's ledger/audit confirmation immediately means a later chunk's
+    # exception only loses that *unprocessed* remainder, not an earlier
+    # chunk's already-confirmed deliveries — mirrors run_sync()'s own
+    # per-batch persistence (drt/engine/sync.py), for the same crash-safety
+    # reason. No wrapping try/except here: propagating the exception is the
+    # correct, documented behavior (same as run_sync()) — this fix is only
+    # about what's already durable by the time it propagates.
+    #
+    # DLQ removal (`remove_ids`/`updates` below) stays accumulated and
+    # reconciled once at the end, deliberately NOT per chunk: `reconcile()`
+    # re-reads and rewrites the *entire* remaining queue on every call (see
+    # its own docstring), so calling it once per chunk would make a large,
+    # small-batch-size queue's retry cost quadratic (caught in Codex review
+    # on #1128) — `DlqBackend` has no cheaper mutation-only primitive to
+    # persist a single chunk's removal without that full-queue cost. A
+    # crash after this point but before the final reconcile() therefore
+    # still leaves an already-delivered record queued — but the per-chunk
+    # ledger mark above means the *next* retry's `already_delivered` check
+    # (see `duplicate_ids` above) catches and skips it rather than
+    # resending it, so the DLQ staying briefly stale does not reopen the
+    # duplicate-delivery risk this fix exists to close for ledger-enabled
+    # projects. A project without `state.idempotency: true` has no such
+    # backstop — for it, this half of #1127 (a crashed later chunk losing
+    # an earlier chunk's DLQ removal, causing a plain resend on the next
+    # retry) remains open, same as before this fix.
+    remove_ids: set[str] = set()
+    updates: dict[str, DeadLetter] = {}
 
     for retry_group, result in retry_groups:
         # Fails closed for the whole group on any unattributed skip — same
         # contract as run_sync()'s per-batch ledger mark / audit write.
         confirmed_idx = successful_indices([e.record for e in retry_group], result)
-        group_remove_ids: set[str] = set()
         group_delivered_ids: set[str] = set()
-        group_updates: dict[str, DeadLetter] = {}
 
         if result.failed == 0:
             succeeded += len(retry_group)
-            group_remove_ids.update(e.id for e in retry_group)
+            remove_ids.update(e.id for e in retry_group)
             group_delivered_ids.update(
                 entry.id for i, entry in enumerate(retry_group) if i in confirmed_idx
             )
@@ -290,12 +305,12 @@ def replay_dead_letters(
             for i, entry in enumerate(retry_group):
                 if pinpointed and i not in failed_idx:
                     succeeded += 1
-                    group_remove_ids.add(entry.id)
+                    remove_ids.add(entry.id)
                     if i in confirmed_idx:
                         group_delivered_ids.add(entry.id)
                     continue
                 err = err_by_idx.get(i)
-                group_updates[entry.id] = DeadLetter(
+                updates[entry.id] = DeadLetter(
                     id=entry.id,  # same identity — a retried entry is not a new one (#955)
                     record=entry.record,
                     error_message=(
@@ -366,24 +381,16 @@ def replay_dead_letters(
                         delivered_at,
                     )
 
-        # reconcile() (#955) re-reads the queue itself rather than trusting
-        # the `entries` snapshot read at the top of this function — a
-        # concurrent `drt run` append that landed since then survives.
-        # Called once per chunk, immediately after that chunk's ledger/audit
-        # writes above, for the same crash-safety reason (#1127).
-        final_entries = store.reconcile(
-            sync.name, remove_ids=group_remove_ids, updates=group_updates
-        )
-
-    if final_entries is None:
-        # No chunk ever ran — either every queued entry was filtered out as
-        # an already-delivered duplicate, or a StagedDestination had nothing
-        # to retry (both produce an empty retry_groups above). Still do one
-        # fresh read so `remaining_depth` reflects current state, matching
-        # the pre-#1127 unconditional reconcile() call's behavior for this
-        # case.
-        final_entries = store.reconcile(sync.name, remove_ids=set(), updates={})
-
+    # reconcile() (#955) re-reads the queue itself rather than trusting the
+    # `entries` snapshot read at the top of this function — a concurrent
+    # `drt run` append that landed since then survives; only the entries
+    # this retry actually touched (succeeded → removed, failed again →
+    # updated) are named. Called once, with everything accumulated across
+    # every chunk — deliberately NOT per chunk; see the comment above the
+    # loop for why (#1127/#1128). `untouched` (beyond --limit) was never
+    # touched either way, so it needs no special handling here. `duplicate_ids`
+    # entries are deliberately not named here — they stay queued (see above).
+    final = store.reconcile(sync.name, remove_ids=remove_ids, updates=updates)
     return {
         "sync": sync.name,
         "queued": len(entries),
@@ -391,7 +398,7 @@ def replay_dead_letters(
         "succeeded": succeeded,
         "still_failing": failed_again,
         "skipped_duplicate": len(duplicate_ids),
-        "remaining_depth": len(final_entries),
+        "remaining_depth": len(final),
         "status": "ok",
     }
 

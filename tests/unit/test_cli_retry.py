@@ -23,10 +23,15 @@ runner = CliRunner()
 
 
 class _FakeLedger:
-    """Minimal IdempotencyLedger fake — records what was checked/marked."""
+    """Minimal IdempotencyLedger fake — records what was checked/marked.
+
+    Stateful like a real ledger: mark_delivered() actually updates the set
+    already_delivered() checks against, so a second replay_dead_letters()
+    call against the same fake sees an earlier call's marks (needed to
+    prove #1127/#1128's fix is load-bearing, not just that the call happened)."""
 
     def __init__(self, already_delivered_keys: set[str] | None = None) -> None:
-        self.already_delivered_keys = already_delivered_keys or set()
+        self.already_delivered_keys = set(already_delivered_keys or set())
         self.checked: list[set[str]] = []
         self.marked: list[list[str]] = []
 
@@ -36,6 +41,7 @@ class _FakeLedger:
 
     def mark_delivered(self, sync_name: str, keys: Collection[str], delivered_at: str) -> None:
         self.marked.append(list(keys))
+        self.already_delivered_keys.update(keys)
 
     def prune(self, sync_name: str, retention_days: int) -> int:
         return 0
@@ -751,14 +757,20 @@ def test_retry_marks_ledger_and_logs_audit_on_success(
         assert (sync_name, run_id, sync_run_id, dest_type) == ("post_users", None, None, "rest_api")
 
 
-def test_retry_persists_earlier_chunk_before_a_later_chunk_raises(
+def test_retry_persists_ledger_and_audit_for_earlier_chunk_before_a_later_chunk_raises(
     ledger_audit_project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#1127: a later chunk's dest.load() raising (the documented, uncaught
-    Destination.load() contract) must not lose an earlier chunk's
-    already-confirmed delivery. batch_size: 1 forces id=1 and id=2 into
-    separate chunks; the fake destination succeeds on the first load() call
-    and raises on the second."""
+    """#1127/#1128: a later chunk's dest.load() raising (the documented,
+    uncaught Destination.load() contract) must not lose an earlier chunk's
+    already-confirmed delivery from the idempotency ledger / audit trail.
+    DLQ removal itself is deliberately NOT persisted per chunk (a per-chunk
+    reconcile() would make retry cost quadratic — caught in Codex review on
+    #1128 — since DlqBackend has no cheaper mutation-only primitive), so
+    both entries stay queued after the raise. The ledger mark is still the
+    load-bearing half: it's what stops the next retry from resending id=1.
+    batch_size: 1 forces id=1 and id=2 into separate chunks; the fake
+    destination succeeds on the first load() call and raises on the
+    second."""
     from drt.cli.commands.retry import replay_dead_letters
     from drt.config.parser import load_syncs
 
@@ -777,8 +789,7 @@ def test_retry_persists_earlier_chunk_before_a_later_chunk_raises(
         )
     )
     store = _seed_ledger_audit(ledger_audit_project, [1, 2])
-    dest = _FakeRaisingDestination(succeed_calls=1)
-    _patch_dest(monkeypatch, dest)
+    _patch_dest(monkeypatch, _FakeRaisingDestination(succeed_calls=1))
     ledger = _FakeLedger()
     audit_trail = _FakeAuditTrail()
     _patch_state_bundle(monkeypatch, store, ledger, audit_trail)
@@ -787,16 +798,30 @@ def test_retry_persists_earlier_chunk_before_a_later_chunk_raises(
     with pytest.raises(RuntimeError, match="boom"):
         replay_dead_letters(sync, project_dir=ledger_audit_project)
 
-    # Chunk 1 (id=1) was fully persisted before chunk 2's dest.load() raised.
+    # Chunk 1 (id=1) was ledger-marked and audit-logged before chunk 2's
+    # dest.load() raised ...
     assert sorted(sum(ledger.marked, [])) == ["1"]
     logged_keys = {e.record_key for _, _, _, _, entries in audit_trail.logged for e in entries}
     assert logged_keys == {"1"}
-    remaining = store.read("post_users")
-    assert [e.record["id"] for e in remaining] == [2]
-    # Chunk 2 never got processed at all — its dest.load() call raised
-    # before any DeadLetter update was built for it, so it must be
-    # untouched: not bumped, not re-timestamped.
-    assert remaining[0].attempts == 1
+    # ... but DLQ removal is deferred to one reconcile() call at the very
+    # end, which this raise never reached — both entries are still queued.
+    assert [e.record["id"] for e in store.read("post_users")] == [1, 2]
+
+    # The fix is load-bearing: prove it by retrying again against a fresh
+    # destination that would happily resend id=1. The ledger mark from the
+    # first (crashed) attempt must make this retry skip id=1 as a duplicate
+    # and only actually send id=2.
+    second_dest = _FakeDestination(fail_ids=set())
+    _patch_dest(monkeypatch, second_dest)
+    summary = replay_dead_letters(sync, project_dir=ledger_audit_project)
+
+    assert summary["skipped_duplicate"] == 1
+    assert summary["succeeded"] == 1
+    assert [rec["id"] for call in second_dest.calls for rec in call] == [2]
+    # id=1 is a duplicate hit, not a failure — it stays queued for an
+    # operator to inspect (see the ledger-hit contract above), while id=2
+    # is gone.
+    assert [e.record["id"] for e in store.read("post_users")] == [1]
 
 
 def test_retry_excludes_unattributed_skip_from_ledger_and_audit(
