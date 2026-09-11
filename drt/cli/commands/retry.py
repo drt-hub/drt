@@ -150,18 +150,6 @@ def replay_dead_letters(
             if duplicate_ids:
                 to_retry = [e for e in to_retry if e.id not in duplicate_ids]
 
-    remove_ids: set[str] = set()
-    # Subset of `remove_ids` this retry's own correlation loop can positively
-    # attribute to a *delivery* (not just "not a re-queued failure") — see
-    # successful_indices()'s docstring (drt.state.idempotency): a match_policy
-    # skip (#757) shows up as neither a RowError nor an attributable failure,
-    # so treating "removed from the DLQ" as "therefore delivered" would mark
-    # a skipped row as delivered in the ledger/audit trail (caught in Codex
-    # review on #1126 — the same false-positive class #1100 caught for
-    # run_sync() itself). `delivered_ids` fails closed per retry_group
-    # instead: only fed to mark_delivered()/log_delivered() below.
-    delivered_ids: set[str] = set()
-    updates: dict[str, DeadLetter] = {}
     succeeded = 0
     failed_again = 0
     retry_groups: Iterator[tuple[list[DeadLetter], SyncResult]]
@@ -180,8 +168,9 @@ def replay_dead_letters(
             # never confirmed for any record. Keep every retried entry queued
             # and record the job-level failure against each one.
             error = f"Staged destination finalize failed: {exc}"
+            finalize_updates: dict[str, DeadLetter] = {}
             for entry in to_retry:
-                updates[entry.id] = DeadLetter(
+                finalize_updates[entry.id] = DeadLetter(
                     id=entry.id,
                     record=entry.record,
                     error_message=error,
@@ -189,7 +178,7 @@ def replay_dead_letters(
                     attempts=entry.attempts + 1,
                     sync_run_id=entry.sync_run_id,
                 )
-            final = store.reconcile(sync.name, remove_ids=set(), updates=updates)
+            final = store.reconcile(sync.name, remove_ids=set(), updates=finalize_updates)
             return {
                 "sync": sync.name,
                 "queued": len(entries),
@@ -223,141 +212,184 @@ def replay_dead_letters(
             for chunk in _chunks(to_retry, sync.sync.batch_size)
         )
 
+    # Ledger mark + audit log are persisted per retry_group/chunk below (not
+    # accumulated and written once at the end) — #1127. A non-staged,
+    # multi-chunk retry calls dest.load() lazily per chunk (see retry_groups
+    # above); Destination.load() may raise an unrecoverable, batch-level
+    # exception (documented, uncaught contract — drt/destinations/base.py),
+    # which propagates straight out of this function. Persisting each
+    # chunk's ledger/audit confirmation immediately means a later chunk's
+    # exception only loses that *unprocessed* remainder, not an earlier
+    # chunk's already-confirmed deliveries — mirrors run_sync()'s own
+    # per-batch persistence (drt/engine/sync.py), for the same crash-safety
+    # reason. No wrapping try/except here: propagating the exception is the
+    # correct, documented behavior (same as run_sync()) — this fix is only
+    # about what's already durable by the time it propagates.
+    #
+    # DLQ removal (`remove_ids`/`updates` below) stays accumulated and
+    # reconciled once at the end, deliberately NOT per chunk: `reconcile()`
+    # re-reads and rewrites the *entire* remaining queue on every call (see
+    # its own docstring), so calling it once per chunk would make a large,
+    # small-batch-size queue's retry cost quadratic (caught in Codex review
+    # on #1128) — `DlqBackend` has no cheaper mutation-only primitive to
+    # persist a single chunk's removal without that full-queue cost. A
+    # crash after this point but before the final reconcile() therefore
+    # still leaves an already-delivered record queued — but the per-chunk
+    # ledger mark above means the *next* retry's `already_delivered` check
+    # (see `duplicate_ids` above) catches and skips it rather than
+    # resending it, so the DLQ staying briefly stale does not reopen the
+    # duplicate-delivery risk this fix exists to close for ledger-enabled
+    # projects. A project without `state.idempotency: true` has no such
+    # backstop — for it, this half of #1127 (a crashed later chunk losing
+    # an earlier chunk's DLQ removal, causing a plain resend on the next
+    # retry) remains open, same as before this fix.
+    remove_ids: set[str] = set()
+    updates: dict[str, DeadLetter] = {}
+
     for retry_group, result in retry_groups:
         # Fails closed for the whole group on any unattributed skip — same
         # contract as run_sync()'s per-batch ledger mark / audit write.
         confirmed_idx = successful_indices([e.record for e in retry_group], result)
+        group_delivered_ids: set[str] = set()
 
         if result.failed == 0:
             succeeded += len(retry_group)
             remove_ids.update(e.id for e in retry_group)
-            delivered_ids.update(
+            group_delivered_ids.update(
                 entry.id for i, entry in enumerate(retry_group) if i in confirmed_idx
             )
-            continue
+        else:
+            # Correlate which records failed again. RowError.batch_index
+            # pinpoints the failures within this retry group; trust that
+            # correlation only when the row_errors fully account for
+            # result.failed. Otherwise the group failed in a way we can't
+            # attribute per-record, so conservatively keep the whole group
+            # queued rather than silently dropping records. For load() a
+            # group is one chunk; for a staged destination it is the full
+            # accumulated record set finalized once. Trade-off: on an
+            # un-attributable group, rows that actually succeeded get
+            # re-queued and may be re-sent on the next retry — we prefer a
+            # re-send (idempotent for upsert destinations) over a silent drop.
+            failed_idx = {
+                e.batch_index for e in result.row_errors if 0 <= e.batch_index < len(retry_group)
+            }
+            pinpointed = len(failed_idx) == result.failed
+            if isinstance(dest, StagedDestination):
+                if len(retry_group) > sync.sync.batch_size:
+                    # StagedDestination's Protocol (drt/destinations/base.py)
+                    # does not define whether RowError.batch_index from
+                    # finalize() is local to the individual stage() call it
+                    # came from or global across the whole accumulated set —
+                    # caught in review. More than one chunk was staged before
+                    # this single finalize() call, so trusting batch_index
+                    # here would silently misattribute a later chunk's
+                    # failure to an earlier chunk's record for any
+                    # implementation that reports chunk-local indices (the
+                    # more natural convention, matching how
+                    # Destination.load()'s own batch_index is always
+                    # chunk-local). A single-chunk retry has no such
+                    # ambiguity — chunk-local and global indexing coincide
+                    # when there was only one stage() call — so only the
+                    # multi-chunk case falls back here.
+                    pinpointed = False
+                elif sync.destination.type == "salesforce_bulk":
+                    # Salesforce's failed-results CSV does not expose the
+                    # original accumulated-list position; its destination
+                    # currently emits 0 for every RowError.batch_index
+                    # regardless of chunk count. Even a single-chunk retry's
+                    # one such error therefore cannot safely identify record
+                    # 0 as the failed source row.
+                    pinpointed = False
+            err_by_idx = {e.batch_index: e for e in result.row_errors}
 
-        # Correlate which records failed again. RowError.batch_index pinpoints
-        # the failures within this retry group; trust that correlation only
-        # when the row_errors fully account for result.failed. Otherwise the
-        # group failed in a way we can't attribute per-record, so
-        # conservatively keep the whole group queued rather than silently
-        # dropping records. For load() a group is one chunk; for a staged
-        # destination it is the full accumulated record set finalized once.
-        # Trade-off: on an un-attributable group, rows that actually succeeded
-        # get re-queued and may be re-sent on the next retry — we prefer a
-        # re-send (idempotent for upsert destinations) over a silent drop.
-        failed_idx = {
-            e.batch_index for e in result.row_errors if 0 <= e.batch_index < len(retry_group)
-        }
-        pinpointed = len(failed_idx) == result.failed
-        if isinstance(dest, StagedDestination):
-            if len(retry_group) > sync.sync.batch_size:
-                # StagedDestination's Protocol (drt/destinations/base.py) does
-                # not define whether RowError.batch_index from finalize() is
-                # local to the individual stage() call it came from or global
-                # across the whole accumulated set — caught in review. More
-                # than one chunk was staged before this single finalize()
-                # call, so trusting batch_index here would silently
-                # misattribute a later chunk's failure to an earlier chunk's
-                # record for any implementation that reports chunk-local
-                # indices (the more natural convention, matching how
-                # Destination.load()'s own batch_index is always chunk-local).
-                # A single-chunk retry has no such ambiguity — chunk-local and
-                # global indexing coincide when there was only one stage()
-                # call — so only the multi-chunk case falls back here.
-                pinpointed = False
-            elif sync.destination.type == "salesforce_bulk":
-                # Salesforce's failed-results CSV does not expose the original
-                # accumulated-list position; its destination currently emits 0
-                # for every RowError.batch_index regardless of chunk count.
-                # Even a single-chunk retry's one such error therefore cannot
-                # safely identify record 0 as the failed source row.
-                pinpointed = False
-        err_by_idx = {e.batch_index: e for e in result.row_errors}
-
-        for i, entry in enumerate(retry_group):
-            if pinpointed and i not in failed_idx:
-                succeeded += 1
-                remove_ids.add(entry.id)
-                if i in confirmed_idx:
-                    delivered_ids.add(entry.id)
-                continue
-            err = err_by_idx.get(i)
-            updates[entry.id] = DeadLetter(
-                id=entry.id,  # same identity — a retried entry is not a new one (#955)
-                record=entry.record,
-                error_message=(
-                    err.error_message
-                    if err is not None
-                    else (result.errors[0] if result.errors else "retry failed")
-                ),
-                http_status=err.http_status if err is not None else None,
-                timestamp=entry.timestamp,  # preserve first-seen time
-                attempts=entry.attempts + 1,
-                # Preserve the *original* failure's run correlation, not this
-                # retry's (there isn't one — retry has no sync_run_id of its
-                # own) — matches metadata_columns' (#762) same call that a
-                # retried row traces back to when it first failed.
-                sync_run_id=entry.sync_run_id,
-            )
-            failed_again += 1
-
-    # Idempotency mark + audit log — only for entries `delivered_ids` names,
-    # i.e. this retry's own correlation loop positively attributed to a
-    # delivery (not merely "removed from the DLQ" — see `delivered_ids`'
-    # definition above for why the two sets diverge on an unattributed
-    # skip). Pre-filtered duplicates (`duplicate_ids`) never entered that
-    # loop, so they can never end up here either — no double-marking, no
-    # audit row claiming a delivery this retry didn't actually make.
-    if delivered_ids:
-        delivered_at = datetime.now(timezone.utc).isoformat()
-        if idempotency_ledger is not None:
-            delivered_keys = [key_by_id[eid] for eid in delivered_ids if eid in key_by_id]
-            if delivered_keys:
-                idempotency_ledger.mark_delivered(sync.name, delivered_keys, delivered_at)
-
-        if audit_enabled:
-            assert audit_trail is not None
-            entries_by_id = {e.id: e for e in to_retry}
-            audit_entries = [
-                AuditEntry(
-                    record_key=":".join(
-                        str(entries_by_id[eid].record[f])
-                        for f in audit_fields
-                        if f in entries_by_id[eid].record
+            for i, entry in enumerate(retry_group):
+                if pinpointed and i not in failed_idx:
+                    succeeded += 1
+                    remove_ids.add(entry.id)
+                    if i in confirmed_idx:
+                        group_delivered_ids.add(entry.id)
+                    continue
+                err = err_by_idx.get(i)
+                updates[entry.id] = DeadLetter(
+                    id=entry.id,  # same identity — a retried entry is not a new one (#955)
+                    record=entry.record,
+                    error_message=(
+                        err.error_message
+                        if err is not None
+                        else (result.errors[0] if result.errors else "retry failed")
                     ),
-                    fields={
-                        f: json_safe_audit_value(entries_by_id[eid].record[f])
-                        for f in audit_fields
-                        if f in entries_by_id[eid].record
-                    },
+                    http_status=err.http_status if err is not None else None,
+                    timestamp=entry.timestamp,  # preserve first-seen time
+                    attempts=entry.attempts + 1,
+                    # Preserve the *original* failure's run correlation, not
+                    # this retry's (there isn't one — retry has no
+                    # sync_run_id of its own) — matches metadata_columns'
+                    # (#762) same call that a retried row traces back to
+                    # when it first failed.
+                    sync_run_id=entry.sync_run_id,
                 )
-                for eid in delivered_ids
-                if eid in entries_by_id
-            ]
-            if audit_entries:
-                # No run_id/sync_run_id of retry's own to attach (see the
-                # sync_run_id comment above) — passing the *original*
-                # failing run's id would misattribute this delivery to a
-                # run that never actually sent it successfully. The
-                # Protocol explicitly allows None for library callers with
-                # no invocation-level id (see ComplianceAuditTrail docs).
-                audit_trail.log_delivered(
-                    sync.name,
-                    None,
-                    None,
-                    sync.destination.type,
-                    audit_entries,
-                    delivered_at,
-                )
+                failed_again += 1
+
+        # Idempotency mark + audit log for THIS chunk only — only for
+        # entries `group_delivered_ids` names, i.e. this chunk's own
+        # correlation just positively attributed to a delivery (not merely
+        # "removed from the DLQ" — see `group_delivered_ids`' population
+        # above for why the two sets diverge on an unattributed skip).
+        # Pre-filtered duplicates (`duplicate_ids`) never entered this loop
+        # at all, so they can never end up here either — no double-marking,
+        # no audit row claiming a delivery this retry didn't actually make.
+        if group_delivered_ids:
+            # Timestamped per chunk, not once for the whole retry — more
+            # accurate for slow multi-chunk retries, and a deliberate
+            # behavior change from #1118's original single-timestamp
+            # version (see CHANGELOG).
+            delivered_at = datetime.now(timezone.utc).isoformat()
+            if idempotency_ledger is not None:
+                delivered_keys = [key_by_id[eid] for eid in group_delivered_ids if eid in key_by_id]
+                if delivered_keys:
+                    idempotency_ledger.mark_delivered(sync.name, delivered_keys, delivered_at)
+
+            if audit_enabled:
+                assert audit_trail is not None
+                audit_entries = [
+                    AuditEntry(
+                        record_key=":".join(
+                            str(entry.record[f]) for f in audit_fields if f in entry.record
+                        ),
+                        fields={
+                            f: json_safe_audit_value(entry.record[f])
+                            for f in audit_fields
+                            if f in entry.record
+                        },
+                    )
+                    for entry in retry_group
+                    if entry.id in group_delivered_ids
+                ]
+                if audit_entries:
+                    # No run_id/sync_run_id of retry's own to attach (see the
+                    # sync_run_id comment above) — passing the *original*
+                    # failing run's id would misattribute this delivery to a
+                    # run that never actually sent it successfully. The
+                    # Protocol explicitly allows None for library callers with
+                    # no invocation-level id (see ComplianceAuditTrail docs).
+                    audit_trail.log_delivered(
+                        sync.name,
+                        None,
+                        None,
+                        sync.destination.type,
+                        audit_entries,
+                        delivered_at,
+                    )
 
     # reconcile() (#955) re-reads the queue itself rather than trusting the
     # `entries` snapshot read at the top of this function — a concurrent
-    # `drt run` append that landed since then survives; only the entries this
-    # retry actually touched (succeeded → removed, failed again → updated)
-    # are named. `untouched` (beyond --limit) was never touched either way,
-    # so it needs no special handling here anymore. `duplicate_ids` entries
-    # are deliberately not named here — they stay queued (see above).
+    # `drt run` append that landed since then survives; only the entries
+    # this retry actually touched (succeeded → removed, failed again →
+    # updated) are named. Called once, with everything accumulated across
+    # every chunk — deliberately NOT per chunk; see the comment above the
+    # loop for why (#1127/#1128). `untouched` (beyond --limit) was never
+    # touched either way, so it needs no special handling here. `duplicate_ids`
+    # entries are deliberately not named here — they stay queued (see above).
     final = store.reconcile(sync.name, remove_ids=remove_ids, updates=updates)
     return {
         "sync": sync.name,

@@ -61,16 +61,17 @@ class DeadLetter:
     # touched JSON (e.g. `engine/sync.py`'s per-failure `DeadLetter(...)`) —
     # its id is assigned once, in Python, before the object is ever
     # serialized. It must NOT fire when *decoding* a legacy JSONL line that
-    # predates this field: `replay_dead_letters()` reads the queue twice per
-    # invocation (once to decide what to retry, again inside `reconcile()`
-    # to compute the write), and two independent `DeadLetter(**json.loads(
-    # line))` calls on the *same unchanged line* would each trigger this
-    # factory fresh — producing two different random ids for one entry, so
-    # every legacy entry's remove/update would silently never match
-    # (caught in review, #955). `decode_dead_letter_line()` below is the
-    # actual JSONL entry point and handles that case with a content hash
-    # instead — deterministic for the same bytes, so two reads of the same
-    # untouched line agree. Bypassing that function and constructing
+    # predates this field: `replay_dead_letters()` reads the queue multiple
+    # times per invocation (once to decide what to retry, then again inside
+    # each per-chunk `reconcile()` call to compute that chunk's write, #1127),
+    # and independent `DeadLetter(**json.loads(line))` calls on the *same
+    # unchanged line* would each trigger this factory fresh — producing a
+    # different random id per read for one entry, so every legacy entry's
+    # remove/update would silently never match (caught in review, #955).
+    # `decode_dead_letter_line()` below is the actual JSONL entry point and
+    # handles that case with a content hash instead — deterministic for the
+    # same bytes, so repeated reads of the same untouched line agree.
+    # Bypassing that function and constructing
     # directly from a legacy dict (as tests occasionally do to simulate a
     # pre-#955 file) is the only path that still exercises this default on
     # already-persisted data — a reminder to route JSONL reads through the
@@ -84,7 +85,8 @@ def decode_dead_letter_line(raw_line: str) -> DeadLetter:
     Entries written before ``id`` existed get a deterministic id — the
     SHA-256 of the literal line content — rather than the dataclass
     default's random one, so repeated reads of the same unchanged line
-    (``replay_dead_letters()`` reads the queue twice per invocation) agree
+    (``replay_dead_letters()`` reads the queue multiple times per
+    invocation, once per per-chunk ``reconcile()`` call — #1127) agree
     on identity instead of producing entries ``reconcile()`` can never
     match (#955).
     """
