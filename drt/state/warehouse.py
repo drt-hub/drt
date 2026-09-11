@@ -112,6 +112,29 @@ def _is_undefined_table(exc: Exception) -> bool:
     return isinstance(exc, psycopg2.errors.UndefinedTable)
 
 
+# Batches DlqBackend.append()/.replace()/.reconcile()'s per-entry writes into
+# bounded multi-row statements (#1121, caught in Codex review on #1120 as a
+# cross-dialect issue, not Snowflake-specific — see warehouse_snowflake.py's
+# own module docstring for the parallel note). 2000 mirrors
+# destinations/snowflake.py's _MERGE_PARAM_BUDGET — the same conservative,
+# empirically-verified-elsewhere budget, well under Postgres's own
+# protocol-level 65535-parameter ceiling. Kept file-local rather than a
+# shared import: this repo already keeps destinations/databricks.py's
+# _NATIVE_PARAM_LIMIT and destinations/snowflake.py's _MERGE_PARAM_BUDGET as
+# two separate constants, not one shared one, and reaching from drt/state/
+# into drt/destinations/ for either would be the wrong import direction
+# (state stores are consumers of destination-shaped data, not the reverse).
+_DLQ_PARAM_BUDGET = 2000
+
+
+def _rows_per_chunk(n_cols: int) -> int:
+    return max(1, _DLQ_PARAM_BUDGET // max(1, n_cols))
+
+
+def _chunked(items: list[Any], size: int) -> list[list[Any]]:
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
 def _ensure_table_exists(
     conn: Any, profile: PostgresProfile, table_name: str, column_defs: str
 ) -> None:
@@ -490,31 +513,49 @@ class PostgresWarehouseDlqBackend:
 
         if not entries:
             return self.depth(sync_name)
+        # Two entries sharing an id within one call would make Postgres
+        # raise "ON CONFLICT DO UPDATE command cannot affect row a second
+        # time" inside one multi-row statement — possible for legacy,
+        # pre-#955 dead letters whose id is a content hash rather than a
+        # random uuid (the same collision class Codex review caught on
+        # #1128's Round 1 attempt at drt/cli/commands/retry.py). The old
+        # per-entry loop tolerated this silently (each duplicate re-executed
+        # its own upsert, last one winning); deduping here by id, keeping
+        # the last occurrence, preserves that exact outcome.
+        deduped: dict[str, DeadLetter] = {}
+        for entry in entries:
+            deduped[entry.id] = entry
         conn = _connect(self._profile)
         try:
             self._ensure_table(conn)
             cur = conn.cursor()
-            for entry in entries:
+            for chunk in _chunked(list(deduped.values()), _rows_per_chunk(8)):
+                values_sql = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(chunk))
+                params: list[Any] = []
+                for entry in chunk:
+                    params.extend(
+                        (
+                            entry.id,
+                            sync_name,
+                            json.dumps(entry.record),
+                            entry.error_message,
+                            entry.http_status,
+                            entry.timestamp,
+                            entry.attempts,
+                            entry.sync_run_id,
+                        )
+                    )
                 cur.execute(
                     _pgsql.SQL(
                         "INSERT INTO {} (id, sync_name, record, error_message, "
                         "http_status, ts, attempts, sync_run_id) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+                        f"VALUES {values_sql} "
                         "ON CONFLICT (id) DO UPDATE SET "
                         "record = EXCLUDED.record, error_message = EXCLUDED.error_message, "
                         "http_status = EXCLUDED.http_status, ts = EXCLUDED.ts, "
                         "attempts = EXCLUDED.attempts, sync_run_id = EXCLUDED.sync_run_id"
                     ).format(_qualified(self._profile, _DLQ_TABLE)),
-                    (
-                        entry.id,
-                        sync_name,
-                        json.dumps(entry.record),
-                        entry.error_message,
-                        entry.http_status,
-                        entry.timestamp,
-                        entry.attempts,
-                        entry.sync_run_id,
-                    ),
+                    params,
                 )
             if max_records > 0:
                 cur.execute(
@@ -553,23 +594,29 @@ class PostgresWarehouseDlqBackend:
                 ),
                 (sync_name,),
             )
-            for entry in entries:
+            for chunk in _chunked(entries, _rows_per_chunk(8)):
+                values_sql = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(chunk))
+                params: list[Any] = []
+                for entry in chunk:
+                    params.extend(
+                        (
+                            entry.id,
+                            sync_name,
+                            json.dumps(entry.record),
+                            entry.error_message,
+                            entry.http_status,
+                            entry.timestamp,
+                            entry.attempts,
+                            entry.sync_run_id,
+                        )
+                    )
                 cur.execute(
                     _pgsql.SQL(
                         "INSERT INTO {} (id, sync_name, record, error_message, "
                         "http_status, ts, attempts, sync_run_id) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+                        f"VALUES {values_sql}"
                     ).format(_qualified(self._profile, _DLQ_TABLE)),
-                    (
-                        entry.id,
-                        sync_name,
-                        json.dumps(entry.record),
-                        entry.error_message,
-                        entry.http_status,
-                        entry.timestamp,
-                        entry.attempts,
-                        entry.sync_run_id,
-                    ),
+                    params,
                 )
             conn.commit()
         finally:
@@ -664,23 +711,39 @@ class PostgresWarehouseDlqBackend:
                     ),
                     (sync_name, list(remove_ids)),
                 )
-            for entry_id, entry in updates.items():
+            for chunk in _chunked(list(updates.items()), _rows_per_chunk(7)):
+                values_sql = ", ".join(
+                    [
+                        "(%s::text, %s::jsonb, %s::text, %s::integer, "
+                        "%s::text, %s::integer, %s::text)"
+                    ]
+                    * len(chunk)
+                )
+                params: list[Any] = []
+                for entry_id, entry in chunk:
+                    params.extend(
+                        (
+                            entry_id,
+                            json.dumps(entry.record),
+                            entry.error_message,
+                            entry.http_status,
+                            entry.timestamp,
+                            entry.attempts,
+                            entry.sync_run_id,
+                        )
+                    )
+                params.append(sync_name)
                 cur.execute(
                     _pgsql.SQL(
-                        "UPDATE {} SET record = %s, error_message = %s, "
-                        "http_status = %s, ts = %s, attempts = %s, sync_run_id = %s "
-                        "WHERE sync_name = %s AND id = %s"
-                    ).format(_qualified(self._profile, _DLQ_TABLE)),
-                    (
-                        json.dumps(entry.record),
-                        entry.error_message,
-                        entry.http_status,
-                        entry.timestamp,
-                        entry.attempts,
-                        entry.sync_run_id,
-                        sync_name,
-                        entry_id,
-                    ),
+                        "UPDATE {table} AS t SET "
+                        "record = v.record, error_message = v.error_message, "
+                        "http_status = v.http_status, ts = v.ts, "
+                        "attempts = v.attempts, sync_run_id = v.sync_run_id "
+                        f"FROM (VALUES {values_sql}) AS v(id, record, error_message, "
+                        "http_status, ts, attempts, sync_run_id) "
+                        "WHERE t.sync_name = %s AND t.id = v.id"
+                    ).format(table=_qualified(self._profile, _DLQ_TABLE)),
+                    params,
                 )
             conn.commit()
         finally:
