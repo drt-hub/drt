@@ -256,9 +256,7 @@ def replay_dead_letters(
             # re-queued and may be re-sent on the next retry — we prefer a
             # re-send (idempotent for upsert destinations) over a silent drop.
             failed_idx = {
-                e.batch_index
-                for e in result.row_errors
-                if 0 <= e.batch_index < len(retry_group)
+                e.batch_index for e in result.row_errors if 0 <= e.batch_index < len(retry_group)
             }
             pinpointed = len(failed_idx) == result.failed
             if isinstance(dest, StagedDestination):
@@ -332,9 +330,7 @@ def replay_dead_letters(
             # version (see CHANGELOG).
             delivered_at = datetime.now(timezone.utc).isoformat()
             if idempotency_ledger is not None:
-                delivered_keys = [
-                    key_by_id[eid] for eid in group_delivered_ids if eid in key_by_id
-                ]
+                delivered_keys = [key_by_id[eid] for eid in group_delivered_ids if eid in key_by_id]
                 if delivered_keys:
                     idempotency_ledger.mark_delivered(sync.name, delivered_keys, delivered_at)
 
