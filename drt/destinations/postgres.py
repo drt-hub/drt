@@ -201,14 +201,18 @@ class PostgresDestination(BaseSqlDestination):
         that column, silently overriding a ``DEFAULT`` (or failing a
         ``NOT NULL`` column outright), caught in Codex review on #1135.
 
-        Each row's ``INSERT`` runs inside its own ``SAVEPOINT`` (#1136): a
-        failed statement aborts the whole Postgres transaction, so
-        recovering the connection for the next row previously meant a full
-        ``conn.rollback()`` — which also discarded every *earlier*
-        successful row in this same call that hadn't been committed yet,
-        even though ``result.success`` had already counted them.
-        ``ROLLBACK TO SAVEPOINT`` recovers from just this row's failure
-        without touching prior work.
+        Each row's ``INSERT`` runs inside its own ``SAVEPOINT`` under
+        ``on_error: skip`` (#1136): a failed statement aborts the whole
+        Postgres transaction, so recovering the connection for the next
+        row previously meant a full ``conn.rollback()`` — which also
+        discarded every *earlier* successful row in this same call that
+        hadn't been committed yet, even though ``result.success`` had
+        already counted them. ``ROLLBACK TO SAVEPOINT`` recovers from just
+        this row's failure without touching prior work. Skipped entirely
+        under ``on_error: fail`` (Codex review on #1139): any failure
+        there rolls back the whole call regardless, so the ``SAVEPOINT``/
+        ``RELEASE`` pair would only add two no-benefit statements to every
+        successful row on the default error-free path.
         """
         from psycopg2 import sql as _pgsql
 
@@ -219,6 +223,7 @@ class PostgresDestination(BaseSqlDestination):
             self._replace_truncated = True
 
         schema_map = self._resolve_schema(config)
+        use_savepoint = sync_options.on_error == "skip"
 
         base_index = 0
         for run_columns, run_records in self._contiguous_signature_runs(records):
@@ -226,14 +231,16 @@ class PostgresDestination(BaseSqlDestination):
             for local_i, record in enumerate(run_records):
                 i = base_index + local_i
                 try:
-                    cur.execute(f"SAVEPOINT {_ROW_SAVEPOINT}")
+                    if use_savepoint:
+                        cur.execute(f"SAVEPOINT {_ROW_SAVEPOINT}")
                     values = [
                         _serialize_value(record.get(c), c, config.json_columns, schema_map)
                         for c in run_columns
                     ]
                     cur.execute(query, values)
                     result.success += 1
-                    cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
+                    if use_savepoint:
+                        cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
                 except Exception as e:
                     self._record_row_error(result, i, record, e)
                     if sync_options.on_error == "fail":
@@ -259,17 +266,20 @@ class PostgresDestination(BaseSqlDestination):
     ) -> SyncResult:
         """Build a shadow table per sync; atomic rename happens in finalize_sync.
 
-        Each row's INSERT runs inside its own SAVEPOINT (#1136) — this
-        method's ``on_error: skip`` path previously had **no** recovery at
-        all after a row failure (unlike its ``_load_upsert``/``_load_replace``
-        siblings), so every row *after* the first failure raised
-        ``InFailedSqlTransaction`` (Postgres aborts the whole transaction on
-        any failed statement) instead of just skipping the one bad row.
+        Each row's INSERT runs inside its own SAVEPOINT under ``on_error:
+        skip`` (#1136) — this method's skip path previously had **no**
+        recovery at all after a row failure (unlike its
+        ``_load_upsert``/``_load_replace`` siblings), so every row *after*
+        the first failure raised ``InFailedSqlTransaction`` (Postgres
+        aborts the whole transaction on any failed statement) instead of
+        just skipping the one bad row. Skipped entirely under ``on_error:
+        fail`` (Codex review on #1139) — see ``_load_replace``'s docstring.
         """
         from psycopg2 import sql as _pgsql
 
         result = SyncResult()
         shadow = _with_relation_suffix(table, "__drt_swap")
+        use_savepoint = sync_options.on_error == "skip"
 
         if not self._swap_shadow_created:
             cur.execute(_pgsql.SQL("DROP TABLE IF EXISTS {}").format(_qualified_ident(shadow)))
@@ -294,14 +304,16 @@ class PostgresDestination(BaseSqlDestination):
             for local_i, record in enumerate(run_records):
                 i = base_index + local_i
                 try:
-                    cur.execute(f"SAVEPOINT {_ROW_SAVEPOINT}")
+                    if use_savepoint:
+                        cur.execute(f"SAVEPOINT {_ROW_SAVEPOINT}")
                     values = [
                         _serialize_value(record.get(c), c, config.json_columns, schema_map)
                         for c in run_columns
                     ]
                     cur.execute(sql, values)
                     result.success += 1
-                    cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
+                    if use_savepoint:
+                        cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
                 except Exception as e:
                     self._record_row_error(result, i, record, e)
                     if sync_options.on_error == "fail":
@@ -612,17 +624,20 @@ class PostgresDestination(BaseSqlDestination):
         ``_load_upsert`` call, so ``on_error: fail``'s existing
         stop-and-roll-back-the-whole-call semantics are untouched).
 
-        Each row's statement runs inside its own ``SAVEPOINT`` (#1136): a
-        failed statement aborts the whole Postgres transaction, so recovering
-        the connection for the next row previously meant a full
-        ``conn.rollback()`` that also discarded every earlier successful row
-        in this same call that hadn't been committed yet, even though
-        ``result.success`` had already counted them. ``ROLLBACK TO
-        SAVEPOINT`` recovers from just this row's failure instead.
+        Each row's statement runs inside its own ``SAVEPOINT`` under
+        ``on_error: skip`` (#1136): a failed statement aborts the whole
+        Postgres transaction, so recovering the connection for the next
+        row previously meant a full ``conn.rollback()`` that also
+        discarded every earlier successful row in this same call that
+        hadn't been committed yet, even though ``result.success`` had
+        already counted them. ``ROLLBACK TO SAVEPOINT`` recovers from just
+        this row's failure instead. Skipped entirely under ``on_error:
+        fail`` (Codex review on #1139) — see ``_load_replace``'s docstring.
         """
         result = SyncResult()
         policy = sync_options.match_policy
         schema_map = self._resolve_schema(config)
+        use_savepoint = sync_options.on_error == "skip"
 
         base_index = 0
         for run_columns, run_records in self._contiguous_signature_runs(records):
@@ -664,7 +679,8 @@ class PostgresDestination(BaseSqlDestination):
             for local_i, record in enumerate(run_records):
                 i = base_index + local_i
                 try:
-                    cur.execute(f"SAVEPOINT {_ROW_SAVEPOINT}")
+                    if use_savepoint:
+                        cur.execute(f"SAVEPOINT {_ROW_SAVEPOINT}")
                     values = [
                         _serialize_value(record.get(c), c, config.json_columns, schema_map)
                         for c in value_cols
@@ -675,7 +691,8 @@ class PostgresDestination(BaseSqlDestination):
                         result.skipped_no_match += 1  # #757 — no create/update target
                     else:
                         result.success += 1
-                    cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
+                    if use_savepoint:
+                        cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
                 except Exception as e:
                     self._record_row_error(result, i, record, e)
                     if sync_options.on_error == "fail":

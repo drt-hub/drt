@@ -145,9 +145,29 @@ class TestMySQLDestinationLoad:
 
         assert result.success == 2
         assert result.failed == 0
-        # 3 execute calls per row (SAVEPOINT/INSERT/RELEASE, #1136) x 2 rows.
-        assert conn.cursor().execute.call_count == 6
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139).
+        assert conn.cursor().execute.call_count == 2
         conn.commit.assert_called_once()
+
+    @patch("drt.destinations.mysql.MySQLDestination._connect")
+    def test_on_error_fail_never_issues_savepoints(self, mock_connect: MagicMock) -> None:
+        """#1139: see PostgresDestination's identical test -- the per-row
+        SAVEPOINT/RELEASE machinery (#1136) only helps on_error: skip, so
+        it's gated to skip only rather than adding two no-benefit
+        statements to every successful row on the default (fail) path."""
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        records = [
+            {"user_id": 1, "company_id": 5, "score": 0.5},
+            {"user_id": 2, "company_id": 5, "score": 0.9},
+        ]
+        result = MySQLDestination().load(records, _config(), _options(on_error="fail"))
+
+        assert result.success == 2
+        assert not any("SAVEPOINT" in c.args[0] for c in cur.execute.call_args_list)
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
     def test_heterogeneous_batch_does_not_drop_a_field_appearing_in_a_later_record(
@@ -167,10 +187,9 @@ class TestMySQLDestinationLoad:
         result = MySQLDestination().load(records, _config(), _options())
 
         assert result.success == 2
-        # 3 execute calls per row (SAVEPOINT/INSERT/RELEASE, #1136) x 2 rows
-        # (each its own run/signature here) -- filter down to just the
-        # actual INSERT calls (the only ones with a second, params, arg).
-        assert cur.execute.call_count == 6
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139), so this is a plain 2 execute calls.
+        assert cur.execute.call_count == 2
         insert_calls = [c for c in cur.execute.call_args_list if len(c.args) > 1]
         queries = [c.args[0] for c in insert_calls]
         params = [c.args[1] for c in insert_calls]
@@ -191,8 +210,9 @@ class TestMySQLDestinationLoad:
         records = [{"user_id": 1, "company_id": 5, "score": 0.95}]
         MySQLDestination().load(records, _config(), options)
 
-        # index 0 = SAVEPOINT, 1 = the actual (tagged) INSERT (#1136).
-        query = conn.cursor().execute.call_args_list[1].args[0]
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139), so this is the only execute call.
+        query = conn.cursor().execute.call_args.args[0]
         assert query.startswith("/* drt sync=s run_id=r */\n")
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
@@ -203,8 +223,9 @@ class TestMySQLDestinationLoad:
         records = [{"user_id": 1, "company_id": 5, "score": 0.95}]
         MySQLDestination().load(records, _config(), _options())
 
-        # index 0 = SAVEPOINT, 1 = the actual INSERT (#1136).
-        query = conn.cursor().execute.call_args_list[1].args[0]
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139), so this is the only execute call.
+        query = conn.cursor().execute.call_args.args[0]
         assert not query.startswith("/* drt")
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
@@ -287,8 +308,9 @@ class TestMySQLDestinationLoad:
         result = MySQLDestination().load(records, _config(), _options())
 
         assert result.success == 1
-        # index 0 = SAVEPOINT, 1 = the actual INSERT (#1136).
-        args, _ = cur.execute.call_args_list[1]
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139), so this is the only execute call.
+        args, _ = cur.execute.call_args
         _sql, values = args
         assert values[2] == '{"lang": "日本語", "level": "N1"}'
         assert values[3] == '["a", "b"]'
@@ -362,8 +384,9 @@ class TestMySQLReplaceMode:
 
         assert result.success == 2
         assert result.failed == 0
-        # TRUNCATE + 2 rows x 3 calls each (SAVEPOINT/INSERT/RELEASE, #1136).
-        assert cur.execute.call_count == 7
+        # TRUNCATE + 2 INSERTs = 3 execute calls (on_error defaults to
+        # "fail" -- no per-row SAVEPOINT overhead there, #1139).
+        assert cur.execute.call_count == 3
         first_call_sql = cur.execute.call_args_list[0][0][0]
         assert "TRUNCATE TABLE" in first_call_sql
         conn.commit.assert_called_once()
@@ -433,8 +456,9 @@ class TestMySQLReplaceMode:
             _options(mode="replace"),
         )
 
-        # calls: 0=TRUNCATE, 1=SAVEPOINT, 2=the actual INSERT (#1136).
-        insert_sql = cur.execute.call_args_list[2][0][0]
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139): calls are 0=TRUNCATE, 1=the actual INSERT.
+        insert_sql = cur.execute.call_args_list[1][0][0]
         assert "ON DUPLICATE KEY" not in insert_sql
         assert "INSERT INTO" in insert_sql
 
@@ -464,8 +488,9 @@ class TestMySQLReplaceMode:
         dest = MySQLDestination()
         dest.load(records, _config(), _options(mode="replace"))
 
-        # calls: 0=TRUNCATE, 1=SAVEPOINT, 2=the actual INSERT (#1136).
-        _sql, values = cur.execute.call_args_list[2][0]
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139): calls are 0=TRUNCATE, 1=the actual INSERT.
+        _sql, values = cur.execute.call_args_list[1][0]
         assert values[2] == '{"lang": "ja"}'
 
 

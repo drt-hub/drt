@@ -146,9 +146,32 @@ class TestPostgresDestinationLoad:
 
         assert result.success == 2
         assert result.failed == 0
-        # 3 execute calls per row (SAVEPOINT/INSERT/RELEASE, #1136) x 2 rows.
-        assert conn.cursor().execute.call_count == 6
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139).
+        assert conn.cursor().execute.call_count == 2
         conn.commit.assert_called_once()
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_on_error_fail_never_issues_savepoints(self, mock_connect: MagicMock) -> None:
+        """#1139: the per-row SAVEPOINT/RELEASE machinery (#1136) exists
+        purely to recover from a per-row failure under on_error: skip --
+        on_error: fail always rolls back the whole call on any failure
+        regardless, so gate it to skip only rather than adding two
+        no-benefit statements to every successful row on the default
+        (fail) error-free path."""
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        records = [
+            {"id": 1, "score": 0.5},
+            {"id": 2, "score": 0.9},
+            {"id": 3, "score": 1.5},
+        ]
+        result = PostgresDestination().load(records, _config(), _options(on_error="fail"))
+
+        assert result.success == 3
+        assert not any("SAVEPOINT" in _query_text(c.args[0]) for c in cur.execute.call_args_list)
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
     def test_upsert_uses_schema_qualified_identifier(self, mock_connect: MagicMock) -> None:
@@ -164,8 +187,9 @@ class TestPostgresDestinationLoad:
         )
 
         assert result.success == 1
-        # index 0 = SAVEPOINT, 1 = the actual INSERT, 2 = RELEASE (#1136).
-        query = _query_text(cur.execute.call_args_list[1].args[0])
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139), so this is the only execute call.
+        query = _query_text(cur.execute.call_args.args[0])
         assert "INSERT INTO" in query
         assert _split_identifier_text("marketing", "email_events") in query
 
@@ -185,8 +209,9 @@ class TestPostgresDestinationLoad:
         # a plain string, so str() gives its repr — the comment fragment is
         # still the leading component (asserted precisely for the plain-str
         # and Composable cases in test_sql_base_tagging.py).
-        # index 0 = SAVEPOINT, 1 = the actual (tagged) INSERT (#1136).
-        query = _query_text(cur.execute.call_args_list[1].args[0])
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139), so this is the only execute call.
+        query = _query_text(cur.execute.call_args.args[0])
         assert query.startswith("Composed([SQL('/* drt sync=s run_id=r */\\n')")
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
@@ -197,8 +222,9 @@ class TestPostgresDestinationLoad:
 
         PostgresDestination().load([{"id": 1, "score": 0.95}], _config(), _options())
 
-        # index 0 = SAVEPOINT, 1 = the actual INSERT (#1136).
-        query = _query_text(cur.execute.call_args_list[1].args[0])
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139), so this is the only execute call.
+        query = _query_text(cur.execute.call_args.args[0])
         assert not query.startswith("/* drt")
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
@@ -222,10 +248,11 @@ class TestPostgresDestinationLoad:
 
         assert result.success == 2
         assert result.failed == 0
-        # 3 execute calls per row (SAVEPOINT/INSERT/RELEASE, #1136) x 2 rows
-        # (each its own run/signature here) -- filter down to just the
-        # actual INSERT calls (the only ones with a second, params, arg).
-        assert cur.execute.call_count == 6
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139), so this is a plain 2 execute calls (one INSERT
+        # per record/run). Filtering to calls with a params arg is still
+        # robust if that ever changes.
+        assert cur.execute.call_count == 2
         insert_calls = [c for c in cur.execute.call_args_list if len(c.args) > 1]
         queries = [_query_text(c.args[0]) for c in insert_calls]
         params = [c.args[1] for c in insert_calls]
@@ -254,8 +281,9 @@ class TestPostgresDestinationLoad:
         ]
         PostgresDestination().load(records, _config(), _options())
 
-        # index 0 = SAVEPOINT, 1 = the actual INSERT (#1136).
-        first_group_params = cur.execute.call_args_list[1].args[1]
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139); index 0 is the first group's own INSERT.
+        first_group_params = cur.execute.call_args_list[0].args[1]
         assert None not in first_group_params
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
@@ -407,8 +435,9 @@ class TestPostgresReplaceMode:
 
         assert result.success == 2
         assert result.failed == 0
-        # TRUNCATE + 2 rows x 3 calls each (SAVEPOINT/INSERT/RELEASE, #1136).
-        assert cur.execute.call_count == 7
+        # TRUNCATE + 2 INSERTs = 3 execute calls (on_error defaults to
+        # "fail" -- no per-row SAVEPOINT overhead there, #1139).
+        assert cur.execute.call_count == 3
         first_call_sql = str(cur.execute.call_args_list[0][0][0])
         assert "TRUNCATE" in first_call_sql
         conn.commit.assert_called_once()
@@ -437,8 +466,9 @@ class TestPostgresReplaceMode:
         dest = PostgresDestination()
         dest.load([{"id": 1, "score": 0.5}], _config(), _options(mode="replace"))
 
-        # calls: 0=TRUNCATE, 1=SAVEPOINT, 2=the actual INSERT (#1136).
-        insert_sql = str(cur.execute.call_args_list[2][0][0])
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139): calls are 0=TRUNCATE, 1=the actual INSERT.
+        insert_sql = str(cur.execute.call_args_list[1][0][0])
         assert "INSERT INTO" in insert_sql
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
@@ -522,8 +552,9 @@ class TestPostgresReplaceMode:
         PostgresDestination().load(records, _config(), _options())
 
         # All values should be plain Python types, no Json wrapping.
-        # index 0 = SAVEPOINT, 1 = the actual INSERT (#1136).
-        call_args = cur.execute.call_args_list[1][0][1]
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139), so this is the only execute call.
+        call_args = cur.execute.call_args[0][1]
         for val in call_args:
             assert not hasattr(val, "adapted"), f"Expected plain value, got Json: {val}"
 

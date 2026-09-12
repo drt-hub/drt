@@ -564,15 +564,26 @@ class BaseSqlDestination:
         ``ROLLBACK TO SAVEPOINT`` undoes only this row's own work, keeping
         every earlier successful row in the same call intact — unlike a
         full ``conn.rollback()``, which used to discard them even though
-        ``result.success`` had already counted them. Falls back to a full
-        ``conn.rollback()`` only if the ``ROLLBACK TO SAVEPOINT`` itself
-        fails (e.g. the row's own ``SAVEPOINT`` statement never actually
-        succeeded, or the connection is otherwise unusable) — the same
-        loss of earlier work this fix otherwise avoids, but the only
-        remaining way to make the connection usable again.
+        ``result.success`` had already counted them.
+
+        Also releases the savepoint immediately after rolling back to it
+        (Codex review on #1139): ``ROLLBACK TO SAVEPOINT`` does not by
+        itself destroy the named savepoint — Postgres leaves it on the
+        subtransaction stack, so the *next* row's ``SAVEPOINT`` (same
+        fixed name) would nest on top of it rather than reusing a clean
+        slot, accumulating one unreleased subtransaction per failed row
+        for the rest of the batch. ``RELEASE`` pops it immediately so the
+        stack never grows past one entry regardless of failure count.
+
+        Falls back to a full ``conn.rollback()`` if either statement fails
+        (e.g. the row's own ``SAVEPOINT`` never actually succeeded, or the
+        connection is otherwise unusable) — the same loss of earlier work
+        this fix otherwise avoids, but the only remaining way to make the
+        connection usable again.
         """
         try:
             cur.execute(f"ROLLBACK TO SAVEPOINT {_ROW_SAVEPOINT}")
+            cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
         except Exception:
             conn.rollback()
 

@@ -160,20 +160,25 @@ class MySQLDestination(BaseSqlDestination):
         ``DEFAULT``/nullability apply, rather than binding an explicit
         ``NULL`` that would override it (caught in Codex review on #1135).
 
-        Each row's INSERT runs inside its own ``SAVEPOINT`` (#1136): the
-        previous ``conn.rollback()`` on a per-row failure discarded every
-        earlier successful row in this same call that hadn't been
-        committed yet, even though ``result.success`` had already counted
-        them -- and, on MySQL specifically, that ``conn.rollback()`` was
-        never even necessary for recovery (InnoDB doesn't abort the whole
-        transaction on an ordinary statement error, verified empirically),
-        so it was pure data loss with no compensating benefit. A plain
-        "skip and keep going" (no rollback of any kind) would fix that
-        common case, but a genuine deadlock *does* force MySQL to roll
-        back the whole transaction -- using the same ``SAVEPOINT``
-        mechanism as Postgres here keeps the recovery code identical
-        across both dialects rather than relying on which specific errors
-        happen to leave the transaction usable.
+        Each row's INSERT runs inside its own ``SAVEPOINT`` under
+        ``on_error: skip`` (#1136): the previous ``conn.rollback()`` on a
+        per-row failure discarded every earlier successful row in this
+        same call that hadn't been committed yet, even though
+        ``result.success`` had already counted them -- and, on MySQL
+        specifically, that ``conn.rollback()`` was never even necessary
+        for recovery (InnoDB doesn't abort the whole transaction on an
+        ordinary statement error, verified empirically), so it was pure
+        data loss with no compensating benefit. A plain "skip and keep
+        going" (no rollback of any kind) would fix that common case, but a
+        genuine deadlock *does* force MySQL to roll back the whole
+        transaction -- using the same ``SAVEPOINT`` mechanism as Postgres
+        here keeps the recovery code identical across both dialects rather
+        than relying on which specific errors happen to leave the
+        transaction usable. Skipped entirely under ``on_error: fail``
+        (Codex review on #1139) -- any failure there rolls back the whole
+        call regardless, so the ``SAVEPOINT``/``RELEASE`` pair would only
+        add two no-benefit statements to every successful row on the
+        default error-free path.
         """
         result = SyncResult()
 
@@ -182,6 +187,7 @@ class MySQLDestination(BaseSqlDestination):
             self._replace_truncated = True
 
         schema_map = self._resolve_schema(config)
+        use_savepoint = sync_options.on_error == "skip"
 
         base_index = 0
         for run_columns, run_records in self._contiguous_signature_runs(records):
@@ -189,14 +195,16 @@ class MySQLDestination(BaseSqlDestination):
             for local_i, record in enumerate(run_records):
                 i = base_index + local_i
                 try:
-                    cur.execute(f"SAVEPOINT {_ROW_SAVEPOINT}")
+                    if use_savepoint:
+                        cur.execute(f"SAVEPOINT {_ROW_SAVEPOINT}")
                     values = [
                         _serialize_value(record.get(c), c, config.json_columns, schema_map)
                         for c in run_columns
                     ]
                     cur.execute(sql, values)
                     result.success += 1
-                    cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
+                    if use_savepoint:
+                        cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
                 except Exception as e:
                     self._record_row_error(result, i, record, e)
                     if sync_options.on_error == "fail":
@@ -222,16 +230,19 @@ class MySQLDestination(BaseSqlDestination):
     ) -> SyncResult:
         """Build a shadow table per sync; atomic rename happens in finalize_sync.
 
-        Each row's INSERT runs inside its own SAVEPOINT (#1136) — this
-        method's ``on_error: skip`` path previously had **no** recovery at
-        all after a row failure (unlike its ``_load_upsert``/``_load_replace``
-        siblings' ``conn.rollback()``), leaving the connection in whatever
-        state MySQL left it in after the failed statement.
+        Each row's INSERT runs inside its own SAVEPOINT under ``on_error:
+        skip`` (#1136) — this method's skip path previously had **no**
+        recovery at all after a row failure (unlike its
+        ``_load_upsert``/``_load_replace`` siblings' ``conn.rollback()``),
+        leaving the connection in whatever state MySQL left it in after
+        the failed statement. Skipped entirely under ``on_error: fail``
+        (Codex review on #1139) — see ``_load_replace``'s docstring.
         """
         result = SyncResult()
         shadow = f"{table}__drt_swap"
         shadow_q = self._quote_ident(shadow)
         table_q = self._quote_ident(table)
+        use_savepoint = sync_options.on_error == "skip"
 
         if not self._swap_shadow_created:
             cur.execute(f"DROP TABLE IF EXISTS {shadow_q}")
@@ -251,14 +262,16 @@ class MySQLDestination(BaseSqlDestination):
             for local_i, record in enumerate(run_records):
                 i = base_index + local_i
                 try:
-                    cur.execute(f"SAVEPOINT {_ROW_SAVEPOINT}")
+                    if use_savepoint:
+                        cur.execute(f"SAVEPOINT {_ROW_SAVEPOINT}")
                     values = [
                         _serialize_value(record.get(c), c, config.json_columns, schema_map)
                         for c in run_columns
                     ]
                     cur.execute(sql, values)
                     result.success += 1
-                    cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
+                    if use_savepoint:
+                        cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
                 except Exception as e:
                     self._record_row_error(result, i, record, e)
                     if sync_options.on_error == "fail":
@@ -435,13 +448,15 @@ class MySQLDestination(BaseSqlDestination):
         never span more than one ``_load_upsert`` call, so this keeps the
         existing one-transaction-per-call semantics untouched).
 
-        Each row's statement runs inside its own ``SAVEPOINT`` (#1136) —
-        see ``PostgresDestination._load_upsert``'s docstring for why a
-        per-row ``conn.rollback()`` on ``on_error: skip`` silently
-        discarded earlier successful rows in the same call.
+        Each row's statement runs inside its own ``SAVEPOINT`` under
+        ``on_error: skip`` (#1136) — see ``PostgresDestination._load_upsert``'s
+        docstring for why a per-row ``conn.rollback()`` there silently
+        discarded earlier successful rows in the same call. Skipped
+        entirely under ``on_error: fail`` (Codex review on #1139).
         """
         result = SyncResult()
         schema_map = self._resolve_schema(config)
+        use_savepoint = sync_options.on_error == "skip"
 
         base_index = 0
         for run_columns, run_records in self._contiguous_signature_runs(records):
@@ -450,14 +465,16 @@ class MySQLDestination(BaseSqlDestination):
             for local_i, record in enumerate(run_records):
                 i = base_index + local_i
                 try:
-                    cur.execute(f"SAVEPOINT {_ROW_SAVEPOINT}")
+                    if use_savepoint:
+                        cur.execute(f"SAVEPOINT {_ROW_SAVEPOINT}")
                     values = [
                         _serialize_value(record.get(c), c, config.json_columns, schema_map)
                         for c in run_columns
                     ]
                     cur.execute(sql, values)
                     result.success += 1
-                    cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
+                    if use_savepoint:
+                        cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
                 except Exception as e:
                     self._record_row_error(result, i, record, e)
                     if sync_options.on_error == "fail":
