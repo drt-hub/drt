@@ -664,6 +664,14 @@ class PostgresDestination(BaseSqlDestination):
     def _build_insert_sql(table: str, columns: list[str]) -> Any:
         from psycopg2 import sql as _pgsql
 
+        if not columns:
+            # A run of genuinely empty records (#1091, caught in Codex
+            # review on #1135): replace mode skips upsert_key validation
+            # (its write never references upsert_key at all), so a batch
+            # can legitimately contain a record with no populated fields
+            # at all. ``INSERT INTO t () VALUES ()`` is invalid Postgres
+            # syntax -- an empty column/value list needs ``DEFAULT VALUES``.
+            return _pgsql.SQL("INSERT INTO {} DEFAULT VALUES").format(_qualified_ident(table))
         return _pgsql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
             _qualified_ident(table),
             _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in columns),

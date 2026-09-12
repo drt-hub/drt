@@ -331,6 +331,17 @@ class TestInsertSql:
         assert "score" in rendered
         assert "updated_at" in rendered
 
+    def test_empty_columns_uses_default_values(self) -> None:
+        """#1091, round 7 of Codex review on #1135: a replace-mode batch can
+        legitimately contain a genuinely empty record (replace mode skips
+        upsert_key validation entirely), which becomes a signature run with
+        no columns at all. ``INSERT INTO t () VALUES ()`` is invalid
+        PostgreSQL syntax — the empty case needs ``DEFAULT VALUES``."""
+        sql = PostgresDestination._build_insert_sql(table="public.scores", columns=[])
+        rendered = str(sql)
+        assert "DEFAULT VALUES" in rendered
+        assert "()" not in rendered
+
 
 class TestQualifiedIdentifiers:
     def test_split_qualified_table_name(self) -> None:

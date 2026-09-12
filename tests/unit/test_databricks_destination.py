@@ -322,14 +322,15 @@ class TestDatabricksDestinationLoad:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """#1091: a field absent from the first record but present in a
-        later one used to be silently dropped for the whole batch. Both the
-        staging INSERT *and* the MERGE now run once per contiguous
-        key-signature run — an earlier version of this fix kept one final
-        MERGE over the batch-wide union, which Codex review on #1135 caught
-        still clobbering an existing row's "note" via a blanket
-        ``UPDATE SET note = source.note`` for runs whose records never sent
-        "note". Running the MERGE per run means the run lacking "note"
-        never mentions it in its own UPDATE SET clause."""
+        later one used to be silently dropped for the whole batch. The
+        staging INSERT still runs once per contiguous key-signature run, so
+        a run lacking "note" never binds a value for it (letting the
+        target's own DEFAULT apply on a brand-new row) — but the single
+        final MERGE (round 7 of Codex review on #1135, replacing an
+        earlier per-run-MERGE design) uses a per-column
+        ``CASE WHEN source.__drt_has_note THEN source.note ELSE
+        target.note END`` presence flag instead, so "note" only overwrites
+        an existing row when that row's own run actually sent it."""
         _set_creds(monkeypatch)
         conn = _fake_conn()
         modules = _mocked_databricks_modules(conn)
@@ -345,33 +346,41 @@ class TestDatabricksDestinationLoad:
         assert result.success == 2
         sqls = [(call.args[0] if call.args else "") for call in conn._cur.execute.call_args_list]
         merge_calls = [s for s in sqls if s.startswith("MERGE INTO main.default.user_scores")]
-        assert len(merge_calls) == 2
-        assert "note" not in merge_calls[0]
-        assert "note" in merge_calls[1]
+        assert len(merge_calls) == 1
+        assert (
+            "note = CASE WHEN source.__drt_has_note THEN source.note ELSE target.note END"
+            in merge_calls[0]
+        )
         insert_staging_calls = [
             s for s in sqls if s.startswith("INSERT INTO main.default.__drt_staging_user_scores")
         ]
         assert len(insert_staging_calls) == 2
-        assert "note" not in insert_staging_calls[0]
-        assert "note" in insert_staging_calls[1]
+        # Both runs stage every union column's presence flag, but only the
+        # run whose records actually sent "note" includes it as a real
+        # (bindable) column alongside the flags.
+        assert "(id, score, __drt_has_score, __drt_has_note)" in insert_staging_calls[0]
+        assert "(id, score, note, __drt_has_score, __drt_has_note)" in insert_staging_calls[1]
 
     def test_on_error_fail_stops_before_any_merge_when_a_later_run_fails_staging(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Codex review on #1135 caught a real atomicity regression: an
-        earlier version of this fix staged then merged one run at a time,
-        so an earlier run's MERGE could already be committed to target by
-        the time a later run's staging insert failed under on_error: fail
-        -- a partial application the original single-staging-then-one-MERGE
-        design never allowed. Staging every run first, and only merging
-        once all of them succeed, restores that all-or-nothing guarantee:
-        target must see zero MERGE statements here."""
+        """A staging INSERT failing partway through, under on_error: fail,
+        must prevent the single final MERGE from running at all. The
+        single-shared-staging-table design (round 7 of Codex review on
+        #1135, replacing an earlier per-run-staging-table design that
+        could leave an *earlier* run's MERGE already committed by the time
+        a *later* run's staging failed) makes this automatic: the MERGE
+        only executes after every run has finished staging."""
         _set_creds(monkeypatch)
         conn = _fake_conn()
         modules = _mocked_databricks_modules(conn)
 
         def _execute_side_effect(sql: str, *args: object) -> None:
-            if sql.startswith("INSERT INTO main.default.__drt_staging_user_scores_1"):
+            # Only the second run's staging INSERT binds a real "note"
+            # column (the first run's INSERT also mentions "note" as part
+            # of the "__drt_has_note" flag column name, so match the full
+            # column list rather than a bare substring).
+            if "(id, score, note, __drt_has_score, __drt_has_note)" in sql:
                 raise RuntimeError("boom")
 
         conn._cur.execute.side_effect = _execute_side_effect

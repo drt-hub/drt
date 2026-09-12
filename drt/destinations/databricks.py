@@ -363,88 +363,102 @@ class DatabricksDestination(BaseSqlDestination):
                 raise ValueError("upsert_key is required for merge mode")
 
             key_clause = " AND ".join([f"target.{k} = source.{k}" for k in config.upsert_key])
-            staging_base = f"{config.catalog}.{config.schema_}.__drt_staging_{config.table}"
+            staging_table = f"{config.catalog}.{config.schema_}.__drt_staging_{config.table}"
 
-            # Two passes, not one interleaved loop (#1091, caught in Codex
-            # review on #1135): the MERGE runs once per contiguous
-            # key-signature run (see below for why), and each MERGE
-            # autocommits immediately (Databricks has no multi-statement
-            # transaction to wrap these in). Staging-then-merging one run
-            # at a time meant a *later* run's staging failure under
-            # on_error: fail left an *earlier* run's MERGE already
-            # committed to the target -- a partial application the
-            # original single-staging-then-one-MERGE design never allowed
-            # (a staging failure there always aborted before the one
-            # MERGE ran). Staging every run first, and only merging once
-            # all of them have succeeded, restores that all-or-nothing
-            # guarantee: an on_error: fail staging failure now aborts
-            # before *any* MERGE touches the target, same as before #1091.
+            # One shared staging table + one final MERGE (#1091, round 7 of
+            # Codex review on #1135): an earlier version of this fix staged
+            # and merged each contiguous key-signature run through its own
+            # uniquely-suffixed table, but that meant neither atomicity
+            # (each MERGE autocommits immediately -- Databricks has no
+            # multi-statement transaction -- so a *later* run's MERGE
+            # failing left an *earlier* run's MERGE already permanent) nor
+            # a bounded statement count (alternating signatures created one
+            # staging table + one MERGE *per run*, up to ~400 statements
+            # for a 100-row batch) could be guaranteed. Consolidating back
+            # to a single MERGE restores both: one autocommitted statement
+            # for the whole batch, and a fixed ~4-statement shape
+            # regardless of how many distinct signatures appear.
             #
-            # Each run gets its own staging table (not one shared table)
-            # so its own MERGE only ever matches that run's own rows —
-            # sharing one staging table across runs would let a later
-            # run's MERGE re-match an earlier run's already-merged rows.
-            staged_runs: list[tuple[str, list[str], int]] = []
+            # The clobber bug the per-run design existed to avoid (a run
+            # whose records never sent a column still getting that
+            # column's blanket ``UPDATE SET`` applied to any row it
+            # matches) is instead avoided with a per-column boolean
+            # "presence flag" staged alongside each row
+            # (``__drt_has_<col>``, true only when that row's own run
+            # included ``<col>``): the single MERGE's ``UPDATE SET`` uses
+            # ``CASE WHEN source.__drt_has_col THEN source.col ELSE
+            # target.col END`` per column, so a column no run for this row
+            # ever sent falls back to the target's own current value --
+            # left untouched, exactly as omitting it from a per-run
+            # ``UPDATE SET`` would have done.
+            #
+            # ``columns`` here is the batch-wide union computed once in
+            # ``BaseSqlDestination.load()``.
+            update_cols = [c for c in columns if c not in config.upsert_key]
+            flag_cols = [f"__drt_has_{c}" for c in update_cols]
+
+            cur.execute(
+                f"CREATE OR REPLACE TABLE {staging_table} AS SELECT * FROM {table_fq} WHERE 1=0"
+            )
+            if flag_cols:
+                # Adding nullable columns to an existing Delta table via
+                # ``ALTER TABLE ... ADD COLUMNS`` is standard, long-supported
+                # schema evolution -- not exercised here against a live
+                # workspace (no ``DRT_SMOKE_DATABRICKS_*`` credentials in
+                # this repo's smoke tier).
+                flag_ddl = ", ".join(f"{f} BOOLEAN" for f in flag_cols)
+                cur.execute(f"ALTER TABLE {staging_table} ADD COLUMNS ({flag_ddl})")
+
             base_index = 0
-            for i, (run_columns, run_records) in enumerate(
-                self._contiguous_signature_runs(records)
-            ):
-                staging_table = f"{staging_base}_{i}"
-                cur.execute(
-                    f"CREATE OR REPLACE TABLE {staging_table} AS SELECT * FROM {table_fq} WHERE 1=0"
+            for run_columns, run_records in self._contiguous_signature_runs(records):
+                # Each run stages only its OWN data columns (#1091) --
+                # widening this to the union with explicit values for
+                # columns this run never sent would put a real (non-absent)
+                # value into every union column, and the ``WHEN NOT
+                # MATCHED`` insert below would then write that staged value
+                # into a brand-new target row instead of letting the
+                # target's own DEFAULT apply -- reintroducing the original
+                # #1091 bug on the new-row path. Only the boolean presence
+                # flags are set for the full union on every row.
+                run_flags = {f"__drt_has_{c}": (c in run_columns) for c in update_cols}
+                augmented_records = [{**rec, **run_flags} for rec in run_records]
+                augmented_columns = run_columns + flag_cols
+                run_value_clause, run_json_cols = _value_clause(
+                    augmented_columns, category_map, ddls
                 )
-                run_col_list = ", ".join(run_columns)
-                run_value_clause, run_json_cols = _value_clause(run_columns, category_map, ddls)
-                staging_sql = f"INSERT INTO {staging_table} ({run_col_list}) {run_value_clause}"
-                failed_before = len(result.row_errors)
+                col_list = ", ".join(augmented_columns)
+                staging_sql = f"INSERT INTO {staging_table} ({col_list}) {run_value_clause}"
                 self._insert_rows(
                     cur,
                     staging_sql,
-                    run_records,
+                    augmented_records,
                     sync_options,
                     result,
-                    run_columns,
+                    augmented_columns,
                     run_json_cols,
                     base_index=base_index,
                     count_success=False,
                 )
-                run_failed = len(result.row_errors) - failed_before
-                staged_runs.append((staging_table, run_columns, len(run_records) - run_failed))
                 base_index += len(run_records)
 
-            # Only now merge each run's staged rows into target, in
-            # original order, then drop its staging table. Running the
-            # MERGE per run (not once over the batch-wide column union)
-            # keeps each run's own ``update_cols`` scoped to exactly the
-            # columns that run's records actually sent — an earlier
-            # version of this fix shared one final MERGE across all runs,
-            # which Codex review caught making
-            # ``WHEN MATCHED THEN UPDATE SET note = source.note`` fire for
-            # *every* matched row regardless of which run it came from, so
-            # a run whose records never sent ``note`` would overwrite an
-            # existing destination row's ``note`` with staging's
-            # DEFAULT-filled value — the same clobber #1091 was originally
-            # about, just reached via MERGE's blanket UPDATE instead of a
-            # missing column.
-            for staging_table, run_columns, run_success_count in staged_runs:
-                update_cols = [c for c in run_columns if c not in config.upsert_key]
-                update_clause = ", ".join([f"{c} = source.{c}" for c in update_cols])
-                insert_cols = ", ".join(run_columns)
-                insert_vals = ", ".join([f"source.{c}" for c in run_columns])
-                matched_clause = (
-                    f"WHEN MATCHED THEN UPDATE SET {update_clause}" if update_cols else ""
-                )
-                merge_sql = (
-                    f"MERGE INTO {table_fq} target "
-                    f"USING {staging_table} source "
-                    f"ON {key_clause} "
-                    f"{matched_clause} "
-                    f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                    f"VALUES ({insert_vals})"
-                )
-                cur.execute(merge_sql)
-                result.success += run_success_count
-                cur.execute(f"DROP TABLE IF EXISTS {staging_table}")
+            update_clause = ", ".join(
+                f"{c} = CASE WHEN source.__drt_has_{c} THEN source.{c} ELSE target.{c} END"
+                for c in update_cols
+            )
+            insert_cols = ", ".join(columns)
+            insert_vals = ", ".join([f"source.{c}" for c in columns])
+            matched_clause = f"WHEN MATCHED THEN UPDATE SET {update_clause}" if update_cols else ""
+            merge_sql = (
+                f"MERGE INTO {table_fq} target "
+                f"USING {staging_table} source "
+                f"ON {key_clause} "
+                f"{matched_clause} "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+            cur.execute(merge_sql)
+            result.success += len(records) - len(result.row_errors)
+            cur.execute(f"DROP TABLE IF EXISTS {staging_table}")
 
         else:
             raise ValueError(f"Unsupported mode: {config.mode}")
