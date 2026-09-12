@@ -489,9 +489,34 @@ class TestSnowflakeWarehouseDlqBackend:
         conn.commit.assert_called_once()
         executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
         assert any(sql.startswith("DELETE FROM") for sql in executed)
-        # #1121: replace() upserts via the same chunked MERGE as append(),
-        # not a plain per-entry INSERT.
-        assert any("MERGE INTO" in sql and "PARSE_JSON(v2)" in sql for sql in executed)
+        # #1121: replace() inserts via its own chunked, plain multi-row
+        # INSERT (_insert_dlq_entries) -- NOT append()'s id-matching MERGE.
+        # Sharing that MERGE here was tried and reverted after Codex review
+        # on #1133 found it could silently corrupt a different sync's row
+        # on an id collision (Snowflake enforces no id uniqueness).
+        assert any("INSERT INTO" in sql and "PARSE_JSON(v2)" in sql for sql in executed)
+        assert not any("MERGE INTO" in sql for sql in executed)
+
+    def test_replace_does_not_touch_another_syncs_row_sharing_an_id(self) -> None:
+        """Regression for the Codex-review finding on #1133: replace() must
+        never match an existing row by id alone, since Snowflake enforces no
+        id uniqueness and a legacy content-hash id can coincide across
+        sync_names. A plain INSERT (not a MERGE) structurally cannot update
+        a pre-existing row, no matter whose sync_name it belongs to."""
+        conn = _mock_conn()
+        with (
+            patch("drt.state.warehouse_snowflake._connect", return_value=conn),
+            patch("drt.sources.snowflake.SnowflakeSource.ensure_managed_schema"),
+            patch("drt.sources.snowflake.SnowflakeSource.managed_table_exists", return_value=True),
+        ):
+            SnowflakeWarehouseDlqBackend(_profile()).replace(
+                "sync-b", [_dead_letter(id="shared-id")]
+            )
+
+        executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
+        insert_calls = [sql for sql in executed if sql.startswith("INSERT INTO")]
+        assert insert_calls
+        assert not any("WHEN MATCHED" in sql or "ON t.id" in sql for sql in executed)
 
     def test_replace_rolls_back_and_reraises_on_failure(self) -> None:
         conn = _mock_conn()

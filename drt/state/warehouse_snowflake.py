@@ -60,16 +60,23 @@ backward under last-writer-wins) apply identically here — see that module's
 docstring rather than repeating it.
 
 **`DlqBackend.append`/`.replace()`/`.reconcile()` batch into bounded
-multi-row `MERGE` statements (#1121)** rather than one `MERGE`/`INSERT`/
-`UPDATE` per dead-letter entry — raised in Codex review on #1120, closed
+multi-row `MERGE`/`INSERT`/`DELETE` statements (#1121)** rather than one
+statement per dead-letter entry — raised in Codex review on #1120, closed
 here after the identical Postgres and Databricks legs (#1129/#1130).
-`append()` and `replace()` share one upsert-by-id `MERGE` helper
-(`_upsert_dlq_entries`); `reconcile()`'s `updates` gets a sibling,
-update-only `MERGE` helper (`_update_dlq_entries`, no `WHEN NOT MATCHED`
-branch); `reconcile()`'s `remove_ids` `DELETE` is also now chunked, closing
-a related gap this leg alone had (an unbounded single statement whose
-parameter count grew 1:1 with `remove_ids`, unlike Postgres's single
-`ANY(%s)` array param or Databricks' already-chunked equivalent).
+`append()` uses an id-matching upsert `MERGE` helper (`_upsert_dlq_entries`).
+`replace()` deliberately does **not** share that helper — it uses its own
+plain multi-row `INSERT` (`_insert_dlq_entries`) instead, because Snowflake
+enforces no id uniqueness at all: routing `replace()` through the
+id-matching `MERGE` was tried and reverted after Codex review on #1133
+caught it silently corrupting a *different* sync's row (and losing this
+sync's own entry) whenever a legacy content-hash id collided across
+sync_names. `reconcile()`'s `updates` gets a third, update-only `MERGE`
+helper (`_update_dlq_entries`, no `WHEN NOT MATCHED` branch, scoped to
+`t.id = s.id AND t.sync_name = %s`); `reconcile()`'s `remove_ids` `DELETE`
+is also now chunked, closing a related gap this leg alone had (an
+unbounded single statement whose parameter count grew 1:1 with
+`remove_ids`, unlike Postgres's single `ANY(%s)` array param or
+Databricks' already-chunked equivalent).
 `PARSE_JSON` still cannot appear inside a `VALUES` literal list on this
 connector, so the batched writes use the same generic-alias-then-outer-
 `SELECT` technique `destinations/snowflake.py`'s own mirror `MERGE`
@@ -436,10 +443,39 @@ def _dlq_merge_values_params(sync_name: str, entry: DeadLetter) -> list[Any]:
     ]
 
 
+def _insert_dlq_entries(cur: Any, t: str, sync_name: str, entries: list[DeadLetter]) -> None:
+    """Chunked, plain multi-row ``INSERT`` for ``DlqBackend.replace()`` (#1121).
+
+    Deliberately **not** ``_upsert_dlq_entries()``: ``replace()`` already
+    ``DELETE``s every row for this ``sync_name`` before calling this, so
+    every entry here needs a genuinely new row for *this* sync, not a
+    match-by-id upsert. Snowflake enforces no id uniqueness at all (its
+    ``id TEXT PRIMARY KEY`` is purely informational), so a legacy
+    content-hash id can coexist across sync_names — a plain ``INSERT``
+    just adds this sync's row alongside it, exactly like the pre-batching
+    per-entry ``INSERT``. Routing ``replace()`` through the id-matching
+    ``MERGE`` in ``_upsert_dlq_entries()`` was tried and reverted: on an id
+    collision it silently updated the *other* sync's row instead (its
+    ``sync_name`` untouched) and left this sync's queue missing the entry
+    — caught in Codex review on #1133/#1121.
+    """
+    row_placeholder = "(" + ", ".join(["%s"] * 8) + ")"
+    for chunk in _chunked(entries, _rows_per_chunk(8)):
+        values_sql = ", ".join([row_placeholder] * len(chunk))
+        params: list[Any] = []
+        for entry in chunk:
+            params.extend(_dlq_merge_values_params(sync_name, entry))
+        cur.execute(
+            f"INSERT INTO {t} (id, sync_name, record, error_message, "
+            "http_status, ts, attempts, sync_run_id) "
+            "SELECT v0, v1, PARSE_JSON(v2), v3, v4, v5, v6, v7 "
+            f"FROM (VALUES {values_sql}) AS raw(v0, v1, v2, v3, v4, v5, v6, v7)",
+            params,
+        )
+
+
 def _upsert_dlq_entries(cur: Any, t: str, sync_name: str, entries: list[DeadLetter]) -> None:
-    """Chunked ``MERGE`` upsert shared by ``DlqBackend.append()``/``.replace()``
-    (#1121) — reused rather than duplicated, since both need the identical
-    upsert-by-id write.
+    """Chunked ``MERGE`` upsert for ``DlqBackend.append()`` (#1121).
 
     ``PARSE_JSON`` cannot appear inside a ``VALUES`` literal list on this
     connector (module docstring) — the ``VALUES``-derived source uses
@@ -452,7 +488,9 @@ def _upsert_dlq_entries(cur: Any, t: str, sync_name: str, entries: list[DeadLett
     Never touches ``sync_name`` on a match, matching every other dialect's
     DLQ upsert precedent: matching globally on ``id`` and reassigning
     ``sync_name`` on a match would let one sync's write silently move
-    another sync's row into its own queue on an id collision.
+    another sync's row into its own queue on an id collision. **Not**
+    reused by ``replace()`` — see ``_insert_dlq_entries()``'s docstring for
+    why sharing this helper there is unsafe.
     """
     row_placeholder = "(" + ", ".join(["%s"] * 8) + ")"
     for chunk in _chunked(entries, _rows_per_chunk(8)):
@@ -593,11 +631,17 @@ class SnowflakeWarehouseDlqBackend:
         (the #955 failure class). ``_snowflake_transaction`` makes the whole
         replacement one commit or none.
 
-        Upserts via ``_upsert_dlq_entries`` (#1121, shared with ``append()``)
-        rather than a plain ``INSERT`` — every id is guaranteed new
-        immediately after the ``DELETE`` above, so ``MERGE``'s
-        ``WHEN NOT MATCHED`` branch applies to every row; reusing the same
-        helper here avoids a second, divergent multi-row write shape.
+        Inserts via ``_insert_dlq_entries`` (#1121) — a plain, chunked
+        multi-row ``INSERT``, **not** the id-matching ``MERGE``
+        ``append()`` uses. Every id is guaranteed new for *this*
+        ``sync_name`` immediately after the ``DELETE`` above, but Snowflake
+        enforces no id uniqueness at all, so the same id can already exist
+        under a *different* sync_name; matching on id alone (as an earlier
+        version of this method did) would then silently overwrite that
+        other sync's row instead of inserting this one, corrupting its
+        queue and leaving this sync's entry missing (caught in Codex
+        review on #1133/#1121). See ``_insert_dlq_entries()``'s own
+        docstring for the full reasoning.
         """
         conn = _connect(self._profile)
         try:
@@ -606,7 +650,7 @@ class SnowflakeWarehouseDlqBackend:
             with _snowflake_transaction(conn):
                 cur = conn.cursor()
                 cur.execute(f"DELETE FROM {t} WHERE sync_name = %s", (sync_name,))
-                _upsert_dlq_entries(cur, t, sync_name, entries)
+                _insert_dlq_entries(cur, t, sync_name, entries)
         finally:
             conn.close()
 
