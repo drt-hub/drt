@@ -65,6 +65,25 @@ def test_serialize_csv() -> None:
     assert "Bob" in data
 
 
+def test_serialize_csv_does_not_drop_a_field_appearing_only_in_a_later_record() -> None:
+    """#1134: columns used to be derived from self._records[0] alone, so
+    csv.DictWriter's default extrasaction='raise' failed the whole upload
+    the moment it reached a record with a field self._records[0] didn't
+    have -- rather than any record silently losing data. Every record's
+    keys must contribute to the column set, in first-seen order, with a
+    blank cell for a record missing a given column."""
+    dest = StagedUploadDestination()
+    dest._records = [
+        {"id": 1, "name": "Alice"},
+        {"id": 2, "name": "Bob", "note": "flagged"},
+    ]
+    data = dest._serialize("csv").decode()
+    lines = data.splitlines()
+    assert lines[0] == "id,name,note"
+    assert lines[1] == "1,Alice,"
+    assert lines[2] == "2,Bob,flagged"
+
+
 def test_serialize_jsonl() -> None:
     dest = StagedUploadDestination()
     dest._records = [{"id": 1}, {"id": 2}]
