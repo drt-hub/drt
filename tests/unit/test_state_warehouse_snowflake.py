@@ -45,6 +45,20 @@ def _mock_conn(*, fetchone=None, fetchall=None, rowcount: int = 0) -> MagicMock:
     return conn
 
 
+def _dead_letter(**overrides: object) -> DeadLetter:
+    defaults: dict = {
+        "record": {"a": 1},
+        "error_message": "boom",
+        "http_status": 500,
+        "timestamp": "t0",
+        "attempts": 1,
+        "sync_run_id": "run-1",
+        "id": "id-1",
+    }
+    defaults.update(overrides)
+    return DeadLetter(**defaults)
+
+
 class TestEnsureTableExists:
     """The concurrent-first-use race guard shared by all three stores'
     _ensure_table() -- same shape as SnowflakeSource.ensure_managed_schema()
@@ -348,6 +362,11 @@ class TestSnowflakeWarehouseDlqBackend:
         conn.autocommit.assert_not_called()
 
     def test_append_merges_within_an_explicit_transaction(self) -> None:
+        """#1121: append() batches into one chunked MERGE via
+        _upsert_dlq_entries -- PARSE_JSON is applied to the VALUES-derived
+        column alias (v2), not directly to a %s placeholder, since
+        PARSE_JSON can't appear inside a VALUES literal list on this
+        connector."""
         conn = _mock_conn(fetchone=(1,))
         with (
             patch("drt.state.warehouse_snowflake._connect", return_value=conn),
@@ -373,7 +392,72 @@ class TestSnowflakeWarehouseDlqBackend:
         conn.commit.assert_called_once()
         executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
         assert any("MERGE INTO" in sql for sql in executed)
-        assert any("PARSE_JSON(%s)" in sql for sql in executed)
+        assert any("PARSE_JSON(v2)" in sql and "VALUES" in sql for sql in executed)
+
+    def test_append_merge_does_not_touch_sync_name_on_match(self) -> None:
+        conn = _mock_conn(fetchone=(1,))
+        with (
+            patch("drt.state.warehouse_snowflake._connect", return_value=conn),
+            patch("drt.sources.snowflake.SnowflakeSource.ensure_managed_schema"),
+            patch("drt.sources.snowflake.SnowflakeSource.managed_table_exists", return_value=True),
+        ):
+            SnowflakeWarehouseDlqBackend(_profile()).append("s", [_dead_letter()])
+
+        merge_call = next(
+            c
+            for c in conn.cursor.return_value.execute.call_args_list
+            if str(c.args[0]).startswith("MERGE INTO")
+        )
+        sql = str(merge_call.args[0])
+        update_clause = sql[sql.index("WHEN MATCHED") : sql.index("WHEN NOT MATCHED")]
+        assert "sync_name" not in update_clause
+
+    def test_append_dedupes_entries_sharing_the_same_id(self) -> None:
+        """Two VALUES rows with the same id would make Snowflake's MERGE
+        raise (it does not support updating the same target row twice in
+        one statement) -- dedup keeps the last, matching the old per-entry
+        loop's last-wins outcome."""
+        conn = _mock_conn(fetchone=(1,))
+        entries = [
+            _dead_letter(id="id-1", error_message="first"),
+            _dead_letter(id="id-1", error_message="second"),
+        ]
+        with (
+            patch("drt.state.warehouse_snowflake._connect", return_value=conn),
+            patch("drt.sources.snowflake.SnowflakeSource.ensure_managed_schema"),
+            patch("drt.sources.snowflake.SnowflakeSource.managed_table_exists", return_value=True),
+        ):
+            SnowflakeWarehouseDlqBackend(_profile()).append("s", entries)
+
+        merge_calls = [
+            c
+            for c in conn.cursor.return_value.execute.call_args_list
+            if str(c.args[0]).startswith("MERGE INTO")
+        ]
+        assert len(merge_calls) == 1
+        _, params = merge_calls[0].args
+        assert len(params) == 8  # one row, not two
+        assert params[3] == "second"  # error_message column, last entry wins
+
+    def test_append_chunks_many_entries_across_multiple_merge_statements(self) -> None:
+        """250 rows fit per MERGE at 8 columns under the 2000-param budget
+        (_rows_per_chunk) -- 600 entries need three chunks."""
+        conn = _mock_conn(fetchone=(600,))
+        entries = [_dead_letter(id=f"id-{i}", record={"n": i}) for i in range(600)]
+        with (
+            patch("drt.state.warehouse_snowflake._connect", return_value=conn),
+            patch("drt.sources.snowflake.SnowflakeSource.ensure_managed_schema"),
+            patch("drt.sources.snowflake.SnowflakeSource.managed_table_exists", return_value=True),
+        ):
+            SnowflakeWarehouseDlqBackend(_profile()).append("s", entries)
+
+        merge_calls = [
+            c
+            for c in conn.cursor.return_value.execute.call_args_list
+            if str(c.args[0]).startswith("MERGE INTO")
+        ]
+        assert len(merge_calls) == 3
+        assert sum(len(c.args[1]) // 8 for c in merge_calls) == 600
 
     def test_replace_wraps_delete_and_inserts_in_one_transaction(self) -> None:
         """The #955 failure class this guards against: an unwrapped
@@ -405,7 +489,9 @@ class TestSnowflakeWarehouseDlqBackend:
         conn.commit.assert_called_once()
         executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
         assert any(sql.startswith("DELETE FROM") for sql in executed)
-        assert any("INSERT INTO" in sql and "PARSE_JSON(%s)" in sql for sql in executed)
+        # #1121: replace() upserts via the same chunked MERGE as append(),
+        # not a plain per-entry INSERT.
+        assert any("MERGE INTO" in sql and "PARSE_JSON(v2)" in sql for sql in executed)
 
     def test_replace_rolls_back_and_reraises_on_failure(self) -> None:
         conn = _mock_conn()
@@ -457,7 +543,10 @@ class TestSnowflakeWarehouseDlqBackend:
         assert "IN (%s, %s)" in sql
         assert params == ("s", "id-1", "id-2")
 
-    def test_reconcile_updates_via_parse_json(self) -> None:
+    def test_reconcile_updates_via_values_merge(self) -> None:
+        """#1121: reconcile()'s updates moved from a per-entry UPDATE onto a
+        chunked, update-only MERGE (_update_dlq_entries) -- no WHEN NOT
+        MATCHED branch, since these touch existing rows only."""
         conn = _mock_conn(fetchall=[])
         with (
             patch("drt.state.warehouse_snowflake._connect", return_value=conn),
@@ -479,15 +568,61 @@ class TestSnowflakeWarehouseDlqBackend:
                 },
             )
 
-        update_call = next(
+        merge_call = next(
             c
             for c in conn.cursor.return_value.execute.call_args_list
-            if str(c.args[0]).startswith("UPDATE")
+            if str(c.args[0]).startswith("MERGE INTO")
         )
-        sql, params = update_call.args
-        assert "PARSE_JSON(%s)" in sql
-        assert params[0] == '{"a": 2}'
-        assert params[-2:] == ("s", "id-1")
+        sql, params = merge_call.args
+        assert "PARSE_JSON(v1)" in sql
+        assert "WHEN NOT MATCHED" not in sql
+        assert params[0] == "id-1"
+        assert params[1] == '{"a": 2}'
+        assert params[-1] == "s"  # sync_name, bound last
+
+    def test_reconcile_chunks_many_updates_across_multiple_merge_statements(self) -> None:
+        """285 rows fit per MERGE at 7 columns under the 2000-param budget
+        -- 600 updates need three chunks."""
+        conn = _mock_conn(fetchall=[])
+        updates = {f"id-{i}": _dead_letter(id=f"id-{i}", record={"n": i}) for i in range(600)}
+        with (
+            patch("drt.state.warehouse_snowflake._connect", return_value=conn),
+            patch("drt.sources.snowflake.SnowflakeSource.ensure_managed_schema"),
+            patch("drt.sources.snowflake.SnowflakeSource.managed_table_exists", return_value=True),
+        ):
+            SnowflakeWarehouseDlqBackend(_profile()).reconcile("s", updates=updates)
+
+        merge_calls = [
+            c
+            for c in conn.cursor.return_value.execute.call_args_list
+            if str(c.args[0]).startswith("MERGE INTO")
+        ]
+        assert len(merge_calls) == 3
+        # Each chunk's params are 7 columns per row plus one trailing
+        # sync_name -- subtract that shared param before dividing by 7.
+        assert sum((len(c.args[1]) - 1) // 7 for c in merge_calls) == 600
+
+    def test_reconcile_chunks_large_remove_id_lists(self) -> None:
+        """#1121: remove_ids' DELETE is now chunked too -- an unbounded
+        single statement's parameter count previously grew 1:1 with
+        remove_ids, unlike Postgres's single ANY(%s) array param or
+        Databricks' already-chunked equivalent."""
+        conn = _mock_conn(fetchall=[])
+        ids = [f"id-{i}" for i in range(2500)]
+        with (
+            patch("drt.state.warehouse_snowflake._connect", return_value=conn),
+            patch("drt.sources.snowflake.SnowflakeSource.ensure_managed_schema"),
+            patch("drt.sources.snowflake.SnowflakeSource.managed_table_exists", return_value=True),
+        ):
+            SnowflakeWarehouseDlqBackend(_profile()).reconcile("s", remove_ids=ids)
+
+        delete_calls = [
+            c
+            for c in conn.cursor.return_value.execute.call_args_list
+            if str(c.args[0]).startswith("DELETE FROM")
+        ]
+        assert len(delete_calls) == 2
+        assert sum(len(c.args[1]) - 1 for c in delete_calls) == 2500
 
     def test_clear_replaces_with_an_empty_list(self) -> None:
         conn = _mock_conn()

@@ -59,16 +59,23 @@ per-project namespace; concurrent runs of the same sync can move a cursor
 backward under last-writer-wins) apply identically here — see that module's
 docstring rather than repeating it.
 
-**One more, raised in Codex review and checked against precedent rather than
-fixed here:** `DlqBackend.append`/`.replace()`/`.reconcile()` issue one
-`MERGE`/`INSERT`/`UPDATE` per dead-letter entry rather than a bounded
-multi-row batch — a sync producing thousands of dead letters means
-thousands of round trips. This is not a Snowflake-specific regression:
-`warehouse.py`'s Postgres implementation has the identical one-statement-
-per-entry loop today. Batching either dialect is a genuine improvement
-worth making, but doing it only for Snowflake here would leave the two
-implementations with different write-volume characteristics for no
-principled reason — tracked as a follow-up applying to both (#1121).
+**`DlqBackend.append`/`.replace()`/`.reconcile()` batch into bounded
+multi-row `MERGE` statements (#1121)** rather than one `MERGE`/`INSERT`/
+`UPDATE` per dead-letter entry — raised in Codex review on #1120, closed
+here after the identical Postgres and Databricks legs (#1129/#1130).
+`append()` and `replace()` share one upsert-by-id `MERGE` helper
+(`_upsert_dlq_entries`); `reconcile()`'s `updates` gets a sibling,
+update-only `MERGE` helper (`_update_dlq_entries`, no `WHEN NOT MATCHED`
+branch); `reconcile()`'s `remove_ids` `DELETE` is also now chunked, closing
+a related gap this leg alone had (an unbounded single statement whose
+parameter count grew 1:1 with `remove_ids`, unlike Postgres's single
+`ANY(%s)` array param or Databricks' already-chunked equivalent).
+`PARSE_JSON` still cannot appear inside a `VALUES` literal list on this
+connector, so the batched writes use the same generic-alias-then-outer-
+`SELECT` technique `destinations/snowflake.py`'s own mirror `MERGE`
+established, applied via a file-local helper rather than an import across
+the `state`/`destinations` boundary — see `_MERGE_PARAM_BUDGET`'s own
+comment.
 """
 
 from __future__ import annotations
@@ -397,6 +404,126 @@ def _row_to_history_entry(row: tuple[Any, ...]) -> HistoryEntry:
     )
 
 
+# Batches DlqBackend.append()/.replace()/.reconcile()'s per-entry writes into
+# bounded multi-row statements (#1121, this module's own docstring flagged it
+# as a follow-up). 2000 mirrors destinations/snowflake.py's own
+# _MERGE_PARAM_BUDGET — the same conservative, empirically-verified budget
+# (see that module's comment for the live-account basis), well under the
+# ~32000-row point that budget was tested up to. Kept file-local rather than
+# imported: this repo already keeps destinations/databricks.py's
+# _NATIVE_PARAM_LIMIT and destinations/snowflake.py's _MERGE_PARAM_BUDGET as
+# two separate constants, not one shared one, and reaching from drt/state/
+# into drt/destinations/ would be the wrong import direction (state stores
+# are consumers of destination-shaped data, not the reverse) — same
+# reasoning as warehouse.py's own _DLQ_PARAM_BUDGET.
+_MERGE_PARAM_BUDGET = 2000
+
+
+def _rows_per_chunk(n_cols: int) -> int:
+    return max(1, _MERGE_PARAM_BUDGET // max(1, n_cols))
+
+
+def _dlq_merge_values_params(sync_name: str, entry: DeadLetter) -> list[Any]:
+    return [
+        entry.id,
+        sync_name,
+        json.dumps(entry.record),
+        entry.error_message,
+        entry.http_status,
+        entry.timestamp,
+        entry.attempts,
+        entry.sync_run_id,
+    ]
+
+
+def _upsert_dlq_entries(cur: Any, t: str, sync_name: str, entries: list[DeadLetter]) -> None:
+    """Chunked ``MERGE`` upsert shared by ``DlqBackend.append()``/``.replace()``
+    (#1121) — reused rather than duplicated, since both need the identical
+    upsert-by-id write.
+
+    ``PARSE_JSON`` cannot appear inside a ``VALUES`` literal list on this
+    connector (module docstring) — the ``VALUES``-derived source uses
+    generic column aliases (``v0``..``v7``), and ``PARSE_JSON`` is applied
+    in the outer ``SELECT``'s projection instead, the same technique
+    ``destinations/snowflake.py``'s own mirror ``MERGE`` already established
+    for this connector (kept file-local here, not imported — see
+    ``_MERGE_PARAM_BUDGET``'s own comment for why).
+
+    Never touches ``sync_name`` on a match, matching every other dialect's
+    DLQ upsert precedent: matching globally on ``id`` and reassigning
+    ``sync_name`` on a match would let one sync's write silently move
+    another sync's row into its own queue on an id collision.
+    """
+    row_placeholder = "(" + ", ".join(["%s"] * 8) + ")"
+    for chunk in _chunked(entries, _rows_per_chunk(8)):
+        values_sql = ", ".join([row_placeholder] * len(chunk))
+        params: list[Any] = []
+        for entry in chunk:
+            params.extend(_dlq_merge_values_params(sync_name, entry))
+        cur.execute(
+            f"MERGE INTO {t} AS t USING ("
+            "SELECT v0 AS id, v1 AS sync_name, PARSE_JSON(v2) AS record, "
+            "v3 AS error_message, v4 AS http_status, v5 AS ts, v6 AS attempts, "
+            "v7 AS sync_run_id "
+            f"FROM (VALUES {values_sql}) AS raw(v0, v1, v2, v3, v4, v5, v6, v7)"
+            ") AS s "
+            "ON t.id = s.id "
+            "WHEN MATCHED THEN UPDATE SET record = s.record, "
+            "error_message = s.error_message, http_status = s.http_status, "
+            "ts = s.ts, attempts = s.attempts, sync_run_id = s.sync_run_id "
+            "WHEN NOT MATCHED THEN INSERT (id, sync_name, record, error_message, "
+            "http_status, ts, attempts, sync_run_id) VALUES (s.id, s.sync_name, "
+            "s.record, s.error_message, s.http_status, s.ts, s.attempts, "
+            "s.sync_run_id)",
+            params,
+        )
+
+
+def _update_dlq_entries(
+    cur: Any, t: str, sync_name: str, update_items: list[tuple[str, DeadLetter]]
+) -> None:
+    """Chunked ``MERGE`` update-only for ``DlqBackend.reconcile()``'s
+    ``updates`` (#1121). No ``WHEN NOT MATCHED`` branch — these touch
+    existing rows only and must never insert, unlike ``_upsert_dlq_entries``.
+    ``sync_name`` is a single shared bound parameter (every update in one
+    ``reconcile()`` call is for the same sync), not a per-row ``VALUES``
+    column.
+    """
+    row_placeholder = "(" + ", ".join(["%s"] * 7) + ")"
+    for chunk in _chunked(update_items, _rows_per_chunk(7)):
+        values_sql = ", ".join([row_placeholder] * len(chunk))
+        params: list[Any] = []
+        for entry_id, entry in chunk:
+            params.extend(
+                (
+                    entry_id,
+                    json.dumps(entry.record),
+                    entry.error_message,
+                    entry.http_status,
+                    entry.timestamp,
+                    entry.attempts,
+                    entry.sync_run_id,
+                )
+            )
+        params.append(sync_name)
+        cur.execute(
+            f"MERGE INTO {t} AS t USING ("
+            "SELECT v0 AS id, PARSE_JSON(v1) AS record, v2 AS error_message, "
+            "v3 AS http_status, v4 AS ts, v5 AS attempts, v6 AS sync_run_id "
+            f"FROM (VALUES {values_sql}) AS raw(v0, v1, v2, v3, v4, v5, v6)"
+            ") AS s "
+            "ON t.id = s.id AND t.sync_name = %s "
+            "WHEN MATCHED THEN UPDATE SET record = s.record, "
+            "error_message = s.error_message, http_status = s.http_status, "
+            "ts = s.ts, attempts = s.attempts, sync_run_id = s.sync_run_id",
+            params,
+        )
+
+
+def _chunked(items: list[Any], size: int) -> list[list[Any]]:
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
 class SnowflakeWarehouseDlqBackend:
     """``DlqBackend`` backed by a ``_drt_dlq`` row per dead-letter entry (#1106)."""
 
@@ -421,38 +548,30 @@ class SnowflakeWarehouseDlqBackend:
     def append(
         self, sync_name: str, entries: list[DeadLetter], *, max_records: int = 10_000
     ) -> int:
+        """Chunked ``MERGE`` upsert via ``_upsert_dlq_entries`` (#1121) —
+        was a per-entry ``MERGE`` loop; see that function's docstring for
+        the ``sync_name``-on-match precedent it preserves.
+
+        Two entries sharing an id within one call would make Snowflake's
+        ``MERGE`` raise (it does not support updating/deleting the same
+        target row more than once in one statement) — possible for legacy,
+        pre-#955 dead letters whose id is a content hash (the same
+        collision class guarded against on the Postgres/Databricks legs,
+        #1129/#1130). Deduping here by id, keeping the last occurrence,
+        preserves the old per-entry loop's last-wins outcome.
+        """
         if not entries:
             return self.depth(sync_name)
+        deduped: dict[str, DeadLetter] = {}
+        for entry in entries:
+            deduped[entry.id] = entry
         conn = _connect(self._profile)
         try:
             self._ensure_table(conn)
             t = _qualified(self._profile, _DLQ_TABLE)
             with _snowflake_transaction(conn):
                 cur = conn.cursor()
-                for entry in entries:
-                    cur.execute(
-                        f"MERGE INTO {t} AS t USING (SELECT %s AS id, %s AS sync_name, "
-                        "PARSE_JSON(%s) AS record, %s AS error_message, %s AS http_status, "
-                        "%s AS ts, %s AS attempts, %s AS sync_run_id) AS s "
-                        "ON t.id = s.id "
-                        "WHEN MATCHED THEN UPDATE SET record = s.record, "
-                        "error_message = s.error_message, http_status = s.http_status, "
-                        "ts = s.ts, attempts = s.attempts, sync_run_id = s.sync_run_id "
-                        "WHEN NOT MATCHED THEN INSERT (id, sync_name, record, error_message, "
-                        "http_status, ts, attempts, sync_run_id) VALUES (s.id, s.sync_name, "
-                        "s.record, s.error_message, s.http_status, s.ts, s.attempts, "
-                        "s.sync_run_id)",
-                        (
-                            entry.id,
-                            sync_name,
-                            json.dumps(entry.record),
-                            entry.error_message,
-                            entry.http_status,
-                            entry.timestamp,
-                            entry.attempts,
-                            entry.sync_run_id,
-                        ),
-                    )
+                _upsert_dlq_entries(cur, t, sync_name, list(deduped.values()))
                 if max_records > 0:
                     cur.execute(
                         f"DELETE FROM {t} WHERE sync_name = %s AND id NOT IN ("
@@ -473,6 +592,12 @@ class SnowflakeWarehouseDlqBackend:
         crash before the inserts land would permanently erase the queue
         (the #955 failure class). ``_snowflake_transaction`` makes the whole
         replacement one commit or none.
+
+        Upserts via ``_upsert_dlq_entries`` (#1121, shared with ``append()``)
+        rather than a plain ``INSERT`` — every id is guaranteed new
+        immediately after the ``DELETE`` above, so ``MERGE``'s
+        ``WHEN NOT MATCHED`` branch applies to every row; reusing the same
+        helper here avoids a second, divergent multi-row write shape.
         """
         conn = _connect(self._profile)
         try:
@@ -481,22 +606,7 @@ class SnowflakeWarehouseDlqBackend:
             with _snowflake_transaction(conn):
                 cur = conn.cursor()
                 cur.execute(f"DELETE FROM {t} WHERE sync_name = %s", (sync_name,))
-                for entry in entries:
-                    cur.execute(
-                        f"INSERT INTO {t} (id, sync_name, record, error_message, "
-                        "http_status, ts, attempts, sync_run_id) "
-                        "SELECT %s, %s, PARSE_JSON(%s), %s, %s, %s, %s, %s",
-                        (
-                            entry.id,
-                            sync_name,
-                            json.dumps(entry.record),
-                            entry.error_message,
-                            entry.http_status,
-                            entry.timestamp,
-                            entry.attempts,
-                            entry.sync_run_id,
-                        ),
-                    )
+                _upsert_dlq_entries(cur, t, sync_name, entries)
         finally:
             conn.close()
 
@@ -569,29 +679,20 @@ class SnowflakeWarehouseDlqBackend:
                     # pattern in drt/destinations/snowflake.py's
                     # _build_mirror_delete (the connector doesn't
                     # auto-expand a Python sequence into a SQL list the way
-                    # psycopg2's ANY(%s) does).
+                    # psycopg2's ANY(%s) does). Chunked (#1121) — an
+                    # unbounded single statement's parameter count would
+                    # otherwise grow 1:1 with remove_ids, unlike Postgres's
+                    # single ANY(%s) array param or Databricks' own
+                    # already-chunked equivalent.
                     ids = list(remove_ids)
-                    placeholders = ", ".join(["%s"] * len(ids))
-                    cur.execute(
-                        f"DELETE FROM {t} WHERE sync_name = %s AND id IN ({placeholders})",
-                        (sync_name, *ids),
-                    )
-                for entry_id, entry in updates.items():
-                    cur.execute(
-                        f"UPDATE {t} SET record = PARSE_JSON(%s), error_message = %s, "
-                        "http_status = %s, ts = %s, attempts = %s, sync_run_id = %s "
-                        "WHERE sync_name = %s AND id = %s",
-                        (
-                            json.dumps(entry.record),
-                            entry.error_message,
-                            entry.http_status,
-                            entry.timestamp,
-                            entry.attempts,
-                            entry.sync_run_id,
-                            sync_name,
-                            entry_id,
-                        ),
-                    )
+                    for chunk in _chunked(ids, _rows_per_chunk(1)):
+                        placeholders = ", ".join(["%s"] * len(chunk))
+                        cur.execute(
+                            f"DELETE FROM {t} WHERE sync_name = %s AND id IN ({placeholders})",
+                            (sync_name, *chunk),
+                        )
+                if updates:
+                    _update_dlq_entries(cur, t, sync_name, list(updates.items()))
         finally:
             conn.close()
         return self.read(sync_name)
