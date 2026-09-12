@@ -952,6 +952,53 @@ class TestPostgresReplaceSwap:
         )
         assert create_calls_after == create_calls_before
 
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_swap_on_error_fail_drops_shadow_even_on_a_later_batch(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """#1139 round 5 (Codex): unlike on_error: skip's savepoint-recovery
+        fallback, on_error: fail must ALWAYS drop the shadow, even when an
+        earlier batch already populated it (shadow_preexisted). The engine
+        calls finalize_sync() unconditionally after breaking out of its
+        batch loop on a fail -- finalize_sync's only signal for "is there a
+        shadow to swap in" is self._swap_shadow_created/_swap_table, so
+        leaving those set after a later-batch failure would make it promote
+        an incomplete, multi-batch shadow into the live table instead of
+        leaving the destination untouched.
+        """
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+        dest = PostgresDestination()
+        opts = _options(mode="replace", replace_strategy="swap", on_error="fail")
+
+        # Batch 1: succeeds cleanly, creates + populates the shadow.
+        batch1 = dest.load([{"id": 1, "score": 0.5}], _config(), opts)
+        assert batch1.success == 1
+        assert dest._swap_shadow_created is True
+
+        # Batch 2: its own INSERT fails outright (on_error: fail).
+        def execute_side_effect(sql: Any, *args: Any) -> None:
+            if args and args[0] == [2, 0.9]:
+                raise Exception("constraint violation")
+
+        cur.execute.side_effect = execute_side_effect
+        batch2 = dest.load([{"id": 2, "score": 0.9}], _config(), opts)
+        assert batch2.success == 0
+        assert batch2.failed == 1
+        # The shadow must have been dropped and state reset, regardless of
+        # batch 1 having already populated it.
+        assert dest._swap_shadow_created is False
+        assert dest._swap_table is None
+
+        # finalize_sync must therefore be a no-op -- no RENAME issued.
+        finalize_result = dest.finalize_sync(
+            _config(), _options(mode="replace", replace_strategy="swap")
+        )
+        assert finalize_result is None
+        sqls_after = [_query_text(c[0][0]) for c in cur.execute.call_args_list]
+        assert not any("RENAME TO" in s for s in sqls_after)
+
 
 # ---------------------------------------------------------------------------
 # Replace mode — swap strategy + json_columns interaction (#448)

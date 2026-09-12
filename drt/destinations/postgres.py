@@ -299,15 +299,20 @@ class PostgresDestination(BaseSqlDestination):
         just skipping the one bad row. Skipped entirely under ``on_error:
         fail`` (Codex review on #1139) — see ``_load_replace``'s docstring.
 
-        A hard failure only drops and recreates the shadow when *this*
-        call is the one that created it (``shadow_preexisted`` False,
-        Codex review round 4 on #1139): the shadow persists across the
-        multiple ``load()`` calls one sync's batches make, so under
-        ``on_error: skip`` a later batch's engine loop keeps going after a
-        savepoint-recovery failure — dropping an already-populated shadow
-        here would silently discard every earlier, already-committed
-        batch's rows, and the next batch would then build a fresh, far
-        smaller shadow that finalize_sync swaps in as if it were complete.
+        The shadow persists across the multiple ``load()`` calls one
+        sync's batches make. ``on_error: fail`` always drops it on any
+        failure, regardless of which batch: the engine calls
+        ``finalize_sync()`` unconditionally after breaking out of its
+        batch loop, and ``finalize_sync``'s only signal for "is there a
+        shadow to swap in" is ``self._swap_shadow_created``/``_swap_table``
+        — leaving them set would make it promote an incomplete shadow into
+        the live table (Codex review round 5 on #1139). ``on_error:
+        skip``'s savepoint-recovery-failure fallback is different: its
+        engine loop keeps sending further batches after this one, so it
+        only drops the shadow when *this* call is the one that created it
+        (``shadow_preexisted`` False, round 4) — dropping an
+        already-populated shadow there would silently discard every
+        earlier, already-committed batch's rows.
         """
         from psycopg2 import sql as _pgsql
 
@@ -354,19 +359,25 @@ class PostgresDestination(BaseSqlDestination):
                     if sync_options.on_error == "fail":
                         conn.rollback()
                         self._mark_batch_aborted(result, records, i)
-                        if not shadow_preexisted:
-                            # Cleanup shadow on hard fail -- safe to drop
-                            # only because nothing from an earlier,
-                            # already-committed batch lives in it yet.
-                            cur = conn.cursor()
-                            cur.execute(
-                                _pgsql.SQL("DROP TABLE IF EXISTS {}").format(
-                                    _qualified_ident(shadow)
-                                )
-                            )
-                            conn.commit()
-                            self._swap_shadow_created = False
-                            self._swap_table = None
+                        # Always drop the shadow here, regardless of
+                        # shadow_preexisted (Codex review round 5 on
+                        # #1139): the engine calls finalize_sync()
+                        # unconditionally after breaking out of the batch
+                        # loop on on_error: fail, and finalize_sync's ONLY
+                        # signal for "is there a shadow to swap in" is
+                        # self._swap_shadow_created/_swap_table -- leaving
+                        # those set here (as the on_error: skip fallback
+                        # below correctly does, since ITS engine loop keeps
+                        # sending batches) would make finalize_sync promote
+                        # an incomplete, multi-batch shadow into the live
+                        # table instead of leaving it untouched.
+                        cur = conn.cursor()
+                        cur.execute(
+                            _pgsql.SQL("DROP TABLE IF EXISTS {}").format(_qualified_ident(shadow))
+                        )
+                        conn.commit()
+                        self._swap_shadow_created = False
+                        self._swap_table = None
                         return result
                     if not self._recover_row_savepoint(conn, cur):
                         # conn.rollback() already ran inside

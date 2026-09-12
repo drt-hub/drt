@@ -784,6 +784,48 @@ class TestMySQLReplaceSwap:
         )
         assert create_calls_after == create_calls_before
 
+    @patch("drt.destinations.mysql.MySQLDestination._connect")
+    def test_swap_on_error_fail_drops_shadow_even_on_a_later_batch(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """#1139 round 5 (Codex): unlike on_error: skip's savepoint-recovery
+        fallback, on_error: fail must ALWAYS drop the shadow, even when an
+        earlier batch already populated it (shadow_preexisted). The engine
+        calls finalize_sync() unconditionally after breaking out of its
+        batch loop on a fail -- finalize_sync's only signal for "is there a
+        shadow to swap in" is self._swap_shadow_created/_swap_table, so
+        leaving those set after a later-batch failure would make it promote
+        an incomplete, multi-batch shadow into the live table instead of
+        leaving the destination untouched.
+        """
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+        dest = MySQLDestination()
+        opts = _options(mode="replace", replace_strategy="swap", on_error="fail")
+
+        batch1 = dest.load([{"user_id": 1, "company_id": 5, "score": 0.5}], _config(), opts)
+        assert batch1.success == 1
+        assert dest._swap_shadow_created is True
+
+        def execute_side_effect(sql: str, *args: Any) -> None:
+            if args and args[0] == [2, 5, 0.9]:
+                raise Exception("data too long for column")
+
+        cur.execute.side_effect = execute_side_effect
+        batch2 = dest.load([{"user_id": 2, "company_id": 5, "score": 0.9}], _config(), opts)
+        assert batch2.success == 0
+        assert batch2.failed == 1
+        assert dest._swap_shadow_created is False
+        assert dest._swap_table is None
+
+        finalize_result = dest.finalize_sync(
+            _config(), _options(mode="replace", replace_strategy="swap")
+        )
+        assert finalize_result is None
+        sqls_after = [c[0][0] for c in cur.execute.call_args_list]
+        assert not any("RENAME TABLE" in s for s in sqls_after)
+
 
 # ---------------------------------------------------------------------------
 # Replace mode — swap strategy + json_columns interaction (#448)
