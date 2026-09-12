@@ -169,9 +169,11 @@ def test_on_error_fail_rolls_back_every_run_in_the_batch() -> None:
         ]
         with patch.object(PostgresDestination, "_connect", return_value=load_conn):
             result = destination.load(records, _config(), SyncOptions(on_error="fail"))
-        assert result.failed == 1
-        # #1136: result.success must reflect the post-rollback reality (run
-        # 1's row did NOT survive), not the pre-rollback per-row count.
+        # #1136/#1139: result.success must reflect the post-rollback reality
+        # (run 1's row did NOT survive), not the pre-rollback per-row count,
+        # and _mark_batch_aborted records a row_error for that discarded row
+        # too (not just the one whose statement actually raised).
+        assert result.failed == 2
         assert result.success == 0
 
         verify_conn = psycopg2.connect(postgres.get_connection_url())

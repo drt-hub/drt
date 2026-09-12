@@ -557,7 +557,7 @@ class BaseSqlDestination:
             )
         )
 
-    def _recover_row_savepoint(self, conn: Any, cur: Any) -> None:
+    def _recover_row_savepoint(self, conn: Any, cur: Any) -> bool:
         """``on_error: skip`` recovery after a per-row statement failure
         under Postgres/MySQL's per-``SAVEPOINT``-row write loops (#1136).
 
@@ -575,17 +575,61 @@ class BaseSqlDestination:
         for the rest of the batch. ``RELEASE`` pops it immediately so the
         stack never grows past one entry regardless of failure count.
 
-        Falls back to a full ``conn.rollback()`` if either statement fails
-        (e.g. the row's own ``SAVEPOINT`` never actually succeeded, or the
-        connection is otherwise unusable) — the same loss of earlier work
-        this fix otherwise avoids, but the only remaining way to make the
-        connection usable again.
+        Returns ``True`` when the row-level rollback succeeded — safe to
+        keep processing further rows in this same transaction. Returns
+        ``False`` when it failed and a full ``conn.rollback()`` was used
+        instead (round 2 of Codex review on #1139): a MySQL deadlock, for
+        instance, makes InnoDB roll back the *entire* transaction on its
+        own, not just this row's savepoint, so ``ROLLBACK TO SAVEPOINT``
+        then fails because that savepoint no longer exists. When that
+        happens, every row this call has accumulated so far — including
+        ones already counted as successful — has actually been discarded
+        along with it, and the caller MUST stop processing and reset
+        ``result.success`` accordingly rather than blindly continuing as
+        if only this one row was affected.
         """
         try:
             cur.execute(f"ROLLBACK TO SAVEPOINT {_ROW_SAVEPOINT}")
             cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
+            return True
         except Exception:
             conn.rollback()
+            return False
+
+    def _mark_batch_aborted(
+        self, result: SyncResult, records: list[dict[str, Any]], failed_index: int
+    ) -> None:
+        """A per-row write loop is bailing out with the whole call's
+        transaction rolled back (#1139) -- either ``on_error: fail``'s
+        ordinary path, or ``on_error: skip`` when even the row-level
+        ``SAVEPOINT`` recovery itself failed (e.g. a MySQL deadlock already
+        rolled back the entire transaction).
+
+        Every record in ``records``, not just the one at ``failed_index``
+        whose exception triggered the bail, must be treated as failed:
+        earlier records already counted in ``result.success`` were undone by
+        the rollback, and later records were never attempted at all. Both
+        groups need a ``RowError`` recorded for them (with a generic
+        "batch aborted" message, since ``failed_index`` already has its own
+        specific one), because ``_accumulate_mirror_state`` (``sync.mode:
+        mirror``) trusts ``result.row_errors`` alone to know which records
+        were NOT actually persisted -- without this, it would wrongly record
+        every other record's key as observed source state even though none
+        of them landed. ``result.success`` is reset to 0 for the same
+        reason; ``skipped``/``skipped_no_match`` are left untouched, since
+        those records never wrote anything the rollback could undo.
+        """
+        already_recorded = {err.batch_index for err in result.row_errors}
+        for idx, record in enumerate(records):
+            if idx in already_recorded:
+                continue
+            self._record_row_error(
+                result,
+                idx,
+                record,
+                RuntimeError("batch aborted: transaction rolled back after an earlier failure"),
+            )
+        result.success = 0
 
     def test_connection(self, config: Any) -> None:
         """Connectivity check: open a connection and run ``SELECT 1``.

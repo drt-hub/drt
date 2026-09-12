@@ -263,6 +263,43 @@ class TestMySQLDestinationLoad:
         assert "duplicate key" in result.row_errors[0].error_message
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
+    def test_row_error_on_error_skip_savepoint_recovery_fails(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """#1139 round 2: a MySQL deadlock rolls back the *whole*
+        transaction on its own, so ``ROLLBACK TO SAVEPOINT`` for the
+        failing row also fails. The earlier successful row must not stay
+        counted in ``result.success``, and every record in the batch --
+        including the one never attempted -- needs its own ``row_error``
+        so mirror-mode's "observed keys" accounting doesn't treat any of
+        them as actually persisted.
+        """
+        conn = _fake_connection()
+        cur = conn.cursor()
+
+        def execute_side_effect(sql: str, *args: Any) -> None:
+            if args and args[0] == [2, 5, 0.9]:
+                raise Exception("Deadlock found when trying to get lock")
+            if sql.startswith("ROLLBACK TO SAVEPOINT"):
+                raise Exception("savepoint does not exist")
+
+        cur.execute.side_effect = execute_side_effect
+        mock_connect.return_value = conn
+
+        records = [
+            {"user_id": 1, "company_id": 5, "score": 0.5},
+            {"user_id": 2, "company_id": 5, "score": 0.9},
+            {"user_id": 3, "company_id": 5, "score": 1.5},
+        ]
+        result = MySQLDestination().load(records, _config(), _options(on_error="skip"))
+
+        assert result.success == 0
+        assert result.failed == 3
+        assert {e.batch_index for e in result.row_errors} == {0, 1, 2}
+        assert "Deadlock" in next(e.error_message for e in result.row_errors if e.batch_index == 1)
+        conn.rollback.assert_called_once()
+
+    @patch("drt.destinations.mysql.MySQLDestination._connect")
     def test_row_error_on_error_fail(self, mock_connect: MagicMock) -> None:
         conn = _fake_connection()
         conn.cursor().execute.side_effect = Exception("constraint violation")
@@ -274,7 +311,12 @@ class TestMySQLDestinationLoad:
         ]
         result = MySQLDestination().load(records, _config(), _options(on_error="fail"))
 
-        assert result.failed == 1
+        # #1139: on_error: fail rolls back the whole call's transaction, so
+        # every record in the batch is unrecoverable -- not just the one
+        # whose statement actually raised -- and _mark_batch_aborted marks
+        # them all failed (this also keeps mirror-mode's "observed keys"
+        # accounting honest; see sql_base.py).
+        assert result.failed == len(records)
         assert result.success == 0
         conn.rollback.assert_called_once()
 
@@ -669,10 +711,12 @@ class TestMySQLReplaceSwap:
             _options(mode="replace", replace_strategy="swap", on_error="fail"),
         )
 
-        assert result.failed == 1
-        # #1136: the first row's success is discarded by the full
+        # #1136/#1139: the first row's success is discarded by the full
         # conn.rollback() this on_error: fail path still (correctly) does --
-        # result.success must reflect that, not the pre-rollback count.
+        # result.success must reflect that, not the pre-rollback count, and
+        # _mark_batch_aborted records a row_error for that discarded row
+        # too (not just the one whose statement actually raised).
+        assert result.failed == 2
         assert result.success == 0
         conn.rollback.assert_called()
         sqls = [c[0][0] for c in cur.execute.call_args_list]

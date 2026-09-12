@@ -321,6 +321,47 @@ class TestPostgresDestinationLoad:
         assert "duplicate key" in result.row_errors[0].error_message
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_row_error_on_error_skip_savepoint_recovery_fails(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """#1139 round 2: when even ``ROLLBACK TO SAVEPOINT`` itself fails
+        (e.g. a MySQL-deadlock-style scenario where the whole transaction
+        was already rolled back out from under it), the earlier successful
+        row must not be left counted in ``result.success``, and every
+        record in the batch -- including the one never attempted -- needs
+        its own ``row_error`` so mirror-mode's "observed keys" accounting
+        (``_accumulate_mirror_state``) doesn't treat any of them as
+        actually persisted.
+        """
+        conn = _fake_connection()
+        cur = conn.cursor()
+
+        def execute_side_effect(sql: Any, *args: Any) -> None:
+            text = _query_text(sql)
+            if args and args[0] == [2, 0.9]:
+                raise Exception("duplicate key")
+            if text.startswith("ROLLBACK TO SAVEPOINT"):
+                raise Exception("current transaction is aborted")
+
+        cur.execute.side_effect = execute_side_effect
+        mock_connect.return_value = conn
+
+        records = [
+            {"id": 1, "score": 0.5},
+            {"id": 2, "score": 0.9},
+            {"id": 3, "score": 1.5},
+        ]
+        result = PostgresDestination().load(records, _config(), _options(on_error="skip"))
+
+        assert result.success == 0
+        assert result.failed == 3
+        assert {e.batch_index for e in result.row_errors} == {0, 1, 2}
+        assert "duplicate key" in next(
+            e.error_message for e in result.row_errors if e.batch_index == 1
+        )
+        conn.rollback.assert_called_once()
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
     def test_row_error_on_error_fail(self, mock_connect: MagicMock) -> None:
         conn = _fake_connection()
         conn.cursor().execute.side_effect = Exception("constraint violation")
@@ -332,7 +373,12 @@ class TestPostgresDestinationLoad:
         ]
         result = PostgresDestination().load(records, _config(), _options(on_error="fail"))
 
-        assert result.failed == 1
+        # #1139: on_error: fail rolls back the whole call's transaction, so
+        # every record in the batch is unrecoverable -- not just the one
+        # whose statement actually raised -- and _mark_batch_aborted marks
+        # them all failed (this also keeps mirror-mode's "observed keys"
+        # accounting honest; see sql_base.py).
+        assert result.failed == len(records)
         assert result.success == 0
         # Should stop after first failure
         conn.rollback.assert_called_once()
@@ -780,10 +826,12 @@ class TestPostgresReplaceSwap:
             _options(mode="replace", replace_strategy="swap", on_error="fail"),
         )
 
-        assert result.failed == 1
-        # #1136: the first row's success is discarded by the full
+        # #1136/#1139: the first row's success is discarded by the full
         # conn.rollback() this on_error: fail path still (correctly) does --
-        # result.success must reflect that, not the pre-rollback count.
+        # result.success must reflect that, not the pre-rollback count, and
+        # _mark_batch_aborted records a row_error for that discarded row
+        # too (not just the one whose statement actually raised).
+        assert result.failed == 2
         assert result.success == 0
         # Rollback called on hard fail
         conn.rollback.assert_called()

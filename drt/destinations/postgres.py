@@ -245,9 +245,16 @@ class PostgresDestination(BaseSqlDestination):
                     self._record_row_error(result, i, record, e)
                     if sync_options.on_error == "fail":
                         conn.rollback()
-                        result.success = 0
+                        self._mark_batch_aborted(result, records, i)
                         return result
-                    self._recover_row_savepoint(conn, cur)
+                    if not self._recover_row_savepoint(conn, cur):
+                        # The row-level savepoint rollback itself failed
+                        # (e.g. a deadlock already forced MySQL/Postgres
+                        # to roll back the *whole* transaction) -- every
+                        # row this call counted so far, including earlier
+                        # successes, was discarded with it (#1139).
+                        self._mark_batch_aborted(result, records, i)
+                        return result
                     continue
             base_index += len(run_records)
 
@@ -318,7 +325,7 @@ class PostgresDestination(BaseSqlDestination):
                     self._record_row_error(result, i, record, e)
                     if sync_options.on_error == "fail":
                         conn.rollback()
-                        result.success = 0
+                        self._mark_batch_aborted(result, records, i)
                         # Cleanup shadow on hard fail
                         cur = conn.cursor()
                         cur.execute(
@@ -328,7 +335,25 @@ class PostgresDestination(BaseSqlDestination):
                         self._swap_shadow_created = False
                         self._swap_table = None
                         return result
-                    self._recover_row_savepoint(conn, cur)
+                    if not self._recover_row_savepoint(conn, cur):
+                        # conn.rollback() already ran inside
+                        # _recover_row_savepoint's own fallback -- e.g. a
+                        # deadlock already forced the whole transaction to
+                        # roll back (#1139). The shadow's own CREATE
+                        # happened in that same transaction on a
+                        # first-batch call, so it's gone too; drop it
+                        # defensively and reset state so finalize_sync
+                        # doesn't try to swap in a partial/nonexistent
+                        # shadow.
+                        self._mark_batch_aborted(result, records, i)
+                        cur = conn.cursor()
+                        cur.execute(
+                            _pgsql.SQL("DROP TABLE IF EXISTS {}").format(_qualified_ident(shadow))
+                        )
+                        conn.commit()
+                        self._swap_shadow_created = False
+                        self._swap_table = None
+                        return result
             base_index += len(run_records)
 
         conn.commit()
@@ -697,9 +722,22 @@ class PostgresDestination(BaseSqlDestination):
                     self._record_row_error(result, i, record, e)
                     if sync_options.on_error == "fail":
                         conn.rollback()
-                        result.success = 0
+                        self._mark_batch_aborted(result, records, i)
                         return result
-                    self._recover_row_savepoint(conn, cur)
+                    if not self._recover_row_savepoint(conn, cur):
+                        # The row-level savepoint rollback itself failed
+                        # (e.g. a deadlock already forced the whole
+                        # transaction to roll back) -- every row this call
+                        # counted so far, including earlier successes, was
+                        # discarded with it (#1139). result.skipped/
+                        # skipped_no_match need no reset: those counters
+                        # represent rows match_policy deliberately wrote
+                        # nothing for, so there was never anything to roll
+                        # back -- but such a row's key is not "observed"
+                        # for mirror.mode purposes either, so it still gets
+                        # a row_error like every other row in this batch.
+                        self._mark_batch_aborted(result, records, i)
+                        return result
                     continue
             base_index += len(run_records)
 
