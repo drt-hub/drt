@@ -300,6 +300,43 @@ class TestMySQLDestinationLoad:
         conn.rollback.assert_called_once()
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
+    def test_row_success_not_double_counted_when_release_savepoint_fails(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """#1139 round 6 (Codex): the INSERT itself can succeed, but RELEASE
+        SAVEPOINT immediately after it can still raise. The old code
+        incremented result.success BEFORE that RELEASE call, so such a row
+        was counted successful even though the except block's
+        ROLLBACK TO SAVEPOINT recovery then actually undoes the INSERT --
+        leaving the row recorded as both successful and failed. success
+        must only be counted once RELEASE SAVEPOINT itself has succeeded.
+        """
+        conn = _fake_connection()
+        cur = conn.cursor()
+        release_call_count = {"n": 0}
+
+        def execute_side_effect(sql: str, *args: Any) -> None:
+            if sql.startswith("RELEASE SAVEPOINT"):
+                release_call_count["n"] += 1
+                if release_call_count["n"] == 2:
+                    # Row 1 (index 1)'s own post-INSERT RELEASE fails.
+                    raise Exception("connection reset")
+
+        cur.execute.side_effect = execute_side_effect
+        mock_connect.return_value = conn
+
+        records = [
+            {"user_id": 1, "company_id": 5, "score": 0.5},
+            {"user_id": 2, "company_id": 5, "score": 0.9},
+            {"user_id": 3, "company_id": 5, "score": 1.5},
+        ]
+        result = MySQLDestination().load(records, _config(), _options(on_error="skip"))
+
+        assert result.success == 2
+        assert result.failed == 1
+        assert {e.batch_index for e in result.row_errors} == {1}
+
+    @patch("drt.destinations.mysql.MySQLDestination._connect")
     def test_row_error_on_error_fail(self, mock_connect: MagicMock) -> None:
         conn = _fake_connection()
         conn.cursor().execute.side_effect = Exception("constraint violation")

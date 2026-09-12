@@ -202,9 +202,17 @@ class MySQLDestination(BaseSqlDestination):
                         for c in run_columns
                     ]
                     cur.execute(sql, values)
-                    result.success += 1
                     if use_savepoint:
+                        # Codex review round 6 on #1139: count the row as
+                        # successful only after RELEASE SAVEPOINT itself
+                        # succeeds -- if RELEASE raises, this row falls
+                        # into the except block below and
+                        # _recover_row_savepoint's ROLLBACK TO SAVEPOINT
+                        # actually undoes this row's INSERT, so counting
+                        # it as success beforehand would leave it recorded
+                        # as both successful and failed.
                         cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
+                    result.success += 1
                 except Exception as e:
                     self._record_row_error(result, i, record, e)
                     if sync_options.on_error == "fail":
@@ -293,9 +301,12 @@ class MySQLDestination(BaseSqlDestination):
                         for c in run_columns
                     ]
                     cur.execute(sql, values)
-                    result.success += 1
                     if use_savepoint:
+                        # See _load_replace's comment (#1139 round 6):
+                        # count success only after RELEASE SAVEPOINT
+                        # itself succeeds.
                         cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
+                    result.success += 1
                 except Exception as e:
                     self._record_row_error(result, i, record, e)
                     if sync_options.on_error == "fail":
@@ -528,9 +539,12 @@ class MySQLDestination(BaseSqlDestination):
                         for c in run_columns
                     ]
                     cur.execute(sql, values)
-                    result.success += 1
                     if use_savepoint:
+                        # See _load_replace's comment (#1139 round 6):
+                        # count success only after RELEASE SAVEPOINT
+                        # itself succeeds.
                         cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
+                    result.success += 1
                 except Exception as e:
                     self._record_row_error(result, i, record, e)
                     if sync_options.on_error == "fail":

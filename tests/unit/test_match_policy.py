@@ -234,6 +234,44 @@ def test_savepoint_recovery_failure_excludes_no_match_skips_from_batch_abort() -
     assert {e.batch_index for e in result.row_errors} == {1}
 
 
+def test_savepoint_rowcount_captured_before_release_overwrites_it() -> None:
+    """#1139 round 6 (Codex): cur.rowcount reflects the LAST executed
+    statement on most DB-API cursors, so match_policy's "no match" check
+    must read it right after the UPDATE/INSERT, before RELEASE SAVEPOINT
+    (itself a separate statement) runs and could overwrite it. This test's
+    fake cursor deliberately sets a different, wrong rowcount when RELEASE
+    SAVEPOINT executes -- if the accounting read cur.rowcount afterward,
+    the row would be misclassified as skipped even though it matched.
+    """
+    dest = PostgresDestination()
+    conn = MagicMock()
+    cur = MagicMock()
+    conn.cursor.return_value = cur
+
+    def execute_side_effect(sql: Any, *args: Any) -> None:
+        text = str(sql)
+        if args and args[0] == [1, 99]:  # update_only: SET score=1 WHERE id=99
+            cur.rowcount = 1  # matched -> should count as success
+            return
+        if text.startswith("RELEASE SAVEPOINT"):
+            # Simulate a driver where a later statement's own rowcount
+            # (here, a no-op RELEASE) clobbers the cursor's rowcount.
+            cur.rowcount = 0
+            return
+        cur.rowcount = 1
+
+    cur.execute.side_effect = execute_side_effect
+    opts = SyncOptions(mode="upsert", match_policy="update_only", on_error="skip")
+    records = [{"id": 99, "score": 1}]
+
+    with patch.object(PostgresDestination, "_connect", return_value=conn):
+        result = dest.load(records, _pg_config(), opts)
+
+    assert result.success == 1
+    assert result.skipped == 0
+    assert result.skipped_no_match == 0
+
+
 def test_update_only_requires_a_non_key_column() -> None:
     dest = PostgresDestination()
     conn = _fake_connection()

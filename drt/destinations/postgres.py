@@ -249,9 +249,18 @@ class PostgresDestination(BaseSqlDestination):
                         for c in run_columns
                     ]
                     cur.execute(query, values)
-                    result.success += 1
                     if use_savepoint:
+                        # Codex review round 6 on #1139: count the row as
+                        # successful only after RELEASE SAVEPOINT itself
+                        # succeeds. If RELEASE raises (rare, but possible),
+                        # the row falls into the except block below and
+                        # _recover_row_savepoint's ROLLBACK TO SAVEPOINT
+                        # actually undoes this row's INSERT -- counting it
+                        # as success beforehand would leave it recorded as
+                        # both successful and failed, disagreeing with what
+                        # the database actually retained.
                         cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
+                    result.success += 1
                 except Exception as e:
                     self._record_row_error(result, i, record, e)
                     if sync_options.on_error == "fail":
@@ -351,9 +360,12 @@ class PostgresDestination(BaseSqlDestination):
                         for c in run_columns
                     ]
                     cur.execute(sql, values)
-                    result.success += 1
                     if use_savepoint:
+                        # See _load_replace's docstring/comment (#1139
+                        # round 6): count success only after RELEASE
+                        # SAVEPOINT itself succeeds.
                         cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
+                    result.success += 1
                 except Exception as e:
                     self._record_row_error(result, i, record, e)
                     if sync_options.on_error == "fail":
@@ -762,14 +774,21 @@ class PostgresDestination(BaseSqlDestination):
                         for c in value_cols
                     ]
                     cur.execute(query, values)
-                    if policy in ("create_only", "update_only") and cur.rowcount == 0:
+                    # cur.rowcount must be captured now, before RELEASE
+                    # SAVEPOINT below overwrites it with that statement's
+                    # own rowcount.
+                    no_match = policy in ("create_only", "update_only") and cur.rowcount == 0
+                    if use_savepoint:
+                        # #1139 round 6: apply the accounting only after
+                        # RELEASE SAVEPOINT itself succeeds -- see
+                        # _load_replace's comment for why.
+                        cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
+                    if no_match:
                         result.skipped += 1
                         result.skipped_no_match += 1  # #757 — no create/update target
                         no_match_indices.add(i)
                     else:
                         result.success += 1
-                    if use_savepoint:
-                        cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
                 except Exception as e:
                     self._record_row_error(result, i, record, e)
                     if sync_options.on_error == "fail":
