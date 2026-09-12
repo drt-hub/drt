@@ -250,7 +250,7 @@ def test_print_diff_table_unlabelled_delete_falls_back_to_plain() -> None:
     assert "mirror" not in out.lower()
 
 
-def _updated_diff(delete_reason: str | None) -> Any:
+def _updated_diff(delete_reason: str | None, *, writes_full_row: bool | None = None) -> Any:
     from drt.engine import diff as diff_mod
 
     return diff_mod.DiffResult(
@@ -259,6 +259,9 @@ def _updated_diff(delete_reason: str | None) -> Any:
         total_destination_rows=1,
         supported=True,
         delete_reason=delete_reason,
+        writes_full_row=(
+            writes_full_row if writes_full_row is not None else delete_reason == "replace"
+        ),
     )
 
 

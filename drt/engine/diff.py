@@ -84,6 +84,18 @@ class DiffResult:
     # Defaults to None so pre-existing callers keep the legacy rendering.
     delete_reason: str | None = None
     delete_preview_unavailable_reason: str | None = None
+    # #1091, caught in Codex review on #1135: whether the real write fully
+    # determines each row from the source record alone (a column the
+    # destination has that the record omits genuinely resets to its
+    # DEFAULT/NULL), as opposed to a partial UPDATE/MERGE that leaves an
+    # omitted column untouched. Deliberately NOT inferred from
+    # ``delete_reason == "replace"`` at render time: `delete_reason` is
+    # suppressed to `None` whenever nothing is deleted (see `compute_diff`),
+    # which is exactly the common case here (same key set, so nothing to
+    # delete, but a column still needs to show as changed). See
+    # `changed_fields()`'s `include_removed` parameter — this field decides
+    # its value at both call sites.
+    writes_full_row: bool = False
 
     @staticmethod
     def changed_fields(
@@ -118,6 +130,40 @@ class DiffResult:
         """
         cols = {*new, *old} if include_removed else set(new)
         return {col: (old.get(col), new.get(col)) for col in cols if old.get(col) != new.get(col)}
+
+
+def _writes_full_row(config: DestinationConfig, sync_options: SyncOptions) -> bool:
+    """True when the real write fully determines each matched row from the
+    source record alone — a column the destination has that the record
+    omits genuinely resets to its ``DEFAULT``/``NULL`` (or, for a plain
+    ``INSERT`` with no matching-row semantics, the destination gains a new
+    physical row instead of updating the existing one at all). False for a
+    genuine partial UPDATE/MERGE that leaves an omitted column untouched.
+
+    Caught in Codex review on #1135, correcting an earlier version of this
+    check that only looked at ``sync_options.mode == "replace"``:
+
+    - ``sync.mode: replace`` always rebuilds every row from the source
+      record alone — the original case this handled correctly.
+    - ClickHouse has no upsert-by-key write at all (``client.insert()``
+      only, per that destination's own module docstring) — every write is
+      a fresh row, so an omitted column is never "left alone" the way an
+      ``ON CONFLICT DO UPDATE`` or ``MERGE`` leaves it.
+    - Snowflake/Databricks default to ``destination.mode: insert`` (only
+      ``mode: merge`` — or ``sync.mode: mirror``, which forces merge
+      internally regardless of ``config.mode`` — does a genuine partial
+      ``UPDATE`` via ``MERGE``), so the same reasoning applies to their
+      default configuration, not just an edge case.
+    - Postgres/MySQL have no such ``config.mode`` dial at all — they
+      always upsert via ``ON CONFLICT DO UPDATE`` outside ``replace``
+      mode, so this returns ``False`` for them unless ``replace``.
+    """
+    if sync_options.mode == "replace":
+        return True
+    if isinstance(config, ClickHouseDestinationConfig):
+        return True
+    effective_mode = "merge" if sync_options.mode == "mirror" else getattr(config, "mode", None)
+    return effective_mode == "insert"
 
 
 def _is_tracked_mirror(sync_options: SyncOptions) -> bool:
@@ -415,11 +461,12 @@ def compute_diff(
 
     added: list[dict[str, Any]] = []
     updated: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    # replace mode rebuilds each row from `record` alone, so a column
-    # `existing` has that `record` omits genuinely resets to its
-    # DEFAULT/NULL -- a real change, unlike the upsert case where an
-    # omitted column is simply never touched (#1091, Codex review).
-    include_removed = sync_options.mode == "replace"
+    # See _writes_full_row's docstring: true whenever the real write fully
+    # determines each row from `record` alone (replace mode, ClickHouse's
+    # always-fresh insert, or Snowflake/Databricks' default insert-only
+    # mode) — a column `existing` has that `record` omits then genuinely
+    # resets, a real change unlike a partial UPDATE/MERGE leaving it alone.
+    include_removed = _writes_full_row(config, sync_options)
 
     for record in records:
         key = tuple(record.get(c) for c in upsert_key)
@@ -486,4 +533,5 @@ def compute_diff(
         # delete set in replace mode is not a "replace deletion".
         delete_reason=delete_reason if deleted else None,
         delete_preview_unavailable_reason=delete_preview_unavailable_reason,
+        writes_full_row=include_removed,
     )

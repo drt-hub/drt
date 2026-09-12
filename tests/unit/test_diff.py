@@ -510,6 +510,11 @@ class TestComputeDiffKeyedFetch:
             table="USERS",
             warehouse="COMPUTE_WH",
             upsert_key=["id"],
+            # mode: merge -- a genuine partial-update MERGE, not the
+            # dialect's insert-only default (which _writes_full_row
+            # correctly treats as always resetting omitted columns, since
+            # it's not a matched-row UPDATE at all).
+            mode="merge",
         )
         # id=1's real write never sends "note" -- id=2's does. Destination
         # already has a real (non-None) "note" for id=1 from a prior sync.
@@ -565,6 +570,96 @@ class TestComputeDiffKeyedFetch:
         assert len(result.updated) == 1
         old, new = result.updated[0]
         assert result.changed_fields(old, new, include_removed=True) == {"note": ("old-note", None)}
+        # The renderer-facing signal must survive even though nothing is
+        # deleted here (same key set) -- delete_reason gets suppressed to
+        # None in exactly this case, which is the P2 Codex caught: a
+        # renderer keyed off delete_reason == "replace" would miss this.
+        assert result.writes_full_row is True
+        assert result.deleted == []
+        assert result.delete_reason is None
+
+    def test_compute_diff_snowflake_default_insert_mode_resets_omitted_fields(
+        self,
+    ) -> None:
+        """Codex review caught that Snowflake/Databricks default to
+        ``destination.mode: insert`` -- a plain INSERT with no upsert-by-key
+        semantics at all, so an omitted column is not "left untouched" the
+        way a genuine ``mode: merge`` MERGE leaves it. This must surface as
+        a real change even for a non-replace sync, since gating only on
+        ``sync_options.mode == "replace"`` (an earlier version of this fix)
+        would silently hide it.
+
+        Two records so "note" appears in field_hint at all (the keyed-fetch
+        path's column hint is built from source records, not the
+        destination) -- id=2 sends "note", id=1 doesn't, so id=1 is the one
+        that must show the reset."""
+        # field_hint sorts alphabetically ("id" < "note").
+        cursor = MagicMock()
+        cursor.description = [("ID", None), ("NOTE", None)]
+        cursor.fetchall.return_value = [(1, "old-note"), (2, "flagged")]
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        sf_config = SnowflakeDestinationConfig(
+            type="snowflake",
+            account_env="SF_ACCOUNT",
+            user_env="SF_USER",
+            password_env="SF_PASSWORD",
+            database="ANALYTICS",
+            schema="PUBLIC",
+            table="USERS",
+            warehouse="COMPUTE_WH",
+            upsert_key=["id"],
+            # mode omitted -- defaults to "insert", not "merge".
+        )
+        records = [{"id": 1}, {"id": 2, "note": "flagged"}]
+
+        with patch(
+            "drt.destinations.snowflake.SnowflakeDestination._connect",
+            return_value=conn,
+        ):
+            result = compute_diff(records, sf_config, _options("full"), limit=20)
+
+        assert result.writes_full_row is True
+        assert len(result.updated) == 1
+        old, new = result.updated[0]
+        assert new["id"] == 1
+
+    def test_compute_diff_snowflake_merge_mode_leaves_omitted_fields_alone(
+        self,
+    ) -> None:
+        """The counterpart: an explicit ``mode: merge`` genuinely leaves an
+        omitted column untouched, so this must NOT surface as a change."""
+        cursor = MagicMock()
+        cursor.description = [("ID", None), ("NOTE", None)]
+        cursor.fetchall.return_value = [(1, "old-note"), (2, "flagged")]
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        sf_config = SnowflakeDestinationConfig(
+            type="snowflake",
+            account_env="SF_ACCOUNT",
+            user_env="SF_USER",
+            password_env="SF_PASSWORD",
+            database="ANALYTICS",
+            schema="PUBLIC",
+            table="USERS",
+            warehouse="COMPUTE_WH",
+            upsert_key=["id"],
+            mode="merge",
+        )
+        records = [{"id": 1}, {"id": 2, "note": "flagged"}]
+
+        with patch(
+            "drt.destinations.snowflake.SnowflakeDestination._connect",
+            return_value=conn,
+        ):
+            result = compute_diff(records, sf_config, _options("full"), limit=20)
+
+        assert result.writes_full_row is False
+        assert result.updated == []
 
     def test_compute_diff_snowflake_field_hint_includes_upsert_key_even_if_first_record_omits_it(
         self,
@@ -1442,3 +1537,79 @@ class TestDiffResult:
         changed = DiffResult.changed_fields(old, new)
 
         assert changed == {}
+
+
+class TestWritesFullRow:
+    """Unit tests for _writes_full_row (#1091, Codex review on #1135)."""
+
+    def test_replace_mode_is_full_row(self) -> None:
+        from drt.engine.diff import _writes_full_row
+
+        assert _writes_full_row(_pg_config(), _options("replace")) is True
+
+    def test_postgres_upsert_is_not_full_row(self) -> None:
+        """Postgres has no config.mode dial -- always a partial upsert
+        outside replace mode."""
+        from drt.engine.diff import _writes_full_row
+
+        assert _writes_full_row(_pg_config(), _options("full")) is False
+
+    def test_clickhouse_is_always_full_row(self) -> None:
+        """ClickHouse has no upsert-by-key write at all -- every write is a
+        fresh row, regardless of sync mode."""
+        from drt.engine.diff import _writes_full_row
+
+        assert _writes_full_row(_clickhouse_config(), _options("full")) is True
+        assert _writes_full_row(_clickhouse_config(), _options("mirror")) is True
+
+    def test_snowflake_default_insert_mode_is_full_row(self) -> None:
+        from drt.engine.diff import _writes_full_row
+
+        config = SnowflakeDestinationConfig(
+            type="snowflake",
+            account_env="SF_ACCOUNT",
+            user_env="SF_USER",
+            password_env="SF_PASSWORD",
+            database="ANALYTICS",
+            schema="PUBLIC",
+            table="USERS",
+            warehouse="COMPUTE_WH",
+            upsert_key=["id"],
+        )
+        assert _writes_full_row(config, _options("full")) is True
+
+    def test_snowflake_merge_mode_is_not_full_row(self) -> None:
+        from drt.engine.diff import _writes_full_row
+
+        config = SnowflakeDestinationConfig(
+            type="snowflake",
+            account_env="SF_ACCOUNT",
+            user_env="SF_USER",
+            password_env="SF_PASSWORD",
+            database="ANALYTICS",
+            schema="PUBLIC",
+            table="USERS",
+            warehouse="COMPUTE_WH",
+            upsert_key=["id"],
+            mode="merge",
+        )
+        assert _writes_full_row(config, _options("full")) is False
+
+    def test_snowflake_insert_mode_mirror_sync_is_not_full_row(self) -> None:
+        """sync.mode: mirror forces the MERGE write path internally
+        regardless of destination.mode -- a genuine partial update."""
+        from drt.engine.diff import _writes_full_row
+
+        config = SnowflakeDestinationConfig(
+            type="snowflake",
+            account_env="SF_ACCOUNT",
+            user_env="SF_USER",
+            password_env="SF_PASSWORD",
+            database="ANALYTICS",
+            schema="PUBLIC",
+            table="USERS",
+            warehouse="COMPUTE_WH",
+            upsert_key=["id"],
+            # mode omitted -- defaults to "insert", but mirror overrides it.
+        )
+        assert _writes_full_row(config, _options("mirror")) is False
