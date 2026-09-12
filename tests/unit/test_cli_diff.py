@@ -250,6 +250,50 @@ def test_print_diff_table_unlabelled_delete_falls_back_to_plain() -> None:
     assert "mirror" not in out.lower()
 
 
+def _updated_diff(delete_reason: str | None) -> Any:
+    from drt.engine import diff as diff_mod
+
+    return diff_mod.DiffResult(
+        updated=[({"id": 1, "note": "old"}, {"id": 1})],
+        total_source_rows=1,
+        total_destination_rows=1,
+        supported=True,
+        delete_reason=delete_reason,
+    )
+
+
+def test_print_diff_table_replace_mode_shows_a_column_the_new_record_omits() -> None:
+    """#1091, caught in a further Codex review round: replace mode rebuilds
+    each row from the new record alone, so a column the destination has
+    that the new record omits genuinely resets to its DEFAULT/NULL — a
+    real change the preview must show, unlike the upsert case where an
+    omitted column is simply never touched."""
+    out = _rendered(_updated_diff("replace"))
+    assert "note: old" in out
+
+
+def test_print_diff_table_non_replace_mode_hides_an_omitted_column() -> None:
+    """The same {"note": "old"} -> {} pair must NOT be reported as a change
+    outside replace mode: an upsert-style write never touches a column the
+    new record didn't send."""
+    out = _rendered(_updated_diff("mirror"))
+    assert "note" not in out
+
+
+def test_diff_to_dict_replace_mode_includes_a_column_the_new_record_omits() -> None:
+    from drt.cli.output import diff_to_dict
+
+    payload = diff_to_dict(_updated_diff("replace"))
+    assert payload["updated"][0]["changed_fields"] == ["note"]  # type: ignore[index]
+
+
+def test_diff_to_dict_non_replace_mode_excludes_an_omitted_column() -> None:
+    from drt.cli.output import diff_to_dict
+
+    payload = diff_to_dict(_updated_diff(None))
+    assert payload["updated"][0]["changed_fields"] == []  # type: ignore[index]
+
+
 def test_diff_to_dict_exposes_delete_reason() -> None:
     """``delete_reason`` rides alongside ``deleted`` without reshaping it."""
     from drt.cli.output import diff_to_dict

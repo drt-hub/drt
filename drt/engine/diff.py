@@ -86,26 +86,38 @@ class DiffResult:
     delete_preview_unavailable_reason: str | None = None
 
     @staticmethod
-    def changed_fields(old: dict[str, Any], new: dict[str, Any]) -> dict[str, tuple[Any, Any]]:
+    def changed_fields(
+        old: dict[str, Any], new: dict[str, Any], *, include_removed: bool = False
+    ) -> dict[str, tuple[Any, Any]]:
         """Return the columns that differ between *old* and *new* as
         ``{col: (old_value, new_value)}``. Equal columns are omitted.
 
         Used by the renderer to show ``score: 0.5 → 0.95`` rather than
         every column on every updated row.
 
-        Iterates ``new``'s own keys only, not ``set(old) | set(new)``
-        (#1091, caught in Codex review on #1135): the keyed-fetch preview
-        (``compute_diff``) fetches the *cross-record* union of columns for
-        ``old``, since a heterogeneous batch's records can have different
-        key sets. If a column present in ``old`` (because *some other*
-        record in the batch has it) is absent from *this* ``new`` record,
-        the real write never touches that column for this record — the
-        write groups by exact key signature, so a record's own keys are
-        exactly what it writes. Comparing a column ``new`` never sent
-        against ``old``'s fetched value would report a phantom
-        ``col: value → None`` for a field this write doesn't change.
+        Iterates ``new``'s own keys only by default, not ``set(old) |
+        set(new)`` (#1091, caught in Codex review on #1135): the
+        keyed-fetch preview (``compute_diff``) fetches the *cross-record*
+        union of columns for ``old``, since a heterogeneous batch's
+        records can have different key sets. For an upsert-style write
+        (the default), a column present in ``old`` (because *some other*
+        record in the batch has it) but absent from *this* ``new`` record
+        is never touched by this record's write — it groups by exact key
+        signature, so a record's own keys are exactly what it writes.
+        Comparing a column ``new`` never sent against ``old``'s fetched
+        value would report a phantom ``col: value → None`` for a field
+        this write doesn't change.
+
+        ``include_removed=True`` restores the ``old``-only columns to the
+        comparison — pass it for ``sync.mode: replace``, caught missing in
+        a further Codex review round: a replace-mode write rebuilds the
+        whole row from ``new`` alone, so a column ``old`` has that ``new``
+        omits genuinely gets reset to its ``DEFAULT``/``NULL`` — unlike the
+        upsert case, that *is* a real change the dry-run preview should
+        show, not a phantom one.
         """
-        return {col: (old.get(col), new.get(col)) for col in new if old.get(col) != new.get(col)}
+        cols = {*new, *old} if include_removed else set(new)
+        return {col: (old.get(col), new.get(col)) for col in cols if old.get(col) != new.get(col)}
 
 
 def _is_tracked_mirror(sync_options: SyncOptions) -> bool:
@@ -403,13 +415,18 @@ def compute_diff(
 
     added: list[dict[str, Any]] = []
     updated: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    # replace mode rebuilds each row from `record` alone, so a column
+    # `existing` has that `record` omits genuinely resets to its
+    # DEFAULT/NULL -- a real change, unlike the upsert case where an
+    # omitted column is simply never touched (#1091, Codex review).
+    include_removed = sync_options.mode == "replace"
 
     for record in records:
         key = tuple(record.get(c) for c in upsert_key)
         existing = dest_by_key.get(key)
         if existing is None:
             added.append(record)
-        elif DiffResult.changed_fields(existing, record):
+        elif DiffResult.changed_fields(existing, record, include_removed=include_removed):
             updated.append((existing, record))
         # else: row matches destination exactly — no entry
 

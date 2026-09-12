@@ -398,8 +398,12 @@ def print_diff_table(diff: object, sync_name: str) -> None:
     # Updated — show field-level changes
     if n_updated:
         console.print(f"\n  [yellow]~ Updated ({n_updated}):[/yellow]")
+        # replace mode rebuilds each row from `new` alone, so an old-only
+        # column genuinely resets to its DEFAULT/NULL -- a real change
+        # (#1091, Codex review) that the upsert-safe default would hide.
+        include_removed = diff.delete_reason == "replace"
         for old, new in diff.updated:
-            changed = DiffResult.changed_fields(old, new)
+            changed = DiffResult.changed_fields(old, new, include_removed=include_removed)
             # Use the first column of new as a stable key label
             key_repr = next((f"{k}={v}" for k, v in new.items() if k in old), "(?)")
             change_repr = ", ".join(
@@ -465,6 +469,10 @@ def diff_to_dict(diff: object) -> dict[str, object]:
             "truncated": diff.truncated,
         }
 
+    # replace mode rebuilds each row from `new` alone, so an old-only
+    # column genuinely resets to its DEFAULT/NULL -- a real change (#1091,
+    # Codex review) the upsert-safe default would otherwise hide.
+    include_removed = diff.delete_reason == "replace"
     return {
         "supported": True,
         "total_source_rows": diff.total_source_rows,
@@ -474,7 +482,9 @@ def diff_to_dict(diff: object) -> dict[str, object]:
             {
                 "old": old,
                 "new": new,
-                "changed_fields": list(DiffResult.changed_fields(old, new).keys()),
+                "changed_fields": list(
+                    DiffResult.changed_fields(old, new, include_removed=include_removed).keys()
+                ),
             }
             for old, new in diff.updated
         ],

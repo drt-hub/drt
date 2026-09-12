@@ -526,6 +526,46 @@ class TestComputeDiffKeyedFetch:
         # id=2 unchanged too (score and note both match destination).
         assert result.updated == []
 
+    def test_compute_diff_replace_mode_reports_a_column_the_new_record_omits(
+        self,
+    ) -> None:
+        """Caught in a further Codex review round on #1091/#1135: replace
+        mode rebuilds each row from the new record alone, so a column the
+        destination has that the new record omits genuinely resets to its
+        DEFAULT/NULL -- a real change, unlike the upsert case where an
+        omitted column is simply never touched."""
+        cursor = MagicMock()
+        cursor.description = [("ID", None), ("NOTE", None)]
+        cursor.fetchall.return_value = [(1, "old-note")]
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        sf_config = SnowflakeDestinationConfig(
+            type="snowflake",
+            account_env="SF_ACCOUNT",
+            user_env="SF_USER",
+            password_env="SF_PASSWORD",
+            database="ANALYTICS",
+            schema="PUBLIC",
+            table="USERS",
+            warehouse="COMPUTE_WH",
+            upsert_key=["id"],
+        )
+        # The new record omits "note" entirely -- replace mode's rebuild
+        # resets it, so this must surface as a real update.
+        records = [{"id": 1}]
+
+        with patch(
+            "drt.destinations.snowflake.SnowflakeDestination._connect",
+            return_value=conn,
+        ):
+            result = compute_diff(records, sf_config, _options("replace"), limit=20)
+
+        assert len(result.updated) == 1
+        old, new = result.updated[0]
+        assert result.changed_fields(old, new, include_removed=True) == {"note": ("old-note", None)}
+
     def test_compute_diff_snowflake_field_hint_includes_upsert_key_even_if_first_record_omits_it(
         self,
     ) -> None:
