@@ -28,7 +28,7 @@ from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, MySQLDestinationConfig, SyncOptions
 from drt.destinations._serializer import serialize_complex_value
 from drt.destinations.base import SyncResult
-from drt.destinations.sql_base import BaseSqlDestination
+from drt.destinations.sql_base import _ROW_SAVEPOINT, BaseSqlDestination
 
 
 def _mysql_json_encoder(value: Any) -> str:
@@ -159,6 +159,21 @@ class MySQLDestination(BaseSqlDestination):
         run's INSERT, letting the destination table's own
         ``DEFAULT``/nullability apply, rather than binding an explicit
         ``NULL`` that would override it (caught in Codex review on #1135).
+
+        Each row's INSERT runs inside its own ``SAVEPOINT`` (#1136): the
+        previous ``conn.rollback()`` on a per-row failure discarded every
+        earlier successful row in this same call that hadn't been
+        committed yet, even though ``result.success`` had already counted
+        them -- and, on MySQL specifically, that ``conn.rollback()`` was
+        never even necessary for recovery (InnoDB doesn't abort the whole
+        transaction on an ordinary statement error, verified empirically),
+        so it was pure data loss with no compensating benefit. A plain
+        "skip and keep going" (no rollback of any kind) would fix that
+        common case, but a genuine deadlock *does* force MySQL to roll
+        back the whole transaction -- using the same ``SAVEPOINT``
+        mechanism as Postgres here keeps the recovery code identical
+        across both dialects rather than relying on which specific errors
+        happen to leave the transaction usable.
         """
         result = SyncResult()
 
@@ -174,19 +189,21 @@ class MySQLDestination(BaseSqlDestination):
             for local_i, record in enumerate(run_records):
                 i = base_index + local_i
                 try:
+                    cur.execute(f"SAVEPOINT {_ROW_SAVEPOINT}")
                     values = [
                         _serialize_value(record.get(c), c, config.json_columns, schema_map)
                         for c in run_columns
                     ]
                     cur.execute(sql, values)
                     result.success += 1
+                    cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
                 except Exception as e:
                     self._record_row_error(result, i, record, e)
                     if sync_options.on_error == "fail":
                         conn.rollback()
+                        result.success = 0
                         return result
-                    conn.rollback()
-                    cur = conn.cursor()
+                    self._recover_row_savepoint(conn, cur)
                     continue
             base_index += len(run_records)
 
@@ -203,7 +220,14 @@ class MySQLDestination(BaseSqlDestination):
         sync_options: SyncOptions,
         config: MySQLDestinationConfig,
     ) -> SyncResult:
-        """Build a shadow table per sync; atomic rename happens in finalize_sync."""
+        """Build a shadow table per sync; atomic rename happens in finalize_sync.
+
+        Each row's INSERT runs inside its own SAVEPOINT (#1136) — this
+        method's ``on_error: skip`` path previously had **no** recovery at
+        all after a row failure (unlike its ``_load_upsert``/``_load_replace``
+        siblings' ``conn.rollback()``), leaving the connection in whatever
+        state MySQL left it in after the failed statement.
+        """
         result = SyncResult()
         shadow = f"{table}__drt_swap"
         shadow_q = self._quote_ident(shadow)
@@ -227,16 +251,19 @@ class MySQLDestination(BaseSqlDestination):
             for local_i, record in enumerate(run_records):
                 i = base_index + local_i
                 try:
+                    cur.execute(f"SAVEPOINT {_ROW_SAVEPOINT}")
                     values = [
                         _serialize_value(record.get(c), c, config.json_columns, schema_map)
                         for c in run_columns
                     ]
                     cur.execute(sql, values)
                     result.success += 1
+                    cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
                 except Exception as e:
                     self._record_row_error(result, i, record, e)
                     if sync_options.on_error == "fail":
                         conn.rollback()
+                        result.success = 0
                         # Cleanup shadow on hard fail
                         cur = conn.cursor()
                         cur.execute(f"DROP TABLE IF EXISTS {shadow_q}")
@@ -244,7 +271,7 @@ class MySQLDestination(BaseSqlDestination):
                         self._swap_shadow_created = False
                         self._swap_table = None
                         return result
-                    # on_error=skip: keep going
+                    self._recover_row_savepoint(conn, cur)
             base_index += len(run_records)
 
         conn.commit()
@@ -406,7 +433,13 @@ class MySQLDestination(BaseSqlDestination):
         whole batch — see ``PostgresDestination._load_upsert``'s docstring
         for the shared rationale (a heterogeneous batch's run boundaries
         never span more than one ``_load_upsert`` call, so this keeps the
-        existing one-transaction-per-call semantics untouched)."""
+        existing one-transaction-per-call semantics untouched).
+
+        Each row's statement runs inside its own ``SAVEPOINT`` (#1136) —
+        see ``PostgresDestination._load_upsert``'s docstring for why a
+        per-row ``conn.rollback()`` on ``on_error: skip`` silently
+        discarded earlier successful rows in the same call.
+        """
         result = SyncResult()
         schema_map = self._resolve_schema(config)
 
@@ -417,19 +450,21 @@ class MySQLDestination(BaseSqlDestination):
             for local_i, record in enumerate(run_records):
                 i = base_index + local_i
                 try:
+                    cur.execute(f"SAVEPOINT {_ROW_SAVEPOINT}")
                     values = [
                         _serialize_value(record.get(c), c, config.json_columns, schema_map)
                         for c in run_columns
                     ]
                     cur.execute(sql, values)
                     result.success += 1
+                    cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
                 except Exception as e:
                     self._record_row_error(result, i, record, e)
                     if sync_options.on_error == "fail":
                         conn.rollback()
+                        result.success = 0
                         return result
-                    conn.rollback()
-                    cur = conn.cursor()
+                    self._recover_row_savepoint(conn, cur)
                     continue
             base_index += len(run_records)
 

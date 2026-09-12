@@ -145,7 +145,8 @@ class TestMySQLDestinationLoad:
 
         assert result.success == 2
         assert result.failed == 0
-        assert conn.cursor().execute.call_count == 2
+        # 3 execute calls per row (SAVEPOINT/INSERT/RELEASE, #1136) x 2 rows.
+        assert conn.cursor().execute.call_count == 6
         conn.commit.assert_called_once()
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
@@ -166,9 +167,13 @@ class TestMySQLDestinationLoad:
         result = MySQLDestination().load(records, _config(), _options())
 
         assert result.success == 2
-        assert cur.execute.call_count == 2
-        queries = [c.args[0] for c in cur.execute.call_args_list]
-        params = [c.args[1] for c in cur.execute.call_args_list]
+        # 3 execute calls per row (SAVEPOINT/INSERT/RELEASE, #1136) x 2 rows
+        # (each its own run/signature here) -- filter down to just the
+        # actual INSERT calls (the only ones with a second, params, arg).
+        assert cur.execute.call_count == 6
+        insert_calls = [c for c in cur.execute.call_args_list if len(c.args) > 1]
+        queries = [c.args[0] for c in insert_calls]
+        params = [c.args[1] for c in insert_calls]
         assert "note" not in queries[0]
         assert None not in params[0]
         assert "note" in queries[1]
@@ -186,7 +191,8 @@ class TestMySQLDestinationLoad:
         records = [{"user_id": 1, "company_id": 5, "score": 0.95}]
         MySQLDestination().load(records, _config(), options)
 
-        query = conn.cursor().execute.call_args.args[0]
+        # index 0 = SAVEPOINT, 1 = the actual (tagged) INSERT (#1136).
+        query = conn.cursor().execute.call_args_list[1].args[0]
         assert query.startswith("/* drt sync=s run_id=r */\n")
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
@@ -197,7 +203,8 @@ class TestMySQLDestinationLoad:
         records = [{"user_id": 1, "company_id": 5, "score": 0.95}]
         MySQLDestination().load(records, _config(), _options())
 
-        query = conn.cursor().execute.call_args.args[0]
+        # index 0 = SAVEPOINT, 1 = the actual INSERT (#1136).
+        query = conn.cursor().execute.call_args_list[1].args[0]
         assert not query.startswith("/* drt")
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
@@ -209,11 +216,18 @@ class TestMySQLDestinationLoad:
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
     def test_row_error_on_error_skip(self, mock_connect: MagicMock) -> None:
+        """#1136: the failing row's own INSERT raises, recovered via
+        ``ROLLBACK TO SAVEPOINT`` (not a full ``conn.rollback()`` / fresh
+        cursor -- the whole point of the fix is that no reconnect is
+        needed and no earlier work is discarded)."""
         conn = _fake_connection()
         cur = conn.cursor()
-        cur.execute.side_effect = [Exception("duplicate key"), None]
-        new_cur = MagicMock()
-        conn.cursor.side_effect = [cur, new_cur]
+
+        def execute_side_effect(sql: str, *args: Any) -> None:
+            if args and args[0] == [1, 5, 0.5]:
+                raise Exception("duplicate key")
+
+        cur.execute.side_effect = execute_side_effect
         mock_connect.return_value = conn
 
         records = [
@@ -273,7 +287,8 @@ class TestMySQLDestinationLoad:
         result = MySQLDestination().load(records, _config(), _options())
 
         assert result.success == 1
-        args, _ = cur.execute.call_args
+        # index 0 = SAVEPOINT, 1 = the actual INSERT (#1136).
+        args, _ = cur.execute.call_args_list[1]
         _sql, values = args
         assert values[2] == '{"lang": "日本語", "level": "N1"}'
         assert values[3] == '["a", "b"]'
@@ -347,23 +362,25 @@ class TestMySQLReplaceMode:
 
         assert result.success == 2
         assert result.failed == 0
-        # TRUNCATE + 2 INSERTs = 3 execute calls
-        assert cur.execute.call_count == 3
+        # TRUNCATE + 2 rows x 3 calls each (SAVEPOINT/INSERT/RELEASE, #1136).
+        assert cur.execute.call_count == 7
         first_call_sql = cur.execute.call_args_list[0][0][0]
         assert "TRUNCATE TABLE" in first_call_sql
         conn.commit.assert_called_once()
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
     def test_replace_row_error_on_error_skip(self, mock_connect: MagicMock) -> None:
-        # replace path: TRUNCATE ok, first INSERT raises, second succeeds on a
-        # fresh cursor. Exercises _load_replace's error branch (rollback →
-        # new cursor → continue) and the shared _record_row_error.
+        """#1136: replace path — TRUNCATE ok, row 0's own INSERT raises,
+        recovered via ``ROLLBACK TO SAVEPOINT`` (no reconnect, and row 1
+        still lands in the same transaction as the TRUNCATE)."""
         conn = _fake_connection()
         cur = conn.cursor()
-        # execute #1 = TRUNCATE (ok), #2 = INSERT row 0 (raises)
-        cur.execute.side_effect = [None, Exception("duplicate key"), None]
-        new_cur = MagicMock()
-        conn.cursor.side_effect = [cur, new_cur]
+
+        def execute_side_effect(sql: str, *args: Any) -> None:
+            if args and args[0] == [1, 5, 0.5]:
+                raise Exception("duplicate key")
+
+        cur.execute.side_effect = execute_side_effect
         mock_connect.return_value = conn
 
         records = [
@@ -379,7 +396,7 @@ class TestMySQLReplaceMode:
         assert len(result.row_errors) == 1
         assert result.row_errors[0].batch_index == 0
         assert "duplicate key" in result.row_errors[0].error_message
-        conn.rollback.assert_called_once()
+        conn.rollback.assert_not_called()
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
     def test_replace_truncates_only_once_across_batches(self, mock_connect: MagicMock) -> None:
@@ -416,7 +433,8 @@ class TestMySQLReplaceMode:
             _options(mode="replace"),
         )
 
-        insert_sql = cur.execute.call_args_list[1][0][0]
+        # calls: 0=TRUNCATE, 1=SAVEPOINT, 2=the actual INSERT (#1136).
+        insert_sql = cur.execute.call_args_list[2][0][0]
         assert "ON DUPLICATE KEY" not in insert_sql
         assert "INSERT INTO" in insert_sql
 
@@ -446,8 +464,8 @@ class TestMySQLReplaceMode:
         dest = MySQLDestination()
         dest.load(records, _config(), _options(mode="replace"))
 
-        # INSERT call (after TRUNCATE)
-        _sql, values = cur.execute.call_args_list[1][0]
+        # calls: 0=TRUNCATE, 1=SAVEPOINT, 2=the actual INSERT (#1136).
+        _sql, values = cur.execute.call_args_list[2][0]
         assert values[2] == '{"lang": "ja"}'
 
 
@@ -627,7 +645,10 @@ class TestMySQLReplaceSwap:
         )
 
         assert result.failed == 1
-        assert result.success == 1
+        # #1136: the first row's success is discarded by the full
+        # conn.rollback() this on_error: fail path still (correctly) does --
+        # result.success must reflect that, not the pre-rollback count.
+        assert result.success == 0
         conn.rollback.assert_called()
         sqls = [c[0][0] for c in cur.execute.call_args_list]
         drops = [s for s in sqls if "DROP TABLE IF EXISTS" in s and "__drt_swap" in s]

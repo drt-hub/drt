@@ -146,7 +146,8 @@ class TestPostgresDestinationLoad:
 
         assert result.success == 2
         assert result.failed == 0
-        assert conn.cursor().execute.call_count == 2
+        # 3 execute calls per row (SAVEPOINT/INSERT/RELEASE, #1136) x 2 rows.
+        assert conn.cursor().execute.call_count == 6
         conn.commit.assert_called_once()
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
@@ -163,7 +164,8 @@ class TestPostgresDestinationLoad:
         )
 
         assert result.success == 1
-        query = _query_text(cur.execute.call_args.args[0])
+        # index 0 = SAVEPOINT, 1 = the actual INSERT, 2 = RELEASE (#1136).
+        query = _query_text(cur.execute.call_args_list[1].args[0])
         assert "INSERT INTO" in query
         assert _split_identifier_text("marketing", "email_events") in query
 
@@ -183,7 +185,8 @@ class TestPostgresDestinationLoad:
         # a plain string, so str() gives its repr — the comment fragment is
         # still the leading component (asserted precisely for the plain-str
         # and Composable cases in test_sql_base_tagging.py).
-        query = _query_text(cur.execute.call_args.args[0])
+        # index 0 = SAVEPOINT, 1 = the actual (tagged) INSERT (#1136).
+        query = _query_text(cur.execute.call_args_list[1].args[0])
         assert query.startswith("Composed([SQL('/* drt sync=s run_id=r */\\n')")
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
@@ -194,7 +197,8 @@ class TestPostgresDestinationLoad:
 
         PostgresDestination().load([{"id": 1, "score": 0.95}], _config(), _options())
 
-        query = _query_text(cur.execute.call_args.args[0])
+        # index 0 = SAVEPOINT, 1 = the actual INSERT (#1136).
+        query = _query_text(cur.execute.call_args_list[1].args[0])
         assert not query.startswith("/* drt")
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
@@ -218,9 +222,13 @@ class TestPostgresDestinationLoad:
 
         assert result.success == 2
         assert result.failed == 0
-        assert cur.execute.call_count == 2
-        queries = [_query_text(c.args[0]) for c in cur.execute.call_args_list]
-        params = [c.args[1] for c in cur.execute.call_args_list]
+        # 3 execute calls per row (SAVEPOINT/INSERT/RELEASE, #1136) x 2 rows
+        # (each its own run/signature here) -- filter down to just the
+        # actual INSERT calls (the only ones with a second, params, arg).
+        assert cur.execute.call_count == 6
+        insert_calls = [c for c in cur.execute.call_args_list if len(c.args) > 1]
+        queries = [_query_text(c.args[0]) for c in insert_calls]
+        params = [c.args[1] for c in insert_calls]
         # First group: just id/score.
         assert "'note'" not in queries[0]
         assert "flagged" not in params[0]
@@ -246,7 +254,8 @@ class TestPostgresDestinationLoad:
         ]
         PostgresDestination().load(records, _config(), _options())
 
-        first_group_params = cur.execute.call_args_list[0].args[1]
+        # index 0 = SAVEPOINT, 1 = the actual INSERT (#1136).
+        first_group_params = cur.execute.call_args_list[1].args[1]
         assert None not in first_group_params
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
@@ -258,13 +267,18 @@ class TestPostgresDestinationLoad:
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
     def test_row_error_on_error_skip(self, mock_connect: MagicMock) -> None:
+        """#1136: the failing row's own INSERT raises, recovered via
+        ``ROLLBACK TO SAVEPOINT`` (not a full ``conn.rollback()`` / fresh
+        cursor -- the whole point of the fix is that no reconnect is
+        needed and no earlier work is discarded)."""
         conn = _fake_connection()
         cur = conn.cursor()
-        # First row fails, second succeeds
-        cur.execute.side_effect = [Exception("duplicate key"), None]
-        # After rollback, return a fresh cursor for the second row
-        new_cur = MagicMock()
-        conn.cursor.side_effect = [cur, new_cur]
+
+        def execute_side_effect(sql: Any, *args: Any) -> None:
+            if args and args[0] == [1, 0.5]:
+                raise Exception("duplicate key")
+
+        cur.execute.side_effect = execute_side_effect
         mock_connect.return_value = conn
 
         records = [
@@ -393,8 +407,8 @@ class TestPostgresReplaceMode:
 
         assert result.success == 2
         assert result.failed == 0
-        # TRUNCATE + 2 INSERTs = 3 execute calls
-        assert cur.execute.call_count == 3
+        # TRUNCATE + 2 rows x 3 calls each (SAVEPOINT/INSERT/RELEASE, #1136).
+        assert cur.execute.call_count == 7
         first_call_sql = str(cur.execute.call_args_list[0][0][0])
         assert "TRUNCATE" in first_call_sql
         conn.commit.assert_called_once()
@@ -423,8 +437,8 @@ class TestPostgresReplaceMode:
         dest = PostgresDestination()
         dest.load([{"id": 1, "score": 0.5}], _config(), _options(mode="replace"))
 
-        # The INSERT call (second execute, after TRUNCATE)
-        insert_sql = str(cur.execute.call_args_list[1][0][0])
+        # calls: 0=TRUNCATE, 1=SAVEPOINT, 2=the actual INSERT (#1136).
+        insert_sql = str(cur.execute.call_args_list[2][0][0])
         assert "INSERT INTO" in insert_sql
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
@@ -472,34 +486,6 @@ class TestPostgresReplaceMode:
         assert "bad row" in result.row_errors[0].error_message
         conn.rollback.assert_called_once()
 
-    @patch("drt.destinations.postgres.PostgresDestination._connect")
-    def test_replace_on_error_skip_retruncates_after_reset_state(
-        self, mock_connect: MagicMock
-    ) -> None:
-        conn = _fake_connection()
-        cur = conn.cursor()
-        mock_connect.return_value = conn
-        dest = PostgresDestination()
-
-        def execute_side_effect(sql: Any, *args: Any) -> None:
-            if "INSERT INTO" in _query_text(sql):
-                dest._replace_truncated = False
-                raise Exception("bad row")
-
-        cur.execute.side_effect = execute_side_effect
-
-        result = dest.load(
-            [{"id": 1, "score": 0.95}],
-            _config(table="marketing.email_events"),
-            _options(mode="replace", on_error="skip"),
-        )
-
-        sqls = [_query_text(c[0][0]) for c in cur.execute.call_args_list]
-        truncate_sqls = [s for s in sqls if "TRUNCATE TABLE" in s]
-        assert result.failed == 1
-        assert len(truncate_sqls) == 2
-        assert all(_split_identifier_text("marketing", "email_events") in s for s in truncate_sqls)
-
     def test_list_passes_through(self) -> None:
         """Non-dict types (including list) must pass through unchanged."""
         from drt.destinations.postgres import _serialize_value
@@ -535,8 +521,9 @@ class TestPostgresReplaceMode:
         records = [{"id": 1, "name": "alice", "score": 99}]
         PostgresDestination().load(records, _config(), _options())
 
-        # All values should be plain Python types, no Json wrapping
-        call_args = cur.execute.call_args[0][1]
+        # All values should be plain Python types, no Json wrapping.
+        # index 0 = SAVEPOINT, 1 = the actual INSERT (#1136).
+        call_args = cur.execute.call_args_list[1][0][1]
         for val in call_args:
             assert not hasattr(val, "adapted"), f"Expected plain value, got Json: {val}"
 
@@ -763,7 +750,10 @@ class TestPostgresReplaceSwap:
         )
 
         assert result.failed == 1
-        assert result.success == 1
+        # #1136: the first row's success is discarded by the full
+        # conn.rollback() this on_error: fail path still (correctly) does --
+        # result.success must reflect that, not the pre-rollback count.
+        assert result.success == 0
         # Rollback called on hard fail
         conn.rollback.assert_called()
         # Cleanup DROP IF EXISTS issued after rollback

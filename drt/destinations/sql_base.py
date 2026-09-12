@@ -29,6 +29,13 @@ from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 from drt.destinations.sql_utils import tagged_cursor as _tagged_cursor
 
+# #1136: per-row SAVEPOINT name, shared by Postgres and MySQL (identical
+# SQL on both dialects) — see BaseSqlDestination._recover_row_savepoint.
+# A fixed name reused per row, released on success / rolled back to on
+# failure; verified against a real Postgres that reuse after RELEASE
+# doesn't grow the savepoint stack across a large batch.
+_ROW_SAVEPOINT = "drt_row_sp"
+
 
 def _union_columns(records: list[dict[str, Any]]) -> list[str]:
     """Column list covering every key across ``records``, in first-seen order.
@@ -549,6 +556,25 @@ class BaseSqlDestination:
                 error_message=str(exc),
             )
         )
+
+    def _recover_row_savepoint(self, conn: Any, cur: Any) -> None:
+        """``on_error: skip`` recovery after a per-row statement failure
+        under Postgres/MySQL's per-``SAVEPOINT``-row write loops (#1136).
+
+        ``ROLLBACK TO SAVEPOINT`` undoes only this row's own work, keeping
+        every earlier successful row in the same call intact — unlike a
+        full ``conn.rollback()``, which used to discard them even though
+        ``result.success`` had already counted them. Falls back to a full
+        ``conn.rollback()`` only if the ``ROLLBACK TO SAVEPOINT`` itself
+        fails (e.g. the row's own ``SAVEPOINT`` statement never actually
+        succeeded, or the connection is otherwise unusable) — the same
+        loss of earlier work this fix otherwise avoids, but the only
+        remaining way to make the connection usable again.
+        """
+        try:
+            cur.execute(f"ROLLBACK TO SAVEPOINT {_ROW_SAVEPOINT}")
+        except Exception:
+            conn.rollback()
 
     def test_connection(self, config: Any) -> None:
         """Connectivity check: open a connection and run ``SELECT 1``.

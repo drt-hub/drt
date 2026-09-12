@@ -141,7 +141,8 @@ def test_create_only_emits_do_nothing_and_counts_existing_as_skipped() -> None:
     with patch.object(PostgresDestination, "_connect", return_value=conn):
         result = dest.load([{"id": 1, "score": 5}, {"id": 2, "score": 6}], _pg_config(), opts)
 
-    query = str(conn.cursor.return_value.execute.call_args.args[0])
+    # index 0 = SAVEPOINT, 1 = the actual INSERT (#1136).
+    query = str(conn.cursor.return_value.execute.call_args_list[1].args[0])
     assert "ON CONFLICT" in query and "DO NOTHING" in query
     assert result.skipped == 2
     assert result.skipped_no_match == 2  # #757 — named subset of skipped
@@ -168,7 +169,8 @@ def test_update_only_emits_update_where_with_set_then_key_params() -> None:
     with patch.object(PostgresDestination, "_connect", return_value=conn):
         result = dest.load([{"id": 1, "score": 5, "name": "a"}], _pg_config(), opts)
 
-    call = conn.cursor.return_value.execute.call_args
+    # index 0 = SAVEPOINT, 1 = the actual UPDATE (#1136).
+    call = conn.cursor.return_value.execute.call_args_list[1]
     query = str(call.args[0])  # psycopg2 Composed repr
     assert "UPDATE " in query
     assert " SET " in query and " WHERE " in query
@@ -235,7 +237,8 @@ def test_default_upsert_policy_still_upserts() -> None:
     with patch.object(PostgresDestination, "_connect", return_value=conn):
         result = dest.load([{"id": 1, "score": 5}], _pg_config(), SyncOptions())
 
-    query = str(conn.cursor.return_value.execute.call_args.args[0])
+    # index 0 = SAVEPOINT, 1 = the actual INSERT (#1136).
+    query = str(conn.cursor.return_value.execute.call_args_list[1].args[0])
     assert "ON CONFLICT" in query and "DO UPDATE" in query
     assert result.success == 1
     assert result.skipped == 0
