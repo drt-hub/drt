@@ -29,6 +29,13 @@ from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import RowError
 from drt.destinations.sql_utils import tagged_cursor as _tagged_cursor
 
+# #1136: per-row SAVEPOINT name, shared by Postgres and MySQL (identical
+# SQL on both dialects) — see BaseSqlDestination._recover_row_savepoint.
+# A fixed name reused per row, released on success / rolled back to on
+# failure; verified against a real Postgres that reuse after RELEASE
+# doesn't grow the savepoint stack across a large batch.
+_ROW_SAVEPOINT = "drt_row_sp"
+
 
 def _union_columns(records: list[dict[str, Any]]) -> list[str]:
     """Column list covering every key across ``records``, in first-seen order.
@@ -549,6 +556,92 @@ class BaseSqlDestination:
                 error_message=str(exc),
             )
         )
+
+    def _recover_row_savepoint(self, conn: Any, cur: Any) -> bool:
+        """``on_error: skip`` recovery after a per-row statement failure
+        under Postgres/MySQL's per-``SAVEPOINT``-row write loops (#1136).
+
+        ``ROLLBACK TO SAVEPOINT`` undoes only this row's own work, keeping
+        every earlier successful row in the same call intact — unlike a
+        full ``conn.rollback()``, which used to discard them even though
+        ``result.success`` had already counted them.
+
+        Also releases the savepoint immediately after rolling back to it
+        (Codex review on #1139): ``ROLLBACK TO SAVEPOINT`` does not by
+        itself destroy the named savepoint — Postgres leaves it on the
+        subtransaction stack, so the *next* row's ``SAVEPOINT`` (same
+        fixed name) would nest on top of it rather than reusing a clean
+        slot, accumulating one unreleased subtransaction per failed row
+        for the rest of the batch. ``RELEASE`` pops it immediately so the
+        stack never grows past one entry regardless of failure count.
+
+        Returns ``True`` when the row-level rollback succeeded — safe to
+        keep processing further rows in this same transaction. Returns
+        ``False`` when it failed and a full ``conn.rollback()`` was used
+        instead (round 2 of Codex review on #1139): a MySQL deadlock, for
+        instance, makes InnoDB roll back the *entire* transaction on its
+        own, not just this row's savepoint, so ``ROLLBACK TO SAVEPOINT``
+        then fails because that savepoint no longer exists. When that
+        happens, every row this call has accumulated so far — including
+        ones already counted as successful — has actually been discarded
+        along with it, and the caller MUST stop processing and reset
+        ``result.success`` accordingly rather than blindly continuing as
+        if only this one row was affected.
+        """
+        try:
+            cur.execute(f"ROLLBACK TO SAVEPOINT {_ROW_SAVEPOINT}")
+            cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
+            return True
+        except Exception:
+            conn.rollback()
+            return False
+
+    def _mark_batch_aborted(
+        self,
+        result: SyncResult,
+        records: list[dict[str, Any]],
+        failed_index: int,
+        exclude_indices: frozenset[int] = frozenset(),
+    ) -> None:
+        """A per-row write loop is bailing out with the whole call's
+        transaction rolled back (#1139) -- either ``on_error: fail``'s
+        ordinary path, or ``on_error: skip`` when even the row-level
+        ``SAVEPOINT`` recovery itself failed (e.g. a MySQL deadlock already
+        rolled back the entire transaction).
+
+        Every record in ``records``, not just the one at ``failed_index``
+        whose exception triggered the bail, must be treated as failed:
+        earlier records already counted in ``result.success`` were undone by
+        the rollback, and later records were never attempted at all. Both
+        groups need a ``RowError`` recorded for them (with a generic
+        "batch aborted" message, since ``failed_index`` already has its own
+        specific one), because ``_accumulate_mirror_state`` (``sync.mode:
+        mirror``) trusts ``result.row_errors`` alone to know which records
+        were NOT actually persisted -- without this, it would wrongly record
+        every other record's key as observed source state even though none
+        of them landed. ``result.success`` is reset to 0 for the same
+        reason.
+
+        ``exclude_indices`` carves out records that already got a final,
+        legitimate ``result.skipped``/``skipped_no_match`` outcome earlier
+        in *this same call* (Codex review round 4 on #1139) -- a Postgres
+        ``match_policy`` row skipped because ``ON CONFLICT DO NOTHING``/the
+        narrowed ``UPDATE`` matched nothing wrote nothing either way, so the
+        later rollback doesn't change that outcome. Without this, such a
+        row would get double-counted as both ``skipped`` and ``failed`` and
+        wrongly routed to the DLQ as if it were a real failure.
+        """
+        already_recorded = {err.batch_index for err in result.row_errors}
+        for idx, record in enumerate(records):
+            if idx in already_recorded or idx in exclude_indices:
+                continue
+            self._record_row_error(
+                result,
+                idx,
+                record,
+                RuntimeError("batch aborted: transaction rolled back after an earlier failure"),
+            )
+        result.success = 0
 
     def test_connection(self, config: Any) -> None:
         """Connectivity check: open a connection and run ``SELECT 1``.

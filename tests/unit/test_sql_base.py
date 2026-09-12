@@ -128,6 +128,51 @@ def test_accumulate_collects_distinct_scopes() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _mark_batch_aborted (#1139)
+# ---------------------------------------------------------------------------
+
+
+def test_mark_batch_aborted_records_every_unrecorded_index() -> None:
+    """A catastrophic mid-batch rollback (on_error: fail, or on_error: skip
+    when even the row-level SAVEPOINT recovery itself fails) discards every
+    record in the call, not just the one whose exception triggered it --
+    both earlier ones already counted in result.success and later ones
+    never attempted."""
+    d = BaseSqlDestination()
+    result = SyncResult()
+    result.success = 2
+    records = [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}]
+    result.row_errors.append(
+        RowError(batch_index=2, record_preview="", http_status=None, error_message="boom")
+    )
+    result.failed = 1
+    d._mark_batch_aborted(result, records, 2)
+    assert result.success == 0
+    assert {e.batch_index for e in result.row_errors} == {0, 1, 2, 3}
+    # The triggering row keeps its own specific message.
+    assert next(e.error_message for e in result.row_errors if e.batch_index == 2) == "boom"
+    # Every other row gets the generic abort message.
+    assert all("batch aborted" in e.error_message for e in result.row_errors if e.batch_index != 2)
+
+
+def test_mark_batch_aborted_then_accumulate_mirror_state_observes_nothing() -> None:
+    """The whole point of #1139's mirror fix: after _mark_batch_aborted,
+    _accumulate_mirror_state must not record ANY key from this batch as
+    observed source state, since none of these records actually landed."""
+    d = BaseSqlDestination()
+    cfg = SimpleNamespace(upsert_key=["id"])
+    result = SyncResult()
+    result.success = 1
+    records = [{"id": 10}, {"id": 20}, {"id": 30}]
+    result.row_errors.append(
+        RowError(batch_index=1, record_preview="", http_status=None, error_message="deadlock")
+    )
+    d._mark_batch_aborted(result, records, 1)
+    d._accumulate_mirror_state(records, result, cfg, _mirror())
+    assert d._mirror_keys == []
+
+
+# ---------------------------------------------------------------------------
 # dialect hooks (#719)
 # ---------------------------------------------------------------------------
 

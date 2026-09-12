@@ -28,7 +28,7 @@ from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, MySQLDestinationConfig, SyncOptions
 from drt.destinations._serializer import serialize_complex_value
 from drt.destinations.base import SyncResult
-from drt.destinations.sql_base import BaseSqlDestination
+from drt.destinations.sql_base import _ROW_SAVEPOINT, BaseSqlDestination
 
 
 def _mysql_json_encoder(value: Any) -> str:
@@ -159,6 +159,26 @@ class MySQLDestination(BaseSqlDestination):
         run's INSERT, letting the destination table's own
         ``DEFAULT``/nullability apply, rather than binding an explicit
         ``NULL`` that would override it (caught in Codex review on #1135).
+
+        Each row's INSERT runs inside its own ``SAVEPOINT`` under
+        ``on_error: skip`` (#1136): the previous ``conn.rollback()`` on a
+        per-row failure discarded every earlier successful row in this
+        same call that hadn't been committed yet, even though
+        ``result.success`` had already counted them -- and, on MySQL
+        specifically, that ``conn.rollback()`` was never even necessary
+        for recovery (InnoDB doesn't abort the whole transaction on an
+        ordinary statement error, verified empirically), so it was pure
+        data loss with no compensating benefit. A plain "skip and keep
+        going" (no rollback of any kind) would fix that common case, but a
+        genuine deadlock *does* force MySQL to roll back the whole
+        transaction -- using the same ``SAVEPOINT`` mechanism as Postgres
+        here keeps the recovery code identical across both dialects rather
+        than relying on which specific errors happen to leave the
+        transaction usable. Skipped entirely under ``on_error: fail``
+        (Codex review on #1139) -- any failure there rolls back the whole
+        call regardless, so the ``SAVEPOINT``/``RELEASE`` pair would only
+        add two no-benefit statements to every successful row on the
+        default error-free path.
         """
         result = SyncResult()
 
@@ -167,6 +187,7 @@ class MySQLDestination(BaseSqlDestination):
             self._replace_truncated = True
 
         schema_map = self._resolve_schema(config)
+        use_savepoint = sync_options.on_error == "skip"
 
         base_index = 0
         for run_columns, run_records in self._contiguous_signature_runs(records):
@@ -174,19 +195,39 @@ class MySQLDestination(BaseSqlDestination):
             for local_i, record in enumerate(run_records):
                 i = base_index + local_i
                 try:
+                    if use_savepoint:
+                        cur.execute(f"SAVEPOINT {_ROW_SAVEPOINT}")
                     values = [
                         _serialize_value(record.get(c), c, config.json_columns, schema_map)
                         for c in run_columns
                     ]
                     cur.execute(sql, values)
+                    if use_savepoint:
+                        # Codex review round 6 on #1139: count the row as
+                        # successful only after RELEASE SAVEPOINT itself
+                        # succeeds -- if RELEASE raises, this row falls
+                        # into the except block below and
+                        # _recover_row_savepoint's ROLLBACK TO SAVEPOINT
+                        # actually undoes this row's INSERT, so counting
+                        # it as success beforehand would leave it recorded
+                        # as both successful and failed.
+                        cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
                     result.success += 1
                 except Exception as e:
                     self._record_row_error(result, i, record, e)
                     if sync_options.on_error == "fail":
                         conn.rollback()
+                        self._mark_batch_aborted(result, records, i)
                         return result
-                    conn.rollback()
-                    cur = conn.cursor()
+                    if not self._recover_row_savepoint(conn, cur):
+                        # The row-level savepoint rollback itself failed
+                        # (e.g. a deadlock already forced InnoDB to roll
+                        # back the *whole* transaction, not just this
+                        # row's savepoint) -- every row this call counted
+                        # so far, including earlier successes, was
+                        # discarded with it (#1139).
+                        self._mark_batch_aborted(result, records, i)
+                        return result
                     continue
             base_index += len(run_records)
 
@@ -203,11 +244,37 @@ class MySQLDestination(BaseSqlDestination):
         sync_options: SyncOptions,
         config: MySQLDestinationConfig,
     ) -> SyncResult:
-        """Build a shadow table per sync; atomic rename happens in finalize_sync."""
+        """Build a shadow table per sync; atomic rename happens in finalize_sync.
+
+        Each row's INSERT runs inside its own SAVEPOINT under ``on_error:
+        skip`` (#1136) — this method's skip path previously had **no**
+        recovery at all after a row failure (unlike its
+        ``_load_upsert``/``_load_replace`` siblings' ``conn.rollback()``),
+        leaving the connection in whatever state MySQL left it in after
+        the failed statement. Skipped entirely under ``on_error: fail``
+        (Codex review on #1139) — see ``_load_replace``'s docstring.
+
+        The shadow persists across the multiple ``load()`` calls one
+        sync's batches make. ``on_error: fail`` always drops it on any
+        failure, regardless of which batch: the engine calls
+        ``finalize_sync()`` unconditionally after breaking out of its
+        batch loop, and ``finalize_sync``'s only signal for "is there a
+        shadow to swap in" is ``self._swap_shadow_created``/``_swap_table``
+        — leaving them set would make it promote an incomplete shadow into
+        the live table (Codex review round 5 on #1139). ``on_error:
+        skip``'s savepoint-recovery-failure fallback is different: its
+        engine loop keeps sending further batches after this one, so it
+        only drops the shadow when *this* call is the one that created it
+        (``shadow_preexisted`` False, round 4) — dropping an
+        already-populated shadow there would silently discard every
+        earlier, already-committed batch's rows.
+        """
         result = SyncResult()
         shadow = f"{table}__drt_swap"
         shadow_q = self._quote_ident(shadow)
         table_q = self._quote_ident(table)
+        use_savepoint = sync_options.on_error == "skip"
+        shadow_preexisted = self._swap_shadow_created
 
         if not self._swap_shadow_created:
             cur.execute(f"DROP TABLE IF EXISTS {shadow_q}")
@@ -227,24 +294,64 @@ class MySQLDestination(BaseSqlDestination):
             for local_i, record in enumerate(run_records):
                 i = base_index + local_i
                 try:
+                    if use_savepoint:
+                        cur.execute(f"SAVEPOINT {_ROW_SAVEPOINT}")
                     values = [
                         _serialize_value(record.get(c), c, config.json_columns, schema_map)
                         for c in run_columns
                     ]
                     cur.execute(sql, values)
+                    if use_savepoint:
+                        # See _load_replace's comment (#1139 round 6):
+                        # count success only after RELEASE SAVEPOINT
+                        # itself succeeds.
+                        cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
                     result.success += 1
                 except Exception as e:
                     self._record_row_error(result, i, record, e)
                     if sync_options.on_error == "fail":
                         conn.rollback()
-                        # Cleanup shadow on hard fail
+                        self._mark_batch_aborted(result, records, i)
+                        # Always drop the shadow here, regardless of
+                        # shadow_preexisted (Codex review round 5 on
+                        # #1139): the engine calls finalize_sync()
+                        # unconditionally after breaking out of the batch
+                        # loop on on_error: fail, and finalize_sync's ONLY
+                        # signal for "is there a shadow to swap in" is
+                        # self._swap_shadow_created/_swap_table -- leaving
+                        # those set here (as the on_error: skip fallback
+                        # below correctly does, since ITS engine loop keeps
+                        # sending batches) would make finalize_sync promote
+                        # an incomplete, multi-batch shadow into the live
+                        # table instead of leaving it untouched.
                         cur = conn.cursor()
                         cur.execute(f"DROP TABLE IF EXISTS {shadow_q}")
                         conn.commit()
                         self._swap_shadow_created = False
                         self._swap_table = None
                         return result
-                    # on_error=skip: keep going
+                    if not self._recover_row_savepoint(conn, cur):
+                        # conn.rollback() already ran inside
+                        # _recover_row_savepoint's own fallback -- e.g. a
+                        # deadlock already forced the whole transaction to
+                        # roll back (#1139).
+                        self._mark_batch_aborted(result, records, i)
+                        if not shadow_preexisted:
+                            # The shadow's own CREATE happened on this
+                            # first-batch call, so it's the only content
+                            # gone with the rollback; drop it defensively
+                            # and reset state so finalize_sync doesn't try
+                            # to swap in a partial/nonexistent shadow. If
+                            # the shadow already held earlier batches'
+                            # committed rows, leave it -- only this
+                            # batch's own rows were rolled back, not
+                            # theirs.
+                            cur = conn.cursor()
+                            cur.execute(f"DROP TABLE IF EXISTS {shadow_q}")
+                            conn.commit()
+                            self._swap_shadow_created = False
+                            self._swap_table = None
+                        return result
             base_index += len(run_records)
 
         conn.commit()
@@ -406,9 +513,17 @@ class MySQLDestination(BaseSqlDestination):
         whole batch — see ``PostgresDestination._load_upsert``'s docstring
         for the shared rationale (a heterogeneous batch's run boundaries
         never span more than one ``_load_upsert`` call, so this keeps the
-        existing one-transaction-per-call semantics untouched)."""
+        existing one-transaction-per-call semantics untouched).
+
+        Each row's statement runs inside its own ``SAVEPOINT`` under
+        ``on_error: skip`` (#1136) — see ``PostgresDestination._load_upsert``'s
+        docstring for why a per-row ``conn.rollback()`` there silently
+        discarded earlier successful rows in the same call. Skipped
+        entirely under ``on_error: fail`` (Codex review on #1139).
+        """
         result = SyncResult()
         schema_map = self._resolve_schema(config)
+        use_savepoint = sync_options.on_error == "skip"
 
         base_index = 0
         for run_columns, run_records in self._contiguous_signature_runs(records):
@@ -417,19 +532,33 @@ class MySQLDestination(BaseSqlDestination):
             for local_i, record in enumerate(run_records):
                 i = base_index + local_i
                 try:
+                    if use_savepoint:
+                        cur.execute(f"SAVEPOINT {_ROW_SAVEPOINT}")
                     values = [
                         _serialize_value(record.get(c), c, config.json_columns, schema_map)
                         for c in run_columns
                     ]
                     cur.execute(sql, values)
+                    if use_savepoint:
+                        # See _load_replace's comment (#1139 round 6):
+                        # count success only after RELEASE SAVEPOINT
+                        # itself succeeds.
+                        cur.execute(f"RELEASE SAVEPOINT {_ROW_SAVEPOINT}")
                     result.success += 1
                 except Exception as e:
                     self._record_row_error(result, i, record, e)
                     if sync_options.on_error == "fail":
                         conn.rollback()
+                        self._mark_batch_aborted(result, records, i)
                         return result
-                    conn.rollback()
-                    cur = conn.cursor()
+                    if not self._recover_row_savepoint(conn, cur):
+                        # The row-level savepoint rollback itself failed
+                        # (e.g. a deadlock already forced InnoDB to roll
+                        # back the *whole* transaction) -- every row this
+                        # call counted so far, including earlier
+                        # successes, was discarded with it (#1139).
+                        self._mark_batch_aborted(result, records, i)
+                        return result
                     continue
             base_index += len(run_records)
 

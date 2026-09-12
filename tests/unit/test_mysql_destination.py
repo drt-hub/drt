@@ -145,8 +145,29 @@ class TestMySQLDestinationLoad:
 
         assert result.success == 2
         assert result.failed == 0
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139).
         assert conn.cursor().execute.call_count == 2
         conn.commit.assert_called_once()
+
+    @patch("drt.destinations.mysql.MySQLDestination._connect")
+    def test_on_error_fail_never_issues_savepoints(self, mock_connect: MagicMock) -> None:
+        """#1139: see PostgresDestination's identical test -- the per-row
+        SAVEPOINT/RELEASE machinery (#1136) only helps on_error: skip, so
+        it's gated to skip only rather than adding two no-benefit
+        statements to every successful row on the default (fail) path."""
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        records = [
+            {"user_id": 1, "company_id": 5, "score": 0.5},
+            {"user_id": 2, "company_id": 5, "score": 0.9},
+        ]
+        result = MySQLDestination().load(records, _config(), _options(on_error="fail"))
+
+        assert result.success == 2
+        assert not any("SAVEPOINT" in c.args[0] for c in cur.execute.call_args_list)
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
     def test_heterogeneous_batch_does_not_drop_a_field_appearing_in_a_later_record(
@@ -166,9 +187,12 @@ class TestMySQLDestinationLoad:
         result = MySQLDestination().load(records, _config(), _options())
 
         assert result.success == 2
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139), so this is a plain 2 execute calls.
         assert cur.execute.call_count == 2
-        queries = [c.args[0] for c in cur.execute.call_args_list]
-        params = [c.args[1] for c in cur.execute.call_args_list]
+        insert_calls = [c for c in cur.execute.call_args_list if len(c.args) > 1]
+        queries = [c.args[0] for c in insert_calls]
+        params = [c.args[1] for c in insert_calls]
         assert "note" not in queries[0]
         assert None not in params[0]
         assert "note" in queries[1]
@@ -186,6 +210,8 @@ class TestMySQLDestinationLoad:
         records = [{"user_id": 1, "company_id": 5, "score": 0.95}]
         MySQLDestination().load(records, _config(), options)
 
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139), so this is the only execute call.
         query = conn.cursor().execute.call_args.args[0]
         assert query.startswith("/* drt sync=s run_id=r */\n")
 
@@ -197,6 +223,8 @@ class TestMySQLDestinationLoad:
         records = [{"user_id": 1, "company_id": 5, "score": 0.95}]
         MySQLDestination().load(records, _config(), _options())
 
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139), so this is the only execute call.
         query = conn.cursor().execute.call_args.args[0]
         assert not query.startswith("/* drt")
 
@@ -209,11 +237,18 @@ class TestMySQLDestinationLoad:
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
     def test_row_error_on_error_skip(self, mock_connect: MagicMock) -> None:
+        """#1136: the failing row's own INSERT raises, recovered via
+        ``ROLLBACK TO SAVEPOINT`` (not a full ``conn.rollback()`` / fresh
+        cursor -- the whole point of the fix is that no reconnect is
+        needed and no earlier work is discarded)."""
         conn = _fake_connection()
         cur = conn.cursor()
-        cur.execute.side_effect = [Exception("duplicate key"), None]
-        new_cur = MagicMock()
-        conn.cursor.side_effect = [cur, new_cur]
+
+        def execute_side_effect(sql: str, *args: Any) -> None:
+            if args and args[0] == [1, 5, 0.5]:
+                raise Exception("duplicate key")
+
+        cur.execute.side_effect = execute_side_effect
         mock_connect.return_value = conn
 
         records = [
@@ -228,6 +263,80 @@ class TestMySQLDestinationLoad:
         assert "duplicate key" in result.row_errors[0].error_message
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
+    def test_row_error_on_error_skip_savepoint_recovery_fails(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """#1139 round 2: a MySQL deadlock rolls back the *whole*
+        transaction on its own, so ``ROLLBACK TO SAVEPOINT`` for the
+        failing row also fails. The earlier successful row must not stay
+        counted in ``result.success``, and every record in the batch --
+        including the one never attempted -- needs its own ``row_error``
+        so mirror-mode's "observed keys" accounting doesn't treat any of
+        them as actually persisted.
+        """
+        conn = _fake_connection()
+        cur = conn.cursor()
+
+        def execute_side_effect(sql: str, *args: Any) -> None:
+            if args and args[0] == [2, 5, 0.9]:
+                raise Exception("Deadlock found when trying to get lock")
+            if sql.startswith("ROLLBACK TO SAVEPOINT"):
+                raise Exception("savepoint does not exist")
+
+        cur.execute.side_effect = execute_side_effect
+        mock_connect.return_value = conn
+
+        records = [
+            {"user_id": 1, "company_id": 5, "score": 0.5},
+            {"user_id": 2, "company_id": 5, "score": 0.9},
+            {"user_id": 3, "company_id": 5, "score": 1.5},
+        ]
+        result = MySQLDestination().load(records, _config(), _options(on_error="skip"))
+
+        assert result.success == 0
+        assert result.failed == 3
+        assert {e.batch_index for e in result.row_errors} == {0, 1, 2}
+        assert "Deadlock" in next(e.error_message for e in result.row_errors if e.batch_index == 1)
+        conn.rollback.assert_called_once()
+
+    @patch("drt.destinations.mysql.MySQLDestination._connect")
+    def test_row_success_not_double_counted_when_release_savepoint_fails(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """#1139 round 6 (Codex): the INSERT itself can succeed, but RELEASE
+        SAVEPOINT immediately after it can still raise. The old code
+        incremented result.success BEFORE that RELEASE call, so such a row
+        was counted successful even though the except block's
+        ROLLBACK TO SAVEPOINT recovery then actually undoes the INSERT --
+        leaving the row recorded as both successful and failed. success
+        must only be counted once RELEASE SAVEPOINT itself has succeeded.
+        """
+        conn = _fake_connection()
+        cur = conn.cursor()
+        release_call_count = {"n": 0}
+
+        def execute_side_effect(sql: str, *args: Any) -> None:
+            if sql.startswith("RELEASE SAVEPOINT"):
+                release_call_count["n"] += 1
+                if release_call_count["n"] == 2:
+                    # Row 1 (index 1)'s own post-INSERT RELEASE fails.
+                    raise Exception("connection reset")
+
+        cur.execute.side_effect = execute_side_effect
+        mock_connect.return_value = conn
+
+        records = [
+            {"user_id": 1, "company_id": 5, "score": 0.5},
+            {"user_id": 2, "company_id": 5, "score": 0.9},
+            {"user_id": 3, "company_id": 5, "score": 1.5},
+        ]
+        result = MySQLDestination().load(records, _config(), _options(on_error="skip"))
+
+        assert result.success == 2
+        assert result.failed == 1
+        assert {e.batch_index for e in result.row_errors} == {1}
+
+    @patch("drt.destinations.mysql.MySQLDestination._connect")
     def test_row_error_on_error_fail(self, mock_connect: MagicMock) -> None:
         conn = _fake_connection()
         conn.cursor().execute.side_effect = Exception("constraint violation")
@@ -239,7 +348,12 @@ class TestMySQLDestinationLoad:
         ]
         result = MySQLDestination().load(records, _config(), _options(on_error="fail"))
 
-        assert result.failed == 1
+        # #1139: on_error: fail rolls back the whole call's transaction, so
+        # every record in the batch is unrecoverable -- not just the one
+        # whose statement actually raised -- and _mark_batch_aborted marks
+        # them all failed (this also keeps mirror-mode's "observed keys"
+        # accounting honest; see sql_base.py).
+        assert result.failed == len(records)
         assert result.success == 0
         conn.rollback.assert_called_once()
 
@@ -273,6 +387,8 @@ class TestMySQLDestinationLoad:
         result = MySQLDestination().load(records, _config(), _options())
 
         assert result.success == 1
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139), so this is the only execute call.
         args, _ = cur.execute.call_args
         _sql, values = args
         assert values[2] == '{"lang": "日本語", "level": "N1"}'
@@ -347,7 +463,8 @@ class TestMySQLReplaceMode:
 
         assert result.success == 2
         assert result.failed == 0
-        # TRUNCATE + 2 INSERTs = 3 execute calls
+        # TRUNCATE + 2 INSERTs = 3 execute calls (on_error defaults to
+        # "fail" -- no per-row SAVEPOINT overhead there, #1139).
         assert cur.execute.call_count == 3
         first_call_sql = cur.execute.call_args_list[0][0][0]
         assert "TRUNCATE TABLE" in first_call_sql
@@ -355,15 +472,17 @@ class TestMySQLReplaceMode:
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
     def test_replace_row_error_on_error_skip(self, mock_connect: MagicMock) -> None:
-        # replace path: TRUNCATE ok, first INSERT raises, second succeeds on a
-        # fresh cursor. Exercises _load_replace's error branch (rollback →
-        # new cursor → continue) and the shared _record_row_error.
+        """#1136: replace path — TRUNCATE ok, row 0's own INSERT raises,
+        recovered via ``ROLLBACK TO SAVEPOINT`` (no reconnect, and row 1
+        still lands in the same transaction as the TRUNCATE)."""
         conn = _fake_connection()
         cur = conn.cursor()
-        # execute #1 = TRUNCATE (ok), #2 = INSERT row 0 (raises)
-        cur.execute.side_effect = [None, Exception("duplicate key"), None]
-        new_cur = MagicMock()
-        conn.cursor.side_effect = [cur, new_cur]
+
+        def execute_side_effect(sql: str, *args: Any) -> None:
+            if args and args[0] == [1, 5, 0.5]:
+                raise Exception("duplicate key")
+
+        cur.execute.side_effect = execute_side_effect
         mock_connect.return_value = conn
 
         records = [
@@ -379,7 +498,7 @@ class TestMySQLReplaceMode:
         assert len(result.row_errors) == 1
         assert result.row_errors[0].batch_index == 0
         assert "duplicate key" in result.row_errors[0].error_message
-        conn.rollback.assert_called_once()
+        conn.rollback.assert_not_called()
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
     def test_replace_truncates_only_once_across_batches(self, mock_connect: MagicMock) -> None:
@@ -416,6 +535,8 @@ class TestMySQLReplaceMode:
             _options(mode="replace"),
         )
 
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139): calls are 0=TRUNCATE, 1=the actual INSERT.
         insert_sql = cur.execute.call_args_list[1][0][0]
         assert "ON DUPLICATE KEY" not in insert_sql
         assert "INSERT INTO" in insert_sql
@@ -446,7 +567,8 @@ class TestMySQLReplaceMode:
         dest = MySQLDestination()
         dest.load(records, _config(), _options(mode="replace"))
 
-        # INSERT call (after TRUNCATE)
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139): calls are 0=TRUNCATE, 1=the actual INSERT.
         _sql, values = cur.execute.call_args_list[1][0]
         assert values[2] == '{"lang": "ja"}'
 
@@ -626,13 +748,114 @@ class TestMySQLReplaceSwap:
             _options(mode="replace", replace_strategy="swap", on_error="fail"),
         )
 
-        assert result.failed == 1
-        assert result.success == 1
+        # #1136/#1139: the first row's success is discarded by the full
+        # conn.rollback() this on_error: fail path still (correctly) does --
+        # result.success must reflect that, not the pre-rollback count, and
+        # _mark_batch_aborted records a row_error for that discarded row
+        # too (not just the one whose statement actually raised).
+        assert result.failed == 2
+        assert result.success == 0
         conn.rollback.assert_called()
         sqls = [c[0][0] for c in cur.execute.call_args_list]
         drops = [s for s in sqls if "DROP TABLE IF EXISTS" in s and "__drt_swap" in s]
         assert len(drops) >= 2
         # State reset → finalize_sync must be a no-op
+        finalize_result = dest.finalize_sync(
+            _config(), _options(mode="replace", replace_strategy="swap")
+        )
+        assert finalize_result is None
+        sqls_after = [c[0][0] for c in cur.execute.call_args_list]
+        assert not any("RENAME TABLE" in s for s in sqls_after)
+
+    @patch("drt.destinations.mysql.MySQLDestination._connect")
+    def test_swap_skip_savepoint_recovery_failure_preserves_earlier_batch(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """#1139 round 4: a sync's batches all reuse the same shadow table
+        across separate load() calls. If a LATER batch hits a savepoint-
+        recovery failure (a MySQL deadlock rolling back the whole
+        transaction), dropping the shadow would silently discard an
+        EARLIER batch's already-committed rows too -- the next batch would
+        then build a fresh, much smaller shadow that finalize_sync swaps
+        in as if it were the whole dataset. The shadow must survive when
+        it already held prior batches' work.
+        """
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+        dest = MySQLDestination()
+        opts = _options(mode="replace", replace_strategy="swap", on_error="skip")
+
+        batch1 = dest.load([{"user_id": 1, "company_id": 5, "score": 0.5}], _config(), opts)
+        assert batch1.success == 1
+        assert dest._swap_shadow_created is True
+
+        def execute_side_effect(sql: str, *args: Any) -> None:
+            if args and args[0] == [2, 5, 0.9]:
+                raise Exception("Deadlock found when trying to get lock")
+            if sql.startswith("ROLLBACK TO SAVEPOINT"):
+                raise Exception("savepoint does not exist")
+
+        cur.execute.side_effect = execute_side_effect
+        drop_calls_before = sum(
+            1 for c in cur.execute.call_args_list if "DROP TABLE IF EXISTS" in c[0][0]
+        )
+        batch2 = dest.load([{"user_id": 2, "company_id": 5, "score": 0.9}], _config(), opts)
+        assert batch2.success == 0
+        assert batch2.failed == 1
+        drop_calls_after = sum(
+            1 for c in cur.execute.call_args_list if "DROP TABLE IF EXISTS" in c[0][0]
+        )
+        assert drop_calls_after == drop_calls_before
+        assert dest._swap_shadow_created is True
+        assert dest._swap_table is not None
+
+        cur.execute.side_effect = None
+        create_calls_before = sum(
+            1 for c in cur.execute.call_args_list if c[0][0].startswith("CREATE TABLE")
+        )
+        batch3 = dest.load([{"user_id": 3, "company_id": 5, "score": 1.5}], _config(), opts)
+        assert batch3.success == 1
+        create_calls_after = sum(
+            1 for c in cur.execute.call_args_list if c[0][0].startswith("CREATE TABLE")
+        )
+        assert create_calls_after == create_calls_before
+
+    @patch("drt.destinations.mysql.MySQLDestination._connect")
+    def test_swap_on_error_fail_drops_shadow_even_on_a_later_batch(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """#1139 round 5 (Codex): unlike on_error: skip's savepoint-recovery
+        fallback, on_error: fail must ALWAYS drop the shadow, even when an
+        earlier batch already populated it (shadow_preexisted). The engine
+        calls finalize_sync() unconditionally after breaking out of its
+        batch loop on a fail -- finalize_sync's only signal for "is there a
+        shadow to swap in" is self._swap_shadow_created/_swap_table, so
+        leaving those set after a later-batch failure would make it promote
+        an incomplete, multi-batch shadow into the live table instead of
+        leaving the destination untouched.
+        """
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+        dest = MySQLDestination()
+        opts = _options(mode="replace", replace_strategy="swap", on_error="fail")
+
+        batch1 = dest.load([{"user_id": 1, "company_id": 5, "score": 0.5}], _config(), opts)
+        assert batch1.success == 1
+        assert dest._swap_shadow_created is True
+
+        def execute_side_effect(sql: str, *args: Any) -> None:
+            if args and args[0] == [2, 5, 0.9]:
+                raise Exception("data too long for column")
+
+        cur.execute.side_effect = execute_side_effect
+        batch2 = dest.load([{"user_id": 2, "company_id": 5, "score": 0.9}], _config(), opts)
+        assert batch2.success == 0
+        assert batch2.failed == 1
+        assert dest._swap_shadow_created is False
+        assert dest._swap_table is None
+
         finalize_result = dest.finalize_sync(
             _config(), _options(mode="replace", replace_strategy="swap")
         )

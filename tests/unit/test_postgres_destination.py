@@ -146,8 +146,32 @@ class TestPostgresDestinationLoad:
 
         assert result.success == 2
         assert result.failed == 0
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139).
         assert conn.cursor().execute.call_count == 2
         conn.commit.assert_called_once()
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_on_error_fail_never_issues_savepoints(self, mock_connect: MagicMock) -> None:
+        """#1139: the per-row SAVEPOINT/RELEASE machinery (#1136) exists
+        purely to recover from a per-row failure under on_error: skip --
+        on_error: fail always rolls back the whole call on any failure
+        regardless, so gate it to skip only rather than adding two
+        no-benefit statements to every successful row on the default
+        (fail) error-free path."""
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        records = [
+            {"id": 1, "score": 0.5},
+            {"id": 2, "score": 0.9},
+            {"id": 3, "score": 1.5},
+        ]
+        result = PostgresDestination().load(records, _config(), _options(on_error="fail"))
+
+        assert result.success == 3
+        assert not any("SAVEPOINT" in _query_text(c.args[0]) for c in cur.execute.call_args_list)
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
     def test_upsert_uses_schema_qualified_identifier(self, mock_connect: MagicMock) -> None:
@@ -163,6 +187,8 @@ class TestPostgresDestinationLoad:
         )
 
         assert result.success == 1
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139), so this is the only execute call.
         query = _query_text(cur.execute.call_args.args[0])
         assert "INSERT INTO" in query
         assert _split_identifier_text("marketing", "email_events") in query
@@ -183,6 +209,8 @@ class TestPostgresDestinationLoad:
         # a plain string, so str() gives its repr — the comment fragment is
         # still the leading component (asserted precisely for the plain-str
         # and Composable cases in test_sql_base_tagging.py).
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139), so this is the only execute call.
         query = _query_text(cur.execute.call_args.args[0])
         assert query.startswith("Composed([SQL('/* drt sync=s run_id=r */\\n')")
 
@@ -194,6 +222,8 @@ class TestPostgresDestinationLoad:
 
         PostgresDestination().load([{"id": 1, "score": 0.95}], _config(), _options())
 
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139), so this is the only execute call.
         query = _query_text(cur.execute.call_args.args[0])
         assert not query.startswith("/* drt")
 
@@ -218,9 +248,14 @@ class TestPostgresDestinationLoad:
 
         assert result.success == 2
         assert result.failed == 0
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139), so this is a plain 2 execute calls (one INSERT
+        # per record/run). Filtering to calls with a params arg is still
+        # robust if that ever changes.
         assert cur.execute.call_count == 2
-        queries = [_query_text(c.args[0]) for c in cur.execute.call_args_list]
-        params = [c.args[1] for c in cur.execute.call_args_list]
+        insert_calls = [c for c in cur.execute.call_args_list if len(c.args) > 1]
+        queries = [_query_text(c.args[0]) for c in insert_calls]
+        params = [c.args[1] for c in insert_calls]
         # First group: just id/score.
         assert "'note'" not in queries[0]
         assert "flagged" not in params[0]
@@ -246,6 +281,8 @@ class TestPostgresDestinationLoad:
         ]
         PostgresDestination().load(records, _config(), _options())
 
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139); index 0 is the first group's own INSERT.
         first_group_params = cur.execute.call_args_list[0].args[1]
         assert None not in first_group_params
 
@@ -258,13 +295,18 @@ class TestPostgresDestinationLoad:
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
     def test_row_error_on_error_skip(self, mock_connect: MagicMock) -> None:
+        """#1136: the failing row's own INSERT raises, recovered via
+        ``ROLLBACK TO SAVEPOINT`` (not a full ``conn.rollback()`` / fresh
+        cursor -- the whole point of the fix is that no reconnect is
+        needed and no earlier work is discarded)."""
         conn = _fake_connection()
         cur = conn.cursor()
-        # First row fails, second succeeds
-        cur.execute.side_effect = [Exception("duplicate key"), None]
-        # After rollback, return a fresh cursor for the second row
-        new_cur = MagicMock()
-        conn.cursor.side_effect = [cur, new_cur]
+
+        def execute_side_effect(sql: Any, *args: Any) -> None:
+            if args and args[0] == [1, 0.5]:
+                raise Exception("duplicate key")
+
+        cur.execute.side_effect = execute_side_effect
         mock_connect.return_value = conn
 
         records = [
@@ -279,6 +321,89 @@ class TestPostgresDestinationLoad:
         assert "duplicate key" in result.row_errors[0].error_message
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_row_error_on_error_skip_savepoint_recovery_fails(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """#1139 round 2: when even ``ROLLBACK TO SAVEPOINT`` itself fails
+        (e.g. a MySQL-deadlock-style scenario where the whole transaction
+        was already rolled back out from under it), the earlier successful
+        row must not be left counted in ``result.success``, and every
+        record in the batch -- including the one never attempted -- needs
+        its own ``row_error`` so mirror-mode's "observed keys" accounting
+        (``_accumulate_mirror_state``) doesn't treat any of them as
+        actually persisted.
+        """
+        conn = _fake_connection()
+        cur = conn.cursor()
+
+        def execute_side_effect(sql: Any, *args: Any) -> None:
+            text = _query_text(sql)
+            if args and args[0] == [2, 0.9]:
+                raise Exception("duplicate key")
+            if text.startswith("ROLLBACK TO SAVEPOINT"):
+                raise Exception("current transaction is aborted")
+
+        cur.execute.side_effect = execute_side_effect
+        mock_connect.return_value = conn
+
+        records = [
+            {"id": 1, "score": 0.5},
+            {"id": 2, "score": 0.9},
+            {"id": 3, "score": 1.5},
+        ]
+        result = PostgresDestination().load(records, _config(), _options(on_error="skip"))
+
+        assert result.success == 0
+        assert result.failed == 3
+        assert {e.batch_index for e in result.row_errors} == {0, 1, 2}
+        assert "duplicate key" in next(
+            e.error_message for e in result.row_errors if e.batch_index == 1
+        )
+        conn.rollback.assert_called_once()
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_row_success_not_double_counted_when_release_savepoint_fails(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """#1139 round 6 (Codex): the INSERT itself can succeed, but RELEASE
+        SAVEPOINT immediately after it can still raise. The old code
+        incremented result.success BEFORE that RELEASE call, so such a row
+        was counted successful even though the except block's
+        ROLLBACK TO SAVEPOINT recovery then actually undoes the INSERT --
+        leaving the row recorded as both successful and failed. success
+        must only be counted once RELEASE SAVEPOINT itself has succeeded.
+        """
+        conn = _fake_connection()
+        cur = conn.cursor()
+        release_call_count = {"n": 0}
+
+        def execute_side_effect(sql: Any, *args: Any) -> None:
+            text = _query_text(sql)
+            if text.startswith("RELEASE SAVEPOINT"):
+                release_call_count["n"] += 1
+                if release_call_count["n"] == 2:
+                    # Row 1 (index 1)'s own post-INSERT RELEASE fails.
+                    raise Exception("connection reset")
+
+        cur.execute.side_effect = execute_side_effect
+        mock_connect.return_value = conn
+
+        records = [
+            {"id": 1, "score": 0.5},
+            {"id": 2, "score": 0.9},
+            {"id": 3, "score": 1.5},
+        ]
+        result = PostgresDestination().load(records, _config(), _options(on_error="skip"))
+
+        # Row 1's failed RELEASE triggers _recover_row_savepoint, whose own
+        # ROLLBACK TO SAVEPOINT + RELEASE SAVEPOINT succeed (recovery, not
+        # the deadlock-fallback) -- row 1 must land ONLY in failed/row_errors,
+        # never counted in success too.
+        assert result.success == 2
+        assert result.failed == 1
+        assert {e.batch_index for e in result.row_errors} == {1}
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
     def test_row_error_on_error_fail(self, mock_connect: MagicMock) -> None:
         conn = _fake_connection()
         conn.cursor().execute.side_effect = Exception("constraint violation")
@@ -290,7 +415,12 @@ class TestPostgresDestinationLoad:
         ]
         result = PostgresDestination().load(records, _config(), _options(on_error="fail"))
 
-        assert result.failed == 1
+        # #1139: on_error: fail rolls back the whole call's transaction, so
+        # every record in the batch is unrecoverable -- not just the one
+        # whose statement actually raised -- and _mark_batch_aborted marks
+        # them all failed (this also keeps mirror-mode's "observed keys"
+        # accounting honest; see sql_base.py).
+        assert result.failed == len(records)
         assert result.success == 0
         # Should stop after first failure
         conn.rollback.assert_called_once()
@@ -393,7 +523,8 @@ class TestPostgresReplaceMode:
 
         assert result.success == 2
         assert result.failed == 0
-        # TRUNCATE + 2 INSERTs = 3 execute calls
+        # TRUNCATE + 2 INSERTs = 3 execute calls (on_error defaults to
+        # "fail" -- no per-row SAVEPOINT overhead there, #1139).
         assert cur.execute.call_count == 3
         first_call_sql = str(cur.execute.call_args_list[0][0][0])
         assert "TRUNCATE" in first_call_sql
@@ -415,6 +546,47 @@ class TestPostgresReplaceMode:
         assert truncate_count == 1
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_replace_skip_savepoint_recovery_failure_reissues_truncate_next_batch(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """#1139 round 4: Postgres's TRUNCATE is itself transactional, so
+        when the first batch's savepoint-recovery fallback does a full
+        conn.rollback(), it undoes that batch's own TRUNCATE too -- the
+        table was never actually emptied. self._replace_truncated must be
+        reset so the next batch reissues it, or the "replace" silently
+        degrades into inserting on top of the untouched old data.
+        """
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+        dest = PostgresDestination()
+        opts = _options(mode="replace", on_error="skip")
+
+        def execute_side_effect(sql: Any, *args: Any) -> None:
+            text = _query_text(sql)
+            if args and args[0] == [1, 0.5]:
+                raise Exception("deadlock detected")
+            if text.startswith("ROLLBACK TO SAVEPOINT"):
+                raise Exception("current transaction is aborted")
+
+        cur.execute.side_effect = execute_side_effect
+        batch1 = dest.load([{"id": 1, "score": 0.5}], _config(), opts)
+        assert batch1.success == 0
+        assert batch1.failed == 1
+        # The rollback undid this call's own TRUNCATE too.
+        assert dest._replace_truncated is False
+
+        cur.execute.side_effect = None
+        dest.load([{"id": 2, "score": 0.9}], _config(), opts)
+        all_sqls = [_query_text(c[0][0]) for c in cur.execute.call_args_list]
+        # Once for batch 1 (later undone by the rollback) and once more for
+        # batch 2, which must reissue it since the table was never actually
+        # emptied -- not left at 1 (which would mean batch 2 wrongly
+        # skipped it, believing batch 1's TRUNCATE had stuck).
+        truncate_count = sum(1 for s in all_sqls if "TRUNCATE" in s)
+        assert truncate_count == 2
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
     def test_replace_uses_plain_insert(self, mock_connect: MagicMock) -> None:
         conn = _fake_connection()
         cur = conn.cursor()
@@ -423,7 +595,8 @@ class TestPostgresReplaceMode:
         dest = PostgresDestination()
         dest.load([{"id": 1, "score": 0.5}], _config(), _options(mode="replace"))
 
-        # The INSERT call (second execute, after TRUNCATE)
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139): calls are 0=TRUNCATE, 1=the actual INSERT.
         insert_sql = str(cur.execute.call_args_list[1][0][0])
         assert "INSERT INTO" in insert_sql
 
@@ -472,34 +645,6 @@ class TestPostgresReplaceMode:
         assert "bad row" in result.row_errors[0].error_message
         conn.rollback.assert_called_once()
 
-    @patch("drt.destinations.postgres.PostgresDestination._connect")
-    def test_replace_on_error_skip_retruncates_after_reset_state(
-        self, mock_connect: MagicMock
-    ) -> None:
-        conn = _fake_connection()
-        cur = conn.cursor()
-        mock_connect.return_value = conn
-        dest = PostgresDestination()
-
-        def execute_side_effect(sql: Any, *args: Any) -> None:
-            if "INSERT INTO" in _query_text(sql):
-                dest._replace_truncated = False
-                raise Exception("bad row")
-
-        cur.execute.side_effect = execute_side_effect
-
-        result = dest.load(
-            [{"id": 1, "score": 0.95}],
-            _config(table="marketing.email_events"),
-            _options(mode="replace", on_error="skip"),
-        )
-
-        sqls = [_query_text(c[0][0]) for c in cur.execute.call_args_list]
-        truncate_sqls = [s for s in sqls if "TRUNCATE TABLE" in s]
-        assert result.failed == 1
-        assert len(truncate_sqls) == 2
-        assert all(_split_identifier_text("marketing", "email_events") in s for s in truncate_sqls)
-
     def test_list_passes_through(self) -> None:
         """Non-dict types (including list) must pass through unchanged."""
         from drt.destinations.postgres import _serialize_value
@@ -535,7 +680,9 @@ class TestPostgresReplaceMode:
         records = [{"id": 1, "name": "alice", "score": 99}]
         PostgresDestination().load(records, _config(), _options())
 
-        # All values should be plain Python types, no Json wrapping
+        # All values should be plain Python types, no Json wrapping.
+        # on_error defaults to "fail" -- no per-row SAVEPOINT overhead
+        # there (#1139), so this is the only execute call.
         call_args = cur.execute.call_args[0][1]
         for val in call_args:
             assert not hasattr(val, "adapted"), f"Expected plain value, got Json: {val}"
@@ -762,8 +909,13 @@ class TestPostgresReplaceSwap:
             _options(mode="replace", replace_strategy="swap", on_error="fail"),
         )
 
-        assert result.failed == 1
-        assert result.success == 1
+        # #1136/#1139: the first row's success is discarded by the full
+        # conn.rollback() this on_error: fail path still (correctly) does --
+        # result.success must reflect that, not the pre-rollback count, and
+        # _mark_batch_aborted records a row_error for that discarded row
+        # too (not just the one whose statement actually raised).
+        assert result.failed == 2
+        assert result.success == 0
         # Rollback called on hard fail
         conn.rollback.assert_called()
         # Cleanup DROP IF EXISTS issued after rollback
@@ -771,6 +923,117 @@ class TestPostgresReplaceSwap:
         drops = [s for s in sqls if "DROP TABLE IF EXISTS" in s and "__drt_swap" in s]
         assert len(drops) >= 2  # initial + cleanup
         # State reset → finalize_sync must be a no-op (no RENAME issued)
+        finalize_result = dest.finalize_sync(
+            _config(), _options(mode="replace", replace_strategy="swap")
+        )
+        assert finalize_result is None
+        sqls_after = [_query_text(c[0][0]) for c in cur.execute.call_args_list]
+        assert not any("RENAME TO" in s for s in sqls_after)
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_swap_skip_savepoint_recovery_failure_preserves_earlier_batch(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """#1139 round 4: a sync's batches all reuse the same shadow table
+        across separate load() calls. If a LATER batch hits a savepoint-
+        recovery failure (e.g. a deadlock), dropping the shadow would
+        silently discard an EARLIER batch's already-committed rows too --
+        the next batch would then build a fresh, much smaller shadow that
+        finalize_sync swaps in as if it were the whole dataset. The shadow
+        must survive when it already held prior batches' work.
+        """
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+        dest = PostgresDestination()
+        opts = _options(mode="replace", replace_strategy="swap", on_error="skip")
+
+        # Batch 1: succeeds cleanly, creates + populates the shadow.
+        batch1 = dest.load([{"id": 1, "score": 0.5}], _config(), opts)
+        assert batch1.success == 1
+        assert dest._swap_shadow_created is True
+
+        # Batch 2: the row's INSERT fails, and the ROLLBACK TO SAVEPOINT
+        # recovery itself fails too (deadlock-style scenario).
+        def execute_side_effect(sql: Any, *args: Any) -> None:
+            text = _query_text(sql)
+            if args and args[0] == [2, 0.9]:
+                raise Exception("deadlock detected")
+            if text.startswith("ROLLBACK TO SAVEPOINT"):
+                raise Exception("current transaction is aborted")
+
+        cur.execute.side_effect = execute_side_effect
+        drop_calls_before = sum(
+            1 for c in cur.execute.call_args_list if "DROP TABLE IF EXISTS" in _query_text(c[0][0])
+        )
+        batch2 = dest.load([{"id": 2, "score": 0.9}], _config(), opts)
+        assert batch2.success == 0
+        assert batch2.failed == 1
+        # The shadow must NOT have been dropped again, and state must still
+        # point at a live shadow so batch 3 (and finalize_sync) can use it.
+        drop_calls_after = sum(
+            1 for c in cur.execute.call_args_list if "DROP TABLE IF EXISTS" in _query_text(c[0][0])
+        )
+        assert drop_calls_after == drop_calls_before
+        assert dest._swap_shadow_created is True
+        assert dest._swap_table is not None
+
+        # Batch 3: succeeds and must NOT recreate the shadow (no new CREATE).
+        cur.execute.side_effect = None
+        create_calls_before = sum(
+            1
+            for c in cur.execute.call_args_list
+            if "CREATE TABLE" in _query_text(c[0][0]) and "INCLUDING ALL" in _query_text(c[0][0])
+        )
+        batch3 = dest.load([{"id": 3, "score": 1.5}], _config(), opts)
+        assert batch3.success == 1
+        create_calls_after = sum(
+            1
+            for c in cur.execute.call_args_list
+            if "CREATE TABLE" in _query_text(c[0][0]) and "INCLUDING ALL" in _query_text(c[0][0])
+        )
+        assert create_calls_after == create_calls_before
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_swap_on_error_fail_drops_shadow_even_on_a_later_batch(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """#1139 round 5 (Codex): unlike on_error: skip's savepoint-recovery
+        fallback, on_error: fail must ALWAYS drop the shadow, even when an
+        earlier batch already populated it (shadow_preexisted). The engine
+        calls finalize_sync() unconditionally after breaking out of its
+        batch loop on a fail -- finalize_sync's only signal for "is there a
+        shadow to swap in" is self._swap_shadow_created/_swap_table, so
+        leaving those set after a later-batch failure would make it promote
+        an incomplete, multi-batch shadow into the live table instead of
+        leaving the destination untouched.
+        """
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+        dest = PostgresDestination()
+        opts = _options(mode="replace", replace_strategy="swap", on_error="fail")
+
+        # Batch 1: succeeds cleanly, creates + populates the shadow.
+        batch1 = dest.load([{"id": 1, "score": 0.5}], _config(), opts)
+        assert batch1.success == 1
+        assert dest._swap_shadow_created is True
+
+        # Batch 2: its own INSERT fails outright (on_error: fail).
+        def execute_side_effect(sql: Any, *args: Any) -> None:
+            if args and args[0] == [2, 0.9]:
+                raise Exception("constraint violation")
+
+        cur.execute.side_effect = execute_side_effect
+        batch2 = dest.load([{"id": 2, "score": 0.9}], _config(), opts)
+        assert batch2.success == 0
+        assert batch2.failed == 1
+        # The shadow must have been dropped and state reset, regardless of
+        # batch 1 having already populated it.
+        assert dest._swap_shadow_created is False
+        assert dest._swap_table is None
+
+        # finalize_sync must therefore be a no-op -- no RENAME issued.
         finalize_result = dest.finalize_sync(
             _config(), _options(mode="replace", replace_strategy="swap")
         )

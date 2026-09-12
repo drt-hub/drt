@@ -141,6 +141,8 @@ def test_create_only_emits_do_nothing_and_counts_existing_as_skipped() -> None:
     with patch.object(PostgresDestination, "_connect", return_value=conn):
         result = dest.load([{"id": 1, "score": 5}, {"id": 2, "score": 6}], _pg_config(), opts)
 
+    # on_error defaults to "fail" -- no per-row SAVEPOINT overhead there
+    # (#1139).
     query = str(conn.cursor.return_value.execute.call_args.args[0])
     assert "ON CONFLICT" in query and "DO NOTHING" in query
     assert result.skipped == 2
@@ -168,6 +170,8 @@ def test_update_only_emits_update_where_with_set_then_key_params() -> None:
     with patch.object(PostgresDestination, "_connect", return_value=conn):
         result = dest.load([{"id": 1, "score": 5, "name": "a"}], _pg_config(), opts)
 
+    # on_error defaults to "fail" -- no per-row SAVEPOINT overhead there
+    # (#1139).
     call = conn.cursor.return_value.execute.call_args
     query = str(call.args[0])  # psycopg2 Composed repr
     assert "UPDATE " in query
@@ -190,6 +194,82 @@ def test_update_only_no_match_is_counted_as_skipped() -> None:
     assert result.skipped == 1
     assert result.skipped_no_match == 1
     assert result.success == 0
+
+
+def test_savepoint_recovery_failure_excludes_no_match_skips_from_batch_abort() -> None:
+    """#1139 round 4 (Codex): a match_policy row already resolved to "no
+    create/update target" wrote nothing either way -- if a LATER row's
+    failure forces a full-batch abort (the row-level SAVEPOINT recovery
+    itself fails, e.g. a deadlock), that already-skipped row must stay
+    counted only as skipped, not ALSO recorded as a batch-abort failure
+    and wrongly routed to the DLQ as if it were a real error.
+    """
+    dest = PostgresDestination()
+    conn = MagicMock()
+    cur = MagicMock()
+    conn.cursor.return_value = cur
+
+    def execute_side_effect(sql: Any, *args: Any) -> None:
+        text = str(sql)
+        if args and args[0] == [1, 99]:  # update_only: SET score=1 WHERE id=99
+            cur.rowcount = 0  # no such row -> skipped, no match
+            return
+        if args and args[0] == [42, 7]:  # update_only: SET score=42 WHERE id=7
+            raise Exception("deadlock detected")
+        if text.startswith("ROLLBACK TO SAVEPOINT"):
+            raise Exception("current transaction is aborted")
+        cur.rowcount = 1
+
+    cur.execute.side_effect = execute_side_effect
+    opts = SyncOptions(mode="upsert", match_policy="update_only", on_error="skip")
+    records = [{"id": 99, "score": 1}, {"id": 7, "score": 42}]
+
+    with patch.object(PostgresDestination, "_connect", return_value=conn):
+        result = dest.load(records, _pg_config(), opts)
+
+    assert result.skipped == 1
+    assert result.skipped_no_match == 1
+    assert result.failed == 1  # only the deadlocked row, not the skipped one too
+    assert result.success == 0
+    assert {e.batch_index for e in result.row_errors} == {1}
+
+
+def test_savepoint_rowcount_captured_before_release_overwrites_it() -> None:
+    """#1139 round 6 (Codex): cur.rowcount reflects the LAST executed
+    statement on most DB-API cursors, so match_policy's "no match" check
+    must read it right after the UPDATE/INSERT, before RELEASE SAVEPOINT
+    (itself a separate statement) runs and could overwrite it. This test's
+    fake cursor deliberately sets a different, wrong rowcount when RELEASE
+    SAVEPOINT executes -- if the accounting read cur.rowcount afterward,
+    the row would be misclassified as skipped even though it matched.
+    """
+    dest = PostgresDestination()
+    conn = MagicMock()
+    cur = MagicMock()
+    conn.cursor.return_value = cur
+
+    def execute_side_effect(sql: Any, *args: Any) -> None:
+        text = str(sql)
+        if args and args[0] == [1, 99]:  # update_only: SET score=1 WHERE id=99
+            cur.rowcount = 1  # matched -> should count as success
+            return
+        if text.startswith("RELEASE SAVEPOINT"):
+            # Simulate a driver where a later statement's own rowcount
+            # (here, a no-op RELEASE) clobbers the cursor's rowcount.
+            cur.rowcount = 0
+            return
+        cur.rowcount = 1
+
+    cur.execute.side_effect = execute_side_effect
+    opts = SyncOptions(mode="upsert", match_policy="update_only", on_error="skip")
+    records = [{"id": 99, "score": 1}]
+
+    with patch.object(PostgresDestination, "_connect", return_value=conn):
+        result = dest.load(records, _pg_config(), opts)
+
+    assert result.success == 1
+    assert result.skipped == 0
+    assert result.skipped_no_match == 0
 
 
 def test_update_only_requires_a_non_key_column() -> None:
@@ -235,6 +315,8 @@ def test_default_upsert_policy_still_upserts() -> None:
     with patch.object(PostgresDestination, "_connect", return_value=conn):
         result = dest.load([{"id": 1, "score": 5}], _pg_config(), SyncOptions())
 
+    # on_error defaults to "fail" -- no per-row SAVEPOINT overhead there
+    # (#1139).
     query = str(conn.cursor.return_value.execute.call_args.args[0])
     assert "ON CONFLICT" in query and "DO UPDATE" in query
     assert result.success == 1
