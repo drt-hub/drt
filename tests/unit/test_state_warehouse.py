@@ -205,6 +205,144 @@ class TestPostgresWarehouseDlqBackend:
             assert PostgresWarehouseDlqBackend(_profile()).append("s", []) == 0
         conn.commit.assert_not_called()
 
+    def test_append_batches_entries_into_one_multi_row_insert(self) -> None:
+        """#1121: a small batch stays one round trip, not N."""
+        conn = _mock_conn(fetchone=(3,))
+        entries = [
+            DeadLetter(record={"n": i}, error_message="boom", id=f"id-{i}") for i in range(3)
+        ]
+        with (
+            patch("drt.state.warehouse._connect", return_value=conn),
+            patch("drt.sources.postgres.PostgresSource.ensure_managed_schema"),
+            patch("drt.sources.postgres.PostgresSource.managed_table_exists", return_value=True),
+        ):
+            PostgresWarehouseDlqBackend(_profile()).append("s", entries)
+
+        insert_calls = [
+            c
+            for c in conn.cursor.return_value.execute.call_args_list
+            if "INSERT INTO" in str(c.args[0])
+        ]
+        assert len(insert_calls) == 1
+        sql, params = insert_calls[0].args
+        assert str(sql).count("(%s, %s, %s, %s, %s, %s, %s, %s)") == 3
+        assert "ON CONFLICT (id) DO UPDATE SET" in str(sql)
+        assert len(params) == 3 * 8
+
+    def test_append_chunks_many_entries_across_multiple_insert_statements(self) -> None:
+        """250 rows fit per INSERT at 8 columns under the 2000-param budget
+        (_rows_per_chunk) -- 600 entries need three chunks."""
+        conn = _mock_conn(fetchone=(600,))
+        entries = [
+            DeadLetter(record={"n": i}, error_message="boom", id=f"id-{i}") for i in range(600)
+        ]
+        with (
+            patch("drt.state.warehouse._connect", return_value=conn),
+            patch("drt.sources.postgres.PostgresSource.ensure_managed_schema"),
+            patch("drt.sources.postgres.PostgresSource.managed_table_exists", return_value=True),
+        ):
+            PostgresWarehouseDlqBackend(_profile()).append("s", entries)
+
+        insert_calls = [
+            c
+            for c in conn.cursor.return_value.execute.call_args_list
+            if "INSERT INTO" in str(c.args[0])
+        ]
+        assert len(insert_calls) == 3
+        assert sum(len(c.args[1]) // 8 for c in insert_calls) == 600
+
+    def test_append_dedupes_entries_sharing_the_same_id(self) -> None:
+        """Two entries with the same id in one call would make Postgres
+        raise "ON CONFLICT DO UPDATE command cannot affect row a second
+        time" inside one multi-row statement -- dedup keeps the last one,
+        matching the old per-entry loop's last-wins outcome."""
+        conn = _mock_conn(fetchone=(1,))
+        entries = [
+            DeadLetter(record={"n": 1}, error_message="first", id="id-1"),
+            DeadLetter(record={"n": 2}, error_message="second", id="id-1"),
+        ]
+        with (
+            patch("drt.state.warehouse._connect", return_value=conn),
+            patch("drt.sources.postgres.PostgresSource.ensure_managed_schema"),
+            patch("drt.sources.postgres.PostgresSource.managed_table_exists", return_value=True),
+        ):
+            PostgresWarehouseDlqBackend(_profile()).append("s", entries)
+
+        insert_calls = [
+            c
+            for c in conn.cursor.return_value.execute.call_args_list
+            if "INSERT INTO" in str(c.args[0])
+        ]
+        assert len(insert_calls) == 1
+        _, params = insert_calls[0].args
+        assert len(params) == 8  # one row, not two
+        assert params[3] == "second"  # error_message column, last entry wins
+
+    def test_replace_chunks_many_entries_across_multiple_insert_statements(self) -> None:
+        conn = _mock_conn(fetchall=[])
+        entries = [
+            DeadLetter(record={"n": i}, error_message="boom", id=f"id-{i}") for i in range(600)
+        ]
+        with (
+            patch("drt.state.warehouse._connect", return_value=conn),
+            patch("drt.sources.postgres.PostgresSource.ensure_managed_schema"),
+            patch("drt.sources.postgres.PostgresSource.managed_table_exists", return_value=True),
+        ):
+            PostgresWarehouseDlqBackend(_profile()).replace("s", entries)
+
+        insert_calls = [
+            c
+            for c in conn.cursor.return_value.execute.call_args_list
+            if "INSERT INTO" in str(c.args[0])
+        ]
+        assert len(insert_calls) == 3
+        assert sum(len(c.args[1]) // 8 for c in insert_calls) == 600
+        assert not any(
+            "ON CONFLICT" in str(c.args[0]) for c in conn.cursor.return_value.execute.call_args_list
+        )
+
+    def test_reconcile_chunks_many_updates_across_multiple_statements(self) -> None:
+        """285 rows fit per UPDATE...FROM(VALUES...) at 7 columns under the
+        2000-param budget (plus one shared sync_name param per statement) --
+        600 updates need three chunks."""
+        conn = _mock_conn(fetchall=[])
+        updates = {
+            f"id-{i}": DeadLetter(record={"n": i}, error_message="still failing", id=f"id-{i}")
+            for i in range(600)
+        }
+        with (
+            patch("drt.state.warehouse._connect", return_value=conn),
+            patch("drt.sources.postgres.PostgresSource.ensure_managed_schema"),
+            patch("drt.sources.postgres.PostgresSource.managed_table_exists", return_value=True),
+        ):
+            PostgresWarehouseDlqBackend(_profile()).reconcile("s", updates=updates)
+
+        update_calls = [
+            c for c in conn.cursor.return_value.execute.call_args_list if "UPDATE" in str(c.args[0])
+        ]
+        assert len(update_calls) == 3
+        # Each chunk's params are 7 columns per row plus one trailing
+        # sync_name — subtract that shared param before dividing by 7.
+        assert sum((len(c.args[1]) - 1) // 7 for c in update_calls) == 600
+
+    def test_reconcile_updates_a_single_entry_via_values(self) -> None:
+        conn = _mock_conn(fetchall=[])
+        updated = DeadLetter(record={"a": 2}, error_message="still failing", attempts=3, id="id-1")
+        with (
+            patch("drt.state.warehouse._connect", return_value=conn),
+            patch("drt.sources.postgres.PostgresSource.ensure_managed_schema"),
+            patch("drt.sources.postgres.PostgresSource.managed_table_exists", return_value=True),
+        ):
+            PostgresWarehouseDlqBackend(_profile()).reconcile("s", updates={"id-1": updated})
+
+        update_call = next(
+            c for c in conn.cursor.return_value.execute.call_args_list if "UPDATE" in str(c.args[0])
+        )
+        sql, params = update_call.args
+        assert "FROM (VALUES" in str(sql)
+        assert params[0] == "id-1"
+        assert params[-1] == "s"  # sync_name, bound last
+
     def test_read_reconstructs_dead_letter(self) -> None:
         row = ("id-1", {"a": 1}, "boom", 500, "t0", 2, "run-1")
         conn = _mock_conn(fetchall=[row])
