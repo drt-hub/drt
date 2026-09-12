@@ -268,11 +268,15 @@ def _updated_diff(delete_reason: str | None, *, writes_full_row: bool | None = N
 def test_print_diff_table_replace_mode_shows_a_column_the_new_record_omits() -> None:
     """#1091, caught in a further Codex review round: replace mode rebuilds
     each row from the new record alone, so a column the destination has
-    that the new record omits genuinely resets to its DEFAULT/NULL — a
-    real change the preview must show, unlike the upsert case where an
-    omitted column is simply never touched."""
+    that the new record omits genuinely resets — a real change the
+    preview must show, unlike the upsert case where an omitted column is
+    simply never touched. Rendered as ``<default>``, not a literal
+    ``None`` (a still-later review round caught that the exact reset
+    value is unknown without schema introspection and can be non-null)."""
     out = _rendered(_updated_diff("replace"))
     assert "note: old" in out
+    assert "<default>" in out
+    assert "None" not in out
 
 
 def test_print_diff_table_non_replace_mode_hides_an_omitted_column() -> None:

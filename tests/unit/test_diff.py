@@ -27,7 +27,7 @@ from drt.config.models import (
     SyncOptions,
 )
 from drt.destinations._mirror_state import key_hash, key_json
-from drt.engine.diff import DiffResult, compute_diff
+from drt.engine.diff import RESET_TO_DESTINATION_DEFAULT, DiffResult, compute_diff
 
 
 def _has_psycopg2() -> bool:
@@ -447,7 +447,17 @@ class TestComputeDiffKeyedFetch:
         dry_run_records accumulates across the whole run (potentially many
         batches), and source rows can legitimately have heterogeneous
         optional fields, so the hint must be the union across all records,
-        not just the first one."""
+        not just the first one.
+
+        id=2 (which sends its own matching PlayerScore) proves the
+        unchanged-row case still works with the wider hint. id=1 (which
+        omits PlayerScore, needing the hint from id=2 to even be fetched
+        into `old`) now correctly reports as updated -- a later Codex
+        review round caught that replace mode rebuilds every row from the
+        source record alone, so an omitted column always resets, and the
+        exact new value is unknown (RESET_TO_DESTINATION_DEFAULT), not
+        necessarily None even when the destination's *current* value
+        happens to be None already."""
         cursor = MagicMock()
         cursor.description = [("ID", None), ("PLAYERSCORE", None)]
         cursor.fetchall.return_value = [(1, None), (2, 42)]
@@ -477,7 +487,12 @@ class TestComputeDiffKeyedFetch:
 
         assert result.deleted == []
         assert result.added == []
-        assert result.updated == []
+        assert len(result.updated) == 1
+        old, new = result.updated[0]
+        assert new["id"] == 1
+        assert result.changed_fields(old, new, include_removed=True) == {
+            "PlayerScore": (None, RESET_TO_DESTINATION_DEFAULT)
+        }
 
     def test_compute_diff_omitted_field_in_a_heterogeneous_batch_is_not_a_phantom_change(
         self,
@@ -569,7 +584,9 @@ class TestComputeDiffKeyedFetch:
 
         assert len(result.updated) == 1
         old, new = result.updated[0]
-        assert result.changed_fields(old, new, include_removed=True) == {"note": ("old-note", None)}
+        assert result.changed_fields(old, new, include_removed=True) == {
+            "note": ("old-note", RESET_TO_DESTINATION_DEFAULT)
+        }
         # The renderer-facing signal must survive even though nothing is
         # deleted here (same key set) -- delete_reason gets suppressed to
         # None in exactly this case, which is the P2 Codex caught: a

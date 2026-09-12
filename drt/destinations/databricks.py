@@ -363,33 +363,33 @@ class DatabricksDestination(BaseSqlDestination):
                 raise ValueError("upsert_key is required for merge mode")
 
             key_clause = " AND ".join([f"target.{k} = source.{k}" for k in config.upsert_key])
+            staging_base = f"{config.catalog}.{config.schema_}.__drt_staging_{config.table}"
 
-            # Databricks Delta needs a relation on the USING side of MERGE.
-            # Delta has no session-local temp tables, so stage into the same
-            # uniquely-named scratch Delta table as before.
-            staging_table = f"{config.catalog}.{config.schema_}.__drt_staging_{config.table}"
-
-            # Both the staging INSERT *and* the MERGE itself run per
-            # contiguous key-signature run (#1091) — not just the staging
-            # INSERT. An earlier version of this fix staged per run but
-            # still issued one final MERGE over the batch-wide column
-            # union: Codex review on #1135 caught that this made
-            # ``WHEN MATCHED THEN UPDATE SET note = source.note`` fire for
-            # *every* matched row regardless of which run it came from, so
-            # a run whose records never sent ``note`` would overwrite an
-            # existing destination row's ``note`` with staging's
-            # DEFAULT-filled value — the same clobber #1091 was originally
-            # about, just reached via MERGE's blanket UPDATE instead of a
-            # missing column. Running the MERGE once per run means each
-            # run's own ``update_cols`` only ever mentions the columns that
-            # run's records actually sent.
+            # Two passes, not one interleaved loop (#1091, caught in Codex
+            # review on #1135): the MERGE runs once per contiguous
+            # key-signature run (see below for why), and each MERGE
+            # autocommits immediately (Databricks has no multi-statement
+            # transaction to wrap these in). Staging-then-merging one run
+            # at a time meant a *later* run's staging failure under
+            # on_error: fail left an *earlier* run's MERGE already
+            # committed to the target -- a partial application the
+            # original single-staging-then-one-MERGE design never allowed
+            # (a staging failure there always aborted before the one
+            # MERGE ran). Staging every run first, and only merging once
+            # all of them have succeeded, restores that all-or-nothing
+            # guarantee: an on_error: fail staging failure now aborts
+            # before *any* MERGE touches the target, same as before #1091.
+            #
+            # Each run gets its own staging table (not one shared table)
+            # so its own MERGE only ever matches that run's own rows —
+            # sharing one staging table across runs would let a later
+            # run's MERGE re-match an earlier run's already-merged rows.
+            staged_runs: list[tuple[str, list[str], int]] = []
             base_index = 0
-            for run_columns, run_records in self._contiguous_signature_runs(records):
-                update_cols = [c for c in run_columns if c not in config.upsert_key]
-                update_clause = ", ".join([f"{c} = source.{c}" for c in update_cols])
-                insert_cols = ", ".join(run_columns)
-                insert_vals = ", ".join([f"source.{c}" for c in run_columns])
-
+            for i, (run_columns, run_records) in enumerate(
+                self._contiguous_signature_runs(records)
+            ):
+                staging_table = f"{staging_base}_{i}"
                 cur.execute(
                     f"CREATE OR REPLACE TABLE {staging_table} AS SELECT * FROM {table_fq} WHERE 1=0"
                 )
@@ -409,7 +409,28 @@ class DatabricksDestination(BaseSqlDestination):
                     count_success=False,
                 )
                 run_failed = len(result.row_errors) - failed_before
+                staged_runs.append((staging_table, run_columns, len(run_records) - run_failed))
+                base_index += len(run_records)
 
+            # Only now merge each run's staged rows into target, in
+            # original order, then drop its staging table. Running the
+            # MERGE per run (not once over the batch-wide column union)
+            # keeps each run's own ``update_cols`` scoped to exactly the
+            # columns that run's records actually sent — an earlier
+            # version of this fix shared one final MERGE across all runs,
+            # which Codex review caught making
+            # ``WHEN MATCHED THEN UPDATE SET note = source.note`` fire for
+            # *every* matched row regardless of which run it came from, so
+            # a run whose records never sent ``note`` would overwrite an
+            # existing destination row's ``note`` with staging's
+            # DEFAULT-filled value — the same clobber #1091 was originally
+            # about, just reached via MERGE's blanket UPDATE instead of a
+            # missing column.
+            for staging_table, run_columns, run_success_count in staged_runs:
+                update_cols = [c for c in run_columns if c not in config.upsert_key]
+                update_clause = ", ".join([f"{c} = source.{c}" for c in update_cols])
+                insert_cols = ", ".join(run_columns)
+                insert_vals = ", ".join([f"source.{c}" for c in run_columns])
                 matched_clause = (
                     f"WHEN MATCHED THEN UPDATE SET {update_clause}" if update_cols else ""
                 )
@@ -422,9 +443,8 @@ class DatabricksDestination(BaseSqlDestination):
                     f"VALUES ({insert_vals})"
                 )
                 cur.execute(merge_sql)
-                result.success += len(run_records) - run_failed
+                result.success += run_success_count
                 cur.execute(f"DROP TABLE IF EXISTS {staging_table}")
-                base_index += len(run_records)
 
         else:
             raise ValueError(f"Unsupported mode: {config.mode}")

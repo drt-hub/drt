@@ -355,6 +355,39 @@ class TestDatabricksDestinationLoad:
         assert "note" not in insert_staging_calls[0]
         assert "note" in insert_staging_calls[1]
 
+    def test_on_error_fail_stops_before_any_merge_when_a_later_run_fails_staging(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex review on #1135 caught a real atomicity regression: an
+        earlier version of this fix staged then merged one run at a time,
+        so an earlier run's MERGE could already be committed to target by
+        the time a later run's staging insert failed under on_error: fail
+        -- a partial application the original single-staging-then-one-MERGE
+        design never allowed. Staging every run first, and only merging
+        once all of them succeed, restores that all-or-nothing guarantee:
+        target must see zero MERGE statements here."""
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        modules = _mocked_databricks_modules(conn)
+
+        def _execute_side_effect(sql: str, *args: object) -> None:
+            if sql.startswith("INSERT INTO main.default.__drt_staging_user_scores_1"):
+                raise RuntimeError("boom")
+
+        conn._cur.execute.side_effect = _execute_side_effect
+
+        records = [
+            {"id": 1, "score": 0.95},
+            {"id": 2, "score": 0.80, "note": "flagged"},
+        ]
+        config = _config(mode="merge", upsert_key=["id"])
+        with patch.dict("sys.modules", modules):
+            with pytest.raises(RuntimeError, match="boom"):
+                DatabricksDestination().load(records, config, _options(on_error="fail"))
+
+        sqls = [(call.args[0] if call.args else "") for call in conn._cur.execute.call_args_list]
+        assert not any(s.startswith("MERGE INTO main.default.user_scores") for s in sqls)
+
     def test_merge_mode_requires_upsert_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
         modules = _mocked_databricks_modules(_fake_conn())

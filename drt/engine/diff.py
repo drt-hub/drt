@@ -31,6 +31,34 @@ from drt.destinations.query import (
 )
 
 
+class _ResetToDestinationDefault:
+    """Sentinel new-value for a column ``changed_fields()`` reports as
+    removed (#1091, caught in Codex review on #1135).
+
+    ``compute_diff()`` has no schema introspection — it can't know a
+    column's real ``DEFAULT`` clause — so a removed column's new value is
+    genuinely unknown, not ``None``. Representing it as a plain ``None``
+    would be actively wrong for a non-null ``DEFAULT`` (reporting a value
+    reset to NULL when it's really reset to, say, ``'unknown'``) and even
+    for a nullable column with no explicit default, comparing this
+    sentinel against ``old``'s value is meaningless (there's nothing to
+    compare against yet). This renders as ``<default>`` wherever it's
+    interpolated into a string.
+    """
+
+    def __repr__(self) -> str:
+        return "<default>"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _ResetToDestinationDefault)
+
+    def __hash__(self) -> int:
+        return hash(_ResetToDestinationDefault)
+
+
+RESET_TO_DESTINATION_DEFAULT = _ResetToDestinationDefault()
+
+
 @dataclass
 class DiffResult:
     """Result of a record-level diff between source records and destination state.
@@ -86,9 +114,10 @@ class DiffResult:
     delete_preview_unavailable_reason: str | None = None
     # #1091, caught in Codex review on #1135: whether the real write fully
     # determines each row from the source record alone (a column the
-    # destination has that the record omits genuinely resets to its
-    # DEFAULT/NULL), as opposed to a partial UPDATE/MERGE that leaves an
-    # omitted column untouched. Deliberately NOT inferred from
+    # destination has that the record omits genuinely resets to the
+    # destination's own DEFAULT — see RESET_TO_DESTINATION_DEFAULT), as
+    # opposed to a partial UPDATE/MERGE that leaves an omitted column
+    # untouched. Deliberately NOT inferred from
     # ``delete_reason == "replace"`` at render time: `delete_reason` is
     # suppressed to `None` whenever nothing is deleted (see `compute_diff`),
     # which is exactly the common case here (same key set, so nothing to
@@ -124,12 +153,23 @@ class DiffResult:
         comparison — pass it for ``sync.mode: replace``, caught missing in
         a further Codex review round: a replace-mode write rebuilds the
         whole row from ``new`` alone, so a column ``old`` has that ``new``
-        omits genuinely gets reset to its ``DEFAULT``/``NULL`` — unlike the
-        upsert case, that *is* a real change the dry-run preview should
-        show, not a phantom one.
+        omits genuinely gets reset — unlike the upsert case, that *is* a
+        real change the dry-run preview should show, not a phantom one.
+        Each such column's reported new value is
+        ``RESET_TO_DESTINATION_DEFAULT`` (rendered as ``<default>``), not
+        a plain ``None`` — a further review round caught that a removed
+        column resets to its table's real ``DEFAULT`` clause, which this
+        function has no schema access to know and can be a non-null value;
+        claiming it becomes ``None`` would be actively wrong for those
+        columns, so it's always reported (never compared for equality
+        against ``old``, since there's no known value to compare).
         """
-        cols = {*new, *old} if include_removed else set(new)
-        return {col: (old.get(col), new.get(col)) for col in cols if old.get(col) != new.get(col)}
+        changed = {col: (old.get(col), new[col]) for col in new if old.get(col) != new[col]}
+        if include_removed:
+            for col in old:
+                if col not in new:
+                    changed[col] = (old[col], RESET_TO_DESTINATION_DEFAULT)
+        return changed
 
 
 def _writes_full_row(config: DestinationConfig, sync_options: SyncOptions) -> bool:
