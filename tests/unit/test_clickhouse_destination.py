@@ -130,11 +130,11 @@ class TestClickHouseDestinationLoad:
     ) -> None:
         """#1091: a field absent from the first record but present in a
         later one used to be silently dropped for the whole batch (columns
-        derived from records[0] alone). ClickHouse's write is always a plain
-        INSERT of new row-versions (never an in-place UPDATE/MERGE), so
-        widening column_names to the cross-record union is safe here — a
-        record missing the field just inserts None for it in its own row,
-        with no pre-existing row to clobber."""
+        derived from records[0] alone). Dispatches one insert() per
+        contiguous key-signature run, each with exactly that run's own
+        columns — not a batch-wide union, which would bind an explicit
+        None (overriding any column DEFAULT) for the run lacking the field
+        (caught in Codex review on #1135)."""
         client = _fake_client()
         mock_connect.return_value = client
 
@@ -146,13 +146,12 @@ class TestClickHouseDestinationLoad:
 
         assert result.success == 2
         assert result.failed == 0
-        client.insert.assert_called_once()
-        call = client.insert.call_args
-        assert call.kwargs["column_names"] == ["id", "score", "note"]
-        assert call.args[1] == [
-            [1, 0.95, None],
-            [2, 0.80, "flagged"],
-        ]
+        assert client.insert.call_count == 2
+        first, second = client.insert.call_args_list
+        assert first.kwargs["column_names"] == ["id", "score"]
+        assert first.args[1] == [[1, 0.95]]
+        assert second.kwargs["column_names"] == ["id", "score", "note"]
+        assert second.args[1] == [[2, 0.80, "flagged"]]
 
     @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
     def test_insert_batches_by_sync_batch_size(self, mock_connect: MagicMock) -> None:

@@ -322,8 +322,14 @@ class TestDatabricksDestinationLoad:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """#1091: a field absent from the first record but present in a
-        later one used to be silently dropped for the whole batch. Now the
-        batch splits into one staged MERGE per distinct key signature."""
+        later one used to be silently dropped for the whole batch. The
+        staging INSERT is now split into one call per contiguous
+        key-signature run, each with exactly that run's own columns —
+        staging shares the target's schema/DEFAULTs, so the run lacking
+        "note" picks up its DEFAULT there instead of an explicit NULL
+        override (caught in Codex review on #1135). The final MERGE still
+        runs once, over the full column union, since staging is by then
+        correctly populated for every row."""
         _set_creds(monkeypatch)
         conn = _fake_conn()
         modules = _mocked_databricks_modules(conn)
@@ -338,8 +344,9 @@ class TestDatabricksDestinationLoad:
 
         assert result.success == 2
         sqls = [(call.args[0] if call.args else "") for call in conn._cur.execute.call_args_list]
-        merge_calls = [s for s in sqls if "MERGE INTO main.default.user_scores" in s]
-        assert len(merge_calls) == 2
+        merge_calls = [s for s in sqls if s.startswith("MERGE INTO main.default.user_scores")]
+        assert len(merge_calls) == 1
+        assert "note" in merge_calls[0]
         insert_staging_calls = [
             s for s in sqls if s.startswith("INSERT INTO main.default.__drt_staging_user_scores")
         ]

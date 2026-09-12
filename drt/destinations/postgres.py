@@ -191,7 +191,16 @@ class PostgresDestination(BaseSqlDestination):
         sync_options: SyncOptions,
         config: PostgresDestinationConfig,
     ) -> SyncResult:
-        """TRUNCATE (once) → INSERT within a transaction."""
+        """TRUNCATE (once) → INSERT within a transaction.
+
+        Builds the INSERT per contiguous key-signature run (#1091), not
+        once for the whole batch: a column entirely absent from a run is
+        omitted from that run's INSERT, letting the destination table's own
+        ``DEFAULT``/nullability apply — widening to the batch-wide union
+        would instead bind an explicit ``NULL`` for every record lacking
+        that column, silently overriding a ``DEFAULT`` (or failing a
+        ``NOT NULL`` column outright), caught in Codex review on #1135.
+        """
         from psycopg2 import sql as _pgsql
 
         result = SyncResult()
@@ -200,28 +209,32 @@ class PostgresDestination(BaseSqlDestination):
             cur.execute(_pgsql.SQL("TRUNCATE TABLE {}").format(_qualified_ident(table)))
             self._replace_truncated = True
 
-        query = self._build_insert_sql(table, columns)
         schema_map = self._resolve_schema(config)
 
-        for i, record in enumerate(records):
-            try:
-                values = [
-                    _serialize_value(record.get(c), c, config.json_columns, schema_map)
-                    for c in columns
-                ]
-                cur.execute(query, values)
-                result.success += 1
-            except Exception as e:
-                self._record_row_error(result, i, record, e)
-                if sync_options.on_error == "fail":
+        base_index = 0
+        for run_columns, run_records in self._contiguous_signature_runs(records):
+            query = self._build_insert_sql(table, run_columns)
+            for local_i, record in enumerate(run_records):
+                i = base_index + local_i
+                try:
+                    values = [
+                        _serialize_value(record.get(c), c, config.json_columns, schema_map)
+                        for c in run_columns
+                    ]
+                    cur.execute(query, values)
+                    result.success += 1
+                except Exception as e:
+                    self._record_row_error(result, i, record, e)
+                    if sync_options.on_error == "fail":
+                        conn.rollback()
+                        return result
                     conn.rollback()
-                    return result
-                conn.rollback()
-                cur = conn.cursor()
-                if not self._replace_truncated:
-                    cur.execute(_pgsql.SQL("TRUNCATE TABLE {}").format(_qualified_ident(table)))
-                    self._replace_truncated = True
-                continue
+                    cur = conn.cursor()
+                    if not self._replace_truncated:
+                        cur.execute(_pgsql.SQL("TRUNCATE TABLE {}").format(_qualified_ident(table)))
+                        self._replace_truncated = True
+                    continue
+            base_index += len(run_records)
 
         conn.commit()
         return result
@@ -253,31 +266,39 @@ class PostgresDestination(BaseSqlDestination):
             self._swap_shadow_created = True
             self._swap_table = table
 
-        sql = self._build_insert_sql(shadow, columns)
         schema_map = self._resolve_schema(config)
 
-        for i, record in enumerate(records):
-            try:
-                values = [
-                    _serialize_value(record.get(c), c, config.json_columns, schema_map)
-                    for c in columns
-                ]
-                cur.execute(sql, values)
-                result.success += 1
-            except Exception as e:
-                self._record_row_error(result, i, record, e)
-                if sync_options.on_error == "fail":
-                    conn.rollback()
-                    # Cleanup shadow on hard fail
-                    cur = conn.cursor()
-                    cur.execute(
-                        _pgsql.SQL("DROP TABLE IF EXISTS {}").format(_qualified_ident(shadow))
-                    )
-                    conn.commit()
-                    self._swap_shadow_created = False
-                    self._swap_table = None
-                    return result
-                # on_error=skip: keep going
+        # Built per contiguous key-signature run (#1091), not once for the
+        # whole batch — see _load_replace's docstring for why (an absent
+        # column should be omitted from the INSERT, not bound as an
+        # explicit NULL that overrides the shadow table's own DEFAULT).
+        base_index = 0
+        for run_columns, run_records in self._contiguous_signature_runs(records):
+            sql = self._build_insert_sql(shadow, run_columns)
+            for local_i, record in enumerate(run_records):
+                i = base_index + local_i
+                try:
+                    values = [
+                        _serialize_value(record.get(c), c, config.json_columns, schema_map)
+                        for c in run_columns
+                    ]
+                    cur.execute(sql, values)
+                    result.success += 1
+                except Exception as e:
+                    self._record_row_error(result, i, record, e)
+                    if sync_options.on_error == "fail":
+                        conn.rollback()
+                        # Cleanup shadow on hard fail
+                        cur = conn.cursor()
+                        cur.execute(
+                            _pgsql.SQL("DROP TABLE IF EXISTS {}").format(_qualified_ident(shadow))
+                        )
+                        conn.commit()
+                        self._swap_shadow_created = False
+                        self._swap_table = None
+                        return result
+                    # on_error=skip: keep going
+            base_index += len(run_records)
 
         conn.commit()
         return result
@@ -565,63 +586,76 @@ class PostgresDestination(BaseSqlDestination):
         config: PostgresDestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult:
+        """One transaction/commit for the whole batch (unchanged by #1091 —
+        see that issue for why the write statement is now built per
+        contiguous key-signature run instead of once for the whole batch:
+        a heterogeneous batch's run boundaries never span more than one
+        ``_load_upsert`` call, so ``on_error: fail``'s existing
+        stop-and-roll-back-the-whole-call semantics are untouched).
+        """
         result = SyncResult()
         policy = sync_options.match_policy
-        update_cols = [c for c in columns if c not in config.upsert_key]
         schema_map = self._resolve_schema(config)
 
-        # match_policy (#757) picks the write shape and, for the narrowed
-        # policies, the parameter order. Postgres has clean rowcount semantics:
-        # ON CONFLICT DO NOTHING reports rows *inserted* (0 == already existed),
-        # and UPDATE reports rows *matched* (0 == no such row) regardless of
-        # whether any value actually changed — so cur.rowcount == 0 is an exact
-        # "skipped, no match" signal for both narrowed policies.
-        if policy == "create_only":
-            query = PostgresDestination._build_create_only_sql(
-                config.table, columns, config.upsert_key
-            )
-            value_cols = columns
-        elif policy == "update_only":
-            if not update_cols:
-                raise ValueError(
-                    "sync.match_policy: update_only needs at least one non-key "
-                    "column to update, but every column is in upsert_key."
-                )
-            query = PostgresDestination._build_update_only_sql(
-                config.table, update_cols, config.upsert_key
-            )
-            # UPDATE ... SET <update_cols> WHERE <upsert_key>: SET params first,
-            # then the WHERE key params.
-            value_cols = update_cols + config.upsert_key
-        else:
-            query = PostgresDestination._build_upsert_sql(
-                config.table,
-                columns,
-                config.upsert_key,
-                update_cols,
-            )
-            value_cols = columns
+        base_index = 0
+        for run_columns, run_records in self._contiguous_signature_runs(records):
+            update_cols = [c for c in run_columns if c not in config.upsert_key]
 
-        for i, record in enumerate(records):
-            try:
-                values = [
-                    _serialize_value(record.get(c), c, config.json_columns, schema_map)
-                    for c in value_cols
-                ]
-                cur.execute(query, values)
-                if policy in ("create_only", "update_only") and cur.rowcount == 0:
-                    result.skipped += 1
-                    result.skipped_no_match += 1  # #757 — no create/update target
-                else:
-                    result.success += 1
-            except Exception as e:
-                self._record_row_error(result, i, record, e)
-                if sync_options.on_error == "fail":
+            # match_policy (#757) picks the write shape and, for the narrowed
+            # policies, the parameter order. Postgres has clean rowcount
+            # semantics: ON CONFLICT DO NOTHING reports rows *inserted* (0 ==
+            # already existed), and UPDATE reports rows *matched* (0 == no
+            # such row) regardless of whether any value actually changed —
+            # so cur.rowcount == 0 is an exact "skipped, no match" signal for
+            # both narrowed policies.
+            if policy == "create_only":
+                query = PostgresDestination._build_create_only_sql(
+                    config.table, run_columns, config.upsert_key
+                )
+                value_cols = run_columns
+            elif policy == "update_only":
+                if not update_cols:
+                    raise ValueError(
+                        "sync.match_policy: update_only needs at least one non-key "
+                        "column to update, but every column is in upsert_key."
+                    )
+                query = PostgresDestination._build_update_only_sql(
+                    config.table, update_cols, config.upsert_key
+                )
+                # UPDATE ... SET <update_cols> WHERE <upsert_key>: SET params
+                # first, then the WHERE key params.
+                value_cols = update_cols + config.upsert_key
+            else:
+                query = PostgresDestination._build_upsert_sql(
+                    config.table,
+                    run_columns,
+                    config.upsert_key,
+                    update_cols,
+                )
+                value_cols = run_columns
+
+            for local_i, record in enumerate(run_records):
+                i = base_index + local_i
+                try:
+                    values = [
+                        _serialize_value(record.get(c), c, config.json_columns, schema_map)
+                        for c in value_cols
+                    ]
+                    cur.execute(query, values)
+                    if policy in ("create_only", "update_only") and cur.rowcount == 0:
+                        result.skipped += 1
+                        result.skipped_no_match += 1  # #757 — no create/update target
+                    else:
+                        result.success += 1
+                except Exception as e:
+                    self._record_row_error(result, i, record, e)
+                    if sync_options.on_error == "fail":
+                        conn.rollback()
+                        return result
                     conn.rollback()
-                    return result
-                conn.rollback()
-                cur = conn.cursor()
-                continue
+                    cur = conn.cursor()
+                    continue
+            base_index += len(run_records)
 
         conn.commit()
         return result

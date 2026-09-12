@@ -101,14 +101,15 @@ class ClickHouseDestination:
         result = SyncResult()
 
         try:
-            # #1091: union of every record's keys, not just records[0] — a
-            # field that first appears partway through the batch used to be
-            # silently dropped for the whole batch. Safe here (unlike an
-            # upsert-style write elsewhere in this codebase): ClickHouse's
-            # write path is always a plain client.insert() appending new
-            # row-versions, never an in-place UPDATE/MERGE, so a record
-            # missing a column just inserts None for it in that row-version
-            # rather than clobbering a pre-existing row's value.
+            # #1091: union of every record's keys, not just records[0] —
+            # used only for the mirror.scope availability check below (a
+            # scope column first appearing in a later record is still
+            # readable per-record). The actual INSERT column list is built
+            # per contiguous key-signature run instead (_insert_all_runs) —
+            # an earlier version of this fix used this union for the INSERT
+            # itself too, which Codex review on #1135 caught as unsafe: an
+            # explicit NULL bind for a record lacking a column overrides
+            # that column's DEFAULT, not just an UPDATE/MERGE's clobber risk.
             columns: list[str] = []
             seen: set[str] = set()
             for record in records:
@@ -121,7 +122,6 @@ class ClickHouseDestination:
                 result = self._load_replace_swap(
                     client,
                     records,
-                    columns,
                     config.table,
                     sync_options,
                 )
@@ -164,14 +164,7 @@ class ClickHouseDestination:
                 # (see clickhouse_connect/driver/insert.py), so pre-quote here.
                 table_q = self._quote_ident(config.table)
 
-                if not self._insert_batched(
-                    client,
-                    table_q,
-                    records,
-                    columns,
-                    sync_options,
-                    result,
-                ):
+                if not self._insert_all_runs(client, table_q, records, sync_options, result):
                     return result
 
                 # sync.mode: mirror (#340 Step 3) — accumulate upsert_key
@@ -199,6 +192,69 @@ class ClickHouseDestination:
             client.close()
 
         return result
+
+    def _contiguous_signature_runs(
+        self, records: list[dict[str, Any]]
+    ) -> list[tuple[list[str], list[dict[str, Any]]]]:
+        """Partition ``records`` into runs of *contiguous* records sharing the
+        same exact key set (#1091), preserving original order. Mirrors
+        ``BaseSqlDestination._contiguous_signature_runs`` — duplicated here
+        rather than imported, since ``ClickHouseDestination`` doesn't
+        inherit that class (its ``client.insert()``-based write model has
+        no shared base with the transactional SQL dialects).
+        """
+        if not records:
+            return []
+        runs: list[tuple[list[str], list[dict[str, Any]]]] = []
+        run_columns = list(records[0].keys())
+        run_signature = frozenset(run_columns)
+        run_records: list[dict[str, Any]] = [records[0]]
+        for record in records[1:]:
+            signature = frozenset(record.keys())
+            if signature == run_signature:
+                run_records.append(record)
+                continue
+            runs.append((run_columns, run_records))
+            run_columns = list(record.keys())
+            run_signature = signature
+            run_records = [record]
+        runs.append((run_columns, run_records))
+        return runs
+
+    def _insert_all_runs(
+        self,
+        client: Any,
+        table_q: str,
+        records: list[dict[str, Any]],
+        sync_options: SyncOptions,
+        result: SyncResult,
+    ) -> bool:
+        """Dispatch ``_insert_batched`` once per contiguous key-signature run
+        (#1091) instead of once for the whole batch with the batch-wide
+        column union — a column absent from a run is omitted from that
+        run's ``client.insert()`` call, letting the destination table's own
+        ``DEFAULT`` apply, rather than binding an explicit ``NULL`` that
+        would override it (caught in Codex review on #1135). No new
+        atomicity exposure: ``client.insert()`` is never wrapped in an
+        app-level transaction here — each call lands immediately regardless
+        of chunking — so this adds nothing beyond the existing
+        ``sync_options.batch_size`` chunking ``_insert_batched`` already
+        does internally.
+        """
+        base_index = 0
+        for run_columns, run_records in self._contiguous_signature_runs(records):
+            if not self._insert_batched(
+                client,
+                table_q,
+                run_records,
+                run_columns,
+                sync_options,
+                result,
+                base_index=base_index,
+            ):
+                return False
+            base_index += len(run_records)
+        return True
 
     def _insert_batched(
         self,
@@ -297,7 +353,6 @@ class ClickHouseDestination:
         self,
         client: Any,
         records: list[dict[str, Any]],
-        columns: list[str],
         table: str,
         sync_options: SyncOptions,
     ) -> SyncResult:
@@ -318,14 +373,7 @@ class ClickHouseDestination:
             self._swap_shadow_created = True
             self._swap_table = table
 
-        if not self._insert_batched(
-            client,
-            shadow_q,
-            records,
-            columns,
-            sync_options,
-            result,
-        ):
+        if not self._insert_all_runs(client, shadow_q, records, sync_options, result):
             # Drop the partial shadow + reset state so finalize_sync() cannot
             # EXCHANGE partial data into the live table. try/finally guarantees
             # state reset even if DROP fails; at worst we leave an orphan

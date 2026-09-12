@@ -33,12 +33,21 @@ from drt.destinations.sql_utils import tagged_cursor as _tagged_cursor
 def _union_columns(records: list[dict[str, Any]]) -> list[str]:
     """Column list covering every key across ``records``, in first-seen order.
 
-    Safe only where there's no pre-existing destination row to clobber (a
-    fresh ``INSERT`` after ``TRUNCATE``/swap): a record missing a column
-    just contributes ``None`` via ``record.get(c)``, the value-extraction
-    convention every dialect already uses. **Not** safe for an upsert-style
-    write against pre-existing rows — see
-    ``_group_records_by_key_signature``'s docstring (#1091).
+    Used only for ``_validate_mirror_scope``'s read-only availability check
+    (#1091) — a scope column that first appears in a later record is still
+    available to ``_accumulate_mirror_state``'s own per-record
+    ``record.get()`` read, so checking membership across the whole batch
+    here is correct and has no write-side implications.
+
+    **Not** used for building a write statement's column list: an earlier
+    version of this fix used it there too, on the theory that a record
+    missing a column just contributes ``None`` via ``record.get(c)`` and
+    that's "safe" wherever there's no pre-existing row to clobber. Codex
+    review on #1135 (#1091) found that reasoning incomplete — an explicit
+    ``NULL`` bind for an omitted column also overrides that column's
+    ``DEFAULT`` on a plain ``INSERT``, not just on an ``UPDATE``/``MERGE``
+    match. See ``BaseSqlDestination._contiguous_signature_runs()`` for the
+    write-side fix.
     """
     columns: list[str] = []
     seen: set[str] = set()
@@ -48,69 +57,6 @@ def _union_columns(records: list[dict[str, Any]]) -> list[str]:
                 seen.add(key)
                 columns.append(key)
     return columns
-
-
-def _group_records_by_key_signature(
-    records: list[dict[str, Any]],
-) -> list[tuple[list[int], list[dict[str, Any]], list[str]]]:
-    """Group ``records`` by their exact key set (#1091), preserving
-    first-seen group order and each group's first-seen column order.
-    Returns one ``(original_indices, group_records, columns)`` tuple per
-    group.
-
-    An upsert-style write (``ON CONFLICT DO UPDATE`` / ``MERGE``) includes
-    every column in ``columns`` in the write statement for *every* record in
-    that call — a record lacking one of those keys writes ``None`` via
-    ``record.get(c)``, silently clobbering whatever the destination already
-    had there. Widening a whole heterogeneous batch's column list to the
-    cross-record union (the way ``_union_columns`` does, safely, for
-    ``replace``/``replace_swap``) would turn today's bug — a field that
-    first appears partway through a batch is silently dropped for the
-    *entire* batch — into a worse one: every record missing that field
-    would actively null it out on the destination. Grouping by exact key
-    signature and dispatching one write call per group keeps each
-    statement's column list exactly the keys the records in that group
-    actually have, so a record is never asked to write — or null out — a
-    column it never sent. A homogeneous batch (every record has the same
-    keys, the common case) is exactly one group, so it dispatches exactly
-    like before this fix.
-    """
-    order: list[frozenset[str]] = []
-    indices_by_signature: dict[frozenset[str], list[int]] = {}
-    columns_by_signature: dict[frozenset[str], list[str]] = {}
-    for i, record in enumerate(records):
-        signature = frozenset(record.keys())
-        if signature not in indices_by_signature:
-            indices_by_signature[signature] = []
-            columns_by_signature[signature] = list(record.keys())
-            order.append(signature)
-        indices_by_signature[signature].append(i)
-    return [
-        (
-            indices_by_signature[signature],
-            [records[i] for i in indices_by_signature[signature]],
-            columns_by_signature[signature],
-        )
-        for signature in order
-    ]
-
-
-def _merge_sync_results(per_group: list[tuple[list[int], SyncResult]]) -> SyncResult:
-    """Combine one ``SyncResult`` per key-signature group (#1091) into one,
-    remapping each ``RowError.batch_index`` from its position within the
-    group's own records back to its position in the original full batch.
-    """
-    merged = SyncResult()
-    for original_indices, result in per_group:
-        merged.success += result.success
-        merged.failed += result.failed
-        merged.skipped += result.skipped
-        merged.skipped_no_match += result.skipped_no_match
-        merged.errors.extend(result.errors)
-        for row_error in result.row_errors:
-            row_error.batch_index = original_indices[row_error.batch_index]
-            merged.row_errors.append(row_error)
-    return merged
 
 
 class BaseSqlDestination:
@@ -167,12 +113,14 @@ class BaseSqlDestination:
 
         try:
             cur = _tagged_cursor(conn.cursor(), sync_options)
+            # ``columns`` stays the batch-wide union for backward-compatible
+            # bookkeeping (e.g. dialect code that logs/inspects it), but the
+            # actual write statement(s) each ``_load_*`` hook builds use
+            # ``self._contiguous_signature_runs(records)`` internally for the
+            # real per-run column list (#1091) — see that method's docstring.
+            columns = _union_columns(records)
 
             if sync_options.mode == "replace":
-                # #1091: safe to widen to the cross-record union here — a
-                # fresh TRUNCATE/swap means there's no pre-existing row for
-                # a missing column's ``None`` fill to clobber.
-                columns = _union_columns(records)
                 if sync_options.replace_strategy == "swap":
                     result = self._load_replace_swap(
                         conn,
@@ -194,7 +142,7 @@ class BaseSqlDestination:
                         config,
                     )
             else:
-                result = self._load_upsert_grouped(conn, cur, records, config, sync_options)
+                result = self._load_upsert(conn, cur, records, columns, config, sync_options)
                 # sync.mode: mirror (#340 / #687) — record the observed
                 # upsert_key (and scope) tuples for the finalize_sync DELETE.
                 if sync_options.mode == "mirror":
@@ -206,36 +154,49 @@ class BaseSqlDestination:
 
         return result
 
-    def _load_upsert_grouped(
-        self,
-        conn: Any,
-        cur: Any,
-        records: list[dict[str, Any]],
-        config: DestinationConfig,
-        sync_options: SyncOptions,
-    ) -> SyncResult:
-        """Dispatch ``_load_upsert`` once per distinct key-signature group in
-        ``records`` (#1091) — see ``_group_records_by_key_signature``'s
-        docstring for why a single call using the batch-wide union of
-        columns is unsafe for an upsert-style write. A homogeneous batch
-        (every record has the same keys, the common case) is exactly one
-        group, so ``_load_upsert`` is called exactly once, with exactly the
-        ``columns`` list it always received before this fix.
+    def _contiguous_signature_runs(
+        self, records: list[dict[str, Any]]
+    ) -> list[tuple[list[str], list[dict[str, Any]]]]:
+        """Partition ``records`` into runs of *contiguous* records sharing the
+        same exact key set (#1091), preserving original order. Returns one
+        ``(columns, run_records)`` tuple per run, in first-seen-per-run
+        column order.
 
-        Stops dispatching further groups once a group reports a failure
-        under ``on_error: fail`` — matching the single-call loop's
-        stop-at-first-failure intent, though for a genuinely heterogeneous
-        batch the exact set of records attempted after that point can differ
-        from strict original-batch order (grouped, not interleaved).
+        Each dialect's ``_load_upsert``/``_load_replace``/``_load_replace_swap``
+        uses this — instead of the batch-wide column union — to build its
+        write statement(s), so a record is never asked to write (an
+        upsert-style write, clobbering a pre-existing destination value) or
+        null out (any write, overriding a column's ``DEFAULT``) a column it
+        never sent. A homogeneous batch (every record has the same keys, the
+        common case) is exactly one run covering the whole batch — identical
+        to this method not existing at all.
+
+        Splits only at a signature **change** rather than grouping by
+        signature globally (an earlier version of this fix did, and Codex
+        review on #1135 caught why that's wrong): the same upsert key can
+        legitimately appear more than once in one batch under different
+        signatures, and global grouping could dispatch those out of their
+        original relative order, changing which write ends up "last" for
+        upsert's implicit last-write-wins semantics. Splitting only at a
+        change preserves every record's original position.
         """
-        groups = _group_records_by_key_signature(records)
-        per_group: list[tuple[list[int], SyncResult]] = []
-        for original_indices, group_records, columns in groups:
-            result = self._load_upsert(conn, cur, group_records, columns, config, sync_options)
-            per_group.append((original_indices, result))
-            if sync_options.on_error == "fail" and result.failed:
-                break
-        return _merge_sync_results(per_group)
+        if not records:
+            return []
+        runs: list[tuple[list[str], list[dict[str, Any]]]] = []
+        run_columns = list(records[0].keys())
+        run_signature = frozenset(run_columns)
+        run_records: list[dict[str, Any]] = [records[0]]
+        for record in records[1:]:
+            signature = frozenset(record.keys())
+            if signature == run_signature:
+                run_records.append(record)
+                continue
+            runs.append((run_columns, run_records))
+            run_columns = list(record.keys())
+            run_signature = signature
+            run_records = [record]
+        runs.append((run_columns, run_records))
+        return runs
 
     def finalize_sync(
         self,

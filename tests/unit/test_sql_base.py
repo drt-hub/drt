@@ -317,73 +317,69 @@ def test_union_columns_empty_list() -> None:
     assert _union_columns([]) == []
 
 
-def test_group_records_by_key_signature_single_group_for_homogeneous_batch() -> None:
-    from drt.destinations.sql_base import _group_records_by_key_signature
+def test_contiguous_signature_runs_empty_list() -> None:
+    d = BaseSqlDestination()
+    assert d._contiguous_signature_runs([]) == []
 
+
+def test_contiguous_signature_runs_single_run_for_homogeneous_batch() -> None:
+    """A homogeneous batch (the common case) is exactly one run covering
+    the whole batch, byte-identical to this method not existing at all."""
+    d = BaseSqlDestination()
     records = [{"a": 1, "b": 2}, {"a": 3, "b": 4}]
-    groups = _group_records_by_key_signature(records)
-    assert len(groups) == 1
-    indices, group_records, columns = groups[0]
-    assert indices == [0, 1]
-    assert group_records == records
+    runs = d._contiguous_signature_runs(records)
+    assert len(runs) == 1
+    columns, run_records = runs[0]
     assert columns == ["a", "b"]
+    assert run_records == records
 
 
-def test_group_records_by_key_signature_splits_heterogeneous_batch() -> None:
+def test_contiguous_signature_runs_splits_at_a_signature_change() -> None:
     """A field that first appears partway through the batch (#1091's bug)
-    gets its own group instead of being silently dropped or force-nulled
+    starts a new run instead of being silently dropped or force-nulled
     onto records that never had it."""
-    from drt.destinations.sql_base import _group_records_by_key_signature
-
+    d = BaseSqlDestination()
     records = [{"a": 1}, {"a": 2, "b": 20}, {"a": 3}]
-    groups = _group_records_by_key_signature(records)
-    assert len(groups) == 2
-    (idx0, recs0, cols0), (idx1, recs1, cols1) = groups
-    assert idx0 == [0, 2]
-    assert recs0 == [{"a": 1}, {"a": 3}]
-    assert cols0 == ["a"]
-    assert idx1 == [1]
-    assert recs1 == [{"a": 2, "b": 20}]
-    assert cols1 == ["a", "b"]
+    runs = d._contiguous_signature_runs(records)
+    assert len(runs) == 3
+    (cols0, recs0), (cols1, recs1), (cols2, recs2) = runs
+    assert cols0 == ["a"] and recs0 == [{"a": 1}]
+    assert cols1 == ["a", "b"] and recs1 == [{"a": 2, "b": 20}]
+    assert cols2 == ["a"] and recs2 == [{"a": 3}]
 
 
-def test_group_records_by_key_signature_preserves_first_seen_group_order() -> None:
-    from drt.destinations.sql_base import _group_records_by_key_signature
-
-    records = [{"b": 1}, {"a": 1}, {"b": 2}, {"a": 2}]
-    groups = _group_records_by_key_signature(records)
-    assert [cols for _, _, cols in groups] == [["b"], ["a"]]
-    assert [idx for idx, _, _ in groups] == [[0, 2], [1, 3]]
-
-
-def test_merge_sync_results_sums_counters_and_remaps_batch_index() -> None:
-    from drt.destinations.sql_base import _merge_sync_results
-
-    group_a = SyncResult(success=1, failed=1, skipped=1, skipped_no_match=1, errors=["e1"])
-    group_a.row_errors.append(
-        RowError(batch_index=0, record_preview="p", http_status=None, error_message="boom-a")
-    )
-    group_b = SyncResult(success=2)
-    group_b.row_errors.append(
-        RowError(batch_index=1, record_preview="p", http_status=None, error_message="boom-b")
-    )
-
-    # group_a covered original indices [0, 2]; group_b covered [1, 3].
-    merged = _merge_sync_results([([0, 2], group_a), ([1, 3], group_b)])
-
-    assert merged.success == 3
-    assert merged.failed == 1
-    assert merged.skipped == 1
-    assert merged.skipped_no_match == 1
-    assert merged.errors == ["e1"]
-    # local index 0 (group_a's first record) -> original index 0
-    # local index 1 (group_b's second record) -> original index 3
-    assert [re.batch_index for re in merged.row_errors] == [0, 3]
+def test_contiguous_signature_runs_merges_adjacent_same_signature_records() -> None:
+    d = BaseSqlDestination()
+    records = [{"a": 1}, {"a": 2}, {"a": 3, "b": 1}, {"a": 4}, {"a": 5}]
+    runs = d._contiguous_signature_runs(records)
+    assert [cols for cols, _ in runs] == [["a"], ["a", "b"], ["a"]]
+    assert [recs for _, recs in runs] == [
+        [{"a": 1}, {"a": 2}],
+        [{"a": 3, "b": 1}],
+        [{"a": 4}, {"a": 5}],
+    ]
 
 
-def _grouping_dest(events: list[str], calls: list[tuple[list[dict[str, Any]], list[str]]]) -> Any:
-    """A BaseSqlDestination subclass whose _load_upsert records each call's
-    records/columns and returns a scripted SyncResult per call."""
+def test_contiguous_signature_runs_preserves_original_order_for_repeated_signatures() -> None:
+    """Codex review on #1135 caught an earlier version of this fix that
+    grouped by signature *globally* (dict-keyed), which could dispatch an
+    interleaved batch out of its original relative order. Splitting only
+    at a signature *change* keeps every record's original position -- the
+    same signature reappearing later starts a fresh run, not a merge back
+    into the earlier one."""
+    d = BaseSqlDestination()
+    records = [{"a": 1}, {"a": 1, "b": 1}, {"a": 1}]
+    runs = d._contiguous_signature_runs(records)
+    assert len(runs) == 3
+    assert [recs for _, recs in runs] == [[{"a": 1}], [{"a": 1, "b": 1}], [{"a": 1}]]
+
+
+def _run_capturing_dest(
+    events: list[str], calls: list[tuple[list[dict[str, Any]], list[str]]]
+) -> Any:
+    """A BaseSqlDestination subclass whose _load_upsert records the records/
+    columns it was called with (exactly once per load() call, per #1091's
+    corrected design -- see the module docstring history in sql_base.py)."""
 
     class _Cur:
         def close(self) -> None:
@@ -417,89 +413,27 @@ def _grouping_dest(events: list[str], calls: list[tuple[list[dict[str, Any]], li
     return _Dest()
 
 
-def test_load_upsert_dispatches_once_per_key_signature_group() -> None:
+def test_load_calls_load_upsert_exactly_once_even_for_a_heterogeneous_batch() -> None:
+    """#1091's corrected design (post Codex review on #1135): load() still
+    calls _load_upsert exactly once per call, passing the batch-wide union
+    as ``columns`` -- per-run column fidelity is the dialect's own
+    responsibility via self._contiguous_signature_runs(), not something
+    the orchestration layer fragments into multiple calls (that broke
+    on_error: fail's transactional atomicity and could reorder writes)."""
     events: list[str] = []
     calls: list[tuple[list[dict[str, Any]], list[str]]] = []
-    d = _grouping_dest(events, calls)
+    d = _run_capturing_dest(events, calls)
     result = d.load(
         [{"id": 1}, {"id": 2, "extra": "x"}, {"id": 3}],
         SimpleNamespace(upsert_key=["id"], table="t"),
         _load_options("upsert"),
     )
-    assert events == ["connect", "upsert", "upsert", "close"]
-    assert calls[0] == ([{"id": 1}, {"id": 3}], ["id"])
-    assert calls[1] == ([{"id": 2, "extra": "x"}], ["id", "extra"])
-    assert result.success == 3
-
-
-def test_load_homogeneous_batch_dispatches_upsert_exactly_once() -> None:
-    """Regression guard: a homogeneous batch (the common case) must not
-    fragment into multiple _load_upsert calls after the #1091 fix."""
-    events: list[str] = []
-    calls: list[tuple[list[dict[str, Any]], list[str]]] = []
-    d = _grouping_dest(events, calls)
-    records = [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}, {"id": 3, "name": "c"}]
-    d.load(
-        records,
-        SimpleNamespace(upsert_key=["id"], table="t"),
-        _load_options("upsert"),
-    )
     assert events == ["connect", "upsert", "close"]
-    assert calls == [(records, ["id", "name"])]
-
-
-def test_load_upsert_stops_after_first_failing_group_on_error_fail() -> None:
-    events: list[str] = []
-    calls: list[tuple[list[dict[str, Any]], list[str]]] = []
-
-    class _Cur:
-        def close(self) -> None:
-            pass
-
-    class _Conn:
-        def cursor(self) -> _Cur:
-            return _Cur()
-
-        def close(self) -> None:
-            events.append("close")
-
-    class _Dest(BaseSqlDestination):
-        def _dialect_connect(self, config: Any, query_tags: dict[str, str] | None = None) -> Any:
-            return _Conn()
-
-        def _load_upsert(
-            self,
-            conn: Any,
-            cur: Any,
-            records: list[dict[str, Any]],
-            columns: list[str],
-            config: Any,
-            sync_options: Any,
-        ) -> SyncResult:
-            calls.append((records, columns))
-            result = SyncResult()
-            if "extra" not in columns:
-                result.failed = 1
-                result.row_errors.append(
-                    RowError(
-                        batch_index=0, record_preview="p", http_status=None, error_message="boom"
-                    )
-                )
-            else:
-                result.success = len(records)
-            return result
-
-    d = _Dest()
-    options = SimpleNamespace(
-        mode="upsert", replace_strategy="delete", mirror=None, on_error="fail"
-    )
-    d.load(
-        [{"id": 1}, {"id": 2, "extra": "x"}],
-        SimpleNamespace(upsert_key=["id"], table="t"),
-        options,
-    )
-    # Only the first group (no "extra") ran; the second group never dispatched.
     assert len(calls) == 1
+    records, columns = calls[0]
+    assert records == [{"id": 1}, {"id": 2, "extra": "x"}, {"id": 3}]
+    assert columns == ["id", "extra"]
+    assert result.success == 3
 
 
 def test_validate_mirror_scope_ok_when_column_first_appears_in_a_later_record() -> None:
