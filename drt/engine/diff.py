@@ -353,15 +353,16 @@ def compute_diff(
     try:
         if use_keyed_fetch:
             # Explicit columns avoid metadata introspection on the keyed
-            # path. Deliberately records[0].keys(), not field_hint's
-            # cross-record union: the real write (BaseSqlDestination.load(),
-            # sql_base.py) derives each batch's column list the same way,
-            # from the first record only, so mirroring that here is what
-            # keeps the preview honest about what the real run will write —
-            # a union would fetch (and could report a phantom diff on)
-            # fields the real write silently drops on a heterogeneous
-            # batch. That drop is itself tracked separately (#1064 follow-up).
-            columns = list(records[0].keys())
+            # path. Uses field_hint's cross-record union (#1091): the real
+            # write (BaseSqlDestination.load(), sql_base.py) used to derive
+            # each batch's column list from the first record only, matching
+            # what this used to do — but that was the #1091 bug, now fixed
+            # (the real write groups a heterogeneous batch by key signature
+            # instead). Fetching the union here is safe regardless of which
+            # dialect-side path each record's write actually takes: this is
+            # a read-only SELECT, so an extra fetched column has no clobber
+            # risk the way widening the real write's column list would.
+            columns = field_hint
             try:
                 dest_rows = fetch_rows_by_keys(
                     config,

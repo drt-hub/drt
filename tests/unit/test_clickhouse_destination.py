@@ -125,6 +125,36 @@ class TestClickHouseDestinationLoad:
         client.close.assert_called_once()
 
     @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_heterogeneous_batch_does_not_drop_a_field_appearing_in_a_later_record(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """#1091: a field absent from the first record but present in a
+        later one used to be silently dropped for the whole batch (columns
+        derived from records[0] alone). ClickHouse's write is always a plain
+        INSERT of new row-versions (never an in-place UPDATE/MERGE), so
+        widening column_names to the cross-record union is safe here — a
+        record missing the field just inserts None for it in its own row,
+        with no pre-existing row to clobber."""
+        client = _fake_client()
+        mock_connect.return_value = client
+
+        records = [
+            {"id": 1, "score": 0.95},
+            {"id": 2, "score": 0.80, "note": "flagged"},
+        ]
+        result = ClickHouseDestination().load(records, _config(), _options())
+
+        assert result.success == 2
+        assert result.failed == 0
+        client.insert.assert_called_once()
+        call = client.insert.call_args
+        assert call.kwargs["column_names"] == ["id", "score", "note"]
+        assert call.args[1] == [
+            [1, 0.95, None],
+            [2, 0.80, "flagged"],
+        ]
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
     def test_insert_batches_by_sync_batch_size(self, mock_connect: MagicMock) -> None:
         client = _fake_client()
         mock_connect.return_value = client

@@ -236,7 +236,9 @@ def _load_dest(events: list[str], mode: str, replace_strategy: str = "delete") -
 
 
 def _load_options(mode: str, replace_strategy: str = "delete") -> SimpleNamespace:
-    return SimpleNamespace(mode=mode, replace_strategy=replace_strategy, mirror=None)
+    return SimpleNamespace(
+        mode=mode, replace_strategy=replace_strategy, mirror=None, on_error="skip"
+    )
 
 
 def test_load_empty_records_returns_early() -> None:
@@ -291,6 +293,223 @@ def test_load_mirror_accumulates_state() -> None:
     )
     assert events == ["connect", "upsert", "close"]
     assert d._mirror_keys == [(1,), (2,)]  # accumulated for mirror
+
+
+# ---------------------------------------------------------------------------
+# heterogeneous-batch column handling (#1091)
+# ---------------------------------------------------------------------------
+
+
+def test_union_columns_is_first_seen_order_across_records() -> None:
+    from drt.destinations.sql_base import _union_columns
+
+    assert _union_columns([{"a": 1, "b": 2}, {"c": 3, "a": 9}, {"b": 4, "d": 5}]) == [
+        "a",
+        "b",
+        "c",
+        "d",
+    ]
+
+
+def test_union_columns_empty_list() -> None:
+    from drt.destinations.sql_base import _union_columns
+
+    assert _union_columns([]) == []
+
+
+def test_group_records_by_key_signature_single_group_for_homogeneous_batch() -> None:
+    from drt.destinations.sql_base import _group_records_by_key_signature
+
+    records = [{"a": 1, "b": 2}, {"a": 3, "b": 4}]
+    groups = _group_records_by_key_signature(records)
+    assert len(groups) == 1
+    indices, group_records, columns = groups[0]
+    assert indices == [0, 1]
+    assert group_records == records
+    assert columns == ["a", "b"]
+
+
+def test_group_records_by_key_signature_splits_heterogeneous_batch() -> None:
+    """A field that first appears partway through the batch (#1091's bug)
+    gets its own group instead of being silently dropped or force-nulled
+    onto records that never had it."""
+    from drt.destinations.sql_base import _group_records_by_key_signature
+
+    records = [{"a": 1}, {"a": 2, "b": 20}, {"a": 3}]
+    groups = _group_records_by_key_signature(records)
+    assert len(groups) == 2
+    (idx0, recs0, cols0), (idx1, recs1, cols1) = groups
+    assert idx0 == [0, 2]
+    assert recs0 == [{"a": 1}, {"a": 3}]
+    assert cols0 == ["a"]
+    assert idx1 == [1]
+    assert recs1 == [{"a": 2, "b": 20}]
+    assert cols1 == ["a", "b"]
+
+
+def test_group_records_by_key_signature_preserves_first_seen_group_order() -> None:
+    from drt.destinations.sql_base import _group_records_by_key_signature
+
+    records = [{"b": 1}, {"a": 1}, {"b": 2}, {"a": 2}]
+    groups = _group_records_by_key_signature(records)
+    assert [cols for _, _, cols in groups] == [["b"], ["a"]]
+    assert [idx for idx, _, _ in groups] == [[0, 2], [1, 3]]
+
+
+def test_merge_sync_results_sums_counters_and_remaps_batch_index() -> None:
+    from drt.destinations.sql_base import _merge_sync_results
+
+    group_a = SyncResult(success=1, failed=1, skipped=1, skipped_no_match=1, errors=["e1"])
+    group_a.row_errors.append(
+        RowError(batch_index=0, record_preview="p", http_status=None, error_message="boom-a")
+    )
+    group_b = SyncResult(success=2)
+    group_b.row_errors.append(
+        RowError(batch_index=1, record_preview="p", http_status=None, error_message="boom-b")
+    )
+
+    # group_a covered original indices [0, 2]; group_b covered [1, 3].
+    merged = _merge_sync_results([([0, 2], group_a), ([1, 3], group_b)])
+
+    assert merged.success == 3
+    assert merged.failed == 1
+    assert merged.skipped == 1
+    assert merged.skipped_no_match == 1
+    assert merged.errors == ["e1"]
+    # local index 0 (group_a's first record) -> original index 0
+    # local index 1 (group_b's second record) -> original index 3
+    assert [re.batch_index for re in merged.row_errors] == [0, 3]
+
+
+def _grouping_dest(events: list[str], calls: list[tuple[list[dict[str, Any]], list[str]]]) -> Any:
+    """A BaseSqlDestination subclass whose _load_upsert records each call's
+    records/columns and returns a scripted SyncResult per call."""
+
+    class _Cur:
+        def close(self) -> None:
+            pass
+
+    class _Conn:
+        def cursor(self) -> _Cur:
+            return _Cur()
+
+        def close(self) -> None:
+            events.append("close")
+
+    class _Dest(BaseSqlDestination):
+        def _dialect_connect(self, config: Any, query_tags: dict[str, str] | None = None) -> Any:
+            events.append("connect")
+            return _Conn()
+
+        def _load_upsert(
+            self,
+            conn: Any,
+            cur: Any,
+            records: list[dict[str, Any]],
+            columns: list[str],
+            config: Any,
+            sync_options: Any,
+        ) -> SyncResult:
+            calls.append((records, columns))
+            events.append("upsert")
+            return SyncResult(success=len(records))
+
+    return _Dest()
+
+
+def test_load_upsert_dispatches_once_per_key_signature_group() -> None:
+    events: list[str] = []
+    calls: list[tuple[list[dict[str, Any]], list[str]]] = []
+    d = _grouping_dest(events, calls)
+    result = d.load(
+        [{"id": 1}, {"id": 2, "extra": "x"}, {"id": 3}],
+        SimpleNamespace(upsert_key=["id"], table="t"),
+        _load_options("upsert"),
+    )
+    assert events == ["connect", "upsert", "upsert", "close"]
+    assert calls[0] == ([{"id": 1}, {"id": 3}], ["id"])
+    assert calls[1] == ([{"id": 2, "extra": "x"}], ["id", "extra"])
+    assert result.success == 3
+
+
+def test_load_homogeneous_batch_dispatches_upsert_exactly_once() -> None:
+    """Regression guard: a homogeneous batch (the common case) must not
+    fragment into multiple _load_upsert calls after the #1091 fix."""
+    events: list[str] = []
+    calls: list[tuple[list[dict[str, Any]], list[str]]] = []
+    d = _grouping_dest(events, calls)
+    records = [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}, {"id": 3, "name": "c"}]
+    d.load(
+        records,
+        SimpleNamespace(upsert_key=["id"], table="t"),
+        _load_options("upsert"),
+    )
+    assert events == ["connect", "upsert", "close"]
+    assert calls == [(records, ["id", "name"])]
+
+
+def test_load_upsert_stops_after_first_failing_group_on_error_fail() -> None:
+    events: list[str] = []
+    calls: list[tuple[list[dict[str, Any]], list[str]]] = []
+
+    class _Cur:
+        def close(self) -> None:
+            pass
+
+    class _Conn:
+        def cursor(self) -> _Cur:
+            return _Cur()
+
+        def close(self) -> None:
+            events.append("close")
+
+    class _Dest(BaseSqlDestination):
+        def _dialect_connect(self, config: Any, query_tags: dict[str, str] | None = None) -> Any:
+            return _Conn()
+
+        def _load_upsert(
+            self,
+            conn: Any,
+            cur: Any,
+            records: list[dict[str, Any]],
+            columns: list[str],
+            config: Any,
+            sync_options: Any,
+        ) -> SyncResult:
+            calls.append((records, columns))
+            result = SyncResult()
+            if "extra" not in columns:
+                result.failed = 1
+                result.row_errors.append(
+                    RowError(
+                        batch_index=0, record_preview="p", http_status=None, error_message="boom"
+                    )
+                )
+            else:
+                result.success = len(records)
+            return result
+
+    d = _Dest()
+    options = SimpleNamespace(
+        mode="upsert", replace_strategy="delete", mirror=None, on_error="fail"
+    )
+    d.load(
+        [{"id": 1}, {"id": 2, "extra": "x"}],
+        SimpleNamespace(upsert_key=["id"], table="t"),
+        options,
+    )
+    # Only the first group (no "extra") ran; the second group never dispatched.
+    assert len(calls) == 1
+
+
+def test_validate_mirror_scope_ok_when_column_first_appears_in_a_later_record() -> None:
+    """#1091: a scope column absent from record 0 but present in a later
+    record must not raise -- _accumulate_mirror_state reads it per-record
+    via record.get(), so it's genuinely available."""
+    d = BaseSqlDestination()
+    d._validate_mirror_scope(
+        [{"id": 1}, {"id": 2, "parent_id": 9}], _cfg(), _mirror(scope=["parent_id"])
+    )
 
 
 def test_load_closes_connection_on_error() -> None:

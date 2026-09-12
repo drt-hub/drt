@@ -318,6 +318,35 @@ class TestDatabricksDestinationLoad:
         # Staging table is dropped at the end so subsequent syncs don't trip
         assert any("DROP TABLE IF EXISTS main.default.__drt_staging_user_scores" in s for s in sqls)
 
+    def test_heterogeneous_batch_does_not_drop_a_field_appearing_in_a_later_record(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1091: a field absent from the first record but present in a
+        later one used to be silently dropped for the whole batch. Now the
+        batch splits into one staged MERGE per distinct key signature."""
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        modules = _mocked_databricks_modules(conn)
+
+        records = [
+            {"id": 1, "score": 0.95},
+            {"id": 2, "score": 0.80, "note": "flagged"},
+        ]
+        config = _config(mode="merge", upsert_key=["id"])
+        with patch.dict("sys.modules", modules):
+            result = DatabricksDestination().load(records, config, _options())
+
+        assert result.success == 2
+        sqls = [(call.args[0] if call.args else "") for call in conn._cur.execute.call_args_list]
+        merge_calls = [s for s in sqls if "MERGE INTO main.default.user_scores" in s]
+        assert len(merge_calls) == 2
+        insert_staging_calls = [
+            s for s in sqls if s.startswith("INSERT INTO main.default.__drt_staging_user_scores")
+        ]
+        assert len(insert_staging_calls) == 2
+        assert "note" not in insert_staging_calls[0]
+        assert "note" in insert_staging_calls[1]
+
     def test_merge_mode_requires_upsert_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
         modules = _mocked_databricks_modules(_fake_conn())
@@ -911,6 +940,24 @@ def test_scope_accepted_on_databricks(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with patch.dict("sys.modules", _mocked_databricks_modules(conn)):
         result = dest.load([{"id": 1, "parent_id": 10}], config, opts)
+
+    assert result.failed == 0
+
+
+def test_scope_column_first_in_later_record_ok_on_databricks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1091: a scope column absent from record 0 but present in a later
+    record must not raise -- it's still readable by the per-record
+    record.get() the mirror-key accumulation uses."""
+    _set_creds(monkeypatch)
+    dest = DatabricksDestination()
+    conn = _fake_conn()
+    config = _config(upsert_key=["id"])
+    opts = _options(mode="mirror", mirror={"scope": ["parent_id"]})
+
+    with patch.dict("sys.modules", _mocked_databricks_modules(conn)):
+        result = dest.load([{"id": 1}, {"id": 2, "parent_id": 10}], config, opts)
 
     assert result.failed == 0
 

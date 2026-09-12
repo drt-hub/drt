@@ -32,7 +32,7 @@ from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, SnowflakeDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import record_row_error
-from drt.destinations.sql_base import BaseSqlDestination
+from drt.destinations.sql_base import BaseSqlDestination, _union_columns
 from drt.destinations.sql_utils import check_mirror_supported, tagged_cursor
 
 _SWAP_SUFFIX = "__drt_swap"
@@ -190,11 +190,15 @@ class SnowflakeDestination(BaseSqlDestination):
             and sync_options.mirror is not None
             and sync_options.mirror.scope
         ):
-            missing = [c for c in sync_options.mirror.scope if c not in records[0]]
+            # #1091: check across every record, not just records[0] — a
+            # scope column that first appears in a later record is still
+            # readable by _accumulate_mirror_state's per-record record.get().
+            available = _union_columns(records)
+            missing = [c for c in sync_options.mirror.scope if c not in available]
             if missing:
                 raise ValueError(
                     "mirror.scope columns missing from the model output: "
-                    f"{missing} (available: {sorted(records[0].keys())})"
+                    f"{missing} (available: {sorted(available)})"
                 )
 
     def _load_replace(

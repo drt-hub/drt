@@ -101,7 +101,21 @@ class ClickHouseDestination:
         result = SyncResult()
 
         try:
-            columns = list(records[0].keys())
+            # #1091: union of every record's keys, not just records[0] — a
+            # field that first appears partway through the batch used to be
+            # silently dropped for the whole batch. Safe here (unlike an
+            # upsert-style write elsewhere in this codebase): ClickHouse's
+            # write path is always a plain client.insert() appending new
+            # row-versions, never an in-place UPDATE/MERGE, so a record
+            # missing a column just inserts None for it in that row-version
+            # rather than clobbering a pre-existing row's value.
+            columns: list[str] = []
+            seen: set[str] = set()
+            for record in records:
+                for key in record:
+                    if key not in seen:
+                        seen.add(key)
+                        columns.append(key)
 
             if sync_options.mode == "replace" and sync_options.replace_strategy == "swap":
                 result = self._load_replace_swap(
@@ -135,11 +149,14 @@ class ClickHouseDestination:
                     and sync_options.mirror is not None
                     and sync_options.mirror.scope
                 ):
-                    missing = [c for c in sync_options.mirror.scope if c not in records[0]]
+                    # #1091: `columns` is already the cross-record union
+                    # computed above, so this checks every record, not just
+                    # records[0].
+                    missing = [c for c in sync_options.mirror.scope if c not in columns]
                     if missing:
                         raise ValueError(
                             "mirror.scope columns missing from the model output: "
-                            f"{missing} (available: {sorted(records[0].keys())})"
+                            f"{missing} (available: {sorted(columns)})"
                         )
 
                 # clickhouse-connect's client.insert(table=...) interpolates

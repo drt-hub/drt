@@ -385,6 +385,20 @@ def test_scope_accepted_on_clickhouse() -> None:
     assert result.failed == 0
 
 
+def test_scope_column_first_in_later_record_ok_on_clickhouse() -> None:
+    """#1091: a scope column absent from record 0 but present in a later
+    record must not raise -- it's still readable by the per-record
+    record.get() the mirror-key accumulation uses."""
+    dest = ClickHouseDestination()
+    client = _fake_client()
+    opts = _options(mirror={"scope": ["parent_id"]})
+
+    with patch.object(ClickHouseDestination, "_connect", return_value=client):
+        result = dest.load([{"id": 1}, {"id": 2, "parent_id": 10}], _config(), opts)
+
+    assert result.failed == 0
+
+
 def test_scope_missing_column_fails_fast_on_clickhouse() -> None:
     dest = ClickHouseDestination()
     client = _fake_client()
