@@ -578,22 +578,16 @@ class TestComputeDiffKeyedFetch:
         assert result.deleted == []
         assert result.delete_reason is None
 
-    def test_compute_diff_snowflake_default_insert_mode_resets_omitted_fields(
+    def test_compute_diff_snowflake_default_insert_mode_does_not_report_omitted_fields(
         self,
     ) -> None:
-        """Codex review caught that Snowflake/Databricks default to
-        ``destination.mode: insert`` -- a plain INSERT with no upsert-by-key
-        semantics at all, so an omitted column is not "left untouched" the
-        way a genuine ``mode: merge`` MERGE leaves it. This must surface as
-        a real change even for a non-replace sync, since gating only on
-        ``sync_options.mode == "replace"`` (an earlier version of this fix)
-        would silently hide it.
-
-        Two records so "note" appears in field_hint at all (the keyed-fetch
-        path's column hint is built from source records, not the
-        destination) -- id=2 sends "note", id=1 doesn't, so id=1 is the one
-        that must show the reset."""
-        # field_hint sorts alphabetically ("id" < "note").
+        """Codex review (a later round) corrected an earlier version of
+        this fix that treated Snowflake/Databricks' default
+        ``destination.mode: insert`` as resetting an omitted column.
+        Append-only writes never touch an existing same-key row at all
+        (they insert a new one, or a uniqueness constraint rejects it) --
+        the destination's existing value is untouched, not reset, so this
+        must NOT surface as a change."""
         cursor = MagicMock()
         cursor.description = [("ID", None), ("NOTE", None)]
         cursor.fetchall.return_value = [(1, "old-note"), (2, "flagged")]
@@ -621,10 +615,8 @@ class TestComputeDiffKeyedFetch:
         ):
             result = compute_diff(records, sf_config, _options("full"), limit=20)
 
-        assert result.writes_full_row is True
-        assert len(result.updated) == 1
-        old, new = result.updated[0]
-        assert new["id"] == 1
+        assert result.writes_full_row is False
+        assert result.updated == []
 
     def test_compute_diff_snowflake_merge_mode_leaves_omitted_fields_alone(
         self,
@@ -1540,7 +1532,17 @@ class TestDiffResult:
 
 
 class TestWritesFullRow:
-    """Unit tests for _writes_full_row (#1091, Codex review on #1135)."""
+    """Unit tests for _writes_full_row (#1091, Codex review on #1135).
+
+    Only sync.mode: replace qualifies. An earlier version of this check
+    also covered ClickHouse and Snowflake/Databricks' default
+    destination.mode: insert, reasoning that an append-only write "resets"
+    an omitted column the same way a table rebuild does -- a further
+    review round corrected that: an append-only write never touches an
+    existing same-key row at all (it inserts a new one, or a uniqueness
+    constraint rejects it), so it's not a "reset" and must not be modeled
+    as one.
+    """
 
     def test_replace_mode_is_full_row(self) -> None:
         from drt.engine.diff import _writes_full_row
@@ -1548,21 +1550,22 @@ class TestWritesFullRow:
         assert _writes_full_row(_pg_config(), _options("replace")) is True
 
     def test_postgres_upsert_is_not_full_row(self) -> None:
-        """Postgres has no config.mode dial -- always a partial upsert
-        outside replace mode."""
         from drt.engine.diff import _writes_full_row
 
         assert _writes_full_row(_pg_config(), _options("full")) is False
 
-    def test_clickhouse_is_always_full_row(self) -> None:
-        """ClickHouse has no upsert-by-key write at all -- every write is a
-        fresh row, regardless of sync mode."""
+    def test_clickhouse_is_not_full_row(self) -> None:
+        """ClickHouse's append-only insert never touches an existing
+        same-key row -- not a reset, so not full-row."""
         from drt.engine.diff import _writes_full_row
 
-        assert _writes_full_row(_clickhouse_config(), _options("full")) is True
-        assert _writes_full_row(_clickhouse_config(), _options("mirror")) is True
+        assert _writes_full_row(_clickhouse_config(), _options("full")) is False
+        assert _writes_full_row(_clickhouse_config(), _options("mirror")) is False
 
-    def test_snowflake_default_insert_mode_is_full_row(self) -> None:
+    def test_snowflake_default_insert_mode_is_not_full_row(self) -> None:
+        """Snowflake's default destination.mode: insert is append-only --
+        an omitted column on a same-key record is not touched, since the
+        write never matches the existing row at all."""
         from drt.engine.diff import _writes_full_row
 
         config = SnowflakeDestinationConfig(
@@ -1576,7 +1579,7 @@ class TestWritesFullRow:
             warehouse="COMPUTE_WH",
             upsert_key=["id"],
         )
-        assert _writes_full_row(config, _options("full")) is True
+        assert _writes_full_row(config, _options("full")) is False
 
     def test_snowflake_merge_mode_is_not_full_row(self) -> None:
         from drt.engine.diff import _writes_full_row
@@ -1594,22 +1597,3 @@ class TestWritesFullRow:
             mode="merge",
         )
         assert _writes_full_row(config, _options("full")) is False
-
-    def test_snowflake_insert_mode_mirror_sync_is_not_full_row(self) -> None:
-        """sync.mode: mirror forces the MERGE write path internally
-        regardless of destination.mode -- a genuine partial update."""
-        from drt.engine.diff import _writes_full_row
-
-        config = SnowflakeDestinationConfig(
-            type="snowflake",
-            account_env="SF_ACCOUNT",
-            user_env="SF_USER",
-            password_env="SF_PASSWORD",
-            database="ANALYTICS",
-            schema="PUBLIC",
-            table="USERS",
-            warehouse="COMPUTE_WH",
-            upsert_key=["id"],
-            # mode omitted -- defaults to "insert", but mirror overrides it.
-        )
-        assert _writes_full_row(config, _options("mirror")) is False

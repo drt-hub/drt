@@ -460,6 +460,52 @@ def test_validate_mirror_scope_ok_when_every_record_has_it() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# _validate_upsert_keys_present (#1091, Codex review on #1135)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_upsert_keys_present_raises_when_a_record_omits_the_key() -> None:
+    """A record missing a configured upsert_key column used to build a
+    write statement that silently omitted the key column, letting an
+    identity/auto-increment default fill in an unintended new key instead
+    of failing loudly."""
+    d = BaseSqlDestination()
+    with pytest.raises(ValueError, match="upsert_key columns missing"):
+        d._validate_upsert_keys_present(
+            [{"id": 1, "score": 0.5}, {"score": 0.9}],
+            _cfg(upsert_key=["id"]),
+            SimpleNamespace(mode="upsert"),
+        )
+
+
+def test_validate_upsert_keys_present_ok_when_every_record_has_it() -> None:
+    d = BaseSqlDestination()
+    d._validate_upsert_keys_present(
+        [{"id": 1, "score": 0.5}, {"id": 2, "score": 0.9}],
+        _cfg(upsert_key=["id"]),
+        SimpleNamespace(mode="upsert"),
+    )
+
+
+def test_validate_upsert_keys_present_noop_when_no_upsert_key_configured() -> None:
+    d = BaseSqlDestination()
+    d._validate_upsert_keys_present(
+        [{"score": 0.5}], _cfg(upsert_key=None), SimpleNamespace(mode="upsert")
+    )
+
+
+def test_validate_upsert_keys_present_skipped_for_replace_mode() -> None:
+    """replace mode's write never references upsert_key at all -- a
+    missing key column there is not this check's concern."""
+    d = BaseSqlDestination()
+    d._validate_upsert_keys_present(
+        [{"id": 1, "score": 0.5}, {"score": 0.9}],
+        _cfg(upsert_key=["id"]),
+        SimpleNamespace(mode="replace"),
+    )
+
+
 def test_load_closes_connection_on_error() -> None:
     events: list[str] = []
 

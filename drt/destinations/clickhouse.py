@@ -144,6 +144,22 @@ class ClickHouseDestination:
                 check_mirror_supported(
                     config, sync_options, "clickhouse", supports_tracked_scope=True
                 )
+                if sync_options.mode == "mirror" and config.upsert_key:
+                    # #1091, caught in Codex review on #1135: a record
+                    # missing an upsert_key column would make
+                    # _accumulate_mirror_state's per-record record.get(k)
+                    # record a (None,) key, which can poison the
+                    # end-of-sync NOT IN delete predicate and leave stale
+                    # rows undeleted. Only mirror mode reads upsert_key on
+                    # ClickHouse -- the INSERT itself never references it.
+                    missing_keys = [
+                        c for c in config.upsert_key if not all(c in record for record in records)
+                    ]
+                    if missing_keys:
+                        raise ValueError(
+                            f"upsert_key columns missing from the model output: {missing_keys} "
+                            "(every record must include every upsert_key column)"
+                        )
                 if (
                     sync_options.mode == "mirror"
                     and sync_options.mirror is not None

@@ -106,6 +106,7 @@ class BaseSqlDestination:
         # the concrete config type internally.
         cfg: Any = config
         self._validate_mirror_scope(records, cfg, sync_options)
+        self._validate_upsert_keys_present(records, cfg, sync_options)
 
         conn = self._dialect_connect(config, getattr(sync_options, "_query_tags", None))
         result = SyncResult()
@@ -419,6 +420,48 @@ class BaseSqlDestination:
             from drt.destinations.sql_utils import check_scope_subset_of_upsert_key
 
             check_scope_subset_of_upsert_key(config, sync_options)
+
+    def _validate_upsert_keys_present(
+        self,
+        records: list[dict[str, Any]],
+        config: Any,
+        sync_options: SyncOptions,
+    ) -> None:
+        """A record missing a configured ``upsert_key`` column is a config
+        error — fail fast before any row is written (#1091, caught in
+        Codex review on #1135).
+
+        ``_contiguous_signature_runs`` partitions purely by which keys a
+        record has; it has no notion that some keys are structurally
+        special. Without this check, a record missing an upsert_key column
+        would land in a run whose write statement omits that column
+        entirely — on Postgres/MySQL, ``ON CONFLICT (id)`` referencing a
+        column absent from the ``INSERT`` lets the table's own identity/
+        default fill in a *new* id instead of matching the intended row
+        (silently creating an unintended extra row, where the pre-#1091
+        code would have bound an explicit ``NULL`` for a missing key and
+        failed loudly on that column's ``NOT NULL``/``PRIMARY KEY``
+        constraint instead). In ``mode: mirror``, the same gap lets
+        ``_accumulate_mirror_state`` record a ``(None,)`` key tuple, which
+        can poison the end-of-sync ``NOT IN`` delete predicate and leave
+        stale rows undeleted.
+
+        Skipped for ``sync.mode: replace``: that path never references
+        upsert_key in its write statement at all (a plain ``INSERT``, no
+        ``ON CONFLICT``/``MERGE``), and doesn't accumulate mirror state
+        either.
+        """
+        if sync_options.mode == "replace":
+            return
+        upsert_key = getattr(config, "upsert_key", None)
+        if not upsert_key:
+            return
+        missing = [c for c in upsert_key if not all(c in record for record in records)]
+        if missing:
+            raise ValueError(
+                f"upsert_key columns missing from the model output: {missing} "
+                "(every record must include every upsert_key column)"
+            )
 
     def _accumulate_mirror_state(
         self,

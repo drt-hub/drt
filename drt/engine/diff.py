@@ -133,37 +133,31 @@ class DiffResult:
 
 
 def _writes_full_row(config: DestinationConfig, sync_options: SyncOptions) -> bool:
-    """True when the real write fully determines each matched row from the
+    """True when the real write fully rebuilds each matched row from the
     source record alone — a column the destination has that the record
-    omits genuinely resets to its ``DEFAULT``/``NULL`` (or, for a plain
-    ``INSERT`` with no matching-row semantics, the destination gains a new
-    physical row instead of updating the existing one at all). False for a
-    genuine partial UPDATE/MERGE that leaves an omitted column untouched.
+    omits genuinely resets to its ``DEFAULT``/``NULL``. False otherwise,
+    including for an append-only write (no matching-row semantics at all).
 
-    Caught in Codex review on #1135, correcting an earlier version of this
-    check that only looked at ``sync_options.mode == "replace"``:
-
-    - ``sync.mode: replace`` always rebuilds every row from the source
-      record alone — the original case this handled correctly.
-    - ClickHouse has no upsert-by-key write at all (``client.insert()``
-      only, per that destination's own module docstring) — every write is
-      a fresh row, so an omitted column is never "left alone" the way an
-      ``ON CONFLICT DO UPDATE`` or ``MERGE`` leaves it.
-    - Snowflake/Databricks default to ``destination.mode: insert`` (only
-      ``mode: merge`` — or ``sync.mode: mirror``, which forces merge
-      internally regardless of ``config.mode`` — does a genuine partial
-      ``UPDATE`` via ``MERGE``), so the same reasoning applies to their
-      default configuration, not just an edge case.
-    - Postgres/MySQL have no such ``config.mode`` dial at all — they
-      always upsert via ``ON CONFLICT DO UPDATE`` outside ``replace``
-      mode, so this returns ``False`` for them unless ``replace``.
+    Only ``sync.mode: replace`` qualifies. A previous version of this
+    check (Codex review on #1135, an earlier round) also returned ``True``
+    for ClickHouse and for Snowflake/Databricks' default
+    ``destination.mode: insert`` — reasoning that an append-only write
+    "resets" an omitted column the same way a table rebuild does. A
+    further review round corrected that: an append-only write does not
+    touch the existing same-key row *at all* — it either inserts a
+    genuinely new physical row alongside it (duplicate keys, until/unless
+    something like ClickHouse's `ReplacingMergeTree` eventually reconciles
+    them in the background) or a uniqueness constraint rejects the insert
+    outright. Either way, the destination's existing value for the omitted
+    column is untouched, not reset — so modeling it as an "Updated
+    column: value → None" change would report something the real write
+    never does. Getting the append-only case fully right (e.g. previewing
+    it as a genuinely new row rather than a same-key update) is a separate,
+    larger modeling question than #1091 set out to fix, so this only
+    special-cases the one write shape #1091 is actually about: a full
+    row rebuild.
     """
-    if sync_options.mode == "replace":
-        return True
-    if isinstance(config, ClickHouseDestinationConfig):
-        return True
-    effective_mode = "merge" if sync_options.mode == "mirror" else getattr(config, "mode", None)
-    return effective_mode == "insert"
+    return sync_options.mode == "replace"
 
 
 def _is_tracked_mirror(sync_options: SyncOptions) -> bool:

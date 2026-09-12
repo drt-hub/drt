@@ -400,6 +400,22 @@ def test_scope_column_missing_from_one_record_fails_fast_on_clickhouse() -> None
             dest.load([{"id": 1}, {"id": 2, "parent_id": 10}], _config(), opts)
 
 
+def test_upsert_key_missing_from_one_record_fails_fast_on_clickhouse() -> None:
+    """#1091, caught in Codex review on #1135: a record missing an
+    upsert_key column would let _accumulate_mirror_state's per-record
+    record.get(k) record a (None,) key, which can poison the end-of-sync
+    NOT IN delete predicate and leave stale rows undeleted."""
+    dest = ClickHouseDestination()
+    client = _fake_client()
+    opts = _options()
+
+    with patch.object(ClickHouseDestination, "_connect", return_value=client):
+        with pytest.raises(ValueError, match="upsert_key columns missing"):
+            dest.load([{"id": 1}, {"score": 0.9}], _config(), opts)
+
+    client.insert.assert_not_called()
+
+
 def test_scope_missing_column_fails_fast_on_clickhouse() -> None:
     dest = ClickHouseDestination()
     client = _fake_client()

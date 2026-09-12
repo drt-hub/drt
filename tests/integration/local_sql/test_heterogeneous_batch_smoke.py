@@ -6,6 +6,8 @@ INSERT/ON CONFLICT round trip to surface.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 from drt.config.models import PostgresDestinationConfig, SyncOptions
@@ -62,18 +64,14 @@ def test_field_first_appearing_in_a_later_record_actually_lands() -> None:
         # call sites, which open a fresh connection per load()), so it gets
         # its own.
         load_conn = psycopg2.connect(postgres.get_connection_url())
-
-        def _fake_connect(_config: PostgresDestinationConfig) -> object:
-            return load_conn
-
         destination = PostgresDestination()
-        destination._connect = _fake_connect  # type: ignore[method-assign]
 
         records = [
             {"id": 1, "score": 0.95},
             {"id": 2, "score": 0.80, "note": "flagged"},
         ]
-        result = destination.load(records, _config(), SyncOptions())
+        with patch.object(PostgresDestination, "_connect", return_value=load_conn):
+            result = destination.load(records, _config(), SyncOptions())
         assert result.success == 2
         assert result.failed == 0
 
@@ -115,18 +113,14 @@ def test_column_default_applies_when_a_run_omits_it() -> None:
             setup_conn.close()
 
         load_conn = psycopg2.connect(postgres.get_connection_url())
-
-        def _fake_connect(_config: PostgresDestinationConfig) -> object:
-            return load_conn
-
         destination = PostgresDestination()
-        destination._connect = _fake_connect  # type: ignore[method-assign]
 
         records = [
             {"id": 1, "score": 0.95},
             {"id": 2, "score": 0.80, "note": "flagged"},
         ]
-        result = destination.load(records, _config(), SyncOptions())
+        with patch.object(PostgresDestination, "_connect", return_value=load_conn):
+            result = destination.load(records, _config(), SyncOptions())
         assert result.success == 2
         assert result.failed == 0
 
@@ -165,12 +159,7 @@ def test_on_error_fail_rolls_back_every_run_in_the_batch() -> None:
             setup_conn.close()
 
         load_conn = psycopg2.connect(postgres.get_connection_url())
-
-        def _fake_connect(_config: PostgresDestinationConfig) -> object:
-            return load_conn
-
         destination = PostgresDestination()
-        destination._connect = _fake_connect  # type: ignore[method-assign]
 
         # Run 1 (signature {id, score}) succeeds; run 2 (signature {id,
         # score, note} -- "note" isn't a real column) fails on every row.
@@ -178,7 +167,8 @@ def test_on_error_fail_rolls_back_every_run_in_the_batch() -> None:
             {"id": 1, "score": 0.95},
             {"id": 2, "score": 0.80, "note": "flagged"},
         ]
-        result = destination.load(records, _config(), SyncOptions(on_error="fail"))
+        with patch.object(PostgresDestination, "_connect", return_value=load_conn):
+            result = destination.load(records, _config(), SyncOptions(on_error="fail"))
         # NOTE: result.success == 1 here (run 1's row IS counted before the
         # rollback) -- a separate, pre-existing over-counting bug tracked
         # as #1136 (unrelated to #1091, not touched by this PR). What this
@@ -220,12 +210,7 @@ def test_upsert_key_repeated_under_different_signatures_preserves_last_write() -
             setup_conn.close()
 
         load_conn = psycopg2.connect(postgres.get_connection_url())
-
-        def _fake_connect(_config: PostgresDestinationConfig) -> object:
-            return load_conn
-
         destination = PostgresDestination()
-        destination._connect = _fake_connect  # type: ignore[method-assign]
 
         # Same id=1 appears three times under two different signatures.
         # Original order says the LAST write (score=2, no note) should win.
@@ -234,7 +219,8 @@ def test_upsert_key_repeated_under_different_signatures_preserves_last_write() -
             {"id": 1, "score": 1, "note": "mid"},
             {"id": 1, "score": 2},
         ]
-        result = destination.load(records, _config(), SyncOptions())
+        with patch.object(PostgresDestination, "_connect", return_value=load_conn):
+            result = destination.load(records, _config(), SyncOptions())
         assert result.success == 3
 
         verify_conn = psycopg2.connect(postgres.get_connection_url())

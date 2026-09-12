@@ -7,7 +7,7 @@ the CLI plumbing: flag validation, JSON-mode embedding, text-mode rendering.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import yaml
@@ -287,14 +287,16 @@ def test_diff_to_dict_replace_mode_includes_a_column_the_new_record_omits() -> N
     from drt.cli.output import diff_to_dict
 
     payload = diff_to_dict(_updated_diff("replace"))
-    assert payload["updated"][0]["changed_fields"] == ["note"]  # type: ignore[index]
+    updated = cast("list[dict[str, Any]]", payload["updated"])
+    assert updated[0]["changed_fields"] == ["note"]
 
 
 def test_diff_to_dict_non_replace_mode_excludes_an_omitted_column() -> None:
     from drt.cli.output import diff_to_dict
 
     payload = diff_to_dict(_updated_diff(None))
-    assert payload["updated"][0]["changed_fields"] == []  # type: ignore[index]
+    updated = cast("list[dict[str, Any]]", payload["updated"])
+    assert updated[0]["changed_fields"] == []
 
 
 def test_diff_to_dict_exposes_delete_reason() -> None:
