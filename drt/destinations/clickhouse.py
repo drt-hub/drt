@@ -97,6 +97,18 @@ class ClickHouseDestination:
         if not records:
             return SyncResult()
 
+        # A record with zero populated fields carries nothing to write --
+        # fail fast rather than let it become a signature run with
+        # column_names=[] (round 7/8 of Codex review on #1135; see
+        # BaseSqlDestination._validate_records_not_empty's docstring, whose
+        # ClickHouse-side copy this mirrors since ClickHouseDestination
+        # doesn't inherit that base class).
+        empty_indices = [i for i, record in enumerate(records) if not record]
+        if empty_indices:
+            raise ValueError(
+                f"records at index {empty_indices} have no fields at all -- nothing to write"
+            )
+
         client = self._connect(config)
         result = SyncResult()
 

@@ -31,34 +31,6 @@ from drt.destinations.query import (
 )
 
 
-class _ResetToDestinationDefault:
-    """Sentinel new-value for a column ``changed_fields()`` reports as
-    removed (#1091, caught in Codex review on #1135).
-
-    ``compute_diff()`` has no schema introspection — it can't know a
-    column's real ``DEFAULT`` clause — so a removed column's new value is
-    genuinely unknown, not ``None``. Representing it as a plain ``None``
-    would be actively wrong for a non-null ``DEFAULT`` (reporting a value
-    reset to NULL when it's really reset to, say, ``'unknown'``) and even
-    for a nullable column with no explicit default, comparing this
-    sentinel against ``old``'s value is meaningless (there's nothing to
-    compare against yet). This renders as ``<default>`` wherever it's
-    interpolated into a string.
-    """
-
-    def __repr__(self) -> str:
-        return "<default>"
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, _ResetToDestinationDefault)
-
-    def __hash__(self) -> int:
-        return hash(_ResetToDestinationDefault)
-
-
-RESET_TO_DESTINATION_DEFAULT = _ResetToDestinationDefault()
-
-
 @dataclass
 class DiffResult:
     """Result of a record-level diff between source records and destination state.
@@ -112,92 +84,20 @@ class DiffResult:
     # Defaults to None so pre-existing callers keep the legacy rendering.
     delete_reason: str | None = None
     delete_preview_unavailable_reason: str | None = None
-    # #1091, caught in Codex review on #1135: whether the real write fully
-    # determines each row from the source record alone (a column the
-    # destination has that the record omits genuinely resets to the
-    # destination's own DEFAULT — see RESET_TO_DESTINATION_DEFAULT), as
-    # opposed to a partial UPDATE/MERGE that leaves an omitted column
-    # untouched. Deliberately NOT inferred from
-    # ``delete_reason == "replace"`` at render time: `delete_reason` is
-    # suppressed to `None` whenever nothing is deleted (see `compute_diff`),
-    # which is exactly the common case here (same key set, so nothing to
-    # delete, but a column still needs to show as changed). See
-    # `changed_fields()`'s `include_removed` parameter — this field decides
-    # its value at both call sites.
-    writes_full_row: bool = False
 
     @staticmethod
-    def changed_fields(
-        old: dict[str, Any], new: dict[str, Any], *, include_removed: bool = False
-    ) -> dict[str, tuple[Any, Any]]:
+    def changed_fields(old: dict[str, Any], new: dict[str, Any]) -> dict[str, tuple[Any, Any]]:
         """Return the columns that differ between *old* and *new* as
         ``{col: (old_value, new_value)}``. Equal columns are omitted.
 
         Used by the renderer to show ``score: 0.5 → 0.95`` rather than
         every column on every updated row.
-
-        Iterates ``new``'s own keys only by default, not ``set(old) |
-        set(new)`` (#1091, caught in Codex review on #1135): the
-        keyed-fetch preview (``compute_diff``) fetches the *cross-record*
-        union of columns for ``old``, since a heterogeneous batch's
-        records can have different key sets. For an upsert-style write
-        (the default), a column present in ``old`` (because *some other*
-        record in the batch has it) but absent from *this* ``new`` record
-        is never touched by this record's write — it groups by exact key
-        signature, so a record's own keys are exactly what it writes.
-        Comparing a column ``new`` never sent against ``old``'s fetched
-        value would report a phantom ``col: value → None`` for a field
-        this write doesn't change.
-
-        ``include_removed=True`` restores the ``old``-only columns to the
-        comparison — pass it for ``sync.mode: replace``, caught missing in
-        a further Codex review round: a replace-mode write rebuilds the
-        whole row from ``new`` alone, so a column ``old`` has that ``new``
-        omits genuinely gets reset — unlike the upsert case, that *is* a
-        real change the dry-run preview should show, not a phantom one.
-        Each such column's reported new value is
-        ``RESET_TO_DESTINATION_DEFAULT`` (rendered as ``<default>``), not
-        a plain ``None`` — a further review round caught that a removed
-        column resets to its table's real ``DEFAULT`` clause, which this
-        function has no schema access to know and can be a non-null value;
-        claiming it becomes ``None`` would be actively wrong for those
-        columns, so it's always reported (never compared for equality
-        against ``old``, since there's no known value to compare).
         """
-        changed = {col: (old.get(col), new[col]) for col in new if old.get(col) != new[col]}
-        if include_removed:
-            for col in old:
-                if col not in new:
-                    changed[col] = (old[col], RESET_TO_DESTINATION_DEFAULT)
-        return changed
-
-
-def _writes_full_row(config: DestinationConfig, sync_options: SyncOptions) -> bool:
-    """True when the real write fully rebuilds each matched row from the
-    source record alone — a column the destination has that the record
-    omits genuinely resets to its ``DEFAULT``/``NULL``. False otherwise,
-    including for an append-only write (no matching-row semantics at all).
-
-    Only ``sync.mode: replace`` qualifies. A previous version of this
-    check (Codex review on #1135, an earlier round) also returned ``True``
-    for ClickHouse and for Snowflake/Databricks' default
-    ``destination.mode: insert`` — reasoning that an append-only write
-    "resets" an omitted column the same way a table rebuild does. A
-    further review round corrected that: an append-only write does not
-    touch the existing same-key row *at all* — it either inserts a
-    genuinely new physical row alongside it (duplicate keys, until/unless
-    something like ClickHouse's `ReplacingMergeTree` eventually reconciles
-    them in the background) or a uniqueness constraint rejects the insert
-    outright. Either way, the destination's existing value for the omitted
-    column is untouched, not reset — so modeling it as an "Updated
-    column: value → None" change would report something the real write
-    never does. Getting the append-only case fully right (e.g. previewing
-    it as a genuinely new row rather than a same-key update) is a separate,
-    larger modeling question than #1091 set out to fix, so this only
-    special-cases the one write shape #1091 is actually about: a full
-    row rebuild.
-    """
-    return sync_options.mode == "replace"
+        return {
+            col: (old.get(col), new.get(col))
+            for col in set(old) | set(new)
+            if old.get(col) != new.get(col)
+        }
 
 
 def _is_tracked_mirror(sync_options: SyncOptions) -> bool:
@@ -453,16 +353,15 @@ def compute_diff(
     try:
         if use_keyed_fetch:
             # Explicit columns avoid metadata introspection on the keyed
-            # path. Uses field_hint's cross-record union (#1091): the real
-            # write (BaseSqlDestination.load(), sql_base.py) used to derive
-            # each batch's column list from the first record only, matching
-            # what this used to do — but that was the #1091 bug, now fixed
-            # (the real write groups a heterogeneous batch by key signature
-            # instead). Fetching the union here is safe regardless of which
-            # dialect-side path each record's write actually takes: this is
-            # a read-only SELECT, so an extra fetched column has no clobber
-            # risk the way widening the real write's column list would.
-            columns = field_hint
+            # path. Deliberately records[0].keys(), not field_hint's
+            # cross-record union: the real write (BaseSqlDestination.load(),
+            # sql_base.py) derives each batch's column list the same way,
+            # from the first record only, so mirroring that here is what
+            # keeps the preview honest about what the real run will write —
+            # a union would fetch (and could report a phantom diff on)
+            # fields the real write silently drops on a heterogeneous
+            # batch. That drop is itself tracked separately (#1064 follow-up).
+            columns = list(records[0].keys())
             try:
                 dest_rows = fetch_rows_by_keys(
                     config,
@@ -495,19 +394,13 @@ def compute_diff(
 
     added: list[dict[str, Any]] = []
     updated: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    # See _writes_full_row's docstring: true whenever the real write fully
-    # determines each row from `record` alone (replace mode, ClickHouse's
-    # always-fresh insert, or Snowflake/Databricks' default insert-only
-    # mode) — a column `existing` has that `record` omits then genuinely
-    # resets, a real change unlike a partial UPDATE/MERGE leaving it alone.
-    include_removed = _writes_full_row(config, sync_options)
 
     for record in records:
         key = tuple(record.get(c) for c in upsert_key)
         existing = dest_by_key.get(key)
         if existing is None:
             added.append(record)
-        elif DiffResult.changed_fields(existing, record, include_removed=include_removed):
+        elif DiffResult.changed_fields(existing, record):
             updated.append((existing, record))
         # else: row matches destination exactly — no entry
 
@@ -567,5 +460,4 @@ def compute_diff(
         # delete set in replace mode is not a "replace deletion".
         delete_reason=delete_reason if deleted else None,
         delete_preview_unavailable_reason=delete_preview_unavailable_reason,
-        writes_full_row=include_removed,
     )

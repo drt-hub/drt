@@ -398,13 +398,8 @@ def print_diff_table(diff: object, sync_name: str) -> None:
     # Updated — show field-level changes
     if n_updated:
         console.print(f"\n  [yellow]~ Updated ({n_updated}):[/yellow]")
-        # diff.writes_full_row (#1091, Codex review) -- NOT
-        # delete_reason == "replace": delete_reason is suppressed to None
-        # whenever nothing is deleted, which is exactly the common case
-        # here (same key set, nothing to delete, but a column still needs
-        # to show as changed).
         for old, new in diff.updated:
-            changed = DiffResult.changed_fields(old, new, include_removed=diff.writes_full_row)
+            changed = DiffResult.changed_fields(old, new)
             # Use the first column of new as a stable key label
             key_repr = next((f"{k}={v}" for k, v in new.items() if k in old), "(?)")
             change_repr = ", ".join(
@@ -470,11 +465,6 @@ def diff_to_dict(diff: object) -> dict[str, object]:
             "truncated": diff.truncated,
         }
 
-    # diff.writes_full_row (#1091, Codex review) -- NOT
-    # delete_reason == "replace": delete_reason is suppressed to None
-    # whenever nothing is deleted, which is exactly the common case here
-    # (same key set, nothing to delete, but a column still needs to show
-    # as changed).
     return {
         "supported": True,
         "total_source_rows": diff.total_source_rows,
@@ -484,9 +474,7 @@ def diff_to_dict(diff: object) -> dict[str, object]:
             {
                 "old": old,
                 "new": new,
-                "changed_fields": list(
-                    DiffResult.changed_fields(old, new, include_removed=diff.writes_full_row).keys()
-                ),
+                "changed_fields": list(DiffResult.changed_fields(old, new).keys()),
             }
             for old, new in diff.updated
         ],

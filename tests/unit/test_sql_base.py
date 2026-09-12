@@ -506,6 +506,63 @@ def test_validate_upsert_keys_present_skipped_for_replace_mode() -> None:
     )
 
 
+def test_validate_upsert_keys_present_skipped_for_insert_mode_dialects() -> None:
+    """Snowflake/Databricks-style configs have a further ``mode: insert |
+    merge`` toggle independent of ``sync_options.mode`` (round 8 of Codex
+    review on #1135) -- an upsert_key configured while the destination's
+    actual write is a plain append (``config.mode == "insert"``) never
+    references it, so a sparse record relying on a destination-generated
+    key must not fail validation before ever connecting."""
+    d = BaseSqlDestination()
+    d._validate_upsert_keys_present(
+        [{"id": 1, "score": 0.5}, {"score": 0.9}],
+        SimpleNamespace(upsert_key=["id"], mode="insert"),
+        SimpleNamespace(mode="upsert"),
+    )
+
+
+def test_validate_upsert_keys_present_enforced_for_merge_mode_dialects() -> None:
+    """The same Snowflake/Databricks-style config, but with the effective
+    write actually a MERGE -- the check must still fire."""
+    d = BaseSqlDestination()
+    with pytest.raises(ValueError, match="upsert_key columns missing"):
+        d._validate_upsert_keys_present(
+            [{"id": 1, "score": 0.5}, {"score": 0.9}],
+            SimpleNamespace(upsert_key=["id"], mode="merge"),
+            SimpleNamespace(mode="upsert"),
+        )
+
+
+def test_validate_upsert_keys_present_enforced_for_mirror_even_with_insert_config() -> None:
+    """``sync.mode: mirror`` forces the MERGE path regardless of
+    ``config.mode`` (matching Snowflake/Databricks' own
+    ``effective_mode`` computation) -- the check must fire even when
+    ``config.mode`` is left at its "insert" default."""
+    d = BaseSqlDestination()
+    with pytest.raises(ValueError, match="upsert_key columns missing"):
+        d._validate_upsert_keys_present(
+            [{"id": 1, "score": 0.5}, {"score": 0.9}],
+            SimpleNamespace(upsert_key=["id"], mode="insert"),
+            SimpleNamespace(mode="mirror"),
+        )
+
+
+# ---------------------------------------------------------------------------
+# _validate_records_not_empty (#1091, round 7/8 of Codex review on #1135)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_records_not_empty_raises_on_a_genuinely_empty_record() -> None:
+    d = BaseSqlDestination()
+    with pytest.raises(ValueError, match="no fields at all"):
+        d._validate_records_not_empty([{"id": 1}, {}])
+
+
+def test_validate_records_not_empty_ok_for_populated_records() -> None:
+    d = BaseSqlDestination()
+    d._validate_records_not_empty([{"id": 1}, {"id": 2, "score": 0.9}])
+
+
 def test_load_closes_connection_on_error() -> None:
     events: list[str] = []
 

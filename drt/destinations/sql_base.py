@@ -105,6 +105,7 @@ class BaseSqlDestination:
         # helpers use. The ``_dialect_connect`` / ``_load_*`` hooks each assert
         # the concrete config type internally.
         cfg: Any = config
+        self._validate_records_not_empty(records)
         self._validate_mirror_scope(records, cfg, sync_options)
         self._validate_upsert_keys_present(records, cfg, sync_options)
 
@@ -370,6 +371,27 @@ class BaseSqlDestination:
             self._schema_cache[config.table] = describe_columns(config)
         return self._schema_cache[config.table]
 
+    def _validate_records_not_empty(self, records: list[dict[str, Any]]) -> None:
+        """A record with zero populated fields carries nothing to write --
+        fail fast rather than let it become a signature run with
+        ``run_columns=[]`` (round 7/8 of Codex review on #1135).
+
+        Reachable because ``replace`` mode (and any other mode with no
+        ``upsert_key`` configured) never requires a record to have a
+        particular column, so a genuinely empty record can slip through
+        ``_contiguous_signature_runs`` unnoticed. An empty column list then
+        forces dialect-specific "no columns" INSERT handling -- invalid
+        syntax on some dialects (``INSERT INTO t () VALUES ()``), silently
+        different semantics on others -- for a record that has nothing to
+        write in the first place. Rejecting it explicitly avoids needing
+        dialect-specific "empty insert" syntax at all.
+        """
+        empty_indices = [i for i, record in enumerate(records) if not record]
+        if empty_indices:
+            raise ValueError(
+                f"records at index {empty_indices} have no fields at all -- nothing to write"
+            )
+
     def _validate_mirror_scope(
         self,
         records: list[dict[str, Any]],
@@ -450,12 +472,29 @@ class BaseSqlDestination:
         upsert_key in its write statement at all (a plain ``INSERT``, no
         ``ON CONFLICT``/``MERGE``), and doesn't accumulate mirror state
         either.
+
+        Also skipped when the destination's *effective* write mode isn't
+        actually an upsert (round 8 of Codex review on #1135): Snowflake
+        and Databricks have a further ``config.mode: insert | merge``
+        toggle independent of ``sync_options.mode`` — ``upsert_key`` can be
+        configured (documentation, or reused by a later ``mode: merge``
+        switch) while the *current* write is a plain append that never
+        references it, and a sparse record relying on a destination-
+        generated/default key would otherwise fail validation before ever
+        connecting. Postgres/MySQL have no such toggle — for them, any
+        non-``replace`` sync always upserts via ``ON CONFLICT`` whenever
+        ``upsert_key`` is set, so the check keeps applying unconditionally.
         """
         if sync_options.mode == "replace":
             return
         upsert_key = getattr(config, "upsert_key", None)
         if not upsert_key:
             return
+        dialect_mode = getattr(config, "mode", None)
+        if dialect_mode is not None:
+            effective_mode = "merge" if sync_options.mode == "mirror" else dialect_mode
+            if effective_mode != "merge":
+                return
         missing = [c for c in upsert_key if not all(c in record for record in records)]
         if missing:
             raise ValueError(

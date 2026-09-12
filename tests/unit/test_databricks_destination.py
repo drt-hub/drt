@@ -318,19 +318,23 @@ class TestDatabricksDestinationLoad:
         # Staging table is dropped at the end so subsequent syncs don't trip
         assert any("DROP TABLE IF EXISTS main.default.__drt_staging_user_scores" in s for s in sqls)
 
-    def test_heterogeneous_batch_does_not_drop_a_field_appearing_in_a_later_record(
+    def test_heterogeneous_merge_batch_is_a_known_open_gap(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """#1091: a field absent from the first record but present in a
-        later one used to be silently dropped for the whole batch. The
-        staging INSERT still runs once per contiguous key-signature run, so
-        a run lacking "note" never binds a value for it (letting the
-        target's own DEFAULT apply on a brand-new row) — but the single
-        final MERGE (round 7 of Codex review on #1135, replacing an
-        earlier per-run-MERGE design) uses a per-column
-        ``CASE WHEN source.__drt_has_note THEN source.note ELSE
-        target.note END`` presence flag instead, so "note" only overwrites
-        an existing row when that row's own run actually sent it."""
+        """#1091 fixed every SQL dialect's `records[0]`-only column
+        derivation except Databricks' `mode: merge` (also reached by
+        `sync.mode: mirror`) — several rounds of Codex review on #1135
+        found that closing it the way the other dialects were closed
+        (per-run-scoped staging/MERGE) trades one real bug for another
+        (MERGE autocommit atomicity, unbounded statement counts for
+        alternating signatures, or `CREATE TABLE ... AS SELECT` not
+        carrying over the target's `DEFAULT` clauses for a genuinely new
+        row). Left at the pre-#1091 baseline deliberately; tracked in
+        #1137. This test documents that the gap still exists, rather than
+        silently reappearing without anyone noticing: "note" — present
+        only on the second record — currently gets bound as an explicit
+        NULL for the first, clobbering its DEFAULT instead of leaving it
+        alone."""
         _set_creds(monkeypatch)
         conn = _fake_conn()
         modules = _mocked_databricks_modules(conn)
@@ -345,57 +349,19 @@ class TestDatabricksDestinationLoad:
 
         assert result.success == 2
         sqls = [(call.args[0] if call.args else "") for call in conn._cur.execute.call_args_list]
-        merge_calls = [s for s in sqls if s.startswith("MERGE INTO main.default.user_scores")]
-        assert len(merge_calls) == 1
-        assert (
-            "note = CASE WHEN source.__drt_has_note THEN source.note ELSE target.note END"
-            in merge_calls[0]
-        )
-        insert_staging_calls = [
+        staging_insert = next(
             s for s in sqls if s.startswith("INSERT INTO main.default.__drt_staging_user_scores")
-        ]
-        assert len(insert_staging_calls) == 2
-        # Both runs stage every union column's presence flag, but only the
-        # run whose records actually sent "note" includes it as a real
-        # (bindable) column alongside the flags.
-        assert "(id, score, __drt_has_score, __drt_has_note)" in insert_staging_calls[0]
-        assert "(id, score, note, __drt_has_score, __drt_has_note)" in insert_staging_calls[1]
-
-    def test_on_error_fail_stops_before_any_merge_when_a_later_run_fails_staging(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A staging INSERT failing partway through, under on_error: fail,
-        must prevent the single final MERGE from running at all. The
-        single-shared-staging-table design (round 7 of Codex review on
-        #1135, replacing an earlier per-run-staging-table design that
-        could leave an *earlier* run's MERGE already committed by the time
-        a *later* run's staging failed) makes this automatic: the MERGE
-        only executes after every run has finished staging."""
-        _set_creds(monkeypatch)
-        conn = _fake_conn()
-        modules = _mocked_databricks_modules(conn)
-
-        def _execute_side_effect(sql: str, *args: object) -> None:
-            # Only the second run's staging INSERT binds a real "note"
-            # column (the first run's INSERT also mentions "note" as part
-            # of the "__drt_has_note" flag column name, so match the full
-            # column list rather than a bare substring).
-            if "(id, score, note, __drt_has_score, __drt_has_note)" in sql:
-                raise RuntimeError("boom")
-
-        conn._cur.execute.side_effect = _execute_side_effect
-
-        records = [
-            {"id": 1, "score": 0.95},
-            {"id": 2, "score": 0.80, "note": "flagged"},
-        ]
-        config = _config(mode="merge", upsert_key=["id"])
-        with patch.dict("sys.modules", modules):
-            with pytest.raises(RuntimeError, match="boom"):
-                DatabricksDestination().load(records, config, _options(on_error="fail"))
-
-        sqls = [(call.args[0] if call.args else "") for call in conn._cur.execute.call_args_list]
-        assert not any(s.startswith("MERGE INTO main.default.user_scores") for s in sqls)
+        )
+        assert "note" in staging_insert
+        params = next(
+            call.args[1]
+            for call in conn._cur.execute.call_args_list
+            if call.args and call.args[0] == staging_insert
+        )
+        # id=1's record never set "note" -- it still binds an explicit
+        # None (NULL) for it rather than omitting the column, the known
+        # #1137 gap this test pins down.
+        assert None in params
 
     def test_merge_mode_requires_upsert_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
