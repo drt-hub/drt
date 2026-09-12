@@ -479,6 +479,53 @@ class TestComputeDiffKeyedFetch:
         assert result.added == []
         assert result.updated == []
 
+    def test_compute_diff_omitted_field_in_a_heterogeneous_batch_is_not_a_phantom_change(
+        self,
+    ) -> None:
+        """Codex review on PR #1135 caught a follow-on bug from #1091's own
+        fix: fetching field_hint's cross-record union for the keyed-fetch
+        preview means a record lacking a field that *another* record in the
+        batch has still gets that field fetched into ``old``. The real
+        write groups by exact key signature, so this record's own write
+        never touches that column — comparing against ``old``'s fetched
+        (non-null) value would report a phantom "note: flagged -> None"
+        even though the actual upsert leaves the destination's "note"
+        untouched for this record."""
+        # field_hint sorts alphabetically ("id" < "note" < "score"), which
+        # is the column order the keyed fetch actually requests.
+        cursor = MagicMock()
+        cursor.description = [("ID", None), ("NOTE", None), ("SCORE", None)]
+        cursor.fetchall.return_value = [(1, "pre-existing", 95), (2, "flagged", 80)]
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__ = MagicMock(return_value=cursor)
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        sf_config = SnowflakeDestinationConfig(
+            type="snowflake",
+            account_env="SF_ACCOUNT",
+            user_env="SF_USER",
+            password_env="SF_PASSWORD",
+            database="ANALYTICS",
+            schema="PUBLIC",
+            table="USERS",
+            warehouse="COMPUTE_WH",
+            upsert_key=["id"],
+        )
+        # id=1's real write never sends "note" -- id=2's does. Destination
+        # already has a real (non-None) "note" for id=1 from a prior sync.
+        records = [{"id": 1, "score": 95}, {"id": 2, "score": 80, "note": "flagged"}]
+
+        with patch(
+            "drt.destinations.snowflake.SnowflakeDestination._connect",
+            return_value=conn,
+        ):
+            result = compute_diff(records, sf_config, _options("full"), limit=20)
+
+        assert result.added == []
+        # id=1 unchanged (score matches, "note" never touched by its write);
+        # id=2 unchanged too (score and note both match destination).
+        assert result.updated == []
+
     def test_compute_diff_snowflake_field_hint_includes_upsert_key_even_if_first_record_omits_it(
         self,
     ) -> None:

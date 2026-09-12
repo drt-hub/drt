@@ -149,10 +149,19 @@ class ClickHouseDestination:
                     and sync_options.mirror is not None
                     and sync_options.mirror.scope
                 ):
-                    # #1091: `columns` is already the cross-record union
-                    # computed above, so this checks every record, not just
-                    # records[0].
-                    missing = [c for c in sync_options.mirror.scope if c not in columns]
+                    # #1091: require every record to have every scope
+                    # column, not just records[0] (tightened after Codex
+                    # review on #1135 — see
+                    # BaseSqlDestination._validate_mirror_scope's docstring
+                    # for why a per-record omission must reject: a missing
+                    # scope value would record as None, and ClickHouse
+                    # stringifies that into the literal "None" in the
+                    # delete predicate).
+                    missing = [
+                        c
+                        for c in sync_options.mirror.scope
+                        if not all(c in record for record in records)
+                    ]
                     if missing:
                         raise ValueError(
                             "mirror.scope columns missing from the model output: "

@@ -483,21 +483,21 @@ def test_scope_accepted_on_snowflake(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.failed == 0
 
 
-def test_scope_column_first_in_later_record_ok_on_snowflake(
+def test_scope_column_missing_from_one_record_fails_fast_on_snowflake(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#1091: a scope column absent from record 0 but present in a later
-    record must not raise -- it's still readable by the per-record
-    record.get() the mirror-key accumulation uses."""
+    """#1091, tightened after Codex review on #1135: a scope column present
+    on some records but genuinely absent from another must still raise --
+    that record's scope is undefined, and record.get() returning None for
+    it would break the delete predicate's IN (...) matching."""
     _set_creds(monkeypatch)
     dest = SnowflakeDestination()
     conn = _fake_conn()
     opts = _options(mirror={"scope": ["parent_id"]})
 
     with patch.dict("sys.modules", _mocked_snowflake_modules(conn)):
-        result = dest.load([{"id": 1}, {"id": 2, "parent_id": 10}], _config(), opts)
-
-    assert result.failed == 0
+        with pytest.raises(ValueError, match="mirror.scope columns missing"):
+            dest.load([{"id": 1}, {"id": 2, "parent_id": 10}], _config(), opts)
 
 
 def test_scope_missing_column_fails_fast_on_snowflake(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -92,12 +92,20 @@ class DiffResult:
 
         Used by the renderer to show ``score: 0.5 → 0.95`` rather than
         every column on every updated row.
+
+        Iterates ``new``'s own keys only, not ``set(old) | set(new)``
+        (#1091, caught in Codex review on #1135): the keyed-fetch preview
+        (``compute_diff``) fetches the *cross-record* union of columns for
+        ``old``, since a heterogeneous batch's records can have different
+        key sets. If a column present in ``old`` (because *some other*
+        record in the batch has it) is absent from *this* ``new`` record,
+        the real write never touches that column for this record — the
+        write groups by exact key signature, so a record's own keys are
+        exactly what it writes. Comparing a column ``new`` never sent
+        against ``old``'s fetched value would report a phantom
+        ``col: value → None`` for a field this write doesn't change.
         """
-        return {
-            col: (old.get(col), new.get(col))
-            for col in set(old) | set(new)
-            if old.get(col) != new.get(col)
-        }
+        return {col: (old.get(col), new.get(col)) for col in new if old.get(col) != new.get(col)}
 
 
 def _is_tracked_mirror(sync_options: SyncOptions) -> bool:

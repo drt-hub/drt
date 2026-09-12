@@ -387,25 +387,34 @@ class BaseSqlDestination:
         state-table column, so a scope column drt never observed as part of
         the tracked key has nothing to derive from.
 
-        Checks membership across every record in the batch (#1091), not just
-        ``records[0]`` — a scope column that first appears in a later record
-        (a legitimately heterogeneous/optional-field source) is still
-        available to ``_accumulate_mirror_state``'s own per-record
-        ``record.get(c)`` read, so checking only ``records[0]`` here would
-        raise a spurious "missing" error before the run ever reaches the
-        write path.
+        Requires **every** record in the batch to have **every** scope
+        column (#1091, tightened after Codex review on #1135) — checking
+        only ``records[0]`` originally let a scope column present on a
+        later record but absent from an earlier one pass validation, but a
+        record actually missing the column makes its scope genuinely
+        undefined: ``_accumulate_mirror_state``'s ``record.get(c)`` would
+        record ``None`` for it, and a delete predicate built from
+        ``IN (..., NULL, ...)`` cannot match `NULL` via SQL's three-valued
+        logic (silently leaving stale rows undeleted) — worse, ClickHouse
+        stringifies a ``None`` scope value into the literal string
+        ``"None"``, which could coincide with a real value. A first
+        attempted fix here checked only whether a scope column appeared
+        *anywhere* in the batch (the cross-record union) rather than on
+        every record — Codex review caught that this still let a
+        per-record omission through.
         """
         if (
             sync_options.mode == "mirror"
             and sync_options.mirror is not None
             and sync_options.mirror.scope
         ):
-            available = _union_columns(records)
-            missing = [c for c in sync_options.mirror.scope if c not in available]
+            missing = [
+                c for c in sync_options.mirror.scope if not all(c in record for record in records)
+            ]
             if missing:
                 raise ValueError(
                     "mirror.scope columns missing from the model output: "
-                    f"{missing} (available: {sorted(available)})"
+                    f"{missing} (available: {sorted(_union_columns(records))})"
                 )
             from drt.destinations.sql_utils import check_scope_subset_of_upsert_key
 

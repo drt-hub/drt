@@ -436,13 +436,27 @@ def test_load_calls_load_upsert_exactly_once_even_for_a_heterogeneous_batch() ->
     assert result.success == 3
 
 
-def test_validate_mirror_scope_ok_when_column_first_appears_in_a_later_record() -> None:
-    """#1091: a scope column absent from record 0 but present in a later
-    record must not raise -- _accumulate_mirror_state reads it per-record
-    via record.get(), so it's genuinely available."""
+def test_validate_mirror_scope_raises_when_any_record_omits_it() -> None:
+    """#1091, tightened after Codex review on #1135: even though a scope
+    column present on *some* records is technically readable via
+    _accumulate_mirror_state's per-record record.get(), a record that
+    genuinely lacks it has an undefined scope -- record.get() would return
+    None, and a delete predicate built from IN (..., NULL, ...) cannot
+    match NULL via SQL's three-valued logic. Every record must have every
+    scope column, not just records[0] and not just "any" record."""
+    d = BaseSqlDestination()
+    with pytest.raises(ValueError, match="mirror.scope columns missing"):
+        d._validate_mirror_scope(
+            [{"id": 1}, {"id": 2, "parent_id": 9}], _cfg(), _mirror(scope=["parent_id"])
+        )
+
+
+def test_validate_mirror_scope_ok_when_every_record_has_it() -> None:
     d = BaseSqlDestination()
     d._validate_mirror_scope(
-        [{"id": 1}, {"id": 2, "parent_id": 9}], _cfg(), _mirror(scope=["parent_id"])
+        [{"id": 1, "parent_id": 8}, {"id": 2, "parent_id": 9}],
+        _cfg(),
+        _mirror(scope=["parent_id"]),
     )
 
 

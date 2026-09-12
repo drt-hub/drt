@@ -192,15 +192,17 @@ class DatabricksDestination(BaseSqlDestination):
             and sync_options.mirror is not None
             and sync_options.mirror.scope
         ):
-            # #1091: check across every record, not just records[0] — a
-            # scope column that first appears in a later record is still
-            # readable by _accumulate_mirror_state's per-record record.get().
-            available = _union_columns(records)
-            missing = [c for c in sync_options.mirror.scope if c not in available]
+            # #1091: require every record to have every scope column (see
+            # BaseSqlDestination._validate_mirror_scope's docstring for why
+            # a per-record omission, not just records[0], must reject —
+            # tightened after Codex review on #1135).
+            missing = [
+                c for c in sync_options.mirror.scope if not all(c in record for record in records)
+            ]
             if missing:
                 raise ValueError(
                     "mirror.scope columns missing from the model output: "
-                    f"{missing} (available: {sorted(available)})"
+                    f"{missing} (available: {sorted(_union_columns(records))})"
                 )
 
     def _load_replace(
@@ -361,34 +363,40 @@ class DatabricksDestination(BaseSqlDestination):
                 raise ValueError("upsert_key is required for merge mode")
 
             key_clause = " AND ".join([f"target.{k} = source.{k}" for k in config.upsert_key])
-            update_cols = [c for c in columns if c not in config.upsert_key]
-            update_clause = ", ".join([f"{c} = source.{c}" for c in update_cols])
-            insert_cols = ", ".join(columns)
-            insert_vals = ", ".join([f"source.{c}" for c in columns])
 
             # Databricks Delta needs a relation on the USING side of MERGE.
             # Delta has no session-local temp tables, so stage into the same
             # uniquely-named scratch Delta table as before.
             staging_table = f"{config.catalog}.{config.schema_}.__drt_staging_{config.table}"
 
-            cur.execute(
-                f"CREATE OR REPLACE TABLE {staging_table} AS SELECT * FROM {table_fq} WHERE 1=0"
-            )
-
-            # Staging INSERT built per contiguous key-signature run (#1091):
-            # staging shares target's schema/DEFAULTs (CREATE ... AS SELECT
-            # * FROM target WHERE 1=0), so a column omitted from a run's
-            # INSERT correctly picks up its DEFAULT there instead of being
-            # explicitly nulled (caught in Codex review on #1135). The
-            # final MERGE below still projects the batch-wide union
-            # (``columns``) — every staging row is by then correctly
-            # populated (a real value or its column's DEFAULT), so copying
-            # the full column set from staging into target is safe.
+            # Both the staging INSERT *and* the MERGE itself run per
+            # contiguous key-signature run (#1091) — not just the staging
+            # INSERT. An earlier version of this fix staged per run but
+            # still issued one final MERGE over the batch-wide column
+            # union: Codex review on #1135 caught that this made
+            # ``WHEN MATCHED THEN UPDATE SET note = source.note`` fire for
+            # *every* matched row regardless of which run it came from, so
+            # a run whose records never sent ``note`` would overwrite an
+            # existing destination row's ``note`` with staging's
+            # DEFAULT-filled value — the same clobber #1091 was originally
+            # about, just reached via MERGE's blanket UPDATE instead of a
+            # missing column. Running the MERGE once per run means each
+            # run's own ``update_cols`` only ever mentions the columns that
+            # run's records actually sent.
             base_index = 0
             for run_columns, run_records in self._contiguous_signature_runs(records):
+                update_cols = [c for c in run_columns if c not in config.upsert_key]
+                update_clause = ", ".join([f"{c} = source.{c}" for c in update_cols])
+                insert_cols = ", ".join(run_columns)
+                insert_vals = ", ".join([f"source.{c}" for c in run_columns])
+
+                cur.execute(
+                    f"CREATE OR REPLACE TABLE {staging_table} AS SELECT * FROM {table_fq} WHERE 1=0"
+                )
                 run_col_list = ", ".join(run_columns)
                 run_value_clause, run_json_cols = _value_clause(run_columns, category_map, ddls)
                 staging_sql = f"INSERT INTO {staging_table} ({run_col_list}) {run_value_clause}"
+                failed_before = len(result.row_errors)
                 self._insert_rows(
                     cur,
                     staging_sql,
@@ -400,20 +408,23 @@ class DatabricksDestination(BaseSqlDestination):
                     base_index=base_index,
                     count_success=False,
                 )
-                base_index += len(run_records)
+                run_failed = len(result.row_errors) - failed_before
 
-            matched_clause = f"WHEN MATCHED THEN UPDATE SET {update_clause}" if update_cols else ""
-            merge_sql = (
-                f"MERGE INTO {table_fq} target "
-                f"USING {staging_table} source "
-                f"ON {key_clause} "
-                f"{matched_clause} "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-            cur.execute(merge_sql)
-            result.success += len(records) - result.failed
-            cur.execute(f"DROP TABLE IF EXISTS {staging_table}")
+                matched_clause = (
+                    f"WHEN MATCHED THEN UPDATE SET {update_clause}" if update_cols else ""
+                )
+                merge_sql = (
+                    f"MERGE INTO {table_fq} target "
+                    f"USING {staging_table} source "
+                    f"ON {key_clause} "
+                    f"{matched_clause} "
+                    f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                    f"VALUES ({insert_vals})"
+                )
+                cur.execute(merge_sql)
+                result.success += len(run_records) - run_failed
+                cur.execute(f"DROP TABLE IF EXISTS {staging_table}")
+                base_index += len(run_records)
 
         else:
             raise ValueError(f"Unsupported mode: {config.mode}")

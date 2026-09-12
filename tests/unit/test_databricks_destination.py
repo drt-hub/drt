@@ -322,14 +322,14 @@ class TestDatabricksDestinationLoad:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """#1091: a field absent from the first record but present in a
-        later one used to be silently dropped for the whole batch. The
-        staging INSERT is now split into one call per contiguous
-        key-signature run, each with exactly that run's own columns —
-        staging shares the target's schema/DEFAULTs, so the run lacking
-        "note" picks up its DEFAULT there instead of an explicit NULL
-        override (caught in Codex review on #1135). The final MERGE still
-        runs once, over the full column union, since staging is by then
-        correctly populated for every row."""
+        later one used to be silently dropped for the whole batch. Both the
+        staging INSERT *and* the MERGE now run once per contiguous
+        key-signature run — an earlier version of this fix kept one final
+        MERGE over the batch-wide union, which Codex review on #1135 caught
+        still clobbering an existing row's "note" via a blanket
+        ``UPDATE SET note = source.note`` for runs whose records never sent
+        "note". Running the MERGE per run means the run lacking "note"
+        never mentions it in its own UPDATE SET clause."""
         _set_creds(monkeypatch)
         conn = _fake_conn()
         modules = _mocked_databricks_modules(conn)
@@ -345,8 +345,9 @@ class TestDatabricksDestinationLoad:
         assert result.success == 2
         sqls = [(call.args[0] if call.args else "") for call in conn._cur.execute.call_args_list]
         merge_calls = [s for s in sqls if s.startswith("MERGE INTO main.default.user_scores")]
-        assert len(merge_calls) == 1
-        assert "note" in merge_calls[0]
+        assert len(merge_calls) == 2
+        assert "note" not in merge_calls[0]
+        assert "note" in merge_calls[1]
         insert_staging_calls = [
             s for s in sqls if s.startswith("INSERT INTO main.default.__drt_staging_user_scores")
         ]
@@ -951,12 +952,13 @@ def test_scope_accepted_on_databricks(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.failed == 0
 
 
-def test_scope_column_first_in_later_record_ok_on_databricks(
+def test_scope_column_missing_from_one_record_fails_fast_on_databricks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#1091: a scope column absent from record 0 but present in a later
-    record must not raise -- it's still readable by the per-record
-    record.get() the mirror-key accumulation uses."""
+    """#1091, tightened after Codex review on #1135: a scope column present
+    on some records but genuinely absent from another must still raise --
+    that record's scope is undefined, and record.get() returning None for
+    it would break the delete predicate's IN (...) matching."""
     _set_creds(monkeypatch)
     dest = DatabricksDestination()
     conn = _fake_conn()
@@ -964,9 +966,8 @@ def test_scope_column_first_in_later_record_ok_on_databricks(
     opts = _options(mode="mirror", mirror={"scope": ["parent_id"]})
 
     with patch.dict("sys.modules", _mocked_databricks_modules(conn)):
-        result = dest.load([{"id": 1}, {"id": 2, "parent_id": 10}], config, opts)
-
-    assert result.failed == 0
+        with pytest.raises(ValueError, match="mirror.scope columns missing"):
+            dest.load([{"id": 1}, {"id": 2, "parent_id": 10}], config, opts)
 
 
 def test_scope_missing_column_fails_fast_on_databricks(monkeypatch: pytest.MonkeyPatch) -> None:

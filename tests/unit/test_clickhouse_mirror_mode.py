@@ -385,18 +385,19 @@ def test_scope_accepted_on_clickhouse() -> None:
     assert result.failed == 0
 
 
-def test_scope_column_first_in_later_record_ok_on_clickhouse() -> None:
-    """#1091: a scope column absent from record 0 but present in a later
-    record must not raise -- it's still readable by the per-record
-    record.get() the mirror-key accumulation uses."""
+def test_scope_column_missing_from_one_record_fails_fast_on_clickhouse() -> None:
+    """#1091, tightened after Codex review on #1135: a scope column present
+    on some records but genuinely absent from another must still raise --
+    that record's scope is undefined, and record.get() returning None for
+    it would break the delete predicate's IN (...) matching (ClickHouse
+    would even stringify it into the literal "None")."""
     dest = ClickHouseDestination()
     client = _fake_client()
     opts = _options(mirror={"scope": ["parent_id"]})
 
     with patch.object(ClickHouseDestination, "_connect", return_value=client):
-        result = dest.load([{"id": 1}, {"id": 2, "parent_id": 10}], _config(), opts)
-
-    assert result.failed == 0
+        with pytest.raises(ValueError, match="mirror.scope columns missing"):
+            dest.load([{"id": 1}, {"id": 2, "parent_id": 10}], _config(), opts)
 
 
 def test_scope_missing_column_fails_fast_on_clickhouse() -> None:

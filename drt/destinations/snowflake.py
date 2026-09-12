@@ -190,15 +190,17 @@ class SnowflakeDestination(BaseSqlDestination):
             and sync_options.mirror is not None
             and sync_options.mirror.scope
         ):
-            # #1091: check across every record, not just records[0] — a
-            # scope column that first appears in a later record is still
-            # readable by _accumulate_mirror_state's per-record record.get().
-            available = _union_columns(records)
-            missing = [c for c in sync_options.mirror.scope if c not in available]
+            # #1091: require every record to have every scope column (see
+            # BaseSqlDestination._validate_mirror_scope's docstring for why
+            # a per-record omission, not just records[0], must reject —
+            # tightened after Codex review on #1135).
+            missing = [
+                c for c in sync_options.mirror.scope if not all(c in record for record in records)
+            ]
             if missing:
                 raise ValueError(
                     "mirror.scope columns missing from the model output: "
-                    f"{missing} (available: {sorted(available)})"
+                    f"{missing} (available: {sorted(_union_columns(records))})"
                 )
 
     def _load_replace(
