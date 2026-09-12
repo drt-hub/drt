@@ -32,7 +32,7 @@ from drt.config.credentials import resolve_env
 from drt.config.models import DestinationConfig, SnowflakeDestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import record_row_error
-from drt.destinations.sql_base import BaseSqlDestination
+from drt.destinations.sql_base import BaseSqlDestination, _union_columns
 from drt.destinations.sql_utils import check_mirror_supported, tagged_cursor
 
 _SWAP_SUFFIX = "__drt_swap"
@@ -190,11 +190,17 @@ class SnowflakeDestination(BaseSqlDestination):
             and sync_options.mirror is not None
             and sync_options.mirror.scope
         ):
-            missing = [c for c in sync_options.mirror.scope if c not in records[0]]
+            # #1091: require every record to have every scope column (see
+            # BaseSqlDestination._validate_mirror_scope's docstring for why
+            # a per-record omission, not just records[0], must reject —
+            # tightened after Codex review on #1135).
+            missing = [
+                c for c in sync_options.mirror.scope if not all(c in record for record in records)
+            ]
             if missing:
                 raise ValueError(
                     "mirror.scope columns missing from the model output: "
-                    f"{missing} (available: {sorted(records[0].keys())})"
+                    f"{missing} (available: {sorted(_union_columns(records))})"
                 )
 
     def _load_replace(
@@ -207,7 +213,14 @@ class SnowflakeDestination(BaseSqlDestination):
         sync_options: SyncOptions,
         config: SnowflakeDestinationConfig,
     ) -> SyncResult:
-        """``replace_strategy: truncate`` — TRUNCATE once, then INSERT rows."""
+        """``replace_strategy: truncate`` — TRUNCATE once, then INSERT rows.
+
+        Built per contiguous key-signature run (#1091), not once for the
+        whole batch — a column absent from a run is omitted from that
+        run's INSERT, letting the destination's own DEFAULT apply, rather
+        than binding an explicit NULL that would override it (caught in
+        Codex review on #1135).
+        """
         del conn
         assert isinstance(config, SnowflakeDestinationConfig)
         result = SyncResult()
@@ -218,10 +231,22 @@ class SnowflakeDestination(BaseSqlDestination):
             cur.execute(f"TRUNCATE TABLE {table_fq}")
             self._replace_truncated = True
 
-        col_list = ", ".join(columns)
-        value_clause, json_cols = _value_clause(columns, schema_map)
-        sql = f"INSERT INTO {table_fq} ({col_list}) {value_clause}"
-        self._insert_rows(cur, sql, records, sync_options, result, columns, json_cols)
+        base_index = 0
+        for run_columns, run_records in self._contiguous_signature_runs(records):
+            col_list = ", ".join(run_columns)
+            value_clause, json_cols = _value_clause(run_columns, schema_map)
+            sql = f"INSERT INTO {table_fq} ({col_list}) {value_clause}"
+            self._insert_rows(
+                cur,
+                sql,
+                run_records,
+                sync_options,
+                result,
+                run_columns,
+                json_cols,
+                base_index=base_index,
+            )
+            base_index += len(run_records)
         return result
 
     def _load_replace_swap(
@@ -257,12 +282,26 @@ class SnowflakeDestination(BaseSqlDestination):
                 self._swap_direct_write = True
 
         write_fq = table_fq if self._swap_direct_write else shadow_fq
-        col_list = ", ".join(columns)
-        value_clause, json_cols = _value_clause(columns, schema_map)
-        sql = f"INSERT INTO {write_fq} ({col_list}) {value_clause}"
 
         try:
-            self._insert_rows(cur, sql, records, sync_options, result, columns, json_cols)
+            # Built per contiguous key-signature run (#1091) — see
+            # _load_replace's docstring for why.
+            base_index = 0
+            for run_columns, run_records in self._contiguous_signature_runs(records):
+                col_list = ", ".join(run_columns)
+                value_clause, json_cols = _value_clause(run_columns, schema_map)
+                sql = f"INSERT INTO {write_fq} ({col_list}) {value_clause}"
+                self._insert_rows(
+                    cur,
+                    sql,
+                    run_records,
+                    sync_options,
+                    result,
+                    run_columns,
+                    json_cols,
+                    base_index=base_index,
+                )
+                base_index += len(run_records)
         except Exception:
             # on_error=fail mid-swap: drop the half-built shadow and reset so a
             # re-run starts clean. (Direct-write path has no shadow to drop.)
@@ -288,69 +327,85 @@ class SnowflakeDestination(BaseSqlDestination):
         table_fq = f"{config.database}.{config.schema_}.{config.table}"
         schema_map = self._resolve_schema(config)
         effective_mode = "merge" if sync_options.mode == "mirror" else config.mode
-        col_list = ", ".join(columns)
-        value_clause, json_cols = _value_clause(columns, schema_map)
 
-        if effective_mode == "insert":
-            sql = f"""
-                INSERT INTO {table_fq} ({col_list})
-                {value_clause}
-            """
-
-            for i, row in enumerate(records):
-                try:
-                    cur.execute(sql, _bind_row(row, columns, json_cols))
-                    result.success += 1
-                except Exception as e:
-                    record_row_error(
-                        result,
-                        i,
-                        str(row)[:200],
-                        e,
-                    )
-                    if sync_options.on_error == "fail":
-                        raise
-
-        elif effective_mode == "merge":
-            if not config.upsert_key:
-                raise ValueError("upsert_key is required for merge mode")
-
-            # #988: chunked MERGE ... USING (VALUES ...) replaces the old
-            # CREATE TEMP TABLE staging step — no DDL privilege needed at all
-            # now. A chunk-level failure falls back to one MERGE per row.
-            chunk_size = _rows_per_merge_chunk(len(columns))
-            for chunk_start in range(0, len(records), chunk_size):
-                chunk = records[chunk_start : chunk_start + chunk_size]
-                try:
-                    using_sql = _merge_using_subquery(columns, schema_map, len(chunk))
-                    merge_sql = _build_merge_sql(table_fq, columns, config.upsert_key, using_sql)
-                    flat_params: list[Any] = [
-                        v for row in chunk for v in _bind_row(row, columns, json_cols)
-                    ]
-                    cur.execute(merge_sql, flat_params)
-                    result.success += len(chunk)
-                except Exception:
-                    for offset, row in enumerate(chunk):
-                        idx = chunk_start + offset
-                        try:
-                            using_sql = _merge_using_subquery(columns, schema_map, 1)
-                            merge_sql = _build_merge_sql(
-                                table_fq, columns, config.upsert_key, using_sql
-                            )
-                            cur.execute(merge_sql, _bind_row(row, columns, json_cols))
-                            result.success += 1
-                        except Exception as e:
-                            record_row_error(
-                                result,
-                                idx,
-                                str(row)[:200],
-                                e,
-                            )
-                            if sync_options.on_error == "fail":
-                                raise
-
-        else:
+        if effective_mode not in ("insert", "merge"):
             raise ValueError(f"Unsupported mode: {config.mode}")
+        upsert_key = config.upsert_key
+        if effective_mode == "merge" and not upsert_key:
+            raise ValueError("upsert_key is required for merge mode")
+
+        # Built per contiguous key-signature run (#1091), not once for the
+        # whole batch: a column absent from a run is omitted from that
+        # run's statement, letting the destination's own DEFAULT apply,
+        # rather than binding an explicit NULL that would override it
+        # (caught in Codex review on #1135). No atomicity change — this
+        # method never wraps writes in a transaction (Snowflake autocommits
+        # per statement; ``conn`` above is unused), so chunking further by
+        # run adds no new partial-failure exposure beyond what per-chunk
+        # ``on_error`` handling already has.
+        base_index = 0
+        for run_columns, run_records in self._contiguous_signature_runs(records):
+            col_list = ", ".join(run_columns)
+            value_clause, json_cols = _value_clause(run_columns, schema_map)
+
+            if effective_mode == "insert":
+                sql = f"""
+                    INSERT INTO {table_fq} ({col_list})
+                    {value_clause}
+                """
+
+                for local_i, row in enumerate(run_records):
+                    i = base_index + local_i
+                    try:
+                        cur.execute(sql, _bind_row(row, run_columns, json_cols))
+                        result.success += 1
+                    except Exception as e:
+                        record_row_error(
+                            result,
+                            i,
+                            str(row)[:200],
+                            e,
+                        )
+                        if sync_options.on_error == "fail":
+                            raise
+
+            else:  # merge
+                assert upsert_key  # guarded above
+                # #988: chunked MERGE ... USING (VALUES ...) replaces the old
+                # CREATE TEMP TABLE staging step — no DDL privilege needed at
+                # all now. A chunk-level failure falls back to one MERGE per
+                # row.
+                chunk_size = _rows_per_merge_chunk(len(run_columns))
+                for chunk_start in range(0, len(run_records), chunk_size):
+                    chunk = run_records[chunk_start : chunk_start + chunk_size]
+                    try:
+                        using_sql = _merge_using_subquery(run_columns, schema_map, len(chunk))
+                        merge_sql = _build_merge_sql(table_fq, run_columns, upsert_key, using_sql)
+                        flat_params: list[Any] = [
+                            v for row in chunk for v in _bind_row(row, run_columns, json_cols)
+                        ]
+                        cur.execute(merge_sql, flat_params)
+                        result.success += len(chunk)
+                    except Exception:
+                        for offset, row in enumerate(chunk):
+                            idx = base_index + chunk_start + offset
+                            try:
+                                using_sql = _merge_using_subquery(run_columns, schema_map, 1)
+                                merge_sql = _build_merge_sql(
+                                    table_fq, run_columns, upsert_key, using_sql
+                                )
+                                cur.execute(merge_sql, _bind_row(row, run_columns, json_cols))
+                                result.success += 1
+                            except Exception as e:
+                                record_row_error(
+                                    result,
+                                    idx,
+                                    str(row)[:200],
+                                    e,
+                                )
+                                if sync_options.on_error == "fail":
+                                    raise
+            base_index += len(run_records)
 
         return result
 
@@ -363,6 +418,8 @@ class SnowflakeDestination(BaseSqlDestination):
         result: SyncResult,
         columns: list[str],
         json_cols: list[str],
+        *,
+        base_index: int = 0,
     ) -> None:
         """Execute a parameterised INSERT per row, honouring ``on_error``.
 
@@ -372,8 +429,16 @@ class SnowflakeDestination(BaseSqlDestination):
         when a source yields rows with a varying key order/set — so
         ``columns``/``json_cols`` are required, not an optional
         ``list(row.values())`` fallback (#699).
+
+        ``base_index`` offsets ``RowError.batch_index`` when the caller
+        dispatches this per contiguous key-signature run (#1091) rather
+        than for the whole batch at once — each run's own ``sql``/
+        ``columns``/``json_cols`` reflect only that run's columns, but
+        error indices still need to land on the record's position in the
+        original full batch.
         """
-        for i, row in enumerate(records):
+        for local_i, row in enumerate(records):
+            i = base_index + local_i
             try:
                 cur.execute(sql, _bind_row(row, columns, json_cols))
                 result.success += 1

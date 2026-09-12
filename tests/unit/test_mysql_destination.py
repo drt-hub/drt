@@ -149,6 +149,32 @@ class TestMySQLDestinationLoad:
         conn.commit.assert_called_once()
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
+    def test_heterogeneous_batch_does_not_drop_a_field_appearing_in_a_later_record(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """#1091: a field absent from the first record but present in a
+        later one used to be silently dropped for the whole batch. Now the
+        batch splits into one write per distinct key signature."""
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        records = [
+            {"user_id": 1, "company_id": 5, "score": 0.95},
+            {"user_id": 2, "company_id": 5, "score": 0.80, "note": "flagged"},
+        ]
+        result = MySQLDestination().load(records, _config(), _options())
+
+        assert result.success == 2
+        assert cur.execute.call_count == 2
+        queries = [c.args[0] for c in cur.execute.call_args_list]
+        params = [c.args[1] for c in cur.execute.call_args_list]
+        assert "note" not in queries[0]
+        assert None not in params[0]
+        assert "note" in queries[1]
+        assert "flagged" in params[1]
+
+    @patch("drt.destinations.mysql.MySQLDestination._connect")
     def test_query_tags_prepend_a_comment_when_present(self, mock_connect: MagicMock) -> None:
         """#768 — sync_options._query_tags flows through load() and lands on
         the actual executed query, via the sql_base.py cursor wrapper."""

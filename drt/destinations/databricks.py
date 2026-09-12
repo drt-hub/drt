@@ -56,7 +56,7 @@ from drt.config.credentials import resolve_env
 from drt.config.models import DatabricksDestinationConfig, DestinationConfig, SyncOptions
 from drt.destinations.base import SyncResult
 from drt.destinations.row_errors import record_row_error
-from drt.destinations.sql_base import BaseSqlDestination
+from drt.destinations.sql_base import BaseSqlDestination, _union_columns
 from drt.destinations.sql_utils import check_mirror_supported, tagged_cursor
 
 _SWAP_SUFFIX = "__drt_swap"
@@ -192,11 +192,17 @@ class DatabricksDestination(BaseSqlDestination):
             and sync_options.mirror is not None
             and sync_options.mirror.scope
         ):
-            missing = [c for c in sync_options.mirror.scope if c not in records[0]]
+            # #1091: require every record to have every scope column (see
+            # BaseSqlDestination._validate_mirror_scope's docstring for why
+            # a per-record omission, not just records[0], must reject —
+            # tightened after Codex review on #1135).
+            missing = [
+                c for c in sync_options.mirror.scope if not all(c in record for record in records)
+            ]
             if missing:
                 raise ValueError(
                     "mirror.scope columns missing from the model output: "
-                    f"{missing} (available: {sorted(records[0].keys())})"
+                    f"{missing} (available: {sorted(_union_columns(records))})"
                 )
 
     def _load_replace(
@@ -209,7 +215,14 @@ class DatabricksDestination(BaseSqlDestination):
         sync_options: SyncOptions,
         config: DatabricksDestinationConfig,
     ) -> SyncResult:
-        """``replace_strategy: truncate`` — TRUNCATE once, then INSERT rows."""
+        """``replace_strategy: truncate`` — TRUNCATE once, then INSERT rows.
+
+        Built per contiguous key-signature run (#1091), not once for the
+        whole batch — a column absent from a run is omitted from that
+        run's INSERT, letting the destination's own DEFAULT apply, rather
+        than binding an explicit NULL that would override it (caught in
+        Codex review on #1135).
+        """
         del conn
         assert isinstance(config, DatabricksDestinationConfig)
         result = SyncResult()
@@ -221,10 +234,22 @@ class DatabricksDestination(BaseSqlDestination):
             cur.execute(f"TRUNCATE TABLE {table_fq}")
             self._replace_truncated = True
 
-        col_list = ", ".join(columns)
-        value_clause, json_cols = _value_clause(columns, category_map, ddls)
-        sql = f"INSERT INTO {table_fq} ({col_list}) {value_clause}"
-        self._insert_rows(cur, sql, records, sync_options, result, columns, json_cols)
+        base_index = 0
+        for run_columns, run_records in self._contiguous_signature_runs(records):
+            run_col_list = ", ".join(run_columns)
+            run_value_clause, run_json_cols = _value_clause(run_columns, category_map, ddls)
+            sql = f"INSERT INTO {table_fq} ({run_col_list}) {run_value_clause}"
+            self._insert_rows(
+                cur,
+                sql,
+                run_records,
+                sync_options,
+                result,
+                run_columns,
+                run_json_cols,
+                base_index=base_index,
+            )
+            base_index += len(run_records)
         return result
 
     def _load_replace_swap(
@@ -263,12 +288,26 @@ class DatabricksDestination(BaseSqlDestination):
                 self._swap_direct_write = True
 
         write_fq = table_fq if self._swap_direct_write else shadow_fq
-        col_list = ", ".join(columns)
-        value_clause, json_cols = _value_clause(columns, category_map, ddls)
-        sql = f"INSERT INTO {write_fq} ({col_list}) {value_clause}"
 
         try:
-            self._insert_rows(cur, sql, records, sync_options, result, columns, json_cols)
+            # Built per contiguous key-signature run (#1091) — see
+            # _load_replace's docstring for why.
+            base_index = 0
+            for run_columns, run_records in self._contiguous_signature_runs(records):
+                run_col_list = ", ".join(run_columns)
+                run_value_clause, run_json_cols = _value_clause(run_columns, category_map, ddls)
+                sql = f"INSERT INTO {write_fq} ({run_col_list}) {run_value_clause}"
+                self._insert_rows(
+                    cur,
+                    sql,
+                    run_records,
+                    sync_options,
+                    result,
+                    run_columns,
+                    run_json_cols,
+                    base_index=base_index,
+                )
+                base_index += len(run_records)
         except Exception:
             # on_error=fail mid-swap: drop the half-built shadow and reset so a
             # re-run starts clean. (Direct-write path has no shadow to drop.)
@@ -295,16 +334,58 @@ class DatabricksDestination(BaseSqlDestination):
         category_map = self._resolve_schema(config)
         ddls = self._resolve_ddls(config)
         effective_mode = "merge" if sync_options.mode == "mirror" else config.mode
-        col_list = ", ".join(columns)
-        value_clause, json_cols = _value_clause(columns, category_map, ddls)
 
         if effective_mode == "insert":
-            sql = f"INSERT INTO {table_fq} ({col_list}) {value_clause}"
-            self._insert_rows(cur, sql, records, sync_options, result, columns, json_cols)
+            # Built per contiguous key-signature run (#1091), not once for
+            # the whole batch — a column absent from a run is omitted from
+            # that run's INSERT, letting the destination's own DEFAULT
+            # apply, rather than binding an explicit NULL that would
+            # override it (caught in Codex review on #1135).
+            base_index = 0
+            for run_columns, run_records in self._contiguous_signature_runs(records):
+                run_col_list = ", ".join(run_columns)
+                run_value_clause, run_json_cols = _value_clause(run_columns, category_map, ddls)
+                sql = f"INSERT INTO {table_fq} ({run_col_list}) {run_value_clause}"
+                self._insert_rows(
+                    cur,
+                    sql,
+                    run_records,
+                    sync_options,
+                    result,
+                    run_columns,
+                    run_json_cols,
+                    base_index=base_index,
+                )
+                base_index += len(run_records)
 
         elif effective_mode == "merge":
             if not config.upsert_key:
                 raise ValueError("upsert_key is required for merge mode")
+
+            # Deliberately NOT scoped per contiguous key-signature run
+            # (#1091) — unlike the ``insert`` branch above. Several rounds
+            # of Codex review on #1135 explored per-run staging/MERGE
+            # designs and each one traded one real bug for another: a
+            # shared final MERGE's blanket ``UPDATE SET`` clobbers a
+            # column a given row's run never sent; splitting into one
+            # MERGE per run breaks atomicity (each MERGE autocommits
+            # independently) and creates unbounded statement counts for
+            # alternating signatures; and per-column presence-flag CASE
+            # expressions fix the UPDATE side but can't fix the INSERT
+            # side, because ``CREATE OR REPLACE TABLE ... AS SELECT``
+            # doesn't carry over the target's DEFAULT clauses — a
+            # genuinely new row for a sparse run ends up with a staged
+            # ``NULL`` instead of the target's default, and a value
+            # expression has no way to say "apply this column's default"
+            # instead. Closing that gap needs either schema introspection
+            # of real DEFAULT values or accepting the per-run statement
+            # amplification #1091 already rejected elsewhere — deliberately
+            # left open and out of scope for #1091's fix. Tracked as a
+            # follow-up covering Databricks `mode: merge` /
+            # `sync.mode: mirror` (which forces this same branch)
+            # specifically.
+            col_list = ", ".join(columns)
+            value_clause, json_cols = _value_clause(columns, category_map, ddls)
 
             key_clause = " AND ".join([f"target.{k} = source.{k}" for k in config.upsert_key])
             update_cols = [c for c in columns if c not in config.upsert_key]
@@ -312,9 +393,6 @@ class DatabricksDestination(BaseSqlDestination):
             insert_cols = col_list
             insert_vals = ", ".join([f"source.{c}" for c in columns])
 
-            # Databricks Delta needs a relation on the USING side of MERGE.
-            # Delta has no session-local temp tables, so stage into the same
-            # uniquely-named scratch Delta table as before.
             staging_table = f"{config.catalog}.{config.schema_}.__drt_staging_{config.table}"
 
             cur.execute(
@@ -343,7 +421,7 @@ class DatabricksDestination(BaseSqlDestination):
                 f"VALUES ({insert_vals})"
             )
             cur.execute(merge_sql)
-            result.success += len(records) - result.failed
+            result.success += len(records) - len(result.row_errors)
             cur.execute(f"DROP TABLE IF EXISTS {staging_table}")
 
         else:
@@ -361,6 +439,7 @@ class DatabricksDestination(BaseSqlDestination):
         columns: list[str],
         json_cols: list[str],
         *,
+        base_index: int = 0,
         count_success: bool = True,
     ) -> None:
         """Execute a parameterised INSERT for ``records``, honouring ``on_error``.
@@ -382,6 +461,11 @@ class DatabricksDestination(BaseSqlDestination):
 
         ``count_success=False`` skips ``result.success`` accounting — the MERGE
         staging path computes success after the merge instead.
+
+        ``base_index`` offsets ``RowError.batch_index`` when the caller
+        dispatches this per contiguous key-signature run (#1091) rather
+        than for the whole batch at once — error indices still need to land
+        on the record's position in the original full batch.
         """
         if json_cols:
             self._insert_rows_one_by_one(
@@ -392,7 +476,7 @@ class DatabricksDestination(BaseSqlDestination):
                 result,
                 columns,
                 json_cols,
-                base_index=0,
+                base_index=base_index,
                 count_success=count_success,
             )
             return
@@ -410,7 +494,7 @@ class DatabricksDestination(BaseSqlDestination):
                     result,
                     columns,
                     json_cols,
-                    base_index=start,
+                    base_index=base_index + start,
                     count_success=count_success,
                 )
                 continue
@@ -433,7 +517,7 @@ class DatabricksDestination(BaseSqlDestination):
                     result,
                     columns,
                     json_cols,
-                    base_index=start,
+                    base_index=base_index + start,
                     count_success=count_success,
                 )
 

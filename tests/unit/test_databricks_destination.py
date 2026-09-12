@@ -318,6 +318,51 @@ class TestDatabricksDestinationLoad:
         # Staging table is dropped at the end so subsequent syncs don't trip
         assert any("DROP TABLE IF EXISTS main.default.__drt_staging_user_scores" in s for s in sqls)
 
+    def test_heterogeneous_merge_batch_is_a_known_open_gap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1091 fixed every SQL dialect's `records[0]`-only column
+        derivation except Databricks' `mode: merge` (also reached by
+        `sync.mode: mirror`) — several rounds of Codex review on #1135
+        found that closing it the way the other dialects were closed
+        (per-run-scoped staging/MERGE) trades one real bug for another
+        (MERGE autocommit atomicity, unbounded statement counts for
+        alternating signatures, or `CREATE TABLE ... AS SELECT` not
+        carrying over the target's `DEFAULT` clauses for a genuinely new
+        row). Left at the pre-#1091 baseline deliberately; tracked in
+        #1137. This test documents that the gap still exists, rather than
+        silently reappearing without anyone noticing: "note" — present
+        only on the second record — currently gets bound as an explicit
+        NULL for the first, clobbering its DEFAULT instead of leaving it
+        alone."""
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        modules = _mocked_databricks_modules(conn)
+
+        records = [
+            {"id": 1, "score": 0.95},
+            {"id": 2, "score": 0.80, "note": "flagged"},
+        ]
+        config = _config(mode="merge", upsert_key=["id"])
+        with patch.dict("sys.modules", modules):
+            result = DatabricksDestination().load(records, config, _options())
+
+        assert result.success == 2
+        sqls = [(call.args[0] if call.args else "") for call in conn._cur.execute.call_args_list]
+        staging_insert = next(
+            s for s in sqls if s.startswith("INSERT INTO main.default.__drt_staging_user_scores")
+        )
+        assert "note" in staging_insert
+        params = next(
+            call.args[1]
+            for call in conn._cur.execute.call_args_list
+            if call.args and call.args[0] == staging_insert
+        )
+        # id=1's record never set "note" -- it still binds an explicit
+        # None (NULL) for it rather than omitting the column, the known
+        # #1137 gap this test pins down.
+        assert None in params
+
     def test_merge_mode_requires_upsert_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
         modules = _mocked_databricks_modules(_fake_conn())
@@ -913,6 +958,24 @@ def test_scope_accepted_on_databricks(monkeypatch: pytest.MonkeyPatch) -> None:
         result = dest.load([{"id": 1, "parent_id": 10}], config, opts)
 
     assert result.failed == 0
+
+
+def test_scope_column_missing_from_one_record_fails_fast_on_databricks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1091, tightened after Codex review on #1135: a scope column present
+    on some records but genuinely absent from another must still raise --
+    that record's scope is undefined, and record.get() returning None for
+    it would break the delete predicate's IN (...) matching."""
+    _set_creds(monkeypatch)
+    dest = DatabricksDestination()
+    conn = _fake_conn()
+    config = _config(upsert_key=["id"])
+    opts = _options(mode="mirror", mirror={"scope": ["parent_id"]})
+
+    with patch.dict("sys.modules", _mocked_databricks_modules(conn)):
+        with pytest.raises(ValueError, match="mirror.scope columns missing"):
+            dest.load([{"id": 1}, {"id": 2, "parent_id": 10}], config, opts)
 
 
 def test_scope_missing_column_fails_fast_on_databricks(monkeypatch: pytest.MonkeyPatch) -> None:

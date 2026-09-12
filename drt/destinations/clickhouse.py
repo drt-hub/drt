@@ -97,17 +97,43 @@ class ClickHouseDestination:
         if not records:
             return SyncResult()
 
+        # A record with zero populated fields carries nothing to write --
+        # fail fast rather than let it become a signature run with
+        # column_names=[] (round 7/8 of Codex review on #1135; see
+        # BaseSqlDestination._validate_records_not_empty's docstring, whose
+        # ClickHouse-side copy this mirrors since ClickHouseDestination
+        # doesn't inherit that base class).
+        empty_indices = [i for i, record in enumerate(records) if not record]
+        if empty_indices:
+            raise ValueError(
+                f"records at index {empty_indices} have no fields at all -- nothing to write"
+            )
+
         client = self._connect(config)
         result = SyncResult()
 
         try:
-            columns = list(records[0].keys())
+            # #1091: union of every record's keys, not just records[0] —
+            # used only for the mirror.scope availability check below (a
+            # scope column first appearing in a later record is still
+            # readable per-record). The actual INSERT column list is built
+            # per contiguous key-signature run instead (_insert_all_runs) —
+            # an earlier version of this fix used this union for the INSERT
+            # itself too, which Codex review on #1135 caught as unsafe: an
+            # explicit NULL bind for a record lacking a column overrides
+            # that column's DEFAULT, not just an UPDATE/MERGE's clobber risk.
+            columns: list[str] = []
+            seen: set[str] = set()
+            for record in records:
+                for key in record:
+                    if key not in seen:
+                        seen.add(key)
+                        columns.append(key)
 
             if sync_options.mode == "replace" and sync_options.replace_strategy == "swap":
                 result = self._load_replace_swap(
                     client,
                     records,
-                    columns,
                     config.table,
                     sync_options,
                 )
@@ -130,16 +156,44 @@ class ClickHouseDestination:
                 check_mirror_supported(
                     config, sync_options, "clickhouse", supports_tracked_scope=True
                 )
+                if sync_options.mode == "mirror" and config.upsert_key:
+                    # #1091, caught in Codex review on #1135: a record
+                    # missing an upsert_key column would make
+                    # _accumulate_mirror_state's per-record record.get(k)
+                    # record a (None,) key, which can poison the
+                    # end-of-sync NOT IN delete predicate and leave stale
+                    # rows undeleted. Only mirror mode reads upsert_key on
+                    # ClickHouse -- the INSERT itself never references it.
+                    missing_keys = [
+                        c for c in config.upsert_key if not all(c in record for record in records)
+                    ]
+                    if missing_keys:
+                        raise ValueError(
+                            f"upsert_key columns missing from the model output: {missing_keys} "
+                            "(every record must include every upsert_key column)"
+                        )
                 if (
                     sync_options.mode == "mirror"
                     and sync_options.mirror is not None
                     and sync_options.mirror.scope
                 ):
-                    missing = [c for c in sync_options.mirror.scope if c not in records[0]]
+                    # #1091: require every record to have every scope
+                    # column, not just records[0] (tightened after Codex
+                    # review on #1135 — see
+                    # BaseSqlDestination._validate_mirror_scope's docstring
+                    # for why a per-record omission must reject: a missing
+                    # scope value would record as None, and ClickHouse
+                    # stringifies that into the literal "None" in the
+                    # delete predicate).
+                    missing = [
+                        c
+                        for c in sync_options.mirror.scope
+                        if not all(c in record for record in records)
+                    ]
                     if missing:
                         raise ValueError(
                             "mirror.scope columns missing from the model output: "
-                            f"{missing} (available: {sorted(records[0].keys())})"
+                            f"{missing} (available: {sorted(columns)})"
                         )
 
                 # clickhouse-connect's client.insert(table=...) interpolates
@@ -147,14 +201,7 @@ class ClickHouseDestination:
                 # (see clickhouse_connect/driver/insert.py), so pre-quote here.
                 table_q = self._quote_ident(config.table)
 
-                if not self._insert_batched(
-                    client,
-                    table_q,
-                    records,
-                    columns,
-                    sync_options,
-                    result,
-                ):
+                if not self._insert_all_runs(client, table_q, records, sync_options, result):
                     return result
 
                 # sync.mode: mirror (#340 Step 3) — accumulate upsert_key
@@ -182,6 +229,69 @@ class ClickHouseDestination:
             client.close()
 
         return result
+
+    def _contiguous_signature_runs(
+        self, records: list[dict[str, Any]]
+    ) -> list[tuple[list[str], list[dict[str, Any]]]]:
+        """Partition ``records`` into runs of *contiguous* records sharing the
+        same exact key set (#1091), preserving original order. Mirrors
+        ``BaseSqlDestination._contiguous_signature_runs`` — duplicated here
+        rather than imported, since ``ClickHouseDestination`` doesn't
+        inherit that class (its ``client.insert()``-based write model has
+        no shared base with the transactional SQL dialects).
+        """
+        if not records:
+            return []
+        runs: list[tuple[list[str], list[dict[str, Any]]]] = []
+        run_columns = list(records[0].keys())
+        run_signature = frozenset(run_columns)
+        run_records: list[dict[str, Any]] = [records[0]]
+        for record in records[1:]:
+            signature = frozenset(record.keys())
+            if signature == run_signature:
+                run_records.append(record)
+                continue
+            runs.append((run_columns, run_records))
+            run_columns = list(record.keys())
+            run_signature = signature
+            run_records = [record]
+        runs.append((run_columns, run_records))
+        return runs
+
+    def _insert_all_runs(
+        self,
+        client: Any,
+        table_q: str,
+        records: list[dict[str, Any]],
+        sync_options: SyncOptions,
+        result: SyncResult,
+    ) -> bool:
+        """Dispatch ``_insert_batched`` once per contiguous key-signature run
+        (#1091) instead of once for the whole batch with the batch-wide
+        column union — a column absent from a run is omitted from that
+        run's ``client.insert()`` call, letting the destination table's own
+        ``DEFAULT`` apply, rather than binding an explicit ``NULL`` that
+        would override it (caught in Codex review on #1135). No new
+        atomicity exposure: ``client.insert()`` is never wrapped in an
+        app-level transaction here — each call lands immediately regardless
+        of chunking — so this adds nothing beyond the existing
+        ``sync_options.batch_size`` chunking ``_insert_batched`` already
+        does internally.
+        """
+        base_index = 0
+        for run_columns, run_records in self._contiguous_signature_runs(records):
+            if not self._insert_batched(
+                client,
+                table_q,
+                run_records,
+                run_columns,
+                sync_options,
+                result,
+                base_index=base_index,
+            ):
+                return False
+            base_index += len(run_records)
+        return True
 
     def _insert_batched(
         self,
@@ -280,7 +390,6 @@ class ClickHouseDestination:
         self,
         client: Any,
         records: list[dict[str, Any]],
-        columns: list[str],
         table: str,
         sync_options: SyncOptions,
     ) -> SyncResult:
@@ -301,14 +410,7 @@ class ClickHouseDestination:
             self._swap_shadow_created = True
             self._swap_table = table
 
-        if not self._insert_batched(
-            client,
-            shadow_q,
-            records,
-            columns,
-            sync_options,
-            result,
-        ):
+        if not self._insert_all_runs(client, shadow_q, records, sync_options, result):
             # Drop the partial shadow + reset state so finalize_sync() cannot
             # EXCHANGE partial data into the live table. try/finally guarantees
             # state reset even if DROP fails; at worst we leave an orphan

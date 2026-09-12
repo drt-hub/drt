@@ -30,6 +30,35 @@ from drt.destinations.row_errors import RowError
 from drt.destinations.sql_utils import tagged_cursor as _tagged_cursor
 
 
+def _union_columns(records: list[dict[str, Any]]) -> list[str]:
+    """Column list covering every key across ``records``, in first-seen order.
+
+    Used only for ``_validate_mirror_scope``'s read-only availability check
+    (#1091) — a scope column that first appears in a later record is still
+    available to ``_accumulate_mirror_state``'s own per-record
+    ``record.get()`` read, so checking membership across the whole batch
+    here is correct and has no write-side implications.
+
+    **Not** used for building a write statement's column list: an earlier
+    version of this fix used it there too, on the theory that a record
+    missing a column just contributes ``None`` via ``record.get(c)`` and
+    that's "safe" wherever there's no pre-existing row to clobber. Codex
+    review on #1135 (#1091) found that reasoning incomplete — an explicit
+    ``NULL`` bind for an omitted column also overrides that column's
+    ``DEFAULT`` on a plain ``INSERT``, not just on an ``UPDATE``/``MERGE``
+    match. See ``BaseSqlDestination._contiguous_signature_runs()`` for the
+    write-side fix.
+    """
+    columns: list[str] = []
+    seen: set[str] = set()
+    for record in records:
+        for key in record:
+            if key not in seen:
+                seen.add(key)
+                columns.append(key)
+    return columns
+
+
 class BaseSqlDestination:
     """Dialect-agnostic state + mirror/schema helpers for SQL destinations."""
 
@@ -76,7 +105,9 @@ class BaseSqlDestination:
         # helpers use. The ``_dialect_connect`` / ``_load_*`` hooks each assert
         # the concrete config type internally.
         cfg: Any = config
+        self._validate_records_not_empty(records)
         self._validate_mirror_scope(records, cfg, sync_options)
+        self._validate_upsert_keys_present(records, cfg, sync_options)
 
         conn = self._dialect_connect(config, getattr(sync_options, "_query_tags", None))
         result = SyncResult()
@@ -84,7 +115,12 @@ class BaseSqlDestination:
 
         try:
             cur = _tagged_cursor(conn.cursor(), sync_options)
-            columns = list(records[0].keys())
+            # ``columns`` stays the batch-wide union for backward-compatible
+            # bookkeeping (e.g. dialect code that logs/inspects it), but the
+            # actual write statement(s) each ``_load_*`` hook builds use
+            # ``self._contiguous_signature_runs(records)`` internally for the
+            # real per-run column list (#1091) — see that method's docstring.
+            columns = _union_columns(records)
 
             if sync_options.mode == "replace":
                 if sync_options.replace_strategy == "swap":
@@ -108,14 +144,7 @@ class BaseSqlDestination:
                         config,
                     )
             else:
-                result = self._load_upsert(
-                    conn,
-                    cur,
-                    records,
-                    columns,
-                    config,
-                    sync_options,
-                )
+                result = self._load_upsert(conn, cur, records, columns, config, sync_options)
                 # sync.mode: mirror (#340 / #687) — record the observed
                 # upsert_key (and scope) tuples for the finalize_sync DELETE.
                 if sync_options.mode == "mirror":
@@ -126,6 +155,50 @@ class BaseSqlDestination:
             conn.close()
 
         return result
+
+    def _contiguous_signature_runs(
+        self, records: list[dict[str, Any]]
+    ) -> list[tuple[list[str], list[dict[str, Any]]]]:
+        """Partition ``records`` into runs of *contiguous* records sharing the
+        same exact key set (#1091), preserving original order. Returns one
+        ``(columns, run_records)`` tuple per run, in first-seen-per-run
+        column order.
+
+        Each dialect's ``_load_upsert``/``_load_replace``/``_load_replace_swap``
+        uses this — instead of the batch-wide column union — to build its
+        write statement(s), so a record is never asked to write (an
+        upsert-style write, clobbering a pre-existing destination value) or
+        null out (any write, overriding a column's ``DEFAULT``) a column it
+        never sent. A homogeneous batch (every record has the same keys, the
+        common case) is exactly one run covering the whole batch — identical
+        to this method not existing at all.
+
+        Splits only at a signature **change** rather than grouping by
+        signature globally (an earlier version of this fix did, and Codex
+        review on #1135 caught why that's wrong): the same upsert key can
+        legitimately appear more than once in one batch under different
+        signatures, and global grouping could dispatch those out of their
+        original relative order, changing which write ends up "last" for
+        upsert's implicit last-write-wins semantics. Splitting only at a
+        change preserves every record's original position.
+        """
+        if not records:
+            return []
+        runs: list[tuple[list[str], list[dict[str, Any]]]] = []
+        run_columns = list(records[0].keys())
+        run_signature = frozenset(run_columns)
+        run_records: list[dict[str, Any]] = [records[0]]
+        for record in records[1:]:
+            signature = frozenset(record.keys())
+            if signature == run_signature:
+                run_records.append(record)
+                continue
+            runs.append((run_columns, run_records))
+            run_columns = list(record.keys())
+            run_signature = signature
+            run_records = [record]
+        runs.append((run_columns, run_records))
+        return runs
 
     def finalize_sync(
         self,
@@ -298,6 +371,27 @@ class BaseSqlDestination:
             self._schema_cache[config.table] = describe_columns(config)
         return self._schema_cache[config.table]
 
+    def _validate_records_not_empty(self, records: list[dict[str, Any]]) -> None:
+        """A record with zero populated fields carries nothing to write --
+        fail fast rather than let it become a signature run with
+        ``run_columns=[]`` (round 7/8 of Codex review on #1135).
+
+        Reachable because ``replace`` mode (and any other mode with no
+        ``upsert_key`` configured) never requires a record to have a
+        particular column, so a genuinely empty record can slip through
+        ``_contiguous_signature_runs`` unnoticed. An empty column list then
+        forces dialect-specific "no columns" INSERT handling -- invalid
+        syntax on some dialects (``INSERT INTO t () VALUES ()``), silently
+        different semantics on others -- for a record that has nothing to
+        write in the first place. Rejecting it explicitly avoids needing
+        dialect-specific "empty insert" syntax at all.
+        """
+        empty_indices = [i for i, record in enumerate(records) if not record]
+        if empty_indices:
+            raise ValueError(
+                f"records at index {empty_indices} have no fields at all -- nothing to write"
+            )
+
     def _validate_mirror_scope(
         self,
         records: list[dict[str, Any]],
@@ -315,21 +409,98 @@ class BaseSqlDestination:
         ``_finalize_mirror_tracked``) rather than stored in a separate
         state-table column, so a scope column drt never observed as part of
         the tracked key has nothing to derive from.
+
+        Requires **every** record in the batch to have **every** scope
+        column (#1091, tightened after Codex review on #1135) — checking
+        only ``records[0]`` originally let a scope column present on a
+        later record but absent from an earlier one pass validation, but a
+        record actually missing the column makes its scope genuinely
+        undefined: ``_accumulate_mirror_state``'s ``record.get(c)`` would
+        record ``None`` for it, and a delete predicate built from
+        ``IN (..., NULL, ...)`` cannot match `NULL` via SQL's three-valued
+        logic (silently leaving stale rows undeleted) — worse, ClickHouse
+        stringifies a ``None`` scope value into the literal string
+        ``"None"``, which could coincide with a real value. A first
+        attempted fix here checked only whether a scope column appeared
+        *anywhere* in the batch (the cross-record union) rather than on
+        every record — Codex review caught that this still let a
+        per-record omission through.
         """
         if (
             sync_options.mode == "mirror"
             and sync_options.mirror is not None
             and sync_options.mirror.scope
         ):
-            missing = [c for c in sync_options.mirror.scope if c not in records[0]]
+            missing = [
+                c for c in sync_options.mirror.scope if not all(c in record for record in records)
+            ]
             if missing:
                 raise ValueError(
                     "mirror.scope columns missing from the model output: "
-                    f"{missing} (available: {sorted(records[0].keys())})"
+                    f"{missing} (available: {sorted(_union_columns(records))})"
                 )
             from drt.destinations.sql_utils import check_scope_subset_of_upsert_key
 
             check_scope_subset_of_upsert_key(config, sync_options)
+
+    def _validate_upsert_keys_present(
+        self,
+        records: list[dict[str, Any]],
+        config: Any,
+        sync_options: SyncOptions,
+    ) -> None:
+        """A record missing a configured ``upsert_key`` column is a config
+        error — fail fast before any row is written (#1091, caught in
+        Codex review on #1135).
+
+        ``_contiguous_signature_runs`` partitions purely by which keys a
+        record has; it has no notion that some keys are structurally
+        special. Without this check, a record missing an upsert_key column
+        would land in a run whose write statement omits that column
+        entirely — on Postgres/MySQL, ``ON CONFLICT (id)`` referencing a
+        column absent from the ``INSERT`` lets the table's own identity/
+        default fill in a *new* id instead of matching the intended row
+        (silently creating an unintended extra row, where the pre-#1091
+        code would have bound an explicit ``NULL`` for a missing key and
+        failed loudly on that column's ``NOT NULL``/``PRIMARY KEY``
+        constraint instead). In ``mode: mirror``, the same gap lets
+        ``_accumulate_mirror_state`` record a ``(None,)`` key tuple, which
+        can poison the end-of-sync ``NOT IN`` delete predicate and leave
+        stale rows undeleted.
+
+        Skipped for ``sync.mode: replace``: that path never references
+        upsert_key in its write statement at all (a plain ``INSERT``, no
+        ``ON CONFLICT``/``MERGE``), and doesn't accumulate mirror state
+        either.
+
+        Also skipped when the destination's *effective* write mode isn't
+        actually an upsert (round 8 of Codex review on #1135): Snowflake
+        and Databricks have a further ``config.mode: insert | merge``
+        toggle independent of ``sync_options.mode`` — ``upsert_key`` can be
+        configured (documentation, or reused by a later ``mode: merge``
+        switch) while the *current* write is a plain append that never
+        references it, and a sparse record relying on a destination-
+        generated/default key would otherwise fail validation before ever
+        connecting. Postgres/MySQL have no such toggle — for them, any
+        non-``replace`` sync always upserts via ``ON CONFLICT`` whenever
+        ``upsert_key`` is set, so the check keeps applying unconditionally.
+        """
+        if sync_options.mode == "replace":
+            return
+        upsert_key = getattr(config, "upsert_key", None)
+        if not upsert_key:
+            return
+        dialect_mode = getattr(config, "mode", None)
+        if dialect_mode is not None:
+            effective_mode = "merge" if sync_options.mode == "mirror" else dialect_mode
+            if effective_mode != "merge":
+                return
+        missing = [c for c in upsert_key if not all(c in record for record in records)]
+        if missing:
+            raise ValueError(
+                f"upsert_key columns missing from the model output: {missing} "
+                "(every record must include every upsert_key column)"
+            )
 
     def _accumulate_mirror_state(
         self,

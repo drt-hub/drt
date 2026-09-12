@@ -310,6 +310,34 @@ class TestSnowflakeDestinationLoad:
         assert any("MERGE INTO ANALYTICS.PUBLIC.USER_SCORES" in s for s in sqls)
         assert any("WHEN MATCHED THEN UPDATE" in s for s in sqls)
 
+    def test_heterogeneous_batch_does_not_drop_a_field_appearing_in_a_later_record(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1091: a field absent from the first record but present in a
+        later one used to be silently dropped for the whole batch. Now the
+        batch splits into one MERGE per distinct key signature."""
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        modules = _mocked_snowflake_modules(conn)
+
+        records = [
+            {"id": 1, "score": 0.95},
+            {"id": 2, "score": 0.80, "note": "flagged"},
+        ]
+        config = _config(mode="merge", upsert_key=["id"])
+        with patch.dict("sys.modules", modules):
+            result = SnowflakeDestination().load(records, config, _options())
+
+        assert result.success == 2
+        merge_calls = [
+            call.args[0]
+            for call in conn._cur.execute.call_args_list
+            if call.args and "MERGE INTO" in call.args[0]
+        ]
+        assert len(merge_calls) == 2
+        assert "note" not in merge_calls[0]
+        assert "note" in merge_calls[1]
+
     def test_merge_mode_requires_upsert_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_creds(monkeypatch)
         modules = _mocked_snowflake_modules(_fake_conn())

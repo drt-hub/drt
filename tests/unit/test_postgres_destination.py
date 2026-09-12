@@ -198,6 +198,58 @@ class TestPostgresDestinationLoad:
         assert not query.startswith("/* drt")
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_heterogeneous_batch_does_not_drop_a_field_appearing_in_a_later_record(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """#1091: a field absent from the first record but present in a
+        later one used to be silently dropped for the *whole* batch
+        (columns derived from records[0] alone). Now the batch splits into
+        one write per distinct key signature, so the field reaches the
+        destination for the records that actually have it."""
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        records = [
+            {"id": 1, "score": 0.5},
+            {"id": 2, "score": 0.9, "note": "flagged"},
+        ]
+        result = PostgresDestination().load(records, _config(), _options())
+
+        assert result.success == 2
+        assert result.failed == 0
+        assert cur.execute.call_count == 2
+        queries = [_query_text(c.args[0]) for c in cur.execute.call_args_list]
+        params = [c.args[1] for c in cur.execute.call_args_list]
+        # First group: just id/score.
+        assert "'note'" not in queries[0]
+        assert "flagged" not in params[0]
+        # Second group: id/score/note, with the note value actually bound.
+        assert "'note'" in queries[1]
+        assert "flagged" in params[1]
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_heterogeneous_batch_does_not_null_fill_a_field_the_row_never_sent(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """The rejected naive fix ("widen columns to the batch union") would
+        make the first group's statement also mention `note`, binding NULL
+        for the record that never sent it -- clobbering any pre-existing
+        destination value. Confirm that never happens."""
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+
+        records = [
+            {"id": 1, "score": 0.5},
+            {"id": 2, "score": 0.9, "note": "flagged"},
+        ]
+        PostgresDestination().load(records, _config(), _options())
+
+        first_group_params = cur.execute.call_args_list[0].args[1]
+        assert None not in first_group_params
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
     def test_empty_records(self, mock_connect: MagicMock) -> None:
         result = PostgresDestination().load([], _config(), _options())
         assert result.success == 0
@@ -278,6 +330,17 @@ class TestInsertSql:
         assert "id" in rendered
         assert "score" in rendered
         assert "updated_at" in rendered
+
+    def test_empty_columns_uses_default_values(self) -> None:
+        """#1091, round 7 of Codex review on #1135: a replace-mode batch can
+        legitimately contain a genuinely empty record (replace mode skips
+        upsert_key validation entirely), which becomes a signature run with
+        no columns at all. ``INSERT INTO t () VALUES ()`` is invalid
+        PostgreSQL syntax — the empty case needs ``DEFAULT VALUES``."""
+        sql = PostgresDestination._build_insert_sql(table="public.scores", columns=[])
+        rendered = str(sql)
+        assert "DEFAULT VALUES" in rendered
+        assert "()" not in rendered
 
 
 class TestQualifiedIdentifiers:

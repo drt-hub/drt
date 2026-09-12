@@ -152,32 +152,43 @@ class MySQLDestination(BaseSqlDestination):
         sync_options: SyncOptions,
         config: MySQLDestinationConfig,
     ) -> SyncResult:
-        """TRUNCATE (once) → INSERT within a transaction."""
+        """TRUNCATE (once) → INSERT within a transaction.
+
+        Builds the INSERT per contiguous key-signature run (#1091), not
+        once for the whole batch — an absent column is omitted from that
+        run's INSERT, letting the destination table's own
+        ``DEFAULT``/nullability apply, rather than binding an explicit
+        ``NULL`` that would override it (caught in Codex review on #1135).
+        """
         result = SyncResult()
 
         if not self._replace_truncated:
             cur.execute(f"TRUNCATE TABLE {self._quote_ident(table)}")
             self._replace_truncated = True
 
-        sql = self._build_insert_sql(table, columns)
         schema_map = self._resolve_schema(config)
 
-        for i, record in enumerate(records):
-            try:
-                values = [
-                    _serialize_value(record.get(c), c, config.json_columns, schema_map)
-                    for c in columns
-                ]
-                cur.execute(sql, values)
-                result.success += 1
-            except Exception as e:
-                self._record_row_error(result, i, record, e)
-                if sync_options.on_error == "fail":
+        base_index = 0
+        for run_columns, run_records in self._contiguous_signature_runs(records):
+            sql = self._build_insert_sql(table, run_columns)
+            for local_i, record in enumerate(run_records):
+                i = base_index + local_i
+                try:
+                    values = [
+                        _serialize_value(record.get(c), c, config.json_columns, schema_map)
+                        for c in run_columns
+                    ]
+                    cur.execute(sql, values)
+                    result.success += 1
+                except Exception as e:
+                    self._record_row_error(result, i, record, e)
+                    if sync_options.on_error == "fail":
+                        conn.rollback()
+                        return result
                     conn.rollback()
-                    return result
-                conn.rollback()
-                cur = conn.cursor()
-                continue
+                    cur = conn.cursor()
+                    continue
+            base_index += len(run_records)
 
         conn.commit()
         return result
@@ -206,29 +217,35 @@ class MySQLDestination(BaseSqlDestination):
             self._swap_shadow_created = True
             self._swap_table = table
 
-        sql = self._build_insert_sql(shadow, columns)
         schema_map = self._resolve_schema(config)
 
-        for i, record in enumerate(records):
-            try:
-                values = [
-                    _serialize_value(record.get(c), c, config.json_columns, schema_map)
-                    for c in columns
-                ]
-                cur.execute(sql, values)
-                result.success += 1
-            except Exception as e:
-                self._record_row_error(result, i, record, e)
-                if sync_options.on_error == "fail":
-                    conn.rollback()
-                    # Cleanup shadow on hard fail
-                    cur = conn.cursor()
-                    cur.execute(f"DROP TABLE IF EXISTS {shadow_q}")
-                    conn.commit()
-                    self._swap_shadow_created = False
-                    self._swap_table = None
-                    return result
-                # on_error=skip: keep going
+        # Built per contiguous key-signature run (#1091) — see
+        # _load_replace's docstring for why.
+        base_index = 0
+        for run_columns, run_records in self._contiguous_signature_runs(records):
+            sql = self._build_insert_sql(shadow, run_columns)
+            for local_i, record in enumerate(run_records):
+                i = base_index + local_i
+                try:
+                    values = [
+                        _serialize_value(record.get(c), c, config.json_columns, schema_map)
+                        for c in run_columns
+                    ]
+                    cur.execute(sql, values)
+                    result.success += 1
+                except Exception as e:
+                    self._record_row_error(result, i, record, e)
+                    if sync_options.on_error == "fail":
+                        conn.rollback()
+                        # Cleanup shadow on hard fail
+                        cur = conn.cursor()
+                        cur.execute(f"DROP TABLE IF EXISTS {shadow_q}")
+                        conn.commit()
+                        self._swap_shadow_created = False
+                        self._swap_table = None
+                        return result
+                    # on_error=skip: keep going
+            base_index += len(run_records)
 
         conn.commit()
         return result
@@ -385,27 +402,36 @@ class MySQLDestination(BaseSqlDestination):
         config: MySQLDestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult:
+        """Built per contiguous key-signature run (#1091), not once for the
+        whole batch — see ``PostgresDestination._load_upsert``'s docstring
+        for the shared rationale (a heterogeneous batch's run boundaries
+        never span more than one ``_load_upsert`` call, so this keeps the
+        existing one-transaction-per-call semantics untouched)."""
         result = SyncResult()
-        update_cols = [c for c in columns if c not in config.upsert_key]
-        sql = MySQLDestination._build_upsert_sql(config.table, columns, update_cols)
         schema_map = self._resolve_schema(config)
 
-        for i, record in enumerate(records):
-            try:
-                values = [
-                    _serialize_value(record.get(c), c, config.json_columns, schema_map)
-                    for c in columns
-                ]
-                cur.execute(sql, values)
-                result.success += 1
-            except Exception as e:
-                self._record_row_error(result, i, record, e)
-                if sync_options.on_error == "fail":
+        base_index = 0
+        for run_columns, run_records in self._contiguous_signature_runs(records):
+            update_cols = [c for c in run_columns if c not in config.upsert_key]
+            sql = MySQLDestination._build_upsert_sql(config.table, run_columns, update_cols)
+            for local_i, record in enumerate(run_records):
+                i = base_index + local_i
+                try:
+                    values = [
+                        _serialize_value(record.get(c), c, config.json_columns, schema_map)
+                        for c in run_columns
+                    ]
+                    cur.execute(sql, values)
+                    result.success += 1
+                except Exception as e:
+                    self._record_row_error(result, i, record, e)
+                    if sync_options.on_error == "fail":
+                        conn.rollback()
+                        return result
                     conn.rollback()
-                    return result
-                conn.rollback()
-                cur = conn.cursor()
-                continue
+                    cur = conn.cursor()
+                    continue
+            base_index += len(run_records)
 
         conn.commit()
         return result

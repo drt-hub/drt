@@ -236,7 +236,9 @@ def _load_dest(events: list[str], mode: str, replace_strategy: str = "delete") -
 
 
 def _load_options(mode: str, replace_strategy: str = "delete") -> SimpleNamespace:
-    return SimpleNamespace(mode=mode, replace_strategy=replace_strategy, mirror=None)
+    return SimpleNamespace(
+        mode=mode, replace_strategy=replace_strategy, mirror=None, on_error="skip"
+    )
 
 
 def test_load_empty_records_returns_early() -> None:
@@ -291,6 +293,274 @@ def test_load_mirror_accumulates_state() -> None:
     )
     assert events == ["connect", "upsert", "close"]
     assert d._mirror_keys == [(1,), (2,)]  # accumulated for mirror
+
+
+# ---------------------------------------------------------------------------
+# heterogeneous-batch column handling (#1091)
+# ---------------------------------------------------------------------------
+
+
+def test_union_columns_is_first_seen_order_across_records() -> None:
+    from drt.destinations.sql_base import _union_columns
+
+    assert _union_columns([{"a": 1, "b": 2}, {"c": 3, "a": 9}, {"b": 4, "d": 5}]) == [
+        "a",
+        "b",
+        "c",
+        "d",
+    ]
+
+
+def test_union_columns_empty_list() -> None:
+    from drt.destinations.sql_base import _union_columns
+
+    assert _union_columns([]) == []
+
+
+def test_contiguous_signature_runs_empty_list() -> None:
+    d = BaseSqlDestination()
+    assert d._contiguous_signature_runs([]) == []
+
+
+def test_contiguous_signature_runs_single_run_for_homogeneous_batch() -> None:
+    """A homogeneous batch (the common case) is exactly one run covering
+    the whole batch, byte-identical to this method not existing at all."""
+    d = BaseSqlDestination()
+    records = [{"a": 1, "b": 2}, {"a": 3, "b": 4}]
+    runs = d._contiguous_signature_runs(records)
+    assert len(runs) == 1
+    columns, run_records = runs[0]
+    assert columns == ["a", "b"]
+    assert run_records == records
+
+
+def test_contiguous_signature_runs_splits_at_a_signature_change() -> None:
+    """A field that first appears partway through the batch (#1091's bug)
+    starts a new run instead of being silently dropped or force-nulled
+    onto records that never had it."""
+    d = BaseSqlDestination()
+    records = [{"a": 1}, {"a": 2, "b": 20}, {"a": 3}]
+    runs = d._contiguous_signature_runs(records)
+    assert len(runs) == 3
+    (cols0, recs0), (cols1, recs1), (cols2, recs2) = runs
+    assert cols0 == ["a"] and recs0 == [{"a": 1}]
+    assert cols1 == ["a", "b"] and recs1 == [{"a": 2, "b": 20}]
+    assert cols2 == ["a"] and recs2 == [{"a": 3}]
+
+
+def test_contiguous_signature_runs_merges_adjacent_same_signature_records() -> None:
+    d = BaseSqlDestination()
+    records = [{"a": 1}, {"a": 2}, {"a": 3, "b": 1}, {"a": 4}, {"a": 5}]
+    runs = d._contiguous_signature_runs(records)
+    assert [cols for cols, _ in runs] == [["a"], ["a", "b"], ["a"]]
+    assert [recs for _, recs in runs] == [
+        [{"a": 1}, {"a": 2}],
+        [{"a": 3, "b": 1}],
+        [{"a": 4}, {"a": 5}],
+    ]
+
+
+def test_contiguous_signature_runs_preserves_original_order_for_repeated_signatures() -> None:
+    """Codex review on #1135 caught an earlier version of this fix that
+    grouped by signature *globally* (dict-keyed), which could dispatch an
+    interleaved batch out of its original relative order. Splitting only
+    at a signature *change* keeps every record's original position -- the
+    same signature reappearing later starts a fresh run, not a merge back
+    into the earlier one."""
+    d = BaseSqlDestination()
+    records = [{"a": 1}, {"a": 1, "b": 1}, {"a": 1}]
+    runs = d._contiguous_signature_runs(records)
+    assert len(runs) == 3
+    assert [recs for _, recs in runs] == [[{"a": 1}], [{"a": 1, "b": 1}], [{"a": 1}]]
+
+
+def _run_capturing_dest(
+    events: list[str], calls: list[tuple[list[dict[str, Any]], list[str]]]
+) -> Any:
+    """A BaseSqlDestination subclass whose _load_upsert records the records/
+    columns it was called with (exactly once per load() call, per #1091's
+    corrected design -- see the module docstring history in sql_base.py)."""
+
+    class _Cur:
+        def close(self) -> None:
+            pass
+
+    class _Conn:
+        def cursor(self) -> _Cur:
+            return _Cur()
+
+        def close(self) -> None:
+            events.append("close")
+
+    class _Dest(BaseSqlDestination):
+        def _dialect_connect(self, config: Any, query_tags: dict[str, str] | None = None) -> Any:
+            events.append("connect")
+            return _Conn()
+
+        def _load_upsert(
+            self,
+            conn: Any,
+            cur: Any,
+            records: list[dict[str, Any]],
+            columns: list[str],
+            config: Any,
+            sync_options: Any,
+        ) -> SyncResult:
+            calls.append((records, columns))
+            events.append("upsert")
+            return SyncResult(success=len(records))
+
+    return _Dest()
+
+
+def test_load_calls_load_upsert_exactly_once_even_for_a_heterogeneous_batch() -> None:
+    """#1091's corrected design (post Codex review on #1135): load() still
+    calls _load_upsert exactly once per call, passing the batch-wide union
+    as ``columns`` -- per-run column fidelity is the dialect's own
+    responsibility via self._contiguous_signature_runs(), not something
+    the orchestration layer fragments into multiple calls (that broke
+    on_error: fail's transactional atomicity and could reorder writes)."""
+    events: list[str] = []
+    calls: list[tuple[list[dict[str, Any]], list[str]]] = []
+    d = _run_capturing_dest(events, calls)
+    result = d.load(
+        [{"id": 1}, {"id": 2, "extra": "x"}, {"id": 3}],
+        SimpleNamespace(upsert_key=["id"], table="t"),
+        _load_options("upsert"),
+    )
+    assert events == ["connect", "upsert", "close"]
+    assert len(calls) == 1
+    records, columns = calls[0]
+    assert records == [{"id": 1}, {"id": 2, "extra": "x"}, {"id": 3}]
+    assert columns == ["id", "extra"]
+    assert result.success == 3
+
+
+def test_validate_mirror_scope_raises_when_any_record_omits_it() -> None:
+    """#1091, tightened after Codex review on #1135: even though a scope
+    column present on *some* records is technically readable via
+    _accumulate_mirror_state's per-record record.get(), a record that
+    genuinely lacks it has an undefined scope -- record.get() would return
+    None, and a delete predicate built from IN (..., NULL, ...) cannot
+    match NULL via SQL's three-valued logic. Every record must have every
+    scope column, not just records[0] and not just "any" record."""
+    d = BaseSqlDestination()
+    with pytest.raises(ValueError, match="mirror.scope columns missing"):
+        d._validate_mirror_scope(
+            [{"id": 1}, {"id": 2, "parent_id": 9}], _cfg(), _mirror(scope=["parent_id"])
+        )
+
+
+def test_validate_mirror_scope_ok_when_every_record_has_it() -> None:
+    d = BaseSqlDestination()
+    d._validate_mirror_scope(
+        [{"id": 1, "parent_id": 8}, {"id": 2, "parent_id": 9}],
+        _cfg(),
+        _mirror(scope=["parent_id"]),
+    )
+
+
+# ---------------------------------------------------------------------------
+# _validate_upsert_keys_present (#1091, Codex review on #1135)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_upsert_keys_present_raises_when_a_record_omits_the_key() -> None:
+    """A record missing a configured upsert_key column used to build a
+    write statement that silently omitted the key column, letting an
+    identity/auto-increment default fill in an unintended new key instead
+    of failing loudly."""
+    d = BaseSqlDestination()
+    with pytest.raises(ValueError, match="upsert_key columns missing"):
+        d._validate_upsert_keys_present(
+            [{"id": 1, "score": 0.5}, {"score": 0.9}],
+            _cfg(upsert_key=["id"]),
+            SimpleNamespace(mode="upsert"),
+        )
+
+
+def test_validate_upsert_keys_present_ok_when_every_record_has_it() -> None:
+    d = BaseSqlDestination()
+    d._validate_upsert_keys_present(
+        [{"id": 1, "score": 0.5}, {"id": 2, "score": 0.9}],
+        _cfg(upsert_key=["id"]),
+        SimpleNamespace(mode="upsert"),
+    )
+
+
+def test_validate_upsert_keys_present_noop_when_no_upsert_key_configured() -> None:
+    d = BaseSqlDestination()
+    d._validate_upsert_keys_present(
+        [{"score": 0.5}], _cfg(upsert_key=None), SimpleNamespace(mode="upsert")
+    )
+
+
+def test_validate_upsert_keys_present_skipped_for_replace_mode() -> None:
+    """replace mode's write never references upsert_key at all -- a
+    missing key column there is not this check's concern."""
+    d = BaseSqlDestination()
+    d._validate_upsert_keys_present(
+        [{"id": 1, "score": 0.5}, {"score": 0.9}],
+        _cfg(upsert_key=["id"]),
+        SimpleNamespace(mode="replace"),
+    )
+
+
+def test_validate_upsert_keys_present_skipped_for_insert_mode_dialects() -> None:
+    """Snowflake/Databricks-style configs have a further ``mode: insert |
+    merge`` toggle independent of ``sync_options.mode`` (round 8 of Codex
+    review on #1135) -- an upsert_key configured while the destination's
+    actual write is a plain append (``config.mode == "insert"``) never
+    references it, so a sparse record relying on a destination-generated
+    key must not fail validation before ever connecting."""
+    d = BaseSqlDestination()
+    d._validate_upsert_keys_present(
+        [{"id": 1, "score": 0.5}, {"score": 0.9}],
+        SimpleNamespace(upsert_key=["id"], mode="insert"),
+        SimpleNamespace(mode="upsert"),
+    )
+
+
+def test_validate_upsert_keys_present_enforced_for_merge_mode_dialects() -> None:
+    """The same Snowflake/Databricks-style config, but with the effective
+    write actually a MERGE -- the check must still fire."""
+    d = BaseSqlDestination()
+    with pytest.raises(ValueError, match="upsert_key columns missing"):
+        d._validate_upsert_keys_present(
+            [{"id": 1, "score": 0.5}, {"score": 0.9}],
+            SimpleNamespace(upsert_key=["id"], mode="merge"),
+            SimpleNamespace(mode="upsert"),
+        )
+
+
+def test_validate_upsert_keys_present_enforced_for_mirror_even_with_insert_config() -> None:
+    """``sync.mode: mirror`` forces the MERGE path regardless of
+    ``config.mode`` (matching Snowflake/Databricks' own
+    ``effective_mode`` computation) -- the check must fire even when
+    ``config.mode`` is left at its "insert" default."""
+    d = BaseSqlDestination()
+    with pytest.raises(ValueError, match="upsert_key columns missing"):
+        d._validate_upsert_keys_present(
+            [{"id": 1, "score": 0.5}, {"score": 0.9}],
+            SimpleNamespace(upsert_key=["id"], mode="insert"),
+            SimpleNamespace(mode="mirror"),
+        )
+
+
+# ---------------------------------------------------------------------------
+# _validate_records_not_empty (#1091, round 7/8 of Codex review on #1135)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_records_not_empty_raises_on_a_genuinely_empty_record() -> None:
+    d = BaseSqlDestination()
+    with pytest.raises(ValueError, match="no fields at all"):
+        d._validate_records_not_empty([{"id": 1}, {}])
+
+
+def test_validate_records_not_empty_ok_for_populated_records() -> None:
+    d = BaseSqlDestination()
+    d._validate_records_not_empty([{"id": 1}, {"id": 2, "score": 0.9}])
 
 
 def test_load_closes_connection_on_error() -> None:

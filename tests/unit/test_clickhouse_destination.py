@@ -125,6 +125,35 @@ class TestClickHouseDestinationLoad:
         client.close.assert_called_once()
 
     @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
+    def test_heterogeneous_batch_does_not_drop_a_field_appearing_in_a_later_record(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """#1091: a field absent from the first record but present in a
+        later one used to be silently dropped for the whole batch (columns
+        derived from records[0] alone). Dispatches one insert() per
+        contiguous key-signature run, each with exactly that run's own
+        columns — not a batch-wide union, which would bind an explicit
+        None (overriding any column DEFAULT) for the run lacking the field
+        (caught in Codex review on #1135)."""
+        client = _fake_client()
+        mock_connect.return_value = client
+
+        records = [
+            {"id": 1, "score": 0.95},
+            {"id": 2, "score": 0.80, "note": "flagged"},
+        ]
+        result = ClickHouseDestination().load(records, _config(), _options())
+
+        assert result.success == 2
+        assert result.failed == 0
+        assert client.insert.call_count == 2
+        first, second = client.insert.call_args_list
+        assert first.kwargs["column_names"] == ["id", "score"]
+        assert first.args[1] == [[1, 0.95]]
+        assert second.kwargs["column_names"] == ["id", "score", "note"]
+        assert second.args[1] == [[2, 0.80, "flagged"]]
+
+    @patch("drt.destinations.clickhouse.ClickHouseDestination._connect")
     def test_insert_batches_by_sync_batch_size(self, mock_connect: MagicMock) -> None:
         client = _fake_client()
         mock_connect.return_value = client
