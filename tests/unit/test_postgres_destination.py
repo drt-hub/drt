@@ -504,6 +504,47 @@ class TestPostgresReplaceMode:
         assert truncate_count == 1
 
     @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_replace_skip_savepoint_recovery_failure_reissues_truncate_next_batch(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """#1139 round 4: Postgres's TRUNCATE is itself transactional, so
+        when the first batch's savepoint-recovery fallback does a full
+        conn.rollback(), it undoes that batch's own TRUNCATE too -- the
+        table was never actually emptied. self._replace_truncated must be
+        reset so the next batch reissues it, or the "replace" silently
+        degrades into inserting on top of the untouched old data.
+        """
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+        dest = PostgresDestination()
+        opts = _options(mode="replace", on_error="skip")
+
+        def execute_side_effect(sql: Any, *args: Any) -> None:
+            text = _query_text(sql)
+            if args and args[0] == [1, 0.5]:
+                raise Exception("deadlock detected")
+            if text.startswith("ROLLBACK TO SAVEPOINT"):
+                raise Exception("current transaction is aborted")
+
+        cur.execute.side_effect = execute_side_effect
+        batch1 = dest.load([{"id": 1, "score": 0.5}], _config(), opts)
+        assert batch1.success == 0
+        assert batch1.failed == 1
+        # The rollback undid this call's own TRUNCATE too.
+        assert dest._replace_truncated is False
+
+        cur.execute.side_effect = None
+        dest.load([{"id": 2, "score": 0.9}], _config(), opts)
+        all_sqls = [_query_text(c[0][0]) for c in cur.execute.call_args_list]
+        # Once for batch 1 (later undone by the rollback) and once more for
+        # batch 2, which must reissue it since the table was never actually
+        # emptied -- not left at 1 (which would mean batch 2 wrongly
+        # skipped it, believing batch 1's TRUNCATE had stuck).
+        truncate_count = sum(1 for s in all_sqls if "TRUNCATE" in s)
+        assert truncate_count == 2
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
     def test_replace_uses_plain_insert(self, mock_connect: MagicMock) -> None:
         conn = _fake_connection()
         cur = conn.cursor()
@@ -846,6 +887,70 @@ class TestPostgresReplaceSwap:
         assert finalize_result is None
         sqls_after = [_query_text(c[0][0]) for c in cur.execute.call_args_list]
         assert not any("RENAME TO" in s for s in sqls_after)
+
+    @patch("drt.destinations.postgres.PostgresDestination._connect")
+    def test_swap_skip_savepoint_recovery_failure_preserves_earlier_batch(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """#1139 round 4: a sync's batches all reuse the same shadow table
+        across separate load() calls. If a LATER batch hits a savepoint-
+        recovery failure (e.g. a deadlock), dropping the shadow would
+        silently discard an EARLIER batch's already-committed rows too --
+        the next batch would then build a fresh, much smaller shadow that
+        finalize_sync swaps in as if it were the whole dataset. The shadow
+        must survive when it already held prior batches' work.
+        """
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+        dest = PostgresDestination()
+        opts = _options(mode="replace", replace_strategy="swap", on_error="skip")
+
+        # Batch 1: succeeds cleanly, creates + populates the shadow.
+        batch1 = dest.load([{"id": 1, "score": 0.5}], _config(), opts)
+        assert batch1.success == 1
+        assert dest._swap_shadow_created is True
+
+        # Batch 2: the row's INSERT fails, and the ROLLBACK TO SAVEPOINT
+        # recovery itself fails too (deadlock-style scenario).
+        def execute_side_effect(sql: Any, *args: Any) -> None:
+            text = _query_text(sql)
+            if args and args[0] == [2, 0.9]:
+                raise Exception("deadlock detected")
+            if text.startswith("ROLLBACK TO SAVEPOINT"):
+                raise Exception("current transaction is aborted")
+
+        cur.execute.side_effect = execute_side_effect
+        drop_calls_before = sum(
+            1 for c in cur.execute.call_args_list if "DROP TABLE IF EXISTS" in _query_text(c[0][0])
+        )
+        batch2 = dest.load([{"id": 2, "score": 0.9}], _config(), opts)
+        assert batch2.success == 0
+        assert batch2.failed == 1
+        # The shadow must NOT have been dropped again, and state must still
+        # point at a live shadow so batch 3 (and finalize_sync) can use it.
+        drop_calls_after = sum(
+            1 for c in cur.execute.call_args_list if "DROP TABLE IF EXISTS" in _query_text(c[0][0])
+        )
+        assert drop_calls_after == drop_calls_before
+        assert dest._swap_shadow_created is True
+        assert dest._swap_table is not None
+
+        # Batch 3: succeeds and must NOT recreate the shadow (no new CREATE).
+        cur.execute.side_effect = None
+        create_calls_before = sum(
+            1
+            for c in cur.execute.call_args_list
+            if "CREATE TABLE" in _query_text(c[0][0]) and "INCLUDING ALL" in _query_text(c[0][0])
+        )
+        batch3 = dest.load([{"id": 3, "score": 1.5}], _config(), opts)
+        assert batch3.success == 1
+        create_calls_after = sum(
+            1
+            for c in cur.execute.call_args_list
+            if "CREATE TABLE" in _query_text(c[0][0]) and "INCLUDING ALL" in _query_text(c[0][0])
+        )
+        assert create_calls_after == create_calls_before
 
 
 # ---------------------------------------------------------------------------

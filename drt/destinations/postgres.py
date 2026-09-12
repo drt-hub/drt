@@ -213,14 +213,25 @@ class PostgresDestination(BaseSqlDestination):
         there rolls back the whole call regardless, so the ``SAVEPOINT``/
         ``RELEASE`` pair would only add two no-benefit statements to every
         successful row on the default error-free path.
+
+        Postgres's ``TRUNCATE`` is itself transactional (unlike MySQL's,
+        which implicitly commits) — if *this* call is the one that issued
+        it, a savepoint-recovery-failure fallback's ``conn.rollback()``
+        undoes it too, but a naive ``self._replace_truncated`` would still
+        read ``True`` (Codex review on #1139): the next batch would then
+        skip re-truncating and insert into the never-actually-truncated
+        table, silently merging with the old data it was supposed to
+        replace. ``truncated_this_call`` tracks that distinction.
         """
         from psycopg2 import sql as _pgsql
 
         result = SyncResult()
 
+        truncated_this_call = False
         if not self._replace_truncated:
             cur.execute(_pgsql.SQL("TRUNCATE TABLE {}").format(_qualified_ident(table)))
             self._replace_truncated = True
+            truncated_this_call = True
 
         schema_map = self._resolve_schema(config)
         use_savepoint = sync_options.on_error == "skip"
@@ -254,6 +265,12 @@ class PostgresDestination(BaseSqlDestination):
                         # row this call counted so far, including earlier
                         # successes, was discarded with it (#1139).
                         self._mark_batch_aborted(result, records, i)
+                        if truncated_this_call:
+                            # The rollback undid this call's own TRUNCATE
+                            # too (Postgres TRUNCATE is transactional) --
+                            # the next batch must reissue it, not assume
+                            # the table is already empty.
+                            self._replace_truncated = False
                         return result
                     continue
             base_index += len(run_records)
@@ -281,12 +298,23 @@ class PostgresDestination(BaseSqlDestination):
         aborts the whole transaction on any failed statement) instead of
         just skipping the one bad row. Skipped entirely under ``on_error:
         fail`` (Codex review on #1139) — see ``_load_replace``'s docstring.
+
+        A hard failure only drops and recreates the shadow when *this*
+        call is the one that created it (``shadow_preexisted`` False,
+        Codex review round 4 on #1139): the shadow persists across the
+        multiple ``load()`` calls one sync's batches make, so under
+        ``on_error: skip`` a later batch's engine loop keeps going after a
+        savepoint-recovery failure — dropping an already-populated shadow
+        here would silently discard every earlier, already-committed
+        batch's rows, and the next batch would then build a fresh, far
+        smaller shadow that finalize_sync swaps in as if it were complete.
         """
         from psycopg2 import sql as _pgsql
 
         result = SyncResult()
         shadow = _with_relation_suffix(table, "__drt_swap")
         use_savepoint = sync_options.on_error == "skip"
+        shadow_preexisted = self._swap_shadow_created
 
         if not self._swap_shadow_created:
             cur.execute(_pgsql.SQL("DROP TABLE IF EXISTS {}").format(_qualified_ident(shadow)))
@@ -326,33 +354,44 @@ class PostgresDestination(BaseSqlDestination):
                     if sync_options.on_error == "fail":
                         conn.rollback()
                         self._mark_batch_aborted(result, records, i)
-                        # Cleanup shadow on hard fail
-                        cur = conn.cursor()
-                        cur.execute(
-                            _pgsql.SQL("DROP TABLE IF EXISTS {}").format(_qualified_ident(shadow))
-                        )
-                        conn.commit()
-                        self._swap_shadow_created = False
-                        self._swap_table = None
+                        if not shadow_preexisted:
+                            # Cleanup shadow on hard fail -- safe to drop
+                            # only because nothing from an earlier,
+                            # already-committed batch lives in it yet.
+                            cur = conn.cursor()
+                            cur.execute(
+                                _pgsql.SQL("DROP TABLE IF EXISTS {}").format(
+                                    _qualified_ident(shadow)
+                                )
+                            )
+                            conn.commit()
+                            self._swap_shadow_created = False
+                            self._swap_table = None
                         return result
                     if not self._recover_row_savepoint(conn, cur):
                         # conn.rollback() already ran inside
                         # _recover_row_savepoint's own fallback -- e.g. a
                         # deadlock already forced the whole transaction to
-                        # roll back (#1139). The shadow's own CREATE
-                        # happened in that same transaction on a
-                        # first-batch call, so it's gone too; drop it
-                        # defensively and reset state so finalize_sync
-                        # doesn't try to swap in a partial/nonexistent
-                        # shadow.
+                        # roll back (#1139).
                         self._mark_batch_aborted(result, records, i)
-                        cur = conn.cursor()
-                        cur.execute(
-                            _pgsql.SQL("DROP TABLE IF EXISTS {}").format(_qualified_ident(shadow))
-                        )
-                        conn.commit()
-                        self._swap_shadow_created = False
-                        self._swap_table = None
+                        if not shadow_preexisted:
+                            # The shadow's own CREATE happened in that same
+                            # transaction on this first-batch call, so it's
+                            # gone too; drop it defensively and reset state
+                            # so finalize_sync doesn't try to swap in a
+                            # partial/nonexistent shadow. If the shadow
+                            # already held earlier batches' committed rows,
+                            # leave it -- only this batch's own rows were
+                            # rolled back, not theirs.
+                            cur = conn.cursor()
+                            cur.execute(
+                                _pgsql.SQL("DROP TABLE IF EXISTS {}").format(
+                                    _qualified_ident(shadow)
+                                )
+                            )
+                            conn.commit()
+                            self._swap_shadow_created = False
+                            self._swap_table = None
                         return result
             base_index += len(run_records)
 
@@ -663,6 +702,7 @@ class PostgresDestination(BaseSqlDestination):
         policy = sync_options.match_policy
         schema_map = self._resolve_schema(config)
         use_savepoint = sync_options.on_error == "skip"
+        no_match_indices: set[int] = set()
 
         base_index = 0
         for run_columns, run_records in self._contiguous_signature_runs(records):
@@ -714,6 +754,7 @@ class PostgresDestination(BaseSqlDestination):
                     if policy in ("create_only", "update_only") and cur.rowcount == 0:
                         result.skipped += 1
                         result.skipped_no_match += 1  # #757 — no create/update target
+                        no_match_indices.add(i)
                     else:
                         result.success += 1
                     if use_savepoint:
@@ -722,21 +763,25 @@ class PostgresDestination(BaseSqlDestination):
                     self._record_row_error(result, i, record, e)
                     if sync_options.on_error == "fail":
                         conn.rollback()
-                        self._mark_batch_aborted(result, records, i)
+                        self._mark_batch_aborted(
+                            result, records, i, exclude_indices=frozenset(no_match_indices)
+                        )
                         return result
                     if not self._recover_row_savepoint(conn, cur):
                         # The row-level savepoint rollback itself failed
                         # (e.g. a deadlock already forced the whole
                         # transaction to roll back) -- every row this call
                         # counted so far, including earlier successes, was
-                        # discarded with it (#1139). result.skipped/
-                        # skipped_no_match need no reset: those counters
-                        # represent rows match_policy deliberately wrote
-                        # nothing for, so there was never anything to roll
-                        # back -- but such a row's key is not "observed"
-                        # for mirror.mode purposes either, so it still gets
-                        # a row_error like every other row in this batch.
-                        self._mark_batch_aborted(result, records, i)
+                        # discarded with it (#1139). no_match_indices are
+                        # excluded from the resulting failures: a
+                        # match_policy row already resolved to "no
+                        # create/update target" wrote nothing either way,
+                        # so the rollback doesn't change that outcome, and
+                        # it must not be double-counted as both skipped
+                        # and failed (Codex review round 4).
+                        self._mark_batch_aborted(
+                            result, records, i, exclude_indices=frozenset(no_match_indices)
+                        )
                         return result
                     continue
             base_index += len(run_records)

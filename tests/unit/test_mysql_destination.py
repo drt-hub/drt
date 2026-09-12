@@ -730,6 +730,60 @@ class TestMySQLReplaceSwap:
         sqls_after = [c[0][0] for c in cur.execute.call_args_list]
         assert not any("RENAME TABLE" in s for s in sqls_after)
 
+    @patch("drt.destinations.mysql.MySQLDestination._connect")
+    def test_swap_skip_savepoint_recovery_failure_preserves_earlier_batch(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """#1139 round 4: a sync's batches all reuse the same shadow table
+        across separate load() calls. If a LATER batch hits a savepoint-
+        recovery failure (a MySQL deadlock rolling back the whole
+        transaction), dropping the shadow would silently discard an
+        EARLIER batch's already-committed rows too -- the next batch would
+        then build a fresh, much smaller shadow that finalize_sync swaps
+        in as if it were the whole dataset. The shadow must survive when
+        it already held prior batches' work.
+        """
+        conn = _fake_connection()
+        cur = conn.cursor()
+        mock_connect.return_value = conn
+        dest = MySQLDestination()
+        opts = _options(mode="replace", replace_strategy="swap", on_error="skip")
+
+        batch1 = dest.load([{"user_id": 1, "company_id": 5, "score": 0.5}], _config(), opts)
+        assert batch1.success == 1
+        assert dest._swap_shadow_created is True
+
+        def execute_side_effect(sql: str, *args: Any) -> None:
+            if args and args[0] == [2, 5, 0.9]:
+                raise Exception("Deadlock found when trying to get lock")
+            if sql.startswith("ROLLBACK TO SAVEPOINT"):
+                raise Exception("savepoint does not exist")
+
+        cur.execute.side_effect = execute_side_effect
+        drop_calls_before = sum(
+            1 for c in cur.execute.call_args_list if "DROP TABLE IF EXISTS" in c[0][0]
+        )
+        batch2 = dest.load([{"user_id": 2, "company_id": 5, "score": 0.9}], _config(), opts)
+        assert batch2.success == 0
+        assert batch2.failed == 1
+        drop_calls_after = sum(
+            1 for c in cur.execute.call_args_list if "DROP TABLE IF EXISTS" in c[0][0]
+        )
+        assert drop_calls_after == drop_calls_before
+        assert dest._swap_shadow_created is True
+        assert dest._swap_table is not None
+
+        cur.execute.side_effect = None
+        create_calls_before = sum(
+            1 for c in cur.execute.call_args_list if c[0][0].startswith("CREATE TABLE")
+        )
+        batch3 = dest.load([{"user_id": 3, "company_id": 5, "score": 1.5}], _config(), opts)
+        assert batch3.success == 1
+        create_calls_after = sum(
+            1 for c in cur.execute.call_args_list if c[0][0].startswith("CREATE TABLE")
+        )
+        assert create_calls_after == create_calls_before
+
 
 # ---------------------------------------------------------------------------
 # Replace mode — swap strategy + json_columns interaction (#448)

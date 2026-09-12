@@ -597,7 +597,11 @@ class BaseSqlDestination:
             return False
 
     def _mark_batch_aborted(
-        self, result: SyncResult, records: list[dict[str, Any]], failed_index: int
+        self,
+        result: SyncResult,
+        records: list[dict[str, Any]],
+        failed_index: int,
+        exclude_indices: frozenset[int] = frozenset(),
     ) -> None:
         """A per-row write loop is bailing out with the whole call's
         transaction rolled back (#1139) -- either ``on_error: fail``'s
@@ -616,12 +620,20 @@ class BaseSqlDestination:
         were NOT actually persisted -- without this, it would wrongly record
         every other record's key as observed source state even though none
         of them landed. ``result.success`` is reset to 0 for the same
-        reason; ``skipped``/``skipped_no_match`` are left untouched, since
-        those records never wrote anything the rollback could undo.
+        reason.
+
+        ``exclude_indices`` carves out records that already got a final,
+        legitimate ``result.skipped``/``skipped_no_match`` outcome earlier
+        in *this same call* (Codex review round 4 on #1139) -- a Postgres
+        ``match_policy`` row skipped because ``ON CONFLICT DO NOTHING``/the
+        narrowed ``UPDATE`` matched nothing wrote nothing either way, so the
+        later rollback doesn't change that outcome. Without this, such a
+        row would get double-counted as both ``skipped`` and ``failed`` and
+        wrongly routed to the DLQ as if it were a real failure.
         """
         already_recorded = {err.batch_index for err in result.row_errors}
         for idx, record in enumerate(records):
-            if idx in already_recorded:
+            if idx in already_recorded or idx in exclude_indices:
                 continue
             self._record_row_error(
                 result,

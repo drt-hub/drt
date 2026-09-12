@@ -245,12 +245,23 @@ class MySQLDestination(BaseSqlDestination):
         leaving the connection in whatever state MySQL left it in after
         the failed statement. Skipped entirely under ``on_error: fail``
         (Codex review on #1139) — see ``_load_replace``'s docstring.
+
+        A hard failure only drops and recreates the shadow when *this*
+        call is the one that created it (``shadow_preexisted`` False,
+        Codex review round 4 on #1139): the shadow persists across the
+        multiple ``load()`` calls one sync's batches make, so under
+        ``on_error: skip`` a later batch's engine loop keeps going after a
+        savepoint-recovery failure — dropping an already-populated shadow
+        here would silently discard every earlier, already-committed
+        batch's rows, and the next batch would then build a fresh, far
+        smaller shadow that finalize_sync swaps in as if it were complete.
         """
         result = SyncResult()
         shadow = f"{table}__drt_swap"
         shadow_q = self._quote_ident(shadow)
         table_q = self._quote_ident(table)
         use_savepoint = sync_options.on_error == "skip"
+        shadow_preexisted = self._swap_shadow_created
 
         if not self._swap_shadow_created:
             cur.execute(f"DROP TABLE IF EXISTS {shadow_q}")
@@ -285,29 +296,37 @@ class MySQLDestination(BaseSqlDestination):
                     if sync_options.on_error == "fail":
                         conn.rollback()
                         self._mark_batch_aborted(result, records, i)
-                        # Cleanup shadow on hard fail
-                        cur = conn.cursor()
-                        cur.execute(f"DROP TABLE IF EXISTS {shadow_q}")
-                        conn.commit()
-                        self._swap_shadow_created = False
-                        self._swap_table = None
+                        if not shadow_preexisted:
+                            # Cleanup shadow on hard fail -- safe to drop
+                            # only because nothing from an earlier,
+                            # already-committed batch lives in it yet.
+                            cur = conn.cursor()
+                            cur.execute(f"DROP TABLE IF EXISTS {shadow_q}")
+                            conn.commit()
+                            self._swap_shadow_created = False
+                            self._swap_table = None
                         return result
                     if not self._recover_row_savepoint(conn, cur):
                         # conn.rollback() already ran inside
                         # _recover_row_savepoint's own fallback -- e.g. a
                         # deadlock already forced the whole transaction to
-                        # roll back (#1139). The shadow's own CREATE
-                        # happened in that same transaction on a
-                        # first-batch call, so it's gone too; drop it
-                        # defensively and reset state so finalize_sync
-                        # doesn't try to swap in a partial/nonexistent
-                        # shadow.
+                        # roll back (#1139).
                         self._mark_batch_aborted(result, records, i)
-                        cur = conn.cursor()
-                        cur.execute(f"DROP TABLE IF EXISTS {shadow_q}")
-                        conn.commit()
-                        self._swap_shadow_created = False
-                        self._swap_table = None
+                        if not shadow_preexisted:
+                            # The shadow's own CREATE happened on this
+                            # first-batch call, so it's the only content
+                            # gone with the rollback; drop it defensively
+                            # and reset state so finalize_sync doesn't try
+                            # to swap in a partial/nonexistent shadow. If
+                            # the shadow already held earlier batches'
+                            # committed rows, leave it -- only this
+                            # batch's own rows were rolled back, not
+                            # theirs.
+                            cur = conn.cursor()
+                            cur.execute(f"DROP TABLE IF EXISTS {shadow_q}")
+                            conn.commit()
+                            self._swap_shadow_created = False
+                            self._swap_table = None
                         return result
             base_index += len(run_records)
 

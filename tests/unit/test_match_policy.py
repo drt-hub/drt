@@ -196,6 +196,44 @@ def test_update_only_no_match_is_counted_as_skipped() -> None:
     assert result.success == 0
 
 
+def test_savepoint_recovery_failure_excludes_no_match_skips_from_batch_abort() -> None:
+    """#1139 round 4 (Codex): a match_policy row already resolved to "no
+    create/update target" wrote nothing either way -- if a LATER row's
+    failure forces a full-batch abort (the row-level SAVEPOINT recovery
+    itself fails, e.g. a deadlock), that already-skipped row must stay
+    counted only as skipped, not ALSO recorded as a batch-abort failure
+    and wrongly routed to the DLQ as if it were a real error.
+    """
+    dest = PostgresDestination()
+    conn = MagicMock()
+    cur = MagicMock()
+    conn.cursor.return_value = cur
+
+    def execute_side_effect(sql: Any, *args: Any) -> None:
+        text = str(sql)
+        if args and args[0] == [1, 99]:  # update_only: SET score=1 WHERE id=99
+            cur.rowcount = 0  # no such row -> skipped, no match
+            return
+        if args and args[0] == [42, 7]:  # update_only: SET score=42 WHERE id=7
+            raise Exception("deadlock detected")
+        if text.startswith("ROLLBACK TO SAVEPOINT"):
+            raise Exception("current transaction is aborted")
+        cur.rowcount = 1
+
+    cur.execute.side_effect = execute_side_effect
+    opts = SyncOptions(mode="upsert", match_policy="update_only", on_error="skip")
+    records = [{"id": 99, "score": 1}, {"id": 7, "score": 42}]
+
+    with patch.object(PostgresDestination, "_connect", return_value=conn):
+        result = dest.load(records, _pg_config(), opts)
+
+    assert result.skipped == 1
+    assert result.skipped_no_match == 1
+    assert result.failed == 1  # only the deadlocked row, not the skipped one too
+    assert result.success == 0
+    assert {e.batch_index for e in result.row_errors} == {1}
+
+
 def test_update_only_requires_a_non_key_column() -> None:
     dest = PostgresDestination()
     conn = _fake_connection()
