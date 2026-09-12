@@ -29,9 +29,9 @@ before merge — see below):
   deliberately has none of. Every method here now does DML only
   (`SELECT`/`UPDATE`/`INSERT`/`DELETE`/`MERGE` against the three real
   tables), never a scratch table.
-- **`save_sync` and `DlqBackend.append` are probe-then-`UPDATE`-or-`INSERT`**,
-  not `MERGE`: `SELECT 1 FROM t WHERE <key> = ? LIMIT`-style existence check,
-  then the matching statement — the same probe-before-act discipline
+- **`save_sync` is probe-then-`UPDATE`-or-`INSERT`**, not `MERGE`:
+  `SELECT 1 FROM t WHERE <key> = ? LIMIT`-style existence check, then the
+  matching statement — the same probe-before-act discipline
   `ensure_managed_schema`/`_ensure_table_exists` already use, one level
   deeper (per-row instead of per-table). This has a check-then-act window
   for two concurrent writers touching the *same* `sync_name`/`id`
@@ -41,10 +41,15 @@ before merge — see below):
   actual failure mode (one writer's `CREATE OR REPLACE` could destroy or
   corrupt a concurrent writer's staged data outright), and concurrent runs
   of the *same* sync are already out of scope per `warehouse.py`'s own
-  documented cross-dialect limitations. `DlqBackend.append()` is therefore a
-  per-entry loop like every other dialect (matching `warehouse_snowflake.py`
-  and the already-tracked #1121 batching follow-up), not a batched
-  operation of any kind.
+  documented cross-dialect limitations. **`DlqBackend.append()` used to
+  share this same probe-then-act shape but was moved onto `replace()`'s
+  own chunked `MERGE` (`_upsert_dlq_entries`, #1121)** — both need the
+  identical upsert-by-id write, so a single shared helper serves both
+  rather than two divergent implementations, and the switch to `MERGE`
+  closes the concurrent-writer race described above for `append()`
+  specifically (as a side effect of batching, not the reason for it).
+  `reconcile()`'s `updates` got the same treatment via a sibling
+  update-only `MERGE` helper, `_update_dlq_entries`.
 - **`DlqBackend.replace()`'s atomicity (the #955 failure class) is closed
   without a scratch table and without `WHEN NOT MATCHED BY SOURCE`:**
   existing ids for `sync_name` are read first (`SELECT id FROM t WHERE
@@ -496,6 +501,91 @@ def _dlq_merge_values_params(sync_name: str, entry: DeadLetter) -> list[Any]:
     ]
 
 
+def _upsert_dlq_entries(cur: Any, t: Any, sync_name: str, entries: list[DeadLetter]) -> None:
+    """Chunked ``MERGE`` upsert shared by ``DlqBackend.append()``/``.replace()``
+    (#1121) — reused rather than duplicated, since both need the identical
+    upsert-by-id shape.
+
+    Never touches ``sync_name`` on a match, matching every other dialect's
+    DLQ upsert precedent (a shared, pre-existing property, not new here):
+    matching globally on ``id`` and reassigning ``sync_name`` on a match
+    would let one sync's write silently move another sync's row into its
+    own queue on an id collision.
+    """
+    rows_per_chunk = _rows_per_chunk(len(_DLQ_COLUMNS))
+    for start in range(0, len(entries), rows_per_chunk):
+        chunk_entries = entries[start : start + rows_per_chunk]
+        values_sql = ", ".join(["(?, ?, ?, ?, ?, ?, ?, ?)"] * len(chunk_entries))
+        params: list[Any] = []
+        for entry in chunk_entries:
+            params.extend(_dlq_merge_values_params(sync_name, entry))
+        cur.execute(
+            f"MERGE INTO {t} AS t USING (VALUES {values_sql}) AS "
+            f"s({', '.join(_DLQ_COLUMNS)}) "
+            "ON t.id = s.id "
+            "WHEN MATCHED THEN UPDATE SET record = parse_json(s.record), "
+            "error_message = s.error_message, http_status = s.http_status, "
+            "ts = s.ts, attempts = s.attempts, sync_run_id = s.sync_run_id "
+            "WHEN NOT MATCHED THEN INSERT (id, sync_name, record, error_message, "
+            "http_status, ts, attempts, sync_run_id) VALUES (s.id, s.sync_name, "
+            "parse_json(s.record), s.error_message, s.http_status, s.ts, "
+            "s.attempts, s.sync_run_id)",
+            params,
+        )
+
+
+_DLQ_UPDATE_COLUMNS = (
+    "id",
+    "record",
+    "error_message",
+    "http_status",
+    "ts",
+    "attempts",
+    "sync_run_id",
+)
+
+
+def _update_dlq_entries(
+    cur: Any, t: Any, sync_name: str, update_items: list[tuple[str, DeadLetter]]
+) -> None:
+    """Chunked ``MERGE`` update-only for ``DlqBackend.reconcile()``'s
+    ``updates`` (#1121). No ``WHEN NOT MATCHED`` branch — these touch
+    existing rows only and must never insert one, unlike
+    ``_upsert_dlq_entries``. ``sync_name`` is a single shared bound
+    parameter (every update in one ``reconcile()`` call is for the same
+    sync), not a per-row ``VALUES`` column.
+    """
+    # One slot reserved for the shared sync_name param, same style as
+    # reconcile()'s own remove_ids chunking just above.
+    rows_per_chunk = max(1, (_NATIVE_PARAM_LIMIT - 1) // len(_DLQ_UPDATE_COLUMNS))
+    for start in range(0, len(update_items), rows_per_chunk):
+        chunk = update_items[start : start + rows_per_chunk]
+        values_sql = ", ".join(["(?, ?, ?, ?, ?, ?, ?)"] * len(chunk))
+        params: list[Any] = []
+        for entry_id, entry in chunk:
+            params.extend(
+                (
+                    entry_id,
+                    json.dumps(entry.record),
+                    entry.error_message,
+                    entry.http_status,
+                    entry.timestamp,
+                    entry.attempts,
+                    entry.sync_run_id,
+                )
+            )
+        params.append(sync_name)
+        cur.execute(
+            f"MERGE INTO {t} AS t USING (VALUES {values_sql}) AS "
+            f"s({', '.join(_DLQ_UPDATE_COLUMNS)}) "
+            "ON t.id = s.id AND t.sync_name = ? "
+            "WHEN MATCHED THEN UPDATE SET record = parse_json(s.record), "
+            "error_message = s.error_message, http_status = s.http_status, "
+            "ts = s.ts, attempts = s.attempts, sync_run_id = s.sync_run_id",
+            params,
+        )
+
+
 class DatabricksWarehouseDlqBackend:
     """``DlqBackend`` backed by a ``_drt_dlq`` row per dead-letter entry (#1108)."""
 
@@ -520,48 +610,35 @@ class DatabricksWarehouseDlqBackend:
     def append(
         self, sync_name: str, entries: list[DeadLetter], *, max_records: int = 10_000
     ) -> int:
-        """Per-entry probe-then-``UPDATE``-or-``INSERT`` — see module
-        docstring for why (no scratch table, matches every other dialect's
-        one-statement-per-entry shape, #1121 tracks batching separately).
+        """Chunked ``MERGE`` upsert via ``_upsert_dlq_entries`` (#1121) —
+        was a per-entry probe-then-``UPDATE``-or-``INSERT`` loop; see that
+        function's docstring for the ``sync_name``-on-match precedent it
+        preserves. Reusing ``replace()``'s own upsert shape here also
+        closes a real, if narrow, race the old probe-then-act loop had:
+        two concurrent writers touching the same ``sync_name``/``id``
+        could both pass the existence probe and both ``INSERT``, producing
+        a duplicate row — a single-statement ``MERGE`` cannot.
 
-        The ``UPDATE`` branch does not touch ``sync_name`` on a match,
-        matching Postgres's/Snowflake's own DLQ upsert precedent (this is a
-        shared, pre-existing property across every dialect, not new here):
-        matching globally on ``id`` and reassigning ``sync_name`` on match
-        would let one sync's ``append()`` silently move another sync's row
-        into its own queue on an id collision."""
+        Two entries sharing an id within one call would make Delta's
+        ``MERGE`` raise ("matched a single row from the target table with
+        multiple rows of the source table") — possible for legacy,
+        pre-#955 dead letters whose id is a content hash (the same
+        collision class Codex review caught on #1128's Round 1 attempt,
+        guarded the same way on the Postgres leg, #1129). Deduping here by
+        id, keeping the last occurrence, preserves the old loop's
+        last-wins outcome.
+        """
         if not entries:
             return self.depth(sync_name)
+        deduped: dict[str, DeadLetter] = {}
+        for entry in entries:
+            deduped[entry.id] = entry
         conn = _connect(self._profile)
         try:
             self._ensure_table(conn)
             t = _qualified(self._profile, _DLQ_TABLE)
             cur = conn.cursor()
-            for entry in entries:
-                cur.execute(f"SELECT 1 FROM {t} WHERE id = ?", [entry.id])
-                exists = cur.fetchone() is not None
-                if exists:
-                    cur.execute(
-                        f"UPDATE {t} SET record = parse_json(?), "
-                        "error_message = ?, http_status = ?, ts = ?, attempts = ?, "
-                        "sync_run_id = ? WHERE id = ?",
-                        [
-                            json.dumps(entry.record),
-                            entry.error_message,
-                            entry.http_status,
-                            entry.timestamp,
-                            entry.attempts,
-                            entry.sync_run_id,
-                            entry.id,
-                        ],
-                    )
-                else:
-                    cur.execute(
-                        f"INSERT INTO {t} (id, sync_name, record, error_message, "
-                        "http_status, ts, attempts, sync_run_id) "
-                        "SELECT ?, ?, parse_json(?), ?, ?, ?, ?, ?",
-                        _dlq_merge_values_params(sync_name, entry),
-                    )
+            _upsert_dlq_entries(cur, t, sync_name, list(deduped.values()))
             if max_records > 0:
                 cur.execute(
                     f"DELETE FROM {t} WHERE sync_name = ? AND id NOT IN ("
@@ -611,26 +688,7 @@ class DatabricksWarehouseDlqBackend:
             new_ids = {entry.id for entry in entries}
             stale_ids = list(existing_ids - new_ids)
 
-            rows_per_chunk = _rows_per_chunk(len(_DLQ_COLUMNS))
-            for start in range(0, len(entries), rows_per_chunk):
-                chunk_entries = entries[start : start + rows_per_chunk]
-                values_sql = ", ".join(["(?, ?, ?, ?, ?, ?, ?, ?)"] * len(chunk_entries))
-                params: list[Any] = []
-                for entry in chunk_entries:
-                    params.extend(_dlq_merge_values_params(sync_name, entry))
-                cur.execute(
-                    f"MERGE INTO {t} AS t USING (VALUES {values_sql}) AS "
-                    f"s({', '.join(_DLQ_COLUMNS)}) "
-                    "ON t.id = s.id "
-                    "WHEN MATCHED THEN UPDATE SET record = parse_json(s.record), "
-                    "error_message = s.error_message, http_status = s.http_status, "
-                    "ts = s.ts, attempts = s.attempts, sync_run_id = s.sync_run_id "
-                    "WHEN NOT MATCHED THEN INSERT (id, sync_name, record, error_message, "
-                    "http_status, ts, attempts, sync_run_id) VALUES (s.id, s.sync_name, "
-                    "parse_json(s.record), s.error_message, s.http_status, s.ts, "
-                    "s.attempts, s.sync_run_id)",
-                    params,
-                )
+            _upsert_dlq_entries(cur, t, sync_name, entries)
 
             if stale_ids:
                 chunk_size = _NATIVE_PARAM_LIMIT - 1  # one slot for sync_name
@@ -717,22 +775,8 @@ class DatabricksWarehouseDlqBackend:
                         f"DELETE FROM {t} WHERE sync_name = ? AND id IN ({placeholders})",
                         [sync_name, *chunk],
                     )
-            for entry_id, entry in updates.items():
-                cur.execute(
-                    f"UPDATE {t} SET record = parse_json(?), error_message = ?, "
-                    "http_status = ?, ts = ?, attempts = ?, sync_run_id = ? "
-                    "WHERE sync_name = ? AND id = ?",
-                    [
-                        json.dumps(entry.record),
-                        entry.error_message,
-                        entry.http_status,
-                        entry.timestamp,
-                        entry.attempts,
-                        entry.sync_run_id,
-                        sync_name,
-                        entry_id,
-                    ],
-                )
+            if updates:
+                _update_dlq_entries(cur, t, sync_name, list(updates.items()))
         finally:
             conn.close()
         return self.read(sync_name)
