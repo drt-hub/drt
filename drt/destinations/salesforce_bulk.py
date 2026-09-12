@@ -87,7 +87,26 @@ class SalesforceBulkDestination:
             auth_headers = {"Authorization": f"Bearer {access_token}"}
 
             # STEP 3 — serialize records to CSV
-            fieldnames = list(self._records[0].keys())
+            #
+            # A field that first appears in a later record (not
+            # self._records[0]) must still get its own CSV column
+            # (#1134) -- otherwise csv.DictWriter's default
+            # extrasaction='raise' fails the entire ingest job the
+            # moment it reaches that record, rather than any earlier
+            # record silently losing data. No per-signature-run grouping
+            # needed (unlike #1091's SQL-destination fix): this is a
+            # one-shot flat-file write with no target-table DEFAULT a
+            # blank cell could wrongly override, so a plain union of
+            # every record's keys, in first-seen order, plus
+            # DictWriter's own default restval='' for a record missing a
+            # column, is sufficient.
+            fieldnames: list[str] = []
+            seen: set[str] = set()
+            for record in self._records:
+                for key in record:
+                    if key not in seen:
+                        seen.add(key)
+                        fieldnames.append(key)
             buf = io.StringIO()
             writer = csv.DictWriter(buf, fieldnames=fieldnames, lineterminator="\n")
             writer.writeheader()
