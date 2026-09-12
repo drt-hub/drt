@@ -47,20 +47,6 @@ def _mock_conn(*, fetchone=None, fetchall=None) -> MagicMock:
     return conn
 
 
-def _sequenced_conn(*, fetchone_sequence=None, fetchall=None) -> MagicMock:
-    """A mock connection whose cursor's fetchone() returns a different value
-    on each call -- needed for tests where one method call issues more than
-    one probe (e.g. append()'s per-row existence check followed by depth()'s
-    final COUNT)."""
-    conn = MagicMock()
-    cur = MagicMock()
-    if fetchone_sequence is not None:
-        cur.fetchone.side_effect = fetchone_sequence
-    cur.fetchall.return_value = fetchall or []
-    conn.cursor.return_value = cur
-    return conn
-
-
 class TestEnsureTableExists:
     """The concurrent-first-use race guard shared by all three stores'
     _ensure_table() -- same shape as DatabricksSource.ensure_managed_schema()
@@ -418,11 +404,11 @@ class TestDatabricksWarehouseDlqBackend:
         ):
             assert DatabricksWarehouseDlqBackend(_profile()).append("s", []) == 0
 
-    def test_append_inserts_new_entry_via_probe_then_insert(self) -> None:
-        """No scratch table, no MERGE -- see module docstring for why an
-        earlier scratch-table + MERGE draft broke the documented escape
-        hatch and was replaced with this per-entry probe."""
-        conn = _sequenced_conn(fetchone_sequence=[None, (1,)])  # probe absent, then depth()
+    def test_append_upserts_via_values_merge(self) -> None:
+        """#1121: append() moved from a per-entry probe-then-UPDATE-or-INSERT
+        loop onto replace()'s own chunked MERGE (_upsert_dlq_entries) -- see
+        module docstring for why the two now share one helper."""
+        conn = _mock_conn(fetchone=(1,))  # depth() at the end
         with (
             patch("drt.state.warehouse_databricks._connect", return_value=conn),
             patch("drt.sources.databricks.DatabricksSource.ensure_managed_schema"),
@@ -434,17 +420,19 @@ class TestDatabricksWarehouseDlqBackend:
 
         assert depth == 1
         executed = [str(c.args[0]) for c in conn.cursor.return_value.execute.call_args_list]
-        assert any(sql.startswith("SELECT 1 FROM") for sql in executed)
-        assert any(sql.startswith("INSERT INTO") and "parse_json(?)" in sql for sql in executed)
+        assert not any(sql.startswith("SELECT 1 FROM") for sql in executed)
         assert not any(sql.startswith("UPDATE") for sql in executed)
-        assert not any("MERGE" in sql or "CREATE OR REPLACE" in sql for sql in executed)
+        merge_sql = next(sql for sql in executed if sql.startswith("MERGE INTO"))
+        assert "USING (VALUES" in merge_sql
+        assert "parse_json(s.record)" in merge_sql
+        assert merge_sql.index("WHEN MATCHED") < merge_sql.index("WHEN NOT MATCHED THEN")
 
-    def test_append_updates_existing_entry_via_probe_then_update(self) -> None:
-        """The UPDATE branch must not touch sync_name -- matching every
-        other dialect's DLQ upsert precedent (see append()'s docstring):
-        reassigning sync_name on an id match would let one sync's append()
-        silently move another sync's row into its own queue."""
-        conn = _sequenced_conn(fetchone_sequence=[(1,), (1,)])  # probe exists, then depth()
+    def test_append_merge_does_not_touch_sync_name_on_match(self) -> None:
+        """Matching globally on id and reassigning sync_name on a match
+        would let one sync's append() silently move another sync's row
+        into its own queue on an id collision -- same precedent as every
+        other dialect's DLQ upsert (see _upsert_dlq_entries's docstring)."""
+        conn = _mock_conn(fetchone=(1,))
         with (
             patch("drt.state.warehouse_databricks._connect", return_value=conn),
             patch("drt.sources.databricks.DatabricksSource.ensure_managed_schema"),
@@ -454,11 +442,63 @@ class TestDatabricksWarehouseDlqBackend:
         ):
             DatabricksWarehouseDlqBackend(_profile()).append("s", [_dead_letter()])
 
-        executed = [str(c.args[0]) for c in conn.cursor.return_value.execute.call_args_list]
-        update_sql = next(sql for sql in executed if sql.startswith("UPDATE"))
-        assert "parse_json(?)" in update_sql
-        assert "sync_name" not in update_sql
-        assert not any(sql.startswith("INSERT INTO") for sql in executed)
+        merge_call = next(
+            c
+            for c in conn.cursor.return_value.execute.call_args_list
+            if str(c.args[0]).startswith("MERGE INTO")
+        )
+        sql = str(merge_call.args[0])
+        update_clause = sql[sql.index("WHEN MATCHED") : sql.index("WHEN NOT MATCHED")]
+        assert "sync_name" not in update_clause
+
+    def test_append_dedupes_entries_sharing_the_same_id(self) -> None:
+        """Two VALUES rows with the same id would make Delta's MERGE raise
+        ("matched a single row from the target table with multiple rows of
+        the source table") -- dedup keeps the last, matching the old
+        per-entry loop's last-wins outcome."""
+        conn = _mock_conn(fetchone=(1,))
+        entries = [
+            _dead_letter(id="id-1", error_message="first"),
+            _dead_letter(id="id-1", error_message="second"),
+        ]
+        with (
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+            patch("drt.sources.databricks.DatabricksSource.ensure_managed_schema"),
+            patch(
+                "drt.sources.databricks.DatabricksSource.managed_table_exists", return_value=True
+            ),
+        ):
+            DatabricksWarehouseDlqBackend(_profile()).append("s", entries)
+
+        merge_calls = [
+            c
+            for c in conn.cursor.return_value.execute.call_args_list
+            if str(c.args[0]).startswith("MERGE INTO")
+        ]
+        assert len(merge_calls) == 1
+        _, params = merge_calls[0].args
+        assert len(params) == 8  # one row, not two
+        assert params[3] == "second"  # error_message column, last entry wins
+
+    def test_append_chunks_many_entries_across_multiple_merge_statements(self) -> None:
+        conn = _mock_conn(fetchone=(40,))
+        entries = [_dead_letter(id=f"id-{i}", record={"n": i}) for i in range(40)]
+        with (
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+            patch("drt.sources.databricks.DatabricksSource.ensure_managed_schema"),
+            patch(
+                "drt.sources.databricks.DatabricksSource.managed_table_exists", return_value=True
+            ),
+        ):
+            DatabricksWarehouseDlqBackend(_profile()).append("s", entries)
+
+        merge_calls = [
+            c
+            for c in conn.cursor.return_value.execute.call_args_list
+            if str(c.args[0]).startswith("MERGE INTO")
+        ]
+        assert len(merge_calls) == 2
+        assert sum(len(c.args[1]) // 8 for c in merge_calls) == 40
 
     def test_replace_upserts_via_values_merge_in_databricks_clause_order(self) -> None:
         """The #955 failure class this guards against, closed without a
@@ -628,7 +668,10 @@ class TestDatabricksWarehouseDlqBackend:
         assert len(delete_calls) == 2
         assert sum(len(c.args[1]) - 1 for c in delete_calls) == 300
 
-    def test_reconcile_updates_via_parse_json(self) -> None:
+    def test_reconcile_updates_via_values_merge(self) -> None:
+        """#1121: reconcile()'s updates moved from a per-entry UPDATE loop
+        onto a chunked, update-only MERGE (_update_dlq_entries) -- no WHEN
+        NOT MATCHED branch, since these touch existing rows only."""
         conn = _mock_conn(fetchall=[])
         with (
             patch("drt.state.warehouse_databricks._connect", return_value=conn),
@@ -650,15 +693,43 @@ class TestDatabricksWarehouseDlqBackend:
                 },
             )
 
-        update_call = next(
+        merge_call = next(
             c
             for c in conn.cursor.return_value.execute.call_args_list
-            if str(c.args[0]).startswith("UPDATE")
+            if str(c.args[0]).startswith("MERGE INTO")
         )
-        sql, params = update_call.args
-        assert "parse_json(?)" in sql
-        assert params[0] == '{"a": 2}'
-        assert params[-2:] == ["s", "id-1"]
+        sql, params = merge_call.args
+        assert "USING (VALUES" in sql
+        assert "parse_json(s.record)" in sql
+        assert "WHEN NOT MATCHED" not in sql
+        assert params[0] == "id-1"
+        assert params[1] == '{"a": 2}'
+        assert params[-1] == "s"  # sync_name, bound last
+
+    def test_reconcile_chunks_many_updates_across_multiple_merge_statements(self) -> None:
+        """36 rows fit per MERGE at 7 columns under the native 255-marker
+        limit (one slot reserved for the shared sync_name param) -- 300
+        updates need nine chunks."""
+        conn = _mock_conn(fetchall=[])
+        updates = {f"id-{i}": _dead_letter(id=f"id-{i}", record={"n": i}) for i in range(300)}
+        with (
+            patch("drt.state.warehouse_databricks._connect", return_value=conn),
+            patch("drt.sources.databricks.DatabricksSource.ensure_managed_schema"),
+            patch(
+                "drt.sources.databricks.DatabricksSource.managed_table_exists", return_value=True
+            ),
+        ):
+            DatabricksWarehouseDlqBackend(_profile()).reconcile("s", updates=updates)
+
+        merge_calls = [
+            c
+            for c in conn.cursor.return_value.execute.call_args_list
+            if str(c.args[0]).startswith("MERGE INTO")
+        ]
+        assert len(merge_calls) == 9
+        # Each chunk's params are 7 columns per row plus one trailing
+        # sync_name -- subtract that shared param before dividing by 7.
+        assert sum((len(c.args[1]) - 1) // 7 for c in merge_calls) == 300
 
     def test_read_reconstructs_dead_letter_from_a_json_string_variant(self) -> None:
         row = ("id-1", '{"a": 1}', "boom", 500, "t0", 2, "run-1")
