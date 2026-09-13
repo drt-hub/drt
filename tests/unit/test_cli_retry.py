@@ -905,6 +905,58 @@ def test_retry_exception_path_does_not_delete_an_untouched_legacy_duplicate(
     assert len(store.read("post_users")) == 2
 
 
+def test_retry_exception_path_does_not_delete_an_untouched_legacy_duplicate_beyond_limit(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review round 3 on #1146: the first version of the exception-path
+    guard only excluded ``to_retry``'s own unprocessed suffix from
+    ``remove_ids`` — it missed a legacy duplicate excluded from ``to_retry``
+    entirely by ``--limit`` (``untouched``). Queue: [A, B, A2], where A and
+    A2 are byte-identical legacy lines (same content-derived id) and B is
+    distinct. ``--limit 2`` + ``batch_size: 1`` means ``to_retry = [A, B]``
+    and ``untouched = [A2]``; the fake destination succeeds on A (confirming
+    it) and raises on B. Before this round's fix, A's id would still land in
+    the exception-path reconcile()'s remove_ids (nothing in `to_retry`'s
+    unprocessed suffix — just B — shares A's id), silently deleting A2 too
+    even though `--limit` was never meant to touch it."""
+    from drt.cli.commands.retry import replay_dead_letters
+    from drt.config.parser import load_syncs
+    from drt.state.dlq import decode_dead_letter_line
+
+    (project / "syncs" / "post_users.yml").write_text(
+        yaml.dump(
+            {
+                "name": "post_users",
+                "model": "ref('users')",
+                "destination": {"type": "rest_api", "url": "https://example.com"},
+                "sync": {"batch_size": 1, "dlq": {"enabled": True}},
+            }
+        )
+    )
+    line_a = '{"record": {"n": 1}, "error_message": "boom"}'
+    line_b = '{"record": {"n": 2}, "error_message": "boom"}'
+    # Preconditions: A/A2 collide on id, and B's id genuinely differs from
+    # A's — otherwise this test wouldn't isolate what it claims to.
+    assert decode_dead_letter_line(line_a).id == decode_dead_letter_line(line_a).id
+    assert decode_dead_letter_line(line_a).id != decode_dead_letter_line(line_b).id
+
+    dlq_path = project / ".drt" / "dlq" / "post_users.jsonl"
+    dlq_path.parent.mkdir(parents=True, exist_ok=True)
+    dlq_path.write_text(line_a + "\n" + line_b + "\n" + line_a + "\n")
+
+    store = DlqStore(project)
+    _patch_dest(monkeypatch, _FakeRaisingDestination(succeed_calls=1))
+    sync = next(s for s in load_syncs(project) if s.name == "post_users")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        replay_dead_letters(sync, project_dir=project, limit=2)
+
+    # All three physical entries survive: A's confirmed delivery isn't safe
+    # to reconcile while A2 -- excluded from this retry entirely by --limit
+    # -- still shares its id.
+    assert len(store.read("post_users")) == 3
+
+
 def test_retry_excludes_unattributed_skip_from_ledger_and_audit(
     ledger_audit_project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

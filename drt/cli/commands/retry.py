@@ -409,33 +409,46 @@ def replay_dead_letters(
         # covers the whole accumulated set.
         #
         # Guard against a legacy-duplicate-id false removal (Codex review on
-        # #1146, round 2): reconcile()'s remove_ids is an id-set filter, not
-        # an occurrence-count filter (see LocalDlqStore.reconcile()) -- if a
-        # legacy (pre-#955) DLQ holds two byte-identical entries that
-        # therefore share the same content-derived id, and one was confirmed
-        # by an earlier (fully processed) chunk while its twin is still
-        # sitting in an unprocessed one (the chunk that raised, or anything
-        # after it), naming that id in remove_ids would delete BOTH physical
-        # entries, silently discarding the untouched one. `to_retry` beyond
-        # `processed_count` is exactly that unprocessed remainder; excluding
-        # its ids from remove_ids here means an id with a still-queued twin
-        # is simply left queued instead -- costs one more retry cycle,
-        # nothing is lost. This was already reachable pre-#1146 via `--limit`
-        # (whose own `untouched` list gets no equivalent guard here -- that
-        # end-of-function call is unchanged by this PR, tracked as #1147
-        # instead), but round 1 of this review under-weighted that this
-        # except block newly exposes it to a *default*, no-`--limit`
-        # `drt retry` too, which is why it's guarded here rather than left to
-        # #1147 alongside the pre-existing `--limit` manifestation.
-        # `updates` is not filtered the same way: a legacy id's twin getting
-        # the same bumped `attempts`/error content is a miscount, not a
-        # deletion, and is left to #1147.
+        # #1146, rounds 2 and 3): reconcile()'s remove_ids is an id-set
+        # filter, not an occurrence-count filter (see LocalDlqStore.reconcile()
+        # ) -- if a legacy (pre-#955) DLQ holds two byte-identical entries
+        # that therefore share the same content-derived id, and one was
+        # confirmed by an earlier (fully processed) chunk while its twin was
+        # never actually retried this invocation, naming that id in
+        # remove_ids would delete BOTH physical entries, silently discarding
+        # the untouched one. An entry can escape being retried this
+        # invocation two ways: it's in `to_retry` but a later exception cut
+        # the loop off before its own chunk ran (`to_retry[processed_count:]`
+        # -- see the comment above `processed_count`'s declaration), or it
+        # was excluded from `to_retry` altogether by `--limit` (`untouched`,
+        # computed near the top of this function). Both sets name entries
+        # this call will not touch either way, so excluding both from
+        # remove_ids here means an id with a still-queued twin is simply
+        # left queued instead of removed -- costs one more retry cycle,
+        # nothing is lost. Round 1 of this review under-weighted that this
+        # except block makes the hazard reachable on a *default*,
+        # no-`--limit` `drt retry` too (previously it needed an explicit
+        # `--limit` truncation), which is why it's guarded here at all;
+        # round 3 caught that the first version of this guard checked only
+        # `to_retry`'s unprocessed suffix and missed `untouched`, so a
+        # `--limit`-excluded twin could still be wrongly deleted by this
+        # except block even though `--limit` was never meant to touch it.
+        #
+        # The always-run, end-of-function reconcile() call below (reached
+        # only when the loop completes with no exception) has no equivalent
+        # `untouched` guard and is unchanged by this PR -- fixing it touches
+        # already-reviewed, already-shipped behavior outside this fix's
+        # scope, tracked as #1147 alongside the narrower `updates`
+        # cross-contamination case (a legacy id's untouched twin can pick up
+        # the same bumped `attempts`/error content without being deleted;
+        # not filtered here either, since overwriting is not the same
+        # failure mode as silently losing the entry).
         #
         # This closes the *exception* path only: a hard process kill
         # (SIGKILL/OOM) between an earlier chunk's success and this handler
         # still loses that window, same as run_sync()'s own per-batch
         # persistence does between batches (#1127, remaining scope).
-        unprocessed_ids = {e.id for e in to_retry[processed_count:]}
+        unprocessed_ids = {e.id for e in to_retry[processed_count:]} | {e.id for e in untouched}
         safe_remove_ids = remove_ids - unprocessed_ids
         try:
             store.reconcile(sync.name, remove_ids=safe_remove_ids, updates=updates)
