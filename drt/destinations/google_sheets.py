@@ -97,17 +97,26 @@ class GoogleSheetsDestination:
                 # under the narrower header set can't be retroactively
                 # backfilled with a new column. Fail loudly instead,
                 # matching FileDestination (#1002/#1006)'s identical raise
-                # for the same cross-batch column-mismatch shape.
+                # for the same cross-batch shape.
+                #
+                # A record simply MISSING a column the header set has is
+                # fine, though (Codex review round 2 on #1144) -- it
+                # creates no positional ambiguity, since the row below is
+                # rendered against `headers` with `row.get(h, "")` either
+                # way, and the first batch's own union step above already
+                # tolerates exactly this shape (a record missing a key
+                # another first-batch record had). Raising on it too would
+                # be an inconsistency this fix itself introduced, not
+                # something inherited from FileDestination's stricter
+                # precedent (which has no equivalent first-batch leniency
+                # to be inconsistent with).
                 expected = set(headers)
                 for index, record in enumerate(records):
-                    actual = set(record)
-                    if actual != expected:
-                        missing = sorted(expected - actual)
-                        unexpected = sorted(actual - expected)
+                    unexpected = sorted(set(record) - expected)
+                    if unexpected:
                         raise ValueError(
                             f"Google Sheets column mismatch at batch record {index}: "
-                            f"expected {headers!r}; missing {missing!r}; "
-                            f"unexpected {unexpected!r}"
+                            f"expected {headers!r}; unexpected {unexpected!r}"
                         )
 
             rows = [[str(row.get(h, "")) for h in headers] for row in records]

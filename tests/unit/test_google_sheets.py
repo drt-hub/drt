@@ -206,6 +206,44 @@ class TestGoogleSheetsDestination:
         # Only batch 1's append should have gone through.
         assert mock_values.append.call_count == 1
 
+    def test_later_batch_missing_an_optional_column_is_blank_filled_not_rejected(
+        self,
+    ) -> None:
+        """P1, Codex review round 2 on #1144: a later-batch record simply
+        missing a column the header set has creates no positional
+        ambiguity (row.get(h, "") blank-fills it either way), and the
+        first batch's own union step already tolerates exactly this shape
+        for a record within IT. Rejecting it only from the second batch
+        onward would be an inconsistency this fix itself introduces --
+        only a genuinely UNEXPECTED (new) column needs the raise."""
+        from drt.destinations.google_sheets import GoogleSheetsDestination
+
+        config = GoogleSheetsDestinationConfig(
+            type="google_sheets",
+            spreadsheet_id="test-id",
+            sheet="Sheet1",
+            mode="append",
+        )
+
+        mock_service = MagicMock()
+        mock_sheets = mock_service.spreadsheets.return_value
+        mock_values = mock_sheets.values.return_value
+        mock_values.append.return_value.execute.return_value = {"updates": {"updatedRows": 1}}
+
+        with patch(
+            "drt.destinations.google_sheets._build_sheets_service",
+            return_value=mock_service,
+        ):
+            dest = GoogleSheetsDestination()
+            result1 = dest.load([{"id": 1, "name": "Alice", "note": "vip"}], config, _options())
+            result2 = dest.load([{"id": 2, "name": "Bob"}], config, _options())
+
+        assert result1.success == 1
+        assert result2.success == 1
+        assert result2.failed == 0
+        appended_rows = mock_values.append.call_args.kwargs["body"]["values"]
+        assert appended_rows == [["2", "Bob", ""]]
+
     def test_empty_records(self) -> None:
         from drt.destinations.google_sheets import GoogleSheetsDestination
 
