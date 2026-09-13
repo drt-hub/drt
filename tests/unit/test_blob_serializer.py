@@ -41,6 +41,22 @@ class TestSerialiseRecordsText:
         assert content_type == "text/csv"
         assert content_encoding is None
 
+    def test_csv_does_not_drop_a_field_appearing_only_in_a_later_record(self) -> None:
+        """#1134: columns used to be derived from records[0] alone, so
+        csv.DictWriter's default extrasaction='raise' failed the whole
+        batch the moment it reached a record with a field records[0]
+        didn't have -- rather than any record silently losing data. Every
+        record's keys must contribute to the column set, in first-seen
+        order, with a blank cell for a record missing a given column."""
+        records = [
+            {"id": 1, "name": "alice"},
+            {"id": 2, "name": "bob", "note": "flagged"},
+        ]
+        body, _, _ = serialise_records(records, format="csv", compression="none")
+
+        text = body.decode("utf-8")
+        assert text.splitlines() == ["id,name,note", "1,alice,", "2,bob,flagged"]
+
     def test_json_emits_array_of_objects(self) -> None:
         records = [{"id": 1}, {"id": 2}]
         body, content_type, content_encoding = serialise_records(

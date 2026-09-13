@@ -68,8 +68,25 @@ def serialise_records(
 
 
 def _serialise_csv(records: list[dict[str, Any]]) -> str:
+    """A field that first appears in a later record (not ``records[0]``) must
+    still get its own CSV column (#1134) — otherwise ``csv.DictWriter``'s
+    default ``extrasaction='raise'`` fails the *entire* batch the moment it
+    reaches that record, rather than any earlier record silently losing
+    data. Unlike the SQL destinations' write-column-list fix (#1091), there
+    is no target-table ``DEFAULT`` a blank cell could wrongly override here
+    — this is a one-shot flat-file write, not an upsert against existing
+    rows — so a plain union of every record's keys, in first-seen order,
+    plus ``DictWriter``'s own default ``restval=''`` for a record missing a
+    column, is sufficient without per-signature-run grouping.
+    """
     buf = io.StringIO()
-    columns = list(records[0].keys())
+    columns: list[str] = []
+    seen: set[str] = set()
+    for record in records:
+        for key in record:
+            if key not in seen:
+                seen.add(key)
+                columns.append(key)
     writer = csv.DictWriter(buf, fieldnames=columns)
     writer.writeheader()
     writer.writerows(records)
