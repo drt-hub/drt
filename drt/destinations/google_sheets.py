@@ -42,6 +42,18 @@ def _build_sheets_service(config: GoogleSheetsDestinationConfig) -> Any:
 class GoogleSheetsDestination:
     """Write records to a Google Sheets spreadsheet."""
 
+    def __init__(self) -> None:
+        # The engine constructs one destination per sync and calls load() on
+        # that same instance once per sync.batch_size-sized chunk of the
+        # source (#1143) -- keep the header order instance-local so only the
+        # FIRST batch clears the sheet / establishes columns, and every
+        # later batch appends instead of re-clearing. range=config.sheet is
+        # a bare sheet name, which in A1 notation means the WHOLE sheet --
+        # re-clearing on a later batch would wipe every earlier batch's
+        # just-written rows (the default sync.batch_size of 100 meant any
+        # sync over 100 records lost all but its last batch).
+        self._headers: list[str] | None = None
+
     def load(
         self,
         records: list[dict[str, Any]],
@@ -59,11 +71,57 @@ class GoogleSheetsDestination:
             sheets = service.spreadsheets()
             range_name = config.sheet
 
-            headers = list(records[0].keys())
-            rows = [headers] + [[str(row.get(h, "")) for h in headers] for row in records]
-            body = {"values": rows}
+            first_batch = self._headers is None
+            if first_batch:
+                # No positional constraint yet -- nothing has been written
+                # for this sync, so a heterogeneous first batch is handled
+                # the same way #1091/#1134 widen a SQL destination's write
+                # columns: union every record's keys (first-seen order) and
+                # blank-fill a record missing a given column (Codex review
+                # on #1144). The stricter "no new column" rule below only
+                # applies from the *second* batch onward, once earlier rows
+                # are already committed under this header set.
+                headers: list[str] = []
+                seen: set[str] = set()
+                for record in records:
+                    for key in record:
+                        if key not in seen:
+                            seen.add(key)
+                            headers.append(key)
+            else:
+                assert self._headers is not None
+                headers = self._headers
+                # A field a later batch introduces that this sync's
+                # remembered header set doesn't have can't be silently
+                # handled: a sheet is positional, and rows already written
+                # under the narrower header set can't be retroactively
+                # backfilled with a new column. Fail loudly instead,
+                # matching FileDestination (#1002/#1006)'s identical raise
+                # for the same cross-batch shape.
+                #
+                # A record simply MISSING a column the header set has is
+                # fine, though (Codex review round 2 on #1144) -- it
+                # creates no positional ambiguity, since the row below is
+                # rendered against `headers` with `row.get(h, "")` either
+                # way, and the first batch's own union step above already
+                # tolerates exactly this shape (a record missing a key
+                # another first-batch record had). Raising on it too would
+                # be an inconsistency this fix itself introduced, not
+                # something inherited from FileDestination's stricter
+                # precedent (which has no equivalent first-batch leniency
+                # to be inconsistent with).
+                expected = set(headers)
+                for index, record in enumerate(records):
+                    unexpected = sorted(set(record) - expected)
+                    if unexpected:
+                        raise ValueError(
+                            f"Google Sheets column mismatch at batch record {index}: "
+                            f"expected {headers!r}; unexpected {unexpected!r}"
+                        )
 
-            if config.mode == "overwrite":
+            rows = [[str(row.get(h, "")) for h in headers] for row in records]
+
+            if first_batch and config.mode == "overwrite":
                 sheets.values().clear(
                     spreadsheetId=config.spreadsheet_id,
                     range=range_name,
@@ -73,20 +131,55 @@ class GoogleSheetsDestination:
                     spreadsheetId=config.spreadsheet_id,
                     range=range_name,
                     valueInputOption="RAW",
-                    body=body,
+                    body={"values": [headers, *rows]},
                 ).execute()
             else:
+                # mode: append (always), or mode: overwrite's later batches
+                # (the sheet already holds this sync's header + earlier
+                # rows from the first batch -- append after them rather
+                # than re-clearing).
                 sheets.values().append(
                     spreadsheetId=config.spreadsheet_id,
                     range=range_name,
                     valueInputOption="RAW",
-                    body={"values": rows[1:]},
+                    body={"values": rows},
                 ).execute()
 
             result.success = len(records)
+            if first_batch:
+                self._headers = headers
 
         except Exception as e:
             result.failed = len(records)
             result.errors.append(str(e))
 
         return result
+
+    def finalize_sync(
+        self,
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> None:
+        """End-of-sync hook (duck-typed, see ``drt/engine/sync.py``): drop
+        this run's remembered header state.
+
+        Mirrors ``FileDestination``'s identical reset (#1002/#1006). A
+        CLI/engine-driven sync gets a fresh ``GoogleSheetsDestination`` per
+        run (via ``get_destination()``), so this never fires mid-run in
+        that path. It matters for a library caller that reuses one
+        instance across multiple ``run_sync()`` calls -- without this
+        reset, that second run's own first batch would be treated as a
+        later batch of the first run (appended, sheet never re-cleared)
+        instead of getting its own fresh first-batch treatment.
+
+        Known gap, not fixed here (Codex review on #1144, tracked as
+        #1145): this hook isn't guaranteed to run on every exit path --
+        the engine's batch loop has no ``finally`` around the
+        ``finalize_sync()`` dispatch itself, so a source-side exception
+        mid-extraction skips it and leaves ``self._headers`` stale for the
+        next reused-instance run. Shared with ``FileDestination``'s
+        identical exposure; fixing it is an engine-level change, not a
+        destination-level one.
+        """
+        del config, sync_options
+        self._headers = None
