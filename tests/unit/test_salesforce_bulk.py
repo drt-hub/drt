@@ -118,6 +118,59 @@ def test_finalize_full_lifecycle_success(monkeypatch: pytest.MonkeyPatch) -> Non
     assert result.row_errors == []
 
 
+def test_finalize_csv_does_not_drop_a_field_appearing_only_in_a_later_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1134: the CSV fieldnames used to be derived from self._records[0]
+    alone, so csv.DictWriter's default extrasaction='raise' failed the
+    whole ingest job the moment it reached a record with a field
+    self._records[0] didn't have -- rather than any record silently
+    losing data. Every record's keys must contribute to the column set,
+    in first-seen order, with a blank cell for a record missing a given
+    column."""
+    _set_sf_env(monkeypatch)
+    dest = SalesforceBulkDestination()
+    config = _config()
+    options = _sync_options()
+
+    dest.stage(
+        [
+            {"id": "1", "name": "Alice"},
+            {"id": "2", "name": "Bob", "note": "flagged"},
+        ],
+        config,
+        options,
+    )
+
+    mock_client = MagicMock()
+    mock_client.post.side_effect = [
+        _make_response(200, {"access_token": "tok123"}),
+        _make_response(200, {"id": "job001"}),
+    ]
+    mock_client.put.return_value = _make_response(201, {})
+    mock_client.patch.return_value = _make_response(200, {})
+    mock_client.get.return_value = _make_response(
+        200,
+        {
+            "state": "JobComplete",
+            "numberRecordsProcessed": 2,
+            "numberRecordsFailed": 0,
+        },
+    )
+
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value.__enter__.return_value = mock_client
+        result = dest.finalize(config, options)
+
+    assert result.success == 2
+    assert result.failed == 0
+    csv_body = mock_client.put.call_args.kwargs["content"].decode("utf-8")
+    lines = csv_body.splitlines()
+    assert lines[0] == "id,name,note"
+    assert lines[1] == "1,Alice,"
+    assert lines[2] == "2,Bob,flagged"
+
+
 # ---------------------------------------------------------------------------
 # Test 3: finalize() with failed records — row_errors populated
 # ---------------------------------------------------------------------------
