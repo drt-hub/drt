@@ -855,6 +855,56 @@ def test_retry_persists_dlq_removal_for_earlier_chunk_before_a_later_chunk_raise
     assert remaining[0].attempts == 1  # unchanged default — never attempted
 
 
+def test_retry_exception_path_does_not_delete_an_untouched_legacy_duplicate(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review round 2 on #1146: the exception-path reconcile() must not
+    delete an untouched legacy dead letter just because a *different*
+    physical entry sharing its content-derived id was confirmed by an
+    earlier chunk. Two byte-identical pre-#955 legacy lines (no ``id`` key)
+    decode to the same SHA-256 fallback id (``decode_dead_letter_line()``).
+    batch_size: 1 puts them in separate chunks; the fake destination
+    succeeds on the first load() call (confirming the first physical entry)
+    and raises on the second (the second physical entry's own chunk — it is
+    never actually attempted). Before the guard, naming that shared id in
+    the exception-path reconcile()'s remove_ids would delete both physical
+    entries, silently discarding the untouched second one."""
+    from drt.cli.commands.retry import replay_dead_letters
+    from drt.config.parser import load_syncs
+    from drt.state.dlq import decode_dead_letter_line
+
+    (project / "syncs" / "post_users.yml").write_text(
+        yaml.dump(
+            {
+                "name": "post_users",
+                "model": "ref('users')",
+                "destination": {"type": "rest_api", "url": "https://example.com"},
+                "sync": {"batch_size": 1, "dlq": {"enabled": True}},
+            }
+        )
+    )
+    raw_line = '{"record": {"n": 1}, "error_message": "boom"}'
+    # Precondition: confirm these two byte-identical legacy lines really do
+    # collide on id before relying on that to make the rest of the test
+    # meaningful (otherwise this would pass vacuously).
+    assert decode_dead_letter_line(raw_line).id == decode_dead_letter_line(raw_line).id
+
+    dlq_path = project / ".drt" / "dlq" / "post_users.jsonl"
+    dlq_path.parent.mkdir(parents=True, exist_ok=True)
+    dlq_path.write_text(raw_line + "\n" + raw_line + "\n")
+
+    store = DlqStore(project)
+    _patch_dest(monkeypatch, _FakeRaisingDestination(succeed_calls=1))
+    sync = next(s for s in load_syncs(project) if s.name == "post_users")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        replay_dead_letters(sync, project_dir=project)
+
+    # Both physical entries survive: the confirmed one wasn't safe to remove
+    # without also removing its untouched, never-attempted twin.
+    assert len(store.read("post_users")) == 2
+
+
 def test_retry_excludes_unattributed_skip_from_ledger_and_audit(
     ledger_audit_project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

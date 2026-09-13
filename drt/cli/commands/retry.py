@@ -244,6 +244,16 @@ def replay_dead_letters(
     # out of scope here, same as it is for run_sync().
     remove_ids: set[str] = set()
     updates: dict[str, DeadLetter] = {}
+    # How many of `to_retry`'s entries have a *fully processed* chunk behind
+    # them -- incremented only once a chunk's own result has actually been
+    # handled below (not merely fetched), so a chunk whose own processing
+    # raises partway through is conservatively NOT counted as processed. Used
+    # only by the except block's legacy-duplicate-id guard (see there); the
+    # staged path's single group covers the whole of `to_retry` and only
+    # reaches here after `finalize()` already succeeded (its own failure is
+    # handled earlier, before this loop), so this count is not meaningful
+    # for it beyond that same conservative default.
+    processed_count = 0
 
     try:
         for retry_group, result in retry_groups:
@@ -384,6 +394,11 @@ def replay_dead_letters(
                             audit_entries,
                             delivered_at,
                         )
+
+            # Only now -- after this chunk's result has been fully handled
+            # above -- does it count as processed for the except block's
+            # legacy-duplicate-id guard.
+            processed_count += len(retry_group)
     except Exception:
         # A later chunk's dest.load() raised (documented, uncaught contract --
         # drt/destinations/base.py) before the final reconcile() below could
@@ -393,25 +408,37 @@ def replay_dead_letters(
         # bump here, unlike the staged path above where finalize() already
         # covers the whole accumulated set.
         #
-        # Pre-existing, NOT introduced by this except block (Codex review on
-        # #1146): reconcile()'s remove_ids is an id-set filter, not an
-        # occurrence-count filter (see LocalDlqStore.reconcile()) -- if a
+        # Guard against a legacy-duplicate-id false removal (Codex review on
+        # #1146, round 2): reconcile()'s remove_ids is an id-set filter, not
+        # an occurrence-count filter (see LocalDlqStore.reconcile()) -- if a
         # legacy (pre-#955) DLQ holds two byte-identical entries that
-        # therefore share the same content-derived id, and one of them was
-        # actually confirmed by an earlier chunk while its twin sits
-        # untouched in a later, never-reached chunk, this call removes BOTH
-        # physical entries, not just the confirmed one. This exact shape
-        # already exists on `main` via `--limit`'s `untouched` list; this
-        # except block is a second call site with the same hazard, not a new
-        # one. Tracked as #1147 (legacy-id migration or an occurrence-aware
-        # reconcile(), neither of which belongs in this fix).
+        # therefore share the same content-derived id, and one was confirmed
+        # by an earlier (fully processed) chunk while its twin is still
+        # sitting in an unprocessed one (the chunk that raised, or anything
+        # after it), naming that id in remove_ids would delete BOTH physical
+        # entries, silently discarding the untouched one. `to_retry` beyond
+        # `processed_count` is exactly that unprocessed remainder; excluding
+        # its ids from remove_ids here means an id with a still-queued twin
+        # is simply left queued instead -- costs one more retry cycle,
+        # nothing is lost. This was already reachable pre-#1146 via `--limit`
+        # (whose own `untouched` list gets no equivalent guard here -- that
+        # end-of-function call is unchanged by this PR, tracked as #1147
+        # instead), but round 1 of this review under-weighted that this
+        # except block newly exposes it to a *default*, no-`--limit`
+        # `drt retry` too, which is why it's guarded here rather than left to
+        # #1147 alongside the pre-existing `--limit` manifestation.
+        # `updates` is not filtered the same way: a legacy id's twin getting
+        # the same bumped `attempts`/error content is a miscount, not a
+        # deletion, and is left to #1147.
         #
         # This closes the *exception* path only: a hard process kill
         # (SIGKILL/OOM) between an earlier chunk's success and this handler
         # still loses that window, same as run_sync()'s own per-batch
         # persistence does between batches (#1127, remaining scope).
+        unprocessed_ids = {e.id for e in to_retry[processed_count:]}
+        safe_remove_ids = remove_ids - unprocessed_ids
         try:
-            store.reconcile(sync.name, remove_ids=remove_ids, updates=updates)
+            store.reconcile(sync.name, remove_ids=safe_remove_ids, updates=updates)
         except Exception as reconcile_exc:
             # Don't mask the original destination failure with a DLQ
             # bookkeeping failure (e.g. ObjectStoreDlqBackend exhausting its
