@@ -389,14 +389,22 @@ def replay_dead_letters(
         # drt/destinations/base.py) before the final reconcile() below could
         # run. Persist whatever remove_ids/updates were already accumulated
         # from fully-processed EARLIER chunks -- the chunk that raised (and
-        # everything after it) stays completely untouched, the same
-        # "some entries never attempted" shape --limit's `untouched` list
-        # already produces and already accepts (including the SHA-256
-        # legacy-duplicate-id collision risk noted above, since a
-        # not-yet-attempted duplicate can never be named in remove_ids here
-        # either). No updates entry and no attempts bump for the raising
-        # chunk -- unlike the staged path above, where finalize() already
-        # covers the whole accumulated set, this chunk was never attempted.
+        # everything after it) is never given an updates entry or attempts
+        # bump here, unlike the staged path above where finalize() already
+        # covers the whole accumulated set.
+        #
+        # Pre-existing, NOT introduced by this except block (Codex review on
+        # #1146): reconcile()'s remove_ids is an id-set filter, not an
+        # occurrence-count filter (see LocalDlqStore.reconcile()) -- if a
+        # legacy (pre-#955) DLQ holds two byte-identical entries that
+        # therefore share the same content-derived id, and one of them was
+        # actually confirmed by an earlier chunk while its twin sits
+        # untouched in a later, never-reached chunk, this call removes BOTH
+        # physical entries, not just the confirmed one. This exact shape
+        # already exists on `main` via `--limit`'s `untouched` list; this
+        # except block is a second call site with the same hazard, not a new
+        # one. Tracked as #1147 (legacy-id migration or an occurrence-aware
+        # reconcile(), neither of which belongs in this fix).
         #
         # This closes the *exception* path only: a hard process kill
         # (SIGKILL/OOM) between an earlier chunk's success and this handler
