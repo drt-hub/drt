@@ -47,6 +47,51 @@ class TestGoogleSheetsDestination:
         mock_values.clear.assert_called_once()
         mock_values.update.assert_called_once()
 
+    def test_first_batch_unions_columns_instead_of_failing_on_a_heterogeneous_batch(
+        self,
+    ) -> None:
+        """Codex review on #1144: no positional constraint applies yet for
+        the very first batch of a sync -- nothing has been written. A field
+        appearing only in a later record of that same first batch should
+        be unioned into the header set and blank-filled, not treated as a
+        column mismatch (the strict raise only makes sense from the
+        SECOND batch onward, once earlier rows are already committed under
+        a fixed header set)."""
+        from drt.destinations.google_sheets import GoogleSheetsDestination
+
+        config = GoogleSheetsDestinationConfig(
+            type="google_sheets",
+            spreadsheet_id="test-id",
+            sheet="Sheet1",
+            mode="overwrite",
+        )
+        records = [
+            {"id": 1, "name": "Alice"},
+            {"id": 2, "name": "Bob", "note": "flagged"},
+        ]
+
+        mock_service = MagicMock()
+        mock_sheets = mock_service.spreadsheets.return_value
+        mock_values = mock_sheets.values.return_value
+        mock_values.clear.return_value.execute.return_value = {}
+        mock_values.update.return_value.execute.return_value = {"updatedRows": 3}
+
+        with patch(
+            "drt.destinations.google_sheets._build_sheets_service",
+            return_value=mock_service,
+        ):
+            dest = GoogleSheetsDestination()
+            result = dest.load(records, config, _options())
+
+        assert result.success == 2
+        assert result.failed == 0
+        written = mock_values.update.call_args.kwargs["body"]["values"]
+        assert written == [
+            ["id", "name", "note"],
+            ["1", "Alice", ""],
+            ["2", "Bob", "flagged"],
+        ]
+
     def test_overwrite_second_batch_does_not_reclear_and_clobber_first(self) -> None:
         """The engine calls load() once per sync.batch_size chunk of the
         source, all on the SAME destination instance (drt/engine/sync.py's

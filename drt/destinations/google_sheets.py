@@ -72,27 +72,43 @@ class GoogleSheetsDestination:
             range_name = config.sheet
 
             first_batch = self._headers is None
-            headers = self._headers if self._headers is not None else list(records[0].keys())
-
-            # A field a later batch introduces that this sync's remembered
-            # header set doesn't have can't be silently handled the way
-            # #1091/#1134 widen a SQL destination's write columns: a sheet
-            # is positional, and rows already written under the narrower
-            # header set can't be retroactively backfilled with a new
-            # column. Fail loudly instead, matching FileDestination
-            # (#1002/#1006)'s identical raise for the same cross-batch
-            # column-mismatch shape.
-            expected = set(headers)
-            for index, record in enumerate(records):
-                actual = set(record)
-                if actual != expected:
-                    missing = sorted(expected - actual)
-                    unexpected = sorted(actual - expected)
-                    raise ValueError(
-                        f"Google Sheets column mismatch at batch record {index}: "
-                        f"expected {headers!r}; missing {missing!r}; "
-                        f"unexpected {unexpected!r}"
-                    )
+            if first_batch:
+                # No positional constraint yet -- nothing has been written
+                # for this sync, so a heterogeneous first batch is handled
+                # the same way #1091/#1134 widen a SQL destination's write
+                # columns: union every record's keys (first-seen order) and
+                # blank-fill a record missing a given column (Codex review
+                # on #1144). The stricter "no new column" rule below only
+                # applies from the *second* batch onward, once earlier rows
+                # are already committed under this header set.
+                headers: list[str] = []
+                seen: set[str] = set()
+                for record in records:
+                    for key in record:
+                        if key not in seen:
+                            seen.add(key)
+                            headers.append(key)
+            else:
+                assert self._headers is not None
+                headers = self._headers
+                # A field a later batch introduces that this sync's
+                # remembered header set doesn't have can't be silently
+                # handled: a sheet is positional, and rows already written
+                # under the narrower header set can't be retroactively
+                # backfilled with a new column. Fail loudly instead,
+                # matching FileDestination (#1002/#1006)'s identical raise
+                # for the same cross-batch column-mismatch shape.
+                expected = set(headers)
+                for index, record in enumerate(records):
+                    actual = set(record)
+                    if actual != expected:
+                        missing = sorted(expected - actual)
+                        unexpected = sorted(actual - expected)
+                        raise ValueError(
+                            f"Google Sheets column mismatch at batch record {index}: "
+                            f"expected {headers!r}; missing {missing!r}; "
+                            f"unexpected {unexpected!r}"
+                        )
 
             rows = [[str(row.get(h, "")) for h in headers] for row in records]
 
@@ -146,6 +162,15 @@ class GoogleSheetsDestination:
         reset, that second run's own first batch would be treated as a
         later batch of the first run (appended, sheet never re-cleared)
         instead of getting its own fresh first-batch treatment.
+
+        Known gap, not fixed here (Codex review on #1144, tracked as
+        #1145): this hook isn't guaranteed to run on every exit path --
+        the engine's batch loop has no ``finally`` around the
+        ``finalize_sync()`` dispatch itself, so a source-side exception
+        mid-extraction skips it and leaves ``self._headers`` stale for the
+        next reused-instance run. Shared with ``FileDestination``'s
+        identical exposure; fixing it is an engine-level change, not a
+        destination-level one.
         """
         del config, sync_options
         self._headers = None
