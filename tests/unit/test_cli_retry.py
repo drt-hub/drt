@@ -763,11 +763,6 @@ def test_retry_persists_ledger_and_audit_for_earlier_chunk_before_a_later_chunk_
     """#1127/#1128: a later chunk's dest.load() raising (the documented,
     uncaught Destination.load() contract) must not lose an earlier chunk's
     already-confirmed delivery from the idempotency ledger / audit trail.
-    DLQ removal itself is deliberately NOT persisted per chunk (a per-chunk
-    reconcile() would make retry cost quadratic — caught in Codex review on
-    #1128 — since DlqBackend has no cheaper mutation-only primitive), so
-    both entries stay queued after the raise. The ledger mark is still the
-    load-bearing half: it's what stops the next retry from resending id=1.
     batch_size: 1 forces id=1 and id=2 into separate chunks; the fake
     destination succeeds on the first load() call and raises on the
     second."""
@@ -803,25 +798,61 @@ def test_retry_persists_ledger_and_audit_for_earlier_chunk_before_a_later_chunk_
     assert sorted(sum(ledger.marked, [])) == ["1"]
     logged_keys = {e.record_key for _, _, _, _, entries in audit_trail.logged for e in entries}
     assert logged_keys == {"1"}
-    # ... but DLQ removal is deferred to one reconcile() call at the very
-    # end, which this raise never reached — both entries are still queued.
-    assert [e.record["id"] for e in store.read("post_users")] == [1, 2]
+    # ... and the fix for the other half of #1127 means the exception
+    # handler also reconciles what was accumulated so far before re-raising,
+    # so id=1 is already removed from the DLQ too — only id=2 (never
+    # attempted) is still queued.
+    assert [e.record["id"] for e in store.read("post_users")] == [2]
 
-    # The fix is load-bearing: prove it by retrying again against a fresh
-    # destination that would happily resend id=1. The ledger mark from the
-    # first (crashed) attempt must make this retry skip id=1 as a duplicate
-    # and only actually send id=2.
+    # A subsequent retry against a fresh destination only re-sends the
+    # genuinely-untouched id=2 — id=1 is gone, not a duplicate to skip.
     second_dest = _FakeDestination(fail_ids=set())
     _patch_dest(monkeypatch, second_dest)
     summary = replay_dead_letters(sync, project_dir=ledger_audit_project)
 
-    assert summary["skipped_duplicate"] == 1
+    assert summary["skipped_duplicate"] == 0
     assert summary["succeeded"] == 1
     assert [rec["id"] for call in second_dest.calls for rec in call] == [2]
-    # id=1 is a duplicate hit, not a failure — it stays queued for an
-    # operator to inspect (see the ledger-hit contract above), while id=2
-    # is gone.
-    assert [e.record["id"] for e in store.read("post_users")] == [1]
+    assert store.read("post_users") == []
+
+
+def test_retry_persists_dlq_removal_for_earlier_chunk_before_a_later_chunk_raises_without_ledger(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1127, remaining half, without a ledger backstop: the default project
+    fixture has no ``state.idempotency`` enabled, so nothing but the DLQ
+    itself protects against resending an already-delivered record. Before
+    this fix, a later chunk's dest.load() raising skipped the single
+    end-of-function reconcile() entirely, leaving id=1 (already delivered by
+    the first, successful load() call) still queued for a plain resend on
+    the next retry. The fix reconciles whatever was accumulated so far
+    inside the exception handler before re-raising, so id=1 must already be
+    gone from the DLQ here — while id=2 (never attempted, since it's the
+    chunk whose load() raised) stays queued with its ``attempts`` count
+    unchanged, proving it was never touched rather than attempted-and-failed."""
+    from drt.cli.commands.retry import replay_dead_letters
+    from drt.config.parser import load_syncs
+
+    (project / "syncs" / "post_users.yml").write_text(
+        yaml.dump(
+            {
+                "name": "post_users",
+                "model": "ref('users')",
+                "destination": {"type": "rest_api", "url": "https://example.com"},
+                "sync": {"batch_size": 1, "dlq": {"enabled": True}},
+            }
+        )
+    )
+    store = _seed(project, [1, 2])
+    _patch_dest(monkeypatch, _FakeRaisingDestination(succeed_calls=1))
+    sync = next(s for s in load_syncs(project) if s.name == "post_users")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        replay_dead_letters(sync, project_dir=project)
+
+    remaining = store.read("post_users")
+    assert [e.record["id"] for e in remaining] == [2]
+    assert remaining[0].attempts == 1  # unchanged default — never attempted
 
 
 def test_retry_excludes_unattributed_skip_from_ledger_and_audit(
