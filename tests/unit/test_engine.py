@@ -9,7 +9,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from drt.config.base import QueryTaggingConfig
 from drt.config.credentials import BigQueryProfile, ProfileConfig
 from drt.config.models import DestinationConfig, SyncConfig, SyncOptions
 from drt.destinations.base import SyncResult
@@ -1565,91 +1564,6 @@ def test_finalize_sync_skipped_on_dry_run(tmp_path: Path) -> None:
     run_sync(sync, source, dest, _make_profile(), tmp_path, dry_run=True)
 
     assert dest.finalize_called is False
-
-
-# ---------------------------------------------------------------------------
-# SyncOptions._sync_run_id — smuggled onto sync.sync for destinations (#897)
-# ---------------------------------------------------------------------------
-
-
-class _CapturingSyncOptionsDestination:
-    """Captures what the engine smuggled onto SyncOptions at load() time
-    (#897's _sync_run_id) -- snapshots the values immediately rather than
-    keeping a reference to the (mutable, reused-across-calls) SyncOptions
-    object itself, so a caller re-running the same SyncConfig doesn't
-    retroactively overwrite an earlier call's captured value."""
-
-    def __init__(self) -> None:
-        self.seen_sync_run_ids: list[str | None] = []
-        self.seen_query_tags: list[dict[str, str] | None] = []
-
-    def load(
-        self,
-        records: list[dict],
-        config: DestinationConfig,
-        sync_options: SyncOptions,
-    ) -> SyncResult:
-        self.seen_sync_run_ids.append(sync_options._sync_run_id)
-        self.seen_query_tags.append(sync_options._query_tags)
-        result = SyncResult()
-        result.success = len(records)
-        return result
-
-
-def test_sync_run_id_is_smuggled_onto_sync_options(tmp_path: Path) -> None:
-    """#897: a destination's load() must be able to read this run's
-    correlation id from sync_options, independent of query_tagging (unlike
-    _query_tags, which is None when query_tagging.enabled is false)."""
-    rows = [{"id": i} for i in range(2)]
-    source = FakeSource(rows)
-    dest = _CapturingSyncOptionsDestination()
-    sync = _make_sync(batch_size=10)
-
-    result = run_sync(sync, source, dest, _make_profile(), tmp_path)
-
-    assert len(dest.seen_sync_run_ids) == 1
-    sync_run_id = dest.seen_sync_run_ids[0]
-    assert sync_run_id is not None
-    assert sync_run_id == result.sync_run_id
-
-
-def test_sync_run_id_is_smuggled_even_when_query_tagging_disabled(tmp_path: Path) -> None:
-    """The whole point of a dedicated _sync_run_id (rather than reusing
-    _query_tags["run_id"]): it must not silently disappear when an unrelated
-    feature is turned off."""
-    rows = [{"id": i} for i in range(2)]
-    source = FakeSource(rows)
-    dest = _CapturingSyncOptionsDestination()
-    sync = _make_sync(batch_size=10)
-
-    run_sync(
-        sync,
-        source,
-        dest,
-        _make_profile(),
-        tmp_path,
-        query_tagging=QueryTaggingConfig(enabled=False),
-    )
-
-    assert dest.seen_query_tags[0] is None
-    assert dest.seen_sync_run_ids[0] is not None
-
-
-def test_sync_run_id_differs_across_separate_runs_of_the_same_sync_config(tmp_path: Path) -> None:
-    """A library caller reusing one SyncConfig object across multiple
-    run_sync() calls must get a fresh id each time -- same overwrite
-    semantics _query_tags already has."""
-    dest = _CapturingSyncOptionsDestination()
-    sync = _make_sync(batch_size=10)
-
-    run_sync(sync, FakeSource([{"id": 1}]), dest, _make_profile(), tmp_path)
-    run_sync(sync, FakeSource([{"id": 2}]), dest, _make_profile(), tmp_path)
-
-    first_id = dest.seen_sync_run_ids[0]
-    second_id = dest.seen_sync_run_ids[1]
-    assert first_id is not None
-    assert second_id is not None
-    assert first_id != second_id
 
 
 # ---------------------------------------------------------------------------

@@ -164,6 +164,7 @@ One is explicitly internal:
 | `StagedDestination` | `drt/destinations/base.py` | Public, frozen (optional-capability) |
 | `OrphanCleanup` | `drt/destinations/base.py` | Public, frozen (optional-capability) |
 | `QueryableDestination` | `drt/destinations/base.py` | Public, frozen (optional-capability extension of `Destination`) |
+| `NativeIdempotencyCapable` | `drt/destinations/base.py` | Public, **not yet frozen** — new in [#897](https://github.com/drt-hub/drt/issues/897), config surface only; no destination implements it yet, so its method set (`supports_native_idempotency_key(config)`) hasn't been exercised against a real caller. Freeze it the same way `ManagedTableCapable` was — once a first destination wires it, or once #304's freeze-scope review reaches it. |
 | `RowCountable` | `drt/destinations/sql_utils.py` | Public, frozen (optional-capability) |
 | `RateLimitKeyed` | `drt/destinations/rate_limiter.py` | Public, frozen — implemented by every `DestinationConfig` member |
 | `RateLimiterBackend` | `drt/destinations/rate_limiter.py` | Public, frozen — the cross-process rate-limit coordination extension point ([ADR 0012](0012-cross-process-rate-limit-coordination.md)) |

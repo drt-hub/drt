@@ -348,10 +348,13 @@ class NativeIdempotencyCapable(Protocol):
     own ``load()`` for retry-safety against drt's per-destination retry (#277,
     #897).
 
-    Stability: Provisional (no destination implements this yet — the config
-    field ships on every SaaS/SMTP/ads destination before any wiring lands,
-    so ``drt validate`` can warn when it's set on a type that still ignores
-    it; see ``drt/cli/commands/validate.py``'s ``_find_ineffective_native_idempotency_keys``).
+    Stability: Public, **not yet frozen** (see ADR 0007's freeze-scope
+    table — same status as ``ManagedTableCapable`` when it shipped: no
+    destination implements this yet, so its method set hasn't been
+    exercised against a real caller. The config field ships on every
+    SaaS/SMTP/ads destination before any wiring lands, so ``drt validate``
+    can warn when it's set on a type that still ignores it; see
+    ``drt/cli/commands/validate.py``'s ``_find_ineffective_native_idempotency_keys``).
 
     Support is an opt-in capability the CLI checks structurally —
     ``isinstance(dest, NativeIdempotencyCapable)`` — rather than a

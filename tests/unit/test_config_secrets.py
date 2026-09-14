@@ -112,6 +112,23 @@ def test_secret_reason_still_catches_literal_secret_next_to_a_template() -> None
     assert reason == "Stripe live secret key"
 
 
+def test_secret_reason_catches_generic_high_entropy_secret_next_to_a_template() -> None:
+    """#897 (Codex review of PR #1150, round 4): round 3's fix only ensured
+    the six known-provider *patterns* still matched next to a template --
+    it left the entropy *fallback* blanket-exempted whenever the value
+    contained ``${`` or ``{{`` anywhere, so a generic high-entropy secret
+    with no known-provider pattern (most real secrets) followed by a Jinja
+    suffix would go undetected. Template expressions are now stripped
+    before the entropy check runs, not used to bypass it outright."""
+    generic_secret = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"
+    assert _secret_reason(generic_secret) is not None  # sanity: flagged alone
+
+    reason = _secret_reason(generic_secret + "{{ var('suffix') }}")
+
+    assert reason is not None
+    assert reason.startswith("high entropy")
+
+
 def test_entropy_helpers_cover_boundary_cases() -> None:
     assert _shannon_entropy("") == 0.0
     assert not _looks_high_entropy("short-token")
