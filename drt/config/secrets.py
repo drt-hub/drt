@@ -118,24 +118,29 @@ def _is_secret_field(field_name: str) -> bool:
 
 
 def _secret_reason(value: str) -> str | None:
-    if "${" in value:
-        return None
-    if "{{" in value:
-        # A Jinja template (e.g. a compact per-record idempotency key like
-        # `{{row.customer_uuid}}`, #897) renders as dense mixed-case
-        # identifier text with no whitespace once collapsed -- exactly what
-        # _looks_high_entropy() is designed to flag in a real secret. Same
-        # exemption shape as the `${ENV_VAR}` check above: a literal secret
-        # sitting next to a template expression would also go unflagged,
-        # which is an accepted, pre-existing tradeoff for that check.
-        return None
     stripped = value.strip()
     if not stripped:
         return None
 
+    # Known-pattern matching runs before the template exemption below: a
+    # literal secret (e.g. `sk_live_...`) hardcoded alongside a `${VAR}` or
+    # `{{ jinja }}` reference must still be caught, precise regex matches
+    # have effectively no false-positive rate regardless of what else is in
+    # the string (#897, Codex review of PR #1150).
     for name, pattern in _KNOWN_SECRET_PATTERNS:
         if pattern.search(stripped):
             return name
+
+    if "${" in value or "{{" in value:
+        # An env-var reference or Jinja template (e.g. a compact per-record
+        # idempotency key like `{{row.customer_uuid}}`, #897) renders as
+        # dense, often mixed-case text with no whitespace -- exactly what
+        # _looks_high_entropy() below is designed to flag in a real secret,
+        # and it has no way to distinguish "template expression" from
+        # "random-looking literal" once rendered. Only the entropy fallback
+        # is exempted here; a literal known-pattern secret is still caught
+        # above regardless of an adjacent template reference.
+        return None
 
     if _looks_high_entropy(stripped):
         return f"high entropy ({_shannon_entropy(stripped):.2f})"

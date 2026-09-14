@@ -99,6 +99,19 @@ def test_secret_reason_exempts_jinja_templates(tmp_path: Path) -> None:
     assert find_hardcoded_secrets(tmp_path) == []
 
 
+def test_secret_reason_still_catches_literal_secret_next_to_a_template() -> None:
+    """#897 (Codex review of PR #1150, round 3): the Jinja/env-var exemption
+    only suppresses the entropy fallback -- a literal known-pattern secret
+    hardcoded alongside a template reference (e.g. someone appending a
+    Jinja suffix to a real Stripe key) must still be flagged, not silently
+    waved through by an early return."""
+    value = "sk_live_" + "a" * 24 + "{{ var('suffix') }}"
+    reason = _secret_reason(value)
+
+    assert reason is not None
+    assert reason == "Stripe live secret key"
+
+
 def test_entropy_helpers_cover_boundary_cases() -> None:
     assert _shannon_entropy("") == 0.0
     assert not _looks_high_entropy("short-token")
