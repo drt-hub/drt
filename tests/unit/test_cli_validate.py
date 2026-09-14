@@ -275,3 +275,89 @@ def test_cli_validate_json_includes_secret_warnings(
     warning = payload["results"][0]["warnings"][0]
     assert warning["path"] == "destination.auth.token"
     assert "hardcoded secret" in warning["message"]
+
+
+# ---------------------------------------------------------------------------
+# native_idempotency_key — no-op warning (#897)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_validate_warns_on_ineffective_native_idempotency_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#897: rest_api is not yet in _NATIVE_IDEMPOTENCY_WIRED_TYPES (no
+    wiring lands until a follow-up PR), so setting native_idempotency_key on
+    it today must warn rather than silently do nothing."""
+    sync = {
+        **VALID_SYNC,
+        "destination": {
+            **VALID_SYNC["destination"],
+            "native_idempotency_key": "{{ row.id }}",
+        },
+    }
+    _write_sync(tmp_path / "syncs", "idem", sync)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["validate"])
+
+    assert result.exit_code == 0
+    assert "WARNING" in result.output
+    assert "native_idempotency_key" in result.output
+    assert "'rest_api'" in result.output
+    assert "no effect" in result.output
+
+
+def test_cli_validate_does_not_warn_when_native_idempotency_key_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_sync(tmp_path / "syncs", "no-idem", VALID_SYNC)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["validate"])
+
+    assert result.exit_code == 0
+    assert "native_idempotency_key" not in result.output
+
+
+def test_cli_validate_native_idempotency_warning_does_not_promote_under_strict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deliberately lower severity than the secret-scan warning: an
+    ineffective idempotency key is a missed opportunity, not a security
+    issue, so --strict must not fail the run over it alone."""
+    sync = {
+        **VALID_SYNC,
+        "destination": {
+            **VALID_SYNC["destination"],
+            "native_idempotency_key": "{{ row.id }}",
+        },
+    }
+    _write_sync(tmp_path / "syncs", "idem", sync)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["validate", "--strict"])
+
+    assert result.exit_code == 0
+    assert "WARNING" in result.output
+
+
+def test_cli_validate_json_includes_idempotency_warnings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sync = {
+        **VALID_SYNC,
+        "destination": {
+            **VALID_SYNC["destination"],
+            "native_idempotency_key": "{{ row.id }}",
+        },
+    }
+    _write_sync(tmp_path / "syncs", "idem", sync)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["validate", "--output", "json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    warning = payload["results"][0]["idempotency_warnings"][0]
+    assert warning["destination_type"] == "rest_api"
+    assert "no effect" in warning["message"]

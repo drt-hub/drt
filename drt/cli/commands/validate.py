@@ -13,6 +13,7 @@ tests and library callers) keeps working.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -36,6 +37,50 @@ from drt.cli.output import (
     print_validation_error,
     print_validation_ok,
 )
+
+# (#897) Destination types whose load() actually consumes
+# native_idempotency_key. Starts empty -- this field ships on every
+# destination that could plausibly need it before any wiring lands, so at
+# this point setting it does nothing on ANY type. A follow-up PR adds an
+# entry here in the same change that wires the field into that destination's
+# load() -- keep this set exactly "types where the field does something,"
+# not aspirational, so it never drifts from what's actually implemented.
+_NATIVE_IDEMPOTENCY_WIRED_TYPES: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class _NativeIdempotencyFinding:
+    """A sync whose destination.native_idempotency_key is set on a
+    destination type with no wiring for it yet (#897) -- accepted by the
+    config schema (so it's never silently dropped) but currently a no-op."""
+
+    sync_name: str
+    destination_type: str
+
+    @property
+    def message(self) -> str:
+        return (
+            f"destination.native_idempotency_key is set on a '{self.destination_type}' "
+            "destination, which has no wiring for it yet — this currently has no effect"
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "sync": self.sync_name,
+            "destination_type": self.destination_type,
+            "message": self.message,
+        }
+
+
+def _find_ineffective_native_idempotency_keys(
+    syncs: list[SyncConfig],
+) -> list[_NativeIdempotencyFinding]:
+    findings = []
+    for s in syncs:
+        key = getattr(s.destination, "native_idempotency_key", None)
+        if key is not None and s.destination.type not in _NATIVE_IDEMPOTENCY_WIRED_TYPES:
+            findings.append(_NativeIdempotencyFinding(s.name, s.destination.type))
+    return findings
 
 
 def _fnmatch_token(name: str, token: str) -> bool:
@@ -105,6 +150,7 @@ def validate(
 
     result = load_syncs_safe(Path("."))
     secret_findings = find_hardcoded_secrets(Path("."))
+    idempotency_findings = _find_ineffective_native_idempotency_keys(result.syncs)
 
     if select or exclude:
         # Resolve method/glob selectors against the parseable syncs. Broken
@@ -150,6 +196,7 @@ def validate(
         result.errors = {k: v for k, v in result.errors.items() if k in error_names}
         result.deprecations = {k: v for k, v in result.deprecations.items() if k in selected_names}
         secret_findings = [f for f in secret_findings if f.sync_name in selected_names]
+        idempotency_findings = [f for f in idempotency_findings if f.sync_name in selected_names]
         if not result.syncs and not result.errors:
             if is_state_only_select(select):
                 console.print(
@@ -160,6 +207,9 @@ def validate(
             raise typer.Exit(1)
 
     secret_warnings_by_sync = _group_secret_findings(secret_findings)
+    idempotency_warnings_by_sync: dict[str, list[_NativeIdempotencyFinding]] = {}
+    for f in idempotency_findings:
+        idempotency_warnings_by_sync.setdefault(f.sync_name, []).append(f)
 
     if output == "json":
         # Collect all deprecations into a flat list for JSON output
@@ -175,6 +225,9 @@ def validate(
                 "deprecations": result.deprecations.get(s.name, []),
                 "warnings": [
                     finding.to_dict() for finding in secret_warnings_by_sync.get(s.name, [])
+                ],
+                "idempotency_warnings": [
+                    finding.to_dict() for finding in idempotency_warnings_by_sync.get(s.name, [])
                 ],
             }
             if strict and entry["warnings"]:
@@ -229,6 +282,9 @@ def validate(
 
         for finding in secret_warnings_by_sync.get(sync.name, []):
             console.print(f"  [yellow]WARNING[/yellow] {finding.message}")
+
+        for idempotency_finding in idempotency_warnings_by_sync.get(sync.name, []):
+            console.print(f"  [yellow]WARNING[/yellow] {idempotency_finding.message}")
 
         if check_connection:
             from drt.cli.output import print_connection_test_result

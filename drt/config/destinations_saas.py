@@ -82,6 +82,13 @@ class RestApiDestinationConfig(DescribableConfig):
     pagination: PaginationConfig | None = None
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
+    # Retry-safety for fire-and-forget destinations (#897): a Jinja template
+    # sent as `native_idempotency_header`'s value on every request. `record` mode
+    # renders per record (row in scope); `body_mode: batch` renders per HTTP
+    # chunk (no single row -- referencing `row` there is a config error, not
+    # a silent empty string). Wiring lives in rest_api.py, not here.
+    native_idempotency_key: str | None = None
+    native_idempotency_header: str = "Idempotency-Key"  # Stripe's de-facto convention
 
     @field_validator("max_records_per_request", mode="after")
     @classmethod
@@ -128,6 +135,10 @@ class SlackDestinationConfig(DescribableConfig):
     block_kit: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
+    # (#897) Accepted but a no-op: Slack Incoming Webhooks have no native
+    # client-supplied idempotency mechanism to wire this to -- `drt validate`
+    # warns rather than silently ignoring it.
+    native_idempotency_key: str | None = None
 
     def _describe_detail(self) -> str:
         return "webhook"
@@ -160,6 +171,11 @@ class TwilioDestinationConfig(DescribableConfig):
     message_template: str
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
+    # (#897) Accepted but a no-op: Twilio's `I-Twilio-Idempotency-Token` is
+    # documented only for newer resources (Conversations Orchestrator,
+    # Broadcast API, Monitor Alarms), not the classic Messages endpoint this
+    # destination calls -- `drt validate` warns rather than silently ignoring it.
+    native_idempotency_key: str | None = None
 
     def _describe_detail(self) -> str:
         return f"{self.from_number}"
@@ -199,6 +215,10 @@ class DiscordDestinationConfig(DescribableConfig):
     embeds: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
+    # (#897) Accepted but a no-op: no documented native idempotency mechanism
+    # on Discord's webhook execute endpoint -- `drt validate` warns rather
+    # than silently ignoring it.
+    native_idempotency_key: str | None = None
 
     def _describe_detail(self) -> str:
         return "webhook"
@@ -222,6 +242,10 @@ class GitHubActionsDestinationConfig(DescribableConfig):
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
+    # (#897) Accepted but a no-op: `workflow_dispatch` has no idempotency
+    # guarantee and its response body carries no run id to dedup against --
+    # `drt validate` warns rather than silently ignoring it.
+    native_idempotency_key: str | None = None
 
     def _describe_detail(self) -> str:
         return f"{self.owner}/{self.repo}"
@@ -566,6 +590,10 @@ class SendGridDestinationConfig(BaseModel):
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
+    # (#897) Accepted but a no-op: SendGrid v3 `mail/send` has no
+    # idempotency-key support -- `drt validate` warns rather than silently
+    # ignoring it.
+    native_idempotency_key: str | None = None
 
     def describe(self) -> str:
         return f"sendgrid ({self.from_email})"
@@ -593,6 +621,10 @@ class LinearDestinationConfig(BaseModel):
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
+    # (#897) Accepted but a no-op: Linear's GraphQL API documents no
+    # idempotency key or dedup-capable mutation id for `issueCreate` --
+    # `drt validate` warns rather than silently ignoring it.
+    native_idempotency_key: str | None = None
 
     def describe(self) -> str:
         return "linear (issue)"
@@ -619,6 +651,11 @@ class TeamsDestinationConfig(DescribableConfig):
     adaptive_card: bool = False
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
+    # (#897) Accepted but a no-op: Microsoft's own community threads describe
+    # duplicate Incoming Webhook delivery as an open, unresolved issue with no
+    # client-side lever to pull -- `drt validate` warns rather than silently
+    # ignoring it.
+    native_idempotency_key: str | None = None
 
     def _describe_detail(self) -> str:
         return "webhook"
@@ -642,6 +679,11 @@ class JiraDestinationConfig(BaseModel):
     issue_id_field: str = "issue_id"  # row key that indicates update mode
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
+    # (#897) Accepted but a no-op: Jira Cloud's create-issue endpoint has no
+    # idempotency key (Atlassian's own developer community confirms this is a
+    # known gap with no first-party fix) -- `drt validate` warns rather than
+    # silently ignoring it.
+    native_idempotency_key: str | None = None
 
     def describe(self) -> str:
         return f"jira ({self.project_key})"
@@ -671,6 +713,10 @@ class EmailSmtpDestinationConfig(DescribableConfig):
     username_env: str | None = None
     password: str | None = None
     password_env: str | None = None
+    # (#897) Accepted but a no-op: SMTP has no concept of a client-supplied
+    # dedup key at the protocol level -- `drt validate` warns rather than
+    # silently ignoring it.
+    native_idempotency_key: str | None = None
 
     def _describe_detail(self) -> str:
         return f"{self.host}"
@@ -691,6 +737,10 @@ class NotionDestinationConfig(DescribableConfig):
     auth: BearerAuth = Field(default_factory=lambda: BearerAuth(type="bearer"))
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
+    # (#897) Accepted but a no-op: Notion always creates a new page (no
+    # upsert path in this destination or in Notion's API) -- `drt validate`
+    # warns rather than silently ignoring it.
+    native_idempotency_key: str | None = None
 
     def _describe_detail(self) -> str:
         return f"database {self.database_id}"
@@ -719,6 +769,11 @@ class GoogleAdsDestinationConfig(BaseModel):
     auth: AuthConfig | None = None  # typically oauth2_client_credentials
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
+    # (#897) Accepted but not yet wired: ClickConversion has a documented
+    # `order_id` field for dedup ("helps minimize duplicate conversions",
+    # Google's upload-clicks docs) -- wiring tracked as a separate follow-up,
+    # gated on confirming re-upload semantics from Google's docs first.
+    native_idempotency_key: str | None = None
 
     def describe(self) -> str:
         return f"google_ads ({self.customer_id})"

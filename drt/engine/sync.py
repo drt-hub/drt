@@ -391,6 +391,14 @@ def run_sync(
     if observer is None:
         observer = NullObserver()
     sync_run_id = new_correlation_id()
+    # Smuggled onto sync.sync for destinations to read (#897) -- same pattern
+    # as _query_tags/_sync_name, but set unconditionally rather than gated on
+    # an opt-in feature (see the field's own docstring). A caller reusing one
+    # SyncConfig object across multiple run_sync() calls (a loop, --threads on
+    # the same sync) gets this overwritten with each call's own fresh value,
+    # same as _query_tags already does -- correct, not a new concurrency
+    # concern this introduces.
+    sync.sync._sync_run_id = sync_run_id
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.perf_counter()
     total_result = SyncResult()

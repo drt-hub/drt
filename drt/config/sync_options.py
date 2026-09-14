@@ -406,6 +406,17 @@ class SyncOptions(BaseModel):
     # dialect's duck-typed hook would otherwise have to accept unchanged.
     _diff_removed_keys: list[dict[str, Any]] | None = PrivateAttr(default=None)
 
+    # This run's correlation id (#897), injected by the engine at run time —
+    # same smuggling pattern as ``_query_tags`` above, but set unconditionally
+    # rather than gated on an opt-in feature: unlike ``_query_tags`` (``None``
+    # when ``query_tagging.enabled: false``), a destination's
+    # ``native_idempotency_key`` batch-mode default template needs a value
+    # that is *always* present and genuinely varies per run — using
+    # ``_query_tags``'s embedded run_id here would make batch-mode retry
+    # safety silently depend on an unrelated, independently-configurable
+    # feature staying enabled. See ``rest_api.py``'s batch-mode key rendering.
+    _sync_run_id: str | None = PrivateAttr(default=None)
+
     @model_validator(mode="after")
     def _check_incremental_cursor(self) -> SyncOptions:
         if self.mode == "incremental" and not self.cursor_field:
