@@ -339,9 +339,14 @@ def create_server(project_dir: Path | None = None) -> Any:
             Dict with 'valid' list of sync names, 'errors' dict of
             sync_name → list of error messages for invalid configs, and
             'warnings' dict of sync_name → list of hardcoded-secret warning
-            messages (present only when there are any). With
-            check_connection, also 'connection_tests' keyed by sync name,
-            each a dict with success/error/skipped.
+            messages (present only when there are any). Also
+            'idempotency_warnings' dict of sync_name → list of messages for
+            a set `destination.native_idempotency_key` with no wiring on
+            that destination type yet (present only when there are any;
+            never promoted to 'errors' by strict — a missed opportunity,
+            not a security issue). With check_connection, also
+            'connection_tests' keyed by sync name, each a dict with
+            success/error/skipped.
         """
         return _validate(ctx, check_connection=check_connection, strict=strict)
 

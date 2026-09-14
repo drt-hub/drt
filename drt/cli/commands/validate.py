@@ -38,15 +38,6 @@ from drt.cli.output import (
     print_validation_ok,
 )
 
-# (#897) Destination types whose load() actually consumes
-# native_idempotency_key. Starts empty -- this field ships on every
-# destination that could plausibly need it before any wiring lands, so at
-# this point setting it does nothing on ANY type. A follow-up PR adds an
-# entry here in the same change that wires the field into that destination's
-# load() -- keep this set exactly "types where the field does something,"
-# not aspirational, so it never drifts from what's actually implemented.
-_NATIVE_IDEMPOTENCY_WIRED_TYPES: frozenset[str] = frozenset()
-
 
 @dataclass(frozen=True)
 class _NativeIdempotencyFinding:
@@ -75,11 +66,31 @@ class _NativeIdempotencyFinding:
 def _find_ineffective_native_idempotency_keys(
     syncs: list[SyncConfig],
 ) -> list[_NativeIdempotencyFinding]:
+    """Warn on syncs where ``destination.native_idempotency_key`` is set but
+    the destination instance doesn't actually consume it (#897).
+
+    Support is checked via ``NativeIdempotencyCapable`` rather than a
+    hardcoded core-only type set, so a correctly-wired plugin destination
+    (#297 entry-point registry) doesn't get a false "no effect" warning.
+    """
+    from drt.connectors.registry import get_destination
+    from drt.destinations.base import NativeIdempotencyCapable
+
     findings = []
     for s in syncs:
         key = getattr(s.destination, "native_idempotency_key", None)
-        if key is not None and s.destination.type not in _NATIVE_IDEMPOTENCY_WIRED_TYPES:
-            findings.append(_NativeIdempotencyFinding(s.name, s.destination.type))
+        if key is None:
+            continue
+        try:
+            dest = get_destination(s.destination)
+        except Exception:
+            # Can't construct (missing credentials, unresolved env var) --
+            # can't determine wiring, so don't warn. Same try/except shape
+            # as _run_connection_test's own construction of this destination.
+            continue
+        if isinstance(dest, NativeIdempotencyCapable) and dest.supports_native_idempotency_key():
+            continue
+        findings.append(_NativeIdempotencyFinding(s.name, s.destination.type))
     return findings
 
 

@@ -23,21 +23,35 @@ def validate(
     to errors on the CLI, so this tool couldn't answer the question
     ``--strict`` exists to answer.
     """
-    from drt.cli.commands.validate import _group_secret_findings, _run_connection_test
+    from drt.cli.commands.validate import (
+        _find_ineffective_native_idempotency_keys,
+        _group_secret_findings,
+        _run_connection_test,
+    )
     from drt.config.secrets import find_hardcoded_secrets
 
     result = ctx.load_syncs_safe()
     secret_findings = find_hardcoded_secrets(ctx.project_dir)
     secret_warnings_by_sync = _group_secret_findings(secret_findings)
+    idempotency_findings = _find_ineffective_native_idempotency_keys(result.syncs)
+    idempotency_warnings_by_sync: dict[str, list[str]] = {}
+    for f in idempotency_findings:
+        idempotency_warnings_by_sync.setdefault(f.sync_name, []).append(f.message)
 
     errors = dict(result.errors)
     warnings: dict[str, list[str]] = {}
+    idempotency_warnings: dict[str, list[str]] = {}
     valid: list[str] = []
 
     for s in result.syncs:
         sync_warnings = [f.message for f in secret_warnings_by_sync.get(s.name, [])]
         if sync_warnings:
             warnings[s.name] = sync_warnings
+        if s.name in idempotency_warnings_by_sync:
+            idempotency_warnings[s.name] = idempotency_warnings_by_sync[s.name]
+        # Deliberately not part of `strict`'s promotion below, matching the
+        # CLI: a no-op native_idempotency_key is a missed opportunity, not a
+        # security issue (#897, Codex review of PR #1150).
         if strict and sync_warnings:
             errors[s.name] = sync_warnings
         else:
@@ -57,6 +71,8 @@ def validate(
     response: dict[str, Any] = {"valid": valid, "errors": errors}
     if warnings:
         response["warnings"] = warnings
+    if idempotency_warnings:
+        response["idempotency_warnings"] = idempotency_warnings
     if check_connection:
         response["connection_tests"] = {s.name: _run_connection_test(s) for s in result.syncs}
     return response

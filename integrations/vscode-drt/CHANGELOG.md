@@ -6,6 +6,13 @@ drt-core version its bundled schemas were generated from.
 
 ## [0.1.13] - Unreleased
 
+- Bundled JSON Schemas regenerated from drt-core: the destination union gains
+  `native_idempotency_key` (a Jinja template sent as a native HTTP dedup
+  header/field, protecting against drt's own per-destination retry resending
+  a request that already succeeded server-side) on `rest_api` (plus
+  `native_idempotency_header`) and ten other SaaS/SMTP/ads destinations —
+  currently accepted but not yet wired into any `load()` (`drt validate`
+  warns when set) (drt-hub/drt#897).
 - Bundled JSON Schemas regenerated from drt-core: `sync.mirror.strategy`
   gains a third `diff` option, deleting exactly the keys
   `incremental_strategy: diff` classified as removed (drt-hub/drt#1110).

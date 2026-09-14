@@ -1103,6 +1103,18 @@
             }
           ],
           "default": null
+        },
+        "native_idempotency_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Native Idempotency Key"
         }
       },
       "required": [
@@ -1320,6 +1332,18 @@
           ],
           "default": null,
           "title": "Password Env"
+        },
+        "native_idempotency_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Native Idempotency Key"
         }
       },
       "required": [
@@ -1569,6 +1593,18 @@
             }
           ],
           "default": null
+        },
+        "native_idempotency_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Native Idempotency Key"
         }
       },
       "required": [
@@ -1682,6 +1718,18 @@
             }
           ],
           "default": null
+        },
+        "native_idempotency_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Native Idempotency Key"
         }
       },
       "required": [
@@ -1945,6 +1993,18 @@
             }
           ],
           "default": null
+        },
+        "native_idempotency_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Native Idempotency Key"
         }
       },
       "required": [
@@ -2217,6 +2277,18 @@
             }
           ],
           "default": null
+        },
+        "native_idempotency_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Native Idempotency Key"
         }
       },
       "required": [
@@ -3081,6 +3153,18 @@
             }
           ],
           "default": null
+        },
+        "native_idempotency_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Native Idempotency Key"
         }
       },
       "required": [
@@ -3624,6 +3708,23 @@
             }
           ],
           "default": null
+        },
+        "native_idempotency_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Native Idempotency Key"
+        },
+        "native_idempotency_header": {
+          "default": "Idempotency-Key",
+          "title": "Native Idempotency Header",
+          "type": "string"
         }
       },
       "required": [
@@ -4029,6 +4130,18 @@
             }
           ],
           "default": null
+        },
+        "native_idempotency_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Native Idempotency Key"
         }
       },
       "required": [
@@ -4145,6 +4258,18 @@
             }
           ],
           "default": null
+        },
+        "native_idempotency_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Native Idempotency Key"
         }
       },
       "required": [
@@ -4947,6 +5072,18 @@
             }
           ],
           "default": null
+        },
+        "native_idempotency_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Native Idempotency Key"
         }
       },
       "required": [
@@ -5043,6 +5180,18 @@
             }
           ],
           "default": null
+        },
+        "native_idempotency_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Native Idempotency Key"
         }
       },
       "required": [

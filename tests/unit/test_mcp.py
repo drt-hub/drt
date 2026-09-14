@@ -207,6 +207,55 @@ async def test_validate_reports_secret_warning_for_invalid_sync(tmp_path: Path) 
     assert "hardcoded secret" in result["warnings"]["broken"][0]
 
 
+@pytest.mark.asyncio
+async def test_validate_warns_on_ineffective_native_idempotency_key(tmp_path: Path) -> None:
+    """#897 (Codex review of PR #1150, finding 3): the MCP validate path had
+    only ever called the secret-scan collector, so an MCP caller got no
+    warning that native_idempotency_key is a no-op on rest_api today."""
+    (tmp_path / "drt_project.yml").write_text("name: test\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "idem.yml").write_text(
+        "name: idem\n"
+        "model: SELECT 1\n"
+        "destination:\n"
+        "  type: rest_api\n"
+        "  url: https://example.com/api\n"
+        "  method: POST\n"
+        "  native_idempotency_key: '{{ row.id }}'\n"
+    )
+    srv = create_server(tmp_path)
+    result = await call(srv, "drt_validate")
+    assert "idem" in result["valid"]
+    assert "no effect" in result["idempotency_warnings"]["idem"][0]
+
+
+@pytest.mark.asyncio
+async def test_validate_native_idempotency_warning_does_not_promote_under_strict(
+    tmp_path: Path,
+) -> None:
+    """Deliberately lower severity than the secret-scan warning, matching
+    the CLI: a no-op idempotency key is a missed opportunity, not a
+    security issue, so --strict must not fail the sync over it alone."""
+    (tmp_path / "drt_project.yml").write_text("name: test\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "idem.yml").write_text(
+        "name: idem\n"
+        "model: SELECT 1\n"
+        "destination:\n"
+        "  type: rest_api\n"
+        "  url: https://example.com/api\n"
+        "  method: POST\n"
+        "  native_idempotency_key: '{{ row.id }}'\n"
+    )
+    srv = create_server(tmp_path)
+    result = await call(srv, "drt_validate", strict=True)
+    assert "idem" in result["valid"]
+    assert "idem" not in result["errors"]
+    assert "no effect" in result["idempotency_warnings"]["idem"][0]
+
+
 # ---------------------------------------------------------------------------
 # drt_run_test
 # ---------------------------------------------------------------------------

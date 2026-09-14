@@ -285,9 +285,9 @@ def test_cli_validate_json_includes_secret_warnings(
 def test_cli_validate_warns_on_ineffective_native_idempotency_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#897: rest_api is not yet in _NATIVE_IDEMPOTENCY_WIRED_TYPES (no
-    wiring lands until a follow-up PR), so setting native_idempotency_key on
-    it today must warn rather than silently do nothing."""
+    """#897: RestApiDestination doesn't implement NativeIdempotencyCapable
+    (no wiring lands until a follow-up PR), so setting native_idempotency_key
+    on it today must warn rather than silently do nothing."""
     sync = {
         **VALID_SYNC,
         "destination": {
@@ -361,3 +361,79 @@ def test_cli_validate_json_includes_idempotency_warnings(
     warning = payload["results"][0]["idempotency_warnings"][0]
     assert warning["destination_type"] == "rest_api"
     assert "no effect" in warning["message"]
+
+
+def test_find_ineffective_native_idempotency_keys_skips_capable_destination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A destination implementing NativeIdempotencyCapable and reporting
+    True must not be flagged -- this is the plugin opt-out path finding 4
+    (Codex review of PR #1150) required in place of a hardcoded core-only
+    type allowlist."""
+    from types import SimpleNamespace
+
+    from drt.cli.commands.validate import _find_ineffective_native_idempotency_keys
+
+    class _CapableDestination:
+        def supports_native_idempotency_key(self) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        "drt.connectors.registry.get_destination", lambda config: _CapableDestination()
+    )
+    sync = SimpleNamespace(
+        name="s1",
+        destination=SimpleNamespace(type="fake_plugin", native_idempotency_key="{{ row.id }}"),
+    )
+
+    assert _find_ineffective_native_idempotency_keys([sync]) == []
+
+
+def test_find_ineffective_native_idempotency_keys_warns_when_capable_but_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Support is a method call, not just Protocol membership -- a
+    destination implementing NativeIdempotencyCapable but returning False
+    for this instance's config (e.g. conditional wiring) still warns."""
+    from types import SimpleNamespace
+
+    from drt.cli.commands.validate import _find_ineffective_native_idempotency_keys
+
+    class _PartiallyCapableDestination:
+        def supports_native_idempotency_key(self) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        "drt.connectors.registry.get_destination",
+        lambda config: _PartiallyCapableDestination(),
+    )
+    sync = SimpleNamespace(
+        name="s1",
+        destination=SimpleNamespace(type="fake_plugin", native_idempotency_key="{{ row.id }}"),
+    )
+
+    findings = _find_ineffective_native_idempotency_keys([sync])
+    assert len(findings) == 1
+    assert findings[0].destination_type == "fake_plugin"
+
+
+def test_find_ineffective_native_idempotency_keys_swallows_construction_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A destination that can't be constructed (missing credentials,
+    unresolved env var) must not crash `drt validate` or be flagged --
+    wiring can't be determined, so we say nothing rather than guess."""
+    from types import SimpleNamespace
+
+    from drt.cli.commands.validate import _find_ineffective_native_idempotency_keys
+
+    def _raise(config: object) -> None:
+        raise RuntimeError("missing credentials")
+
+    monkeypatch.setattr("drt.connectors.registry.get_destination", _raise)
+    sync = SimpleNamespace(
+        name="s1",
+        destination=SimpleNamespace(type="rest_api", native_idempotency_key="{{ row.id }}"),
+    )
+
+    assert _find_ineffective_native_idempotency_keys([sync]) == []

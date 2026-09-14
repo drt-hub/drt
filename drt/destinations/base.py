@@ -340,3 +340,34 @@ class QueryableDestination(Protocol):
             Exception: connection or query failure.
         """
         ...
+
+
+@runtime_checkable
+class NativeIdempotencyCapable(Protocol):
+    """Destination that wires ``destination.native_idempotency_key`` into its
+    own ``load()`` for retry-safety against drt's per-destination retry (#277,
+    #897).
+
+    Stability: Provisional (no destination implements this yet — the config
+    field ships on every SaaS/SMTP/ads destination before any wiring lands,
+    so ``drt validate`` can warn when it's set on a type that still ignores
+    it; see ``drt/cli/commands/validate.py``'s ``_find_ineffective_native_idempotency_keys``).
+
+    Support is an opt-in capability the CLI checks structurally —
+    ``isinstance(dest, NativeIdempotencyCapable)`` — rather than a
+    hardcoded core-only type allowlist, so a plugin destination (registered
+    via the #297 entry-point system) can wire this field into its own
+    ``load()`` and correctly stop triggering the no-op warning without any
+    change to drt-core, per AGENTS.md's registry-driven connector extension
+    rule.
+    """
+
+    def supports_native_idempotency_key(self) -> bool:
+        """Return whether this destination instance actually consumes
+        ``native_idempotency_key`` for the config it was constructed with.
+
+        A method rather than a bare marker so a destination whose wiring is
+        conditional (e.g. only in one ``body_mode``) can answer precisely
+        instead of being all-or-nothing at the type level.
+        """
+        ...
