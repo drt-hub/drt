@@ -120,6 +120,15 @@ def _is_secret_field(field_name: str) -> bool:
 def _secret_reason(value: str) -> str | None:
     if "${" in value:
         return None
+    if "{{" in value:
+        # A Jinja template (e.g. a compact per-record idempotency key like
+        # `{{row.customer_uuid}}`, #897) renders as dense mixed-case
+        # identifier text with no whitespace once collapsed -- exactly what
+        # _looks_high_entropy() is designed to flag in a real secret. Same
+        # exemption shape as the `${ENV_VAR}` check above: a literal secret
+        # sitting next to a template expression would also go unflagged,
+        # which is an accepted, pre-existing tradeoff for that check.
+        return None
     stripped = value.strip()
     if not stripped:
         return None

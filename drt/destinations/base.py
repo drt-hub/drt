@@ -362,12 +362,15 @@ class NativeIdempotencyCapable(Protocol):
     rule.
     """
 
-    def supports_native_idempotency_key(self) -> bool:
-        """Return whether this destination instance actually consumes
-        ``native_idempotency_key`` for the config it was constructed with.
+    def supports_native_idempotency_key(self, config: DestinationConfig) -> bool:
+        """Return whether ``native_idempotency_key`` is actually wired for
+        *this* destination config.
 
-        A method rather than a bare marker so a destination whose wiring is
-        conditional (e.g. only in one ``body_mode``) can answer precisely
-        instead of being all-or-nothing at the type level.
+        Takes the config (not just ``self``) so a destination whose wiring
+        is conditional on a config value (e.g. ``rest_api``'s ``record``
+        vs. ``body_mode: batch`` -- a per-record template is inapplicable
+        in batch mode, see ``rest_api.py``) can answer precisely for the
+        specific sync being validated, rather than being all-or-nothing at
+        the type level.
         """
         ...

@@ -375,7 +375,7 @@ def test_find_ineffective_native_idempotency_keys_skips_capable_destination(
     from drt.cli.commands.validate import _find_ineffective_native_idempotency_keys
 
     class _CapableDestination:
-        def supports_native_idempotency_key(self) -> bool:
+        def supports_native_idempotency_key(self, config: object) -> bool:
             return True
 
     monkeypatch.setattr(
@@ -389,6 +389,44 @@ def test_find_ineffective_native_idempotency_keys_skips_capable_destination(
     assert _find_ineffective_native_idempotency_keys([sync]) == []
 
 
+def test_find_ineffective_native_idempotency_keys_passes_config_for_conditional_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#897 (Codex review of PR #1150, finding B): the capability probe
+    receives the sync's own destination config, not just a bare instance --
+    a destination whose wiring is conditional on a config value (e.g.
+    rest_api's per-record template being inapplicable in body_mode: batch)
+    must be able to answer precisely per sync rather than all-or-nothing."""
+    from types import SimpleNamespace
+
+    from drt.cli.commands.validate import _find_ineffective_native_idempotency_keys
+
+    class _ConditionallyCapableDestination:
+        def supports_native_idempotency_key(self, config: object) -> bool:
+            return getattr(config, "body_mode", None) == "record"
+
+    monkeypatch.setattr(
+        "drt.connectors.registry.get_destination",
+        lambda config: _ConditionallyCapableDestination(),
+    )
+    wired_sync = SimpleNamespace(
+        name="wired",
+        destination=SimpleNamespace(
+            type="fake_plugin", native_idempotency_key="{{ row.id }}", body_mode="record"
+        ),
+    )
+    unwired_sync = SimpleNamespace(
+        name="unwired",
+        destination=SimpleNamespace(
+            type="fake_plugin", native_idempotency_key="{{ row.id }}", body_mode="batch"
+        ),
+    )
+
+    findings = _find_ineffective_native_idempotency_keys([wired_sync, unwired_sync])
+
+    assert [f.sync_name for f in findings] == ["unwired"]
+
+
 def test_find_ineffective_native_idempotency_keys_warns_when_capable_but_unsupported(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -400,7 +438,7 @@ def test_find_ineffective_native_idempotency_keys_warns_when_capable_but_unsuppo
     from drt.cli.commands.validate import _find_ineffective_native_idempotency_keys
 
     class _PartiallyCapableDestination:
-        def supports_native_idempotency_key(self) -> bool:
+        def supports_native_idempotency_key(self, config: object) -> bool:
             return False
 
     monkeypatch.setattr(

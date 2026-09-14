@@ -88,7 +88,9 @@ def _find_ineffective_native_idempotency_keys(
             # can't determine wiring, so don't warn. Same try/except shape
             # as _run_connection_test's own construction of this destination.
             continue
-        if isinstance(dest, NativeIdempotencyCapable) and dest.supports_native_idempotency_key():
+        if isinstance(dest, NativeIdempotencyCapable) and dest.supports_native_idempotency_key(
+            s.destination
+        ):
             continue
         findings.append(_NativeIdempotencyFinding(s.name, s.destination.type))
     return findings

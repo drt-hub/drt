@@ -73,6 +73,32 @@ def test_secret_reason_uses_entropy_and_ignores_blank_values() -> None:
     assert reason.startswith("high entropy")
 
 
+def test_secret_reason_exempts_jinja_templates(tmp_path: Path) -> None:
+    """#897 (Codex review of PR #1150): a compact, no-whitespace Jinja
+    template used as an idempotency key (e.g. `{{row.customer_uuid}}`, 21
+    chars, no whitespace) reads as dense mixed-case text -- exactly what
+    the entropy heuristic is designed to catch in a real secret -- so
+    without this exemption `native_idempotency_key`/`idempotency_key`
+    would spuriously fail `drt validate --strict`."""
+    assert _secret_reason("{{row.customer_uuid}}") is None
+    assert _secret_reason("{{ row.id }}") is None
+
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "idem.yml").write_text(
+        "\n".join(
+            [
+                "name: idem",
+                "destination:",
+                "  type: rest_api",
+                "  native_idempotency_key: '{{row.customer_uuid}}'",
+            ]
+        )
+    )
+
+    assert find_hardcoded_secrets(tmp_path) == []
+
+
 def test_entropy_helpers_cover_boundary_cases() -> None:
     assert _shannon_entropy("") == 0.0
     assert not _looks_high_entropy("short-token")
