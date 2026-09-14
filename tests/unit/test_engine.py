@@ -1567,6 +1567,139 @@ def test_finalize_sync_skipped_on_dry_run(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# reset_write_state() — guaranteed write-state reset on every exit path (#1145)
+# ---------------------------------------------------------------------------
+
+
+class FakeDestinationWithResetWriteState:
+    """Non-staged destination that also implements duck-typed
+    reset_write_state() -- deliberately a SEPARATE hook from finalize_sync
+    (see FakeDestinationWithFinalize above), since it must be safe to call
+    unconditionally, including when the batch loop never completes."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[dict]] = []
+        self.reset_call_count = 0
+        self.reset_args: tuple[DestinationConfig, SyncOptions] | None = None
+
+    def load(
+        self,
+        records: list[dict],
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult:
+        self.calls.append(records)
+        result = SyncResult()
+        result.success = len(records)
+        return result
+
+    def reset_write_state(
+        self,
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> None:
+        self.reset_call_count += 1
+        self.reset_args = (config, sync_options)
+
+
+class _RaisingAfterNSource:
+    """Yields the first ``n`` rows, then raises -- simulates a dropped
+    source connection mid-extraction (#1145). ``n=0`` raises before any
+    batch is ever assembled."""
+
+    def __init__(self, rows: list[dict], n: int) -> None:
+        self._rows = rows
+        self._n = n
+
+    def extract(
+        self, query: str, config: ProfileConfig, *, query_tags: dict[str, str] | None = None
+    ) -> Iterator[dict]:
+        for i, row in enumerate(self._rows):
+            if i >= self._n:
+                raise RuntimeError("source connection dropped")
+            yield row
+
+    def test_connection(self, config: ProfileConfig) -> bool:
+        return True
+
+
+def test_reset_write_state_called_on_success(tmp_path: Path) -> None:
+    """Engine should call reset_write_state() if the destination implements
+    it, on a normal, non-exception completion."""
+    rows = [{"id": i} for i in range(3)]
+    source = FakeSource(rows)
+    dest = FakeDestinationWithResetWriteState()
+    sync = _make_sync(batch_size=10)
+
+    run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+    assert dest.reset_call_count == 1
+    assert dest.reset_args is not None
+
+
+def test_reset_write_state_absent_does_not_crash(tmp_path: Path) -> None:
+    """Engine should not crash when destination has no reset_write_state
+    attr -- same contract as the finalize_sync absent-hook test above."""
+    rows = [{"id": i} for i in range(3)]
+    source = FakeSource(rows)
+    dest = FakeDestination()  # has only load(), no reset_write_state
+    sync = _make_sync(batch_size=10)
+
+    result = run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+    assert result.success == 3
+    assert not hasattr(dest, "reset_call_count")
+
+
+def test_reset_write_state_skipped_on_dry_run(tmp_path: Path) -> None:
+    """A dry run never calls destination.load(), so there's no write-state
+    to reset -- same gating as every sibling block in run_sync()'s outer
+    finally."""
+    rows = [{"id": i} for i in range(2)]
+    source = FakeSource(rows)
+    dest = FakeDestinationWithResetWriteState()
+    sync = _make_sync(batch_size=10)
+
+    run_sync(sync, source, dest, _make_profile(), tmp_path, dry_run=True)
+
+    assert dest.reset_call_count == 0
+
+
+def test_reset_write_state_called_when_source_raises_after_first_batch(tmp_path: Path) -> None:
+    """The core #1145 guarantee: reset_write_state() must still fire even
+    when the source raises mid-extraction, after at least one batch was
+    already loaded -- unlike finalize_sync(), which the batch loop's own
+    try/finally does NOT guarantee on this path (see FakeDestinationWithFinalize's
+    tests above, none of which cover an exception)."""
+    rows = [{"id": i} for i in range(5)]
+    source = _RaisingAfterNSource(rows, n=3)
+    dest = FakeDestinationWithResetWriteState()
+    sync = _make_sync(batch_size=3)
+
+    with pytest.raises(RuntimeError, match="source connection dropped"):
+        run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+    assert dest.calls == [[{"id": 0}, {"id": 1}, {"id": 2}]]
+    assert dest.reset_call_count == 1
+
+
+def test_reset_write_state_called_when_source_raises_before_any_batch(tmp_path: Path) -> None:
+    """Even a source that raises on its very first ``next()`` -- zero
+    batches ever reached, destination.load() never called -- must still
+    get its write-state reset called safely (there's nothing to reset, but
+    the hook must not assume load() ran first)."""
+    source = _RaisingAfterNSource([{"id": 0}], n=0)
+    dest = FakeDestinationWithResetWriteState()
+    sync = _make_sync(batch_size=10)
+
+    with pytest.raises(RuntimeError, match="source connection dropped"):
+        run_sync(sync, source, dest, _make_profile(), tmp_path)
+
+    assert dest.calls == []
+    assert dest.reset_call_count == 1
+
+
+# ---------------------------------------------------------------------------
 # Graceful shutdown via stop_event (#279)
 # ---------------------------------------------------------------------------
 

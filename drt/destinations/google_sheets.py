@@ -155,13 +155,14 @@ class GoogleSheetsDestination:
 
         return result
 
-    def finalize_sync(
+    def reset_write_state(
         self,
         config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> None:
-        """End-of-sync hook (duck-typed, see ``drt/engine/sync.py``): drop
-        this run's remembered header state.
+        """Guaranteed end-of-sync hook (duck-typed, see ``drt/engine/sync.py``
+        ``run_sync()``'s outer ``finally``): drop this run's remembered
+        header state.
 
         Mirrors ``FileDestination``'s identical reset (#1002/#1006). A
         CLI/engine-driven sync gets a fresh ``GoogleSheetsDestination`` per
@@ -172,14 +173,13 @@ class GoogleSheetsDestination:
         later batch of the first run (appended, sheet never re-cleared)
         instead of getting its own fresh first-batch treatment.
 
-        Known gap, not fixed here (Codex review on #1144, tracked as
-        #1145): this hook isn't guaranteed to run on every exit path --
-        the engine's batch loop has no ``finally`` around the
-        ``finalize_sync()`` dispatch itself, so a source-side exception
-        mid-extraction skips it and leaves ``self._headers`` stale for the
-        next reused-instance run. Shared with ``FileDestination``'s
-        identical exposure; fixing it is an engine-level change, not a
-        destination-level one.
+        Named separately from ``finalize_sync()`` and called unconditionally
+        by the engine on every exit path -- success, interruption, or a
+        raised exception from the source (#1145, closing the gap Codex
+        review on #1144 found: this used to be named ``finalize_sync()``,
+        which the engine only dispatches when the batch loop completes
+        without raising, leaving ``self._headers`` stale after a source-side
+        exception on a reused instance).
         """
         del config, sync_options
         self._headers = None

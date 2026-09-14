@@ -71,13 +71,14 @@ class FileDestination:
 
         return result
 
-    def finalize_sync(
+    def reset_write_state(
         self,
         config: DestinationConfig,
         sync_options: SyncOptions,
     ) -> None:
-        """End-of-sync hook (duck-typed, see ``drt/engine/sync.py``): drop this
-        run's write-state bookkeeping.
+        """Guaranteed end-of-sync hook (duck-typed, see ``drt/engine/sync.py``
+        ``run_sync()``'s outer ``finally``): drop this run's write-state
+        bookkeeping.
 
         A CLI/engine-driven sync gets a fresh ``FileDestination`` per run (via
         ``get_destination()``), so this never fires mid-run in that path. It
@@ -87,6 +88,14 @@ class FileDestination:
         records instead of truncating, contradicting the "first batch of this
         run replaces the file" contract ``load()`` documents (caught in Codex
         review on PR #1006).
+
+        Named separately from ``finalize_sync()`` (#1145): unlike that
+        duck-typed hook (used by SQL destinations to promote a staged swap,
+        real non-idempotent work that must not run if the batch loop never
+        completed), this one is called unconditionally by the engine on
+        every exit path — success, interruption, or a raised exception from
+        the source — so it must stay pure state-reset, safe to call more
+        than once and on an already-empty state.
         """
         del config, sync_options
         self._csv_columns.clear()

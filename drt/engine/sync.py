@@ -541,6 +541,39 @@ def run_sync(
             except Exception as exc:  # noqa: BLE001 — best-effort
                 observer.on_warning(sync.name, f"Compliance audit log prune failure: {exc}")
 
+        # Guaranteed destination write-state reset (#1145) — fires on every
+        # exit path (success, exception, interruption), unlike
+        # finalize_sync() below in _run_sync_body(), which only runs when
+        # the batch loop completes without raising. A destination that
+        # keeps per-instance write-state to distinguish "first batch of
+        # this run" from "later batch" (FileDestination,
+        # GoogleSheetsDestination) needs that reset even when a source-side
+        # exception skips finalize_sync() entirely — otherwise a reused
+        # instance's next run_sync() call wrongly treats its own first
+        # batch as a continuation of the run that raised. Deliberately a
+        # SEPARATE hook from finalize_sync(): sql_base.py's finalize_sync()
+        # does real, non-idempotent work (shadow-table promotion, mirror
+        # DELETE) that must NOT run on a raised exception — promoting an
+        # incomplete shadow because the *source* died mid-stream would
+        # replace good, complete live data with a partial one. Widening
+        # finalize_sync()'s own contract (e.g. an added `exc=` parameter)
+        # would touch every existing implementer (four SQL dialects) and
+        # any third-party plugin destination (#297) defining it today, just
+        # to have them ignore a new argument. This hook is purely additive:
+        # absent on a destination, nothing changes; present, it must be
+        # side-effect-free enough to call unconditionally, on both a clean
+        # and a raised exit, and (once per instance) more than once per
+        # instance's lifetime if reused. dry_run never calls
+        # destination.load()/stage(), so there's no write-state to reset —
+        # gated the same as every sibling block in this `finally`.
+        if not dry_run:
+            resetter = getattr(destination, "reset_write_state", None)
+            if callable(resetter):
+                try:
+                    resetter(sync.destination, sync.sync)
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    observer.on_warning(sync.name, f"Write-state reset failed: {exc}")
+
         # Guaranteed final flush point — fires on every exit path (success,
         # exception, interruption), unlike on_sync_completed which only fires
         # on the normal-return path. Observers that buffer writes in memory

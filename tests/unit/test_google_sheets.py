@@ -5,9 +5,15 @@ Mocks the Google Sheets API client since there is no local server equivalent.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
-from drt.config.models import GoogleSheetsDestinationConfig, SyncOptions
+import pytest
+
+from drt.config.credentials import BigQueryProfile, ProfileConfig
+from drt.config.models import GoogleSheetsDestinationConfig, SyncConfig, SyncOptions
 
 
 def _options() -> SyncOptions:
@@ -308,12 +314,13 @@ class TestGoogleSheetsDestination:
             dest.load(records, config, _options())
             assert dest._headers is None
 
-    def test_finalize_sync_resets_header_state_for_reused_instance(self) -> None:
+    def test_reset_write_state_resets_header_state_for_reused_instance(self) -> None:
         """#1143: a library caller reusing one instance across multiple
         run_sync() calls must have the second run's first batch treated as
         a fresh first batch (clear + establish columns), not as a later
         batch of the first run. Mirrors FileDestination's identical
-        finalize_sync() reset (#1002/#1006)."""
+        reset_write_state() reset (#1002/#1006, renamed from
+        finalize_sync() by #1145)."""
         from drt.destinations.google_sheets import GoogleSheetsDestination
 
         config = GoogleSheetsDestinationConfig(
@@ -336,9 +343,146 @@ class TestGoogleSheetsDestination:
             dest.load([{"id": 1, "name": "Alice"}], config, _options())
             assert dest._headers == ["id", "name"]
 
-            dest.finalize_sync(config, _options())
+            dest.reset_write_state(config, _options())
             assert dest._headers is None
 
             dest.load([{"id": 2, "name": "Bob"}], config, _options())
 
         assert mock_values.clear.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Engine-level: reset_write_state() on a source exception (#1145)
+# ---------------------------------------------------------------------------
+
+
+class _RaisingAfterNSource:
+    """Yields the first ``n`` rows, then raises -- simulates a dropped
+    source connection mid-extraction (#1145)."""
+
+    def __init__(self, rows: list[dict[str, Any]], n: int) -> None:
+        self._rows = rows
+        self._n = n
+
+    def extract(
+        self,
+        query: str,
+        config: ProfileConfig,
+        *,
+        query_tags: dict[str, str] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        for i, row in enumerate(self._rows):
+            if i >= self._n:
+                raise RuntimeError("source connection dropped")
+            yield row
+
+    def test_connection(self, config: ProfileConfig) -> bool:
+        return True
+
+
+class _RowsSource:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+
+    def extract(
+        self,
+        query: str,
+        config: ProfileConfig,
+        *,
+        query_tags: dict[str, str] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        yield from self._rows
+
+    def test_connection(self, config: ProfileConfig) -> bool:
+        return True
+
+
+def _profile() -> BigQueryProfile:
+    return BigQueryProfile(type="bigquery", project="p", dataset="d")
+
+
+def _sheets_sync(*, batch_size: int = 100, name: str = "sheets_sync") -> SyncConfig:
+    return SyncConfig.model_validate(
+        {
+            "name": name,
+            "model": "ref('rows')",
+            "destination": {
+                "type": "google_sheets",
+                "spreadsheet_id": "test-id",
+                "sheet": "Sheet1",
+                "mode": "overwrite",
+            },
+            "sync": {"batch_size": batch_size},
+        }
+    )
+
+
+def test_source_exception_after_first_batch_still_resets_state_for_reused_instance(
+    tmp_path: Path,
+) -> None:
+    """#1145: a source-side exception mid-extraction must not leave
+    GoogleSheetsDestination's header-state bookkeeping stale on a reused
+    instance. The first run's source raises after yielding exactly one full
+    batch (which gets loaded and written); the second run on the SAME
+    instance must still start fresh (clear + establish columns) rather than
+    treating its own first batch as a continuation of the run that
+    raised."""
+    from drt.destinations.google_sheets import GoogleSheetsDestination
+    from drt.engine.sync import run_sync
+
+    mock_service = MagicMock()
+    mock_values = mock_service.spreadsheets.return_value.values.return_value
+    mock_values.clear.return_value.execute.return_value = {}
+    mock_values.update.return_value.execute.return_value = {}
+
+    destination = GoogleSheetsDestination()
+    # 4 rows total, but the source raises after yielding the first 3 (index
+    # 3 never yields) -- one full batch loads successfully before the
+    # exception propagates out of the batch loop.
+    written_records = [{"id": i, "name": f"first-{i}"} for i in range(3)]
+    unreached_record = [{"id": 3, "name": "first-3"}]
+
+    with patch(
+        "drt.destinations.google_sheets._build_sheets_service",
+        return_value=mock_service,
+    ):
+        with pytest.raises(RuntimeError, match="source connection dropped"):
+            run_sync(
+                _sheets_sync(batch_size=3),
+                _RaisingAfterNSource(written_records + unreached_record, n=3),
+                destination,
+                _profile(),
+                tmp_path,
+            )
+
+        # reset_write_state() already cleared the header state fired by the
+        # exception path -- the assertion that matters is the SECOND run's
+        # behavior below (a fresh first batch, not a continuation).
+        assert destination._headers is None
+
+        second_records = [{"id": i, "name": f"second-{i}"} for i in range(2)]
+        second_result = run_sync(
+            _sheets_sync(batch_size=100, name="second_run"),
+            _RowsSource(second_records),
+            destination,
+            _profile(),
+            tmp_path,
+        )
+
+    assert second_result.success == 2
+    # reset_write_state() unconditionally resets at the end of EVERY
+    # run_sync() call, success or failure -- state is only meaningful within
+    # one run's own batch loop.
+    assert destination._headers is None
+    # clear() ran again on the second run -- proof the second run's first
+    # batch was treated as fresh (re-cleared), not appended to the first
+    # run's incomplete data.
+    assert mock_values.clear.call_count == 2
+    # The second update() call wrote only second_records' own header +
+    # rows -- not merged with anything left over from the first run.
+    second_update_call = mock_values.update.call_args_list[-1]
+    assert second_update_call.kwargs["body"]["values"] == [
+        ["id", "name"],
+        ["0", "second-0"],
+        ["1", "second-1"],
+    ]

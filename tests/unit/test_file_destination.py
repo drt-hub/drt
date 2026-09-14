@@ -341,3 +341,67 @@ def test_reused_instance_does_not_leak_state_into_a_later_run(
     assert second_result.success == 3
 
     assert _read_records(output_path, file_format) == second_records
+
+
+class _RaisingAfterNSource:
+    """Yields the first ``n`` rows, then raises -- simulates a dropped
+    source connection mid-extraction (#1145)."""
+
+    def __init__(self, rows: list[dict[str, Any]], n: int) -> None:
+        self._rows = rows
+        self._n = n
+
+    def extract(
+        self,
+        query: str,
+        config: ProfileConfig,
+        *,
+        query_tags: dict[str, str] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        for i, row in enumerate(self._rows):
+            if i >= self._n:
+                raise RuntimeError("source connection dropped")
+            yield row
+
+    def test_connection(self, config: ProfileConfig) -> bool:
+        return True
+
+
+@pytest.mark.parametrize("file_format", ["csv", "json", "jsonl"])
+def test_source_exception_after_first_batch_still_resets_state_for_reused_instance(
+    tmp_path: Path, file_format: str
+) -> None:
+    """#1145: a source-side exception mid-extraction must not leave
+    FileDestination's write-state bookkeeping stale on a reused instance.
+    The first run's source raises after yielding exactly one full batch
+    (which gets loaded and written); the second run on the SAME instance
+    must still start fresh (truncate/clear) rather than treating its own
+    first batch as a continuation of the run that raised."""
+    destination = FileDestination()
+    output_path = tmp_path / f"output.{file_format}"
+
+    # 4 rows total, but the source raises after yielding the first 3 (index
+    # 3 never yields) -- one full batch loads and writes successfully
+    # before the exception propagates out of the batch loop.
+    written_records = [{"id": i, "name": f"first-{i}"} for i in range(3)]
+    unreached_record = [{"id": 3, "name": "first-3"}]
+    first_sync = _sync(output_path, file_format, batch_size=3)
+    with pytest.raises(RuntimeError, match="source connection dropped"):
+        run_sync(
+            first_sync,
+            _RaisingAfterNSource(written_records + unreached_record, n=3),
+            destination,
+            _profile(),
+            tmp_path,
+        )
+    # The one full batch before the raise was still written.
+    assert _read_records(output_path, file_format) == written_records
+
+    second_records = [{"id": i, "name": f"second-{i}"} for i in range(2)]
+    second_sync = _sync(output_path, file_format, batch_size=100, name="second_run")
+    second_result = run_sync(
+        second_sync, _RowsSource(second_records), destination, _profile(), tmp_path
+    )
+
+    assert second_result.success == 2
+    assert _read_records(output_path, file_format) == second_records

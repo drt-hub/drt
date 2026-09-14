@@ -514,6 +514,52 @@ def test_engine_routes_audit_trail_prune_failure_through_observer(tmp_path: Path
     )
 
 
+def test_engine_routes_reset_write_state_failure_through_observer_without_masking_original(
+    tmp_path: Path,
+) -> None:
+    """#1145: when reset_write_state() itself raises, the engine must swallow
+    it via observer.on_warning -- and, critically, this must never replace
+    the *original* exception a raised source produced. A DLQ bookkeeping-style
+    failure during this best-effort cleanup masking the real destination/source
+    failure would be exactly the #1146-style regression this session has
+    already fixed once, in a different subsystem."""
+    from tests.unit.test_engine import _make_profile, _make_sync
+
+    class _RaisingSource:
+        def extract(self, query, config, *, query_tags=None):  # type: ignore[no-untyped-def]
+            raise RuntimeError("source blew up")
+            yield  # pragma: no cover — makes this a generator function
+
+        def test_connection(self, config):  # type: ignore[no-untyped-def]
+            return True
+
+    class _BadResetDestination:
+        def load(self, records, config, sync_options):  # type: ignore[no-untyped-def]
+            result = SyncResult()
+            result.success = len(records)
+            return result
+
+        def reset_write_state(self, config, sync_options):  # type: ignore[no-untyped-def]
+            raise RuntimeError("reset blew up too")
+
+    obs = MagicMock(spec=SyncObserver)
+    sync = _make_sync()
+
+    from drt.engine.sync import run_sync
+
+    with pytest.raises(RuntimeError, match="source blew up"):
+        run_sync(
+            sync, _RaisingSource(), _BadResetDestination(), _make_profile(), tmp_path, observer=obs
+        )
+
+    warning_calls = [
+        c for c in obs.on_warning.call_args_list if "Write-state reset failed" in c.args[1]
+    ]
+    assert warning_calls, (
+        f"Expected on_warning('Write-state reset failed'...), got {obs.on_warning.call_args_list}"
+    )
+
+
 def test_engine_calls_on_sync_ended_on_success(tmp_path: Path) -> None:
     from tests.unit.test_engine import FakeDestination, FakeSource, _make_profile, _make_sync
 
