@@ -464,7 +464,6 @@ def replay_dead_letters(
             )
         raise
 
-
     # reconcile() (#955) re-reads the queue itself rather than trusting the
     # `entries` snapshot read at the top of this function — a concurrent
     # `drt run` append that landed since then survives; only the entries
