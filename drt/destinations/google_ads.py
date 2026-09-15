@@ -28,6 +28,7 @@ Example sync YAML:
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import httpx
@@ -44,8 +45,71 @@ from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import record_row_error
 
+logger = logging.getLogger(__name__)
+
 _API_VERSION = "v17"
 _BASE_URL = "https://googleads.googleapis.com"
+
+
+def _parse_conversion_upload_errors(
+    partial_failure_error: dict[str, Any], conversion_count: int
+) -> list[tuple[int, dict[str, Any]]] | None:
+    """Map a ``partialFailureError`` to ``(conversions-index, GoogleAdsError)``
+    pairs, or ``None`` if the response didn't match the documented shape.
+
+    ``partialFailureError.details`` always contains exactly one ``Any``-packed
+    ``GoogleAdsFailure`` object -- regardless of how many conversions failed
+    -- not one entry per failure (see the Partial Failure guide:
+    https://developers.google.com/google-ads/api/docs/best-practices/partial-failures).
+    That object's own ``errors`` array has one ``GoogleAdsError`` per actual
+    failure, each carrying ``location.fieldPathElements[].index`` to identify
+    which conversion (by position in the request's ``conversions[]``) it
+    belongs to. Returning ``None`` on any shape mismatch lets the caller
+    degrade to a safe, conservative fallback rather than guessing at counts.
+    """
+    details = partial_failure_error.get("details")
+    # Exactly one -- per the documented contract above, not "at least one".
+    # Silently reading details[0] and ignoring any further entries would
+    # drop real errors from an undocumented multi-entry response, wrongly
+    # crediting those conversions as delivered (Codex review of PR #1153).
+    if not isinstance(details, list) or len(details) != 1:
+        return None
+    failure = details[0]
+    if not isinstance(failure, dict):
+        return None
+    errors = failure.get("errors")
+    # An empty errors list is also treated as unparseable rather than "zero
+    # failures" -- a non-null partialFailureError with nothing inside it is
+    # itself a shape drt-core has never observed, not a legitimate all-clear.
+    if not isinstance(errors, list) or not errors:
+        return None
+
+    mapped: list[tuple[int, dict[str, Any]]] = []
+    for error in errors:
+        if not isinstance(error, dict):
+            return None
+        location = error.get("location")
+        if not isinstance(location, dict):
+            return None
+        field_path = location.get("fieldPathElements")
+        if not isinstance(field_path, list):
+            return None
+        index: Any = None
+        for el in field_path:
+            if not isinstance(el, dict):
+                return None
+            if el.get("fieldName") == "conversions":
+                index = el.get("index")
+                break
+        # bool is an int subclass in Python -- an unvalidated `"index": true`
+        # would otherwise be accepted as index 1 and misattribute the error
+        # to an arbitrary record instead of hitting the whole-batch fallback.
+        if isinstance(index, bool) or not isinstance(index, int):
+            return None
+        if not (0 <= index < conversion_count):
+            return None
+        mapped.append((index, error))
+    return mapped
 
 
 class GoogleAdsDestination:
@@ -76,8 +140,13 @@ class GoogleAdsDestination:
             "Content-Type": "application/json",
         }
 
-        # Build conversions payload
-        conversions = []
+        # Build conversions payload. conversion_record_indices[j] is the
+        # original `records` index that conversions[j] came from -- a record
+        # skipped below (missing gclid/conversion_time) never gets a
+        # conversions[] entry, so the two lists can diverge and the mapping
+        # can't be assumed to be the identity.
+        conversions: list[dict[str, Any]] = []
+        conversion_record_indices: list[int] = []
         for i, record in enumerate(records):
             gclid = record.get(config.gclid_field)
             conv_time = record.get(config.conversion_time_field)
@@ -109,6 +178,7 @@ class GoogleAdsDestination:
                     conversion["currencyCode"] = config.currency_code
 
             conversions.append(conversion)
+            conversion_record_indices.append(i)
 
         if not conversions:
             return result
@@ -131,14 +201,61 @@ class GoogleAdsDestination:
                 response = with_retry(do_upload, retry_config)
 
             resp_data = response.json()
-            # Count partial failures
             partial_errors = resp_data.get("partialFailureError")
-            if partial_errors:
-                error_details = partial_errors.get("details", [])
-                result.failed += len(error_details)
-                result.success += len(conversions) - len(error_details)
-                for detail in error_details[:10]:
-                    result.errors.append(str(detail.get("message", "")))
+            # Field *presence*, not truthiness and not None-ness: a present
+            # but empty/malformed partialFailureError (e.g. `{}`, or an
+            # explicit `null` from a malformed/intermediary response) is
+            # still a signal something is wrong, not a legitimate all-clear
+            # -- either a truthiness or a None check would take the success
+            # branch below and credit every conversion as delivered (Codex
+            # review of PR #1153, rounds 3 and 4).
+            if "partialFailureError" in resp_data:
+                mapped = (
+                    _parse_conversion_upload_errors(partial_errors, len(conversions))
+                    if isinstance(partial_errors, dict)
+                    else None
+                )
+                if mapped is None:
+                    # Response didn't match the documented shape -- degrade
+                    # to a conservative "can't tell which ones failed" rather
+                    # than guessing, same shape as rest_api.py's
+                    # _handle_batch_http_error's error_path fallback.
+                    logger.warning(
+                        "Google Ads partialFailureError did not match the "
+                        "documented response shape; marking the whole "
+                        "upload as failed"
+                    )
+                    message = "partial failure"
+                    if isinstance(partial_errors, dict):
+                        message = str(partial_errors.get("message", "")) or message
+                    for record_index in conversion_record_indices:
+                        record_row_error(
+                            result,
+                            record_index,
+                            json.dumps(records[record_index], default=str)[:200],
+                            ValueError(),
+                            error_message=message,
+                        )
+                else:
+                    # Group by conversion index first: Google can return more
+                    # than one GoogleAdsError for the same conversion, and
+                    # recording one RowError per *error* rather than per
+                    # conversion would inflate `failed` past the batch size
+                    # and enqueue the same record into the DLQ more than once.
+                    errors_by_index: dict[int, list[dict[str, Any]]] = {}
+                    for idx, error in mapped:
+                        errors_by_index.setdefault(idx, []).append(error)
+                    for idx, idx_errors in errors_by_index.items():
+                        record_index = conversion_record_indices[idx]
+                        message = "; ".join(str(e.get("message", "")) for e in idx_errors)
+                        record_row_error(
+                            result,
+                            record_index,
+                            json.dumps(records[record_index], default=str)[:200],
+                            ValueError(),
+                            error_message=message,
+                        )
+                    result.success += len(conversions) - len(errors_by_index)
             else:
                 result.success += len(conversions)
 
