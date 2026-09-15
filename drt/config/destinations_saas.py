@@ -83,10 +83,16 @@ class RestApiDestinationConfig(DescribableConfig):
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
     # Retry-safety for fire-and-forget destinations (#897): a Jinja template
-    # sent as `native_idempotency_header`'s value on every request. `record` mode
-    # renders per record (row in scope); `body_mode: batch` renders per HTTP
-    # chunk (no single row -- referencing `row` there is a config error, not
-    # a silent empty string). Wiring lives in rest_api.py, not here.
+    # sent as `native_idempotency_header`'s value on every request. See
+    # rest_api.py's load() for the exact context each mode renders with:
+    # `body_mode: record` has `row` + `sync_name` in scope (a stable,
+    # content-derived key is the point -- retrying the same row across
+    # separate runs should dedupe against a prior successful delivery);
+    # `body_mode: batch` has `sync_name` + a fresh `request_id` (a random
+    # token, generated once per HTTP chunk before drt's own retry loop, so
+    # retries of that one chunk reuse it but every chunk/run gets a fresh
+    # one) -- `row` is out of scope there, so referencing it is a runtime
+    # template error, not a silently empty key.
     native_idempotency_key: str | None = None
     native_idempotency_header: str = "Idempotency-Key"  # Stripe's de-facto convention
 

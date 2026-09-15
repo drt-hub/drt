@@ -285,15 +285,16 @@ def test_cli_validate_json_includes_secret_warnings(
 def test_cli_validate_warns_on_ineffective_native_idempotency_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#897: RestApiDestination doesn't implement NativeIdempotencyCapable
-    (no wiring lands until a follow-up PR), so setting native_idempotency_key
-    on it today must warn rather than silently do nothing."""
+    """#897: SlackDestination has no native idempotency mechanism to wire
+    this to (Incoming Webhooks are fire-and-forget with no dedup header),
+    so setting native_idempotency_key on it must warn rather than silently
+    do nothing. Uses `slack`, not `rest_api` -- rest_api's own wiring
+    landed in the follow-up PR that added this test's sibling assertion
+    below (test_cli_validate_does_not_warn_for_a_wired_destination_type)."""
     sync = {
-        **VALID_SYNC,
-        "destination": {
-            **VALID_SYNC["destination"],
-            "native_idempotency_key": "{{ row.id }}",
-        },
+        "name": "test-sync",
+        "model": "SELECT 1",
+        "destination": {"type": "slack", "native_idempotency_key": "{{ row.id }}"},
     }
     _write_sync(tmp_path / "syncs", "idem", sync)
     monkeypatch.chdir(tmp_path)
@@ -303,7 +304,7 @@ def test_cli_validate_warns_on_ineffective_native_idempotency_key(
     assert result.exit_code == 0
     assert "WARNING" in result.output
     assert "native_idempotency_key" in result.output
-    assert "'rest_api'" in result.output
+    assert "'slack'" in result.output
     assert "no effect" in result.output
 
 
@@ -319,6 +320,28 @@ def test_cli_validate_does_not_warn_when_native_idempotency_key_unset(
     assert "native_idempotency_key" not in result.output
 
 
+def test_cli_validate_does_not_warn_for_a_wired_destination_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#897: rest_api implements NativeIdempotencyCapable (both body_mode:
+    record and body_mode: batch are wired) -- setting native_idempotency_key
+    on it must not trigger the no-op warning."""
+    sync = {
+        **VALID_SYNC,
+        "destination": {
+            **VALID_SYNC["destination"],
+            "native_idempotency_key": "{{ row.id }}",
+        },
+    }
+    _write_sync(tmp_path / "syncs", "idem", sync)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["validate"])
+
+    assert result.exit_code == 0
+    assert "native_idempotency_key" not in result.output
+
+
 def test_cli_validate_native_idempotency_warning_does_not_promote_under_strict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -326,11 +349,9 @@ def test_cli_validate_native_idempotency_warning_does_not_promote_under_strict(
     ineffective idempotency key is a missed opportunity, not a security
     issue, so --strict must not fail the run over it alone."""
     sync = {
-        **VALID_SYNC,
-        "destination": {
-            **VALID_SYNC["destination"],
-            "native_idempotency_key": "{{ row.id }}",
-        },
+        "name": "test-sync",
+        "model": "SELECT 1",
+        "destination": {"type": "slack", "native_idempotency_key": "{{ row.id }}"},
     }
     _write_sync(tmp_path / "syncs", "idem", sync)
     monkeypatch.chdir(tmp_path)
@@ -345,11 +366,9 @@ def test_cli_validate_json_includes_idempotency_warnings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sync = {
-        **VALID_SYNC,
-        "destination": {
-            **VALID_SYNC["destination"],
-            "native_idempotency_key": "{{ row.id }}",
-        },
+        "name": "test-sync",
+        "model": "SELECT 1",
+        "destination": {"type": "slack", "native_idempotency_key": "{{ row.id }}"},
     }
     _write_sync(tmp_path / "syncs", "idem", sync)
     monkeypatch.chdir(tmp_path)
@@ -359,7 +378,7 @@ def test_cli_validate_json_includes_idempotency_warnings(
     assert result.exit_code == 0
     payload = json.loads(result.output)
     warning = payload["results"][0]["idempotency_warnings"][0]
-    assert warning["destination_type"] == "rest_api"
+    assert warning["destination_type"] == "slack"
     assert "no effect" in warning["message"]
 
 
