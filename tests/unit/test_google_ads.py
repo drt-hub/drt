@@ -436,3 +436,53 @@ class TestGoogleAdsDestination:
         assert result.failed == 2
         assert result.success == 0
         assert len(result.row_errors) == 2
+
+    def test_partial_failure_empty_object_is_not_a_success(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex review of #1153, round 3: `partialFailureError: {}` is
+        falsey in Python but still a *present* field -- a truthiness check
+        would take the success branch and credit every conversion as
+        delivered, contradicting the conservative-fallback philosophy the
+        rest of this parser follows."""
+        monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
+
+        httpserver.expect_request(
+            "/v17/customers/1234567890:uploadClickConversions",
+        ).respond_with_json({"partialFailureError": {}})
+
+        from drt.destinations import google_ads
+
+        monkeypatch.setattr(google_ads, "_BASE_URL", httpserver.url_for(""))
+
+        config = _config(httpserver)
+        records = [{"gclid": "g1", "conversion_time": "2024-01-01 12:00:00"}]
+        result = GoogleAdsDestination().load(records, config, _options())
+
+        assert result.failed == 1
+        assert result.success == 0
+        assert len(result.row_errors) == 1
+
+    def test_partial_failure_non_object_payload_does_not_crash(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex review of #1153, round 3: a truthy but non-dict
+        `partialFailureError` must not be handed to `.get()` (an
+        AttributeError there would fall through to the outer generic
+        `except Exception`, which records `failed` but no `row_errors`)."""
+        monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
+
+        httpserver.expect_request(
+            "/v17/customers/1234567890:uploadClickConversions",
+        ).respond_with_json({"partialFailureError": "unexpected string payload"})
+
+        from drt.destinations import google_ads
+
+        monkeypatch.setattr(google_ads, "_BASE_URL", httpserver.url_for(""))
+
+        config = _config(httpserver)
+        records = [{"gclid": "g1", "conversion_time": "2024-01-01 12:00:00"}]
+        result = GoogleAdsDestination().load(records, config, _options())
+
+        assert result.failed == 1
+        assert len(result.row_errors) == 1

@@ -197,8 +197,17 @@ class GoogleAdsDestination:
 
             resp_data = response.json()
             partial_errors = resp_data.get("partialFailureError")
-            if partial_errors:
-                mapped = _parse_conversion_upload_errors(partial_errors, len(conversions))
+            # `is not None`, not truthiness: a *present but empty/malformed*
+            # partialFailureError (e.g. `{}`) is still a signal something is
+            # wrong, not a legitimate all-clear -- a truthiness check would
+            # take the success branch below and credit every conversion as
+            # delivered (Codex review of PR #1153, round 3).
+            if partial_errors is not None:
+                mapped = (
+                    _parse_conversion_upload_errors(partial_errors, len(conversions))
+                    if isinstance(partial_errors, dict)
+                    else None
+                )
                 if mapped is None:
                     # Response didn't match the documented shape -- degrade
                     # to a conservative "can't tell which ones failed" rather
@@ -209,7 +218,9 @@ class GoogleAdsDestination:
                         "documented response shape; marking the whole "
                         "upload as failed"
                     )
-                    message = str(partial_errors.get("message", "")) or "partial failure"
+                    message = "partial failure"
+                    if isinstance(partial_errors, dict):
+                        message = str(partial_errors.get("message", "")) or message
                     for record_index in conversion_record_indices:
                         record_row_error(
                             result,
