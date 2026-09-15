@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from collections.abc import Iterator
 from typing import Any
 
@@ -86,6 +87,7 @@ class RestApiDestination:
         headers = {**config.headers, **auth_headers}
         rate_limiter = resolve_rate_limiter(config, sync_options, limiter_factory=RateLimiter)
         retry_config = resolve_retry(config.retry, sync_options)
+        sync_name = sync_options._sync_name or ""
 
         with httpx.Client(timeout=30.0) as client:
             if config.body_mode == "batch":
@@ -112,9 +114,42 @@ class RestApiDestination:
                             return result
                         continue
 
+                    request_headers = headers
+                    if config.native_idempotency_key:
+                        # A fresh token per chunk, computed once before the
+                        # retry loop below so drt's own retries of *this*
+                        # chunk reuse it — but a separate chunk or a separate
+                        # run always gets a new one (#897). `row` is
+                        # deliberately not in scope here (no single row for a
+                        # batch request); a template referencing it raises
+                        # UndefinedError, normalized by render_template() to
+                        # ValueError, and is handled as a template error
+                        # below rather than silently rendering empty.
+                        try:
+                            idem_value = render_template(
+                                config.native_idempotency_key,
+                                sync_name=sync_name,
+                                request_id=uuid.uuid4().hex,
+                            )
+                        except Exception as e:  # noqa: BLE001 — same rationale as above
+                            self._fail_chunk(
+                                result,
+                                sub_chunk,
+                                offset,
+                                http_status=None,
+                                error_message=f"Template error: {e}",
+                            )
+                            if sync_options.on_error == "fail":
+                                return result
+                            continue
+                        request_headers = {
+                            **headers,
+                            config.native_idempotency_header: idem_value,
+                        }
+
                     def do_batch_request(
                         _body: str = batch_body,
-                        _headers: dict[str, Any] = headers,
+                        _headers: dict[str, Any] = request_headers,
                     ) -> httpx.Response:
                         response = client.request(
                             method=config.method,
@@ -180,9 +215,34 @@ class RestApiDestination:
                 else:
                     body = record
 
+                request_headers = headers
+                if config.native_idempotency_key:
+                    # A content-derived key is the point in record mode
+                    # (unlike batch mode's random request_id): retrying the
+                    # same row across separate runs should dedupe against a
+                    # previously successful delivery of that exact row
+                    # (#897). Computed once before the retry loop below so
+                    # drt's own retries of this row reuse it.
+                    try:
+                        idem_value = render_template(
+                            config.native_idempotency_key, record, sync_name=sync_name
+                        )
+                    except Exception as e:  # noqa: BLE001 — same rationale as body_template above
+                        record_row_error(
+                            result,
+                            i,
+                            json.dumps(record, default=str)[:200],
+                            e,
+                            error_message=f"Template error: {e}",
+                        )
+                        if sync_options.on_error == "fail":
+                            return result
+                        continue
+                    request_headers = {**headers, config.native_idempotency_header: idem_value}
+
                 def do_request(
                     _body: dict[str, Any] | str = body,
-                    _headers: dict[str, Any] = headers,
+                    _headers: dict[str, Any] = request_headers,
                 ) -> httpx.Response:
                     response = client.request(
                         method=config.method,
@@ -220,6 +280,12 @@ class RestApiDestination:
 
         # Return as SyncResult-compatible object
         return result
+
+    def supports_native_idempotency_key(self, config: DestinationConfig) -> bool:
+        """NativeIdempotencyCapable (#897): both ``body_mode: record`` and
+        ``body_mode: batch`` are wired — see ``load()``'s per-request header
+        injection above."""
+        return True
 
     @staticmethod
     def _fail_chunk(

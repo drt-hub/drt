@@ -211,7 +211,28 @@ async def test_validate_reports_secret_warning_for_invalid_sync(tmp_path: Path) 
 async def test_validate_warns_on_ineffective_native_idempotency_key(tmp_path: Path) -> None:
     """#897 (Codex review of PR #1150, finding 3): the MCP validate path had
     only ever called the secret-scan collector, so an MCP caller got no
-    warning that native_idempotency_key is a no-op on rest_api today."""
+    warning that native_idempotency_key is a no-op on slack today (Incoming
+    Webhooks have no native dedup mechanism to wire this to)."""
+    (tmp_path / "drt_project.yml").write_text("name: test\nprofile: default\n")
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "idem.yml").write_text(
+        "name: idem\n"
+        "model: SELECT 1\n"
+        "destination:\n"
+        "  type: slack\n"
+        "  native_idempotency_key: '{{ row.id }}'\n"
+    )
+    srv = create_server(tmp_path)
+    result = await call(srv, "drt_validate")
+    assert "idem" in result["valid"]
+    assert "no effect" in result["idempotency_warnings"]["idem"][0]
+
+
+@pytest.mark.asyncio
+async def test_validate_does_not_warn_for_a_wired_destination_type(tmp_path: Path) -> None:
+    """#897: rest_api implements NativeIdempotencyCapable (both body_mode:
+    record and body_mode: batch are wired) -- no warning for it."""
     (tmp_path / "drt_project.yml").write_text("name: test\nprofile: default\n")
     syncs_dir = tmp_path / "syncs"
     syncs_dir.mkdir()
@@ -227,7 +248,7 @@ async def test_validate_warns_on_ineffective_native_idempotency_key(tmp_path: Pa
     srv = create_server(tmp_path)
     result = await call(srv, "drt_validate")
     assert "idem" in result["valid"]
-    assert "no effect" in result["idempotency_warnings"]["idem"][0]
+    assert "idempotency_warnings" not in result
 
 
 @pytest.mark.asyncio
@@ -244,9 +265,7 @@ async def test_validate_native_idempotency_warning_does_not_promote_under_strict
         "name: idem\n"
         "model: SELECT 1\n"
         "destination:\n"
-        "  type: rest_api\n"
-        "  url: https://example.com/api\n"
-        "  method: POST\n"
+        "  type: slack\n"
         "  native_idempotency_key: '{{ row.id }}'\n"
     )
     srv = create_server(tmp_path)

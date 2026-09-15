@@ -920,3 +920,208 @@ class TestSharedRateLimiterBucket:
 
         assert len(seen) == 2, "both call sites must go through the registry"
         assert seen[0] is seen[1], "one host, one bucket"
+
+
+# ---------------------------------------------------------------------------
+# native_idempotency_key wiring (#897)
+# ---------------------------------------------------------------------------
+
+
+class TestRestApiDestinationNativeIdempotencyKey:
+    def test_supports_native_idempotency_key_returns_true(self) -> None:
+        assert RestApiDestination().supports_native_idempotency_key(_dest_config()) is True
+
+    def test_absent_by_default_in_record_mode(self) -> None:
+        config = _dest_config()
+        options = _sync_options()
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.return_value = _make_response(200, "OK")
+
+            RestApiDestination().load([{"id": 1}], config, options)
+
+        headers = mock_client.request.call_args.kwargs["headers"]
+        assert "Idempotency-Key" not in headers
+
+    def test_record_mode_renders_content_derived_key(self) -> None:
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/webhook",
+            method="POST",
+            native_idempotency_key="{{ sync_name }}:{{ row.id }}",
+        )
+        options = _sync_options()
+        options._sync_name = "my_sync"
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.return_value = _make_response(200, "OK")
+
+            RestApiDestination().load([{"id": 42}], config, options)
+
+        headers = mock_client.request.call_args.kwargs["headers"]
+        assert headers["Idempotency-Key"] == "my_sync:42"
+
+    def test_record_mode_uses_custom_header_name(self) -> None:
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/webhook",
+            method="POST",
+            native_idempotency_key="{{ row.id }}",
+            native_idempotency_header="X-Request-Id",
+        )
+        options = _sync_options()
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.return_value = _make_response(200, "OK")
+
+            RestApiDestination().load([{"id": 1}], config, options)
+
+        headers = mock_client.request.call_args.kwargs["headers"]
+        assert headers["X-Request-Id"] == "1"
+        assert "Idempotency-Key" not in headers
+
+    def test_record_mode_key_is_stable_across_a_retry(self) -> None:
+        """The point of computing the key once before with_retry: a network
+        blip that makes drt itself retry the same row must resend the exact
+        same key, or the destination's dedup can't recognize it as a retry
+        of the same request."""
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/webhook",
+            method="POST",
+            native_idempotency_key="{{ row.id }}",
+        )
+        options = _sync_options(max_attempts=2)
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.side_effect = [
+                _make_response(503, "busy"),
+                _make_response(200, "OK"),
+            ]
+
+            RestApiDestination().load([{"id": 7}], config, options)
+
+        assert mock_client.request.call_count == 2
+        first_headers = mock_client.request.call_args_list[0].kwargs["headers"]
+        second_headers = mock_client.request.call_args_list[1].kwargs["headers"]
+        assert first_headers["Idempotency-Key"] == second_headers["Idempotency-Key"] == "7"
+
+    def test_record_mode_template_error_fails_row_without_request(self) -> None:
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/webhook",
+            method="POST",
+            native_idempotency_key="{{ row.missing }}",
+        )
+        options = _sync_options()
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+
+            result = RestApiDestination().load([{"id": 1}], config, options)
+
+        assert result.failed == 1
+        assert mock_client.request.call_count == 0
+        assert "Template error" in result.row_errors[0].error_message
+
+    def test_batch_mode_renders_key_with_sync_name_and_request_id(self) -> None:
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/batch",
+            body_mode="batch",
+            batch_template="{{ rows | tojson_safe }}",
+            native_idempotency_key="{{ sync_name }}:{{ request_id }}",
+        )
+        options = _sync_options()
+        options._sync_name = "my_sync"
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.return_value = _make_response(200, "OK")
+
+            RestApiDestination().load([{"id": 1}, {"id": 2}], config, options)
+
+        headers = mock_client.request.call_args.kwargs["headers"]
+        assert headers["Idempotency-Key"].startswith("my_sync:")
+        assert len(headers["Idempotency-Key"]) > len("my_sync:")
+
+    def test_batch_mode_request_id_differs_across_chunks(self) -> None:
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/batch",
+            body_mode="batch",
+            batch_template="{{ rows | tojson_safe }}",
+            max_records_per_request=1,
+            native_idempotency_key="{{ request_id }}",
+        )
+        options = _sync_options()
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.return_value = _make_response(200, "OK")
+
+            RestApiDestination().load([{"id": 1}, {"id": 2}], config, options)
+
+        assert mock_client.request.call_count == 2
+        first_key = mock_client.request.call_args_list[0].kwargs["headers"]["Idempotency-Key"]
+        second_key = mock_client.request.call_args_list[1].kwargs["headers"]["Idempotency-Key"]
+        assert first_key != second_key
+
+    def test_batch_mode_key_is_stable_across_a_retry_of_one_chunk(self) -> None:
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/batch",
+            body_mode="batch",
+            batch_template="{{ rows | tojson_safe }}",
+            native_idempotency_key="{{ request_id }}",
+        )
+        options = _sync_options(max_attempts=2)
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.request.side_effect = [
+                _make_response(503, "busy"),
+                _make_response(200, "OK"),
+            ]
+
+            RestApiDestination().load([{"id": 1}, {"id": 2}], config, options)
+
+        assert mock_client.request.call_count == 2
+        first_headers = mock_client.request.call_args_list[0].kwargs["headers"]
+        second_headers = mock_client.request.call_args_list[1].kwargs["headers"]
+        assert first_headers["Idempotency-Key"] == second_headers["Idempotency-Key"]
+
+    def test_batch_mode_referencing_row_is_a_template_error_not_empty_key(self) -> None:
+        """#897's design constraint: body_mode: batch has no single row in
+        scope, so a template referencing `row` must fail loudly rather than
+        silently render an empty/undefined key."""
+        config = RestApiDestinationConfig(
+            type="rest_api",
+            url="https://api.example.com/batch",
+            body_mode="batch",
+            batch_template="{{ rows | tojson_safe }}",
+            native_idempotency_key="{{ row.id }}",
+        )
+        options = _sync_options()
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+
+            result = RestApiDestination().load([{"id": 1}, {"id": 2}], config, options)
+
+        assert result.failed == 2
+        assert mock_client.request.call_count == 0
+        assert "Template error" in result.row_errors[0].error_message
