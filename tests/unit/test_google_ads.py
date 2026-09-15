@@ -239,3 +239,152 @@ class TestGoogleAdsDestination:
         conv = body["conversions"][0]
         assert conv["conversionValue"] == 9800.0
         assert conv["currencyCode"] == "JPY"
+
+    def test_partial_failure_multiple_errors_for_one_conversion_counted_once(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex review of #1153: Google can return more than one
+        GoogleAdsError for the same conversion index. Recording one RowError
+        per *error* instead of per conversion would inflate `failed` past
+        the batch size and enqueue the same record into the DLQ twice."""
+        monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
+
+        httpserver.expect_request(
+            "/v17/customers/1234567890:uploadClickConversions",
+        ).respond_with_json(
+            {
+                "partialFailureError": {
+                    "code": 3,
+                    "message": "Request contains an invalid argument.",
+                    "details": [
+                        {
+                            "@type": (
+                                "type.googleapis.com/google.ads.googleads."
+                                "v17.errors.GoogleAdsFailure"
+                            ),
+                            "errors": [
+                                {
+                                    "errorCode": {"conversionUploadError": "INVALID_GCLID"},
+                                    "message": "Invalid gclid",
+                                    "location": {
+                                        "fieldPathElements": [
+                                            {"fieldName": "conversions", "index": 0}
+                                        ]
+                                    },
+                                },
+                                {
+                                    "errorCode": {"conversionActionError": "INVALID_ARGUMENT"},
+                                    "message": "Invalid conversion action",
+                                    "location": {
+                                        "fieldPathElements": [
+                                            {"fieldName": "conversions", "index": 0}
+                                        ]
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                },
+            }
+        )
+
+        from drt.destinations import google_ads
+
+        monkeypatch.setattr(google_ads, "_BASE_URL", httpserver.url_for(""))
+
+        config = _config(httpserver)
+        records = [{"gclid": "bad", "conversion_time": "2024-01-01 12:00:00"}]
+        result = GoogleAdsDestination().load(records, config, _options())
+
+        assert result.failed == 1
+        assert result.success == 0
+        assert len(result.row_errors) == 1
+        assert "Invalid gclid" in result.row_errors[0].error_message
+        assert "Invalid conversion action" in result.row_errors[0].error_message
+
+    def test_partial_failure_malformed_nested_shape_does_not_crash(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex review of #1153: a non-dict `location` (or any other nested
+        type mismatch) must be validated, not dereferenced with an unchecked
+        `.get()` -- an unhandled AttributeError here would fall through to
+        the outer generic `except Exception`, which records `failed` but no
+        `row_errors`, silently dropping these records from the DLQ."""
+        monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
+
+        httpserver.expect_request(
+            "/v17/customers/1234567890:uploadClickConversions",
+        ).respond_with_json(
+            {
+                "partialFailureError": {
+                    "message": "Request contains an invalid argument.",
+                    "details": [
+                        {
+                            "@type": (
+                                "type.googleapis.com/google.ads.googleads."
+                                "v17.errors.GoogleAdsFailure"
+                            ),
+                            "errors": [
+                                {
+                                    "errorCode": {"conversionUploadError": "INVALID_GCLID"},
+                                    "message": "Invalid gclid",
+                                    "location": "not-a-dict",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        )
+
+        from drt.destinations import google_ads
+
+        monkeypatch.setattr(google_ads, "_BASE_URL", httpserver.url_for(""))
+
+        config = _config(httpserver)
+        records = [{"gclid": "bad", "conversion_time": "2024-01-01 12:00:00"}]
+        result = GoogleAdsDestination().load(records, config, _options())
+
+        assert result.failed == 1
+        assert len(result.row_errors) == 1
+        assert result.row_errors[0].batch_index == 0
+
+    def test_partial_failure_empty_errors_list_is_unparseable(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex review of #1153: a non-null partialFailureError with an
+        empty `errors` array is not a legitimate all-clear -- treat it the
+        same as any other unparseable shape rather than silently crediting
+        every conversion as a success."""
+        monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
+
+        httpserver.expect_request(
+            "/v17/customers/1234567890:uploadClickConversions",
+        ).respond_with_json(
+            {
+                "partialFailureError": {
+                    "message": "Request contains an invalid argument.",
+                    "details": [
+                        {
+                            "@type": (
+                                "type.googleapis.com/google.ads.googleads."
+                                "v17.errors.GoogleAdsFailure"
+                            ),
+                            "errors": [],
+                        }
+                    ],
+                },
+            }
+        )
+
+        from drt.destinations import google_ads
+
+        monkeypatch.setattr(google_ads, "_BASE_URL", httpserver.url_for(""))
+
+        config = _config(httpserver)
+        records = [{"gclid": "g1", "conversion_time": "2024-01-01 12:00:00"}]
+        result = GoogleAdsDestination().load(records, config, _options())
+
+        assert result.failed == 1
+        assert result.success == 0
+        assert len(result.row_errors) == 1

@@ -70,19 +70,33 @@ def _parse_conversion_upload_errors(
     details = partial_failure_error.get("details")
     if not isinstance(details, list) or not details:
         return None
-    errors = details[0].get("errors")
-    if not isinstance(errors, list):
+    failure = details[0]
+    if not isinstance(failure, dict):
+        return None
+    errors = failure.get("errors")
+    # An empty errors list is also treated as unparseable rather than "zero
+    # failures" -- a non-null partialFailureError with nothing inside it is
+    # itself a shape drt-core has never observed, not a legitimate all-clear.
+    if not isinstance(errors, list) or not errors:
         return None
 
     mapped: list[tuple[int, dict[str, Any]]] = []
     for error in errors:
         if not isinstance(error, dict):
             return None
-        field_path = (error.get("location") or {}).get("fieldPathElements") or []
-        index = next(
-            (el.get("index") for el in field_path if el.get("fieldName") == "conversions"),
-            None,
-        )
+        location = error.get("location")
+        if not isinstance(location, dict):
+            return None
+        field_path = location.get("fieldPathElements")
+        if not isinstance(field_path, list):
+            return None
+        index: Any = None
+        for el in field_path:
+            if not isinstance(el, dict):
+                return None
+            if el.get("fieldName") == "conversions":
+                index = el.get("index")
+                break
         if not isinstance(index, int) or not (0 <= index < conversion_count):
             return None
         mapped.append((index, error))
@@ -201,17 +215,25 @@ class GoogleAdsDestination:
                             error_message=message,
                         )
                 else:
-                    failed_conversion_indices = {idx for idx, _ in mapped}
+                    # Group by conversion index first: Google can return more
+                    # than one GoogleAdsError for the same conversion, and
+                    # recording one RowError per *error* rather than per
+                    # conversion would inflate `failed` past the batch size
+                    # and enqueue the same record into the DLQ more than once.
+                    errors_by_index: dict[int, list[dict[str, Any]]] = {}
                     for idx, error in mapped:
+                        errors_by_index.setdefault(idx, []).append(error)
+                    for idx, idx_errors in errors_by_index.items():
                         record_index = conversion_record_indices[idx]
+                        message = "; ".join(str(e.get("message", "")) for e in idx_errors)
                         record_row_error(
                             result,
                             record_index,
                             json.dumps(records[record_index], default=str)[:200],
                             ValueError(),
-                            error_message=str(error.get("message", "")),
+                            error_message=message,
                         )
-                    result.success += len(conversions) - len(failed_conversion_indices)
+                    result.success += len(conversions) - len(errors_by_index)
             else:
                 result.success += len(conversions)
 
