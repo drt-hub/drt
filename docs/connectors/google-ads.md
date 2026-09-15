@@ -30,13 +30,13 @@ destination:
 | `conversion_time_field` | string | `"conversion_time"` | Row field holding the conversion timestamp. |
 | `conversion_value_field` | string \| null | null | Optional row field holding the conversion value. |
 | `currency_code` | string | `"USD"` | Currency for the conversion value. |
-| `developer_token_env` | string | `"GOOGLE_ADS_DEVELOPER_TOKEN"` | Env var holding the Google Ads developer token. |
+| `developer_token_env` | string | `"GOOGLE_ADS_DEVELOPER_TOKEN"` | Env var holding the Google Ads developer token. Sent when set; no longer required (Google's Cloud-project-based access model made this header optional and server-ignored). |
 | `auth` | AuthConfig \| null | null | Typically `oauth2_client_credentials` (client id/secret + refresh token). |
 | `retry` | RetryConfig \| null | null | Per-destination override of `sync.retry`. |
 
 ## Authentication
 
-You need a **developer token** (from your Google Ads manager account) plus an **OAuth2** client:
+You need an **OAuth2** client. A **developer token** (from your Google Ads manager account) is sent as a request header when configured, but is no longer required — Google's Cloud-project-based access model made it optional and server-ignored:
 
 ```bash
 export GOOGLE_ADS_DEVELOPER_TOKEN="..."
@@ -49,3 +49,4 @@ See [rest-api.md](rest-api.md) for the `oauth2_client_credentials` auth block (c
 - Core connector — no `pip install` extras needed.
 - Each row becomes one offline conversion upload; `gclid` + `conversion_time` are required per conversion.
 - Conversions can take time to appear in the Google Ads UI (standard attribution delay).
+- Google no longer accepts *new* adopters of offline click-conversion imports via this endpoint (`ConversionUploadService.UploadClickConversions`) — since 2026-06-15, a developer token with no prior conversion-import activity gets `CUSTOMER_NOT_ALLOWLISTED_FOR_THIS_FEATURE`. Existing adopters are unaffected during Google's transition to the newer Data Manager API; there is no drt-side workaround for a newly-allowlisted account.

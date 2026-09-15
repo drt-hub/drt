@@ -248,7 +248,11 @@ def test_salesforce_bulk_provider_uris_route_through_resolve_env() -> None:
     ]
 
 
-def test_google_ads_missing_resolved_token_keeps_existing_error() -> None:
+def test_google_ads_missing_resolved_token_no_longer_raises() -> None:
+    """#1154: the developer-token header became optional and server-ignored
+    under Google's Cloud-project-based access model, so a destination
+    config whose developer_token_env resolves to nothing must no longer
+    raise -- it proceeds with the header omitted."""
     config = GoogleAdsDestinationConfig(
         type="google_ads",
         customer_id="123",
@@ -257,8 +261,10 @@ def test_google_ads_missing_resolved_token_keeps_existing_error() -> None:
     )
 
     with patch.object(google_ads, "resolve_env", return_value=None):
-        with pytest.raises(ValueError, match=_URI):
-            GoogleAdsDestination().load([{}], config, SyncOptions())
+        result = GoogleAdsDestination().load([{}], config, SyncOptions())
+
+    assert result.failed == 1
+    assert "Missing required field" in result.row_errors[0].error_message
 
 
 def test_google_sheets_provider_uri_routes_through_resolve_env() -> None:
