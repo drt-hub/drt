@@ -28,6 +28,7 @@ Example sync YAML:
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import httpx
@@ -44,8 +45,48 @@ from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import record_row_error
 
+logger = logging.getLogger(__name__)
+
 _API_VERSION = "v17"
 _BASE_URL = "https://googleads.googleapis.com"
+
+
+def _parse_conversion_upload_errors(
+    partial_failure_error: dict[str, Any], conversion_count: int
+) -> list[tuple[int, dict[str, Any]]] | None:
+    """Map a ``partialFailureError`` to ``(conversions-index, GoogleAdsError)``
+    pairs, or ``None`` if the response didn't match the documented shape.
+
+    ``partialFailureError.details`` always contains exactly one ``Any``-packed
+    ``GoogleAdsFailure`` object -- regardless of how many conversions failed
+    -- not one entry per failure (see the Partial Failure guide:
+    https://developers.google.com/google-ads/api/docs/best-practices/partial-failures).
+    That object's own ``errors`` array has one ``GoogleAdsError`` per actual
+    failure, each carrying ``location.fieldPathElements[].index`` to identify
+    which conversion (by position in the request's ``conversions[]``) it
+    belongs to. Returning ``None`` on any shape mismatch lets the caller
+    degrade to a safe, conservative fallback rather than guessing at counts.
+    """
+    details = partial_failure_error.get("details")
+    if not isinstance(details, list) or not details:
+        return None
+    errors = details[0].get("errors")
+    if not isinstance(errors, list):
+        return None
+
+    mapped: list[tuple[int, dict[str, Any]]] = []
+    for error in errors:
+        if not isinstance(error, dict):
+            return None
+        field_path = (error.get("location") or {}).get("fieldPathElements") or []
+        index = next(
+            (el.get("index") for el in field_path if el.get("fieldName") == "conversions"),
+            None,
+        )
+        if not isinstance(index, int) or not (0 <= index < conversion_count):
+            return None
+        mapped.append((index, error))
+    return mapped
 
 
 class GoogleAdsDestination:
@@ -76,8 +117,13 @@ class GoogleAdsDestination:
             "Content-Type": "application/json",
         }
 
-        # Build conversions payload
-        conversions = []
+        # Build conversions payload. conversion_record_indices[j] is the
+        # original `records` index that conversions[j] came from -- a record
+        # skipped below (missing gclid/conversion_time) never gets a
+        # conversions[] entry, so the two lists can diverge and the mapping
+        # can't be assumed to be the identity.
+        conversions: list[dict[str, Any]] = []
+        conversion_record_indices: list[int] = []
         for i, record in enumerate(records):
             gclid = record.get(config.gclid_field)
             conv_time = record.get(config.conversion_time_field)
@@ -109,6 +155,7 @@ class GoogleAdsDestination:
                     conversion["currencyCode"] = config.currency_code
 
             conversions.append(conversion)
+            conversion_record_indices.append(i)
 
         if not conversions:
             return result
@@ -131,14 +178,40 @@ class GoogleAdsDestination:
                 response = with_retry(do_upload, retry_config)
 
             resp_data = response.json()
-            # Count partial failures
             partial_errors = resp_data.get("partialFailureError")
             if partial_errors:
-                error_details = partial_errors.get("details", [])
-                result.failed += len(error_details)
-                result.success += len(conversions) - len(error_details)
-                for detail in error_details[:10]:
-                    result.errors.append(str(detail.get("message", "")))
+                mapped = _parse_conversion_upload_errors(partial_errors, len(conversions))
+                if mapped is None:
+                    # Response didn't match the documented shape -- degrade
+                    # to a conservative "can't tell which ones failed" rather
+                    # than guessing, same shape as rest_api.py's
+                    # _handle_batch_http_error's error_path fallback.
+                    logger.warning(
+                        "Google Ads partialFailureError did not match the "
+                        "documented response shape; marking the whole "
+                        "upload as failed"
+                    )
+                    message = str(partial_errors.get("message", "")) or "partial failure"
+                    for record_index in conversion_record_indices:
+                        record_row_error(
+                            result,
+                            record_index,
+                            json.dumps(records[record_index], default=str)[:200],
+                            ValueError(),
+                            error_message=message,
+                        )
+                else:
+                    failed_conversion_indices = {idx for idx, _ in mapped}
+                    for idx, error in mapped:
+                        record_index = conversion_record_indices[idx]
+                        record_row_error(
+                            result,
+                            record_index,
+                            json.dumps(records[record_index], default=str)[:200],
+                            ValueError(),
+                            error_message=str(error.get("message", "")),
+                        )
+                    result.success += len(conversions) - len(failed_conversion_indices)
             else:
                 result.success += len(conversions)
 
