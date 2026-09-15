@@ -4,8 +4,10 @@ Sends conversion data to Google Ads via the Conversions Upload API.
 Each record should contain a gclid, conversion timestamp, and optionally
 a conversion value.
 
-Requires OAuth2 authentication (service account or client credentials)
-and a developer token.
+Requires OAuth2 authentication (service account or client credentials).
+A developer token (``developer_token_env``) is sent when configured but no
+longer required (#1154) -- Google's Cloud-project-based access model made
+the header optional and server-ignored.
 
 Example sync YAML:
 
@@ -47,7 +49,16 @@ from drt.destinations.row_errors import record_row_error
 
 logger = logging.getLogger(__name__)
 
-_API_VERSION = "v17"
+# v17 sunset 2025-06-04 (drt-hub/drt#1154) -- every request against it fails
+# outright. v25 (released 2026-07-22) is the current version with the
+# longest remaining runway (sunsets ~August 2027); v22-v24 all sunset within
+# a year of writing this. ClickConversion's five fields this destination
+# sets (gclid, conversionAction, conversionDateTime, conversionValue,
+# currencyCode), the partial-failure error shape this destination parses
+# (GoogleAdsFailure/GoogleAdsError/FieldPathElement), and order_id are all
+# confirmed byte-identical between v22 and v25's proto sources -- this is a
+# version-string bump, not a payload/response shape migration.
+_API_VERSION = "v25"
 _BASE_URL = "https://googleads.googleapis.com"
 
 
@@ -129,16 +140,21 @@ class GoogleAdsDestination:
         rate_limiter = resolve_rate_limiter(config, sync_options, limiter_factory=RateLimiter)
         retry_config = resolve_retry(config.retry, sync_options)
 
-        developer_token = resolve_env(None, config.developer_token_env) or ""
-        if not developer_token:
-            raise ValueError(f"Google Ads: env var '{config.developer_token_env}' is not set.")
-
         auth_headers = AuthHandler(config.auth).get_headers()
         headers = {
             **auth_headers,
-            "developer-token": developer_token,
             "Content-Type": "application/json",
         }
+        developer_token = resolve_env(None, config.developer_token_env)
+        if developer_token:
+            # (#1154) Google's September 2026 access-model change made this
+            # header optional and server-ignored for every caller, not just
+            # new Cloud-project-based adopters -- requiring it client-side
+            # is now a purely drt-imposed constraint that would otherwise
+            # block anyone onboarding under the new model with no token to
+            # give. Sent when configured (harmless for existing setups),
+            # omitted rather than raising when absent.
+            headers["developer-token"] = developer_token
 
         # Build conversions payload. conversion_record_indices[j] is the
         # original `records` index that conversions[j] came from -- a record
