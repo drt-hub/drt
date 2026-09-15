@@ -486,3 +486,84 @@ class TestGoogleAdsDestination:
 
         assert result.failed == 1
         assert len(result.row_errors) == 1
+
+    def test_partial_failure_explicit_null_is_not_a_success(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex review of #1153, round 4: `resp_data.get("partialFailureError")`
+        returns the same `None` for an absent key and an explicit
+        `"partialFailureError": null` -- a malformed/intermediary response
+        sending the latter must still route through the conservative
+        fallback, not the absent-field success branch."""
+        monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
+
+        httpserver.expect_request(
+            "/v17/customers/1234567890:uploadClickConversions",
+        ).respond_with_json({"partialFailureError": None})
+
+        from drt.destinations import google_ads
+
+        monkeypatch.setattr(google_ads, "_BASE_URL", httpserver.url_for(""))
+
+        config = _config(httpserver)
+        records = [{"gclid": "g1", "conversion_time": "2024-01-01 12:00:00"}]
+        result = GoogleAdsDestination().load(records, config, _options())
+
+        assert result.failed == 1
+        assert result.success == 0
+        assert len(result.row_errors) == 1
+
+    def test_partial_failure_boolean_index_is_unparseable(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex review of #1153, round 4: `bool` is an `int` subclass in
+        Python, so an unvalidated `"index": true` would otherwise be
+        accepted as index 1 and misattribute the error to an arbitrary
+        record instead of hitting the whole-batch fallback."""
+        monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
+
+        httpserver.expect_request(
+            "/v17/customers/1234567890:uploadClickConversions",
+        ).respond_with_json(
+            {
+                "partialFailureError": {
+                    "message": "Request contains an invalid argument.",
+                    "details": [
+                        {
+                            "@type": (
+                                "type.googleapis.com/google.ads.googleads."
+                                "v17.errors.GoogleAdsFailure"
+                            ),
+                            "errors": [
+                                {
+                                    "errorCode": {"conversionUploadError": "INVALID_GCLID"},
+                                    "message": "Invalid gclid",
+                                    "location": {
+                                        "fieldPathElements": [
+                                            {"fieldName": "conversions", "index": True}
+                                        ]
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        )
+
+        from drt.destinations import google_ads
+
+        monkeypatch.setattr(google_ads, "_BASE_URL", httpserver.url_for(""))
+
+        config = _config(httpserver)
+        records = [
+            {"gclid": "g0", "conversion_time": "2024-01-01 12:00:00"},
+            {"gclid": "g1", "conversion_time": "2024-01-01 12:00:00"},
+        ]
+        result = GoogleAdsDestination().load(records, config, _options())
+
+        # Unparseable -> conservative whole-batch failure, not "index 1
+        # (== True) failed, index 0 silently succeeded".
+        assert result.failed == 2
+        assert result.success == 0
+        assert len(result.row_errors) == 2

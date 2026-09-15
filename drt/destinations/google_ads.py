@@ -101,7 +101,12 @@ def _parse_conversion_upload_errors(
             if el.get("fieldName") == "conversions":
                 index = el.get("index")
                 break
-        if not isinstance(index, int) or not (0 <= index < conversion_count):
+        # bool is an int subclass in Python -- an unvalidated `"index": true`
+        # would otherwise be accepted as index 1 and misattribute the error
+        # to an arbitrary record instead of hitting the whole-batch fallback.
+        if isinstance(index, bool) or not isinstance(index, int):
+            return None
+        if not (0 <= index < conversion_count):
             return None
         mapped.append((index, error))
     return mapped
@@ -197,12 +202,14 @@ class GoogleAdsDestination:
 
             resp_data = response.json()
             partial_errors = resp_data.get("partialFailureError")
-            # `is not None`, not truthiness: a *present but empty/malformed*
-            # partialFailureError (e.g. `{}`) is still a signal something is
-            # wrong, not a legitimate all-clear -- a truthiness check would
-            # take the success branch below and credit every conversion as
-            # delivered (Codex review of PR #1153, round 3).
-            if partial_errors is not None:
+            # Field *presence*, not truthiness and not None-ness: a present
+            # but empty/malformed partialFailureError (e.g. `{}`, or an
+            # explicit `null` from a malformed/intermediary response) is
+            # still a signal something is wrong, not a legitimate all-clear
+            # -- either a truthiness or a None check would take the success
+            # branch below and credit every conversion as delivered (Codex
+            # review of PR #1153, rounds 3 and 4).
+            if "partialFailureError" in resp_data:
                 mapped = (
                     _parse_conversion_upload_errors(partial_errors, len(conversions))
                     if isinstance(partial_errors, dict)
