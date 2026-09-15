@@ -388,3 +388,51 @@ class TestGoogleAdsDestination:
         assert result.failed == 1
         assert result.success == 0
         assert len(result.row_errors) == 1
+
+    def test_partial_failure_multiple_details_entries_is_unparseable(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex review of #1153, round 2: `details` is documented to always
+        contain exactly one packed GoogleAdsFailure. Silently reading
+        `details[0]` and ignoring a second entry would drop real errors from
+        an undocumented multi-entry response and wrongly credit those
+        conversions as successfully delivered."""
+        monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
+
+        one_failure = {
+            "@type": "type.googleapis.com/google.ads.googleads.v17.errors.GoogleAdsFailure",
+            "errors": [
+                {
+                    "errorCode": {"conversionUploadError": "INVALID_GCLID"},
+                    "message": "Invalid gclid",
+                    "location": {"fieldPathElements": [{"fieldName": "conversions", "index": 0}]},
+                }
+            ],
+        }
+        httpserver.expect_request(
+            "/v17/customers/1234567890:uploadClickConversions",
+        ).respond_with_json(
+            {
+                "partialFailureError": {
+                    "message": "Request contains an invalid argument.",
+                    "details": [one_failure, one_failure],
+                },
+            }
+        )
+
+        from drt.destinations import google_ads
+
+        monkeypatch.setattr(google_ads, "_BASE_URL", httpserver.url_for(""))
+
+        config = _config(httpserver)
+        records = [
+            {"gclid": "bad0", "conversion_time": "2024-01-01 12:00:00"},
+            {"gclid": "bad1", "conversion_time": "2024-01-01 12:00:00"},
+        ]
+        result = GoogleAdsDestination().load(records, config, _options())
+
+        # Unparseable -> conservative whole-batch failure, not "index 0
+        # failed, index 1 silently succeeded".
+        assert result.failed == 2
+        assert result.success == 0
+        assert len(result.row_errors) == 2

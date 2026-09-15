@@ -68,7 +68,11 @@ def _parse_conversion_upload_errors(
     degrade to a safe, conservative fallback rather than guessing at counts.
     """
     details = partial_failure_error.get("details")
-    if not isinstance(details, list) or not details:
+    # Exactly one -- per the documented contract above, not "at least one".
+    # Silently reading details[0] and ignoring any further entries would
+    # drop real errors from an undocumented multi-entry response, wrongly
+    # crediting those conversions as delivered (Codex review of PR #1153).
+    if not isinstance(details, list) or len(details) != 1:
         return None
     failure = details[0]
     if not isinstance(failure, dict):
