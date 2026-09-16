@@ -1802,6 +1802,65 @@ class TestRateLimitKey:
 
         assert a.rate_limit_key() == b.rate_limit_key()
 
+    def test_google_ads_rate_limit_key_distinguishes_tokenless_oauth_clients(self) -> None:
+        """#1154: developer_token_env alone stopped being a reliable account
+        signal once the header became optional -- two tokenless configs
+        with different OAuth clients (the norm under Google's Cloud-
+        project-based access model) must not collapse onto one limiter."""
+        from drt.config.base import OAuth2ClientCredentialsAuth
+        from drt.config.destinations_saas import GoogleAdsDestinationConfig
+
+        auth_a = OAuth2ClientCredentialsAuth(
+            type="oauth2_client_credentials",
+            token_url="https://oauth2.googleapis.com/token",
+            client_id_env="CLIENT_A_ID",
+            client_secret_env="CLIENT_A_SECRET",
+        )
+        auth_b = OAuth2ClientCredentialsAuth(
+            type="oauth2_client_credentials",
+            token_url="https://oauth2.googleapis.com/token",
+            client_id_env="CLIENT_B_ID",
+            client_secret_env="CLIENT_B_SECRET",
+        )
+        a = GoogleAdsDestinationConfig(
+            type="google_ads",
+            customer_id="111",
+            conversion_action="customers/111/conversionActions/1",
+            auth=auth_a,
+        )
+        b = GoogleAdsDestinationConfig(
+            type="google_ads",
+            customer_id="222",
+            conversion_action="customers/222/conversionActions/2",
+            auth=auth_b,
+        )
+
+        # Both left developer_token_env at its shared default -- only the
+        # OAuth client identity distinguishes them.
+        assert a.developer_token_env == b.developer_token_env
+        assert a.rate_limit_key() != b.rate_limit_key()
+
+    def test_google_ads_rate_limit_key_shares_bucket_for_same_token(self) -> None:
+        """Accounts sharing one developer token still share the metering
+        budget (#769) -- the OAuth-client refinement narrows over-sharing,
+        it doesn't eliminate the original "same token" bucketing."""
+        from drt.config.destinations_saas import GoogleAdsDestinationConfig
+
+        a = GoogleAdsDestinationConfig(
+            type="google_ads",
+            customer_id="111",
+            conversion_action="customers/111/conversionActions/1",
+            developer_token_env="SHARED_TOKEN",
+        )
+        b = GoogleAdsDestinationConfig(
+            type="google_ads",
+            customer_id="222",
+            conversion_action="customers/222/conversionActions/2",
+            developer_token_env="SHARED_TOKEN",
+        )
+
+        assert a.rate_limit_key() == b.rate_limit_key()
+
     def test_klaviyo_rate_limit_key_is_the_account(self) -> None:
         from drt.config.destinations_saas import KlaviyoDestinationConfig
 
