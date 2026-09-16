@@ -788,24 +788,34 @@ class GoogleAdsDestinationConfig(BaseModel):
         return "google_ads"
 
     def rate_limit_key(self) -> str:
-        """Per developer token (#769), refined by OAuth client identity
-        (#1154). Google Ads meters API operations against the developer
-        token, so accounts sharing one token share the budget;
+        """Per developer token (#769). Google Ads meters API operations against
+        the developer token, so accounts sharing one token share the budget;
         ``customer_id`` is the narrower scope and would over-split it.
         ``describe_safe()`` drops the id entirely (#696), another reason it
         cannot be the key. (``BaseModel``-direct config.)
 
-        ``developer_token_env`` alone stopped being a reliable account
-        signal once the header became optional (#1154, Google's
-        Cloud-project-based access model) -- every tokenless config leaves
-        this field at its shared default name, which would otherwise
-        collapse unrelated Cloud projects using different OAuth clients
-        onto one limiter. ``_auth_identity()`` (already used by several
-        other destinations for exactly this "what real-world account is
-        behind this config" question) disambiguates by OAuth client
-        regardless of whether a developer token is present.
+        Deliberately **not** refined by OAuth client identity, despite
+        ``developer_token_env`` alone now over-sharing one bucket across
+        genuinely distinct tokenless Cloud projects that all leave this
+        field at its shared default name (#1154, Google's Cloud-project-
+        based access model made the developer-token header optional). An
+        earlier draft appended ``_auth_identity(self.auth)`` to fix that,
+        but Codex review correctly caught that it violates the real-quota-
+        holder invariant this method exists to serve: when a token *is*
+        configured, Google enforces the quota per token regardless of which
+        OAuth client authenticates the request, so two clients sharing one
+        token must share one bucket -- appending auth identity unconditionally
+        would instead split them, letting concurrent syncs multiply the
+        effective request rate against one real, shared ceiling and trigger
+        actual 429s. That's the dangerous direction of imprecision; the
+        original tokenless-over-sharing gap is the safe one (slower pacing,
+        never a quota error) that this class of method already accepts
+        elsewhere (see the `rest_api`/`staged_upload` host-keying precedent) --
+        left as-is rather than "fixed" into something worse. No way to key
+        correctly for both cases is available at config-construction time
+        without runtime credential resolution, which this method does not do.
         """
-        return f"{self.type}:{self.developer_token_env}:{_auth_identity(self.auth)}"
+        return f"{self.type}:{self.developer_token_env}"
 
 
 class MetaConversionsDestinationConfig(BaseModel):
