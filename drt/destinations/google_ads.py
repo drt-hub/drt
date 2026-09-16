@@ -36,7 +36,6 @@ from typing import Any
 import httpx
 
 from drt.config.credentials import resolve_env
-from drt.config.destinations_saas import _auth_identity as auth_identity
 from drt.config.models import (
     DestinationConfig,
     GoogleAdsDestinationConfig,
@@ -149,24 +148,13 @@ class GoogleAdsDestination:
         # configured (harmless for existing setups), omitted rather than
         # raising when absent.
         #
-        # rate_limit_key() stays keyed on developer_token_env alone (a
-        # second Codex review round reverted an attempt to always fold in
-        # OAuth-client identity there -- when a token exists, Google meters
-        # per token regardless of which OAuth client authenticates, so two
-        # clients sharing one token must keep sharing one bucket). But that
-        # leaves every *tokenless* config sharing one bucket under the
-        # field's default name regardless of OAuth client, which -- unlike
-        # the pre-#1154 world, where a token was mandatory and thus almost
-        # always a real per-account signal -- is now a common, not a rare,
-        # case. Override the key here, at the one place a resolved
-        # (non-)token is actually known, rather than in rate_limit_key()
-        # itself (which has no runtime credential resolution to draw on).
-        key_override = None
-        if not developer_token:
-            key_override = f"{config.type}:no-token:{auth_identity(config.auth)}"
-        rate_limiter = resolve_rate_limiter(
-            config, sync_options, limiter_factory=RateLimiter, key_override=key_override
-        )
+        # rate_limit_key() stays keyed on developer_token_env alone with no
+        # further splitting -- see its docstring in destinations_saas.py for
+        # why a third review round's attempt to split tokenless configs by
+        # OAuth-client identity was also reverted (a per-client key can
+        # under-share a quota Google now scopes to the Cloud project, which
+        # can own several OAuth clients).
+        rate_limiter = resolve_rate_limiter(config, sync_options, limiter_factory=RateLimiter)
 
         auth_headers = AuthHandler(config.auth).get_headers()
         headers = {

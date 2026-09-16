@@ -794,31 +794,34 @@ class GoogleAdsDestinationConfig(BaseModel):
         ``describe_safe()`` drops the id entirely (#696), another reason it
         cannot be the key. (``BaseModel``-direct config.)
 
-        Deliberately **not** refined by OAuth client identity here, despite
-        ``developer_token_env`` alone over-sharing one bucket across
+        Deliberately **not** refined by OAuth client identity, even though
+        ``developer_token_env`` alone over-shares one bucket across
         genuinely distinct tokenless Cloud projects that all leave this
         field at its shared default name (#1154, Google's Cloud-project-
-        based access model made the developer-token header optional). An
-        earlier draft appended ``_auth_identity(self.auth)`` unconditionally
-        to fix that here, but Codex review correctly caught that it violates
-        the real-quota-holder invariant this method exists to serve: when a
-        token *is* configured, Google enforces the quota per token
-        regardless of which OAuth client authenticates the request, so two
-        clients sharing one token must share one bucket -- appending auth
-        identity unconditionally would instead split them, letting
-        concurrent syncs multiply the effective request rate against one
-        real, shared ceiling and trigger actual 429s.
+        based access model made the developer-token header optional).
+        Two narrower keys were tried and rejected across three Codex review
+        rounds on #1155:
 
-        This method has no runtime credential resolution to draw on, so it
-        cannot itself tell "genuinely tokenless" apart from "token
-        configured but I can't see the value here" -- that distinction is
-        only knowable where the token is actually resolved.
-        ``GoogleAdsDestination.load()`` (``drt/destinations/google_ads.py``)
-        does know it, and overrides this key via
-        ``resolve_rate_limiter(..., key_override=...)`` folding in
-        ``_auth_identity(config.auth)`` for the specific tokenless case,
-        leaving this method's own default (token-based) key untouched for
-        every config that does resolve a real token.
+        - Appending ``_auth_identity(self.auth)`` unconditionally splits two
+          OAuth clients that share one real token's quota -- when a token
+          *is* configured, Google enforces it per token regardless of which
+          client authenticates, so those clients must share one bucket.
+        - Overriding the key by OAuth-client identity only for the
+          tokenless case (via ``GoogleAdsDestination.load()``'s
+          ``resolve_rate_limiter(..., key_override=...)``) still under-shares:
+          Google's Cloud-project-based access model scopes quota to the
+          project that owns the OAuth client's credentials, and one project
+          can own several OAuth clients, so per-client keys can still split
+          one real, shared quota across independent limiters.
+
+        No field on ``OAuth2ClientCredentialsAuth`` currently identifies the
+        underlying Cloud project, so there is no signal left to split on
+        that isn't itself known to be wrong. Per this codebase's own
+        over-sharing-is-safe / under-sharing-can-429 policy (see the
+        process-wide rate-limiter registry note in AGENTS.md), every
+        ``google_ads`` config -- tokenless or not -- shares one bucket here
+        until a config field can name the real Cloud-project identity
+        (tracked as #1157).
         """
         return f"{self.type}:{self.developer_token_env}"
 

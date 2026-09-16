@@ -611,11 +611,14 @@ class TestGoogleAdsDestination:
 
 
 class TestGoogleAdsRateLimiterKeying:
-    """#1154, Codex review round 3: rate_limit_key() itself stays keyed on
-    developer_token_env alone (round 2 established that's the only correct
-    choice when a real token is shared across OAuth clients), but a
-    genuinely tokenless config needs its OAuth-client identity folded in at
-    the one place that actually knows the token didn't resolve -- here."""
+    """#1154, Codex review round 5: a round-3 attempt to split tokenless
+    configs' rate-limit key by OAuth-client identity was reverted -- Google's
+    Cloud-project-based access model scopes quota to the project, which can
+    own several OAuth clients, so per-client keys can under-share a quota
+    that is really shared. No config field currently identifies the
+    underlying Cloud project, so every google_ads config (tokenless or not)
+    deliberately shares one bucket per rate_limit_key(); see that method's
+    docstring in destinations_saas.py."""
 
     @staticmethod
     def _patch_common(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
@@ -627,34 +630,7 @@ class TestGoogleAdsRateLimiterKeying:
         monkeypatch.setattr(google_ads.httpx, "Client", MagicMock())
         return spy
 
-    def test_tokenless_config_overrides_key_by_auth_identity(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from drt.config.base import OAuth2ClientCredentialsAuth
-
-        monkeypatch.delenv("GOOGLE_ADS_DEVELOPER_TOKEN", raising=False)
-        spy = self._patch_common(monkeypatch)
-
-        config = GoogleAdsDestinationConfig(
-            type="google_ads",
-            customer_id="123",
-            conversion_action="customers/123/conversionActions/456",
-            auth=OAuth2ClientCredentialsAuth(
-                type="oauth2_client_credentials",
-                token_url="https://oauth2.googleapis.com/token",
-                client_id_env="CLIENT_A_ID",
-                client_secret_env="CLIENT_A_SECRET",
-            ),
-        )
-
-        GoogleAdsDestination().load(
-            [{"gclid": "g", "conversion_time": "2024-01-01"}], config, _options()
-        )
-
-        assert spy.call_args.kwargs["key_override"] is not None
-        assert "CLIENT_A_ID" in spy.call_args.kwargs["key_override"]
-
-    def test_tokenless_configs_get_different_overrides_for_different_oauth_clients(
+    def test_tokenless_configs_share_one_bucket_regardless_of_oauth_client(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from drt.config.base import OAuth2ClientCredentialsAuth
@@ -679,16 +655,12 @@ class TestGoogleAdsRateLimiterKeying:
         GoogleAdsDestination().load(records, make_config("CLIENT_A_ID"), _options())
         GoogleAdsDestination().load(records, make_config("CLIENT_B_ID"), _options())
 
-        key_a = spy.call_args_list[0].kwargs["key_override"]
-        key_b = spy.call_args_list[1].kwargs["key_override"]
-        assert key_a != key_b
+        assert "key_override" not in spy.call_args_list[0].kwargs
+        assert "key_override" not in spy.call_args_list[1].kwargs
 
     def test_config_with_token_does_not_override_the_key(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When a real token resolves, rate_limit_key()'s own token-based
-        key must be left untouched -- overriding it here would split two
-        OAuth clients that share one token's real, shared Google quota."""
         monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
         spy = self._patch_common(monkeypatch)
 
@@ -701,4 +673,4 @@ class TestGoogleAdsRateLimiterKeying:
             [{"gclid": "g", "conversion_time": "2024-01-01"}], config, _options()
         )
 
-        assert spy.call_args.kwargs["key_override"] is None
+        assert "key_override" not in spy.call_args.kwargs
