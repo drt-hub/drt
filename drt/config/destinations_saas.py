@@ -794,26 +794,31 @@ class GoogleAdsDestinationConfig(BaseModel):
         ``describe_safe()`` drops the id entirely (#696), another reason it
         cannot be the key. (``BaseModel``-direct config.)
 
-        Deliberately **not** refined by OAuth client identity, despite
-        ``developer_token_env`` alone now over-sharing one bucket across
+        Deliberately **not** refined by OAuth client identity here, despite
+        ``developer_token_env`` alone over-sharing one bucket across
         genuinely distinct tokenless Cloud projects that all leave this
         field at its shared default name (#1154, Google's Cloud-project-
         based access model made the developer-token header optional). An
-        earlier draft appended ``_auth_identity(self.auth)`` to fix that,
-        but Codex review correctly caught that it violates the real-quota-
-        holder invariant this method exists to serve: when a token *is*
-        configured, Google enforces the quota per token regardless of which
-        OAuth client authenticates the request, so two clients sharing one
-        token must share one bucket -- appending auth identity unconditionally
-        would instead split them, letting concurrent syncs multiply the
-        effective request rate against one real, shared ceiling and trigger
-        actual 429s. That's the dangerous direction of imprecision; the
-        original tokenless-over-sharing gap is the safe one (slower pacing,
-        never a quota error) that this class of method already accepts
-        elsewhere (see the `rest_api`/`staged_upload` host-keying precedent) --
-        left as-is rather than "fixed" into something worse. No way to key
-        correctly for both cases is available at config-construction time
-        without runtime credential resolution, which this method does not do.
+        earlier draft appended ``_auth_identity(self.auth)`` unconditionally
+        to fix that here, but Codex review correctly caught that it violates
+        the real-quota-holder invariant this method exists to serve: when a
+        token *is* configured, Google enforces the quota per token
+        regardless of which OAuth client authenticates the request, so two
+        clients sharing one token must share one bucket -- appending auth
+        identity unconditionally would instead split them, letting
+        concurrent syncs multiply the effective request rate against one
+        real, shared ceiling and trigger actual 429s.
+
+        This method has no runtime credential resolution to draw on, so it
+        cannot itself tell "genuinely tokenless" apart from "token
+        configured but I can't see the value here" -- that distinction is
+        only knowable where the token is actually resolved.
+        ``GoogleAdsDestination.load()`` (``drt/destinations/google_ads.py``)
+        does know it, and overrides this key via
+        ``resolve_rate_limiter(..., key_override=...)`` folding in
+        ``_auth_identity(config.auth)`` for the specific tokenless case,
+        leaving this method's own default (token-based) key untouched for
+        every config that does resolve a real token.
         """
         return f"{self.type}:{self.developer_token_env}"
 

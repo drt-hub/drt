@@ -36,6 +36,7 @@ from typing import Any
 import httpx
 
 from drt.config.credentials import resolve_env
+from drt.config.destinations_saas import _auth_identity as auth_identity
 from drt.config.models import (
     DestinationConfig,
     GoogleAdsDestinationConfig,
@@ -137,23 +138,42 @@ class GoogleAdsDestination:
             return SyncResult()
 
         result = SyncResult()
-        rate_limiter = resolve_rate_limiter(config, sync_options, limiter_factory=RateLimiter)
         retry_config = resolve_retry(config.retry, sync_options)
+
+        developer_token = resolve_env(None, config.developer_token_env)
+        # (#1154) Google's September 2026 access-model change made this
+        # header optional and server-ignored for every caller, not just new
+        # Cloud-project-based adopters -- requiring it client-side is now a
+        # purely drt-imposed constraint that would otherwise block anyone
+        # onboarding under the new model with no token to give. Sent when
+        # configured (harmless for existing setups), omitted rather than
+        # raising when absent.
+        #
+        # rate_limit_key() stays keyed on developer_token_env alone (a
+        # second Codex review round reverted an attempt to always fold in
+        # OAuth-client identity there -- when a token exists, Google meters
+        # per token regardless of which OAuth client authenticates, so two
+        # clients sharing one token must keep sharing one bucket). But that
+        # leaves every *tokenless* config sharing one bucket under the
+        # field's default name regardless of OAuth client, which -- unlike
+        # the pre-#1154 world, where a token was mandatory and thus almost
+        # always a real per-account signal -- is now a common, not a rare,
+        # case. Override the key here, at the one place a resolved
+        # (non-)token is actually known, rather than in rate_limit_key()
+        # itself (which has no runtime credential resolution to draw on).
+        key_override = None
+        if not developer_token:
+            key_override = f"{config.type}:no-token:{auth_identity(config.auth)}"
+        rate_limiter = resolve_rate_limiter(
+            config, sync_options, limiter_factory=RateLimiter, key_override=key_override
+        )
 
         auth_headers = AuthHandler(config.auth).get_headers()
         headers = {
             **auth_headers,
             "Content-Type": "application/json",
         }
-        developer_token = resolve_env(None, config.developer_token_env)
         if developer_token:
-            # (#1154) Google's September 2026 access-model change made this
-            # header optional and server-ignored for every caller, not just
-            # new Cloud-project-based adopters -- requiring it client-side
-            # is now a purely drt-imposed constraint that would otherwise
-            # block anyone onboarding under the new model with no token to
-            # give. Sent when configured (harmless for existing setups),
-            # omitted rather than raising when absent.
             headers["developer-token"] = developer_token
 
         # Build conversions payload. conversion_record_indices[j] is the
