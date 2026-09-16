@@ -788,13 +788,24 @@ class GoogleAdsDestinationConfig(BaseModel):
         return "google_ads"
 
     def rate_limit_key(self) -> str:
-        """Per developer token (#769). Google Ads meters API operations against
-        the developer token, so accounts sharing one token share the budget;
+        """Per developer token (#769), refined by OAuth client identity
+        (#1154). Google Ads meters API operations against the developer
+        token, so accounts sharing one token share the budget;
         ``customer_id`` is the narrower scope and would over-split it.
         ``describe_safe()`` drops the id entirely (#696), another reason it
         cannot be the key. (``BaseModel``-direct config.)
+
+        ``developer_token_env`` alone stopped being a reliable account
+        signal once the header became optional (#1154, Google's
+        Cloud-project-based access model) -- every tokenless config leaves
+        this field at its shared default name, which would otherwise
+        collapse unrelated Cloud projects using different OAuth clients
+        onto one limiter. ``_auth_identity()`` (already used by several
+        other destinations for exactly this "what real-world account is
+        behind this config" question) disambiguates by OAuth client
+        regardless of whether a developer token is present.
         """
-        return f"{self.type}:{self.developer_token_env}"
+        return f"{self.type}:{self.developer_token_env}:{_auth_identity(self.auth)}"
 
 
 class MetaConversionsDestinationConfig(BaseModel):
