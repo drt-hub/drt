@@ -80,6 +80,51 @@ def test_oauth2_caches_token(httpserver: HTTPServer, monkeypatch: pytest.MonkeyP
     assert len(httpserver.log) == 1
 
 
+def test_oauth2_cache_does_not_mix_up_different_clients_on_the_same_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1155 (Codex review): two distinct OAuth clients sharing one
+    token_url (e.g. two Google-anything destinations both hitting Google's
+    common token endpoint) must never share a cached access token -- that
+    would silently authenticate one client's requests as the other."""
+    from unittest.mock import MagicMock, patch
+
+    monkeypatch.setenv("CLIENT_A_ID", "id-a")
+    monkeypatch.setenv("CLIENT_A_SECRET", "secret-a")
+    monkeypatch.setenv("CLIENT_B_ID", "id-b")
+    monkeypatch.setenv("CLIENT_B_SECRET", "secret-b")
+
+    auth_a = OAuth2ClientCredentialsAuth(
+        type="oauth2_client_credentials",
+        token_url="https://oauth2.example.com/token",
+        client_id_env="CLIENT_A_ID",
+        client_secret_env="CLIENT_A_SECRET",
+    )
+    auth_b = OAuth2ClientCredentialsAuth(
+        type="oauth2_client_credentials",
+        token_url="https://oauth2.example.com/token",
+        client_id_env="CLIENT_B_ID",
+        client_secret_env="CLIENT_B_SECRET",
+    )
+
+    response_a = MagicMock()
+    response_a.json.return_value = {"access_token": "token-for-a", "expires_in": 3600}
+    response_b = MagicMock()
+    response_b.json.return_value = {"access_token": "token-for-b", "expires_in": 3600}
+
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client_cls.return_value.__enter__.return_value = mock_client
+        mock_client.post.side_effect = [response_a, response_b]
+
+        headers_a = AuthHandler(auth_a).get_headers()
+        headers_b = AuthHandler(auth_b).get_headers()
+
+    assert headers_a == {"Authorization": "Bearer token-for-a"}
+    assert headers_b == {"Authorization": "Bearer token-for-b"}
+    assert mock_client.post.call_count == 2
+
+
 def test_oauth2_missing_client_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

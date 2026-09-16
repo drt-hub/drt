@@ -65,8 +65,18 @@ class AuthHandler:
         return {}
 
 
-# Cache: token_url → (access_token, expires_at)
-_oauth2_cache: dict[str, tuple[str, float]] = {}
+# Cache: (token_url, client_id_env) -> (access_token, expires_at). Keyed by
+# client_id_env too, not token_url alone (#1155 Codex review): two distinct
+# OAuth2ClientCredentialsAuth configs sharing one token_url (e.g. any two
+# Google-anything destinations both hitting
+# https://oauth2.googleapis.com/token) are different clients/accounts, and
+# keying on the URL alone would return client A's cached access token to
+# client B's requests -- a cross-account credential mix-up, not just an
+# inefficiency. client_id_env alone disambiguates (matching
+# destinations_saas.py's own ``_auth_identity()`` convention for this exact
+# question); client_secret_env need not also be included, since a real
+# client_id uniquely determines its own secret.
+_oauth2_cache: dict[tuple[str, str], tuple[str, float]] = {}
 
 
 def _get_oauth2_token(auth: OAuth2ClientCredentialsAuth) -> dict[str, str]:
@@ -77,8 +87,8 @@ def _get_oauth2_token(auth: OAuth2ClientCredentialsAuth) -> dict[str, str]:
 
     from drt.config.credentials import resolve_env
 
-    # Check cache
-    cached = _oauth2_cache.get(auth.token_url)
+    cache_key = (auth.token_url, auth.client_id_env)
+    cached = _oauth2_cache.get(cache_key)
     if cached:
         token, expires_at = cached
         if time.monotonic() < expires_at:
@@ -108,7 +118,7 @@ def _get_oauth2_token(auth: OAuth2ClientCredentialsAuth) -> dict[str, str]:
     expires_in: int = token_data.get("expires_in", 3600)
 
     # Cache with 60s safety margin
-    _oauth2_cache[auth.token_url] = (
+    _oauth2_cache[cache_key] = (
         access_token,
         time.monotonic() + expires_in - 60,
     )
