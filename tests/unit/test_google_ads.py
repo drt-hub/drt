@@ -29,7 +29,7 @@ class TestGoogleAdsDestination:
         monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
 
         httpserver.expect_request(
-            "/v17/customers/1234567890:uploadClickConversions",
+            "/v25/customers/1234567890:uploadClickConversions",
             method="POST",
         ).respond_with_json({"results": [{}]})
 
@@ -53,17 +53,57 @@ class TestGoogleAdsDestination:
         assert result.failed == 1
         assert any("Missing" in e.error_message for e in result.row_errors)
 
-    def test_missing_developer_token(
+    def test_missing_developer_token_no_longer_raises(
         self, monkeypatch: pytest.MonkeyPatch, httpserver: HTTPServer
     ) -> None:
+        """#1154: Google's Cloud-project-based access model made the
+        developer-token header optional and server-ignored -- requiring it
+        client-side would block anyone onboarding under the new model with
+        no token to give. The request proceeds without the header."""
         monkeypatch.delenv("GOOGLE_ADS_DEVELOPER_TOKEN", raising=False)
+
+        httpserver.expect_request(
+            "/v25/customers/1234567890:uploadClickConversions",
+        ).respond_with_json({"results": [{}]})
+
+        from drt.destinations import google_ads
+
+        monkeypatch.setattr(google_ads, "_BASE_URL", httpserver.url_for(""))
+
         config = _config(httpserver)
-        with pytest.raises(ValueError, match="GOOGLE_ADS_DEVELOPER_TOKEN"):
-            GoogleAdsDestination().load(
-                [{"gclid": "x", "conversion_time": "t"}],
-                config,
-                _options(),
-            )
+        result = GoogleAdsDestination().load(
+            [{"gclid": "x", "conversion_time": "t"}],
+            config,
+            _options(),
+        )
+
+        assert result.success == 1
+        assert result.failed == 0
+        req = httpserver.log[0][0]
+        assert "developer-token" not in req.headers
+
+    def test_developer_token_sent_when_configured(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
+
+        httpserver.expect_request(
+            "/v25/customers/1234567890:uploadClickConversions",
+        ).respond_with_json({"results": [{}]})
+
+        from drt.destinations import google_ads
+
+        monkeypatch.setattr(google_ads, "_BASE_URL", httpserver.url_for(""))
+
+        config = _config(httpserver)
+        GoogleAdsDestination().load(
+            [{"gclid": "x", "conversion_time": "t"}],
+            config,
+            _options(),
+        )
+
+        req = httpserver.log[0][0]
+        assert req.headers["developer-token"] == "dev-tok"
 
     def test_partial_failure(self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch) -> None:
         """#1152: partialFailureError.details always has exactly ONE
@@ -76,7 +116,7 @@ class TestGoogleAdsDestination:
         monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
 
         httpserver.expect_request(
-            "/v17/customers/1234567890:uploadClickConversions",
+            "/v25/customers/1234567890:uploadClickConversions",
         ).respond_with_json(
             {
                 "partialFailureError": {
@@ -86,7 +126,7 @@ class TestGoogleAdsDestination:
                         {
                             "@type": (
                                 "type.googleapis.com/google.ads.googleads."
-                                "v17.errors.GoogleAdsFailure"
+                                "v25.errors.GoogleAdsFailure"
                             ),
                             "errors": [
                                 {
@@ -130,7 +170,7 @@ class TestGoogleAdsDestination:
         monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
 
         httpserver.expect_request(
-            "/v17/customers/1234567890:uploadClickConversions",
+            "/v25/customers/1234567890:uploadClickConversions",
         ).respond_with_json(
             {
                 "partialFailureError": {
@@ -140,7 +180,7 @@ class TestGoogleAdsDestination:
                         {
                             "@type": (
                                 "type.googleapis.com/google.ads.googleads."
-                                "v17.errors.GoogleAdsFailure"
+                                "v25.errors.GoogleAdsFailure"
                             ),
                             "errors": [
                                 {
@@ -190,7 +230,7 @@ class TestGoogleAdsDestination:
         monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
 
         httpserver.expect_request(
-            "/v17/customers/1234567890:uploadClickConversions",
+            "/v25/customers/1234567890:uploadClickConversions",
         ).respond_with_json({"partialFailureError": {"message": "something went wrong"}})
 
         from drt.destinations import google_ads
@@ -210,7 +250,7 @@ class TestGoogleAdsDestination:
         monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
 
         httpserver.expect_request(
-            "/v17/customers/1234567890:uploadClickConversions",
+            "/v25/customers/1234567890:uploadClickConversions",
         ).respond_with_json({"results": [{}]})
 
         from drt.destinations import google_ads
@@ -250,7 +290,7 @@ class TestGoogleAdsDestination:
         monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
 
         httpserver.expect_request(
-            "/v17/customers/1234567890:uploadClickConversions",
+            "/v25/customers/1234567890:uploadClickConversions",
         ).respond_with_json(
             {
                 "partialFailureError": {
@@ -260,7 +300,7 @@ class TestGoogleAdsDestination:
                         {
                             "@type": (
                                 "type.googleapis.com/google.ads.googleads."
-                                "v17.errors.GoogleAdsFailure"
+                                "v25.errors.GoogleAdsFailure"
                             ),
                             "errors": [
                                 {
@@ -313,7 +353,7 @@ class TestGoogleAdsDestination:
         monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
 
         httpserver.expect_request(
-            "/v17/customers/1234567890:uploadClickConversions",
+            "/v25/customers/1234567890:uploadClickConversions",
         ).respond_with_json(
             {
                 "partialFailureError": {
@@ -322,7 +362,7 @@ class TestGoogleAdsDestination:
                         {
                             "@type": (
                                 "type.googleapis.com/google.ads.googleads."
-                                "v17.errors.GoogleAdsFailure"
+                                "v25.errors.GoogleAdsFailure"
                             ),
                             "errors": [
                                 {
@@ -359,7 +399,7 @@ class TestGoogleAdsDestination:
         monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
 
         httpserver.expect_request(
-            "/v17/customers/1234567890:uploadClickConversions",
+            "/v25/customers/1234567890:uploadClickConversions",
         ).respond_with_json(
             {
                 "partialFailureError": {
@@ -368,7 +408,7 @@ class TestGoogleAdsDestination:
                         {
                             "@type": (
                                 "type.googleapis.com/google.ads.googleads."
-                                "v17.errors.GoogleAdsFailure"
+                                "v25.errors.GoogleAdsFailure"
                             ),
                             "errors": [],
                         }
@@ -400,7 +440,7 @@ class TestGoogleAdsDestination:
         monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
 
         one_failure = {
-            "@type": "type.googleapis.com/google.ads.googleads.v17.errors.GoogleAdsFailure",
+            "@type": "type.googleapis.com/google.ads.googleads.v25.errors.GoogleAdsFailure",
             "errors": [
                 {
                     "errorCode": {"conversionUploadError": "INVALID_GCLID"},
@@ -410,7 +450,7 @@ class TestGoogleAdsDestination:
             ],
         }
         httpserver.expect_request(
-            "/v17/customers/1234567890:uploadClickConversions",
+            "/v25/customers/1234567890:uploadClickConversions",
         ).respond_with_json(
             {
                 "partialFailureError": {
@@ -448,7 +488,7 @@ class TestGoogleAdsDestination:
         monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
 
         httpserver.expect_request(
-            "/v17/customers/1234567890:uploadClickConversions",
+            "/v25/customers/1234567890:uploadClickConversions",
         ).respond_with_json({"partialFailureError": {}})
 
         from drt.destinations import google_ads
@@ -473,7 +513,7 @@ class TestGoogleAdsDestination:
         monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
 
         httpserver.expect_request(
-            "/v17/customers/1234567890:uploadClickConversions",
+            "/v25/customers/1234567890:uploadClickConversions",
         ).respond_with_json({"partialFailureError": "unexpected string payload"})
 
         from drt.destinations import google_ads
@@ -498,7 +538,7 @@ class TestGoogleAdsDestination:
         monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
 
         httpserver.expect_request(
-            "/v17/customers/1234567890:uploadClickConversions",
+            "/v25/customers/1234567890:uploadClickConversions",
         ).respond_with_json({"partialFailureError": None})
 
         from drt.destinations import google_ads
@@ -523,7 +563,7 @@ class TestGoogleAdsDestination:
         monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
 
         httpserver.expect_request(
-            "/v17/customers/1234567890:uploadClickConversions",
+            "/v25/customers/1234567890:uploadClickConversions",
         ).respond_with_json(
             {
                 "partialFailureError": {
@@ -532,7 +572,7 @@ class TestGoogleAdsDestination:
                         {
                             "@type": (
                                 "type.googleapis.com/google.ads.googleads."
-                                "v17.errors.GoogleAdsFailure"
+                                "v25.errors.GoogleAdsFailure"
                             ),
                             "errors": [
                                 {
