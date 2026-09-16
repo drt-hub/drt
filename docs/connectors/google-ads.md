@@ -33,6 +33,7 @@ destination:
 | `developer_token_env` | string | `"GOOGLE_ADS_DEVELOPER_TOKEN"` | Env var holding the Google Ads developer token. Sent when set; no longer required (Google's Cloud-project-based access model made this header optional and server-ignored). |
 | `auth` | AuthConfig \| null | null | Typically `oauth2_client_credentials` (client id/secret + refresh token). |
 | `retry` | RetryConfig \| null | null | Per-destination override of `sync.retry`. |
+| `native_idempotency_key` | string \| null | null | Jinja template rendered per row (`{{ row.<field> }}`, `{{ sync_name }}`) and sent as ClickConversion's `orderId` field. Makes retries of the same row safe: Google recognizes a reused `orderId` and returns `ORDER_ID_ALREADY_IN_USE` instead of reprocessing it, which drt counts as a successful delivery. |
 
 ## Authentication
 
@@ -50,3 +51,5 @@ See [rest-api.md](rest-api.md) for the `oauth2_client_credentials` auth block (c
 - Each row becomes one offline conversion upload; `gclid` + `conversion_time` are required per conversion.
 - Conversions can take time to appear in the Google Ads UI (standard attribution delay).
 - Google no longer accepts *new* adopters of offline click-conversion imports via this endpoint (`ConversionUploadService.UploadClickConversions`) — since 2026-06-15, a developer token with no prior conversion-import activity gets `CUSTOMER_NOT_ALLOWLISTED_FOR_THIS_FEATURE`. Existing adopters are unaffected during Google's transition to the newer Data Manager API; there is no drt-side workaround for a newly-allowlisted account.
+- `native_idempotency_key` becomes the conversion's `orderId`, which Google rejects if it looks like personally-identifiable information (`ORDER_ID_CONTAINS_PII`) — don't template it from an email address or phone number, even though those are common `upsert_key` choices elsewhere.
+- `order_id`/`native_idempotency_key` isn't permitted at all when the conversion action uses an external attribution model (`ORDER_ID_NOT_PERMITTED_FOR_EXTERNALLY_ATTRIBUTED_CONVERSION_ACTION`) — leave the field unset for those conversion actions.

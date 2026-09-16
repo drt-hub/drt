@@ -775,10 +775,10 @@ class GoogleAdsDestinationConfig(BaseModel):
     auth: AuthConfig | None = None  # typically oauth2_client_credentials
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
-    # (#897) Accepted but not yet wired: ClickConversion has a documented
-    # `order_id` field for dedup ("helps minimize duplicate conversions",
-    # Google's upload-clicks docs) -- wiring tracked as a separate follow-up,
-    # gated on confirming re-upload semantics from Google's docs first.
+    # (#897) Rendered per record and sent as ClickConversion's `orderId`
+    # field. A retry that reuses a previously-delivered order_id gets back
+    # `ORDER_ID_ALREADY_IN_USE` (google_ads.py's `load()`), which is treated
+    # as a successful, deduplicated delivery rather than a failure.
     native_idempotency_key: str | None = None
 
     def describe(self) -> str:

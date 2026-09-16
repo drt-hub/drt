@@ -342,6 +342,29 @@ def test_cli_validate_does_not_warn_for_a_wired_destination_type(
     assert "native_idempotency_key" not in result.output
 
 
+def test_cli_validate_does_not_warn_for_google_ads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#897: google_ads sends native_idempotency_key as ClickConversion's
+    orderId dedup field -- setting it must not trigger the no-op warning."""
+    sync = {
+        **VALID_SYNC,
+        "destination": {
+            "type": "google_ads",
+            "customer_id": "1234567890",
+            "conversion_action": "customers/1234567890/conversionActions/987",
+            "native_idempotency_key": "{{ row.id }}",
+        },
+    }
+    _write_sync(tmp_path / "syncs", "idem-google-ads", sync)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["validate"])
+
+    assert result.exit_code == 0
+    assert "native_idempotency_key" not in result.output
+
+
 def test_cli_validate_native_idempotency_warning_does_not_promote_under_strict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

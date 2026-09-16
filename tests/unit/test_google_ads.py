@@ -610,6 +610,256 @@ class TestGoogleAdsDestination:
         assert len(result.row_errors) == 2
 
 
+class TestGoogleAdsNativeIdempotencyKey:
+    """#897: native_idempotency_key is rendered per record and sent as
+    ClickConversion's orderId dedup field."""
+
+    def test_sent_as_order_id(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
+
+        httpserver.expect_request(
+            "/v25/customers/1234567890:uploadClickConversions",
+        ).respond_with_json({"results": [{}]})
+
+        from drt.destinations import google_ads
+
+        monkeypatch.setattr(google_ads, "_BASE_URL", httpserver.url_for(""))
+
+        config = _config(httpserver, native_idempotency_key="order-{{ row.id }}")
+        result = GoogleAdsDestination().load(
+            [{"gclid": "g", "conversion_time": "2024-01-01", "id": "42"}],
+            config,
+            _options(),
+        )
+
+        assert result.success == 1
+        body = httpserver.log[0][0].get_json()
+        assert body["conversions"][0]["orderId"] == "order-42"
+
+    def test_sync_name_is_in_template_scope(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        httpserver.expect_request(
+            "/v25/customers/1234567890:uploadClickConversions",
+        ).respond_with_json({"results": [{}]})
+
+        from drt.destinations import google_ads
+
+        monkeypatch.setattr(google_ads, "_BASE_URL", httpserver.url_for(""))
+
+        config = _config(httpserver, native_idempotency_key="{{ sync_name }}-{{ row.id }}")
+        options = _options()
+        options._sync_name = "my-sync"
+        GoogleAdsDestination().load(
+            [{"gclid": "g", "conversion_time": "2024-01-01", "id": "42"}], config, options
+        )
+
+        body = httpserver.log[0][0].get_json()
+        assert body["conversions"][0]["orderId"] == "my-sync-42"
+
+    def test_omitted_when_not_configured(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
+
+        httpserver.expect_request(
+            "/v25/customers/1234567890:uploadClickConversions",
+        ).respond_with_json({"results": [{}]})
+
+        from drt.destinations import google_ads
+
+        monkeypatch.setattr(google_ads, "_BASE_URL", httpserver.url_for(""))
+
+        config = _config(httpserver)
+        GoogleAdsDestination().load(
+            [{"gclid": "g", "conversion_time": "2024-01-01"}], config, _options()
+        )
+
+        body = httpserver.log[0][0].get_json()
+        assert "orderId" not in body["conversions"][0]
+
+    def test_template_error_is_a_row_error(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
+        config = _config(httpserver, native_idempotency_key="order-{{ row.missing_field }}")
+
+        result = GoogleAdsDestination().load(
+            [{"gclid": "g", "conversion_time": "2024-01-01"}], config, _options()
+        )
+
+        assert result.failed == 1
+        assert result.success == 0
+        assert "Template error" in result.row_errors[0].error_message
+
+    def test_order_id_already_in_use_counts_as_success(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A retry that reuses a previously-delivered orderId is a
+        successful, deduplicated delivery, not a failure."""
+        monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
+
+        httpserver.expect_request(
+            "/v25/customers/1234567890:uploadClickConversions",
+        ).respond_with_json(
+            {
+                "partialFailureError": {
+                    "code": 3,
+                    "message": "Request contains an invalid argument.",
+                    "details": [
+                        {
+                            "@type": (
+                                "type.googleapis.com/google.ads.googleads."
+                                "v25.errors.GoogleAdsFailure"
+                            ),
+                            "errors": [
+                                {
+                                    "errorCode": {
+                                        "conversionUploadError": "ORDER_ID_ALREADY_IN_USE"
+                                    },
+                                    "message": "Order ID already recorded",
+                                    "location": {
+                                        "fieldPathElements": [
+                                            {"fieldName": "conversions", "index": 0}
+                                        ]
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        )
+
+        from drt.destinations import google_ads
+
+        monkeypatch.setattr(google_ads, "_BASE_URL", httpserver.url_for(""))
+
+        config = _config(httpserver, native_idempotency_key="order-{{ row.id }}")
+        result = GoogleAdsDestination().load(
+            [{"gclid": "g", "conversion_time": "2024-01-01", "id": "42"}], config, _options()
+        )
+
+        assert result.success == 1
+        assert result.failed == 0
+        assert result.row_errors == []
+
+    def test_order_id_already_in_use_mixed_with_real_error_still_fails(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the same conversion also carries a genuine error alongside
+        ORDER_ID_ALREADY_IN_USE, it must not be waved through as dedup."""
+        monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
+
+        httpserver.expect_request(
+            "/v25/customers/1234567890:uploadClickConversions",
+        ).respond_with_json(
+            {
+                "partialFailureError": {
+                    "code": 3,
+                    "message": "Request contains an invalid argument.",
+                    "details": [
+                        {
+                            "@type": (
+                                "type.googleapis.com/google.ads.googleads."
+                                "v25.errors.GoogleAdsFailure"
+                            ),
+                            "errors": [
+                                {
+                                    "errorCode": {
+                                        "conversionUploadError": "ORDER_ID_ALREADY_IN_USE"
+                                    },
+                                    "message": "Order ID already recorded",
+                                    "location": {
+                                        "fieldPathElements": [
+                                            {"fieldName": "conversions", "index": 0}
+                                        ]
+                                    },
+                                },
+                                {
+                                    "errorCode": {"conversionUploadError": "INVALID_GCLID"},
+                                    "message": "Invalid gclid",
+                                    "location": {
+                                        "fieldPathElements": [
+                                            {"fieldName": "conversions", "index": 0}
+                                        ]
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                },
+            }
+        )
+
+        from drt.destinations import google_ads
+
+        monkeypatch.setattr(google_ads, "_BASE_URL", httpserver.url_for(""))
+
+        config = _config(httpserver, native_idempotency_key="order-{{ row.id }}")
+        result = GoogleAdsDestination().load(
+            [{"gclid": "g", "conversion_time": "2024-01-01", "id": "42"}], config, _options()
+        )
+
+        assert result.success == 0
+        assert result.failed == 1
+
+    def test_duplicate_order_id_is_not_treated_as_dedup(
+        self, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DUPLICATE_ORDER_ID ("multiple events include multiple
+        conversions with the same order ID ... were not processed") is a
+        real config problem -- e.g. a native_idempotency_key template that
+        renders the same value for two different rows in one batch -- not
+        drt's own redelivery, and must not be swept into the
+        ORDER_ID_ALREADY_IN_USE dedup path."""
+        monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "dev-tok")
+
+        httpserver.expect_request(
+            "/v25/customers/1234567890:uploadClickConversions",
+        ).respond_with_json(
+            {
+                "partialFailureError": {
+                    "code": 3,
+                    "message": "Request contains an invalid argument.",
+                    "details": [
+                        {
+                            "@type": (
+                                "type.googleapis.com/google.ads.googleads."
+                                "v25.errors.GoogleAdsFailure"
+                            ),
+                            "errors": [
+                                {
+                                    "errorCode": {"conversionUploadError": "DUPLICATE_ORDER_ID"},
+                                    "message": "Duplicate order ID in request",
+                                    "location": {
+                                        "fieldPathElements": [
+                                            {"fieldName": "conversions", "index": 0}
+                                        ]
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        )
+
+        from drt.destinations import google_ads
+
+        monkeypatch.setattr(google_ads, "_BASE_URL", httpserver.url_for(""))
+
+        config = _config(httpserver, native_idempotency_key="order-{{ row.id }}")
+        result = GoogleAdsDestination().load(
+            [{"gclid": "g", "conversion_time": "2024-01-01", "id": "42"}], config, _options()
+        )
+
+        assert result.success == 0
+        assert result.failed == 1
+
+
 class TestGoogleAdsRateLimiterKeying:
     """#1154, Codex review round 5: a round-3 attempt to split tokenless
     configs' rate-limit key by OAuth-client identity was reverted -- Google's

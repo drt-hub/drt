@@ -9,6 +9,14 @@ A developer token (``developer_token_env``) is sent when configured but no
 longer required (#1154) -- Google's Cloud-project-based access model made
 the header optional and server-ignored.
 
+``destination.native_idempotency_key`` (#897) is rendered per record and
+sent as ClickConversion's documented ``orderId`` dedup field, making
+drt's own per-destination retry (#277) safe against Google having already
+processed a request that looked like it failed client-side (timeout,
+dropped connection): a retry that reuses the same ``orderId`` gets back
+``ORDER_ID_ALREADY_IN_USE`` rather than reprocessing it, which this
+destination counts as a successful delivery, not a failure.
+
 Example sync YAML:
 
     destination:
@@ -46,6 +54,7 @@ from drt.destinations.base import SyncResult
 from drt.destinations.rate_limiter import RateLimiter, resolve_rate_limiter
 from drt.destinations.retry import resolve_retry, with_retry
 from drt.destinations.row_errors import record_row_error
+from drt.templates.renderer import render_template
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +132,31 @@ def _parse_conversion_upload_errors(
     return mapped
 
 
+def _is_order_id_already_in_use(error: dict[str, Any]) -> bool:
+    """A `GoogleAdsError` reporting `ORDER_ID_ALREADY_IN_USE`: "the imported
+    event includes an order ID that was previously recorded, so the event
+    was not processed" (`ConversionUploadErrorEnum`). Retrying a conversion
+    upload with the same ``native_idempotency_key``-derived ``orderId``
+    (#897) after a prior run already delivered it looks like this, not like
+    a fresh success -- so it is dedup, not failure.
+
+    Deliberately narrower than Google's other dedup signal,
+    ``CLICK_CONVERSION_ALREADY_EXISTS`` ("same click and
+    ``conversion_date_time`` as an existing conversion"), which stays a
+    failure here: that one fires with no explicit opt-in and can describe a
+    genuinely distinct conversion that happens to share a click and
+    timestamp, so treating it as success would risk silently swallowing a
+    real, non-duplicate error. ``ORDER_ID_ALREADY_IN_USE`` only fires when
+    the caller explicitly set ``native_idempotency_key``, so a match here
+    can only mean drt's own redelivery of a row it already sent.
+    """
+    error_code = error.get("errorCode")
+    return (
+        isinstance(error_code, dict)
+        and error_code.get("conversionUploadError") == "ORDER_ID_ALREADY_IN_USE"
+    )
+
+
 class GoogleAdsDestination:
     """Upload offline click conversions to Google Ads."""
 
@@ -169,6 +203,7 @@ class GoogleAdsDestination:
         # skipped below (missing gclid/conversion_time) never gets a
         # conversions[] entry, so the two lists can diverge and the mapping
         # can't be assumed to be the identity.
+        sync_name = sync_options._sync_name or ""
         conversions: list[dict[str, Any]] = []
         conversion_record_indices: list[int] = []
         for i, record in enumerate(records):
@@ -200,6 +235,31 @@ class GoogleAdsDestination:
                 if val is not None:
                     conversion["conversionValue"] = float(val)
                     conversion["currencyCode"] = config.currency_code
+
+            if config.native_idempotency_key:
+                # Content-derived, like rest_api.py's record-mode key: a
+                # retry of the same row across separate runs should
+                # deduplicate against a previously delivered upload of that
+                # exact row (#897) -- see _is_order_id_already_in_use below
+                # for how Google's response signals that happened.
+                try:
+                    conversion["orderId"] = render_template(
+                        config.native_idempotency_key, record, sync_name=sync_name
+                    )
+                except Exception as e:  # noqa: BLE001 — a template can raise
+                    # more than render_template()'s own normalized
+                    # ValueError (rest_api.py established this precedent);
+                    # on_error: skip must stay effective for any of them.
+                    record_row_error(
+                        result,
+                        i,
+                        json.dumps(record, default=str)[:200],
+                        e,
+                        error_message=f"Template error: {e}",
+                    )
+                    if sync_options.on_error == "fail":
+                        break
+                    continue
 
             conversions.append(conversion)
             conversion_record_indices.append(i)
@@ -269,7 +329,17 @@ class GoogleAdsDestination:
                     errors_by_index: dict[int, list[dict[str, Any]]] = {}
                     for idx, error in mapped:
                         errors_by_index.setdefault(idx, []).append(error)
+                    dedup_indices = 0
                     for idx, idx_errors in errors_by_index.items():
+                        if all(_is_order_id_already_in_use(e) for e in idx_errors):
+                            # A previous run (or an earlier retry of this
+                            # one) already delivered this exact orderId
+                            # (#897 native_idempotency_key) -- Google
+                            # recognized the dedup and skipped reprocessing
+                            # it, so this is a successful delivery, not a
+                            # failure.
+                            dedup_indices += 1
+                            continue
                         record_index = conversion_record_indices[idx]
                         message = "; ".join(str(e.get("message", "")) for e in idx_errors)
                         record_row_error(
@@ -279,7 +349,13 @@ class GoogleAdsDestination:
                             ValueError(),
                             error_message=message,
                         )
-                    result.success += len(conversions) - len(errors_by_index)
+                    if dedup_indices:
+                        logger.info(
+                            "Google Ads reported %d conversion(s) as already delivered "
+                            "(ORDER_ID_ALREADY_IN_USE) -- counted as success, not failure",
+                            dedup_indices,
+                        )
+                    result.success += len(conversions) - (len(errors_by_index) - dedup_indices)
             else:
                 result.success += len(conversions)
 
@@ -293,3 +369,9 @@ class GoogleAdsDestination:
             result.errors.append(f"Google Ads error: {e}")
 
         return result
+
+    def supports_native_idempotency_key(self, config: DestinationConfig) -> bool:
+        """NativeIdempotencyCapable (#897): wired via ClickConversion's
+        documented ``orderId`` dedup field -- see ``load()``'s per-record
+        rendering and ``_is_order_id_already_in_use`` above."""
+        return True
