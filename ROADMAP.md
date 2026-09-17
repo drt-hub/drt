@@ -197,12 +197,25 @@ No breaking changes — drop-in upgrade from v0.9.1.
 
 ## v1.0 — Stable Release
 
-**Theme:** Protocol freeze, semver guarantee, public launch.
+**Theme:** Protocol freeze, semver guarantee, public launch — plus a deliberately bounded hardening pass so "stable" isn't just a version number.
 
 **Scope:**
-- Protocol freeze — Source / Destination / StateManager interfaces (#304)
-- Migration guide v0.x → v1.0 (#305)
+- Protocol freeze — Source / Destination / StateManager interfaces (#304) ✅
+- Migration guide v0.x → v1.0 (#305) ✅
+- Versioning/deprecation policy, `VERSIONING.md` (#431) ✅
+- **Hardening pass, added 2026-09-17** (see decision note below):
+  - #1134 — six destinations (BigQuery, file, google_sheets, staged_upload, salesforce_bulk, `_blob_serializer`) derive write columns/headers from `records[0]` alone, silently dropping fields or crashing on a heterogeneous batch
+  - #1147 — `drt retry --limit`'s `reconcile()` can drop an unconfirmed legacy dead letter sharing a content-derived ID with a confirmed one
+  - #1157 — `google_ads` has no config field to identify the Cloud project for correct rate-limit quota scoping under Google's new access model
+  - #903 — OIDC JWT verification for `drt serve`'s Pub/Sub push leg (#854)
+  - #1075 — Klaviyo events destination needs a `backfill` flag so a first sync/backfill doesn't re-trigger live customer-facing flows for old events
+  - #778 — run artifacts: versioned `target/run_results.json` per invocation (dbt-style), for CI/observability integration
 - v1.0 launch campaign — blog, HN, Reddit, X (#306)
+- Release-cut mechanics: bump `Development Status` classifier to Production/Stable (#1019, deliberately deferred to the actual release-cut PR)
+
+**Explicitly deferred to v1.1+, not v1.0** (considered and rejected for this release on 2026-09-17 — see decision note): diff-based incremental (#755/#960/#920, foundational new engine capability, unbuilt from zero — too large to build carefully inside this release's timeline), BigQuery `replace`/`mirror` parity (#1055, Large effort, real gap but not correctness-critical), the schema-management cluster (#760/#761/#896), windowed backfill (#758), multi-destination fan-out (#425), sync dependency graph (#426), built-in scheduler (#428, also needs re-litigating against ADR 0004's "no daemon" Tier-1 posture), upstream API change detection (#649, still research-phase).
+
+**Decision note (2026-09-17):** v1.0's original scope was narrowly "Protocol freeze + semver + launch," which was already essentially complete. Repo owner wanted v1.0 to land "deliberately and substantially" rather than as a bare version bump, so a bounded hardening pass was added — real correctness/security bugs and one high-leverage ecosystem-polish item (#778), explicitly excluding any unbuilt large engine feature so the freeze isn't rushed. Large new capabilities stay queued for a v1.1 push right after the stable release.
 
 **Target:** 2026-11 · **Progress:** [milestone/7](https://github.com/drt-hub/drt/milestone/7)
 
