@@ -957,6 +957,60 @@ def test_retry_exception_path_does_not_delete_an_untouched_legacy_duplicate_beyo
     assert len(store.read("post_users")) == 3
 
 
+def test_retry_normal_completion_does_not_delete_an_untouched_legacy_duplicate_beyond_limit(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1147: the always-run, end-of-function reconcile() call (reached when
+    the retry loop completes with no exception at all) had no `untouched`
+    guard, unlike the exception path (#1146, rounds 2-3) -- a legacy
+    duplicate excluded from `to_retry` by `--limit` could be silently
+    deleted just because its content-identical twin, included in `to_retry`,
+    was successfully retried. Queue: [A, B, A2], where A and A2 are
+    byte-identical legacy lines (same content-derived id) and B is
+    distinct. ``--limit 2`` + ``batch_size: 1`` means ``to_retry = [A, B]``
+    and ``untouched = [A2]``; both A and B succeed, so the retry loop
+    completes normally -- no exception, so the exception-path guard never
+    runs; this is the one reconcile() call site that guard doesn't cover."""
+    from drt.cli.commands.retry import replay_dead_letters
+    from drt.config.parser import load_syncs
+    from drt.state.dlq import decode_dead_letter_line
+
+    (project / "syncs" / "post_users.yml").write_text(
+        yaml.dump(
+            {
+                "name": "post_users",
+                "model": "ref('users')",
+                "destination": {"type": "rest_api", "url": "https://example.com"},
+                "sync": {"batch_size": 1, "dlq": {"enabled": True}},
+            }
+        )
+    )
+    line_a = '{"record": {"n": 1}, "error_message": "boom"}'
+    line_b = '{"record": {"n": 2}, "error_message": "boom"}'
+    # Preconditions: A/A2 collide on id, and B's id genuinely differs from
+    # A's — otherwise this test wouldn't isolate what it claims to.
+    assert decode_dead_letter_line(line_a).id == decode_dead_letter_line(line_a).id
+    assert decode_dead_letter_line(line_a).id != decode_dead_letter_line(line_b).id
+
+    dlq_path = project / ".drt" / "dlq" / "post_users.jsonl"
+    dlq_path.parent.mkdir(parents=True, exist_ok=True)
+    dlq_path.write_text(line_a + "\n" + line_b + "\n" + line_a + "\n")
+
+    store = DlqStore(project)
+    _patch_dest(monkeypatch, _FakeDestination(fail_ids=set()))
+    sync = next(s for s in load_syncs(project) if s.name == "post_users")
+
+    result = replay_dead_letters(sync, project_dir=project, limit=2)
+
+    assert result["status"] == "ok"
+    # B is gone (succeeded, no id collision); both A copies survive -- A's
+    # confirmed delivery isn't safe to reconcile while A2, excluded from
+    # this retry entirely by --limit, still shares its id.
+    remaining = store.read("post_users")
+    assert len(remaining) == 2
+    assert all(e.record == {"n": 1} for e in remaining)
+
+
 def test_retry_excludes_unattributed_skip_from_ledger_and_audit(
     ledger_audit_project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

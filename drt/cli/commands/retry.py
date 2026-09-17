@@ -425,24 +425,15 @@ def replay_dead_letters(
         # this call will not touch either way, so excluding both from
         # remove_ids here means an id with a still-queued twin is simply
         # left queued instead of removed -- costs one more retry cycle,
-        # nothing is lost. Round 1 of this review under-weighted that this
-        # except block makes the hazard reachable on a *default*,
-        # no-`--limit` `drt retry` too (previously it needed an explicit
-        # `--limit` truncation), which is why it's guarded here at all;
-        # round 3 caught that the first version of this guard checked only
-        # `to_retry`'s unprocessed suffix and missed `untouched`, so a
-        # `--limit`-excluded twin could still be wrongly deleted by this
-        # except block even though `--limit` was never meant to touch it.
+        # nothing is lost.
         #
-        # The always-run, end-of-function reconcile() call below (reached
-        # only when the loop completes with no exception) has no equivalent
-        # `untouched` guard and is unchanged by this PR -- fixing it touches
-        # already-reviewed, already-shipped behavior outside this fix's
-        # scope, tracked as #1147 alongside the narrower `updates`
-        # cross-contamination case (a legacy id's untouched twin can pick up
-        # the same bumped `attempts`/error content without being deleted;
-        # not filtered here either, since overwriting is not the same
-        # failure mode as silently losing the entry).
+        # `updates` is deliberately left unfiltered: it's keyed by id too, so
+        # an untouched twin sharing a removed entry's id would pick up that
+        # entry's bumped `attempts`/error content -- cosmetically wrong, but
+        # excluding the id here instead would mean the entry that WAS
+        # actually retried-and-failed also loses its own attempts bump
+        # (reconcile() has no way to address one occurrence of a shared id
+        # without the other), which is strictly worse (#1147).
         #
         # This closes the *exception* path only: a hard process kill
         # (SIGKILL/OOM) between an earlier chunk's success and this handler
@@ -470,10 +461,19 @@ def replay_dead_letters(
     # this retry actually touched (succeeded → removed, failed again →
     # updated) are named. Called once, with everything accumulated across
     # every chunk — deliberately NOT per chunk; see the comment above the
-    # loop for why (#1127/#1128). `untouched` (beyond --limit) was never
-    # touched either way, so it needs no special handling here. `duplicate_ids`
-    # entries are deliberately not named here — they stay queued (see above).
-    final = store.reconcile(sync.name, remove_ids=remove_ids, updates=updates)
+    # loop for why (#1127/#1128). `duplicate_ids` entries are deliberately
+    # not named here — they stay queued (see above).
+    #
+    # `untouched` (beyond --limit) was never retried this invocation either,
+    # and needs the same legacy-duplicate-id exclusion from `remove_ids` the
+    # except block above already applies (#1147) — this line is the one
+    # place that guard was missing (the loop completing with no exception
+    # means `processed_count == len(to_retry)`, so `to_retry[processed_count:]`
+    # is empty and the exclusion set reduces to just `untouched`). `updates`
+    # stays unfiltered here too, for the same reason given in that comment.
+    final = store.reconcile(
+        sync.name, remove_ids=remove_ids - {e.id for e in untouched}, updates=updates
+    )
     return {
         "sync": sync.name,
         "queued": len(entries),
