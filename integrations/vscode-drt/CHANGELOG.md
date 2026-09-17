@@ -6,6 +6,11 @@ drt-core version its bundled schemas were generated from.
 
 ## [0.1.13] - Unreleased
 
+- Bundled JSON Schemas regenerated from drt-core: `google_ads` gains
+  `cloud_project_id` (the Google Cloud project owning the config's OAuth
+  client credentials — the real API quota boundary under Google's
+  Cloud-project-based access model; optional, folds into rate-limit
+  keying when set) (drt-hub/drt#1157).
 - Bundled JSON Schemas regenerated from drt-core: the destination union gains
   `native_idempotency_key` (a Jinja template sent as a native HTTP dedup
   header/field, protecting against drt's own per-destination retry resending

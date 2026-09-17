@@ -1730,6 +1730,18 @@
           ],
           "default": null,
           "title": "Native Idempotency Key"
+        },
+        "cloud_project_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cloud Project Id"
         }
       },
       "required": [

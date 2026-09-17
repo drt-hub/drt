@@ -1847,6 +1847,81 @@ class TestRateLimitKey:
 
         assert a.rate_limit_key() == b.rate_limit_key()
 
+    def test_google_ads_rate_limit_key_uses_cloud_project_id_when_set(self) -> None:
+        """#1157: an explicit cloud_project_id names the real Cloud-project
+        quota boundary directly, so two configs sharing one project must
+        share one bucket even with different developer tokens and OAuth
+        clients -- neither of those is the real quota unit once the
+        operator has told us the actual project."""
+        from drt.config.base import OAuth2ClientCredentialsAuth
+        from drt.config.destinations_saas import GoogleAdsDestinationConfig
+
+        a = GoogleAdsDestinationConfig(
+            type="google_ads",
+            customer_id="111",
+            conversion_action="customers/111/conversionActions/1",
+            developer_token_env="TOKEN_A",
+            auth=OAuth2ClientCredentialsAuth(
+                type="oauth2_client_credentials",
+                token_url="https://oauth2.googleapis.com/token",
+                client_id_env="CLIENT_A_ID",
+                client_secret_env="CLIENT_A_SECRET",
+            ),
+            cloud_project_id="shared-project",
+        )
+        b = GoogleAdsDestinationConfig(
+            type="google_ads",
+            customer_id="222",
+            conversion_action="customers/222/conversionActions/2",
+            developer_token_env="TOKEN_B",
+            auth=OAuth2ClientCredentialsAuth(
+                type="oauth2_client_credentials",
+                token_url="https://oauth2.googleapis.com/token",
+                client_id_env="CLIENT_B_ID",
+                client_secret_env="CLIENT_B_SECRET",
+            ),
+            cloud_project_id="shared-project",
+        )
+
+        assert a.rate_limit_key() == b.rate_limit_key()
+
+    def test_google_ads_rate_limit_key_distinguishes_different_cloud_project_ids(
+        self,
+    ) -> None:
+        """Two configs naming different Cloud projects must not share a
+        bucket -- that would under-share a real, distinct quota."""
+        from drt.config.destinations_saas import GoogleAdsDestinationConfig
+
+        a = GoogleAdsDestinationConfig(
+            type="google_ads",
+            customer_id="111",
+            conversion_action="customers/111/conversionActions/1",
+            cloud_project_id="project-a",
+        )
+        b = GoogleAdsDestinationConfig(
+            type="google_ads",
+            customer_id="222",
+            conversion_action="customers/222/conversionActions/2",
+            cloud_project_id="project-b",
+        )
+
+        assert a.rate_limit_key() != b.rate_limit_key()
+
+    def test_google_ads_rate_limit_key_falls_back_when_cloud_project_id_unset(
+        self,
+    ) -> None:
+        """No behavior change to existing configs that don't set the new
+        (optional) field -- the pre-#1157 token-based key is unchanged."""
+        from drt.config.destinations_saas import GoogleAdsDestinationConfig
+
+        config = GoogleAdsDestinationConfig(
+            type="google_ads",
+            customer_id="111",
+            conversion_action="customers/111/conversionActions/1",
+        )
+
+        assert config.rate_limit_key() == f"google_ads:{config.developer_token_env}"
+
     def test_klaviyo_rate_limit_key_is_the_account(self) -> None:
         from drt.config.destinations_saas import KlaviyoDestinationConfig
 

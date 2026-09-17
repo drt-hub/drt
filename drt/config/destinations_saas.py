@@ -780,6 +780,13 @@ class GoogleAdsDestinationConfig(BaseModel):
     # `ORDER_ID_ALREADY_IN_USE` (google_ads.py's `load()`), which is treated
     # as a successful, deduplicated delivery rather than a failure.
     native_idempotency_key: str | None = None
+    # (#1157) Optional: the Google Cloud project that owns this config's
+    # OAuth client credentials -- the real quota boundary under Google's
+    # Cloud-project-based access model (#1154). No field on
+    # OAuth2ClientCredentialsAuth can derive this automatically (a project
+    # can own several OAuth clients), so it's an explicit opt-in the
+    # operator provides; see rate_limit_key() for how it's used.
+    cloud_project_id: str | None = None
 
     def describe(self) -> str:
         return f"google_ads ({self.customer_id})"
@@ -788,19 +795,33 @@ class GoogleAdsDestinationConfig(BaseModel):
         return "google_ads"
 
     def rate_limit_key(self) -> str:
-        """Per developer token (#769). Google Ads meters API operations against
-        the developer token, so accounts sharing one token share the budget;
+        """``cloud_project_id`` when set (#1157); otherwise per developer
+        token (#769). (``BaseModel``-direct config.)
+
+        Google's Cloud-project-based access model (#1154) scopes API quota
+        to the Cloud project that owns the caller's OAuth client
+        credentials, not to the developer token or the individual OAuth
+        client -- so when the operator has explicitly named that project via
+        ``cloud_project_id``, it's used directly as the key, taking
+        precedence over the token-based fallback below regardless of
+        whether a developer token is also configured.
+
+        No field on ``OAuth2ClientCredentialsAuth`` can derive the Cloud
+        project automatically (a project can own several OAuth clients), so
+        ``cloud_project_id`` is an explicit opt-in rather than something
+        this method infers -- when it's unset, this falls back to:
+
+        Per developer token. Google Ads meters API operations against the
+        developer token, so accounts sharing one token share the budget;
         ``customer_id`` is the narrower scope and would over-split it.
         ``describe_safe()`` drops the id entirely (#696), another reason it
-        cannot be the key. (``BaseModel``-direct config.)
+        cannot be the key.
 
         Deliberately **not** refined by OAuth client identity, even though
         ``developer_token_env`` alone over-shares one bucket across
         genuinely distinct tokenless Cloud projects that all leave this
-        field at its shared default name (#1154, Google's Cloud-project-
-        based access model made the developer-token header optional).
-        Two narrower keys were tried and rejected across three Codex review
-        rounds on #1155:
+        field at its shared default name. Two narrower keys were tried and
+        rejected across three Codex review rounds on #1155:
 
         - Appending ``_auth_identity(self.auth)`` unconditionally splits two
           OAuth clients that share one real token's quota -- when a token
@@ -809,20 +830,18 @@ class GoogleAdsDestinationConfig(BaseModel):
         - Overriding the key by OAuth-client identity only for the
           tokenless case (via ``GoogleAdsDestination.load()``'s
           ``resolve_rate_limiter(..., key_override=...)``) still under-shares:
-          Google's Cloud-project-based access model scopes quota to the
-          project that owns the OAuth client's credentials, and one project
-          can own several OAuth clients, so per-client keys can still split
-          one real, shared quota across independent limiters.
+          one Cloud project can own several OAuth clients, so per-client
+          keys can still split one real, shared quota across independent
+          limiters.
 
-        No field on ``OAuth2ClientCredentialsAuth`` currently identifies the
-        underlying Cloud project, so there is no signal left to split on
-        that isn't itself known to be wrong. Per this codebase's own
-        over-sharing-is-safe / under-sharing-can-429 policy (see the
-        process-wide rate-limiter registry note in AGENTS.md), every
-        ``google_ads`` config -- tokenless or not -- shares one bucket here
-        until a config field can name the real Cloud-project identity
-        (tracked as #1157).
+        Per this codebase's own over-sharing-is-safe / under-sharing-can-429
+        policy (see the process-wide rate-limiter registry note in
+        AGENTS.md), every tokenless ``google_ads`` config without an
+        explicit ``cloud_project_id`` shares one bucket here rather than
+        guessing at a finer split.
         """
+        if self.cloud_project_id:
+            return f"{self.type}:{self.cloud_project_id}"
         return f"{self.type}:{self.developer_token_env}"
 
 

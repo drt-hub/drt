@@ -204,9 +204,9 @@ No breaking changes — drop-in upgrade from v0.9.1.
 - Migration guide v0.x → v1.0 (#305) ✅
 - Versioning/deprecation policy, `VERSIONING.md` (#431) ✅
 - **Hardening pass, added 2026-09-17** (see decision note below):
-  - #1134 — six destinations (BigQuery, file, google_sheets, staged_upload, salesforce_bulk, `_blob_serializer`) derive write columns/headers from `records[0]` alone, silently dropping fields or crashing on a heterogeneous batch
-  - #1147 — `drt retry --limit`'s `reconcile()` can drop an unconfirmed legacy dead letter sharing a content-derived ID with a confirmed one
-  - #1157 — `google_ads` has no config field to identify the Cloud project for correct rate-limit quota scoping under Google's new access model
+  - #1134 — six destinations (BigQuery, file, google_sheets, staged_upload, salesforce_bulk, `_blob_serializer`) derive write columns/headers from `records[0]` alone, silently dropping fields or crashing on a heterogeneous batch — ✅ five of six already fixed pre-dating this pass (#1140/#1141/#1142/#1143/#1144); `file.py` determined not a bug (already fails loudly by design); BigQuery `_merge`'s leg is genuinely blocked on the same MERGE-NULL-clobber wall as #1137 (assigned, off-limits) — tracked there instead, no further action here
+  - #1147 — `drt retry --limit`'s `reconcile()` can drop an unconfirmed legacy dead letter sharing a content-derived ID with a confirmed one — ✅ the silent-drop hazard fixed (#1160); left open/unmilestoned as a narrower `updates`-cross-contamination residual that would need a `DlqBackend` Protocol change (frozen at v1.0, ADR 0007) to close fully
+  - #1157 — `google_ads` has no config field to identify the Cloud project for correct rate-limit quota scoping under Google's new access model — ✅ fixed, opt-in `cloud_project_id` field
   - #903 — OIDC JWT verification for `drt serve`'s Pub/Sub push leg (#854)
   - #1075 — Klaviyo events destination needs a `backfill` flag so a first sync/backfill doesn't re-trigger live customer-facing flows for old events
   - #778 — run artifacts: versioned `target/run_results.json` per invocation (dbt-style), for CI/observability integration
