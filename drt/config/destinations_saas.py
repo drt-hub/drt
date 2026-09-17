@@ -836,9 +836,15 @@ class GoogleAdsDestinationConfig(BaseModel):
 
         Per this codebase's own over-sharing-is-safe / under-sharing-can-429
         policy (see the process-wide rate-limiter registry note in
-        AGENTS.md), every tokenless ``google_ads`` config without an
-        explicit ``cloud_project_id`` shares one bucket here rather than
-        guessing at a finer split.
+        AGENTS.md), a ``google_ads`` config without an explicit
+        ``cloud_project_id`` falls back to sharing a bucket with every other
+        config naming the same ``developer_token_env`` (tokenless or not)
+        rather than guessing at a finer split -- **not** with every
+        ``google_ads`` config unconditionally: two configs naming
+        *different* env vars still get separate buckets even if they belong
+        to the same real Cloud project, which is exactly the gap
+        ``cloud_project_id`` exists to close (#1157, caught by Codex review
+        pointing out this docstring's own earlier, overclaiming phrasing).
         """
         if self.cloud_project_id:
             return f"{self.type}:{self.cloud_project_id}"
