@@ -46,16 +46,19 @@ Auth (``--auth`` on ``drt serve``):
 
     oidc    Google-signed OIDC JWT in the ``Authorization: Bearer <token>``
             header, no body signature at all — Pub/Sub push's own scheme
-            (#903). Verified against Google's public keys via
-            ``google-auth`` (``drt-core[serve-oidc]``); checks ``aud``
-            (required, ``--oidc-audience``), ``iss`` (already validated
-            internally by ``google-auth`` against Google's own accepted
-            values; ``--oidc-issuer`` overrides this only for a future
-            non-Google IdP), and ``email`` (required, ``--oidc-email``) —
-            the caller's *audience* alone is not proof of authorization,
-            since Google will mint a
-            token with any audience for any Google Cloud principal, so the
-            expected service account must be named explicitly.
+            (#903). Google-specific, not a generic OIDC verifier: uses
+            ``google-auth`` (``drt-core[serve-oidc]``)'s
+            ``verify_oauth2_token``, which checks the signature against
+            Google's own certs, ``aud`` (required, ``--oidc-audience``),
+            and ``iss`` against Google's own accepted values, all
+            internally — a non-Google issuer's token fails signature
+            verification outright, before any issuer comparison could run,
+            so there is no override point for another IdP here. ``email``
+            (required, ``--oidc-email``) is drt's own additional check: the
+            caller's *audience* alone is not proof of authorization, since
+            Google will mint a token with any audience for any Google Cloud
+            principal, so the expected service account must be named
+            explicitly.
 
 Every route except ``GET /health`` is authenticated. ``GET /runs/<id>`` returns
 the SyncResult and any error text, so it is not exempt: the run id is a uuid4,
@@ -136,16 +139,16 @@ class AuthConfig:
     # it names the one caller identity (the push subscription's own service
     # account) actually allowed through.
     oidc_audience: str | None = None
-    # Unset by default: `verify_oauth2_token` already validates `iss`
-    # against Google's own accepted set internally
-    # (`google.oauth2.id_token._GOOGLE_ISSUERS == ["accounts.google.com",
-    # "https://accounts.google.com"]` — Google's real tokens legitimately
-    # use either spelling), so an *additional*, exact-match default here
-    # would reject one of Google's own two valid forms depending on which a
-    # given token happened to use (Codex review). Only set this to override
-    # -- e.g. a future non-Google IdP reusing this verifier's JWT shape,
-    # which has no such built-in check of its own.
-    oidc_issuer: str | None = None
+    # No `oidc_issuer` field: `verify_oauth2_token` (Google-specific, not a
+    # generic OIDC verifier) already validates `iss` against Google's own
+    # accepted set internally (`google.oauth2.id_token._GOOGLE_ISSUERS ==
+    # ["accounts.google.com", "https://accounts.google.com"]`), and it
+    # fetches certs only from Google's own endpoint, so a non-Google
+    # issuer's token fails signature verification outright before any
+    # issuer comparison could even run -- there is no working override
+    # point for another IdP to add here (Codex review; an earlier draft
+    # documented one that could never actually function).
+    #
     # The one service account allowed to call this endpoint under this
     # scheme — see the audience-is-not-authorization note above.
     oidc_email: str | None = None
@@ -208,27 +211,26 @@ def _get_oidc_request() -> Any:
     return _oidc_request
 
 
-def _verify_oidc(header_value: str, audience: str, issuer: str | None, email: str | None) -> bool:
+def _verify_oidc(header_value: str, audience: str, email: str) -> bool:
     """Verify a Google-signed OIDC JWT (#903 — Pub/Sub push's own auth scheme).
 
     Delegates signature verification (against Google's rotating public keys)
     to ``google-auth`` (``drt-core[serve-oidc]``) rather than hand-rolling
     JWKS fetch + RS256 -- verification code you write yourself is
-    verification code you get wrong. ``verify_oauth2_token`` already checks
-    the signature, expiry, (given ``audience``) the ``aud`` claim, and
-    ``iss`` against Google's own accepted values internally
-    (``google.oauth2.id_token._GOOGLE_ISSUERS`` -- both ``accounts.google.com``
-    and ``https://accounts.google.com`` are legitimate). ``issuer`` here is
-    an *additional* exact-match check, applied only when explicitly passed
-    (an unset default would otherwise risk rejecting one of Google's own two
-    valid forms depending on which a given token happened to use -- Codex
-    review) -- meant for a future non-Google IdP reusing this same shape,
-    not for narrowing Google's own already-correct check. ``email`` is
-    drt's own check on top for a different reason: ``audience`` alone is
-    not proof of authorization -- Google will mint a token with any
-    audience for any Google Cloud principal who asks -- so callers of this
-    function are expected to always pass a real ``email`` (``AuthConfig``
-    enforces this).
+    verification code you get wrong. ``verify_oauth2_token`` is
+    Google-specific, not a generic OIDC verifier: it fetches certs only
+    from Google's own endpoint and already checks the signature, expiry,
+    (given ``audience``) the ``aud`` claim, and ``iss`` against Google's own
+    accepted values internally (``google.oauth2.id_token._GOOGLE_ISSUERS``
+    -- both ``accounts.google.com`` and ``https://accounts.google.com`` are
+    legitimate) -- a non-Google issuer's token fails signature verification
+    outright, before any issuer check could matter, so there is no
+    meaningful override point for another IdP here (an earlier draft added
+    one; Codex review found it could never actually function and it was
+    removed). ``email`` is drt's own check on top, for a different reason:
+    ``audience`` alone is not proof of authorization -- Google will mint a
+    token with any audience for any Google Cloud principal who asks -- so
+    ``AuthConfig`` requires a real ``email`` whenever this scheme is used.
 
     Any failure -- bad signature, expired, wrong audience, malformed header,
     the library not installed, a network error fetching Google's certs --
@@ -249,9 +251,7 @@ def _verify_oidc(header_value: str, audience: str, issuer: str | None, email: st
         claims = id_token.verify_oauth2_token(token, request, audience)  # type: ignore[no-untyped-call]
     except Exception:  # noqa: BLE001 — any verification failure is just "unauthorized"
         return False
-    if issuer is not None and claims.get("iss") != issuer:
-        return False
-    if email is not None and claims.get("email") != email:
+    if claims.get("email") != email:
         return False
     return True
 
@@ -566,7 +566,6 @@ def make_handler(
                 return _verify_oidc(
                     self.headers.get("Authorization", ""),
                     auth.oidc_audience,
-                    auth.oidc_issuer,
                     auth.oidc_email,
                 )
             assert auth.hmac_secret is not None
@@ -689,7 +688,6 @@ def serve(
     hmac_scheme: str = "generic",
     hmac_tolerance: int = 300,
     oidc_audience: str | None = None,
-    oidc_issuer: str | None = None,
     oidc_email: str | None = None,
 ) -> None:
     """Start the webhook server (blocking).
@@ -713,7 +711,6 @@ def serve(
         hmac_scheme=hmac_scheme,
         hmac_tolerance=hmac_tolerance,
         oidc_audience=oidc_audience,
-        oidc_issuer=oidc_issuer,
         oidc_email=oidc_email,
     )
 

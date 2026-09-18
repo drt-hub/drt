@@ -251,16 +251,16 @@ drt serve --auth oidc \
 Pub/Sub push authenticates with an **OIDC JWT** in the `Authorization: Bearer
 <token>` header, not a body signature — verified against Google's rotating
 public keys via `google-auth` (`drt-core[serve-oidc]`, kept out of core to
-avoid forcing the dependency on every deployment):
+avoid forcing the dependency on every deployment). This is Google-specific,
+not a generic OIDC verifier: it fetches certs only from Google's own
+endpoint and validates `iss` against Google's own accepted values
+internally (both `accounts.google.com` and `https://accounts.google.com`
+are legitimate) — a non-Google issuer's token would fail signature
+verification outright, so there's no issuer override for another IdP:
 
 - **`--oidc-audience`** (required) must match the audience the push
   subscription was configured with — usually the exact `POST` URL Pub/Sub
   delivers to.
-- **`--oidc-issuer`** is unset by default — `google-auth` already validates
-  `iss` against Google's own accepted values internally (both
-  `accounts.google.com` and `https://accounts.google.com` are legitimate);
-  only set this to override for a future non-Google IdP reusing this same
-  JWT shape.
 - **`--oidc-email`** (required) names the one service account allowed to call
   this endpoint — the push subscription's own invoker identity. A valid
   signature and the right audience alone are **not** proof of authorization:

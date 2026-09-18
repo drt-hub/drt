@@ -73,16 +73,6 @@ def serve(
             "was configured with (the aud claim Google's JWT must carry)."
         ),
     ),
-    oidc_issuer: str = typer.Option(
-        "",
-        "--oidc-issuer",
-        help=(
-            "Override the expected iss claim for --auth oidc. Leave unset for "
-            "Google tokens -- google-auth already validates iss against "
-            "Google's own accepted values internally; only set this for a "
-            "future non-Google IdP reusing this same JWT verification path."
-        ),
-    ),
     oidc_email: str = typer.Option(
         "",
         "--oidc-email",
@@ -150,6 +140,5 @@ def serve(
         hmac_scheme=hmac_scheme,
         hmac_tolerance=hmac_tolerance,
         oidc_audience=oidc_audience or None,
-        oidc_issuer=oidc_issuer or None,
         oidc_email=oidc_email or None,
     )

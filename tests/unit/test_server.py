@@ -467,33 +467,34 @@ def test_oidc_valid_token_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch, claims={"iss": "https://accounts.google.com", "email": "svc@example.com"}
     )
     assert _verify_oidc(
-        "Bearer fake.jwt.token", "https://drt.example.com/sync/s", None, "svc@example.com"
+        "Bearer fake.jwt.token", "https://drt.example.com/sync/s", "svc@example.com"
     )
 
 
-def test_oidc_accepts_both_google_issuer_spellings_by_default(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Codex review: google-auth's own verify_oauth2_token already validates
-    iss against Google's accepted set internally
-    (google.oauth2.id_token._GOOGLE_ISSUERS == ["accounts.google.com",
-    "https://accounts.google.com"] -- both are legitimate). AuthConfig's
-    default leaves oidc_issuer unset (None) precisely so drt's own
-    *additional* exact-match check never rejects whichever of the two forms
-    a real Google-issued token happens to use."""
+def test_oidc_accepts_both_google_issuer_spellings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex review: verify_oauth2_token (Google-specific, not a generic
+    OIDC verifier) already validates iss against Google's accepted set
+    internally (google.oauth2.id_token._GOOGLE_ISSUERS ==
+    ["accounts.google.com", "https://accounts.google.com"] -- both are
+    legitimate). _verify_oidc has no issuer parameter of its own (an
+    earlier draft added one meant for a future non-Google IdP override,
+    but verify_oauth2_token's hardcoded Google certs endpoint means a
+    non-Google token fails signature verification outright regardless, so
+    that override could never actually function -- removed). Both of
+    Google's own accepted spellings must pass."""
     for spelling in ("accounts.google.com", "https://accounts.google.com"):
         _inject_fake_google_auth(monkeypatch, claims={"iss": spelling, "email": "svc@example.com"})
         assert _verify_oidc(
-            "Bearer fake.jwt.token", "https://drt.example.com/sync/s", None, "svc@example.com"
-        ), f"issuer spelling {spelling!r} should be accepted when oidc_issuer is unset"
+            "Bearer fake.jwt.token", "https://drt.example.com/sync/s", "svc@example.com"
+        ), f"issuer spelling {spelling!r} should be accepted"
 
 
 def test_oidc_missing_bearer_prefix_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     """Never reaches the (mocked) verifier at all -- an absent/malformed
     Authorization header is rejected before any JWT parsing is attempted."""
     verify_mock = _inject_fake_google_auth(monkeypatch, claims={})
-    assert not _verify_oidc("fake.jwt.token", "https://drt.example.com/sync/s", None, None)
-    assert not _verify_oidc("", "https://drt.example.com/sync/s", None, None)
+    assert not _verify_oidc("fake.jwt.token", "https://drt.example.com/sync/s", "svc@example.com")
+    assert not _verify_oidc("", "https://drt.example.com/sync/s", "svc@example.com")
     verify_mock.assert_not_called()
 
 
@@ -501,36 +502,21 @@ def test_oidc_verification_failure_rejected(monkeypatch: pytest.MonkeyPatch) -> 
     """Bad signature, expired, wrong audience, malformed token -- whatever
     the library raises for -- is just "unauthorized", never a 500."""
     _inject_fake_google_auth(monkeypatch, raises=ValueError("Token expired"))
-    assert not _verify_oidc("Bearer fake.jwt.token", "https://drt.example.com/sync/s", None, None)
-
-
-def test_oidc_wrong_issuer_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    _inject_fake_google_auth(monkeypatch, claims={"iss": "https://evil.example.com"})
     assert not _verify_oidc(
-        "Bearer fake.jwt.token",
-        "https://drt.example.com/sync/s",
-        "https://accounts.google.com",
-        None,
+        "Bearer fake.jwt.token", "https://drt.example.com/sync/s", "svc@example.com"
     )
 
 
 def test_oidc_wrong_email_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scenario Codex review flagged in an earlier round: a real
+    Google-signed token for the right audience, minted for a different
+    Google Cloud principal than the one this endpoint trusts."""
     _inject_fake_google_auth(
         monkeypatch, claims={"iss": "https://accounts.google.com", "email": "attacker@evil.com"}
     )
     assert not _verify_oidc(
-        "Bearer fake.jwt.token",
-        "https://drt.example.com/sync/s",
-        "https://accounts.google.com",
-        "svc@example.com",
+        "Bearer fake.jwt.token", "https://drt.example.com/sync/s", "svc@example.com"
     )
-
-
-def test_oidc_unset_issuer_and_email_skip_those_checks(monkeypatch: pytest.MonkeyPatch) -> None:
-    """AuthConfig's own default still checks iss -- this proves the checks
-    are opt-in at the _verify_oidc level, not hardcoded to always run."""
-    _inject_fake_google_auth(monkeypatch, claims={"iss": "https://anything.example.com"})
-    assert _verify_oidc("Bearer fake.jwt.token", "https://drt.example.com/sync/s", None, None)
 
 
 def test_oidc_request_is_cached_across_calls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -543,8 +529,8 @@ def test_oidc_request_is_cached_across_calls(monkeypatch: pytest.MonkeyPatch) ->
     second = _get_oidc_request()
     assert first is second
 
-    _verify_oidc("Bearer t1", "aud", None, "svc@example.com")
-    _verify_oidc("Bearer t2", "aud", None, "svc@example.com")
+    _verify_oidc("Bearer t1", "aud", "svc@example.com")
+    _verify_oidc("Bearer t2", "aud", "svc@example.com")
     assert _get_oidc_request() is first
 
 
@@ -565,7 +551,9 @@ def test_oidc_library_not_installed_returns_false(monkeypatch: pytest.MonkeyPatc
     # actually bites.
     monkeypatch.delattr(sys.modules["google.oauth2"], "id_token", raising=False)
     monkeypatch.setitem(sys.modules, "google.oauth2.id_token", None)
-    assert not _verify_oidc("Bearer fake.jwt.token", "https://drt.example.com/sync/s", None, None)
+    assert not _verify_oidc(
+        "Bearer fake.jwt.token", "https://drt.example.com/sync/s", "svc@example.com"
+    )
 
 
 def test_oidc_end_to_end_via_server(monkeypatch: pytest.MonkeyPatch) -> None:
