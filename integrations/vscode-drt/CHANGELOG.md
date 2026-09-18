@@ -6,6 +6,11 @@ drt-core version its bundled schemas were generated from.
 
 ## [0.1.13] - Unreleased
 
+- Bundled JSON Schemas regenerated from drt-core: `klaviyo` gains `backfill`
+  (event-endpoint only — suppresses live flow/automation triggers for a
+  historical replay; rejected at config time on `endpoint: profile`) and its
+  `revision` default moves to `"2026-07-15"`, the minimum Klaviyo revision
+  that recognizes the new field (drt-hub/drt#1075).
 - Bundled JSON Schemas regenerated from drt-core: `google_ads` gains
   `cloud_project_id` (the Google Cloud project owning the config's OAuth
   client credentials — the real API quota boundary under Google's

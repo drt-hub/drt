@@ -2173,9 +2173,14 @@
           "title": "List Id Env"
         },
         "revision": {
-          "default": "2026-01-15",
+          "default": "2026-07-15",
           "title": "Revision",
           "type": "string"
+        },
+        "backfill": {
+          "default": false,
+          "title": "Backfill",
+          "type": "boolean"
         },
         "retry": {
           "anyOf": [

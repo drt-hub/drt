@@ -436,8 +436,21 @@ class KlaviyoDestinationConfig(BaseModel):
     # Optional: add each upserted profile to this Klaviyo list.
     list_id: str | None = None
     list_id_env: str | None = None
-    # Klaviyo API revision (sent as the `revision` header).
-    revision: str = "2026-01-15"
+    # Klaviyo API revision (sent as the `revision` header). 2026-07-15 is the
+    # minimum that recognizes `backfill` below (added at that exact revision
+    # -- Klaviyo's changelog) -- confirmed via Klaviyo's own changelog that
+    # nothing between 2026-01-15 and 2026-07-15 changes the Profiles,
+    # Lists-relationships, or Accounts behavior this destination already
+    # relies on (the one breaking change in that range, plural
+    # `conversations` on profiles, touches a relationship this destination
+    # never reads).
+    revision: str = "2026-07-15"
+    # (#1075) Event-endpoint only: suppresses live flow/automation triggers
+    # for this event, so a first full sync or a cursor-override replay of
+    # historical rows doesn't re-send customer-facing messages (emails/SMS)
+    # for events that already happened. The event still counts toward
+    # metrics/segmentation -- only flow triggering is suppressed.
+    backfill: bool = False
     retry: RetryConfig | None = None
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
 
@@ -475,6 +488,8 @@ class KlaviyoDestinationConfig(BaseModel):
             self.unique_id_field is None or not self.unique_id_field.strip()
         ):
             raise ValueError("unique_id_field is required when endpoint is 'event'.")
+        if self.backfill and self.endpoint != "event":
+            raise ValueError("backfill is only meaningful when endpoint is 'event'.")
         return self
 
 
