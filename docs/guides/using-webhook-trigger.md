@@ -258,9 +258,14 @@ avoid forcing the dependency on every deployment):
   delivers to.
 - **`--oidc-issuer`** defaults to Google's own `https://accounts.google.com`;
   override only if a future non-Google IdP reuses this same JWT shape.
-- **`--oidc-email`** restricts acceptance to one service account (the push
-  subscription's own invoker identity) — leave unset to accept any
-  Google-signed token for the right audience.
+- **`--oidc-email`** (required) names the one service account allowed to call
+  this endpoint — the push subscription's own invoker identity. A valid
+  signature and the right audience alone are **not** proof of authorization:
+  Google will mint a token with any audience for any Google Cloud principal
+  who asks (e.g. `gcloud auth print-identity-token --audiences=<anything>`),
+  so without an explicit expected caller, this endpoint would accept a
+  request from anyone with a Google Cloud identity, not just your own Pub/Sub
+  subscription.
 
 Unlike `hmac`, a `GET` is verified exactly the same way as a `POST` — the JWT
 signs itself independent of the request it's attached to, so there's no

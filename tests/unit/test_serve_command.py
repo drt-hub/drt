@@ -44,6 +44,16 @@ def test_serve_auth_oidc_requires_audience() -> None:
     assert "--oidc-audience" in result.output
 
 
+def test_serve_auth_oidc_requires_email() -> None:
+    """A valid signature and audience alone are not proof of authorization
+    (Codex review on #903) -- --oidc-email is required, not optional."""
+    result = runner.invoke(
+        app, ["serve", "--auth", "oidc", "--oidc-audience", "https://drt.example.com/sync/s"]
+    )
+    assert result.exit_code != 0
+    assert "--oidc-email" in result.output
+
+
 def test_serve_passes_options_through(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DRT_WEBHOOK_TOKEN", "tok123")
     with mock.patch("drt.cli.server.serve") as serve_impl:
@@ -147,12 +157,23 @@ def test_serve_oidc_scheme_requires_audience(tmp_path: Any) -> None:
         serve(port=0, project_dir=str(tmp_path), auth_scheme="oidc")
 
 
+def test_serve_oidc_scheme_requires_email(tmp_path: Any) -> None:
+    with pytest.raises(ValueError, match="requires an expected caller email"):
+        serve(
+            port=0,
+            project_dir=str(tmp_path),
+            auth_scheme="oidc",
+            oidc_audience="https://drt.example.com/sync/s",
+        )
+
+
 def test_serve_oidc_scheme_builds(fake_http_server: type[_FakeHTTPServer], tmp_path: Any) -> None:
     serve(
         port=0,
         project_dir=str(tmp_path),
         auth_scheme="oidc",
         oidc_audience="https://drt.example.com/sync/s",
+        oidc_email="svc@example.com",
     )
     assert fake_http_server.instances[0].shutdown_called
 

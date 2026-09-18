@@ -24,6 +24,7 @@ from drt import __version__
 from drt.cli.server import (
     AuthConfig,
     SyncScheduler,
+    _get_oidc_request,
     _verify_hmac,
     _verify_oidc,
     _verify_stripe_hmac,
@@ -412,26 +413,33 @@ def _inject_fake_google_auth(
     claims: dict[str, Any] | None = None,
     raises: Exception | None = None,
 ) -> MagicMock:
-    """Fake the ``google.auth``/``google.oauth2`` import chain ``_verify_oidc``
-    lazily imports, via ``sys.modules`` injection -- same pattern
-    ``test_deltalake_source.py`` uses for its own optional extra, so these
-    tests run without the real (optional, ``drt-core[serve-oidc]``)
-    dependency installed. ``from google.oauth2 import id_token`` needs every
-    parent package importable, not just the leaf module, so the whole chain
-    is faked, not just ``id_token`` itself.
+    """Fake the ``google.auth``/``google.oauth2``/``cachecontrol`` import
+    chain ``_verify_oidc``/``_get_oidc_request`` lazily import, via
+    ``sys.modules`` injection -- same pattern ``test_deltalake_source.py``
+    uses for its own optional extra, so these tests run without the real
+    (optional, ``drt-core[serve-oidc]``) dependencies installed.
+    ``from google.oauth2 import id_token`` needs every parent package
+    importable, not just the leaf module, so the whole chain is faked, not
+    just ``id_token`` itself. Also resets the ``_get_oidc_request()``
+    singleton so each test builds its own from its own fakes, rather than
+    reusing whatever a previous test's call already cached.
     """
+    monkeypatch.setattr("drt.cli.server._oidc_request", None)
+
     google_mod = types.ModuleType("google")
     google_auth_mod = types.ModuleType("google.auth")
     google_auth_transport_mod = types.ModuleType("google.auth.transport")
     google_auth_transport_requests_mod = types.ModuleType("google.auth.transport.requests")
     google_oauth2_mod = types.ModuleType("google.oauth2")
     google_oauth2_id_token_mod = types.ModuleType("google.oauth2.id_token")
+    cachecontrol_mod = types.ModuleType("cachecontrol")
 
     google_auth_transport_requests_mod.Request = MagicMock  # type: ignore[attr-defined]
     google_auth_transport_mod.requests = google_auth_transport_requests_mod  # type: ignore[attr-defined]
     google_auth_mod.transport = google_auth_transport_mod  # type: ignore[attr-defined]
     google_mod.auth = google_auth_mod  # type: ignore[attr-defined]
     google_mod.oauth2 = google_oauth2_mod  # type: ignore[attr-defined]
+    cachecontrol_mod.CacheControl = MagicMock(side_effect=lambda session: session)  # type: ignore[attr-defined]
 
     verify_mock = MagicMock()
     if raises is not None:
@@ -448,6 +456,7 @@ def _inject_fake_google_auth(
         ("google.auth.transport.requests", google_auth_transport_requests_mod),
         ("google.oauth2", google_oauth2_mod),
         ("google.oauth2.id_token", google_oauth2_id_token_mod),
+        ("cachecontrol", cachecontrol_mod),
     ):
         monkeypatch.setitem(sys.modules, name, mod)
     return verify_mock
@@ -507,10 +516,37 @@ def test_oidc_unset_issuer_and_email_skip_those_checks(monkeypatch: pytest.Monke
     assert _verify_oidc("Bearer fake.jwt.token", "https://drt.example.com/sync/s", None, None)
 
 
+def test_oidc_request_is_cached_across_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex review on #903: verify_oauth2_token fetches Google's certs
+    fresh on every call by default, so the Request object must be built
+    once and reused, not reconstructed per verification (which would defeat
+    cachecontrol's whole purpose -- a fresh wrapper has an empty cache)."""
+    _inject_fake_google_auth(monkeypatch, claims={"email": "svc@example.com"})
+    first = _get_oidc_request()
+    second = _get_oidc_request()
+    assert first is second
+
+    _verify_oidc("Bearer t1", "aud", None, "svc@example.com")
+    _verify_oidc("Bearer t2", "aud", None, "svc@example.com")
+    assert _get_oidc_request() is first
+
+
 def test_oidc_library_not_installed_returns_false(monkeypatch: pytest.MonkeyPatch) -> None:
     """``google.oauth2.id_token`` absent (no drt-core[serve-oidc]) is a
     verification failure, not a crash -- matching every other library
-    ImportError guard in this codebase (e.g. drt/sources/deltalake.py)."""
+    ImportError guard in this codebase (e.g. drt/sources/deltalake.py).
+    Fakes the rest of the chain first (so this isolates *just* id_token
+    missing, regardless of what an earlier test already cached in the
+    process-wide _get_oidc_request() singleton), then knocks out id_token
+    specifically."""
+    _inject_fake_google_auth(monkeypatch, claims={})
+    # `_inject_fake_google_auth` also sets `id_token` as an *attribute* on
+    # the fake `google.oauth2` module, which would otherwise satisfy `from
+    # google.oauth2 import id_token` regardless of the sys.modules entry
+    # below (IMPORT_FROM only falls back to sys.modules when the attribute
+    # lookup itself fails) -- remove it so the None-in-sys.modules simulation
+    # actually bites.
+    monkeypatch.delattr(sys.modules["google.oauth2"], "id_token", raising=False)
     monkeypatch.setitem(sys.modules, "google.oauth2.id_token", None)
     assert not _verify_oidc("Bearer fake.jwt.token", "https://drt.example.com/sync/s", None, None)
 
@@ -518,9 +554,15 @@ def test_oidc_library_not_installed_returns_false(monkeypatch: pytest.MonkeyPatc
 def test_oidc_end_to_end_via_server(monkeypatch: pytest.MonkeyPatch) -> None:
     """Confirms the scheme dispatch in Handler._check_auth, not just
     _verify_oidc in isolation."""
-    _inject_fake_google_auth(monkeypatch, claims={"iss": "https://accounts.google.com"})
+    _inject_fake_google_auth(
+        monkeypatch, claims={"iss": "https://accounts.google.com", "email": "svc@example.com"}
+    )
     server, _, port = _run_server(
-        auth=AuthConfig(scheme="oidc", oidc_audience="https://drt.example.com/sync/s")
+        auth=AuthConfig(
+            scheme="oidc",
+            oidc_audience="https://drt.example.com/sync/s",
+            oidc_email="svc@example.com",
+        )
     )
     try:
         status, body = _post(f"http://127.0.0.1:{port}/sync/s", token="fake.jwt.token")
@@ -532,10 +574,37 @@ def test_oidc_end_to_end_via_server(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_oidc_end_to_end_via_server_rejects_bad_token(monkeypatch: pytest.MonkeyPatch) -> None:
     _inject_fake_google_auth(monkeypatch, raises=ValueError("invalid signature"))
     server, _, port = _run_server(
-        auth=AuthConfig(scheme="oidc", oidc_audience="https://drt.example.com/sync/s")
+        auth=AuthConfig(
+            scheme="oidc",
+            oidc_audience="https://drt.example.com/sync/s",
+            oidc_email="svc@example.com",
+        )
     )
     try:
         status, _ = _post(f"http://127.0.0.1:{port}/sync/s", token="forged.jwt.token")
+        assert status == 401
+    finally:
+        server.shutdown()
+
+
+def test_oidc_end_to_end_via_server_rejects_right_signature_wrong_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact scenario Codex review flagged: a real Google-signed token
+    for the right audience, but minted for a different Google Cloud
+    principal than the one this endpoint is configured to trust."""
+    _inject_fake_google_auth(
+        monkeypatch, claims={"iss": "https://accounts.google.com", "email": "attacker@evil.com"}
+    )
+    server, _, port = _run_server(
+        auth=AuthConfig(
+            scheme="oidc",
+            oidc_audience="https://drt.example.com/sync/s",
+            oidc_email="svc@example.com",
+        )
+    )
+    try:
+        status, _ = _post(f"http://127.0.0.1:{port}/sync/s", token="attacker.jwt.token")
         assert status == 401
     finally:
         server.shutdown()
@@ -548,6 +617,8 @@ def test_auth_config_rejects_misconfiguration() -> None:
         AuthConfig(scheme="hmac")
     with pytest.raises(ValueError, match="requires an audience"):
         AuthConfig(scheme="oidc")
+    with pytest.raises(ValueError, match="requires an expected caller email"):
+        AuthConfig(scheme="oidc", oidc_audience="https://drt.example.com/sync/s")
     with pytest.raises(ValueError, match="unknown auth scheme"):
         AuthConfig(scheme="saml")
 

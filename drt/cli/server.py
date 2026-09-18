@@ -50,8 +50,10 @@ Auth (``--auth`` on ``drt serve``):
             ``google-auth`` (``drt-core[serve-oidc]``); checks ``aud``
             (required, ``--oidc-audience``), ``iss`` (``--oidc-issuer``,
             defaults to Google's own ``https://accounts.google.com``), and
-            optionally ``email`` (``--oidc-email``, restrict to one
-            service account).
+            ``email`` (required, ``--oidc-email``) — the caller's *audience*
+            alone is not proof of authorization, since Google will mint a
+            token with any audience for any Google Cloud principal, so the
+            expected service account must be named explicitly.
 
 Every route except ``GET /health`` is authenticated. ``GET /runs/<id>`` returns
 the SyncResult and any error text, so it is not exempt: the run id is a uuid4,
@@ -122,15 +124,21 @@ class AuthConfig:
     hmac_tolerance: int = 300
     # OIDC (#903) — Pub/Sub push's scheme. `audience` is the URL the push
     # subscription was configured with; Google's own JWT library requires it
-    # to reject a token minted for an unrelated Google Cloud resource.
+    # to reject a token minted for an unrelated Google Cloud resource. But
+    # `aud` alone is NOT proof of authorization: Google will mint a
+    # Google-signed ID token with *any* audience for *any* Google Cloud
+    # principal who asks (e.g. `gcloud auth print-identity-token
+    # --audiences=<anything>`), so treating "signature valid + right
+    # audience" as sufficient would let any Google Cloud user trigger this
+    # endpoint (Codex review). `email` is therefore required, not optional —
+    # it names the one caller identity (the push subscription's own service
+    # account) actually allowed through.
     oidc_audience: str | None = None
     # Google's own issuer for these tokens; overridable in case a future
     # scheme reuses this verifier for a non-Google IdP with the same shape.
     oidc_issuer: str | None = "https://accounts.google.com"
-    # Restrict to one service account, e.g. the Pub/Sub subscription's own
-    # push service account. Unset accepts any Google-signed token for the
-    # right audience — narrower than most deployments want, but matches
-    # "verify the signature" being the only hard requirement Google documents.
+    # The one service account allowed to call this endpoint under this
+    # scheme — see the audience-is-not-authorization note above.
     oidc_email: str | None = None
 
     def __post_init__(self) -> None:
@@ -142,6 +150,12 @@ class AuthConfig:
             raise ValueError("auth scheme 'hmac' requires a secret")
         if self.scheme == "oidc" and not self.oidc_audience:
             raise ValueError("auth scheme 'oidc' requires an audience")
+        if self.scheme == "oidc" and not self.oidc_email:
+            raise ValueError(
+                "auth scheme 'oidc' requires an expected caller email -- a valid "
+                "signature and audience alone do not prove the caller was authorized, "
+                "since Google will mint a token with any audience for any principal"
+            )
         if self.hmac_scheme not in ("generic", "stripe"):
             raise ValueError(f"unknown hmac scheme: {self.hmac_scheme!r}")
         if self.hmac_tolerance <= 0:
@@ -155,6 +169,36 @@ def _verify_bearer(header_value: str, token: str) -> bool:
     return secrets.compare_digest(header_value.encode(), f"Bearer {token}".encode())
 
 
+_oidc_request: Any = None
+
+
+def _get_oidc_request() -> Any:
+    """Lazily build one process-wide, cache-aware ``Request`` for OIDC cert
+    fetches, reused across every ``_verify_oidc`` call (Codex review on
+    #903).
+
+    ``verify_oauth2_token`` fetches Google's signing certs fresh on every
+    single call by default -- a plain ``Request()`` provides no caching of
+    its own, so every request to this endpoint (including an
+    unauthenticated one, since the fetch happens before the signature is
+    even checked) would trigger a blocking external HTTP call to Google.
+    Wrapping the session in ``cachecontrol`` (``drt-core[serve-oidc]``)
+    makes it honor the ``Cache-Control`` headers Google's certs endpoint
+    already sends, so certs are actually refetched only when they expire.
+    Reused as one long-lived object rather than built per call, since a
+    fresh ``CacheControl`` wrapper has an empty cache and would defeat the
+    point.
+    """
+    global _oidc_request
+    if _oidc_request is None:
+        from cachecontrol import CacheControl
+        from google.auth.transport import requests as google_requests
+        from requests import Session
+
+        _oidc_request = google_requests.Request(session=CacheControl(Session()))
+    return _oidc_request
+
+
 def _verify_oidc(header_value: str, audience: str, issuer: str | None, email: str | None) -> bool:
     """Verify a Google-signed OIDC JWT (#903 — Pub/Sub push's own auth scheme).
 
@@ -164,7 +208,10 @@ def _verify_oidc(header_value: str, audience: str, issuer: str | None, email: st
     verification code you get wrong. ``verify_oauth2_token`` already checks
     the signature, expiry, and (given ``audience``) the ``aud`` claim; ``iss``
     and ``email`` are drt's own additional checks on top, since the library
-    only enforces what it's told to.
+    only enforces what it's told to. ``audience`` alone is not proof of
+    authorization -- Google will mint a token with any audience for any
+    Google Cloud principal who asks -- so callers of this function are
+    expected to always pass a real ``email`` (``AuthConfig`` enforces this).
 
     Any failure -- bad signature, expired, wrong audience, malformed header,
     the library not installed, a network error fetching Google's certs --
@@ -176,15 +223,13 @@ def _verify_oidc(header_value: str, audience: str, issuer: str | None, email: st
         return False
     token = header_value[len(prefix) :]
     try:
-        from google.auth.transport import requests as google_requests
+        request = _get_oidc_request()
         from google.oauth2 import id_token
     except ImportError:
         logging.getLogger(__name__).error("--auth oidc requires: pip install drt-core[serve-oidc]")
         return False
     try:
-        claims = id_token.verify_oauth2_token(  # type: ignore[no-untyped-call]
-            token, google_requests.Request(), audience
-        )
+        claims = id_token.verify_oauth2_token(token, request, audience)  # type: ignore[no-untyped-call]
     except Exception:  # noqa: BLE001 — any verification failure is just "unauthorized"
         return False
     if issuer is not None and claims.get("iss") != issuer:
@@ -500,6 +545,7 @@ def make_handler(
                 # Neither `body` nor `path` matters here: the JWT signs
                 # itself, independent of the request it's attached to.
                 assert auth.oidc_audience is not None
+                assert auth.oidc_email is not None
                 return _verify_oidc(
                     self.headers.get("Authorization", ""),
                     auth.oidc_audience,

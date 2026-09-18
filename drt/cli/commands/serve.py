@@ -82,9 +82,11 @@ def serve(
         "",
         "--oidc-email",
         help=(
-            "Restrict --auth oidc to one service account's email "
-            "(e.g. the Pub/Sub subscription's own push service account). "
-            "Empty accepts any Google-signed token for the right audience."
+            "Required for --auth oidc: the one service account's email "
+            "allowed to call this endpoint (e.g. the Pub/Sub subscription's "
+            "own push service account). A valid signature and audience "
+            "alone do not prove authorization -- Google will mint a token "
+            "with any audience for any Google Cloud principal."
         ),
     ),
 ) -> None:
@@ -118,6 +120,8 @@ def serve(
         )
     if auth == "oidc" and not oidc_audience:
         raise typer.BadParameter("--auth oidc requires --oidc-audience", param_hint="--auth")
+    if auth == "oidc" and not oidc_email:
+        raise typer.BadParameter("--auth oidc requires --oidc-email", param_hint="--auth")
     if hmac_scheme not in _HMAC_SCHEMES:
         raise typer.BadParameter(
             f"--hmac-scheme must be one of {', '.join(_HMAC_SCHEMES)}",
