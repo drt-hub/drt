@@ -471,6 +471,23 @@ def test_oidc_valid_token_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def test_oidc_accepts_both_google_issuer_spellings_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex review: google-auth's own verify_oauth2_token already validates
+    iss against Google's accepted set internally
+    (google.oauth2.id_token._GOOGLE_ISSUERS == ["accounts.google.com",
+    "https://accounts.google.com"] -- both are legitimate). AuthConfig's
+    default leaves oidc_issuer unset (None) precisely so drt's own
+    *additional* exact-match check never rejects whichever of the two forms
+    a real Google-issued token happens to use."""
+    for spelling in ("accounts.google.com", "https://accounts.google.com"):
+        _inject_fake_google_auth(monkeypatch, claims={"iss": spelling, "email": "svc@example.com"})
+        assert _verify_oidc(
+            "Bearer fake.jwt.token", "https://drt.example.com/sync/s", None, "svc@example.com"
+        ), f"issuer spelling {spelling!r} should be accepted when oidc_issuer is unset"
+
+
 def test_oidc_missing_bearer_prefix_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     """Never reaches the (mocked) verifier at all -- an absent/malformed
     Authorization header is rejected before any JWT parsing is attempted."""

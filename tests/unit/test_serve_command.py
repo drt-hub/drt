@@ -81,7 +81,7 @@ def test_serve_passes_options_through(monkeypatch: pytest.MonkeyPatch) -> None:
         hmac_scheme="generic",
         hmac_tolerance=300,
         oidc_audience=None,
-        oidc_issuer="https://accounts.google.com",
+        oidc_issuer=None,
         oidc_email=None,
     )
 
@@ -104,7 +104,7 @@ def test_serve_passes_oidc_options_through() -> None:
     kwargs = serve_impl.call_args.kwargs
     assert kwargs["auth_scheme"] == "oidc"
     assert kwargs["oidc_audience"] == "https://drt.example.com/sync/s"
-    assert kwargs["oidc_issuer"] == "https://accounts.google.com"
+    assert kwargs["oidc_issuer"] is None
     assert kwargs["oidc_email"] == "svc@example.com"
 
 

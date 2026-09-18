@@ -256,8 +256,11 @@ avoid forcing the dependency on every deployment):
 - **`--oidc-audience`** (required) must match the audience the push
   subscription was configured with — usually the exact `POST` URL Pub/Sub
   delivers to.
-- **`--oidc-issuer`** defaults to Google's own `https://accounts.google.com`;
-  override only if a future non-Google IdP reuses this same JWT shape.
+- **`--oidc-issuer`** is unset by default — `google-auth` already validates
+  `iss` against Google's own accepted values internally (both
+  `accounts.google.com` and `https://accounts.google.com` are legitimate);
+  only set this to override for a future non-Google IdP reusing this same
+  JWT shape.
 - **`--oidc-email`** (required) names the one service account allowed to call
   this endpoint — the push subscription's own invoker identity. A valid
   signature and the right audience alone are **not** proof of authorization:

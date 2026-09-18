@@ -74,9 +74,14 @@ def serve(
         ),
     ),
     oidc_issuer: str = typer.Option(
-        "https://accounts.google.com",
+        "",
         "--oidc-issuer",
-        help="Expected iss claim for --auth oidc.",
+        help=(
+            "Override the expected iss claim for --auth oidc. Leave unset for "
+            "Google tokens -- google-auth already validates iss against "
+            "Google's own accepted values internally; only set this for a "
+            "future non-Google IdP reusing this same JWT verification path."
+        ),
     ),
     oidc_email: str = typer.Option(
         "",
