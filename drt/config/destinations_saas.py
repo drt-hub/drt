@@ -417,6 +417,9 @@ class AirtableDestinationConfig(BaseModel):
         return self
 
 
+_KLAVIYO_BACKFILL_MIN_REVISION = "2026-07-15"  # see revision field docstring below
+
+
 class KlaviyoDestinationConfig(BaseModel):
     type: Literal["klaviyo"]
     api_key: str | None = None
@@ -444,7 +447,7 @@ class KlaviyoDestinationConfig(BaseModel):
     # relies on (the one breaking change in that range, plural
     # `conversations` on profiles, touches a relationship this destination
     # never reads).
-    revision: str = "2026-07-15"
+    revision: str = _KLAVIYO_BACKFILL_MIN_REVISION
     # (#1075) Event-endpoint only: suppresses live flow/automation triggers
     # for this event, so a first full sync or a cursor-override replay of
     # historical rows doesn't re-send customer-facing messages (emails/SMS)
@@ -490,6 +493,18 @@ class KlaviyoDestinationConfig(BaseModel):
             raise ValueError("unique_id_field is required when endpoint is 'event'.")
         if self.backfill and self.endpoint != "event":
             raise ValueError("backfill is only meaningful when endpoint is 'event'.")
+        # Codex review on #1075: a config written before this field existed
+        # (or one that deliberately pins an older revision) could set
+        # backfill: true alongside an explicit revision older than the one
+        # Klaviyo introduced it at -- silently failing to suppress flow
+        # triggering, defeating the entire point of the field. Klaviyo
+        # revisions are YYYY-MM-DD strings, so lexical comparison is a valid
+        # date comparison here.
+        if self.backfill and self.revision < _KLAVIYO_BACKFILL_MIN_REVISION:
+            raise ValueError(
+                f"backfill requires revision >= {_KLAVIYO_BACKFILL_MIN_REVISION!r} "
+                f"(Klaviyo's own minimum for this field); got {self.revision!r}."
+            )
         return self
 
 

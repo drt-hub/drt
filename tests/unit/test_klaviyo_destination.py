@@ -95,6 +95,29 @@ class TestKlaviyoConfig:
         )
         assert config.backfill is True
 
+    def test_backfill_rejected_with_older_revision(self) -> None:
+        """#1075, Codex review: a config that explicitly pins the pre-#1075
+        default revision (or any revision Klaviyo introduced backfill
+        after) must not silently fail to suppress flow triggering."""
+        with pytest.raises(ValueError, match="backfill requires revision"):
+            _config(
+                endpoint="event",
+                metric_name="Upgraded Plan",
+                unique_id_field="event_id",
+                backfill=True,
+                revision="2026-01-15",
+            )
+
+    def test_backfill_allowed_with_newer_revision(self) -> None:
+        config = _config(
+            endpoint="event",
+            metric_name="Upgraded Plan",
+            unique_id_field="event_id",
+            backfill=True,
+            revision="2026-08-01",
+        )
+        assert config.backfill is True
+
     def test_describe(self) -> None:
         assert _config().describe() == "klaviyo (profiles)"
         assert (

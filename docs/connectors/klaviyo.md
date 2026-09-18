@@ -30,7 +30,7 @@ destination:
 | `properties_template` | string \| null | null | Jinja2 JSON template → custom profile/event `properties`. When omitted, profile mode sends all row fields except `email_field`; event mode also excludes configured metric/time/value/unique-ID control fields. Event payloads always include `properties` (at least `{}`). |
 | `list_id` / `list_id_env` | string \| null | null | For `endpoint: profile`, add each upserted profile to this Klaviyo list. |
 | `backfill` | boolean | `false` | For `endpoint: event` only. When `true`, suppresses live flow/automation triggers for the event — use during a first full sync or a cursor-override replay of historical rows so existing flows don't re-send customer-facing messages for events that already happened. The event still counts toward metrics/segmentation. Rejected at config time if set with `endpoint: profile`. |
-| `revision` | string | `"2026-07-15"` | Klaviyo API revision (sent as the `revision` header). Must be `"2026-07-15"` or later for `backfill` to be recognized (that's the revision Klaviyo introduced it at). |
+| `revision` | string | `"2026-07-15"` | Klaviyo API revision (sent as the `revision` header). Must be `"2026-07-15"` or later when `backfill: true` (enforced at config validation) — that's the revision Klaviyo introduced the field at. |
 | `retry` | RetryConfig \| null | null | Per-destination override of `sync.retry`. |
 | `rate_limit` | RateLimitConfig \| null | null | Per-destination override of `sync.rate_limit`. |
 
