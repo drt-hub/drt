@@ -1,8 +1,9 @@
 """drt webhook server — lightweight HTTP endpoint to trigger syncs.
 
 Enables event-driven sync patterns (GitHub webhooks, dbt job completion,
-Pub/Sub push behind a proxy, etc.). No external dependencies — uses stdlib
-``http.server``.
+Pub/Sub push, etc.). Uses stdlib ``http.server`` — no external dependency for
+``--auth none|bearer|hmac``; ``--auth oidc`` (Pub/Sub push's own scheme) needs
+``drt-core[serve-oidc]``.
 
 Routes:
     GET  /health                → {"status": "ok", "version": "..."}
@@ -43,15 +44,23 @@ Auth (``--auth`` on ``drt serve``):
                        sends a GET, so ``GET /runs/<id>`` has no signature to
                        verify under this scheme.
 
+    oidc    Google-signed OIDC JWT in the ``Authorization: Bearer <token>``
+            header, no body signature at all — Pub/Sub push's own scheme
+            (#903). Verified against Google's public keys via
+            ``google-auth`` (``drt-core[serve-oidc]``); checks ``aud``
+            (required, ``--oidc-audience``), ``iss`` (``--oidc-issuer``,
+            defaults to Google's own ``https://accounts.google.com``), and
+            optionally ``email`` (``--oidc-email``, restrict to one
+            service account).
+
 Every route except ``GET /health`` is authenticated. ``GET /runs/<id>`` returns
 the SyncResult and any error text, so it is not exempt: the run id is a uuid4,
 but it travels in the URL path, which every reverse proxy in front of drt writes
 to an access log. Under ``hmac`` a GET has no body to sign, so the signature is
-over the empty body, making it a constant per secret (see the guide).
-
-Pub/Sub push authenticates with an OIDC JWT instead of a body signature; that
-verification path is a follow-up (#903 — it needs a JWT dependency decision) and until
-then Pub/Sub still requires a verifying proxy in front.
+over the empty body, making it a constant per secret (see the guide). Under
+``oidc`` a GET is verified the same way as a POST — the JWT carries its own
+signature independent of the request body, so there is no GET/POST asymmetry
+to account for the way there is under ``hmac``.
 """
 
 from __future__ import annotations
@@ -61,6 +70,7 @@ import hashlib
 import hmac
 import itertools
 import json
+import logging
 import secrets
 import threading
 import time
@@ -96,7 +106,7 @@ class AuthConfig:
     OIDC for Pub/Sub push) is an addition, not a rewrite.
     """
 
-    scheme: str = "none"  # "none" | "bearer" | "hmac"
+    scheme: str = "none"  # "none" | "bearer" | "hmac" | "oidc"
     token: str | None = None
     hmac_secret: str | None = None
     hmac_header: str = "X-Hub-Signature-256"
@@ -110,14 +120,28 @@ class AuthConfig:
     # default to five minutes; their docs warn against 0, which turns the
     # recency check off entirely rather than making it strict.
     hmac_tolerance: int = 300
+    # OIDC (#903) — Pub/Sub push's scheme. `audience` is the URL the push
+    # subscription was configured with; Google's own JWT library requires it
+    # to reject a token minted for an unrelated Google Cloud resource.
+    oidc_audience: str | None = None
+    # Google's own issuer for these tokens; overridable in case a future
+    # scheme reuses this verifier for a non-Google IdP with the same shape.
+    oidc_issuer: str | None = "https://accounts.google.com"
+    # Restrict to one service account, e.g. the Pub/Sub subscription's own
+    # push service account. Unset accepts any Google-signed token for the
+    # right audience — narrower than most deployments want, but matches
+    # "verify the signature" being the only hard requirement Google documents.
+    oidc_email: str | None = None
 
     def __post_init__(self) -> None:
-        if self.scheme not in ("none", "bearer", "hmac"):
+        if self.scheme not in ("none", "bearer", "hmac", "oidc"):
             raise ValueError(f"unknown auth scheme: {self.scheme!r}")
         if self.scheme == "bearer" and not self.token:
             raise ValueError("auth scheme 'bearer' requires a token")
         if self.scheme == "hmac" and not self.hmac_secret:
             raise ValueError("auth scheme 'hmac' requires a secret")
+        if self.scheme == "oidc" and not self.oidc_audience:
+            raise ValueError("auth scheme 'oidc' requires an audience")
         if self.hmac_scheme not in ("generic", "stripe"):
             raise ValueError(f"unknown hmac scheme: {self.hmac_scheme!r}")
         if self.hmac_tolerance <= 0:
@@ -129,6 +153,45 @@ class AuthConfig:
 
 def _verify_bearer(header_value: str, token: str) -> bool:
     return secrets.compare_digest(header_value.encode(), f"Bearer {token}".encode())
+
+
+def _verify_oidc(header_value: str, audience: str, issuer: str | None, email: str | None) -> bool:
+    """Verify a Google-signed OIDC JWT (#903 — Pub/Sub push's own auth scheme).
+
+    Delegates signature verification (against Google's rotating public keys)
+    to ``google-auth`` (``drt-core[serve-oidc]``) rather than hand-rolling
+    JWKS fetch + RS256 -- verification code you write yourself is
+    verification code you get wrong. ``verify_oauth2_token`` already checks
+    the signature, expiry, and (given ``audience``) the ``aud`` claim; ``iss``
+    and ``email`` are drt's own additional checks on top, since the library
+    only enforces what it's told to.
+
+    Any failure -- bad signature, expired, wrong audience, malformed header,
+    the library not installed, a network error fetching Google's certs --
+    returns ``False`` rather than raising, matching every other verifier in
+    this module: an unauthenticated caller must never turn into a 500.
+    """
+    prefix = "Bearer "
+    if not header_value.startswith(prefix):
+        return False
+    token = header_value[len(prefix) :]
+    try:
+        from google.auth.transport import requests as google_requests
+        from google.oauth2 import id_token
+    except ImportError:
+        logging.getLogger(__name__).error("--auth oidc requires: pip install drt-core[serve-oidc]")
+        return False
+    try:
+        claims = id_token.verify_oauth2_token(  # type: ignore[no-untyped-call]
+            token, google_requests.Request(), audience
+        )
+    except Exception:  # noqa: BLE001 — any verification failure is just "unauthorized"
+        return False
+    if issuer is not None and claims.get("iss") != issuer:
+        return False
+    if email is not None and claims.get("email") != email:
+        return False
+    return True
 
 
 _GET_KEY_INFO = b"drt/serve/v1/get-path"
@@ -433,6 +496,16 @@ def make_handler(
             if auth.scheme == "bearer":
                 assert auth.token is not None
                 return _verify_bearer(self.headers.get("Authorization", ""), auth.token)
+            if auth.scheme == "oidc":
+                # Neither `body` nor `path` matters here: the JWT signs
+                # itself, independent of the request it's attached to.
+                assert auth.oidc_audience is not None
+                return _verify_oidc(
+                    self.headers.get("Authorization", ""),
+                    auth.oidc_audience,
+                    auth.oidc_issuer,
+                    auth.oidc_email,
+                )
             assert auth.hmac_secret is not None
             signature = self.headers.get(auth.hmac_header, "")
             if not signature:
@@ -552,6 +625,9 @@ def serve(
     hmac_header: str = "X-Hub-Signature-256",
     hmac_scheme: str = "generic",
     hmac_tolerance: int = 300,
+    oidc_audience: str | None = None,
+    oidc_issuer: str | None = "https://accounts.google.com",
+    oidc_email: str | None = None,
 ) -> None:
     """Start the webhook server (blocking).
 
@@ -573,6 +649,9 @@ def serve(
         hmac_header=hmac_header,
         hmac_scheme=hmac_scheme,
         hmac_tolerance=hmac_tolerance,
+        oidc_audience=oidc_audience,
+        oidc_issuer=oidc_issuer,
+        oidc_email=oidc_email,
     )
 
     project_path = Path(project_dir)
@@ -609,6 +688,7 @@ def serve(
             if auth.hmac_scheme == "stripe"
             else f"with HMAC auth ({auth.hmac_header})"
         ),
+        "oidc": f"with OIDC auth (audience={auth.oidc_audience})",
     }[auth.scheme]
     from drt.cli.output import console
 

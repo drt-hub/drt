@@ -38,6 +38,12 @@ def test_serve_auth_hmac_requires_secret(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "DRT_WEBHOOK_HMAC_SECRET" in result.output
 
 
+def test_serve_auth_oidc_requires_audience() -> None:
+    result = runner.invoke(app, ["serve", "--auth", "oidc"])
+    assert result.exit_code != 0
+    assert "--oidc-audience" in result.output
+
+
 def test_serve_passes_options_through(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DRT_WEBHOOK_TOKEN", "tok123")
     with mock.patch("drt.cli.server.serve") as serve_impl:
@@ -53,7 +59,32 @@ def test_serve_passes_options_through(monkeypatch: pytest.MonkeyPatch) -> None:
         hmac_header="X-Hub-Signature-256",
         hmac_scheme="generic",
         hmac_tolerance=300,
+        oidc_audience=None,
+        oidc_issuer="https://accounts.google.com",
+        oidc_email=None,
     )
+
+
+def test_serve_passes_oidc_options_through() -> None:
+    with mock.patch("drt.cli.server.serve") as serve_impl:
+        result = runner.invoke(
+            app,
+            [
+                "serve",
+                "--auth",
+                "oidc",
+                "--oidc-audience",
+                "https://drt.example.com/sync/s",
+                "--oidc-email",
+                "svc@example.com",
+            ],
+        )
+    assert result.exit_code == 0
+    kwargs = serve_impl.call_args.kwargs
+    assert kwargs["auth_scheme"] == "oidc"
+    assert kwargs["oidc_audience"] == "https://drt.example.com/sync/s"
+    assert kwargs["oidc_issuer"] == "https://accounts.google.com"
+    assert kwargs["oidc_email"] == "svc@example.com"
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +139,22 @@ def test_serve_hmac_scheme_builds(fake_http_server: type[_FakeHTTPServer], tmp_p
 
 def test_serve_rejects_bad_scheme(tmp_path: Any) -> None:
     with pytest.raises(ValueError, match="unknown auth scheme"):
+        serve(port=0, project_dir=str(tmp_path), auth_scheme="saml")
+
+
+def test_serve_oidc_scheme_requires_audience(tmp_path: Any) -> None:
+    with pytest.raises(ValueError, match="requires an audience"):
         serve(port=0, project_dir=str(tmp_path), auth_scheme="oidc")
+
+
+def test_serve_oidc_scheme_builds(fake_http_server: type[_FakeHTTPServer], tmp_path: Any) -> None:
+    serve(
+        port=0,
+        project_dir=str(tmp_path),
+        auth_scheme="oidc",
+        oidc_audience="https://drt.example.com/sync/s",
+    )
+    assert fake_http_server.instances[0].shutdown_called
 
 
 def test_serve_wires_a_real_project(fake_http_server: type[_FakeHTTPServer], tmp_path: Any) -> None:

@@ -94,6 +94,13 @@
   SQL Server sensor that didn't already pass `minimum_interval_seconds=`**
   — ships as dagster-drt 0.5.0, not folded into a patch; see that
   release's CHANGELOG entry for the upgrade note.
+- **Amended:** 2026-09-18 — [#903](https://github.com/drt-hub/drt/issues/903)
+  closed the last Tier 3 residual named in the 2026-08-03 amendment:
+  `drt serve --auth oidc` verifies Pub/Sub push's OIDC JWT (signature, `aud`,
+  `iss`, optional `email`) via `google-auth` (`drt-core[serve-oidc]`), so a
+  Pub/Sub push subscription can point at `drt serve` directly, no verifying
+  proxy required. Tier 3 now has no known residual against the shape this
+  ADR describes.
 - **Issue:** [#786](https://github.com/drt-hub/drt/issues/786)
 - **Implementation:** none — this ADR recommends **not** building a native
   watcher. The work it does sanction is listed under

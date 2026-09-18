@@ -239,9 +239,32 @@ signature avoids. If you need to poll run state, run a second listener with
 `--auth bearer` for that, or query it from the same process that triggered the
 sync using the run id returned by the 202.
 
-Pub/Sub push authenticates with an **OIDC JWT**, not a body signature — that
-verification path is [#903](https://github.com/drt-hub/drt/issues/903), and until it lands Pub/Sub still needs
-a verifying proxy in front.
+### Pub/Sub push OIDC JWT
+
+```bash
+pip install "drt-core[serve-oidc]"
+drt serve --auth oidc \
+  --oidc-audience https://your-drt-host/sync/sync_users \
+  --oidc-email push-invoker@your-project.iam.gserviceaccount.com
+```
+
+Pub/Sub push authenticates with an **OIDC JWT** in the `Authorization: Bearer
+<token>` header, not a body signature — verified against Google's rotating
+public keys via `google-auth` (`drt-core[serve-oidc]`, kept out of core to
+avoid forcing the dependency on every deployment):
+
+- **`--oidc-audience`** (required) must match the audience the push
+  subscription was configured with — usually the exact `POST` URL Pub/Sub
+  delivers to.
+- **`--oidc-issuer`** defaults to Google's own `https://accounts.google.com`;
+  override only if a future non-Google IdP reuses this same JWT shape.
+- **`--oidc-email`** restricts acceptance to one service account (the push
+  subscription's own invoker identity) — leave unset to accept any
+  Google-signed token for the right audience.
+
+Unlike `hmac`, a `GET` is verified exactly the same way as a `POST` — the JWT
+signs itself independent of the request it's attached to, so there's no
+GET/POST asymmetry to account for.
 
 ## Use cases
 

@@ -6,14 +6,17 @@ import base64
 import hashlib
 import hmac
 import json
+import sys
 import threading
 import time
+import types
 import urllib.error
 import urllib.request
 from collections.abc import Callable
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -22,6 +25,7 @@ from drt.cli.server import (
     AuthConfig,
     SyncScheduler,
     _verify_hmac,
+    _verify_oidc,
     _verify_stripe_hmac,
     make_handler,
 )
@@ -402,13 +406,150 @@ def test_hmac_bodyless_post_still_signs_the_empty_body() -> None:
         server.shutdown()
 
 
+def _inject_fake_google_auth(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    claims: dict[str, Any] | None = None,
+    raises: Exception | None = None,
+) -> MagicMock:
+    """Fake the ``google.auth``/``google.oauth2`` import chain ``_verify_oidc``
+    lazily imports, via ``sys.modules`` injection -- same pattern
+    ``test_deltalake_source.py`` uses for its own optional extra, so these
+    tests run without the real (optional, ``drt-core[serve-oidc]``)
+    dependency installed. ``from google.oauth2 import id_token`` needs every
+    parent package importable, not just the leaf module, so the whole chain
+    is faked, not just ``id_token`` itself.
+    """
+    google_mod = types.ModuleType("google")
+    google_auth_mod = types.ModuleType("google.auth")
+    google_auth_transport_mod = types.ModuleType("google.auth.transport")
+    google_auth_transport_requests_mod = types.ModuleType("google.auth.transport.requests")
+    google_oauth2_mod = types.ModuleType("google.oauth2")
+    google_oauth2_id_token_mod = types.ModuleType("google.oauth2.id_token")
+
+    google_auth_transport_requests_mod.Request = MagicMock  # type: ignore[attr-defined]
+    google_auth_transport_mod.requests = google_auth_transport_requests_mod  # type: ignore[attr-defined]
+    google_auth_mod.transport = google_auth_transport_mod  # type: ignore[attr-defined]
+    google_mod.auth = google_auth_mod  # type: ignore[attr-defined]
+    google_mod.oauth2 = google_oauth2_mod  # type: ignore[attr-defined]
+
+    verify_mock = MagicMock()
+    if raises is not None:
+        verify_mock.side_effect = raises
+    else:
+        verify_mock.return_value = claims or {}
+    google_oauth2_id_token_mod.verify_oauth2_token = verify_mock  # type: ignore[attr-defined]
+    google_oauth2_mod.id_token = google_oauth2_id_token_mod  # type: ignore[attr-defined]
+
+    for name, mod in (
+        ("google", google_mod),
+        ("google.auth", google_auth_mod),
+        ("google.auth.transport", google_auth_transport_mod),
+        ("google.auth.transport.requests", google_auth_transport_requests_mod),
+        ("google.oauth2", google_oauth2_mod),
+        ("google.oauth2.id_token", google_oauth2_id_token_mod),
+    ):
+        monkeypatch.setitem(sys.modules, name, mod)
+    return verify_mock
+
+
+def test_oidc_valid_token_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    _inject_fake_google_auth(
+        monkeypatch, claims={"iss": "https://accounts.google.com", "email": "svc@example.com"}
+    )
+    assert _verify_oidc(
+        "Bearer fake.jwt.token", "https://drt.example.com/sync/s", None, "svc@example.com"
+    )
+
+
+def test_oidc_missing_bearer_prefix_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never reaches the (mocked) verifier at all -- an absent/malformed
+    Authorization header is rejected before any JWT parsing is attempted."""
+    verify_mock = _inject_fake_google_auth(monkeypatch, claims={})
+    assert not _verify_oidc("fake.jwt.token", "https://drt.example.com/sync/s", None, None)
+    assert not _verify_oidc("", "https://drt.example.com/sync/s", None, None)
+    verify_mock.assert_not_called()
+
+
+def test_oidc_verification_failure_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bad signature, expired, wrong audience, malformed token -- whatever
+    the library raises for -- is just "unauthorized", never a 500."""
+    _inject_fake_google_auth(monkeypatch, raises=ValueError("Token expired"))
+    assert not _verify_oidc("Bearer fake.jwt.token", "https://drt.example.com/sync/s", None, None)
+
+
+def test_oidc_wrong_issuer_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    _inject_fake_google_auth(monkeypatch, claims={"iss": "https://evil.example.com"})
+    assert not _verify_oidc(
+        "Bearer fake.jwt.token",
+        "https://drt.example.com/sync/s",
+        "https://accounts.google.com",
+        None,
+    )
+
+
+def test_oidc_wrong_email_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    _inject_fake_google_auth(
+        monkeypatch, claims={"iss": "https://accounts.google.com", "email": "attacker@evil.com"}
+    )
+    assert not _verify_oidc(
+        "Bearer fake.jwt.token",
+        "https://drt.example.com/sync/s",
+        "https://accounts.google.com",
+        "svc@example.com",
+    )
+
+
+def test_oidc_unset_issuer_and_email_skip_those_checks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AuthConfig's own default still checks iss -- this proves the checks
+    are opt-in at the _verify_oidc level, not hardcoded to always run."""
+    _inject_fake_google_auth(monkeypatch, claims={"iss": "https://anything.example.com"})
+    assert _verify_oidc("Bearer fake.jwt.token", "https://drt.example.com/sync/s", None, None)
+
+
+def test_oidc_library_not_installed_returns_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``google.oauth2.id_token`` absent (no drt-core[serve-oidc]) is a
+    verification failure, not a crash -- matching every other library
+    ImportError guard in this codebase (e.g. drt/sources/deltalake.py)."""
+    monkeypatch.setitem(sys.modules, "google.oauth2.id_token", None)
+    assert not _verify_oidc("Bearer fake.jwt.token", "https://drt.example.com/sync/s", None, None)
+
+
+def test_oidc_end_to_end_via_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Confirms the scheme dispatch in Handler._check_auth, not just
+    _verify_oidc in isolation."""
+    _inject_fake_google_auth(monkeypatch, claims={"iss": "https://accounts.google.com"})
+    server, _, port = _run_server(
+        auth=AuthConfig(scheme="oidc", oidc_audience="https://drt.example.com/sync/s")
+    )
+    try:
+        status, body = _post(f"http://127.0.0.1:{port}/sync/s", token="fake.jwt.token")
+        assert status == 202, body
+    finally:
+        server.shutdown()
+
+
+def test_oidc_end_to_end_via_server_rejects_bad_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    _inject_fake_google_auth(monkeypatch, raises=ValueError("invalid signature"))
+    server, _, port = _run_server(
+        auth=AuthConfig(scheme="oidc", oidc_audience="https://drt.example.com/sync/s")
+    )
+    try:
+        status, _ = _post(f"http://127.0.0.1:{port}/sync/s", token="forged.jwt.token")
+        assert status == 401
+    finally:
+        server.shutdown()
+
+
 def test_auth_config_rejects_misconfiguration() -> None:
     with pytest.raises(ValueError, match="requires a token"):
         AuthConfig(scheme="bearer")
     with pytest.raises(ValueError, match="requires a secret"):
         AuthConfig(scheme="hmac")
-    with pytest.raises(ValueError, match="unknown auth scheme"):
+    with pytest.raises(ValueError, match="requires an audience"):
         AuthConfig(scheme="oidc")
+    with pytest.raises(ValueError, match="unknown auth scheme"):
+        AuthConfig(scheme="saml")
 
 
 # ---------------------------------------------------------------------------
