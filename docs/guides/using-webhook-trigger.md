@@ -268,7 +268,11 @@ verification outright, so there's no issuer override for another IdP:
   who asks (e.g. `gcloud auth print-identity-token --audiences=<anything>`),
   so without an explicit expected caller, this endpoint would accept a
   request from anyone with a Google Cloud identity, not just your own Pub/Sub
-  subscription.
+  subscription. The token must also carry `email_verified: true` for the
+  `email` claim to count — matching Google's own [authenticated-push
+  guidance](https://docs.cloud.google.com/pubsub/docs/authenticate-push-subscriptions),
+  since `email` alone only says who the token *claims* to be, not that
+  Google vouches for it.
 
 Unlike `hmac`, a `GET` is verified exactly the same way as a `POST` — the JWT
 signs itself independent of the request it's attached to, so there's no

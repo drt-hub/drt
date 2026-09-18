@@ -227,10 +227,16 @@ def _verify_oidc(header_value: str, audience: str, email: str) -> bool:
     outright, before any issuer check could matter, so there is no
     meaningful override point for another IdP here (an earlier draft added
     one; Codex review found it could never actually function and it was
-    removed). ``email`` is drt's own check on top, for a different reason:
-    ``audience`` alone is not proof of authorization -- Google will mint a
-    token with any audience for any Google Cloud principal who asks -- so
-    ``AuthConfig`` requires a real ``email`` whenever this scheme is used.
+    removed). ``email`` (+ ``email_verified``) is drt's own check on top,
+    for a different reason: ``audience`` alone is not proof of
+    authorization -- Google will mint a token with any audience for any
+    Google Cloud principal who asks -- so ``AuthConfig`` requires a real
+    ``email`` whenever this scheme is used. Both claims are required
+    together, matching Google's own authenticated-push guidance
+    (docs.cloud.google.com/pubsub/docs/authenticate-push-subscriptions):
+    ``email`` alone only says who the token *claims* to be, ``email_verified``
+    is what Google actually vouches for (Codex review -- an earlier draft
+    checked ``email`` only).
 
     Any failure -- bad signature, expired, wrong audience, malformed header,
     the library not installed, a network error fetching Google's certs --
@@ -251,7 +257,14 @@ def _verify_oidc(header_value: str, audience: str, email: str) -> bool:
         claims = id_token.verify_oauth2_token(token, request, audience)  # type: ignore[no-untyped-call]
     except Exception:  # noqa: BLE001 — any verification failure is just "unauthorized"
         return False
-    if claims.get("email") != email:
+    # Google's own authenticated-push guidance checks both claims together
+    # (docs.cloud.google.com/pubsub/docs/authenticate-push-subscriptions):
+    # `email` alone identifies who the token *claims* to be, but
+    # `email_verified` is what establishes Google actually vouches for that
+    # identity being the token's true owner (Codex review) -- `is not True`,
+    # not falsy, since an absent claim and an explicit `false` must both
+    # fail the same way a missing claim already does elsewhere here.
+    if claims.get("email") != email or claims.get("email_verified") is not True:
         return False
     return True
 

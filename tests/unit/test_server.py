@@ -464,11 +464,37 @@ def _inject_fake_google_auth(
 
 def test_oidc_valid_token_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
     _inject_fake_google_auth(
-        monkeypatch, claims={"iss": "https://accounts.google.com", "email": "svc@example.com"}
+        monkeypatch,
+        claims={
+            "iss": "https://accounts.google.com",
+            "email": "svc@example.com",
+            "email_verified": True,
+        },
     )
     assert _verify_oidc(
         "Bearer fake.jwt.token", "https://drt.example.com/sync/s", "svc@example.com"
     )
+
+
+def test_oidc_unverified_email_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Google's own authenticated-push guidance
+    (docs.cloud.google.com/pubsub/docs/authenticate-push-subscriptions)
+    checks email_verified alongside email: the email claim alone only says
+    who the token *claims* to be, not that Google vouches for it (Codex
+    review -- an earlier draft checked email only). Both an explicit
+    ``false`` and a missing claim must be rejected the same way."""
+    for email_verified_claim in ({"email_verified": False}, {}):
+        _inject_fake_google_auth(
+            monkeypatch,
+            claims={
+                "iss": "https://accounts.google.com",
+                "email": "svc@example.com",
+                **email_verified_claim,
+            },
+        )
+        assert not _verify_oidc(
+            "Bearer fake.jwt.token", "https://drt.example.com/sync/s", "svc@example.com"
+        ), f"email_verified={email_verified_claim!r} should be rejected"
 
 
 def test_oidc_accepts_both_google_issuer_spellings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -483,7 +509,10 @@ def test_oidc_accepts_both_google_issuer_spellings(monkeypatch: pytest.MonkeyPat
     that override could never actually function -- removed). Both of
     Google's own accepted spellings must pass."""
     for spelling in ("accounts.google.com", "https://accounts.google.com"):
-        _inject_fake_google_auth(monkeypatch, claims={"iss": spelling, "email": "svc@example.com"})
+        _inject_fake_google_auth(
+            monkeypatch,
+            claims={"iss": spelling, "email": "svc@example.com", "email_verified": True},
+        )
         assert _verify_oidc(
             "Bearer fake.jwt.token", "https://drt.example.com/sync/s", "svc@example.com"
         ), f"issuer spelling {spelling!r} should be accepted"
@@ -560,7 +589,12 @@ def test_oidc_end_to_end_via_server(monkeypatch: pytest.MonkeyPatch) -> None:
     """Confirms the scheme dispatch in Handler._check_auth, not just
     _verify_oidc in isolation."""
     _inject_fake_google_auth(
-        monkeypatch, claims={"iss": "https://accounts.google.com", "email": "svc@example.com"}
+        monkeypatch,
+        claims={
+            "iss": "https://accounts.google.com",
+            "email": "svc@example.com",
+            "email_verified": True,
+        },
     )
     server, _, port = _run_server(
         auth=AuthConfig(
