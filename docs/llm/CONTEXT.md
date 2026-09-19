@@ -146,6 +146,7 @@ drt run --limit 10                # sampled run (#774): extract at most N rows; 
 drt run --fail-fast               # stop scheduling after first failure (#775); remaining syncs report status=skipped; also on drt test
 drt run --threads 4               # parallel sync execution
 drt run --cursor-value '2026-01-01 00:00:00'  # override watermark cursor for backfill
+# every `drt run` invocation also writes target/drt/run_results.json (#778) -- dbt run_results.json-style durable per-invocation record, independent of --output (written in text mode too). Reuses the same per-sync entries --output json's syncs array builds, minus raw error text (dropped, not redacted -- error_type/error_stage/error_suggestion stay). --target-path <dir> relocates it (default target/drt/, deliberately not dbt's own target/)
 drt test                          # run post-sync validation tests
 drt test --select <sync-name>     # test a specific sync
 drt test --store-failures         # sample up to N failing rows/failed test (#779); sync.mask applied
@@ -156,7 +157,8 @@ drt destinations                  # list available destination connectors
 drt status                        # show recent sync results
 drt status --output json          # JSON output for status
 drt mcp run                       # start MCP server (requires drt-core[mcp])
-drt serve --port 8080             # HTTP webhook endpoint — POST /sync/<name> answers 202 + run id (poll GET /runs/<id>, or ?wait=true for the result); same-sync triggers coalesce, different syncs run concurrently, nothing accepted is dropped (#854). Auth: --auth none|bearer|hmac, applied to every route except GET /health (GET /runs/<id> included; under hmac a POST signs its raw body while a GET signs the request path under a derived key, so a signature is bound to one run id and cannot be replayed as a POST, #936)
+drt serve --port 8080             # HTTP webhook endpoint — POST /sync/<name> answers 202 + run id (poll GET /runs/<id>, or ?wait=true for the result); same-sync triggers coalesce, different syncs run concurrently, nothing accepted is dropped (#854). Auth: --auth none|bearer|hmac|oidc, applied to every route except GET /health (GET /runs/<id> included; under hmac a POST signs its raw body while a GET signs the request path under a derived key, so a signature is bound to one run id and cannot be replayed as a POST, #936)
+drt serve --auth oidc --oidc-audience <aud> --oidc-email <email>  # OIDC JWT verification for Pub/Sub push (#903) — needs drt-core[serve-oidc]; verifies signature against Google's rotating public keys, requires email_verified:true for --oidc-email, fails closed (401) if the extra isn't installed. Google-specific: no --oidc-issuer override, since verify_oauth2_token only ever fetches Google's own certs
 drt docs generate                 # static docs site to target/docs/ (html; also --format mermaid|json|dbt-exposures). dbt-exposures prints deterministic ref()-only dbt exposure YAML to stdout (#781). Destination labels are docs-safe by default (#696): object identity (table/channel/sheet/bucket) stays, endpoints/hosts/phones/emails do not
 drt docs generate --full-labels   # verbatim describe() labels + unredacted error text — trusted/internal hosting only (#696/#698)
 drt docs generate --history-depth 20  # recent runs per sync embedded in the manifest from .drt/history (schema v2, #698; default 10, 0 disables, --no-state omits)

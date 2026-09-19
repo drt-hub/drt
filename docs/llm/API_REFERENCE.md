@@ -1061,6 +1061,7 @@ destination:
   conversion_value_field: revenue      # optional: row field for conversion value
   currency_code: JPY                   # default: USD
   developer_token_env: GOOGLE_ADS_DEVELOPER_TOKEN
+  cloud_project_id: "my-gcp-project"   # optional (#1157): the GCP project owning this config's OAuth client credentials -- the real rate-limit quota boundary under Google's Cloud-project-based access model; when unset, falls back to sharing a bucket per developer_token_env
   auth:
     type: oauth2_client_credentials
     token_url: "https://oauth2.googleapis.com/token"
