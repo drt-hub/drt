@@ -283,6 +283,7 @@ sync:
 | `--limit N` | Sampled run: send at most N rows per sync (watermarks frozen; refused for mirror/replace) |
 | `--threads N` | Parallel execution for faster pipelines |
 | `--log-format json` | Structured logs for log aggregators |
+| `--target-path <dir>` | Where `run_results.json` is written (default `target/`; #778) |
 
 ## Persisting state across ephemeral runs
 
@@ -312,6 +313,49 @@ IAM, S3 configuration, and migration from an existing `.drt/` directory.
 | `1` | One or more syncs failed |
 
 Use exit codes to gate deployments or trigger alerts.
+
+## Run artifacts (`target/run_results.json`)
+
+Every `drt run` invocation also writes `target/run_results.json` — a durable,
+machine-readable record of that invocation, independent of `--output`
+(written even in the default text mode). This is dbt's `run_results.json`
+pattern: `--output json` prints to stdout and vanishes with the process, so
+a CI system that wants to upload a run artifact, or an observability
+pipeline ingesting historical runs, needs a file it can pick up after the
+process exits — not console output it would have to have captured live.
+
+```json
+{
+  "schema_version": 1,
+  "invocation": {
+    "run_id": "…",
+    "started_at": "2026-09-19T00:00:00+00:00",
+    "completed_at": "2026-09-19T00:00:12+00:00",
+    "duration_seconds": 12.4,
+    "argv": ["drt", "run", "--select", "users_to_hubspot"],
+    "drt_version": "0.10.0",
+    "succeeded": 1,
+    "failed": 0,
+    "skipped": 0
+  },
+  "results": [ /* the same per-sync entries --output json's "syncs" array contains */ ]
+}
+```
+
+```yaml
+- run: drt run
+- uses: actions/upload-artifact@v4
+  if: always()
+  with:
+    name: drt-run-results
+    path: target/run_results.json
+```
+
+Use `--target-path <dir>` to relocate it (default `target/`). Written
+best-effort: a failure to write it (permissions, disk full) is logged and
+never changes the run's own exit code. `results` is exactly the same list of
+per-sync entries `--output json`'s `syncs` array already contains — one
+schema, not a second one to keep in sync.
 
 ## Parsing JSON output
 

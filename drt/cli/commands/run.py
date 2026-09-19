@@ -9,6 +9,7 @@ Extracted from ``drt/cli/main.py`` in Phase 2b PR (a) of the #546 split
   telemetry)
 - ``_print_watermark_summary`` (post-run notes about default / override
   watermark usage)
+- ``_write_run_results`` (``target/run_results.json`` per invocation, #778)
 - ``run`` (the @app.command itself; signal handling; parallel/sequential
   dispatch; JSON-mode output)
 
@@ -31,6 +32,7 @@ import json
 import logging
 import os
 import signal
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -40,6 +42,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import typer
+
+from drt import __version__
 
 if TYPE_CHECKING:
     from drt.config.base import QueryTaggingConfig
@@ -425,6 +429,74 @@ def _print_watermark_summary(results: list[dict[str, object]]) -> None:
         )
 
 
+def _write_run_results(
+    target_path: Path,
+    *,
+    run_id: str,
+    started_at: str,
+    results: list[dict[str, object]],
+    succeeded: int,
+    failed: int,
+    skipped: int,
+    total_duration: float,
+) -> None:
+    """Write ``<target_path>/run_results.json`` (#778) — a durable,
+    machine-readable per-invocation record, dbt's ``run_results.json``
+    pattern, for CI/observability consumption that stdout doesn't serve
+    (a CI system can't upload a run artifact from console output).
+
+    Written unconditionally, independent of ``--output`` (text vs json) --
+    the point is a durable record *even when* JSON wasn't requested on
+    stdout -- reusing the exact same ``results`` entries ``--output json``
+    already builds (``run.py``'s ``_run_one``/``_skipped_entry``), so there
+    is no second, divergent shape to keep in sync.
+
+    ``schema_version`` follows the docs manifest's own convention
+    (``drt/docs/manifest.py``'s ``SCHEMA_VERSION``) rather than publishing a
+    separate JSON Schema file -- this repo has no precedent for the latter
+    even for the docs manifest, a comparably important artifact, and a
+    second, different versioning story for one more artifact type would be
+    its own inconsistency. New fields are additive/omit-when-absent, same
+    discipline as the manifest.
+
+    Best-effort: a write failure (permissions, a read-only filesystem, disk
+    full) is logged and swallowed rather than raised -- this bookkeeping
+    must never change the run's own exit code or mask a real sync failure.
+    Called from the same call site the existing ``--output json`` stdout
+    print already sits at (after the dispatch loop, before the
+    signal/failure exit-code checks), which is already reached on a
+    graceful-shutdown (#279) exit today, so no separate shutdown-path
+    wiring is needed for the "best-effort on SIGTERM" requirement.
+
+    Not included in this version, deliberately: a per-sync watermark
+    before/after pair. The engine never returns the post-run watermark
+    value to the CLI today (only to ``StatePersistingObserver``, which
+    persists it directly) -- adding it would mean an extra
+    ``watermark_storage.get()`` read per sync purely for this artifact,
+    which isn't justified until a real consumer asks for it.
+    """
+    run_results = {
+        "schema_version": 1,
+        "invocation": {
+            "run_id": run_id,
+            "started_at": started_at,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "duration_seconds": total_duration,
+            "argv": sys.argv,
+            "drt_version": __version__,
+            "succeeded": succeeded,
+            "failed": failed,
+            "skipped": skipped,
+        },
+        "results": results,
+    }
+    try:
+        target_path.mkdir(parents=True, exist_ok=True)
+        (target_path / "run_results.json").write_text(json.dumps(run_results, indent=2))
+    except OSError as e:
+        logging.getLogger(__name__).warning("Failed to write run_results.json: %s", e)
+
+
 # ---------------------------------------------------------------------------
 # @app.command run
 # ---------------------------------------------------------------------------
@@ -591,6 +663,14 @@ def run(
         20,
         "--diff-limit",
         help="Maximum number of records to show per diff category (default 20).",
+    ),
+    target_path: Path = typer.Option(
+        Path("target"),
+        "--target-path",
+        help=(
+            "Directory to write run_results.json into (dbt-style; #778). "
+            "Written on every invocation, independent of --output."
+        ),
     ),
 ) -> None:
     """Run sync(s) defined in the project.
@@ -784,6 +864,7 @@ def run(
 
     json_results: list[dict[str, object]] = []
     t_total = time.monotonic()
+    invocation_started_at = datetime.now(timezone.utc).isoformat()  # for run_results.json (#778)
     succeeded = 0
     failed = 0
     skipped = 0
@@ -947,6 +1028,17 @@ def run(
                 indent=2,
             )
         )
+
+    _write_run_results(
+        target_path,
+        run_id=ctx.run_id,
+        started_at=invocation_started_at,
+        results=json_results,
+        succeeded=succeeded,
+        failed=failed,
+        skipped=skipped,
+        total_duration=total_duration,
+    )
 
     # Graceful shutdown path (#279) takes precedence over the failure exit
     # code: even if some syncs reported failures before the signal arrived,

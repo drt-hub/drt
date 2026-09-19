@@ -149,6 +149,13 @@ COMMAND_EXCLUSIONS: dict[str, dict[str, str]] = {
             "gets this via drt_get_status() + its own filter, then calls "
             "drt_run_sync per name (#870)"
         ),
+        "--target-path": (
+            "where to write the multi-sync target/run_results.json artifact "
+            "(#778) for one CLI invocation; drt_run_sync runs exactly one "
+            "sync per call with no invocation-level artifact to place — an "
+            "orchestrating agent already gets each call's outcome as that "
+            "call's own return value"
+        ),
     },
     "docs generate": {
         "--inline": "HTML packaging (single-object bundling); MCP returns the manifest",

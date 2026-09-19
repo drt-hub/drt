@@ -209,7 +209,7 @@ No breaking changes — drop-in upgrade from v0.9.1.
   - #1157 — `google_ads` has no config field to identify the Cloud project for correct rate-limit quota scoping under Google's new access model — ✅ fixed, opt-in `cloud_project_id` field
   - #903 — OIDC JWT verification for `drt serve`'s Pub/Sub push leg (#854) — ✅ fixed, `--auth oidc` via `drt-core[serve-oidc]`
   - #1075 — Klaviyo events destination needs a `backfill` flag so a first sync/backfill doesn't re-trigger live customer-facing flows for old events
-  - #778 — run artifacts: versioned `target/run_results.json` per invocation (dbt-style), for CI/observability integration
+  - #778 — run artifacts: versioned `target/run_results.json` per invocation (dbt-style), for CI/observability integration — ✅ fixed for `drt run`; `drt test`/`drt build` writing a compatible artifact and drt-action consuming it are tracked as separate follow-ups
 - v1.0 launch campaign — blog, HN, Reddit, X (#306)
 - Release-cut mechanics: bump `Development Status` classifier to Production/Stable (#1019, deliberately deferred to the actual release-cut PR)
 
