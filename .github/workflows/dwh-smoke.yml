@@ -168,12 +168,26 @@ jobs:
           # status check, start request) -- separate from the polling loop's
           # own longer-running retry budget, so neither call fails the whole
           # job over a single bad response.
+          #
+          # `-sf` used to swallow the response body on a non-2xx, so a real
+          # API rejection (expired token, deleted warehouse, workspace
+          # suspended) and a network blip were both indistinguishable
+          # "Failed to request warehouse start" -- diagnosed #1149's 12-day
+          # unattended failure the hard way, by re-running with -f dropped
+          # locally. Now captures HTTP status + body on every failed
+          # attempt and logs it, so the actual cause shows up in the run
+          # log itself next time, without needing a manual repro.
           curl_retry() {
-            local attempt
+            local attempt body status
             for attempt in 1 2 3; do
-              if curl -sf --connect-timeout 10 --max-time 30 "${auth[@]}" "$@"; then
+              body=$(curl -s --connect-timeout 10 --max-time 30 -w '\n%{http_code}' "${auth[@]}" "$@")
+              status="${body##*$'\n'}"
+              body="${body%$'\n'*}"
+              if [ "$status" -ge 200 ] 2>/dev/null && [ "$status" -lt 300 ] 2>/dev/null; then
+                printf '%s' "$body"
                 return 0
               fi
+              echo "  curl attempt ${attempt} failed: HTTP ${status:-<no response>} - ${body}" >&2
               sleep 3
             done
             return 1
@@ -189,7 +203,7 @@ jobs:
           if [ "$state" != "RUNNING" ]; then
             echo "Starting warehouse..."
             if ! curl_retry -X POST "${api}/start" >/dev/null; then
-              echo "::error::Failed to request warehouse start"
+              echo "::error::Failed to request warehouse start (see attempt log above for the API's actual response)"
               exit 1
             fi
 
