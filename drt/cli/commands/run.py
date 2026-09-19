@@ -762,6 +762,18 @@ def run(
       drt run --failed
       drt run --dry-run --diff
     """
+    # #778 review: clear any prior invocation's artifact up front. A
+    # preflight failure (this check, a missing project/profile, malformed
+    # --vars) never reaches the try/finally below that writes a fresh one
+    # (by design -- syncs aren't known yet, see _write_run_results), so a
+    # stale successful artifact from a previous run in a reused workspace
+    # would otherwise sit there to be silently re-uploaded by a CI job's
+    # `if: always()` step as if it were this (failed) invocation's result.
+    try:
+        (target_path / "run_results.json").unlink(missing_ok=True)
+    except OSError:
+        pass
+
     if diff and not dry_run:
         print_error("--diff requires --dry-run")
         raise typer.Exit(1)

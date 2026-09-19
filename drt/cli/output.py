@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from drt._redaction import redact_error_text
 from drt.config.models import SyncConfig
 from drt.config.profiles import ProfileConfigLike
 from drt.destinations.base import SyncResult
@@ -451,7 +452,17 @@ def print_diff_table(diff: object, sync_name: str) -> None:
 
 
 def diff_to_dict(diff: object) -> dict[str, object]:
-    """Serialise a DiffResult for ``--output json`` mode."""
+    """Serialise a DiffResult for ``--output json`` mode (and, via
+    ``run.py``'s ``entry["diff"]``, the persisted run_results.json
+    artifact, #778).
+
+    ``fallback_reason``/``delete_preview_unavailable_reason`` are redacted
+    (#778 review) -- both come straight from ``f"{type(error).__name__}:
+    {error}"`` around a failed destination/state read (``drt/engine/diff.py``),
+    the same class of raw connector-exception text ``entry["error"]``
+    already redacts, and a DB driver error routinely embeds a DSN, host, or
+    credential.
+    """
     from drt.engine.diff import DiffResult
 
     assert isinstance(diff, DiffResult)
@@ -459,7 +470,11 @@ def diff_to_dict(diff: object) -> dict[str, object]:
     if not diff.supported:
         return {
             "supported": False,
-            "fallback_reason": diff.fallback_reason,
+            "fallback_reason": (
+                redact_error_text(diff.fallback_reason)
+                if diff.fallback_reason is not None
+                else None
+            ),
             "total_source_rows": diff.total_source_rows,
             "sample": diff.sample,
             "truncated": diff.truncated,
@@ -486,6 +501,10 @@ def diff_to_dict(diff: object) -> dict[str, object]:
         "delete_reason": diff.delete_reason,
         # null means the delete read succeeded (including a genuine zero-row
         # result); a string means only the mirror DELETE portion is unknown.
-        "delete_preview_unavailable_reason": diff.delete_preview_unavailable_reason,
+        "delete_preview_unavailable_reason": (
+            redact_error_text(diff.delete_preview_unavailable_reason)
+            if diff.delete_preview_unavailable_reason is not None
+            else None
+        ),
         "truncated": diff.truncated,
     }

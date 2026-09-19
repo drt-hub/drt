@@ -334,3 +334,100 @@ def test_text_mode_diff_included_in_artifact(
     entry = data["results"][0]
     assert entry["diff"]["supported"] is False
     assert entry["diff"]["fallback_reason"] == "file: no comparison available"
+
+
+def test_error_field_redacts_authorization_header_credential(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single \\S+ used to redact only the scheme word ("Bearer") and leave
+    the actual credential sitting right after it untouched (Codex review,
+    #778 PR round 4) -- an unquoted key's value must consume the whole
+    space-separated run, not just its first word."""
+    from drt.engine import sync as sync_module
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("request failed: Authorization: Bearer sk_live_123")
+
+    monkeypatch.setattr(sync_module, "run_sync", _boom, raising=False)
+
+    result = runner.invoke(app, ["run", "--select", "users"])
+    assert result.exit_code == 1
+
+    data = json.loads((project / "target" / "drt" / "run_results.json").read_text())
+    entry = data["results"][0]
+    assert "sk_live_123" not in entry["error"]
+    assert "Bearer" not in entry["error"]
+    assert "« redacted »" in entry["error"]
+
+
+def test_diff_unavailable_reason_is_redacted(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`delete_preview_unavailable_reason`/`fallback_reason` come from
+    `f"{type(error).__name__}: {error}"` around a failed destination/state
+    read (drt/engine/diff.py) -- the same raw-connector-exception class
+    `entry["error"]` already redacts, but this field bypassed it entirely
+    and landed in the persisted artifact verbatim (Codex review, #778 PR
+    round 4)."""
+    from drt.engine import diff as diff_mod
+    from drt.engine import sync as sync_module
+
+    sample_diff = diff_mod.DiffResult(
+        sample=[],
+        total_source_rows=1,
+        supported=True,
+        total_destination_rows=0,
+        added=[],
+        updated=[],
+        deleted=[],
+        delete_reason="mirror",
+        delete_preview_unavailable_reason=(
+            "OperationalError: connection to postgres://drt:hunter2@db.internal:5432 failed"
+        ),
+    )
+
+    class _FakeResult:
+        success = 1
+        failed = 0
+        skipped = 0
+        skipped_no_match = 0
+        rows_extracted = 1
+        row_errors: list[Any] = []
+        errors: list[str] = []
+        watermark_source: str | None = None
+        cursor_value_used: str | None = None
+        watermark_lag: str | None = None
+        limit_applied: int | None = None
+        duration_seconds = 0.01
+        interrupted = False
+        run_id: str | None = None
+        sync_run_id: str | None = "fake-sync-run-id"
+        diff: Any = sample_diff
+
+    monkeypatch.setattr(sync_module, "run_sync", lambda *_a, **_k: _FakeResult(), raising=False)
+
+    result = runner.invoke(app, ["run", "--select", "users", "--dry-run", "--diff"])
+    assert result.exit_code == 0
+
+    data = json.loads((project / "target" / "drt" / "run_results.json").read_text())
+    reason = data["results"][0]["diff"]["delete_preview_unavailable_reason"]
+    assert "hunter2" not in reason
+    assert "db.internal" not in reason
+    assert "« redacted »" in reason
+
+
+def test_stale_artifact_cleared_on_preflight_failure(project: Path) -> None:
+    """A prior successful run's artifact must not linger to be silently
+    re-uploaded by a CI job's `if: always()` step as if it were the current
+    (failed) invocation's result. A preflight failure (--diff without
+    --dry-run here) never reaches the try/finally that writes a fresh
+    artifact -- syncs aren't known yet -- so the stale one must be cleared
+    up front instead (Codex review, #778 PR round 4)."""
+    good = runner.invoke(app, ["run", "--select", "users"])
+    assert good.exit_code == 0
+    artifact_path = project / "target" / "drt" / "run_results.json"
+    assert artifact_path.exists()
+
+    rejected = runner.invoke(app, ["run", "--diff"])
+    assert rejected.exit_code == 1
+    assert not artifact_path.exists()

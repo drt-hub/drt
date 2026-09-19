@@ -21,7 +21,12 @@ _PHONE_RE = re.compile(r"\+\d[\d\s().-]{7,}\d")
 _KV_RE = re.compile(
     r"(?i)\b(password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|"
     r"authorization|host(?:name)?|dsn|user(?:name)?|account|endpoint)\b"
-    r"(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|\S+)"
+    # Unquoted values run across spaces (not just to the first one) so an
+    # "Authorization: Bearer <token>"-shaped value redacts as one unit --
+    # a single \S+ used to stop at "Bearer" and leave the actual credential
+    # sitting right after it (#778 review). Still bounded by ,/;/) so it
+    # doesn't run on into unrelated trailing text in "host=x, port=y".
+    r"(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;)]+(?:\s+[^\s,;)]+)*)"
 )
 REDACTED = "« redacted »"
 
