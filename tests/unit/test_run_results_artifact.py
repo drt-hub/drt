@@ -1,5 +1,9 @@
-"""Tests for `target/run_results.json` (#778) — a durable, machine-readable
+"""Tests for `target/drt/run_results.json` (#778) — a durable, machine-readable
 per-invocation record, dbt's `run_results.json` pattern.
+
+Defaults to `target/drt`, not dbt's own `target/`, so the documented
+co-located `dbt run && drt run` workflow (docs/guides/using-with-dbt.md)
+doesn't clobber dbt's own `target/run_results.json`.
 """
 
 from __future__ import annotations
@@ -7,6 +11,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -53,7 +58,7 @@ def test_written_by_default_text_mode(project: Path) -> None:
     result = runner.invoke(app, ["run", "--select", "users"])
     assert result.exit_code == 0
 
-    artifact_path = project / "target" / "run_results.json"
+    artifact_path = project / "target" / "drt" / "run_results.json"
     assert artifact_path.exists()
     data = json.loads(artifact_path.read_text())
     assert data["schema_version"] == 1
@@ -76,7 +81,7 @@ def test_matches_output_json_syncs_entries(project: Path) -> None:
     result = runner.invoke(app, ["run", "--select", "users", "--output", "json"])
     stdout_data = json.loads(result.output)
 
-    artifact_data = json.loads((project / "target" / "run_results.json").read_text())
+    artifact_data = json.loads((project / "target" / "drt" / "run_results.json").read_text())
 
     assert artifact_data["results"] == stdout_data["syncs"]
     assert artifact_data["invocation"]["run_id"] == stdout_data["run_id"]
@@ -90,7 +95,7 @@ def test_target_path_option_redirects_the_write(project: Path) -> None:
     result = runner.invoke(app, ["run", "--select", "users", "--target-path", "custom_target"])
     assert result.exit_code == 0
     assert (project / "custom_target" / "run_results.json").exists()
-    assert not (project / "target" / "run_results.json").exists()
+    assert not (project / "target" / "drt" / "run_results.json").exists()
 
 
 def test_written_even_when_a_sync_fails(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -114,7 +119,7 @@ def test_written_even_when_a_sync_fails(project: Path, monkeypatch: pytest.Monke
     result = runner.invoke(app, ["run"])
     assert result.exit_code == 1
 
-    data = json.loads((project / "target" / "run_results.json").read_text())
+    data = json.loads((project / "target" / "drt" / "run_results.json").read_text())
     assert data["invocation"]["failed"] == 1
     statuses = {entry["name"]: entry["status"] for entry in data["results"]}
     assert statuses["broken"] != "success"
@@ -132,3 +137,67 @@ def test_write_failure_does_not_change_exit_code(project: Path) -> None:
 
     assert result.exit_code == 0
     assert (project / "target").read_text() == "not a directory"  # untouched, not overwritten
+
+
+def test_written_on_no_op_exit(project: Path) -> None:
+    """--failed against a fresh project (no prior run to have failed) exits
+    0 via an early `raise typer.Exit(0)` before the dispatch loop ever runs
+    -- one of the successful no-op paths a first review round found were
+    skipping the artifact write entirely (Codex review, #778 PR)."""
+    result = runner.invoke(app, ["run", "--failed"])
+    assert result.exit_code == 0
+    assert "Nothing failed" in result.output
+
+    artifact_path = project / "target" / "drt" / "run_results.json"
+    assert artifact_path.exists()
+    data = json.loads(artifact_path.read_text())
+    assert data["invocation"]["succeeded"] == 0
+    assert data["invocation"]["failed"] == 0
+    assert data["invocation"]["skipped"] == 0
+    assert data["results"] == []
+
+
+def test_text_mode_diff_included_in_artifact(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plain-text `--dry-run --diff` run (no --output json) must still
+    carry diff data in the artifact -- the documented contract is that the
+    artifact is independent of --output, but `entry["diff"]` used to be
+    populated only `if ctx.json_mode` (Codex review, #778 PR)."""
+    from drt.engine import diff as diff_mod
+    from drt.engine import sync as sync_module
+
+    sample_diff = diff_mod.DiffResult(
+        sample=[{"id": 1}],
+        total_source_rows=1,
+        supported=False,
+        fallback_reason="file: no comparison available",
+    )
+
+    class _FakeResult:
+        success = 1
+        failed = 0
+        skipped = 0
+        skipped_no_match = 0
+        rows_extracted = 1
+        row_errors: list[Any] = []
+        errors: list[str] = []
+        watermark_source: str | None = None
+        cursor_value_used: str | None = None
+        watermark_lag: str | None = None
+        limit_applied: int | None = None
+        duration_seconds = 0.01
+        interrupted = False
+        run_id: str | None = None
+        sync_run_id: str | None = "fake-sync-run-id"
+        diff: Any = sample_diff
+
+    monkeypatch.setattr(sync_module, "run_sync", lambda *_a, **_k: _FakeResult(), raising=False)
+
+    result = runner.invoke(app, ["run", "--select", "users", "--dry-run", "--diff"])
+    assert result.exit_code == 0
+
+    data = json.loads((project / "target" / "drt" / "run_results.json").read_text())
+    entry = data["results"][0]
+    assert entry["diff"]["supported"] is False
+    assert entry["diff"]["fallback_reason"] == "file: no comparison available"

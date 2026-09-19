@@ -283,7 +283,7 @@ sync:
 | `--limit N` | Sampled run: send at most N rows per sync (watermarks frozen; refused for mirror/replace) |
 | `--threads N` | Parallel execution for faster pipelines |
 | `--log-format json` | Structured logs for log aggregators |
-| `--target-path <dir>` | Where `run_results.json` is written (default `target/`; #778) |
+| `--target-path <dir>` | Where `run_results.json` is written (default `target/drt/`; #778) |
 
 ## Persisting state across ephemeral runs
 
@@ -314,15 +314,21 @@ IAM, S3 configuration, and migration from an existing `.drt/` directory.
 
 Use exit codes to gate deployments or trigger alerts.
 
-## Run artifacts (`target/run_results.json`)
+## Run artifacts (`target/drt/run_results.json`)
 
-Every `drt run` invocation also writes `target/run_results.json` — a durable,
-machine-readable record of that invocation, independent of `--output`
-(written even in the default text mode). This is dbt's `run_results.json`
-pattern: `--output json` prints to stdout and vanishes with the process, so
-a CI system that wants to upload a run artifact, or an observability
-pipeline ingesting historical runs, needs a file it can pick up after the
-process exits — not console output it would have to have captured live.
+Every `drt run` invocation also writes `target/drt/run_results.json` — a
+durable, machine-readable record of that invocation, independent of
+`--output` (written even in the default text mode). This is dbt's
+`run_results.json` pattern: `--output json` prints to stdout and vanishes
+with the process, so a CI system that wants to upload a run artifact, or an
+observability pipeline ingesting historical runs, needs a file it can pick
+up after the process exits — not console output it would have to have
+captured live.
+
+The default lives under `target/drt/`, not directly under dbt's own
+`target/`, so that the documented [`dbt run && drt run`](using-with-dbt.md)
+co-located workflow doesn't clobber dbt's own `target/run_results.json`
+with drt's incompatible document of the same name.
 
 ```json
 {
@@ -348,14 +354,16 @@ process exits — not console output it would have to have captured live.
   if: always()
   with:
     name: drt-run-results
-    path: target/run_results.json
+    path: target/drt/run_results.json
 ```
 
-Use `--target-path <dir>` to relocate it (default `target/`). Written
-best-effort: a failure to write it (permissions, disk full) is logged and
-never changes the run's own exit code. `results` is exactly the same list of
-per-sync entries `--output json`'s `syncs` array already contains — one
-schema, not a second one to keep in sync.
+Use `--target-path <dir>` to relocate it (default `target/drt/`). Written
+for every invocation that resolves a sync list — including no-op runs where
+nothing was selected, changed, or previously failed — not just a full
+dispatch, and best-effort: a failure to write it (permissions, disk full) is
+logged and never changes the run's own exit code. `results` is exactly the
+same list of per-sync entries `--output json`'s `syncs` array already
+contains — one schema, not a second one to keep in sync.
 
 ## Parsing JSON output
 
