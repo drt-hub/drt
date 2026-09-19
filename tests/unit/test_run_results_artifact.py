@@ -431,3 +431,81 @@ def test_stale_artifact_cleared_on_preflight_failure(project: Path) -> None:
     rejected = runner.invoke(app, ["run", "--diff"])
     assert rejected.exit_code == 1
     assert not artifact_path.exists()
+
+
+def test_error_field_redacts_quoted_dict_repr_credential(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A quote sitting between the key and the "=:" separator -- exactly
+    what a Python/JSON dict repr produces (`{'Authorization': 'Bearer ...'}`,
+    `{'password': 'hunter2'}`) -- broke the match entirely, persisting the
+    credential verbatim (Codex review, #778 PR round 5)."""
+    from drt.engine import sync as sync_module
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError(
+            "request failed with headers {'Authorization': 'Bearer sk_live_123', "
+            "'password': 'hunter2'}"
+        )
+
+    monkeypatch.setattr(sync_module, "run_sync", _boom, raising=False)
+
+    result = runner.invoke(app, ["run", "--select", "users"])
+    assert result.exit_code == 1
+
+    data = json.loads((project / "target" / "drt" / "run_results.json").read_text())
+    error = data["results"][0]["error"]
+    assert "sk_live_123" not in error
+    assert "hunter2" not in error
+    assert "« redacted »" in error
+
+
+def test_error_field_redaction_survives_embedded_comma(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unquoted value stopped at the first `,`/`;`/`)` -- but a real
+    secret can itself contain one, so `password=abc,def` (one value, not
+    "abc" plus unrelated trailing text) left `,def` exposed (Codex review,
+    #778 PR round 5)."""
+    from drt.engine import sync as sync_module
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("auth failed: password=abc,def123")
+
+    monkeypatch.setattr(sync_module, "run_sync", _boom, raising=False)
+
+    result = runner.invoke(app, ["run", "--select", "users"])
+    assert result.exit_code == 1
+
+    data = json.loads((project / "target" / "drt" / "run_results.json").read_text())
+    error = data["results"][0]["error"]
+    assert "abc" not in error
+    assert "def123" not in error
+    assert "« redacted »" in error
+
+
+def test_write_is_atomic_no_partial_file_on_write_failure(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write failure (disk-full, interrupted) must never leave a
+    truncated/invalid file at the final path for the documented
+    `if: always()` CI step to upload -- the write goes through a temporary
+    sibling and an atomic rename, so a failure partway through only ever
+    touches the *temp* file, cleaned up on the way out (Codex review, #778
+    PR round 5)."""
+    final_path = project / "target" / "drt" / "run_results.json"
+    tmp_path = project / "target" / "drt" / ".run_results.json.tmp"
+    real_write_text = Path.write_text
+
+    def _flaky_write_text(self: Path, *args: object, **kwargs: object) -> int:
+        if self.name == ".run_results.json.tmp":
+            raise OSError("simulated disk-full mid-write")
+        return real_write_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", _flaky_write_text)
+
+    result = runner.invoke(app, ["run", "--select", "users"])
+
+    assert result.exit_code == 0  # bookkeeping failure never masks the run's own outcome
+    assert not final_path.exists()
+    assert not tmp_path.exists()

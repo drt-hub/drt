@@ -21,12 +21,22 @@ _PHONE_RE = re.compile(r"\+\d[\d\s().-]{7,}\d")
 _KV_RE = re.compile(
     r"(?i)\b(password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|"
     r"authorization|host(?:name)?|dsn|user(?:name)?|account|endpoint)\b"
-    # Unquoted values run across spaces (not just to the first one) so an
-    # "Authorization: Bearer <token>"-shaped value redacts as one unit --
+    # An optional quote right after the keyword matches a Python/JSON dict
+    # repr's own quoted key (`{'Authorization': 'Bearer ...'}`) -- without
+    # it the quote sits between the keyword and the "=:" separator and the
+    # whole match fails, leaving the credential untouched (#778 review).
+    r"(['\"]?\s*[=:]\s*)"
+    # Unquoted values run across a few spaces (not just to the first one) so
+    # an "Authorization: Bearer <token>"-shaped value redacts as one unit --
     # a single \S+ used to stop at "Bearer" and leave the actual credential
-    # sitting right after it (#778 review). Still bounded by ,/;/) so it
-    # doesn't run on into unrelated trailing text in "host=x, port=y".
-    r"(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;)]+(?:\s+[^\s,;)]+)*)"
+    # sitting right after it. Not bounded by punctuation like ,/;/) --
+    # a real secret can itself contain one ("password=abc,def" is one value,
+    # not "abc" plus unrelated trailing text), and under-redaction is a
+    # leak while over-redacting an adjacent field is only cosmetic (#778
+    # review). Bounded to 5 extra space/tab-separated words, and never
+    # crosses a newline, so it can't run on into an unrelated later
+    # paragraph of a long multi-line exception message.
+    r"(\"[^\"]*\"|'[^']*'|\S+(?:[ \t]+\S+){0,5})"
 )
 REDACTED = "« redacted »"
 

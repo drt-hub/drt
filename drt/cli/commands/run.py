@@ -553,13 +553,25 @@ def _write_run_results(
         },
         "results": results,
     }
+    final_path = target_path / "run_results.json"
+    tmp_path = target_path / ".run_results.json.tmp"
     try:
         target_path.mkdir(parents=True, exist_ok=True)
-        (target_path / "run_results.json").write_text(
-            json.dumps(run_results, indent=2, default=str)
-        )
+        # Write-then-rename (#778 review): a disk-full or interrupted write
+        # hitting `write_text()` on the final path directly could leave a
+        # truncated, invalid JSON file behind for the documented
+        # `if: always()` CI step to upload -- worse than no file at all.
+        # `Path.replace()` is an atomic same-filesystem rename (os.replace),
+        # so the final path only ever holds a complete write or its
+        # previous (possibly absent) content.
+        tmp_path.write_text(json.dumps(run_results, indent=2, default=str))
+        tmp_path.replace(final_path)
     except OSError as e:
         logging.getLogger(__name__).warning("Failed to write run_results.json: %s", e)
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
