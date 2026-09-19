@@ -23,15 +23,15 @@ _KV_RE = re.compile(
     r"authorization|host(?:name)?|dsn|user(?:name)?|account|endpoint)\b"
     r"(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|\S+)"
 )
-_REDACTION = "« redacted »"
+REDACTED = "« redacted »"
 
 
 def redact_error_text(text: str) -> str:
     """Mask URLs, e-mails, phone numbers, and credential-ish ``key=value``
     fragments in free-form text. URLs go first so a ``dsn=scheme://…`` loses
     the whole locator, not just the part after the key."""
-    text = _URL_RE.sub(_REDACTION, text)
-    text = _EMAIL_RE.sub(_REDACTION, text)
-    text = _PHONE_RE.sub(_REDACTION, text)
-    text = _KV_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTION}", text)
+    text = _URL_RE.sub(REDACTED, text)
+    text = _EMAIL_RE.sub(REDACTED, text)
+    text = _PHONE_RE.sub(REDACTED, text)
+    text = _KV_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{REDACTED}", text)
     return text

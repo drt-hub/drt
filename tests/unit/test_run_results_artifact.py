@@ -214,6 +214,35 @@ def test_argv_is_redacted(project: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     assert "« redacted »" in argv_text
 
 
+def test_argv_vars_value_redacted_whole_regardless_of_key_name(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--vars carries arbitrary, project-defined variable names -- a fixed
+    keyword list (password/token/api_key/...) can never anticipate every
+    project's own names, so `stripe_key: sk_live_...` sailed through the
+    free-text heuristic sweep untouched (Codex review, #778 PR round 3). The
+    whole value after --vars is now redacted outright, key name or not, in
+    both the `--vars value` and `--vars=value` forms."""
+    monkeypatch.setattr(sys, "argv", ["drt", "run", "--vars", "stripe_key: sk_live_abc123"])
+    result = runner.invoke(
+        app, ["run", "--select", "users", "--vars", "stripe_key: sk_live_abc123"]
+    )
+    assert result.exit_code == 0
+    data = json.loads((project / "target" / "drt" / "run_results.json").read_text())
+    argv_text = " ".join(data["invocation"]["argv"])
+    assert "sk_live_abc123" not in argv_text
+    assert "stripe_key" not in argv_text
+    assert "« redacted »" in argv_text
+
+    monkeypatch.setattr(sys, "argv", ["drt", "run", "--vars=stripe_key: sk_live_abc123"])
+    result = runner.invoke(app, ["run", "--select", "users", "--vars=stripe_key: sk_live_abc123"])
+    assert result.exit_code == 0
+    data = json.loads((project / "target" / "drt" / "run_results.json").read_text())
+    argv_text = " ".join(data["invocation"]["argv"])
+    assert "sk_live_abc123" not in argv_text
+    assert "--vars=« redacted »" in argv_text
+
+
 def test_diff_with_non_json_native_values_does_not_crash(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

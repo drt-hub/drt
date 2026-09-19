@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 
 
 from drt._identifiers import new_run_id
-from drt._redaction import redact_error_text
+from drt._redaction import REDACTED, redact_error_text
 from drt.cli._app import app
 from drt.cli._helpers import (
     exit_code_for_signal as _exit_code_for_signal,
@@ -441,6 +441,37 @@ def _print_watermark_summary(results: list[dict[str, object]]) -> None:
         )
 
 
+def _redact_argv(argv: list[str]) -> list[str]:
+    """Redact ``argv`` for persistence into ``run_results.json`` (#778).
+
+    ``--vars`` carries arbitrary, project-defined variable names -- unlike
+    ``entry["error"]``'s free-form connector exceptions, there is no fixed
+    keyword list (``password``, ``token``, ...) that could ever cover every
+    project's own var names (a ``stripe_key: sk_live_...`` var wouldn't
+    match any of them), so a heuristic sweep under-redacts here. Every value
+    directly following ``--vars`` (both ``--vars value`` and ``--vars=value``
+    forms) is therefore treated as wholly sensitive and redacted outright,
+    same trust model as `docs/guides/using-with-dbt.md`'s "project config,
+    surface injection-shaped ones rather than blocking" already applies to
+    vars elsewhere. Every other argument still goes through the free-text
+    sweep (a connector URL/DSN could appear in, say, a ``--state`` path).
+    """
+    redacted = []
+    take_next_whole = False
+    for arg in argv:
+        if take_next_whole:
+            redacted.append(REDACTED)
+            take_next_whole = False
+        elif arg == "--vars":
+            redacted.append(arg)
+            take_next_whole = True
+        elif arg.startswith("--vars="):
+            redacted.append(f"--vars={REDACTED}")
+        else:
+            redacted.append(redact_error_text(arg))
+    return redacted
+
+
 def _write_run_results(
     target_path: Path,
     *,
@@ -503,10 +534,9 @@ def _write_run_results(
     ``watermark_storage.get()`` read per sync purely for this artifact,
     which isn't justified until a real consumer asks for it.
     """
-    # Redacted (#778 review): --vars can carry sensitive values straight
-    # through onto the command line, and this is the one place argv is
-    # persisted to disk rather than transient console/log output.
-    argv = [redact_error_text(a) for a in sys.argv]
+    # Redacted (#778 review): this is the one place argv is persisted to
+    # disk rather than transient console/log output.
+    argv = _redact_argv(sys.argv)
     run_results = {
         "schema_version": 1,
         "invocation": {
