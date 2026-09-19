@@ -345,7 +345,7 @@ with drt's incompatible document of the same name.
     "failed": 0,
     "skipped": 0
   },
-  "results": [ /* the same per-sync entries --output json's "syncs" array contains */ ]
+  "results": [ /* the same per-sync entries --output json's "syncs" array contains, minus "error" */ ]
 }
 ```
 
@@ -354,10 +354,20 @@ changed, nothing previously failed to retry — `succeeded`/`failed`/`skipped`
 all 0, `exit_code` 0) from a rejected invocation (an unmatched selector, an
 invalid `--limit`/`--full-refresh` combination) that also never attempts a
 sync but is not healthy (`exit_code` non-zero) — both would otherwise look
-byte-identical. `argv` and per-sync `error` text are redacted the same way
-the docs manifest already redacts connector error text (URLs/DSNs, hosts,
-e-mails, key=value credential fragments) before this file is written, since
-it — unlike a console line — is meant to be uploaded and retained.
+byte-identical.
+
+Because this file, unlike a console line or `--output json` stdout, is meant
+to be uploaded and retained, it does not carry a failed sync's raw `error`
+text (`error_type`/`error_stage`/`error_suggestion` — an exception class
+name, an enum, a static hint — stay, since a CI consumer's triage need is
+usually satisfied by those alone) or a diff preview's raw
+`delete_preview_unavailable_reason` (replaced with a fixed placeholder,
+distinguishable from a successful delete-preview read). A `--vars` value is
+still redacted outright in `argv`. A pattern-based sweep for arbitrary
+free text turned out to have no reliable fixed point (see
+`drt/_redaction.py`'s docstring), so this project chose not to persist the
+free text at all rather than trust a heuristic to catch every shape of
+secret a connector's own exception might embed.
 
 ```yaml
 - run: drt run

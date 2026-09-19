@@ -383,7 +383,11 @@ def compute_diff(
             total_source_rows=len(records),
             truncated=len(records) > limit,
             supported=False,
-            fallback_reason=f"Could not query destination ({type(e).__name__}): {e}",
+            # Exception class name only, not str(e) -- #778 review: this
+            # reaches --dry-run --diff's persisted run_results.json
+            # artifact today, and a driver error routinely embeds a DSN,
+            # host, or credential in its message.
+            fallback_reason=f"Could not query destination ({type(e).__name__})",
         )
 
     # Build dest lookup keyed on upsert_key tuple

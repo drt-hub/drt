@@ -174,11 +174,20 @@ def test_exit_code_distinguishes_rejected_invocation_from_a_clean_no_op(project:
     assert data["results"] == []
 
 
-def test_error_field_is_redacted(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A connector exception embedding a DSN/credential must not land in the
-    persisted artifact verbatim -- run_results.json is recommended for CI
-    upload with `if: always()`, unlike a console line (Codex review, #778 PR
-    round 2)."""
+def test_error_field_dropped_from_artifact_but_kept_in_stdout(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A heuristic keyword sweep has no fixed point against arbitrary
+    connector-exception text -- a #778 review round after round kept
+    finding a new bypass (unquoted multi-word values, quoted dict-repr
+    keys, comma-embedded values, compound identifiers like `client_secret`)
+    for whatever the sweep had just been widened to catch. `error` (raw
+    `str(exception)`) is dropped from the artifact outright instead of
+    redacted -- `error_type`/`error_stage`/`error_suggestion` are bounded
+    vocabulary and stay, giving a CI consumer stage + exception class
+    without the free text. Unlike the persisted artifact, `--output json`
+    stdout and the console render are existing, non-uploaded consumers, so
+    `error` stays there, unredacted, exactly as before #778."""
     from drt.engine import sync as sync_module
 
     def _boom(*_a: object, **_k: object) -> None:
@@ -186,14 +195,18 @@ def test_error_field_is_redacted(project: Path, monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(sync_module, "run_sync", _boom, raising=False)
 
-    result = runner.invoke(app, ["run", "--select", "users"])
+    result = runner.invoke(app, ["run", "--select", "users", "--output", "json"])
     assert result.exit_code == 1
+    stdout_data = json.loads(result.output)
+    stdout_entry = stdout_data["syncs"][0]
+    assert "hunter2" in stdout_entry["error"]  # unredacted, unchanged, for existing consumers
 
     data = json.loads((project / "target" / "drt" / "run_results.json").read_text())
-    entry = data["results"][0]
-    assert "postgres://" not in entry["error"]
-    assert "hunter2" not in entry["error"]
-    assert "« redacted »" in entry["error"]
+    artifact_entry = data["results"][0]
+    assert "error" not in artifact_entry
+    assert artifact_entry["error_type"] == stdout_entry["error_type"]
+    assert artifact_entry["error_stage"] == stdout_entry["error_stage"]
+    assert artifact_entry == {k: v for k, v in stdout_entry.items() if k != "error"}
 
 
 def test_argv_is_redacted(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -336,39 +349,18 @@ def test_text_mode_diff_included_in_artifact(
     assert entry["diff"]["fallback_reason"] == "file: no comparison available"
 
 
-def test_error_field_redacts_authorization_header_credential(
+def test_diff_unavailable_reason_replaced_in_artifact_but_kept_in_stdout(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A single \\S+ used to redact only the scheme word ("Bearer") and leave
-    the actual credential sitting right after it untouched (Codex review,
-    #778 PR round 4) -- an unquoted key's value must consume the whole
-    space-separated run, not just its first word."""
-    from drt.engine import sync as sync_module
-
-    def _boom(*_a: object, **_k: object) -> None:
-        raise RuntimeError("request failed: Authorization: Bearer sk_live_123")
-
-    monkeypatch.setattr(sync_module, "run_sync", _boom, raising=False)
-
-    result = runner.invoke(app, ["run", "--select", "users"])
-    assert result.exit_code == 1
-
-    data = json.loads((project / "target" / "drt" / "run_results.json").read_text())
-    entry = data["results"][0]
-    assert "sk_live_123" not in entry["error"]
-    assert "Bearer" not in entry["error"]
-    assert "« redacted »" in entry["error"]
-
-
-def test_diff_unavailable_reason_is_redacted(
-    project: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`delete_preview_unavailable_reason`/`fallback_reason` come from
+    """`delete_preview_unavailable_reason` comes from
     `f"{type(error).__name__}: {error}"` around a failed destination/state
-    read (drt/engine/diff.py) -- the same raw-connector-exception class
-    `entry["error"]` already redacts, but this field bypassed it entirely
-    and landed in the persisted artifact verbatim (Codex review, #778 PR
-    round 4)."""
+    read (drt/engine/diff.py) -- raw connector-exception text, same class
+    `error` is, and existing tests (test_diff.py) pin its exact format for
+    console/`--output json` display, so it can't be sanitized at the
+    source. The artifact instead replaces it with a fixed placeholder
+    (not null -- null already means "the delete read succeeded", and the
+    two outcomes must stay distinguishable) (Codex review, #778 PR rounds
+    4-6)."""
     from drt.engine import diff as diff_mod
     from drt.engine import sync as sync_module
 
@@ -406,14 +398,19 @@ def test_diff_unavailable_reason_is_redacted(
 
     monkeypatch.setattr(sync_module, "run_sync", lambda *_a, **_k: _FakeResult(), raising=False)
 
-    result = runner.invoke(app, ["run", "--select", "users", "--dry-run", "--diff"])
+    result = runner.invoke(
+        app, ["run", "--select", "users", "--dry-run", "--diff", "--output", "json"]
+    )
     assert result.exit_code == 0
+    stdout_data = json.loads(result.output)
+    stdout_reason = stdout_data["syncs"][0]["diff"]["delete_preview_unavailable_reason"]
+    assert "hunter2" in stdout_reason  # unredacted, unchanged, for existing consumers
 
     data = json.loads((project / "target" / "drt" / "run_results.json").read_text())
-    reason = data["results"][0]["diff"]["delete_preview_unavailable_reason"]
-    assert "hunter2" not in reason
-    assert "db.internal" not in reason
-    assert "« redacted »" in reason
+    artifact_reason = data["results"][0]["diff"]["delete_preview_unavailable_reason"]
+    assert artifact_reason is not None  # still distinguishable from "read succeeded"
+    assert "hunter2" not in artifact_reason
+    assert "db.internal" not in artifact_reason
 
 
 def test_stale_artifact_cleared_on_preflight_failure(project: Path) -> None:
@@ -433,55 +430,36 @@ def test_stale_artifact_cleared_on_preflight_failure(project: Path) -> None:
     assert not artifact_path.exists()
 
 
-def test_error_field_redacts_quoted_dict_repr_credential(
+def test_setup_failure_before_run_sync_is_recorded_not_uncaught(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A quote sitting between the key and the "=:" separator -- exactly
-    what a Python/JSON dict repr produces (`{'Authorization': 'Bearer ...'}`,
-    `{'password': 'hunter2'}`) -- broke the match entirely, persisting the
-    credential verbatim (Codex review, #778 PR round 5)."""
-    from drt.engine import sync as sync_module
+    """A failure in per-sync setup (permission check, destination/watermark/
+    observer construction) used to propagate out of `_run_one` entirely
+    uncaught -- the sync got no entry at all, and in a multi-sync run any
+    later syncs in a sequential dispatch were silently never attempted
+    either, while the artifact (written from the outer `finally`) still
+    claimed `exit_code: 1` with nothing to show why (Codex review, #778 PR
+    round 6). `_run_one`'s try now wraps setup too, so it always returns a
+    structured entry."""
+    from drt.cli.commands import run as run_module
 
-    def _boom(*_a: object, **_k: object) -> None:
-        raise RuntimeError(
-            "request failed with headers {'Authorization': 'Bearer sk_live_123', "
-            "'password': 'hunter2'}"
-        )
+    def _boom(*_a: object, **_k: object) -> Any:
+        raise RuntimeError("destination config rejected: bad table name")
 
-    monkeypatch.setattr(sync_module, "run_sync", _boom, raising=False)
+    monkeypatch.setattr(run_module, "get_destination", _boom)
 
     result = runner.invoke(app, ["run", "--select", "users"])
     assert result.exit_code == 1
 
     data = json.loads((project / "target" / "drt" / "run_results.json").read_text())
-    error = data["results"][0]["error"]
-    assert "sk_live_123" not in error
-    assert "hunter2" not in error
-    assert "« redacted »" in error
-
-
-def test_error_field_redaction_survives_embedded_comma(
-    project: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An unquoted value stopped at the first `,`/`;`/`)` -- but a real
-    secret can itself contain one, so `password=abc,def` (one value, not
-    "abc" plus unrelated trailing text) left `,def` exposed (Codex review,
-    #778 PR round 5)."""
-    from drt.engine import sync as sync_module
-
-    def _boom(*_a: object, **_k: object) -> None:
-        raise RuntimeError("auth failed: password=abc,def123")
-
-    monkeypatch.setattr(sync_module, "run_sync", _boom, raising=False)
-
-    result = runner.invoke(app, ["run", "--select", "users"])
-    assert result.exit_code == 1
-
-    data = json.loads((project / "target" / "drt" / "run_results.json").read_text())
-    error = data["results"][0]["error"]
-    assert "abc" not in error
-    assert "def123" not in error
-    assert "« redacted »" in error
+    assert data["invocation"]["exit_code"] == 1
+    assert data["invocation"]["failed"] == 1
+    assert len(data["results"]) == 1
+    entry = data["results"][0]
+    assert entry["name"] == "users"
+    assert entry["status"] == "failed"
+    assert "error" not in entry
+    assert entry["error_type"] == "RuntimeError"
 
 
 def test_write_is_atomic_no_partial_file_on_write_failure(
@@ -494,11 +472,12 @@ def test_write_is_atomic_no_partial_file_on_write_failure(
     touches the *temp* file, cleaned up on the way out (Codex review, #778
     PR round 5)."""
     final_path = project / "target" / "drt" / "run_results.json"
-    tmp_path = project / "target" / "drt" / ".run_results.json.tmp"
     real_write_text = Path.write_text
 
     def _flaky_write_text(self: Path, *args: object, **kwargs: object) -> int:
-        if self.name == ".run_results.json.tmp":
+        # Suffixed with a run_id (round 6) rather than a fixed name -- match
+        # by the stable prefix/suffix instead of the exact filename.
+        if self.name.startswith(".run_results.json.") and self.name.endswith(".tmp"):
             raise OSError("simulated disk-full mid-write")
         return real_write_text(self, *args, **kwargs)  # type: ignore[arg-type]
 
@@ -508,4 +487,5 @@ def test_write_is_atomic_no_partial_file_on_write_failure(
 
     assert result.exit_code == 0  # bookkeeping failure never masks the run's own outcome
     assert not final_path.exists()
-    assert not tmp_path.exists()
+    leftover_tmp_files = list((project / "target" / "drt").glob(".run_results.json.*.tmp"))
+    assert leftover_tmp_files == []

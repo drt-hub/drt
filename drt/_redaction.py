@@ -1,14 +1,28 @@
 """Free-text redaction for error strings and other free-form values that may
-embed secrets/PII (originally #698, extracted from ``drt/docs/builder.py`` in
-#778 for a second consumer — ``drt run``'s ``run_results.json`` artifact).
+embed secrets/PII (#698, extracted from ``drt/docs/builder.py`` in #778 so
+``drt run``'s ``run_results.json`` artifact could reuse it as a second,
+best-effort, defense-in-depth pass on argv -- see ``run.py``'s
+``_redact_argv``).
 
 Connector exceptions routinely embed URLs/DSNs ("connection to
 postgres://user@db.internal:5432 failed"), hosts, e-mail addresses, phone
 numbers, and key=value credential fragments. Free text has no key structure
 to anchor on, so this is a pattern sweep — deliberately over-eager ("user: 42"
 masks the 42), because for an artifact that leaves the process (a hosted docs
-site, a CI-uploaded run artifact) over-redaction is a cosmetic bug and
-under-redaction is a leak.
+site) over-redaction is a cosmetic bug and under-redaction is a leak.
+
+This is a heuristic keyword sweep, not a guarantee: a #778 review round found
+it has no fixed point (unquoted multi-word values, quoted dict-repr keys,
+comma-embedded values, compound identifiers like ``client_secret`` where
+``secret`` doesn't start on a word boundary each defeated an attempted fix in
+turn). ``run.py`` does not rely on this to scrub known-risky free text
+(a raw exception's ``str(e)``, a diff-preview failure's raw message) out of
+``run_results.json`` -- those fields are dropped from the artifact outright
+(``_sanitize_entry_for_artifact``) rather than redacted. This module stays a
+narrower, best-effort second layer for the docs manifest's hosted-artifact
+redaction (its original job) and for incidental argv content outside the one
+CLI option (``--vars``) known to carry arbitrary values, which is redacted
+by whole-value replacement instead of by pattern.
 """
 
 from __future__ import annotations
@@ -21,22 +35,7 @@ _PHONE_RE = re.compile(r"\+\d[\d\s().-]{7,}\d")
 _KV_RE = re.compile(
     r"(?i)\b(password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|"
     r"authorization|host(?:name)?|dsn|user(?:name)?|account|endpoint)\b"
-    # An optional quote right after the keyword matches a Python/JSON dict
-    # repr's own quoted key (`{'Authorization': 'Bearer ...'}`) -- without
-    # it the quote sits between the keyword and the "=:" separator and the
-    # whole match fails, leaving the credential untouched (#778 review).
-    r"(['\"]?\s*[=:]\s*)"
-    # Unquoted values run across a few spaces (not just to the first one) so
-    # an "Authorization: Bearer <token>"-shaped value redacts as one unit --
-    # a single \S+ used to stop at "Bearer" and leave the actual credential
-    # sitting right after it. Not bounded by punctuation like ,/;/) --
-    # a real secret can itself contain one ("password=abc,def" is one value,
-    # not "abc" plus unrelated trailing text), and under-redaction is a
-    # leak while over-redacting an adjacent field is only cosmetic (#778
-    # review). Bounded to 5 extra space/tab-separated words, and never
-    # crosses a newline, so it can't run on into an unrelated later
-    # paragraph of a long multi-line exception message.
-    r"(\"[^\"]*\"|'[^']*'|\S+(?:[ \t]+\S+){0,5})"
+    r"(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|\S+)"
 )
 REDACTED = "« redacted »"
 

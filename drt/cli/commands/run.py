@@ -195,27 +195,35 @@ def _run_one(
     from drt.engine.sync import run_sync
     from drt.security import PermissionAction, get_permission_checker
 
-    # Enterprise extension point (#298, ADR 0008) — no-op under the OSS
-    # default (AllowAllPermissionChecker); raises PermissionDeniedError if
-    # an Enterprise checker is registered and denies this sync.
-    get_permission_checker().check(PermissionAction.RUN, sync.name)
-
-    dest = get_destination(sync)
-    wm_storage = get_watermark_storage(sync, Path("."))
-    observer = _build_observer(sync, ctx, wm_storage)
-    if not ctx.json_mode and not ctx.dry_run and not ctx.quiet:
-        print_sync_start(sync.name, ctx.dry_run)
     t0 = time.monotonic()
     started_at = datetime.now(timezone.utc).isoformat()  # for #784 degraded-alert context
-    if ctx.log_json:
-        logging.info("sync_started", extra={"sync": sync.name})
-
     status_str = "failed"
     rows_synced = 0
     elapsed = 0.0
     return_value: tuple[str, dict[str, object], bool]
     try:
         try:
+            # Enterprise extension point (#298, ADR 0008) — no-op under the OSS
+            # default (AllowAllPermissionChecker); raises PermissionDeniedError if
+            # an Enterprise checker is registered and denies this sync.
+            get_permission_checker().check(PermissionAction.RUN, sync.name)
+
+            # Setup (destination/watermark-storage/observer construction) is
+            # inside this try too (#778 review) -- previously a failure here
+            # (e.g. a destination's __init__ validating a config value)
+            # propagated out of _run_one entirely uncaught, skipping this
+            # sync's entry rather than recording it as a structured failure.
+            # None of these three are referenced below by the failure branch,
+            # only by the success path, so widening the try changes nothing
+            # about what a run_sync() failure itself reports.
+            dest = get_destination(sync)
+            wm_storage = get_watermark_storage(sync, Path("."))
+            observer = _build_observer(sync, ctx, wm_storage)
+            if not ctx.json_mode and not ctx.dry_run and not ctx.quiet:
+                print_sync_start(sync.name, ctx.dry_run)
+            if ctx.log_json:
+                logging.info("sync_started", extra={"sync": sync.name})
+
             result = run_sync(
                 sync,
                 ctx.source,
@@ -258,13 +266,14 @@ def _run_one(
                 # Preserve `error` for backwards compatibility with JSON
                 # consumers that already parse it. Add structured siblings
                 # for new consumers (stage, error_type, error_suggestion).
-                # Redacted (#778 review) -- this now also lands in the
-                # persisted run_results.json artifact (recommended for
-                # CI upload with `if: always()`), and connector exceptions
-                # routinely embed DSNs/hosts/credentials the same way the
-                # docs manifest already redacts them for (drt/_redaction.py,
-                # originally #698).
-                "error": redact_error_text(str(e)),
+                # Raw and unredacted, same as before #778 -- a heuristic
+                # keyword sweep has no fixed point against arbitrary
+                # connector-exception text (#778 review, several rounds).
+                # `_sanitize_entry_for_artifact` drops this key entirely
+                # before it reaches the persisted run_results.json instead;
+                # it stays here, unredacted, for --output json stdout and
+                # the console render, same as always.
+                "error": str(e),
                 "error_type": fe.error_type,
                 "error_stage": fe.stage.value,
                 "error_suggestion": fe.suggestion,
@@ -472,6 +481,52 @@ def _redact_argv(argv: list[str]) -> list[str]:
     return redacted
 
 
+_DIFF_REASON_REDACTED = (
+    "redacted for run_results.json -- see console output or --output json for detail"
+)
+
+
+def _sanitize_entry_for_artifact(entry: dict[str, object]) -> dict[str, object]:
+    """Drop or replace the free-text fields a per-sync entry can carry
+    before it reaches the persisted run_results.json (#778 review).
+
+    A #778 review round found no fixed point for redacting arbitrary
+    connector-exception text by pattern (see ``drt/_redaction.py``'s
+    docstring) -- so this doesn't try. Instead, the two fields that are
+    *only* ever raw exception text are kept out of the file entirely:
+
+    - ``error`` (``str(exception)`` from a sync failure) is dropped outright.
+      ``error_type``/``error_stage``/``error_suggestion`` are bounded
+      vocabulary (an exception class name, an enum value, a static
+      rule-table string) and stay -- a CI consumer still gets stage +
+      exception class, which is what triage needs. The full text is still
+      in the job log (console render) and in ``--output json`` stdout for
+      existing consumers, unredacted, same as always -- this only stops
+      duplicating it into a file this project documents uploading to CI
+      artifact storage.
+    - ``diff.delete_preview_unavailable_reason`` (a failed mirror-delete
+      preview read) is replaced with a fixed placeholder rather than
+      dropped or set to null -- unlike ``error``, null already means
+      something specific here (the delete read succeeded), and the two
+      must not collapse into each other (see ``DiffResult``'s own
+      docstring). ``diff.fallback_reason`` needs no such handling: its one
+      exception-derived case is sanitized at the source
+      (``drt/engine/diff.py``) since, unlike ``delete_preview_unavailable_
+      reason``, existing tests pin its exact text for the other three
+      (static, benign) cases and dropping it wholesale would cost real,
+      always-safe diagnostic value for the common non-queryable-destination
+      path.
+    """
+    sanitized = {k: v for k, v in entry.items() if k != "error"}
+    diff_value = sanitized.get("diff")
+    if isinstance(diff_value, dict) and diff_value.get("delete_preview_unavailable_reason"):
+        sanitized["diff"] = {
+            **diff_value,
+            "delete_preview_unavailable_reason": _DIFF_REASON_REDACTED,
+        }
+    return sanitized
+
+
 def _write_run_results(
     target_path: Path,
     *,
@@ -554,11 +609,15 @@ def _write_run_results(
         "results": results,
     }
     final_path = target_path / "run_results.json"
-    tmp_path = target_path / ".run_results.json.tmp"
+    # Suffixed with run_id (#778 review) -- a fixed temp name would collide
+    # if two `drt run` invocations ever share a target_path concurrently,
+    # letting one process's rename land mid-write of the other's and
+    # defeating the atomic-write guarantee below.
+    tmp_path = target_path / f".run_results.json.{run_id}.tmp"
     try:
         target_path.mkdir(parents=True, exist_ok=True)
-        # Write-then-rename (#778 review): a disk-full or interrupted write
-        # hitting `write_text()` on the final path directly could leave a
+        # Write-then-rename: a disk-full or interrupted write hitting
+        # `write_text()` on the final path directly could leave a
         # truncated, invalid JSON file behind for the documented
         # `if: always()` CI step to upload -- worse than no file at all.
         # `Path.replace()` is an atomic same-filesystem rename (os.replace),
@@ -1169,7 +1228,7 @@ def run(
             target_path,
             run_id=run_id,
             started_at=invocation_started_at,
-            results=json_results,
+            results=[_sanitize_entry_for_artifact(e) for e in json_results],
             succeeded=succeeded,
             failed=failed,
             skipped=skipped,
