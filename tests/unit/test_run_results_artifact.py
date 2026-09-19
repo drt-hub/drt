@@ -151,10 +151,114 @@ def test_written_on_no_op_exit(project: Path) -> None:
     artifact_path = project / "target" / "drt" / "run_results.json"
     assert artifact_path.exists()
     data = json.loads(artifact_path.read_text())
+    assert data["invocation"]["exit_code"] == 0
     assert data["invocation"]["succeeded"] == 0
     assert data["invocation"]["failed"] == 0
     assert data["invocation"]["skipped"] == 0
     assert data["results"] == []
+
+
+def test_exit_code_distinguishes_rejected_invocation_from_a_clean_no_op(project: Path) -> None:
+    """A rejected invocation (here: --limit 0) never attempts a sync either,
+    so its results/counts look byte-identical to the clean no-op above --
+    exit_code is what tells a CI/observability consumer these two 0/0/0
+    artifacts are not the same outcome (Codex review, #778 PR round 2)."""
+    result = runner.invoke(app, ["run", "--select", "users", "--limit", "0"])
+    assert result.exit_code == 1
+
+    data = json.loads((project / "target" / "drt" / "run_results.json").read_text())
+    assert data["invocation"]["exit_code"] == 1
+    assert data["invocation"]["succeeded"] == 0
+    assert data["invocation"]["failed"] == 0
+    assert data["invocation"]["skipped"] == 0
+    assert data["results"] == []
+
+
+def test_error_field_is_redacted(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A connector exception embedding a DSN/credential must not land in the
+    persisted artifact verbatim -- run_results.json is recommended for CI
+    upload with `if: always()`, unlike a console line (Codex review, #778 PR
+    round 2)."""
+    from drt.engine import sync as sync_module
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("connection to postgres://user:hunter2@db.internal:5432 failed")
+
+    monkeypatch.setattr(sync_module, "run_sync", _boom, raising=False)
+
+    result = runner.invoke(app, ["run", "--select", "users"])
+    assert result.exit_code == 1
+
+    data = json.loads((project / "target" / "drt" / "run_results.json").read_text())
+    entry = data["results"][0]
+    assert "postgres://" not in entry["error"]
+    assert "hunter2" not in entry["error"]
+    assert "« redacted »" in entry["error"]
+
+
+def test_argv_is_redacted(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """--vars values reach argv verbatim; unlike stdout, this artifact is a
+    durable file recommended for CI upload, so a sensitive --vars value must
+    not be persisted as-is (Codex review, #778 PR round 2). CliRunner.invoke
+    doesn't touch the real process `sys.argv` (it dispatches in-process), so
+    it's patched here to look like the invocation actually being tested."""
+    monkeypatch.setattr(sys, "argv", ["drt", "run", "--vars", "api_key: super-secret-value"])
+    result = runner.invoke(
+        app, ["run", "--select", "users", "--vars", "api_key: super-secret-value"]
+    )
+    assert result.exit_code == 0
+
+    data = json.loads((project / "target" / "drt" / "run_results.json").read_text())
+    argv_text = " ".join(data["invocation"]["argv"])
+    assert "super-secret-value" not in argv_text
+    assert "« redacted »" in argv_text
+
+
+def test_diff_with_non_json_native_values_does_not_crash(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A diff sample can carry warehouse-native datetime/Decimal/UUID values
+    `json.dumps` can't serialize natively; this must degrade to a readable
+    string, not turn an otherwise-successful preview into a crash (Codex
+    review, #778 PR round 2)."""
+    from datetime import datetime as dt
+
+    from drt.engine import diff as diff_mod
+    from drt.engine import sync as sync_module
+
+    sample_diff = diff_mod.DiffResult(
+        sample=[{"id": 1, "created_at": dt(2026, 1, 1)}],
+        total_source_rows=1,
+        supported=False,
+        fallback_reason="file: no comparison available",
+    )
+
+    class _FakeResult:
+        success = 1
+        failed = 0
+        skipped = 0
+        skipped_no_match = 0
+        rows_extracted = 1
+        row_errors: list[Any] = []
+        errors: list[str] = []
+        watermark_source: str | None = None
+        cursor_value_used: str | None = None
+        watermark_lag: str | None = None
+        limit_applied: int | None = None
+        duration_seconds = 0.01
+        interrupted = False
+        run_id: str | None = None
+        sync_run_id: str | None = "fake-sync-run-id"
+        diff: Any = sample_diff
+
+    monkeypatch.setattr(sync_module, "run_sync", lambda *_a, **_k: _FakeResult(), raising=False)
+
+    result = runner.invoke(app, ["run", "--select", "users", "--dry-run", "--diff"])
+    assert result.exit_code == 0
+
+    data = json.loads((project / "target" / "drt" / "run_results.json").read_text())
+    sample = data["results"][0]["diff"]["sample"]
+    assert sample == [{"id": 1, "created_at": "2026-01-01 00:00:00"}]
 
 
 def test_text_mode_diff_included_in_artifact(

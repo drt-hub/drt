@@ -59,6 +59,7 @@ if TYPE_CHECKING:
 
 
 from drt._identifiers import new_run_id
+from drt._redaction import redact_error_text
 from drt.cli._app import app
 from drt.cli._helpers import (
     exit_code_for_signal as _exit_code_for_signal,
@@ -257,7 +258,13 @@ def _run_one(
                 # Preserve `error` for backwards compatibility with JSON
                 # consumers that already parse it. Add structured siblings
                 # for new consumers (stage, error_type, error_suggestion).
-                "error": str(e),
+                # Redacted (#778 review) -- this now also lands in the
+                # persisted run_results.json artifact (recommended for
+                # CI upload with `if: always()`), and connector exceptions
+                # routinely embed DSNs/hosts/credentials the same way the
+                # docs manifest already redacts them for (drt/_redaction.py,
+                # originally #698).
+                "error": redact_error_text(str(e)),
                 "error_type": fe.error_type,
                 "error_stage": fe.stage.value,
                 "error_suggestion": fe.suggestion,
@@ -444,6 +451,7 @@ def _write_run_results(
     failed: int,
     skipped: int,
     total_duration: float,
+    exit_code: int,
 ) -> None:
     """Write ``<target_path>/run_results.json`` (#778) — a durable,
     machine-readable per-invocation record, dbt's ``run_results.json``
@@ -465,17 +473,28 @@ def _write_run_results(
     its own inconsistency. New fields are additive/omit-when-absent, same
     discipline as the manifest.
 
+    ``exit_code`` disambiguates a legitimate zero-result no-op (nothing
+    selected/changed/failed to retry -- ``succeeded``/``failed``/``skipped``
+    genuinely all 0, ``exit_code`` 0) from a *rejected* invocation (a bad
+    ``--limit``/``--full-refresh``/``--cursor-value`` combination, an
+    unmatched selector) that never got far enough to attempt a sync either,
+    but is not healthy -- without it the two are byte-identical on the
+    ``results``/counts alone (#778 review).
+
     Best-effort: a write failure (permissions, a read-only filesystem, disk
     full) is logged and swallowed rather than raised -- this bookkeeping
     must never change the run's own exit code or mask a real sync failure.
-    Called from a ``finally`` block wrapping the whole "syncs are known"
-    portion of ``run()`` -- so it fires on the no-op exits too (nothing
-    selected/changed/failed, a bad --limit/--full-refresh combination), not
-    just after a full dispatch loop, and still fires on a graceful-shutdown
-    (#279) exit or an unhandled exception. It does *not* fire on preflight
-    failures before ``syncs`` is resolved (bad project/profile/vars) --
-    mirrors dbt's own run_results.json, which isn't written until
-    compilation resolves a node list.
+    Serialization uses ``default=str`` -- a diff sample (#778 review) can
+    carry warehouse-native ``datetime``/``Decimal``/UUID values ``json``
+    can't handle natively, and a serialization failure on an otherwise
+    successful preview must degrade to a readable string, not crash the
+    command's own bookkeeping. Called from a ``finally`` block wrapping the
+    whole "syncs are known" portion of ``run()`` -- so it fires on the no-op
+    exits too, not just after a full dispatch loop, and still fires on a
+    graceful-shutdown (#279) exit or an unhandled exception. It does *not*
+    fire on preflight failures before ``syncs`` is resolved (bad
+    project/profile/vars) -- mirrors dbt's own run_results.json, which isn't
+    written until compilation resolves a node list.
 
     Not included in this version, deliberately: a per-sync watermark
     before/after pair. The engine never returns the post-run watermark
@@ -484,6 +503,10 @@ def _write_run_results(
     ``watermark_storage.get()`` read per sync purely for this artifact,
     which isn't justified until a real consumer asks for it.
     """
+    # Redacted (#778 review): --vars can carry sensitive values straight
+    # through onto the command line, and this is the one place argv is
+    # persisted to disk rather than transient console/log output.
+    argv = [redact_error_text(a) for a in sys.argv]
     run_results = {
         "schema_version": 1,
         "invocation": {
@@ -491,8 +514,9 @@ def _write_run_results(
             "started_at": started_at,
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "duration_seconds": total_duration,
-            "argv": sys.argv,
+            "argv": argv,
             "drt_version": __version__,
+            "exit_code": exit_code,
             "succeeded": succeeded,
             "failed": failed,
             "skipped": skipped,
@@ -501,7 +525,9 @@ def _write_run_results(
     }
     try:
         target_path.mkdir(parents=True, exist_ok=True)
-        (target_path / "run_results.json").write_text(json.dumps(run_results, indent=2))
+        (target_path / "run_results.json").write_text(
+            json.dumps(run_results, indent=2, default=str)
+        )
     except OSError as e:
         logging.getLogger(__name__).warning("Failed to write run_results.json: %s", e)
 
@@ -778,6 +804,12 @@ def run(
     failed = 0
     skipped = 0
     total_duration: float | None = None
+    # #778 review: disambiguates a legitimate zero-result no-op (exit 0,
+    # nothing selected/changed/failed to retry) from a *rejected* invocation
+    # (bad --limit/--full-refresh combination, unmatched selector) that also
+    # never attempts a sync -- both would otherwise write byte-identical
+    # empty-results artifacts.
+    exit_code = 0
 
     try:
         if not syncs:
@@ -1072,6 +1104,12 @@ def run(
 
         if failed > 0:
             raise typer.Exit(1)
+    except typer.Exit as exc:
+        exit_code = exc.exit_code if exc.exit_code is not None else 0
+        raise
+    except BaseException:
+        exit_code = 1
+        raise
     finally:
         _write_run_results(
             target_path,
@@ -1086,4 +1124,5 @@ def run(
                 if total_duration is not None
                 else round(time.monotonic() - t_total, 2)
             ),
+            exit_code=exit_code,
         )

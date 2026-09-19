@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from drt import __version__
+from drt._redaction import redact_error_text as _redact_error_text
 from drt.config.fingerprint import sync_fingerprints
 from drt.config.models import SyncConfig
 from drt.config.parser import load_project, load_syncs_safe
@@ -351,35 +352,13 @@ def build_manifest(
     )
 
 
-# Free-text redaction for error strings embedded in the manifest (#698). The
-# ``state.last_error`` and ``runs[].errors`` values come straight from
-# connector exceptions, which routinely embed the very things #696 keeps out
-# of labels: URLs/DSNs ("connection to postgres://user@db.internal:5432
-# failed"), hosts, e-mail addresses, phone numbers, and key=value credential
-# fragments. Free text has no key structure to anchor on, so this is a
-# pattern sweep — deliberately over-eager ("user: 42" masks the 42), because
-# for a hosted artifact over-redaction is a cosmetic bug and under-redaction
-# is a leak. ``--full-labels`` bypasses it, same trust model as labels.
-_ERROR_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+")
-_ERROR_EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b")
-_ERROR_PHONE_RE = re.compile(r"\+\d[\d\s().-]{7,}\d")
-_ERROR_KV_RE = re.compile(
-    r"(?i)\b(password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|"
-    r"authorization|host(?:name)?|dsn|user(?:name)?|account|endpoint)\b"
-    r"(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|\S+)"
-)
-_ERROR_REDACTION = "« redacted »"
-
-
-def _redact_error_text(text: str) -> str:
-    """Mask URLs, e-mails, phone numbers, and credential-ish ``key=value``
-    fragments in free-form error text. URLs go first so a ``dsn=scheme://…``
-    loses the whole locator, not just the part after the key."""
-    text = _ERROR_URL_RE.sub(_ERROR_REDACTION, text)
-    text = _ERROR_EMAIL_RE.sub(_ERROR_REDACTION, text)
-    text = _ERROR_PHONE_RE.sub(_ERROR_REDACTION, text)
-    text = _ERROR_KV_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_ERROR_REDACTION}", text)
-    return text
+# Free-text redaction for error strings embedded in the manifest (#698) --
+# ``state.last_error`` and ``runs[].errors`` come straight from connector
+# exceptions, which routinely embed the very things #696 keeps out of labels
+# (URLs/DSNs, hosts, e-mails, phone numbers, key=value credential fragments).
+# ``--full-labels`` bypasses it, same trust model as labels. The pattern sweep
+# itself lives in drt._redaction (#778 gave it a second consumer: `drt run`'s
+# run_results.json artifact).
 
 
 # Inline value redaction for the raw-YAML docs tab (#696). The tab publishes the

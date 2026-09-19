@@ -340,6 +340,7 @@ with drt's incompatible document of the same name.
     "duration_seconds": 12.4,
     "argv": ["drt", "run", "--select", "users_to_hubspot"],
     "drt_version": "0.10.0",
+    "exit_code": 0,
     "succeeded": 1,
     "failed": 0,
     "skipped": 0
@@ -347,6 +348,16 @@ with drt's incompatible document of the same name.
   "results": [ /* the same per-sync entries --output json's "syncs" array contains */ ]
 }
 ```
+
+`exit_code` disambiguates a genuinely clean no-op (nothing selected, nothing
+changed, nothing previously failed to retry — `succeeded`/`failed`/`skipped`
+all 0, `exit_code` 0) from a rejected invocation (an unmatched selector, an
+invalid `--limit`/`--full-refresh` combination) that also never attempts a
+sync but is not healthy (`exit_code` non-zero) — both would otherwise look
+byte-identical. `argv` and per-sync `error` text are redacted the same way
+the docs manifest already redacts connector error text (URLs/DSNs, hosts,
+e-mails, key=value credential fragments) before this file is written, since
+it — unlike a console line — is meant to be uploaded and retained.
 
 ```yaml
 - run: drt run
