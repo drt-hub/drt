@@ -146,7 +146,7 @@ drt run --limit 10                # sampled run (#774): extract at most N rows; 
 drt run --fail-fast               # stop scheduling after first failure (#775); remaining syncs report status=skipped; also on drt test
 drt run --threads 4               # parallel sync execution
 drt run --cursor-value '2026-01-01 00:00:00'  # override watermark cursor for backfill
-# every `drt run` invocation also writes target/drt/run_results.json (#778) -- dbt run_results.json-style durable per-invocation record, independent of --output (written in text mode too). Reuses the same per-sync entries --output json's syncs array builds, minus raw error text (dropped, not redacted -- error_type/error_stage/error_suggestion stay). --target-path <dir> relocates it (default target/drt/, deliberately not dbt's own target/)
+# drt run also writes target/drt/run_results.json (#778) -- dbt run_results.json-style durable per-invocation record, independent of --output (written in text mode too), for every invocation that resolves a sync list (including no-op runs) -- NOT written for a preflight failure before syncs are known (bad project/profile/vars, --diff without --dry-run), matching dbt's own run_results.json. Reuses the same per-sync entries --output json's syncs array builds, minus raw error text (dropped, not redacted -- error_type/error_stage/error_suggestion stay). --target-path <dir> relocates it (default target/drt/, deliberately not dbt's own target/)
 drt test                          # run post-sync validation tests
 drt test --select <sync-name>     # test a specific sync
 drt test --store-failures         # sample up to N failing rows/failed test (#779); sync.mask applied
