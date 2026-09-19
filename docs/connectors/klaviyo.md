@@ -29,7 +29,8 @@ destination:
 | `unique_id_field` | string \| null | null | Row field holding Klaviyo's event deduplication key (`unique_id`). Required for `endpoint: event`; omitted when the configured row value is null. |
 | `properties_template` | string \| null | null | Jinja2 JSON template → custom profile/event `properties`. When omitted, profile mode sends all row fields except `email_field`; event mode also excludes configured metric/time/value/unique-ID control fields. Event payloads always include `properties` (at least `{}`). |
 | `list_id` / `list_id_env` | string \| null | null | For `endpoint: profile`, add each upserted profile to this Klaviyo list. |
-| `revision` | string | `"2026-01-15"` | Klaviyo API revision (sent as the `revision` header). |
+| `backfill` | boolean | `false` | For `endpoint: event` only. When `true`, suppresses live flow/automation triggers for the event — use during a first full sync or a cursor-override replay of historical rows so existing flows don't re-send customer-facing messages for events that already happened. The event still counts toward metrics/segmentation. Rejected at config time if set with `endpoint: profile`. |
+| `revision` | string | `"2026-07-15"` | Klaviyo API revision (sent as the `revision` header). Must be `"2026-07-15"` or later when `backfill: true` (enforced at config validation) — that's the revision Klaviyo introduced the field at. |
 | `retry` | RetryConfig \| null | null | Per-destination override of `sync.retry`. |
 | `rate_limit` | RateLimitConfig \| null | null | Per-destination override of `sync.rate_limit`. |
 
@@ -70,6 +71,23 @@ destination:
 ```
 
 Every event needs a non-empty email and metric name. Set either `metric_name_field` for a per-row name or `metric_name` for one constant name. `unique_id_field` is required: [Klaviyo documents](https://developers.klaviyo.com/en/reference/events_api_overview) that an omitted `unique_id` defaults to the event timestamp truncated to one second, which can silently discard distinct same-profile/metric events in that second and makes an ambiguous request retry non-idempotent. Use a stable source ID for each logical event. `time` and `value` are optional and omitted when their configured row value is null; datetime values are sent as ISO-8601 strings, date-only values are rejected, and numeric values are sent as numbers. Use a warehouse `TIMESTAMP`/`DATETIME` source column—not a `DATE` column—for `time_field`. Without a template, configured event control fields are excluded from `properties`; custom templates remain explicit. Event `properties` is always sent, using `{}` when there are no properties.
+
+### Safe historical replay (`backfill`)
+
+Sending historical rows through `endpoint: event` — a first full sync of years of past orders, or a `--cursor-value` override re-processing old warehouse rows — replays each one as a live event by default, which can re-trigger existing Klaviyo flows and send customers duplicate/backdated emails or texts for things that already happened. Set `backfill: true` for that run to suppress flow triggering while the events still land for metrics and segmentation:
+
+```yaml
+destination:
+  type: klaviyo
+  api_key_env: KLAVIYO_API_KEY
+  endpoint: event
+  email_field: email
+  metric_name_field: event_name
+  unique_id_field: event_id
+  backfill: true   # historical replay — don't re-fire flows
+```
+
+Turn `backfill` back off (the default) once the historical load is done, so future incremental syncs of genuinely new events trigger flows normally.
 
 ## Rate limiting
 

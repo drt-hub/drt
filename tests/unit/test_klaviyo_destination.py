@@ -82,6 +82,42 @@ class TestKlaviyoConfig:
                 unique_id_field=unique_id_field,
             )
 
+    def test_backfill_rejected_on_profile_endpoint(self) -> None:
+        with pytest.raises(ValueError, match="backfill"):
+            _config(backfill=True)
+
+    def test_backfill_allowed_on_event_endpoint(self) -> None:
+        config = _config(
+            endpoint="event",
+            metric_name="Upgraded Plan",
+            unique_id_field="event_id",
+            backfill=True,
+        )
+        assert config.backfill is True
+
+    def test_backfill_rejected_with_older_revision(self) -> None:
+        """#1075, Codex review: a config that explicitly pins the pre-#1075
+        default revision (or any revision Klaviyo introduced backfill
+        after) must not silently fail to suppress flow triggering."""
+        with pytest.raises(ValueError, match="backfill requires revision"):
+            _config(
+                endpoint="event",
+                metric_name="Upgraded Plan",
+                unique_id_field="event_id",
+                backfill=True,
+                revision="2026-01-15",
+            )
+
+    def test_backfill_allowed_with_newer_revision(self) -> None:
+        config = _config(
+            endpoint="event",
+            metric_name="Upgraded Plan",
+            unique_id_field="event_id",
+            backfill=True,
+            revision="2026-08-01",
+        )
+        assert config.backfill is True
+
     def test_describe(self) -> None:
         assert _config().describe() == "klaviyo (profiles)"
         assert (
@@ -133,7 +169,7 @@ class TestKlaviyoLoad:
         assert client.post.call_args.kwargs == {
             "headers": {
                 "Authorization": "Klaviyo-API-Key pk_test",
-                "revision": "2026-01-15",
+                "revision": "2026-07-15",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             },
@@ -452,7 +488,7 @@ class TestKlaviyoEventLoad:
         assert client.post.call_args.args == ("https://a.klaviyo.com/api/events/",)
         assert client.post.call_args.kwargs["headers"] == {
             "Authorization": "Klaviyo-API-Key pk_test",
-            "revision": "2026-01-15",
+            "revision": "2026-07-15",
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
@@ -479,6 +515,43 @@ class TestKlaviyoEventLoad:
                 },
             }
         }
+
+    def test_event_omits_backfill_by_default(self) -> None:
+        """No behavior change to existing configs that don't set the new
+        (optional) field -- byte-identical payload to before #1075."""
+        client = MagicMock()
+        client.post.return_value = _resp(202)
+        config = _config(
+            endpoint="event",
+            metric_name="Abandoned Cart",
+            unique_id_field="event_id",
+        )
+        record = {"email": "a@x.com", "event_id": "evt-123"}
+
+        with _patch_client(client):
+            result = KlaviyoDestination().load([record], config, _options())
+
+        assert result.success == 1
+        assert "backfill" not in client.post.call_args.kwargs["json"]["data"]["attributes"]
+
+    def test_event_sends_backfill_true(self) -> None:
+        """#1075: backfill: true on the event's own attributes suppresses
+        Klaviyo flow/automation triggers for a historical replay."""
+        client = MagicMock()
+        client.post.return_value = _resp(202)
+        config = _config(
+            endpoint="event",
+            metric_name="Abandoned Cart",
+            unique_id_field="event_id",
+            backfill=True,
+        )
+        record = {"email": "a@x.com", "event_id": "evt-123"}
+
+        with _patch_client(client):
+            result = KlaviyoDestination().load([record], config, _options())
+
+        assert result.success == 1
+        assert client.post.call_args.kwargs["json"]["data"]["attributes"]["backfill"] is True
 
     def test_event_normalizes_warehouse_types_and_excludes_control_fields(
         self,

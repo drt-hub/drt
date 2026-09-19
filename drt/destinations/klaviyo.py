@@ -12,7 +12,11 @@ is upserted by **email**:
 
 With ``endpoint: event``, each row is instead sent to ``POST /api/events/``
 with an email-identified profile, a metric name, properties, a required stable
-``unique_id``, and any configured ``time`` / ``value`` fields.
+``unique_id``, and any configured ``time`` / ``value`` fields. Optional
+``backfill: true`` (#1075) suppresses live flow/automation triggers for a
+historical replay (a first full sync, or a cursor-override re-processing old
+rows) so existing flows don't re-send customer-facing messages for events
+that already happened; the event still counts toward metrics/segmentation.
 
 Auth is an API key (``Authorization: Klaviyo-API-Key <key>``) plus the
 ``revision`` header. No extra dependencies beyond core ``httpx``. Per-record
@@ -199,6 +203,8 @@ class KlaviyoDestination:
             if unique_id is None or str(unique_id).strip() == "":
                 raise ValueError(f"Row missing unique_id field {config.unique_id_field!r}.")
             attributes["unique_id"] = str(unique_id)
+        if config.backfill:
+            attributes["backfill"] = True
 
         payload = {"data": {"type": "event", "attributes": attributes}}
 
