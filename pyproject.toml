@@ -110,7 +110,7 @@ dev = [
     "pytest-cov>=5.0",
     "pytest-httpserver>=1.0",
     "mypy>=1.10,<3",
-    "ruff==0.16.6",
+    "ruff==0.16.7",
     "types-pyyaml",
     "types-PyMySQL",
     "testcontainers[postgres]>=4.0",
