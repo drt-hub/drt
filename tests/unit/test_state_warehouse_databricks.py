@@ -423,7 +423,7 @@ class TestDatabricksWarehouseDlqBackend:
         assert not any(sql.startswith("SELECT 1 FROM") for sql in executed)
         assert not any(sql.startswith("UPDATE") for sql in executed)
         merge_sql = next(sql for sql in executed if sql.startswith("MERGE INTO"))
-        assert "USING (VALUES" in merge_sql
+        assert "USING (SELECT * FROM (VALUES" in merge_sql
         assert "parse_json(s.record)" in merge_sql
         assert merge_sql.index("WHEN MATCHED") < merge_sql.index("WHEN NOT MATCHED THEN")
 
@@ -520,7 +520,7 @@ class TestDatabricksWarehouseDlqBackend:
         assert not any(sql.startswith("DELETE FROM") for sql in executed)
         assert not any("CREATE" in sql for sql in executed)
         merge_sql = next(sql for sql in executed if sql.startswith("MERGE INTO"))
-        assert "USING (VALUES" in merge_sql
+        assert "USING (SELECT * FROM (VALUES" in merge_sql
         assert "parse_json(s.record)" in merge_sql
         # Databricks MERGE grammar: WHEN MATCHED before WHEN NOT MATCHED,
         # and no WHEN NOT MATCHED BY SOURCE at all in this design.
@@ -699,7 +699,7 @@ class TestDatabricksWarehouseDlqBackend:
             if str(c.args[0]).startswith("MERGE INTO")
         )
         sql, params = merge_call.args
-        assert "USING (VALUES" in sql
+        assert "USING (SELECT * FROM (VALUES" in sql
         assert "parse_json(s.record)" in sql
         assert "WHEN NOT MATCHED" not in sql
         assert params[0] == "id-1"

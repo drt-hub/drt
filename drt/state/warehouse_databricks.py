@@ -55,9 +55,10 @@ before merge — see below):
   existing ids for `sync_name` are read first (`SELECT id FROM t WHERE
   sync_name = ?`) to compute which are absent from the new `entries`
   (stale), the new entries are upserted **first** via a chunked
-  `MERGE INTO t USING (VALUES (?, ?, ...), ...) AS s(id, sync_name, record,
-  ...) ON t.id = s.id WHEN MATCHED THEN UPDATE / WHEN NOT MATCHED THEN
-  INSERT` (`_rows_per_chunk` from `drt/destinations/databricks.py`, reused
+  `MERGE INTO t USING (SELECT * FROM (VALUES (?, ?, ...), ...) AS s(id,
+  sync_name, record, ...)) AS s ON t.id = s.id WHEN MATCHED THEN UPDATE /
+  WHEN NOT MATCHED THEN INSERT` (`_rows_per_chunk` from
+  `drt/destinations/databricks.py`, reused
   rather than a second copy of the same 255-marker budget), and only
   **after every upsert chunk has succeeded** are the stale ids deleted by
   explicit id (`DELETE ... WHERE id IN (...)`, chunked like `reconcile()`'s
@@ -82,10 +83,21 @@ before merge — see below):
   SOURCE` (doc-derived, not precedent-derived — no call site in this repo
   combines more than one clause type in a single `MERGE`, so there was no
   existing example to check the ordering against before this review caught
-  it). The `VALUES`-derived-table `MERGE` source is the same native `?`
-  binding inside a `VALUES` clause already proven nightly by #734's
-  multi-row `INSERT` batching — a much shorter extrapolation than either the
-  removed scratch table or a `FROM`-less `SELECT ? AS x` derived table.
+  it). **A live-smoke-only regression (never caught by the mocked unit
+  suite, same "mocks can't prove SQL validity" class as #908/#920's
+  history): Databricks' `MERGE` grammar additionally rejects a column-alias
+  list directly on its `USING` source** (`[COLUMN_ALIASES_NOT_ALLOWED]
+  Column aliases are not allowed in MERGE`) — a stricter rule than "a
+  `VALUES` clause accepts native `?` binding," which #734's `INSERT`
+  batching genuinely does prove, but that proof never exercised `MERGE`'s
+  own `USING` grammar position, and the two turned out not to be the same
+  claim. `dwh-smoke`'s Databricks leg went dark for 12 days (#1149, an
+  unrelated workspace-activation issue) and this bug shipped and sat
+  undetected for that entire window. Fixed by nesting the aliased `VALUES`
+  table one level deeper — `USING (SELECT * FROM (VALUES (...)) AS
+  s(...)) AS s` — so the column-alias list sits on the *inner* derived
+  table, and the object `MERGE`'s `USING` clause sees directly is a bare
+  `(SELECT ...) AS s` with no alias list of its own.
   `replace(sync_name, [])` (`clear()`) is special-cased as a plain `DELETE`
   — no entries means every existing id is "stale", so the id-diffing path
   above degenerates to it anyway, and it avoids depending on whatever this
@@ -520,8 +532,8 @@ def _upsert_dlq_entries(cur: Any, t: Any, sync_name: str, entries: list[DeadLett
         for entry in chunk_entries:
             params.extend(_dlq_merge_values_params(sync_name, entry))
         cur.execute(
-            f"MERGE INTO {t} AS t USING (VALUES {values_sql}) AS "
-            f"s({', '.join(_DLQ_COLUMNS)}) "
+            f"MERGE INTO {t} AS t USING "
+            f"(SELECT * FROM (VALUES {values_sql}) AS s({', '.join(_DLQ_COLUMNS)})) AS s "
             "ON t.id = s.id "
             "WHEN MATCHED THEN UPDATE SET record = parse_json(s.record), "
             "error_message = s.error_message, http_status = s.http_status, "
@@ -576,8 +588,8 @@ def _update_dlq_entries(
             )
         params.append(sync_name)
         cur.execute(
-            f"MERGE INTO {t} AS t USING (VALUES {values_sql}) AS "
-            f"s({', '.join(_DLQ_UPDATE_COLUMNS)}) "
+            f"MERGE INTO {t} AS t USING "
+            f"(SELECT * FROM (VALUES {values_sql}) AS s({', '.join(_DLQ_UPDATE_COLUMNS)})) AS s "
             "ON t.id = s.id AND t.sync_name = ? "
             "WHEN MATCHED THEN UPDATE SET record = parse_json(s.record), "
             "error_message = s.error_message, http_status = s.http_status, "
@@ -658,7 +670,8 @@ class DatabricksWarehouseDlqBackend:
         wrong; Codex review caught both before merge).
 
         New/changed entries are upserted **first**, via a chunked
-        ``MERGE ... USING (VALUES ...) AS s(...)``; stale ids (existing but
+        ``MERGE ... USING (SELECT * FROM (VALUES ...) AS s(...)) AS s``;
+        stale ids (existing but
         absent from ``entries``) are only deleted, by explicit id and
         chunked, **after every upsert chunk has succeeded**. This order
         matters for crash-safety, not just final correctness: deleting stale
