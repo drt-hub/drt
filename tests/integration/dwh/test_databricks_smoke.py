@@ -482,7 +482,8 @@ def test_databricks_merge_sparse_rows_preserve_defaults_and_updates() -> None:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                f"CREATE TABLE {fqn} (id INT, score INT, note STRING DEFAULT 'pending') USING DELTA"
+                f"CREATE TABLE {fqn} (id INT, score INT, note STRING DEFAULT 'pending') "
+                "USING DELTA TBLPROPERTIES ('delta.feature.allowColumnDefaults' = 'supported')"
             )
             cur.execute(f"INSERT INTO {fqn} (id, score, note) VALUES (1, 1, 'keep')")
     finally:
