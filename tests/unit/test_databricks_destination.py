@@ -312,8 +312,7 @@ class TestDatabricksDestinationLoad:
         assert (
             "CREATE OR REPLACE TABLE main.default.__drt_staging_user_scores "
             "TBLPROPERTIES ('delta.feature.allowColumnDefaults' = 'supported') "
-            "AS SELECT * FROM main.default.user_scores WHERE 1=0"
-            in sqls
+            "AS SELECT * FROM main.default.user_scores WHERE 1=0" in sqls
         )
         # Staging gets INSERTed before MERGE
         assert any("INSERT INTO main.default.__drt_staging_user_scores" in s for s in sqls)
@@ -737,8 +736,7 @@ class TestDatabricksMirrorMode:
         assert (
             f"CREATE OR REPLACE TABLE {keys_tbl} "
             "TBLPROPERTIES ('delta.feature.allowColumnDefaults' = 'supported') "
-            "AS SELECT id FROM main.default.user_scores WHERE 1=0"
-            in sqls
+            "AS SELECT id FROM main.default.user_scores WHERE 1=0" in sqls
         )
         key_insert_calls = [
             c for c in calls if c.args and c.args[0].startswith(f"INSERT INTO {keys_tbl}")
@@ -953,8 +951,7 @@ class TestDatabricksReplaceMode:
         assert (
             f"CREATE OR REPLACE TABLE {_SHADOW} "
             "TBLPROPERTIES ('delta.feature.allowColumnDefaults' = 'supported') "
-            f"AS SELECT * FROM {_FQ} WHERE 1=0"
-            in sqls
+            f"AS SELECT * FROM {_FQ} WHERE 1=0" in sqls
         )
         assert any(f"INSERT INTO {_SHADOW} (" in s for s in sqls)
 

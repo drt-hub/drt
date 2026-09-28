@@ -60,9 +60,7 @@ from drt.destinations.sql_base import BaseSqlDestination, _union_columns
 from drt.destinations.sql_utils import check_mirror_supported, tagged_cursor
 
 _SWAP_SUFFIX = "__drt_swap"
-_ALLOW_COLUMN_DEFAULTS = (
-    "TBLPROPERTIES ('delta.feature.allowColumnDefaults' = 'supported')"
-)
+_ALLOW_COLUMN_DEFAULTS = "TBLPROPERTIES ('delta.feature.allowColumnDefaults' = 'supported')"
 
 
 def _value_expressions(
