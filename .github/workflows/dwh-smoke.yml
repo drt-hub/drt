@@ -152,6 +152,7 @@ jobs:
       # RUNNING before handing off to pytest, rather than relying on the SQL
       # client to trigger and outlast a cold start on its own.
       - name: Start Databricks SQL warehouse and wait until running
+        id: warehouse
         if: steps.creds.outputs.has_creds == 'true'
         run: |
           # No `set -e`: every failure point below is handled explicitly.
@@ -177,6 +178,7 @@ jobs:
           # locally. Now captures HTTP status + body on every failed
           # attempt and logs it, so the actual cause shows up in the run
           # log itself next time, without needing a manual repro.
+          last_failed_body=""
           curl_retry() {
             local attempt body status
             for attempt in 1 2 3; do
@@ -188,6 +190,7 @@ jobs:
                 return 0
               fi
               echo "  curl attempt ${attempt} failed: HTTP ${status:-<no response>} - ${body}" >&2
+              last_failed_body="$body"
               sleep 3
             done
             return 1
@@ -203,6 +206,23 @@ jobs:
           if [ "$state" != "RUNNING" ]; then
             echo "Starting warehouse..."
             if ! curl_retry -X POST "${api}/start" >/dev/null; then
+              # Free Edition deactivates the whole workspace (denyReason
+              # INACTIVE); the API cannot reactivate it, only a manual Start
+              # in the Databricks console can. That is an operational state,
+              # not a regression, so a *scheduled* run reports it as a loud
+              # warning instead of a red run that reads like a code failure.
+              # Manual runs stay strict: a workflow_dispatch that quietly
+              # skipped the leg would read as a green verification.
+              if [ "${GITHUB_EVENT_NAME}" = "schedule" ] \
+                && [[ "$last_failed_body" == *DENY_NEW_AND_EXISTING_RESOURCES* ]] \
+                && [[ "$last_failed_body" == *'"denyReason":"INACTIVE"'* ]]; then
+                msg="Databricks workspace is INACTIVE - the Databricks leg was NOT run. Press Start in the Databricks console (SQL Warehouses) to reactivate it."
+                echo "::warning title=Databricks smoke skipped::${msg}"
+                echo "### :warning: Databricks smoke skipped" >> "$GITHUB_STEP_SUMMARY"
+                echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+                echo "workspace_inactive=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
               echo "::error::Failed to request warehouse start (see attempt log above for the API's actual response)"
               exit 1
             fi
@@ -228,7 +248,7 @@ jobs:
           fi
           echo "Warehouse is running."
       - name: Run Databricks smoke
-        if: steps.creds.outputs.has_creds == 'true'
+        if: steps.creds.outputs.has_creds == 'true' && steps.warehouse.outputs.workspace_inactive != 'true'
         # #1108's managed-table and warehouse-state-backend smoke suites live
         # in tests/integration/dwh/ alongside test_databricks_smoke.py -- each
         # job here names its files explicitly, not the whole directory, so
