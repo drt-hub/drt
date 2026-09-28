@@ -64,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Databricks merge no longer fails for any Delta target with column `DEFAULT`s**: the merge staging CTAS now enables `delta.feature.allowColumnDefaults`, preventing Databricks' `WRONG_COLUMN_DEFAULTS_FOR_DELTA_FEATURE_NOT_ENABLED` rejection while retaining #1137's presence-flag semantics — an omitted sparse-row field still uses the target's declared default on insert and preserves the existing value on update. The same table property is applied to the replace-swap shadow and mirror-key scratch CTAS paths, which can inherit default metadata from their target too; explicit-schema tracked-diff and warehouse-state tables are unaffected.
+
 ## [1.0.0] - 2026-09-22
 
 ### Added

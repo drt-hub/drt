@@ -306,9 +306,14 @@ class TestDatabricksDestinationLoad:
 
         assert result.success == 2
         sqls = [(call.args[0] if call.args else "") for call in conn._cur.execute.call_args_list]
-        # Staging Delta table created from the target table's schema
-        assert any(
-            "CREATE OR REPLACE TABLE main.default.__drt_staging_user_scores" in s for s in sqls
+        # The inherited DEFAULT metadata requires the Delta table feature on
+        # the new staging table, and Databricks grammar puts TBLPROPERTIES
+        # before AS SELECT.
+        assert (
+            "CREATE OR REPLACE TABLE main.default.__drt_staging_user_scores "
+            "TBLPROPERTIES ('delta.feature.allowColumnDefaults' = 'supported') "
+            "AS SELECT * FROM main.default.user_scores WHERE 1=0"
+            in sqls
         )
         # Staging gets INSERTed before MERGE
         assert any("INSERT INTO main.default.__drt_staging_user_scores" in s for s in sqls)
@@ -387,7 +392,23 @@ class TestDatabricksDestinationLoad:
             for call in conn._cur.execute.call_args_list
             if call.args and call.args[0] == staging_insert
         )
-        assert len(params) == 12
+        # Omitted values remain explicit NULLs in staging. The presence flags
+        # above, not an inherited staging default, choose the target default on
+        # INSERT and preserve the existing target value on UPDATE.
+        assert params == [
+            1,
+            0.95,
+            None,
+            2,
+            None,
+            "flagged",
+            3,
+            0.80,
+            None,
+            4,
+            None,
+            "review",
+        ]
 
     def test_merge_presence_flag_avoids_target_column_collision(
         self, monkeypatch: pytest.MonkeyPatch
@@ -713,7 +734,12 @@ class TestDatabricksMirrorMode:
         calls = conn._cur.execute.call_args_list
         sqls = [(c.args[0] if c.args else "") for c in calls]
         keys_tbl = "main.default.__drt_mirror_keys_user_scores"
-        assert any(s.startswith(f"CREATE OR REPLACE TABLE {keys_tbl}") for s in sqls)
+        assert (
+            f"CREATE OR REPLACE TABLE {keys_tbl} "
+            "TBLPROPERTIES ('delta.feature.allowColumnDefaults' = 'supported') "
+            "AS SELECT id FROM main.default.user_scores WHERE 1=0"
+            in sqls
+        )
         key_insert_calls = [
             c for c in calls if c.args and c.args[0].startswith(f"INSERT INTO {keys_tbl}")
         ]
@@ -924,8 +950,11 @@ class TestDatabricksReplaceMode:
             )
         assert result.success == 1
         sqls = _sqls(conn._cur)
-        assert any(
-            f"CREATE OR REPLACE TABLE {_SHADOW} AS SELECT * FROM {_FQ} WHERE 1=0" in s for s in sqls
+        assert (
+            f"CREATE OR REPLACE TABLE {_SHADOW} "
+            "TBLPROPERTIES ('delta.feature.allowColumnDefaults' = 'supported') "
+            f"AS SELECT * FROM {_FQ} WHERE 1=0"
+            in sqls
         )
         assert any(f"INSERT INTO {_SHADOW} (" in s for s in sqls)
 

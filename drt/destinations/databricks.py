@@ -60,6 +60,9 @@ from drt.destinations.sql_base import BaseSqlDestination, _union_columns
 from drt.destinations.sql_utils import check_mirror_supported, tagged_cursor
 
 _SWAP_SUFFIX = "__drt_swap"
+_ALLOW_COLUMN_DEFAULTS = (
+    "TBLPROPERTIES ('delta.feature.allowColumnDefaults' = 'supported')"
+)
 
 
 def _value_expressions(
@@ -212,10 +215,10 @@ class DatabricksDestination(BaseSqlDestination):
     ) -> dict[str, Any]:
         """Read target columns and their declared defaults once for MERGE.
 
-        ``CREATE TABLE AS SELECT`` creates an empty Delta staging table but
-        strips target ``DEFAULT`` clauses.  We therefore read the metadata from
-        the target itself and use its declared DEFAULT expressions in the final,
-        single MERGE.
+        The staging CTAS can inherit target ``DEFAULT`` metadata, but every
+        union column is explicitly inserted into staging (with ``NULL`` for an
+        omitted value).  We therefore still read the target metadata and use
+        its declared DEFAULT expressions in the final, single MERGE.
         """
         if config.table not in self._column_default_cache:
             # INFORMATION_SCHEMA.COLUMNS.COLUMN_DEFAULT is permanently NULL
@@ -436,7 +439,8 @@ class DatabricksDestination(BaseSqlDestination):
         if not self._swap_shadow_created and not self._swap_direct_write:
             if self._target_exists(cur, config):
                 cur.execute(
-                    f"CREATE OR REPLACE TABLE {shadow_fq} AS SELECT * FROM {table_fq} WHERE 1=0"
+                    f"CREATE OR REPLACE TABLE {shadow_fq} {_ALLOW_COLUMN_DEFAULTS} "
+                    f"AS SELECT * FROM {table_fq} WHERE 1=0"
                 )
                 self._swap_shadow_created = True
                 self._swap_table = table_fq
@@ -534,7 +538,8 @@ class DatabricksDestination(BaseSqlDestination):
             # final MERGE preserve fields a particular source row omitted.
             staging_table = f"{config.catalog}.{config.schema_}.__drt_staging_{config.table}"
             cur.execute(
-                f"CREATE OR REPLACE TABLE {staging_table} AS SELECT * FROM {table_fq} WHERE 1=0"
+                f"CREATE OR REPLACE TABLE {staging_table} {_ALLOW_COLUMN_DEFAULTS} "
+                f"AS SELECT * FROM {table_fq} WHERE 1=0"
             )
             if flags:
                 flag_ddl = ", ".join(f"{flag} BOOLEAN" for flag in flags.values())
@@ -775,7 +780,8 @@ class DatabricksDestination(BaseSqlDestination):
         row_marker = "(" + ", ".join(["?"] * len(upsert_cols)) + ")"
 
         cur.execute(
-            f"CREATE OR REPLACE TABLE {keys_table} AS SELECT {key_cols} FROM {table_fq} WHERE 1=0"
+            f"CREATE OR REPLACE TABLE {keys_table} {_ALLOW_COLUMN_DEFAULTS} "
+            f"AS SELECT {key_cols} FROM {table_fq} WHERE 1=0"
         )
         insert_key_prefix = f"INSERT INTO {keys_table} ({key_cols}) VALUES "
         rows_per = _rows_per_chunk(len(upsert_cols))
