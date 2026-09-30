@@ -203,13 +203,34 @@ Released as **v1.0.0** on 2026-09-22. See [CHANGELOG.md](CHANGELOG.md#100---2026
 
 **Hardening pass (added 2026-09-17, see decision note below) — all six closed:** #1157 (`google_ads.cloud_project_id`, opt-in Cloud-project identity for correct rate-limit quota scoping under Google's new access model); #903 (`drt serve --auth oidc`, OIDC JWT verification for the Pub/Sub push leg via `drt-core[serve-oidc]`, five Codex review rounds — see CHANGELOG); #1075 (`klaviyo.backfill`, suppresses live flow triggers during historical event replay, also bumped the connector's default API revision to `2026-07-15`); #778 (`target/drt/run_results.json`, a durable per-invocation run artifact — seven Codex review rounds, the last of which replaced an increasingly-patched redaction regex with a structural fix once the regex proved to have no fixed point; see CHANGELOG for the full arc); #1134 (six destinations deriving write columns from `records[0]` alone — five of six fixed pre-dating this pass, `file.py` determined not a bug, BigQuery's leg stays genuinely blocked on #1137's MERGE-NULL-clobber wall, tracked there); #1147 (`drt retry --limit`'s silent-duplicate-drop hazard — the hazard itself fixed, a narrower `updates`-cross-contamination residual left open/unmilestoned pending a future `DlqBackend` Protocol change). **Two more real bugs surfaced and fixed during this pass's own verification work, neither part of the original six**: `dwh-smoke`'s Databricks leg had gone dark for 12 days (#1149, a Databricks workspace identity-verification gate, invisible because the workflow swallowed the API's actual error) and, once restored, immediately caught a genuinely pre-existing bug — Databricks' warehouse-backed DLQ (#1108) had been unable to write at all since it shipped, due to a `MERGE` grammar restriction on column-alias lists. Both fixed and verified live against a real warehouse before merging (see CHANGELOG).
 
-**Explicitly deferred to v1.1+, not v1.0** (considered and rejected for this release on 2026-09-17 — see decision note): diff-based incremental (#755/#960/#920, foundational new engine capability, unbuilt from zero — too large to build carefully inside this release's timeline), BigQuery `replace`/`mirror` parity (#1055, Large effort, real gap but not correctness-critical), the schema-management cluster (#760/#761/#896), windowed backfill (#758), multi-destination fan-out (#425), sync dependency graph (#426), built-in scheduler (#428, also needs re-litigating against ADR 0004's "no daemon" Tier-1 posture), upstream API change detection (#649, still research-phase). Also unfinished: the v1.0 launch campaign itself (#306, blog/HN/Reddit/X — in progress, tracked separately from the code release).
+**Shipped Postgres-first, other dialects continue in v1.1** (ADR 0005's warehouse-write track): the warehouse-managed table primitive (#960), the warehouse-backed state/history/DLQ backend (#920), diff-based incremental `sync.incremental_strategy: diff` (#755) and `sync.mirror.strategy: diff` (#1110) all landed in this release. The managed-table primitive and state backend reach Snowflake and Databricks as well; the diff-incremental source leg is Postgres-only for now. The remaining dialect legs are tracked under [v1.1](#v11--warehouse-parity) below.
 
-**Decision note (2026-09-17):** v1.0's original scope was narrowly "Protocol freeze + semver + launch," which was already essentially complete. Repo owner wanted v1.0 to land "deliberately and substantially" rather than as a bare version bump, so a bounded hardening pass was added — real correctness/security bugs and one high-leverage ecosystem-polish item (#778), explicitly excluding any unbuilt large engine feature so the freeze isn't rushed. Large new capabilities stay queued for a v1.1 push right after the stable release.
+**Explicitly deferred to v1.1+, not v1.0** (considered and rejected for this release on 2026-09-17 — see decision note): BigQuery `replace`/`mirror` parity (#1055, Large effort, real gap but not correctness-critical), the schema-management cluster (#760/#761/#896), windowed backfill (#758), multi-destination fan-out (#425), sync dependency graph (#426), built-in scheduler (#428, also needs re-litigating against ADR 0004's "no daemon" Tier-1 posture), upstream API change detection (#649, still research-phase). The v1.0 launch campaign itself (#306, blog/HN/Reddit/X) is tracked separately from the code release.
+
+**Decision note (2026-09-17):** v1.0's original scope was narrowly "Protocol freeze + semver + launch," which was already essentially complete. Repo owner wanted v1.0 to land "deliberately and substantially" rather than as a bare version bump, so a bounded hardening pass was added — real correctness/security bugs and one high-leverage ecosystem-polish item (#778), explicitly excluding any unbuilt large engine feature so the freeze isn't rushed. Large new capabilities stay queued for v1.1 right after the stable release.
 
 No breaking changes — drop-in upgrade from v0.10.0.
 
-**Target:** 2026-11 · **Progress:** [milestone/7](https://github.com/drt-hub/drt/milestone/7)
+---
+
+## v1.1 — Warehouse parity
+
+**Theme: every capability that shipped Postgres-first in v1.0 reaches the other warehouses.** v1.0 landed ADR 0005's warehouse-write track (managed-table primitive, warehouse state, diff-based incremental) by proving each piece live against one dialect at a time, because a mock cursor cannot prove SQL validity (#908, #1175). v1.1 finishes the matrix, one live-verified dialect per landing, instead of adding new engine surface.
+
+| Capability | Postgres | Snowflake | Databricks | BigQuery |
+|---|---|---|---|---|
+| Managed-table primitive (#960) | ✅ | ✅ | ✅ | ✅ source side (#1124) |
+| Warehouse state / history / DLQ (#920) | ✅ | ✅ | merged, live verification pending ([#1108](https://github.com/drt-hub/drt/issues/1108)) | [#1107](https://github.com/drt-hub/drt/issues/1107) — needs an IAM decision |
+| Diff-based incremental (#755) | ✅ | [#1112](https://github.com/drt-hub/drt/issues/1112) | [#1114](https://github.com/drt-hub/drt/issues/1114) | [#1113](https://github.com/drt-hub/drt/issues/1113) |
+| `sync.mode: replace` / `mirror` (destination) | ✅ | ✅ | ✅ | [#1055](https://github.com/drt-hub/drt/issues/1055) |
+
+**Also in scope:** `sync.mirror.strategy: diff` for ClickHouse and Databricks (the shared finalizer only covers Postgres/MySQL/Snowflake today), and the BigQuery `_merge` leg of [#1134](https://github.com/drt-hub/drt/issues/1134) (its blocker, #1137, is closed).
+
+**Patch lane (v1.0.x):** correctness fixes found after launch ship as patch releases without waiting for v1.1.
+
+**Deliberately not in v1.1:** the schema-management cluster (#760/#761/#896) is the v1.2 candidate; scheduler / fan-out / `depends_on` (#428/#425/#426) stay parked until there is user demand and, for #428, an ADR 0004 re-decision.
+
+**Progress:** [milestone/14](https://github.com/drt-hub/drt/milestone/14)
 
 ---
 
