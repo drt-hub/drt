@@ -365,15 +365,10 @@ class SnowflakeSource:
     # --- SnapshotDiffSource (#755/#1112, ADR 0005 step 5) -------------------
 
     def _snapshot_table_names(self, sync_name: str) -> tuple[str, str]:
-        # Managed identifiers fold to uppercase, so sync names differing only
-        # by case ("users" / "Users") would share one baseline. A stable hash
-        # of the exact name keeps them apart; all-lowercase names stay plain.
-        suffix = (
-            ""
-            if sync_name == sync_name.lower()
-            else ("_" + hashlib.sha1(sync_name.encode()).hexdigest()[:8])
-        )
-        base = f"_drt_snapshot_{sync_name}{suffix}"
+        # Managed identifiers fold to uppercase ("users"/"Users", "straße"/
+        # "strasse"), so the exact name goes in as a digest to stay injective.
+        digest = hashlib.sha1(sync_name.encode()).hexdigest()[:8]
+        base = f"_drt_snapshot_{sync_name}_{digest}"
         return base, f"{base}_scratch"
 
     @staticmethod
@@ -457,6 +452,9 @@ class SnowflakeSource:
                     f"model's output columns {all_columns}."
                 )
             sql_keys = [r for r in resolved_keys if r is not None]
+            # Records must carry the key names the YAML configured (destinations
+            # and masking look them up exactly), not Snowflake's folded casing.
+            key_rename = {r: c for r, c in zip(sql_keys, key_columns) if r != c}
             if hash_columns == "all":
                 diff_columns = [column for column in all_columns if column not in sql_keys]
             else:
@@ -492,6 +490,7 @@ class SnowflakeSource:
             added = self._stream_query(
                 config,
                 f"SELECT * FROM {scratch_ident}",
+                rename=key_rename,
                 scratch_table=scratch_table,
                 expected_token=run_token,
                 sync_name=sync_name,
@@ -506,6 +505,7 @@ class SnowflakeSource:
                 f"SELECT s.* FROM {scratch_ident} AS s "
                 f"LEFT JOIN {current_ident} AS c ON {join_condition} "
                 f"WHERE {_column_ref('c', sql_keys[0])} IS NULL",
+                rename=key_rename,
                 scratch_table=scratch_table,
                 expected_token=run_token,
                 sync_name=sync_name,
@@ -538,6 +538,7 @@ class SnowflakeSource:
                     config,
                     f"SELECT s.* FROM {scratch_ident} AS s "
                     f"JOIN {current_ident} AS c ON {join_condition}" + changed_filter,
+                    rename=key_rename,
                     scratch_table=scratch_table,
                     expected_token=run_token,
                     sync_name=sync_name,
@@ -562,6 +563,7 @@ class SnowflakeSource:
         expected_token: str,
         sync_name: str,
         query_tags: dict[str, str] | None,
+        rename: dict[str, str] | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Stream one snapshot classification query on its own connection.
 
@@ -588,6 +590,8 @@ class SnowflakeSource:
         conn, cur, columns = with_retry(
             _connect_and_execute, RetryConfig(), retry_on=self._is_transient
         )
+        if rename:
+            columns = [rename.get(c, c) for c in columns]
         try:
             for row in cur:
                 yield dict(zip(columns, row))

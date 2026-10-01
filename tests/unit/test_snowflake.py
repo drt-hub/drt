@@ -596,12 +596,12 @@ class TestSnapshotDiffSource:
         assert list(result.changed) == []
         assert list(result.removed_keys) == []
         assert stream.call_args.args[1] == (
-            'SELECT * FROM "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_DAILY-USERS_SCRATCH"'
+            'SELECT * FROM "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_DAILY-USERS_4C0B66A8_SCRATCH"'
         )
         create_sql = conn.cursor.return_value.execute.call_args_list[0].args[0]
         assert create_sql.startswith(
             'CREATE OR REPLACE TABLE "ANALYTICS"."_DRT".'
-            '"_DRT_SNAPSHOT_DAILY-USERS_SCRATCH" COMMENT = \''
+            '"_DRT_SNAPSHOT_DAILY-USERS_4C0B66A8_SCRATCH" COMMENT = \''
         )
         create_call = conn.cursor.return_value.execute.call_args_list[0]
         assert len(create_call.args) == 1  # no bind params: model SQL may contain '%'
@@ -659,7 +659,7 @@ class TestSnapshotDiffSource:
         changed_sql = queries[2]
         assert "HASH" not in changed_sql
         assert "WHERE" not in changed_sql
-        assert 'JOIN "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_USERS" AS c ON s."id" = c."id"' in (
+        assert 'JOIN "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_USERS_5B7DCD14" AS c ON s."id" = c."id"' in (
             changed_sql
         )
 
@@ -671,13 +671,65 @@ class TestSnapshotDiffSource:
     def test_key_missing_from_baseline_restarts_as_first_run(self) -> None:
         result, queries = self._extract_with_baseline_columns(["id", "note"], ["note"])
         assert result.is_first_run is True
-        assert queries == ['SELECT * FROM "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_USERS_SCRATCH"']
+        assert queries == [
+            'SELECT * FROM "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_USERS_5B7DCD14_SCRATCH"'
+        ]
+
+    def test_folded_key_columns_are_renamed_back_in_added_and_changed_records(self) -> None:
+        conn = self._snapshot_conn(["ID", "NOTE"], current_exists=True)
+        source = SnowflakeSource()
+        with (
+            patch.object(source, "ensure_managed_schema"),
+            patch.object(source, "_connect", return_value=conn),
+            patch.object(
+                source, "_stream_query", side_effect=[iter(()), iter(()), iter(())]
+            ) as stream,
+        ):
+            source.extract_snapshot_diff(
+                "SELECT id, note FROM users",
+                _config(),
+                sync_name="users",
+                key_columns=["id"],
+                hash_columns="all",
+            )
+
+        # added, removed (aliased in SQL instead), changed
+        assert [call.kwargs.get("rename") for call in stream.call_args_list] == [
+            {"ID": "id"},
+            None,
+            {"ID": "id"},
+        ]
+
+    def test_stream_query_applies_rename_to_row_keys(self) -> None:
+        cur = _fake_cursor(["ID", "NOTE"], [(1, "a")])
+        cur.fetchone.return_value = ("tok",)
+        conn = _fake_conn(cur)
+        source = SnowflakeSource()
+        with patch.object(source, "_connect", return_value=conn):
+            rows = list(
+                source._stream_query(
+                    _config(),
+                    "SELECT * FROM scratch",
+                    scratch_table="scratch",
+                    expected_token="tok",
+                    sync_name="users",
+                    query_tags=None,
+                    rename={"ID": "id"},
+                )
+            )
+        assert rows == [{"id": 1, "NOTE": "a"}]
+
+    def test_unicode_fold_collisions_get_distinct_tables(self) -> None:
+        source = SnowflakeSource()
+        a = source._snapshot_table_names("straße")
+        b = source._snapshot_table_names("strasse")
+        assert {t.upper() for t in a}.isdisjoint({t.upper() for t in b})
 
     def test_sync_names_differing_only_by_case_get_distinct_tables(self) -> None:
         source = SnowflakeSource()
         lower = source._snapshot_table_names("users")
         upper = source._snapshot_table_names("Users")
-        assert lower == ("_drt_snapshot_users", "_drt_snapshot_users_scratch")
+        assert lower == ("_drt_snapshot_users_5b7dcd14", "_drt_snapshot_users_5b7dcd14_scratch")
         assert {t.upper() for t in lower}.isdisjoint({t.upper() for t in upper})
 
     def test_unquoted_model_columns_resolve_through_snowflake_uppercase_fold(self) -> None:
@@ -733,7 +785,7 @@ class TestSnapshotDiffSource:
         assert list(result.removed_keys) == [{"id": 3}]
 
         added_sql, removed_sql, changed_sql = [call.args[1] for call in stream.call_args_list]
-        assert 'LEFT JOIN "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_DAILY-USERS" AS c' in added_sql
+        assert 'LEFT JOIN "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_DAILY-USERS_4C0B66A8" AS c' in added_sql
         assert 's."id" = c."id"' in added_sql
         assert 'WHERE c."id" IS NULL' in added_sql
         assert removed_sql.startswith('SELECT c."id" FROM ')
@@ -828,7 +880,7 @@ class TestSnapshotDiffSource:
                 source._stream_query(
                     _config(),
                     "SELECT * FROM scratch",
-                    scratch_table="_drt_snapshot_users_scratch",
+                    scratch_table="_drt_snapshot_users_5b7dcd14_scratch",
                     expected_token="run-token",
                     sync_name="users",
                     query_tags=None,
@@ -859,7 +911,7 @@ class TestSnapshotDiffSource:
         executed = [call.args[0] for call in cur.execute.call_args_list]
         assert any(" SWAP WITH " in sql for sql in executed)
         assert executed[-1] == (
-            'DROP TABLE IF EXISTS "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_DAILY-USERS_SCRATCH"'
+            'DROP TABLE IF EXISTS "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_DAILY-USERS_4C0B66A8_SCRATCH"'
         )
 
     def test_commit_renames_scratch_on_first_promotion(self) -> None:
@@ -879,8 +931,8 @@ class TestSnapshotDiffSource:
 
         executed = [call.args[0] for call in cur.execute.call_args_list]
         assert (
-            'ALTER TABLE "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_USERS_SCRATCH" '
-            'RENAME TO "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_USERS"'
+            'ALTER TABLE "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_USERS_5B7DCD14_SCRATCH" '
+            'RENAME TO "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_USERS_5B7DCD14"'
         ) in executed
 
     def test_commit_token_mismatch_raises_without_swapping(self) -> None:
@@ -940,7 +992,7 @@ class TestSnapshotDiffSource:
         executed = [call.args[0] for call in cur.execute.call_args_list]
         renames = [sql for sql in executed if " RENAME TO " in sql]
         assert len(renames) == 2
-        assert renames[1].endswith('_DRT_SNAPSHOT_USERS_SCRATCH"')
+        assert renames[1].endswith('_DRT_SNAPSHOT_USERS_5B7DCD14_SCRATCH"')
 
     def test_commit_raises_when_scratch_vanished_and_baseline_is_not_ours(self) -> None:
         conn = MagicMock()

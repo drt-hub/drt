@@ -254,7 +254,7 @@ yielded is not retried.
 ## As a source — diff-based incremental ([#1112](https://github.com/drt-hub/drt/issues/1112))
 
 Snowflake supports `sync.incremental_strategy: diff` for models without a reliable cursor column.
-Each run materializes the full model result in `_drt_snapshot_<sync_name>` under the source
+Each run materializes the full model result in `_drt_snapshot_<sync_name>_<digest>` under the source
 profile's `managed_schema`, then classifies added, changed, and removed rows with server-side joins
 on `destination.upsert_key`. Added and changed rows follow the normal upsert path; removed keys are
 available in `SyncResult.diff_removed_keys`, power `mirror.strategy: diff`, and appear in

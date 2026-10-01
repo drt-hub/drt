@@ -56,7 +56,7 @@ def _profile(creds: dict[str, str]) -> SnowflakeProfile:
         kwargs["private_key_env"] = KEY_ENV
     else:
         kwargs["password_env"] = PASSWORD_ENV
-    return SnowflakeProfile(**kwargs)  # type: ignore[arg-type]
+    return SnowflakeProfile.model_validate(kwargs)
 
 
 def _connect(creds: dict[str, str]):
