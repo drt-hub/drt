@@ -309,8 +309,8 @@ TOCTOU window remains between each token check and the following statement. drt 
 lock across extraction, destination writes, and commit because a row failure deliberately skips
 commit and could leak that lock in a long-running process. Use
 `drt serve` request coalescing ([#854](https://github.com/drt-hub/drt/issues/854)) or scheduler
-overlap protection. The concurrent-replacement behavior has unit coverage but is **not yet live
-verified**; verification remains pending until the Snowflake `dwh-smoke` test runs.
+overlap protection. The concurrent-replacement detection is covered by a live `dwh-smoke` test
+(`test_snowflake_diff_incremental_smoke.py`) as well as unit tests.
 
 ## Notes
 
