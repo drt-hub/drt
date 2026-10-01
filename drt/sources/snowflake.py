@@ -16,6 +16,7 @@ Example ~/.drt/profiles.yml:
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections.abc import Iterator
 from typing import Any, Literal
@@ -341,6 +342,17 @@ class SnowflakeSource:
         )
         return cur.fetchone() is not None
 
+    @staticmethod
+    def _managed_table_columns(cur: Any, config: SnowflakeProfile, table_name: str) -> list[str]:
+        columns_table = f"{_managed_identifier(config.database)}.INFORMATION_SCHEMA.COLUMNS"
+        cur.execute(
+            f"SELECT column_name FROM {columns_table} "
+            "WHERE UPPER(table_schema) = UPPER(%s) "
+            "AND UPPER(table_name) = UPPER(%s) ORDER BY ordinal_position",
+            (config.managed_schema, table_name),
+        )
+        return [row[0] for row in cur.fetchall()]
+
     def drop_managed_table(self, config: ProfileConfigLike, table_name: str) -> None:
         assert isinstance(config, SnowflakeProfile)
         conn = self._connect(config)
@@ -353,7 +365,16 @@ class SnowflakeSource:
     # --- SnapshotDiffSource (#755/#1112, ADR 0005 step 5) -------------------
 
     def _snapshot_table_names(self, sync_name: str) -> tuple[str, str]:
-        return f"_drt_snapshot_{sync_name}", f"_drt_snapshot_{sync_name}_scratch"
+        # Managed identifiers fold to uppercase, so sync names differing only
+        # by case ("users" / "Users") would share one baseline. A stable hash
+        # of the exact name keeps them apart; all-lowercase names stay plain.
+        suffix = (
+            ""
+            if sync_name == sync_name.lower()
+            else ("_" + hashlib.sha1(sync_name.encode()).hexdigest()[:8])
+        )
+        base = f"_drt_snapshot_{sync_name}{suffix}"
+        return base, f"{base}_scratch"
 
     @staticmethod
     def _snapshot_token_key(config: SnowflakeProfile, sync_name: str) -> tuple[str, str]:
@@ -425,14 +446,7 @@ class SnowflakeSource:
                 f"CREATE OR REPLACE TABLE {scratch_ident} COMMENT = '{run_token}' AS {query}"
             )
             self._snapshot_diff_tokens[self._snapshot_token_key(config, sync_name)] = run_token
-            columns_table = f"{_managed_identifier(config.database)}.INFORMATION_SCHEMA.COLUMNS"
-            cur.execute(
-                f"SELECT column_name FROM {columns_table} "
-                "WHERE UPPER(table_schema) = UPPER(%s) "
-                "AND UPPER(table_name) = UPPER(%s) ORDER BY ordinal_position",
-                (config.managed_schema, scratch_table),
-            )
-            all_columns = [row[0] for row in cur.fetchall()]
+            all_columns = self._managed_table_columns(cur, config, scratch_table)
 
             resolved_keys = [_resolve_output_column(c, all_columns) for c in key_columns]
             missing_keys = [c for c, r in zip(key_columns, resolved_keys) if r is None]
@@ -457,6 +471,20 @@ class SnowflakeSource:
                 diff_columns = [r for r in resolved_hash if r is not None]
 
             is_first_run = not self._managed_table_exists(cur, config, current_table)
+            reclassify_all_existing = False
+            if not is_first_run:
+                baseline_columns = self._managed_table_columns(cur, config, current_table)
+                if any(column not in baseline_columns for column in sql_keys):
+                    # The key set changed since the baseline was written, so the
+                    # old snapshot cannot be joined; start over from this one.
+                    is_first_run = True
+                else:
+                    # A column added to the model is absent from the baseline,
+                    # so every existing row must be re-sent to populate it.
+                    reclassify_all_existing = any(
+                        column not in baseline_columns for column in diff_columns
+                    )
+                    diff_columns = [c for c in diff_columns if c in baseline_columns]
         finally:
             conn.close()
 
@@ -499,13 +527,17 @@ class SnowflakeSource:
                 sync_name=sync_name,
                 query_tags=query_tags,
             )
-            if diff_columns:
+            if diff_columns or reclassify_all_existing:
+                changed_filter = (
+                    ""
+                    if reclassify_all_existing
+                    else f" WHERE {_diff_hash_expr(diff_columns, 's')} "
+                    f"<> {_diff_hash_expr(diff_columns, 'c')}"
+                )
                 changed = self._stream_query(
                     config,
                     f"SELECT s.* FROM {scratch_ident} AS s "
-                    f"JOIN {current_ident} AS c ON {join_condition} "
-                    f"WHERE {_diff_hash_expr(diff_columns, 's')} "
-                    f"<> {_diff_hash_expr(diff_columns, 'c')}",
+                    f"JOIN {current_ident} AS c ON {join_condition}" + changed_filter,
                     scratch_table=scratch_table,
                     expected_token=run_token,
                     sync_name=sync_name,

@@ -629,6 +629,57 @@ class TestSnapshotDiffSource:
         assert len(create_call.args) == 1
         assert create_call.args[0].endswith(f" AS {model_sql}")
 
+    def _extract_with_baseline_columns(
+        self, scratch: list[str], baseline: list[str], **kwargs: Any
+    ) -> tuple[Any, list[str]]:
+        conn = self._snapshot_conn(scratch, current_exists=True)
+        conn.cursor.return_value.fetchall.side_effect = [
+            [(c,) for c in scratch],
+            [(c,) for c in baseline],
+        ]
+        source = SnowflakeSource()
+        with (
+            patch.object(source, "ensure_managed_schema"),
+            patch.object(source, "_connect", return_value=conn),
+            patch.object(
+                source, "_stream_query", side_effect=[iter(()), iter(()), iter(())]
+            ) as stream,
+        ):
+            result = source.extract_snapshot_diff(
+                "SELECT * FROM users",
+                _config(),
+                sync_name="users",
+                key_columns=["id"],
+                hash_columns=kwargs.get("hash_columns", "all"),
+            )
+        return result, [call.args[1] for call in stream.call_args_list]
+
+    def test_column_added_since_baseline_resends_every_existing_row(self) -> None:
+        _, queries = self._extract_with_baseline_columns(["id", "note", "plan"], ["id", "note"])
+        changed_sql = queries[2]
+        assert "HASH" not in changed_sql
+        assert "WHERE" not in changed_sql
+        assert 'JOIN "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_USERS" AS c ON s."id" = c."id"' in (
+            changed_sql
+        )
+
+    def test_column_dropped_from_model_hashes_only_shared_columns(self) -> None:
+        _, queries = self._extract_with_baseline_columns(["id", "note"], ["id", "note", "old"])
+        assert 'HASH(s."note") <> HASH(c."note")' in queries[2]
+        assert "old" not in queries[2]
+
+    def test_key_missing_from_baseline_restarts_as_first_run(self) -> None:
+        result, queries = self._extract_with_baseline_columns(["id", "note"], ["note"])
+        assert result.is_first_run is True
+        assert queries == ['SELECT * FROM "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_USERS_SCRATCH"']
+
+    def test_sync_names_differing_only_by_case_get_distinct_tables(self) -> None:
+        source = SnowflakeSource()
+        lower = source._snapshot_table_names("users")
+        upper = source._snapshot_table_names("Users")
+        assert lower == ("_drt_snapshot_users", "_drt_snapshot_users_scratch")
+        assert {t.upper() for t in lower}.isdisjoint({t.upper() for t in upper})
+
     def test_unquoted_model_columns_resolve_through_snowflake_uppercase_fold(self) -> None:
         conn = self._snapshot_conn(["ID", "NOTE"], current_exists=True)
         source = SnowflakeSource()
