@@ -21,6 +21,16 @@ name: dwh-smoke
 
 on:
   workflow_dispatch:
+    inputs:
+      snowflake_tests:
+        description: >-
+          Space-separated Snowflake smoke files to run instead of the full
+          set (e.g. tests/integration/dwh/test_snowflake_diff_incremental_smoke.py).
+          Empty runs all of them. Each run wakes the paid smoke warehouse, so
+          narrowing a development run keeps the account's credits down.
+        required: false
+        default: ''
+        type: string
   schedule:
     # Nightly 03:00 UTC — offset from CI (00:00) and the weekly audits.
     - cron: '0 3 * * *'
@@ -40,12 +50,10 @@ jobs:
     # producing a false finding or clobbering the other run's restore
     # (Codex review, #985). cancel-in-progress: false queues rather than
     # kills an in-flight run, which is safer than cancelling mid-ALTER.
-    # Shared with cost-digest.yml's digest job: that workflow deliberately
-    # piggybacks on this same warehouse right after this job (see its own
-    # comment), and its usage-view query would auto-resume a warehouse this
-    # job just suspended for the probe test -- producing a false regression
-    # (or getting interrupted itself). Same group name, same reasoning
-    # (Codex review, #985).
+    # Shared with cost-digest.yml's digest job: its usage-view query would
+    # auto-resume a warehouse this job just suspended for the probe test --
+    # producing a false regression (or getting interrupted itself). Same
+    # group name, same reasoning (Codex review, #985).
     concurrency:
       group: dwh-smoke-snowflake
       cancel-in-progress: false
@@ -85,16 +93,35 @@ jobs:
         run: uv pip install --system -e ".[dev,duckdb,snowflake]"
       - name: Run Snowflake smoke
         if: steps.creds.outputs.has_creds == 'true'
+        env:
+          SNOWFLAKE_TESTS: ${{ inputs.snowflake_tests }}
         # Each Snowflake smoke file is explicit rather than directory-wide;
         # new capability legs such as #1112 must be listed here or they never
-        # run in the credentialed workflow.
+        # run in the credentialed workflow. A manual dispatch may narrow the
+        # set via `snowflake_tests`; the input goes through an env var and is
+        # checked against the expected path shape before reaching pytest.
         run: |
-          pytest -m dwh_smoke \
-            tests/integration/dwh/test_snowflake_smoke.py \
-            tests/integration/dwh/test_snowflake_managed_table_smoke.py \
-            tests/integration/dwh/test_snowflake_warehouse_state_smoke.py \
-            tests/integration/dwh/test_snowflake_diff_incremental_smoke.py \
-            -v
+          if [ -z "$SNOWFLAKE_TESTS" ]; then
+            files=(
+              tests/integration/dwh/test_snowflake_smoke.py
+              tests/integration/dwh/test_snowflake_managed_table_smoke.py
+              tests/integration/dwh/test_snowflake_warehouse_state_smoke.py
+              tests/integration/dwh/test_snowflake_diff_incremental_smoke.py
+            )
+          else
+            files=()
+            for f in $SNOWFLAKE_TESTS; do
+              case "$f" in
+                tests/integration/dwh/test_snowflake_*_smoke.py | tests/integration/dwh/test_snowflake_smoke.py) ;;
+                *) echo "::error::Not a Snowflake smoke file: $f"; exit 1 ;;
+              esac
+              if [ ! -f "$f" ]; then
+                echo "::error::No such file: $f"; exit 1
+              fi
+              files+=("$f")
+            done
+          fi
+          pytest -m dwh_smoke "${files[@]}" -v
 
   databricks:
     name: Databricks smoke

@@ -12,10 +12,11 @@
 # lives in the accounts: Snowflake resource monitor, GCP budget,
 # Free Edition's structural $0.
 #
-# Runs daily at 03:20 UTC — right after dwh-smoke (03:00), so the digest
-# includes the night's smoke usage AND reuses the still-warm Snowflake
-# warehouse (AUTO_SUSPEND=60s bills a fresh ~2-minute resume cycle per
-# burst; piggybacking saves ~1 credit/month ≈ $3).
+# Runs daily at 03:20 UTC, after dwh-smoke (03:00), so the digest normally
+# includes the night's smoke usage. Do not count on reusing dwh-smoke's warm
+# Snowflake warehouse: GitHub delays scheduled runs by minutes to hours
+# independently per workflow, and AUTO_SUSPEND=60s means the warehouse is
+# usually cold again, so assume the digest pays its own resume (~1 credit/month).
 
 name: cost-digest
 
@@ -31,11 +32,10 @@ jobs:
   digest:
     runs-on: ubuntu-latest
     if: github.repository == 'drt-hub/drt'
-    # Shared with dwh-smoke.yml's snowflake job: this digest deliberately
-    # piggybacks on the same still-warm warehouse right after that job runs
-    # (see the comment above), and its usage-view query would auto-resume a
-    # warehouse dwh-smoke's probe test just suspended -- producing a false
-    # regression there, or getting interrupted itself (Codex review, #985).
+    # Shared with dwh-smoke.yml's snowflake job: this digest's usage-view
+    # query would auto-resume a warehouse dwh-smoke's probe test just
+    # suspended -- producing a false regression there, or getting interrupted
+    # itself (Codex review, #985).
     concurrency:
       group: dwh-smoke-snowflake
       cancel-in-progress: false
