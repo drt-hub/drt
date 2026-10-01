@@ -629,6 +629,62 @@ class TestSnapshotDiffSource:
         assert len(create_call.args) == 1
         assert create_call.args[0].endswith(f" AS {model_sql}")
 
+    def test_transient_error_in_setup_is_retried_with_a_stable_run_token(self) -> None:
+        pytest.importorskip("snowflake.connector")
+        from snowflake.connector import errors as sf_errors
+
+        failing_conn = self._snapshot_conn(["id"], current_exists=False)
+        failing_conn.cursor.return_value.execute.side_effect = sf_errors.OperationalError(
+            msg="warehouse unavailable"
+        )
+        good_conn = self._snapshot_conn(["id"], current_exists=False)
+        source = SnowflakeSource()
+        with (
+            patch.object(source, "ensure_managed_schema"),
+            patch.object(source, "_connect", side_effect=[failing_conn, good_conn]) as connect,
+            patch.object(source, "_stream_query", return_value=iter(())) as stream,
+            patch("drt.destinations.retry.time.sleep"),
+        ):
+            result = source.extract_snapshot_diff(
+                "SELECT id AS id FROM users",
+                _config(),
+                sync_name="users",
+                key_columns=["id"],
+                hash_columns="all",
+            )
+
+        assert result.is_first_run is True
+        assert connect.call_count == 2
+        failing_conn.close.assert_called_once()
+        good_conn.close.assert_called_once()
+        failed_sql = failing_conn.cursor.return_value.execute.call_args_list[0].args[0]
+        good_sql = good_conn.cursor.return_value.execute.call_args_list[0].args[0]
+        token = re.search(r"COMMENT = '([0-9a-f-]{36})' AS ", good_sql).group(1)
+        assert f"COMMENT = '{token}'" in failed_sql
+        assert stream.call_args.kwargs["expected_token"] == token
+        assert source._snapshot_diff_tokens[source._snapshot_token_key(_config(), "users")] == token
+
+    def test_missing_key_column_in_setup_is_not_retried(self) -> None:
+        conn = self._snapshot_conn(["note"], current_exists=False)
+        source = SnowflakeSource()
+        with (
+            patch.object(source, "ensure_managed_schema"),
+            patch.object(source, "_connect", return_value=conn) as connect,
+            patch("drt.destinations.retry.time.sleep") as sleep,
+        ):
+            with pytest.raises(ValueError, match="not found in the model's output columns"):
+                source.extract_snapshot_diff(
+                    "SELECT note FROM users",
+                    _config(),
+                    sync_name="users",
+                    key_columns=["id"],
+                    hash_columns="all",
+                )
+
+        assert connect.call_count == 1
+        conn.close.assert_called_once()
+        sleep.assert_not_called()
+
     def _extract_with_baseline_columns(
         self, scratch: list[str], baseline: list[str], **kwargs: Any
     ) -> tuple[Any, list[str]]:

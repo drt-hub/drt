@@ -421,70 +421,77 @@ class SnowflakeSource:
         """See ``SnapshotDiffSource.extract_snapshot_diff``."""
         assert isinstance(config, SnowflakeProfile)
 
-        self.ensure_managed_schema(config)
         current_table, scratch_table = self._snapshot_table_names(sync_name)
         current_ident = _managed_table_identifier(config, current_table)
         scratch_ident = _managed_table_identifier(config, scratch_table)
         run_token = str(uuid.uuid4())
 
-        conn = self._connect(config, query_tags=query_tags)
-        try:
-            cur = conn.cursor()
-            # CTAS is atomic in Snowflake. CREATE OR REPLACE also makes a
-            # scratch table left by an interrupted extract self-healing. The
-            # per-run comment lets every later connection detect when another
-            # run of this sync replaced the fixed-name scratch in the meantime.
-            # The token is a locally generated UUID, safe to inline. Binding it
-            # would make the connector %-format the whole statement and break
-            # model SQL containing a literal ``%`` (e.g. ``LIKE 'a%'``).
-            cur.execute(
-                f"CREATE OR REPLACE TABLE {scratch_ident} COMMENT = '{run_token}' AS {query}"
-            )
-            self._snapshot_diff_tokens[self._snapshot_token_key(config, sync_name)] = run_token
-            all_columns = self._managed_table_columns(cur, config, scratch_table)
-
-            resolved_keys = [_resolve_output_column(c, all_columns) for c in key_columns]
-            missing_keys = [c for c, r in zip(key_columns, resolved_keys) if r is None]
-            if missing_keys:
-                raise ValueError(
-                    "sync.incremental_strategy: diff — destination "
-                    f"upsert_key column(s) {missing_keys} not found in the "
-                    f"model's output columns {all_columns}."
+        def _setup() -> tuple[bool, bool, list[str], dict[str, str], list[str]]:
+            self.ensure_managed_schema(config)
+            conn = self._connect(config, query_tags=query_tags)
+            try:
+                cur = conn.cursor()
+                # CTAS is atomic in Snowflake. CREATE OR REPLACE also makes a
+                # scratch table left by an interrupted extract self-healing. The
+                # per-run comment lets every later connection detect when another
+                # run of this sync replaced the fixed-name scratch in the meantime.
+                # The token is a locally generated UUID, safe to inline. Binding it
+                # would make the connector %-format the whole statement and break
+                # model SQL containing a literal ``%`` (e.g. ``LIKE 'a%'``).
+                cur.execute(
+                    f"CREATE OR REPLACE TABLE {scratch_ident} COMMENT = '{run_token}' AS {query}"
                 )
-            sql_keys = [r for r in resolved_keys if r is not None]
-            # Records must carry the key names the YAML configured (destinations
-            # and masking look them up exactly), not Snowflake's folded casing.
-            key_rename = {r: c for r, c in zip(sql_keys, key_columns) if r != c}
-            if hash_columns == "all":
-                diff_columns = [column for column in all_columns if column not in sql_keys]
-            else:
-                resolved_hash = [_resolve_output_column(c, all_columns) for c in hash_columns]
-                missing_hash = [c for c, r in zip(hash_columns, resolved_hash) if r is None]
-                if missing_hash:
-                    raise ValueError(
-                        f"sync.diff.hash_columns: column(s) {missing_hash} "
-                        "not found in the model's output columns "
-                        f"{all_columns} — check for a typo."
-                    )
-                diff_columns = [r for r in resolved_hash if r is not None]
+                self._snapshot_diff_tokens[self._snapshot_token_key(config, sync_name)] = run_token
+                all_columns = self._managed_table_columns(cur, config, scratch_table)
 
-            is_first_run = not self._managed_table_exists(cur, config, current_table)
-            reclassify_all_existing = False
-            if not is_first_run:
-                baseline_columns = self._managed_table_columns(cur, config, current_table)
-                if any(column not in baseline_columns for column in sql_keys):
-                    # The key set changed since the baseline was written, so the
-                    # old snapshot cannot be joined; start over from this one.
-                    is_first_run = True
-                else:
-                    # A column added to the model is absent from the baseline,
-                    # so every existing row must be re-sent to populate it.
-                    reclassify_all_existing = any(
-                        column not in baseline_columns for column in diff_columns
+                resolved_keys = [_resolve_output_column(c, all_columns) for c in key_columns]
+                missing_keys = [c for c, r in zip(key_columns, resolved_keys) if r is None]
+                if missing_keys:
+                    raise ValueError(
+                        "sync.incremental_strategy: diff — destination "
+                        f"upsert_key column(s) {missing_keys} not found in the "
+                        f"model's output columns {all_columns}."
                     )
-                    diff_columns = [c for c in diff_columns if c in baseline_columns]
-        finally:
-            conn.close()
+                sql_keys = [r for r in resolved_keys if r is not None]
+                # Records must carry the key names the YAML configured (destinations
+                # and masking look them up exactly), not Snowflake's folded casing.
+                key_rename = {r: c for r, c in zip(sql_keys, key_columns) if r != c}
+                if hash_columns == "all":
+                    diff_columns = [column for column in all_columns if column not in sql_keys]
+                else:
+                    resolved_hash = [_resolve_output_column(c, all_columns) for c in hash_columns]
+                    missing_hash = [c for c, r in zip(hash_columns, resolved_hash) if r is None]
+                    if missing_hash:
+                        raise ValueError(
+                            f"sync.diff.hash_columns: column(s) {missing_hash} "
+                            "not found in the model's output columns "
+                            f"{all_columns} — check for a typo."
+                        )
+                    diff_columns = [r for r in resolved_hash if r is not None]
+
+                is_first_run = not self._managed_table_exists(cur, config, current_table)
+                reclassify_all_existing = False
+                if not is_first_run:
+                    baseline_columns = self._managed_table_columns(cur, config, current_table)
+                    if any(column not in baseline_columns for column in sql_keys):
+                        # The key set changed since the baseline was written, so the
+                        # old snapshot cannot be joined; start over from this one.
+                        is_first_run = True
+                    else:
+                        # A column added to the model is absent from the baseline,
+                        # so every existing row must be re-sent to populate it.
+                        reclassify_all_existing = any(
+                            column not in baseline_columns for column in diff_columns
+                        )
+                        diff_columns = [c for c in diff_columns if c in baseline_columns]
+            finally:
+                conn.close()
+            return is_first_run, reclassify_all_existing, sql_keys, key_rename, diff_columns
+
+        # Setup is retried as one unit; CREATE OR REPLACE makes each attempt idempotent.
+        is_first_run, reclassify_all_existing, sql_keys, key_rename, diff_columns = with_retry(
+            _setup, RetryConfig(), retry_on=self._is_transient
+        )
 
         if is_first_run:
             added = self._stream_query(
