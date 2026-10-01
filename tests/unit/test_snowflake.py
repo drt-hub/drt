@@ -849,6 +849,34 @@ class TestSnapshotDiffSource:
         assert any(" SWAP WITH " in sql for sql in executed)
         assert not any(sql.startswith("DROP TABLE") for sql in executed)
 
+    def test_commit_raises_when_scratch_vanished_and_baseline_is_not_ours(self) -> None:
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.fetchone.side_effect = [None, ("another-run-token",)]
+        conn.cursor.return_value = cur
+        source = SnowflakeSource()
+        source._snapshot_diff_tokens[("_DRT", "users")] = "this-run-token"
+
+        with (
+            patch.object(source, "_connect", return_value=conn),
+            pytest.raises(RuntimeError, match=r"must not run concurrently"),
+        ):
+            source.commit_snapshot_diff(_config(), "users")
+
+    def test_commit_tolerates_missing_scratch_when_baseline_carries_our_token(self) -> None:
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.fetchone.side_effect = [None, ("this-run-token",)]
+        conn.cursor.return_value = cur
+        source = SnowflakeSource()
+        source._snapshot_diff_tokens[("_DRT", "users")] = "this-run-token"
+
+        with patch.object(source, "_connect", return_value=conn):
+            source.commit_snapshot_diff(_config(), "users")
+
+        executed = [call.args[0] for call in cur.execute.call_args_list]
+        assert not any(" SWAP WITH " in sql or " RENAME TO " in sql for sql in executed)
+
     def test_commit_without_remembered_token_is_noop(self) -> None:
         source = SnowflakeSource()
         with patch.object(source, "_connect") as connect:

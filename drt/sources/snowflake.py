@@ -572,7 +572,14 @@ class SnowflakeSource:
         try:
             cur = conn.cursor()
             if not self._managed_table_exists(cur, config, scratch_table):
-                return
+                # A remembered token means this run built a scratch table, so
+                # its absence is only benign if our snapshot is already the
+                # baseline. Otherwise an overlapping run consumed it.
+                promoted, actual_token = self._managed_table_comment(cur, config, current_table)
+                if promoted and actual_token == expected_token:
+                    self._snapshot_diff_tokens.pop(token_key, None)
+                    return
+                _raise_diff_concurrency_race(sync_name)
             current_exists = self._managed_table_exists(cur, config, current_table)
             self._assert_snapshot_token(cur, config, scratch_table, expected_token, sync_name)
             # Snowflake offers no conditional SWAP/RENAME based on COMMENT,

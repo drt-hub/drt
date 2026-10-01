@@ -179,6 +179,16 @@ def test_diff_strategy_commits_snapshot_on_success(tmp_path: Path) -> None:
     assert source.commit_calls == ["diff_sync"]
 
 
+def test_diff_strategy_does_not_commit_on_limited_run(tmp_path: Path) -> None:
+    source = FakeSnapshotDiffSource(added=[{"id": 1}, {"id": 2}], changed=[], removed_keys=[])
+    dest = FakeDestination()
+
+    result = run_sync(_make_diff_sync(), source, dest, _make_profile(), tmp_path, extract_limit=1)
+
+    assert result.success == 1
+    assert source.commit_calls == []
+
+
 def test_diff_strategy_does_not_commit_on_row_failure(tmp_path: Path) -> None:
     """On_error: skip lets the run continue with a failure recorded; the
     baseline must stay stale so the failed row is reclassified next run

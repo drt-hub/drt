@@ -1197,10 +1197,13 @@ def _run_sync_body(
     # reclassified as added/changed again next run rather than risking a
     # row that never reached the destination being treated as delivered —
     # same conservative posture as #920's/#955's reconcile-on-next-run fixes.
+    # A --limit run delivers only a prefix of the diff, so promoting the full
+    # snapshot would make the skipped rows look delivered on the next run.
     if (
         sync.sync.incremental_strategy == "diff"
         and not dry_run
         and total_result.failed == 0
+        and extract_limit is None
         and isinstance(source, SnapshotDiffSource)
     ):
         with _stage_ctx("source"):
