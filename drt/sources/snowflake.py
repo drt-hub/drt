@@ -72,6 +72,15 @@ def _column_ref(alias: str, column: str) -> str:
     return f"{alias}.{_quote_identifier(column)}"
 
 
+def _resolve_output_column(name: str, actual_columns: list[str]) -> str | None:
+    """Match a configured column to the CTAS output: exact first, else Snowflake's
+    unquoted-name fold (``id`` -> ``ID``)."""
+    if name in actual_columns:
+        return name
+    folded = name.upper()
+    return folded if folded in actual_columns else None
+
+
 def _key_join_condition(key_columns: list[str], left: str, right: str) -> str:
     return " AND ".join(
         f"{_column_ref(left, column)} = {_column_ref(right, column)}" for column in key_columns
@@ -425,24 +434,27 @@ class SnowflakeSource:
             )
             all_columns = [row[0] for row in cur.fetchall()]
 
-            missing_keys = [column for column in key_columns if column not in all_columns]
+            resolved_keys = [_resolve_output_column(c, all_columns) for c in key_columns]
+            missing_keys = [c for c, r in zip(key_columns, resolved_keys) if r is None]
             if missing_keys:
                 raise ValueError(
                     "sync.incremental_strategy: diff — destination "
                     f"upsert_key column(s) {missing_keys} not found in the "
                     f"model's output columns {all_columns}."
                 )
+            sql_keys = [r for r in resolved_keys if r is not None]
             if hash_columns == "all":
-                diff_columns = [column for column in all_columns if column not in key_columns]
+                diff_columns = [column for column in all_columns if column not in sql_keys]
             else:
-                missing_hash = [column for column in hash_columns if column not in all_columns]
+                resolved_hash = [_resolve_output_column(c, all_columns) for c in hash_columns]
+                missing_hash = [c for c, r in zip(hash_columns, resolved_hash) if r is None]
                 if missing_hash:
                     raise ValueError(
                         f"sync.diff.hash_columns: column(s) {missing_hash} "
                         "not found in the model's output columns "
                         f"{all_columns} — check for a typo."
                     )
-                diff_columns = list(hash_columns)
+                diff_columns = [r for r in resolved_hash if r is not None]
 
             is_first_run = not self._managed_table_exists(cur, config, current_table)
         finally:
@@ -460,12 +472,12 @@ class SnowflakeSource:
             changed: Iterator[dict[str, Any]] = iter(())
             removed_keys: Iterator[dict[str, Any]] = iter(())
         else:
-            join_condition = _key_join_condition(key_columns, "s", "c")
+            join_condition = _key_join_condition(sql_keys, "s", "c")
             added = self._stream_query(
                 config,
                 f"SELECT s.* FROM {scratch_ident} AS s "
                 f"LEFT JOIN {current_ident} AS c ON {join_condition} "
-                f"WHERE {_column_ref('c', key_columns[0])} IS NULL",
+                f"WHERE {_column_ref('c', sql_keys[0])} IS NULL",
                 scratch_table=scratch_table,
                 expected_token=run_token,
                 sync_name=sync_name,
@@ -474,10 +486,14 @@ class SnowflakeSource:
             removed_keys = self._stream_query(
                 config,
                 "SELECT "
-                + ", ".join(_column_ref("c", column) for column in key_columns)
+                + ", ".join(
+                    _column_ref("c", resolved)
+                    + ("" if resolved == configured else f" AS {_quote_identifier(configured)}")
+                    for resolved, configured in zip(sql_keys, key_columns)
+                )
                 + f" FROM {current_ident} AS c LEFT JOIN {scratch_ident} AS s ON "
-                + _key_join_condition(key_columns, "c", "s")
-                + f" WHERE {_column_ref('s', key_columns[0])} IS NULL",
+                + _key_join_condition(sql_keys, "c", "s")
+                + f" WHERE {_column_ref('s', sql_keys[0])} IS NULL",
                 scratch_table=scratch_table,
                 expected_token=run_token,
                 sync_name=sync_name,
@@ -590,12 +606,25 @@ class SnowflakeSource:
             # source extraction, destination writes, and this commit could leak
             # whenever commit is skipped.
             if current_exists:
-                cur.execute(f"ALTER TABLE {scratch_ident} SWAP WITH {current_ident}")
-                self._assert_snapshot_token(cur, config, current_table, expected_token, sync_name)
-                cur.execute(f"DROP TABLE IF EXISTS {scratch_ident}")
+                promote_sql = f"ALTER TABLE {scratch_ident} SWAP WITH {current_ident}"
+                undo_sql = promote_sql  # SWAP is its own inverse
             else:
-                cur.execute(f"ALTER TABLE {scratch_ident} RENAME TO {current_ident}")
+                promote_sql = f"ALTER TABLE {scratch_ident} RENAME TO {current_ident}"
+                undo_sql = f"ALTER TABLE {current_ident} RENAME TO {scratch_ident}"
+            cur.execute(promote_sql)
+            try:
                 self._assert_snapshot_token(cur, config, current_table, expected_token, sync_name)
+            except RuntimeError:
+                # A replacement landed between the check and the promotion, so
+                # the baseline just advanced to another run's undelivered
+                # snapshot. Put it back before surfacing the race.
+                try:
+                    cur.execute(undo_sql)
+                except Exception:
+                    pass
+                raise
+            if current_exists:
+                cur.execute(f"DROP TABLE IF EXISTS {scratch_ident}")
             self._snapshot_diff_tokens.pop(token_key, None)
         finally:
             conn.close()
