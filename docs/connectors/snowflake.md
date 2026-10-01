@@ -299,6 +299,19 @@ does not wedge the next run. Cursor incremental remains the read-only-source opt
 write/create/drop privileges in `managed_schema`, or an administrator can pre-create and grant the
 schema following the same managed-table escape hatch used by warehouse-backed state.
 
+Concurrent runs of the **same** diff sync are unsupported. Each scratch table is tagged with a
+per-run token in its Snowflake table comment; every classification stream checks the token before
+reading (and again after draining), and commit checks it immediately before `SWAP`/`RENAME` and on
+the promoted baseline afterward. If a second run has replaced the fixed-name scratch, the first
+run fails loudly instead of knowingly streaming or successfully reporting promotion of the second
+run's snapshot. Detection is deliberately best-effort: Snowflake DDL autocommits, so a narrow
+TOCTOU window remains between each token check and the following statement. drt does not hold a
+lock across extraction, destination writes, and commit because a row failure deliberately skips
+commit and could leak that lock in a long-running process. Use
+`drt serve` request coalescing ([#854](https://github.com/drt-hub/drt/issues/854)) or scheduler
+overlap protection. The concurrent-replacement behavior has unit coverage but is **not yet live
+verified**; verification remains pending until the Snowflake `dwh-smoke` test runs.
+
 ## Notes
 
 - Requires `pip install drt-core[snowflake]` (uses `snowflake-connector-python`)

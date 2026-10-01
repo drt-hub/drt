@@ -168,3 +168,59 @@ def test_snowflake_diff_incremental_round_trip_and_crash_recovery() -> None:
         conn.close()
         source.drop_managed_table(profile, scratch)
         source.drop_managed_table(profile, baseline)
+
+
+def test_snowflake_diff_incremental_detects_concurrent_scratch_replacement() -> None:
+    """A second run cannot be streamed or promoted by the first run."""
+    creds = _require_creds()
+    profile = _profile(creds)
+    first_source = SnowflakeSource()
+    second_source = SnowflakeSource()
+    suffix = uuid.uuid4().hex[:10]
+    source_table = f"DRT_DIFF_RACE_SOURCE_{suffix}"
+    source_fq = (
+        f"{creds['DRT_SMOKE_SNOWFLAKE_DATABASE']}."
+        f"{creds['DRT_SMOKE_SNOWFLAKE_SCHEMA']}.{source_table}"
+    )
+    sync_name = f"snowflake-diff-race-{suffix}"
+    query = f'SELECT id AS "id", note AS "note" FROM {source_fq}'
+    baseline, scratch = first_source._snapshot_table_names(sync_name)
+
+    conn = _connect(creds)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"CREATE TABLE {source_fq} (id INTEGER, note VARCHAR)")
+            cur.execute(f"INSERT INTO {source_fq} VALUES (1, 'first')")
+
+        first = first_source.extract_snapshot_diff(
+            query,
+            profile,
+            sync_name=sync_name,
+            key_columns=["id"],
+            hash_columns="all",
+        )
+        # The second run uses the same fixed scratch name and replaces it with
+        # a different per-run token before the first run starts streaming.
+        second_source.extract_snapshot_diff(
+            query,
+            profile,
+            sync_name=sync_name,
+            key_columns=["id"],
+            hash_columns="all",
+        )
+
+        yielded: list[dict[str, object]] = []
+        with pytest.raises(RuntimeError, match=r"must not run concurrently"):
+            for row in first.added:
+                yielded.append(row)
+        assert yielded == []
+
+        with pytest.raises(RuntimeError, match=r"must not run concurrently"):
+            first_source.commit_snapshot_diff(profile, sync_name)
+        assert first_source.managed_table_exists(profile, baseline) is False
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS {source_fq}")
+        conn.close()
+        first_source.drop_managed_table(profile, scratch)
+        first_source.drop_managed_table(profile, baseline)

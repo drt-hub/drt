@@ -16,6 +16,7 @@ Example ~/.drt/profiles.yml:
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterator
 from typing import Any, Literal
 
@@ -28,6 +29,17 @@ from drt.sources.base import SnapshotDiffResult
 # to be re-established, which is exactly what a retry does. Observed during
 # the #654 smoke programme on long-running extracts.
 _SNOWFLAKE_TOKEN_EXPIRED = 390114
+
+
+def _raise_diff_concurrency_race(sync_name: str) -> None:
+    """Fail loudly when another run replaced this run's scratch snapshot."""
+    raise RuntimeError(
+        f"sync.incremental_strategy: diff — another run of sync "
+        f"{sync_name!r} appears to be building the same snapshot table "
+        f"concurrently. diff-strategy syncs must not run concurrently "
+        f"for the same sync — see drt serve's request coalescing (#854) "
+        f"or your scheduler's own overlap protection."
+    )
 
 
 def _quote_identifier(identifier: str) -> str:
@@ -79,6 +91,13 @@ def _diff_hash_expr(columns: list[str], alias: str) -> str:
 
 class SnowflakeSource:
     """Extract records from a Snowflake data warehouse."""
+
+    def __init__(self) -> None:
+        # One source instance is used for both extraction and commit by the
+        # engine. A source is freshly constructed for each CLI invocation, so
+        # this state identifies the scratch snapshot built by this run without
+        # introducing a durable lock that could leak when commit is skipped.
+        self._snapshot_diff_tokens: dict[tuple[str, str], str] = {}
 
     def _is_transient(self, exc: Exception) -> bool:
         """Is ``exc`` worth retrying? (#766)
@@ -327,6 +346,43 @@ class SnowflakeSource:
     def _snapshot_table_names(self, sync_name: str) -> tuple[str, str]:
         return f"_drt_snapshot_{sync_name}", f"_drt_snapshot_{sync_name}_scratch"
 
+    @staticmethod
+    def _snapshot_token_key(config: SnowflakeProfile, sync_name: str) -> tuple[str, str]:
+        return config.managed_schema.upper(), sync_name
+
+    @staticmethod
+    def _managed_table_comment(
+        cur: Any, config: SnowflakeProfile, table_name: str
+    ) -> tuple[bool, str | None]:
+        """Return table existence and its comment from INFORMATION_SCHEMA.
+
+        ``INFORMATION_SCHEMA.TABLES`` exposes ``COMMENT`` directly and can be
+        filtered with bound values, unlike ``SHOW TABLES`` whose result shape
+        must be parsed. The fully-qualified view also avoids depending on the
+        connection's current schema.
+        """
+        tables = f"{_managed_identifier(config.database)}.INFORMATION_SCHEMA.TABLES"
+        cur.execute(
+            f"SELECT comment FROM {tables} "
+            "WHERE UPPER(table_schema) = UPPER(%s) "
+            "AND UPPER(table_name) = UPPER(%s) AND table_type = 'BASE TABLE'",
+            (config.managed_schema, table_name),
+        )
+        row = cur.fetchone()
+        return (False, None) if row is None else (True, row[0])
+
+    def _assert_snapshot_token(
+        self,
+        cur: Any,
+        config: SnowflakeProfile,
+        table_name: str,
+        expected_token: str,
+        sync_name: str,
+    ) -> None:
+        exists, actual_token = self._managed_table_comment(cur, config, table_name)
+        if not exists or actual_token != expected_token:
+            _raise_diff_concurrency_race(sync_name)
+
     def extract_snapshot_diff(
         self,
         query: str,
@@ -344,13 +400,22 @@ class SnowflakeSource:
         current_table, scratch_table = self._snapshot_table_names(sync_name)
         current_ident = _managed_table_identifier(config, current_table)
         scratch_ident = _managed_table_identifier(config, scratch_table)
+        run_token = str(uuid.uuid4())
 
         conn = self._connect(config, query_tags=query_tags)
         try:
             cur = conn.cursor()
             # CTAS is atomic in Snowflake. CREATE OR REPLACE also makes a
-            # scratch table left by an interrupted extract self-healing.
-            cur.execute(f"CREATE OR REPLACE TABLE {scratch_ident} AS {query}")
+            # scratch table left by an interrupted extract self-healing. The
+            # per-run comment lets every later connection detect when another
+            # run of this sync replaced the fixed-name scratch in the meantime.
+            # The token is a locally generated UUID, safe to inline. Binding it
+            # would make the connector %-format the whole statement and break
+            # model SQL containing a literal ``%`` (e.g. ``LIKE 'a%'``).
+            cur.execute(
+                f"CREATE OR REPLACE TABLE {scratch_ident} COMMENT = '{run_token}' AS {query}"
+            )
+            self._snapshot_diff_tokens[self._snapshot_token_key(config, sync_name)] = run_token
             columns_table = f"{_managed_identifier(config.database)}.INFORMATION_SCHEMA.COLUMNS"
             cur.execute(
                 f"SELECT column_name FROM {columns_table} "
@@ -387,6 +452,9 @@ class SnowflakeSource:
             added = self._stream_query(
                 config,
                 f"SELECT * FROM {scratch_ident}",
+                scratch_table=scratch_table,
+                expected_token=run_token,
+                sync_name=sync_name,
                 query_tags=query_tags,
             )
             changed: Iterator[dict[str, Any]] = iter(())
@@ -398,6 +466,9 @@ class SnowflakeSource:
                 f"SELECT s.* FROM {scratch_ident} AS s "
                 f"LEFT JOIN {current_ident} AS c ON {join_condition} "
                 f"WHERE {_column_ref('c', key_columns[0])} IS NULL",
+                scratch_table=scratch_table,
+                expected_token=run_token,
+                sync_name=sync_name,
                 query_tags=query_tags,
             )
             removed_keys = self._stream_query(
@@ -407,6 +478,9 @@ class SnowflakeSource:
                 + f" FROM {current_ident} AS c LEFT JOIN {scratch_ident} AS s ON "
                 + _key_join_condition(key_columns, "c", "s")
                 + f" WHERE {_column_ref('s', key_columns[0])} IS NULL",
+                scratch_table=scratch_table,
+                expected_token=run_token,
+                sync_name=sync_name,
                 query_tags=query_tags,
             )
             if diff_columns:
@@ -416,6 +490,9 @@ class SnowflakeSource:
                     f"JOIN {current_ident} AS c ON {join_condition} "
                     f"WHERE {_diff_hash_expr(diff_columns, 's')} "
                     f"<> {_diff_hash_expr(diff_columns, 'c')}",
+                    scratch_table=scratch_table,
+                    expected_token=run_token,
+                    sync_name=sync_name,
                     query_tags=query_tags,
                 )
             else:
@@ -433,15 +510,27 @@ class SnowflakeSource:
         config: SnowflakeProfile,
         query: str,
         *,
+        scratch_table: str,
+        expected_token: str,
+        sync_name: str,
         query_tags: dict[str, str] | None,
     ) -> Iterator[dict[str, Any]]:
-        """Stream one snapshot classification query on its own connection."""
+        """Stream one snapshot classification query on its own connection.
+
+        The token is checked immediately before the query starts and after it
+        drains. There is necessarily a small TOCTOU window between a check and
+        the following statement because Snowflake DDL autocommits and these
+        iterators use independent connections. A later stream or commit checks
+        again, so replacement is detected on a best-effort basis without a
+        cross-lifecycle lock that could leak when the engine skips commit.
+        """
 
         def _connect_and_execute() -> tuple[Any, Any, list[str]]:
             conn = self._connect(config, query_tags=query_tags)
             try:
                 cur = conn.cursor()
                 cur.arraysize = config.fetch_size
+                self._assert_snapshot_token(cur, config, scratch_table, expected_token, sync_name)
                 cur.execute(query)
                 return conn, cur, [desc[0] for desc in cur.description]
             except BaseException:
@@ -454,6 +543,7 @@ class SnowflakeSource:
         try:
             for row in cur:
                 yield dict(zip(columns, row))
+            self._assert_snapshot_token(cur, config, scratch_table, expected_token, sync_name)
         finally:
             cur.close()
             conn.close()
@@ -467,6 +557,13 @@ class SnowflakeSource:
         its cleanup DROP, the next extract's CREATE OR REPLACE heals it.
         """
         assert isinstance(config, SnowflakeProfile)
+        token_key = self._snapshot_token_key(config, sync_name)
+        expected_token = self._snapshot_diff_tokens.get(token_key)
+        if expected_token is None:
+            # extract_snapshot_diff was never called on this run's source
+            # instance. Never adopt a fixed-name scratch left by another run.
+            return
+
         current_table, scratch_table = self._snapshot_table_names(sync_name)
         current_ident = _managed_table_identifier(config, current_table)
         scratch_ident = _managed_table_identifier(config, scratch_table)
@@ -476,10 +573,22 @@ class SnowflakeSource:
             cur = conn.cursor()
             if not self._managed_table_exists(cur, config, scratch_table):
                 return
-            if self._managed_table_exists(cur, config, current_table):
+            current_exists = self._managed_table_exists(cur, config, current_table)
+            self._assert_snapshot_token(cur, config, scratch_table, expected_token, sync_name)
+            # Snowflake offers no conditional SWAP/RENAME based on COMMENT,
+            # and DDL autocommits, so a replacement can still land in the tiny
+            # TOCTOU window after this check. Verify the promoted table below
+            # as well so that race fails loudly rather than returning success.
+            # This is deliberately best-effort detection: holding a lock across
+            # source extraction, destination writes, and this commit could leak
+            # whenever commit is skipped.
+            if current_exists:
                 cur.execute(f"ALTER TABLE {scratch_ident} SWAP WITH {current_ident}")
+                self._assert_snapshot_token(cur, config, current_table, expected_token, sync_name)
                 cur.execute(f"DROP TABLE IF EXISTS {scratch_ident}")
             else:
                 cur.execute(f"ALTER TABLE {scratch_ident} RENAME TO {current_ident}")
+                self._assert_snapshot_token(cur, config, current_table, expected_token, sync_name)
+            self._snapshot_diff_tokens.pop(token_key, None)
         finally:
             conn.close()

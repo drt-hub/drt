@@ -5,6 +5,7 @@ Uses a mock snowflake-connector-python — no real database required.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -600,8 +601,33 @@ class TestSnapshotDiffSource:
         create_sql = conn.cursor.return_value.execute.call_args_list[0].args[0]
         assert create_sql.startswith(
             'CREATE OR REPLACE TABLE "ANALYTICS"."_DRT".'
-            '"_DRT_SNAPSHOT_DAILY-USERS_SCRATCH" AS SELECT'
+            '"_DRT_SNAPSHOT_DAILY-USERS_SCRATCH" COMMENT = \''
         )
+        create_call = conn.cursor.return_value.execute.call_args_list[0]
+        assert len(create_call.args) == 1  # no bind params: model SQL may contain '%'
+        create_token = re.search(r"COMMENT = '([0-9a-f-]{36})' AS ", create_sql).group(1)
+        assert stream.call_args.kwargs["expected_token"] == create_token
+
+    def test_model_sql_with_percent_literal_is_not_percent_formatted(self) -> None:
+        conn = self._snapshot_conn(["id", "note"], current_exists=False)
+        source = SnowflakeSource()
+        model_sql = 'SELECT id AS "id", note AS "note" FROM users WHERE note LIKE \'a%\''
+        with (
+            patch.object(source, "ensure_managed_schema"),
+            patch.object(source, "_connect", return_value=conn),
+            patch.object(source, "_stream_query", return_value=iter(())),
+        ):
+            source.extract_snapshot_diff(
+                model_sql,
+                _config(),
+                sync_name="daily-users",
+                key_columns=["id"],
+                hash_columns="all",
+            )
+
+        create_call = conn.cursor.return_value.execute.call_args_list[0]
+        assert len(create_call.args) == 1
+        assert create_call.args[0].endswith(f" AS {model_sql}")
 
     def test_existing_snapshot_builds_quoted_join_hash_and_removed_key_queries(self) -> None:
         conn = self._snapshot_conn(["id", "note", "ignored"], current_exists=True)
@@ -683,13 +709,78 @@ class TestSnapshotDiffSource:
         assert 'HASH(c."note", c."plan")' in changed_sql
         assert 'HASH(s."id"' not in changed_sql
 
+    def test_token_mismatch_before_classification_yields_no_rows(self) -> None:
+        build_conn = self._snapshot_conn(["id", "note"], current_exists=False)
+        stream_conn = MagicMock()
+        stream_cur = MagicMock()
+        stream_cur.fetchone.return_value = ("another-run-token",)
+        stream_cur.description = [("id",), ("note",)]
+        stream_cur.__iter__.return_value = iter([(1, "must-not-be-yielded")])
+        stream_conn.cursor.return_value = stream_cur
+        source = SnowflakeSource()
+
+        with (
+            patch.object(source, "ensure_managed_schema"),
+            patch.object(source, "_connect", side_effect=[build_conn, stream_conn]),
+        ):
+            result = source.extract_snapshot_diff(
+                "SELECT * FROM users",
+                _config(),
+                sync_name="users",
+                key_columns=["id"],
+                hash_columns="all",
+            )
+            yielded: list[dict[str, Any]] = []
+            with pytest.raises(RuntimeError, match=r"must not run concurrently"):
+                for row in result.added:
+                    yielded.append(row)
+
+        assert yielded == []
+        executed = [call.args[0] for call in stream_cur.execute.call_args_list]
+        assert len(executed) == 1
+        assert executed[0].startswith("SELECT comment FROM ")
+
+    def test_stream_checks_matching_token_before_and_after_query(self) -> None:
+        source = SnowflakeSource()
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.fetchone.side_effect = [("run-token",), ("run-token",)]
+        cur.description = [("id",), ("note",)]
+        cur.__iter__.return_value = iter([(1, "ok")])
+        conn.cursor.return_value = cur
+
+        with patch.object(source, "_connect", return_value=conn):
+            rows = list(
+                source._stream_query(
+                    _config(),
+                    "SELECT * FROM scratch",
+                    scratch_table="_drt_snapshot_users_scratch",
+                    expected_token="run-token",
+                    sync_name="users",
+                    query_tags=None,
+                )
+            )
+
+        assert rows == [{"id": 1, "note": "ok"}]
+        executed = [call.args[0] for call in cur.execute.call_args_list]
+        assert executed[1] == "SELECT * FROM scratch"
+        assert executed[0].startswith("SELECT comment FROM ")
+        assert executed[2].startswith("SELECT comment FROM ")
+
     def test_commit_swaps_existing_baseline_then_cleans_old_snapshot(self) -> None:
         conn = MagicMock()
         cur = MagicMock()
-        cur.fetchone.side_effect = [(1,), (1,)]  # scratch exists, current exists
+        cur.fetchone.side_effect = [
+            (1,),
+            (1,),
+            ("run-token",),
+            ("run-token",),
+        ]  # scratch/current exist, token matches before and after SWAP
         conn.cursor.return_value = cur
-        with patch.object(SnowflakeSource, "_connect", return_value=conn):
-            SnowflakeSource().commit_snapshot_diff(_config(), "daily-users")
+        source = SnowflakeSource()
+        source._snapshot_diff_tokens[("_DRT", "daily-users")] = "run-token"
+        with patch.object(source, "_connect", return_value=conn):
+            source.commit_snapshot_diff(_config(), "daily-users")
 
         executed = [call.args[0] for call in cur.execute.call_args_list]
         assert any(" SWAP WITH " in sql for sql in executed)
@@ -700,15 +791,70 @@ class TestSnapshotDiffSource:
     def test_commit_renames_scratch_on_first_promotion(self) -> None:
         conn = MagicMock()
         cur = MagicMock()
-        cur.fetchone.side_effect = [(1,), None]  # scratch exists, current absent
+        cur.fetchone.side_effect = [
+            (1,),
+            None,
+            ("run-token",),
+            ("run-token",),
+        ]  # scratch exists, current absent, token matches before/after RENAME
         conn.cursor.return_value = cur
-        with patch.object(SnowflakeSource, "_connect", return_value=conn):
-            SnowflakeSource().commit_snapshot_diff(_config(), "users")
+        source = SnowflakeSource()
+        source._snapshot_diff_tokens[("_DRT", "users")] = "run-token"
+        with patch.object(source, "_connect", return_value=conn):
+            source.commit_snapshot_diff(_config(), "users")
 
-        assert cur.execute.call_args_list[-1].args[0] == (
+        executed = [call.args[0] for call in cur.execute.call_args_list]
+        assert (
             'ALTER TABLE "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_USERS_SCRATCH" '
             'RENAME TO "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_USERS"'
-        )
+        ) in executed
+
+    def test_commit_token_mismatch_raises_without_swapping(self) -> None:
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.fetchone.side_effect = [(1,), None, ("another-run-token",)]
+        conn.cursor.return_value = cur
+        source = SnowflakeSource()
+        source._snapshot_diff_tokens[("_DRT", "users")] = "this-run-token"
+
+        with (
+            patch.object(source, "_connect", return_value=conn),
+            pytest.raises(RuntimeError, match=r"must not run concurrently"),
+        ):
+            source.commit_snapshot_diff(_config(), "users")
+
+        executed = [call.args[0] for call in cur.execute.call_args_list]
+        assert not any(" SWAP WITH " in sql or " RENAME TO " in sql for sql in executed)
+
+    def test_commit_detects_replacement_in_final_swap_window(self) -> None:
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.fetchone.side_effect = [
+            (1,),
+            (1,),
+            ("this-run-token",),
+            ("another-run-token",),
+        ]
+        conn.cursor.return_value = cur
+        source = SnowflakeSource()
+        source._snapshot_diff_tokens[("_DRT", "users")] = "this-run-token"
+
+        with (
+            patch.object(source, "_connect", return_value=conn),
+            pytest.raises(RuntimeError, match=r"must not run concurrently"),
+        ):
+            source.commit_snapshot_diff(_config(), "users")
+
+        executed = [call.args[0] for call in cur.execute.call_args_list]
+        assert any(" SWAP WITH " in sql for sql in executed)
+        assert not any(sql.startswith("DROP TABLE") for sql in executed)
+
+    def test_commit_without_remembered_token_is_noop(self) -> None:
+        source = SnowflakeSource()
+        with patch.object(source, "_connect") as connect:
+            source.commit_snapshot_diff(_config(), "users")
+
+        connect.assert_not_called()
 
     def test_snapshot_diff_protocol_satisfied(self) -> None:
         from drt.sources.base import SnapshotDiffSource
