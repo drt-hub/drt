@@ -226,6 +226,8 @@ No breaking changes — drop-in upgrade from v0.10.0.
 
 **Also in scope:** `sync.mirror.strategy: diff` for ClickHouse and Databricks (the shared finalizer only covers Postgres/MySQL/Snowflake today), and the BigQuery `_merge` leg of [#1134](https://github.com/drt-hub/drt/issues/1134) (its blocker, #1137, is closed).
 
+**Community-welcome (unscheduled, no milestone):** new destinations and recipes open for contribution, not v1.1 commitments — tested `rest_api` recipes for long-tail SaaS ([#1179](https://github.com/drt-hub/drt/issues/1179), recipes first per ADR 0011; a connector only where `rest_api` cannot express the semantics), Kafka ([#1180](https://github.com/drt-hub/drt/issues/1180)), Pub/Sub ([#1181](https://github.com/drt-hub/drt/issues/1181)), SQS ([#1182](https://github.com/drt-hub/drt/issues/1182)), Pipedrive ([#1183](https://github.com/drt-hub/drt/issues/1183)), MongoDB ([#1184](https://github.com/drt-hub/drt/issues/1184)), Redis ([#1185](https://github.com/drt-hub/drt/issues/1185)), TikTok Events API ([#1186](https://github.com/drt-hub/drt/issues/1186)) and LinkedIn Conversions API ([#1187](https://github.com/drt-hub/drt/issues/1187)).
+
 **Patch lane (v1.0.x):** correctness fixes found after launch ship as patch releases without waiting for v1.1.
 
 **Deliberately not in v1.1:** the schema-management cluster (#760/#761/#896) is the v1.2 candidate; scheduler / fan-out / `depends_on` (#428/#425/#426) stay parked until there is user demand and, for #428, an ADR 0004 re-decision.
