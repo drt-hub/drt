@@ -72,11 +72,11 @@ Snowflake prerequisites (#671):
   schema, and `CREATE TABLE` on the schema (`ALTER TABLE ... SWAP WITH` needs
   ownership/`OWNERSHIP`-equivalent on both names, which the creating role holds
   for tables it created).
-- The Snowflake leg drives four paths against the throwaway schema — `mode: insert`,
-  `replace_strategy: swap` (`ALTER TABLE ... SWAP WITH` #434), complex-type
-  `PARSE_JSON` serialization (VARIANT / OBJECT / ARRAY #317 Layer 3 / #653), and
-  `test_connection` — and drops everything it creates (target + `__drt_swap`
-  shadow) in `finally`.
+- The Snowflake leg drives destination insert/swap/mirror/complex-type paths,
+  source connection and managed-table paths, warehouse-backed state, and
+  snapshot-diff incremental (#1112), including `NULL` → `''` change detection
+  and crash-before-commit recovery. Every test drops its target, shadow, and
+  managed snapshot tables in `finally`.
 
 **Databricks** (#672)
 | Secret | Notes |

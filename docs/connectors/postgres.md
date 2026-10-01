@@ -319,11 +319,10 @@ pg:
   managed_schema: _drt      # default: "_drt" — never "public"
 ```
 
-The first consumer is [warehouse-backed state](../guides/warehouse-state.md)
-(`state.backend: warehouse`, [#920](https://github.com/drt-hub/drt/issues/920)) — see that guide
-for the tables it creates here. Diff-based incremental ([#755](https://github.com/drt-hub/drt/issues/755))
-and compliance audit trails ([#1100](https://github.com/drt-hub/drt/issues/1100)) will share this
-same schema once they land.
+The consumers include [warehouse-backed state](../guides/warehouse-state.md)
+(`state.backend: warehouse`, [#920](https://github.com/drt-hub/drt/issues/920)) and diff-based
+incremental extraction ([#755](https://github.com/drt-hub/drt/issues/755)); both keep their own
+tables in this same schema. See the warehouse-state guide for its table set.
 
 The default is a dedicated schema, not `public` — every reverse-ETL vendor whose approach was
 researched for this design (RudderStack's `_rudderstack`, Segment's `__segment_reverse_etl`,

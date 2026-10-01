@@ -742,16 +742,15 @@ def _run_sync_body(
     # changed are chained into one flat iterator so everything below this
     # point (batching, transforms, load) is unchanged; removed_keys is
     # drained eagerly (bounded by the removed set, not the table — see
-    # SnapshotDiffResult) for SyncResult.diff_removed_keys, since a
-    # mirror-delete consumer doesn't exist yet (tracked as a follow-up).
+    # SnapshotDiffResult) for SyncResult.diff_removed_keys and
+    # mirror.strategy: diff's destination-side finalize pass.
     diff_removed_keys: list[dict[str, Any]] | None = None
     if sync.sync.incremental_strategy == "diff":
         if not isinstance(source, SnapshotDiffSource):
             raise NotImplementedError(
                 f"sync.incremental_strategy: diff is not supported by "
-                f"{type(source).__name__} — Postgres only today (#755). "
-                "Other dialects are tracked as follow-up issues once this "
-                "is verified, same as #960/#920's rollout."
+                f"{type(source).__name__} — supported sources are Postgres "
+                "and Snowflake (#755/#1112)."
             )
         key_columns = getattr(sync.destination, "upsert_key", None)
         if not key_columns:

@@ -6,6 +6,9 @@ drt-core version its bundled schemas were generated from.
 
 ## [0.1.13] - Unreleased
 
+- Bundled JSON Schema hover text now reflects that warehouse-side
+  `incremental_strategy: diff` supports Snowflake as well as Postgres
+  (drt-hub/drt#1112).
 - Bundled JSON Schemas regenerated from drt-core: `klaviyo` gains `backfill`
   (event-endpoint only — suppresses live flow/automation triggers for a
   historical replay; rejected at config time on `endpoint: profile`) and its

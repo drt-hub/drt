@@ -1,11 +1,10 @@
 """Engine wiring for ``sync.incremental_strategy: diff`` (#755).
 
-The actual SQL diff computation is Postgres-specific and covered live in
-``tests/integration/local_sql/test_diff_incremental_smoke.py`` (a mock
-cursor can't prove JOIN/hash correctness — see that file's docstring). These
-tests cover what the engine itself is responsible for: routing added+changed
-into the normal batch/load path unchanged, surfacing removed_keys on
-SyncResult, and the commit-only-on-success gating.
+The dialect SQL diff computation is covered by the Postgres local smoke and
+the gated Snowflake DWH smoke (a mock cursor cannot prove JOIN/hash syntax).
+These tests cover what the engine itself is responsible for: routing
+added+changed into the normal batch/load path unchanged, masking and surfacing
+removed_keys on SyncResult, and the commit-only-on-success gating.
 """
 
 from __future__ import annotations
@@ -246,7 +245,7 @@ def test_diff_strategy_rejected_for_a_source_without_the_capability(tmp_path: Pa
     dest = FakeDestination()
     sync = _make_diff_sync()
 
-    with pytest.raises(NotImplementedError, match="Postgres only today"):
+    with pytest.raises(NotImplementedError, match="supported sources are Postgres and Snowflake"):
         run_sync(sync, PlainFakeSource(), dest, _make_profile(), tmp_path)
 
 

@@ -251,6 +251,54 @@ warehouse — busy for the duration, which is worth knowing if you are billing o
 Per [#766](https://github.com/drt-hub/drt/issues/766) a failure after the first row has been
 yielded is not retried.
 
+## As a source — diff-based incremental ([#1112](https://github.com/drt-hub/drt/issues/1112))
+
+Snowflake supports `sync.incremental_strategy: diff` for models without a reliable cursor column.
+Each run materializes the full model result in `_drt_snapshot_<sync_name>` under the source
+profile's `managed_schema`, then classifies added, changed, and removed rows with server-side joins
+on `destination.upsert_key`. Added and changed rows follow the normal upsert path; removed keys are
+available in `SyncResult.diff_removed_keys`, power `mirror.strategy: diff`, and appear in
+`--dry-run --diff` deletion previews.
+
+```yaml
+# ~/.drt/profiles.yml
+sf:
+  type: snowflake
+  account: xy12345.us-east-1
+  user: analyst
+  private_key_env: SNOWFLAKE_PRIVATE_KEY
+  database: ANALYTICS
+  schema: PUBLIC
+  warehouse: COMPUTE_WH
+  managed_schema: _drt       # default; drt needs table create/drop here
+```
+
+```yaml
+destination:
+  type: snowflake
+  # ... connection fields ...
+  mode: merge
+  upsert_key: [id]
+
+sync:
+  mode: upsert               # or mirror
+  incremental_strategy: diff
+  diff:
+    hash_columns: all        # or an explicit non-empty column list
+```
+
+`hash_columns: all` hashes every model output column except the upsert key. An explicit list is
+validated against the actual output columns and a typo fails loudly. Snowflake's native typed
+`HASH(...)` is used directly, so `NULL` and an empty string are different changes without casting
+values through session-dependent text formats.
+
+The new snapshot becomes the baseline only after a non-dry-run sync completes with zero row
+failures. Existing baselines are promoted with Snowflake's atomic `ALTER TABLE ... SWAP WITH`;
+scratch is rebuilt with `CREATE OR REPLACE`, so an interrupted extract or a crash around promotion
+does not wedge the next run. Cursor incremental remains the read-only-source option: diff requires
+write/create/drop privileges in `managed_schema`, or an administrator can pre-create and grant the
+schema following the same managed-table escape hatch used by warehouse-backed state.
+
 ## Notes
 
 - Requires `pip install drt-core[snowflake]` (uses `snowflake-connector-python`)

@@ -17,16 +17,64 @@ Example ~/.drt/profiles.yml:
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, Literal
 
 from drt.config.credentials import ProfileConfigLike, SnowflakeProfile, resolve_env
 from drt.config.models import RetryConfig
 from drt.destinations.retry import with_retry
+from drt.sources.base import SnapshotDiffResult
 
 # Snowflake error code for an expired authentication token — the session has
 # to be re-established, which is exactly what a retry does. Observed during
 # the #654 smoke programme on long-running extracts.
 _SNOWFLAKE_TOKEN_EXPIRED = 390114
+
+
+def _quote_identifier(identifier: str) -> str:
+    """Quote one Snowflake identifier without changing its case."""
+    escaped = identifier.replace('"', '""')
+    return f'"{escaped}"'
+
+
+def _managed_identifier(identifier: str) -> str:
+    """Quote an identifier using this connector's existing unquoted semantics.
+
+    Managed-schema configuration historically used unquoted Snowflake names,
+    which fold to uppercase. Normalizing before quoting preserves that public
+    behaviour while removing caller-controlled text from raw SQL.
+    """
+    return _quote_identifier(identifier.upper())
+
+
+def _managed_table_identifier(config: SnowflakeProfile, table_name: str) -> str:
+    return ".".join(
+        (
+            _managed_identifier(config.database),
+            _managed_identifier(config.managed_schema),
+            _managed_identifier(table_name),
+        )
+    )
+
+
+def _column_ref(alias: str, column: str) -> str:
+    return f"{alias}.{_quote_identifier(column)}"
+
+
+def _key_join_condition(key_columns: list[str], left: str, right: str) -> str:
+    return " AND ".join(
+        f"{_column_ref(left, column)} = {_column_ref(right, column)}" for column in key_columns
+    )
+
+
+def _diff_hash_expr(columns: list[str], alias: str) -> str:
+    """Build Snowflake's native, type-aware row hash expression.
+
+    ``HASH`` accepts multiple typed expressions directly and never returns
+    NULL, including when one or every input is NULL. It therefore preserves
+    the distinction between SQL NULL and an empty string without converting
+    values through session-sensitive text formatting.
+    """
+    return f"HASH({', '.join(_column_ref(alias, column) for column in columns)})"
 
 
 class SnowflakeSource:
@@ -187,19 +235,10 @@ class SnowflakeSource:
 
     # --- ManagedTableCapable (#960/#1106, ADR 0005 step 3) ------------------
     #
-    # Identifiers here are deliberately unquoted, unlike the Postgres
-    # implementation's psycopg2.sql.Identifier() (which preserves exact
-    # case). This connector has no quoting helper of its own — the existing
-    # tracked-mirror bookkeeping table (destinations/snowflake.py's
-    # _create_state_table/_mirror_table_ident) already builds fully-
-    # qualified names via plain f-string interpolation and compares them
-    # back with .upper() (_state_scope_columns_exist) — so unquoted DDL +
-    # UPPER()-normalized probes matches that existing convention instead of
-    # introducing a second, quoted-identifier one. Snowflake folds an
-    # unquoted CREATE to uppercase; probing with UPPER() on both sides keeps
-    # the create path, the probe path, and an admin's escape-hatch
-    # CREATE SCHEMA (following the provisioning docs, also unquoted) all in
-    # agreement regardless of the case actually typed in config.
+    # Managed names retain the connector's historical unquoted/uppercase
+    # semantics, but are now rendered as quoted identifiers. This preserves
+    # compatibility with admin-created unquoted schemas while ensuring no
+    # caller-controlled database/schema/table text is interpolated raw.
 
     def ensure_managed_schema(self, config: ProfileConfigLike) -> None:
         """Create ``config.managed_schema`` inside ``config.database`` if it
@@ -224,25 +263,26 @@ class SnowflakeSource:
            live concurrent-first-caller smoke test.
         """
         assert isinstance(config, SnowflakeProfile)
+        schemata = f"{_managed_identifier(config.database)}.INFORMATION_SCHEMA.SCHEMATA"
         conn = self._connect(config)
         try:
             cur = conn.cursor()
             cur.execute(
-                f"SELECT 1 FROM {config.database}.information_schema.schemata "
-                "WHERE UPPER(schema_name) = UPPER(%s)",
+                f"SELECT 1 FROM {schemata} WHERE UPPER(schema_name) = UPPER(%s)",
                 (config.managed_schema,),
             )
             if cur.fetchone() is not None:
                 return
             try:
                 cur.execute(
-                    f"CREATE SCHEMA IF NOT EXISTS {config.database}.{config.managed_schema}"
+                    "CREATE SCHEMA IF NOT EXISTS "
+                    f"{_managed_identifier(config.database)}."
+                    f"{_managed_identifier(config.managed_schema)}"
                 )
             except Exception:
                 cur = conn.cursor()
                 cur.execute(
-                    f"SELECT 1 FROM {config.database}.information_schema.schemata "
-                    "WHERE UPPER(schema_name) = UPPER(%s)",
+                    f"SELECT 1 FROM {schemata} WHERE UPPER(schema_name) = UPPER(%s)",
                     (config.managed_schema,),
                 )
                 if cur.fetchone() is None:
@@ -255,26 +295,191 @@ class SnowflakeSource:
         conn = self._connect(config)
         try:
             cur = conn.cursor()
-            # table_type = 'BASE TABLE' excludes views, same distinction the
-            # Postgres implementation makes — a same-named view would
-            # otherwise read back as "exists" and later fail on DROP TABLE.
-            cur.execute(
-                f"SELECT 1 FROM {config.database}.information_schema.tables "
-                "WHERE UPPER(table_schema) = UPPER(%s) AND UPPER(table_name) = UPPER(%s) "
-                "AND table_type = 'BASE TABLE'",
-                (config.managed_schema, table_name),
-            )
-            return cur.fetchone() is not None
+            return self._managed_table_exists(cur, config, table_name)
         finally:
             conn.close()
+
+    @staticmethod
+    def _managed_table_exists(cur: Any, config: SnowflakeProfile, table_name: str) -> bool:
+        # table_type = 'BASE TABLE' excludes views, same distinction the
+        # Postgres implementation makes — a same-named view would otherwise
+        # read back as "exists" and later fail on DROP TABLE.
+        tables = f"{_managed_identifier(config.database)}.INFORMATION_SCHEMA.TABLES"
+        cur.execute(
+            f"SELECT 1 FROM {tables} "
+            "WHERE UPPER(table_schema) = UPPER(%s) AND UPPER(table_name) = UPPER(%s) "
+            "AND table_type = 'BASE TABLE'",
+            (config.managed_schema, table_name),
+        )
+        return cur.fetchone() is not None
 
     def drop_managed_table(self, config: ProfileConfigLike, table_name: str) -> None:
         assert isinstance(config, SnowflakeProfile)
         conn = self._connect(config)
         try:
             cur = conn.cursor()
+            cur.execute(f"DROP TABLE IF EXISTS {_managed_table_identifier(config, table_name)}")
+        finally:
+            conn.close()
+
+    # --- SnapshotDiffSource (#755/#1112, ADR 0005 step 5) -------------------
+
+    def _snapshot_table_names(self, sync_name: str) -> tuple[str, str]:
+        return f"_drt_snapshot_{sync_name}", f"_drt_snapshot_{sync_name}_scratch"
+
+    def extract_snapshot_diff(
+        self,
+        query: str,
+        config: ProfileConfigLike,
+        *,
+        sync_name: str,
+        key_columns: list[str],
+        hash_columns: Literal["all"] | list[str],
+        query_tags: dict[str, str] | None = None,
+    ) -> SnapshotDiffResult:
+        """See ``SnapshotDiffSource.extract_snapshot_diff``."""
+        assert isinstance(config, SnowflakeProfile)
+
+        self.ensure_managed_schema(config)
+        current_table, scratch_table = self._snapshot_table_names(sync_name)
+        current_ident = _managed_table_identifier(config, current_table)
+        scratch_ident = _managed_table_identifier(config, scratch_table)
+
+        conn = self._connect(config, query_tags=query_tags)
+        try:
+            cur = conn.cursor()
+            # CTAS is atomic in Snowflake. CREATE OR REPLACE also makes a
+            # scratch table left by an interrupted extract self-healing.
+            cur.execute(f"CREATE OR REPLACE TABLE {scratch_ident} AS {query}")
+            columns_table = f"{_managed_identifier(config.database)}.INFORMATION_SCHEMA.COLUMNS"
             cur.execute(
-                f"DROP TABLE IF EXISTS {config.database}.{config.managed_schema}.{table_name}"
+                f"SELECT column_name FROM {columns_table} "
+                "WHERE UPPER(table_schema) = UPPER(%s) "
+                "AND UPPER(table_name) = UPPER(%s) ORDER BY ordinal_position",
+                (config.managed_schema, scratch_table),
             )
+            all_columns = [row[0] for row in cur.fetchall()]
+
+            missing_keys = [column for column in key_columns if column not in all_columns]
+            if missing_keys:
+                raise ValueError(
+                    "sync.incremental_strategy: diff — destination "
+                    f"upsert_key column(s) {missing_keys} not found in the "
+                    f"model's output columns {all_columns}."
+                )
+            if hash_columns == "all":
+                diff_columns = [column for column in all_columns if column not in key_columns]
+            else:
+                missing_hash = [column for column in hash_columns if column not in all_columns]
+                if missing_hash:
+                    raise ValueError(
+                        f"sync.diff.hash_columns: column(s) {missing_hash} "
+                        "not found in the model's output columns "
+                        f"{all_columns} — check for a typo."
+                    )
+                diff_columns = list(hash_columns)
+
+            is_first_run = not self._managed_table_exists(cur, config, current_table)
+        finally:
+            conn.close()
+
+        if is_first_run:
+            added = self._stream_query(
+                config,
+                f"SELECT * FROM {scratch_ident}",
+                query_tags=query_tags,
+            )
+            changed: Iterator[dict[str, Any]] = iter(())
+            removed_keys: Iterator[dict[str, Any]] = iter(())
+        else:
+            join_condition = _key_join_condition(key_columns, "s", "c")
+            added = self._stream_query(
+                config,
+                f"SELECT s.* FROM {scratch_ident} AS s "
+                f"LEFT JOIN {current_ident} AS c ON {join_condition} "
+                f"WHERE {_column_ref('c', key_columns[0])} IS NULL",
+                query_tags=query_tags,
+            )
+            removed_keys = self._stream_query(
+                config,
+                "SELECT "
+                + ", ".join(_column_ref("c", column) for column in key_columns)
+                + f" FROM {current_ident} AS c LEFT JOIN {scratch_ident} AS s ON "
+                + _key_join_condition(key_columns, "c", "s")
+                + f" WHERE {_column_ref('s', key_columns[0])} IS NULL",
+                query_tags=query_tags,
+            )
+            if diff_columns:
+                changed = self._stream_query(
+                    config,
+                    f"SELECT s.* FROM {scratch_ident} AS s "
+                    f"JOIN {current_ident} AS c ON {join_condition} "
+                    f"WHERE {_diff_hash_expr(diff_columns, 's')} "
+                    f"<> {_diff_hash_expr(diff_columns, 'c')}",
+                    query_tags=query_tags,
+                )
+            else:
+                changed = iter(())
+
+        return SnapshotDiffResult(
+            added=added,
+            changed=changed,
+            removed_keys=removed_keys,
+            is_first_run=is_first_run,
+        )
+
+    def _stream_query(
+        self,
+        config: SnowflakeProfile,
+        query: str,
+        *,
+        query_tags: dict[str, str] | None,
+    ) -> Iterator[dict[str, Any]]:
+        """Stream one snapshot classification query on its own connection."""
+
+        def _connect_and_execute() -> tuple[Any, Any, list[str]]:
+            conn = self._connect(config, query_tags=query_tags)
+            try:
+                cur = conn.cursor()
+                cur.arraysize = config.fetch_size
+                cur.execute(query)
+                return conn, cur, [desc[0] for desc in cur.description]
+            except BaseException:
+                conn.close()
+                raise
+
+        conn, cur, columns = with_retry(
+            _connect_and_execute, RetryConfig(), retry_on=self._is_transient
+        )
+        try:
+            for row in cur:
+                yield dict(zip(columns, row))
+        finally:
+            cur.close()
+            conn.close()
+
+    def commit_snapshot_diff(self, config: ProfileConfigLike, sync_name: str) -> None:
+        """Atomically promote scratch to the next Snowflake baseline.
+
+        Existing baselines use ``SWAP WITH``: the exchange is one atomic DDL
+        statement, so readers can only observe the complete old or complete
+        new snapshot. If a crash leaves the old baseline in scratch before
+        its cleanup DROP, the next extract's CREATE OR REPLACE heals it.
+        """
+        assert isinstance(config, SnowflakeProfile)
+        current_table, scratch_table = self._snapshot_table_names(sync_name)
+        current_ident = _managed_table_identifier(config, current_table)
+        scratch_ident = _managed_table_identifier(config, scratch_table)
+
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            if not self._managed_table_exists(cur, config, scratch_table):
+                return
+            if self._managed_table_exists(cur, config, current_table):
+                cur.execute(f"ALTER TABLE {scratch_ident} SWAP WITH {current_ident}")
+                cur.execute(f"DROP TABLE IF EXISTS {scratch_ident}")
+            else:
+                cur.execute(f"ALTER TABLE {scratch_ident} RENAME TO {current_ident}")
         finally:
             conn.close()

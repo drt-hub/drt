@@ -85,15 +85,15 @@ jobs:
         run: uv pip install --system -e ".[dev,duckdb,snowflake]"
       - name: Run Snowflake smoke
         if: steps.creds.outputs.has_creds == 'true'
-        # #1106's managed-table and warehouse-state-backend smoke suites were
-        # added to tests/integration/dwh/ but never wired into this job's
-        # command (each job here names its files explicitly, not the whole
-        # directory) -- silently never ran on any schedule until this fix.
+        # Each Snowflake smoke file is explicit rather than directory-wide;
+        # new capability legs such as #1112 must be listed here or they never
+        # run in the credentialed workflow.
         run: |
           pytest -m dwh_smoke \
             tests/integration/dwh/test_snowflake_smoke.py \
             tests/integration/dwh/test_snowflake_managed_table_smoke.py \
             tests/integration/dwh/test_snowflake_warehouse_state_smoke.py \
+            tests/integration/dwh/test_snowflake_diff_incremental_smoke.py \
             -v
 
   databricks:

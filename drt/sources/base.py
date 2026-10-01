@@ -201,12 +201,10 @@ class SnapshotDiffResult:
     only ``key_columns`` — everything a mirror-delete pass needs and nothing
     more; bounded by the size of the removed set, not the table.
 
-    ``removed_keys`` is exposed today for observability
-    (``SyncResult.diff_removed_keys``) only — no destination consumes it yet.
-    A ``mode: mirror`` integration that deletes these rows directly (instead
-    of ``mirror``'s existing whole-destination-scan or tracked-state passes)
-    is tracked as a follow-up issue; this shape was chosen so that follow-up
-    only has to plumb the value through, not change it.
+    ``removed_keys`` is exposed as ``SyncResult.diff_removed_keys`` and feeds
+    ``mirror.strategy: diff`` plus its ``--dry-run --diff`` preview. The key-
+    only shape lets those paths delete or display the exact removed rows
+    without a destination-side scan.
     """
 
     added: Iterator[dict[str, Any]]

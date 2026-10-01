@@ -217,10 +217,9 @@ class SnowflakeProfile:
     #: rationale (deliberately distinct from `schema` above, which is the
     #: query-execution default, a different concept). Lives inside
     #: `database` above rather than a separate managed-database field.
-    #: Created/probed unquoted — Snowflake folds it to uppercase, matching
-    #: this connector's existing `_drt_synced_keys` bookkeeping table
-    #: convention (`destinations/snowflake.py`) rather than introducing a
-    #: second, quoted-identifier convention alongside it.
+    #: Uses Snowflake's unquoted-name semantics (folded to uppercase) for
+    #: compatibility with existing admin-created schemas, but SQL renders the
+    #: normalized value as a quoted identifier so caller text is never raw.
     managed_schema: str = "_drt"
 
     def describe(self) -> str:

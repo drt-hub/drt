@@ -444,7 +444,7 @@ class TestManagedTableCapable:
             SnowflakeSource().ensure_managed_schema(_config())
 
         executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
-        assert any("information_schema.schemata" in sql for sql in executed)
+        assert any("INFORMATION_SCHEMA.SCHEMATA" in sql for sql in executed)
         assert any("CREATE SCHEMA" in sql for sql in executed)
         conn.close.assert_called_once()
 
@@ -501,7 +501,7 @@ class TestManagedTableCapable:
             SnowflakeSource().ensure_managed_schema(_config(managed_schema="custom_schema"))
 
         sql, params = conn.cursor.return_value.execute.call_args.args
-        assert "ANALYTICS.information_schema.schemata" in sql
+        assert '"ANALYTICS".INFORMATION_SCHEMA.SCHEMATA' in sql
         assert "UPPER(schema_name) = UPPER(%s)" in sql
         assert params == ("custom_schema",)
 
@@ -526,7 +526,7 @@ class TestManagedTableCapable:
             )
 
         sql, params = conn.cursor.return_value.execute.call_args.args
-        assert "information_schema.tables" in sql
+        assert "INFORMATION_SCHEMA.TABLES" in sql
         assert "table_type = 'BASE TABLE'" in sql
         assert params == ("custom_schema", "_drt_runs")
 
@@ -536,10 +536,181 @@ class TestManagedTableCapable:
             SnowflakeSource().drop_managed_table(_config(), "_drt_runs")
 
         executed = [str(call.args[0]) for call in conn.cursor.return_value.execute.call_args_list]
-        assert any("DROP TABLE IF EXISTS" in sql for sql in executed)
+        assert 'DROP TABLE IF EXISTS "ANALYTICS"."_DRT"."_DRT_RUNS"' in executed
         conn.close.assert_called_once()
+
+    def test_managed_identifiers_are_quoted_and_embedded_quotes_are_escaped(self) -> None:
+        conn = self._mock_ddl_conn()
+        with patch.object(SnowflakeSource, "_connect", return_value=conn):
+            SnowflakeSource().drop_managed_table(
+                _config(database='analytics"prod', managed_schema='drt"managed'),
+                'snapshot"name',
+            )
+
+        sql = conn.cursor.return_value.execute.call_args.args[0]
+        assert sql == ('DROP TABLE IF EXISTS "ANALYTICS""PROD"."DRT""MANAGED"."SNAPSHOT""NAME"')
 
     def test_managed_table_capable_protocol_satisfied(self) -> None:
         from drt.sources.base import ManagedTableCapable
 
         assert isinstance(SnowflakeSource(), ManagedTableCapable)
+
+
+class TestSnapshotDiffSource:
+    """#1112 — Snowflake's server-side snapshot-diff SQL contract.
+
+    These mocks verify query shape and lifecycle only. Real Snowflake syntax
+    and NULL-vs-empty hashing are covered by the gated DWH smoke test.
+    """
+
+    @staticmethod
+    def _snapshot_conn(columns: list[str], *, current_exists: bool) -> MagicMock:
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.fetchall.return_value = [(column,) for column in columns]
+        cur.fetchone.return_value = (1,) if current_exists else None
+        conn.cursor.return_value = cur
+        return conn
+
+    def test_first_run_classifies_every_row_as_added(self) -> None:
+        conn = self._snapshot_conn(["id", "note"], current_exists=False)
+        source = SnowflakeSource()
+        with (
+            patch.object(source, "ensure_managed_schema"),
+            patch.object(source, "_connect", return_value=conn),
+            patch.object(
+                source, "_stream_query", return_value=iter([{"id": 1, "note": None}])
+            ) as stream,
+        ):
+            result = source.extract_snapshot_diff(
+                'SELECT id AS "id", note AS "note" FROM users',
+                _config(),
+                sync_name="daily-users",
+                key_columns=["id"],
+                hash_columns="all",
+            )
+
+        assert result.is_first_run is True
+        assert list(result.added) == [{"id": 1, "note": None}]
+        assert list(result.changed) == []
+        assert list(result.removed_keys) == []
+        assert stream.call_args.args[1] == (
+            'SELECT * FROM "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_DAILY-USERS_SCRATCH"'
+        )
+        create_sql = conn.cursor.return_value.execute.call_args_list[0].args[0]
+        assert create_sql.startswith(
+            'CREATE OR REPLACE TABLE "ANALYTICS"."_DRT".'
+            '"_DRT_SNAPSHOT_DAILY-USERS_SCRATCH" AS SELECT'
+        )
+
+    def test_existing_snapshot_builds_quoted_join_hash_and_removed_key_queries(self) -> None:
+        conn = self._snapshot_conn(["id", "note", "ignored"], current_exists=True)
+        source = SnowflakeSource()
+        with (
+            patch.object(source, "ensure_managed_schema"),
+            patch.object(source, "_connect", return_value=conn),
+            patch.object(
+                source,
+                "_stream_query",
+                side_effect=[
+                    iter([{"id": 4, "note": "new", "ignored": 0}]),
+                    iter([{"id": 3}]),
+                    iter([{"id": 2, "note": "changed", "ignored": 0}]),
+                ],
+            ) as stream,
+        ):
+            result = source.extract_snapshot_diff(
+                "SELECT * FROM users",
+                _config(),
+                sync_name="daily-users",
+                key_columns=["id"],
+                hash_columns=["note"],
+            )
+
+        assert result.is_first_run is False
+        assert [row["id"] for row in result.added] == [4]
+        assert [row["id"] for row in result.changed] == [2]
+        assert list(result.removed_keys) == [{"id": 3}]
+
+        added_sql, removed_sql, changed_sql = [call.args[1] for call in stream.call_args_list]
+        assert 'LEFT JOIN "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_DAILY-USERS" AS c' in added_sql
+        assert 's."id" = c."id"' in added_sql
+        assert 'WHERE c."id" IS NULL' in added_sql
+        assert removed_sql.startswith('SELECT c."id" FROM ')
+        assert 'c."id" = s."id"' in removed_sql
+        assert 'WHERE s."id" IS NULL' in removed_sql
+        assert 'HASH(s."note") <> HASH(c."note")' in changed_sql
+        assert "COALESCE" not in changed_sql
+
+    def test_hash_columns_typo_raises_loudly(self) -> None:
+        conn = self._snapshot_conn(["id", "note"], current_exists=False)
+        source = SnowflakeSource()
+        with (
+            patch.object(source, "ensure_managed_schema"),
+            patch.object(source, "_connect", return_value=conn),
+        ):
+            with pytest.raises(ValueError, match=r"hash_columns.*\['ntoe'\].*typo"):
+                source.extract_snapshot_diff(
+                    "SELECT * FROM users",
+                    _config(),
+                    sync_name="users",
+                    key_columns=["id"],
+                    hash_columns=["ntoe"],
+                )
+
+    def test_all_hash_columns_excludes_upsert_key(self) -> None:
+        conn = self._snapshot_conn(["id", "note", "plan"], current_exists=True)
+        source = SnowflakeSource()
+        with (
+            patch.object(source, "ensure_managed_schema"),
+            patch.object(source, "_connect", return_value=conn),
+            patch.object(
+                source,
+                "_stream_query",
+                side_effect=[iter(()), iter(()), iter(())],
+            ) as stream,
+        ):
+            source.extract_snapshot_diff(
+                "SELECT * FROM users",
+                _config(),
+                sync_name="users",
+                key_columns=["id"],
+                hash_columns="all",
+            )
+
+        changed_sql = stream.call_args_list[2].args[1]
+        assert 'HASH(s."note", s."plan")' in changed_sql
+        assert 'HASH(c."note", c."plan")' in changed_sql
+        assert 'HASH(s."id"' not in changed_sql
+
+    def test_commit_swaps_existing_baseline_then_cleans_old_snapshot(self) -> None:
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.fetchone.side_effect = [(1,), (1,)]  # scratch exists, current exists
+        conn.cursor.return_value = cur
+        with patch.object(SnowflakeSource, "_connect", return_value=conn):
+            SnowflakeSource().commit_snapshot_diff(_config(), "daily-users")
+
+        executed = [call.args[0] for call in cur.execute.call_args_list]
+        assert any(" SWAP WITH " in sql for sql in executed)
+        assert executed[-1] == (
+            'DROP TABLE IF EXISTS "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_DAILY-USERS_SCRATCH"'
+        )
+
+    def test_commit_renames_scratch_on_first_promotion(self) -> None:
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.fetchone.side_effect = [(1,), None]  # scratch exists, current absent
+        conn.cursor.return_value = cur
+        with patch.object(SnowflakeSource, "_connect", return_value=conn):
+            SnowflakeSource().commit_snapshot_diff(_config(), "users")
+
+        assert cur.execute.call_args_list[-1].args[0] == (
+            'ALTER TABLE "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_USERS_SCRATCH" '
+            'RENAME TO "ANALYTICS"."_DRT"."_DRT_SNAPSHOT_USERS"'
+        )
+
+    def test_snapshot_diff_protocol_satisfied(self) -> None:
+        from drt.sources.base import SnapshotDiffSource
+
+        assert isinstance(SnowflakeSource(), SnapshotDiffSource)

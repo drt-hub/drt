@@ -222,8 +222,9 @@ class DiffConfig(BaseModel):
     cursor-based incremental to ever detect a delete.
 
     Deliberately no ``schema`` field here — the managed schema name is the
-    source profile's own ``managed_schema`` (#960, ``PostgresProfile``), not
-    a second, independently-settable knob that could disagree with it.
+    source profile's own ``managed_schema`` (#960, currently
+    ``PostgresProfile`` and ``SnowflakeProfile``), not a second,
+    independently-settable knob that could disagree with it.
     Likewise no ``state`` field: the snapshot always lives in the source
     warehouse (the only warehouse #960's ``ManagedTableCapable`` primitive
     can reach) — there is nowhere else for it to live until a destination-side
@@ -237,7 +238,7 @@ class DiffConfig(BaseModel):
     # last_login_at column that changes every run without being a
     # business-meaningful update). Validated against the model's actual
     # output columns at run time (config time can't see them) — see
-    # PostgresSource.extract_snapshot_diff.
+    # SnapshotDiffSource implementations validate this at extraction time.
     hash_columns: Literal["all"] | list[str] = "all"
 
     @model_validator(mode="after")

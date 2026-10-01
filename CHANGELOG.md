@@ -64,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Diff-based incremental extraction — Snowflake leg** ([#1112](https://github.com/drt-hub/drt/issues/1112), follow-up to [#755](https://github.com/drt-hub/drt/issues/755)): `SnowflakeSource` now implements `sync.incremental_strategy: diff` with full model results staged in `_drt_snapshot_<sync_name>`, server-side added/changed/removed joins on `destination.upsert_key`, native multi-expression `HASH(...)` for deterministic typed comparisons (including `NULL` versus `''`), and atomic baseline promotion through `ALTER TABLE ... SWAP WITH`. Scratch creation is `CREATE OR REPLACE`, so an extract interrupted before commit or a crash after the swap cannot wedge the next run. Identifiers are quoted after preserving Snowflake's established uppercase/unquoted-name semantics. Unit coverage is complete; **live Snowflake verification remains pending until the `dwh-smoke` workflow runs the new gated test.**
+
 ### Fixed
 
 - **Databricks merge no longer fails for any Delta target with column `DEFAULT`s**: the merge staging CTAS now enables `delta.feature.allowColumnDefaults`, preventing Databricks' `WRONG_COLUMN_DEFAULTS_FOR_DELTA_FEATURE_NOT_ENABLED` rejection while retaining #1137's presence-flag semantics — an omitted sparse-row field still uses the target's declared default on insert and preserves the existing value on update. The same table property is applied to the replace-swap shadow and mirror-key scratch CTAS paths, which can inherit default metadata from their target too; explicit-schema tracked-diff and warehouse-state tables are unaffected.
