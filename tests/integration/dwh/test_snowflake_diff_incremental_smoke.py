@@ -43,20 +43,18 @@ def _require_creds() -> dict[str, str]:
 
 
 def _profile(creds: dict[str, str]) -> SnowflakeProfile:
-    kwargs: dict[str, object] = {
-        "type": "snowflake",
-        "account": creds[ACCOUNT_ENV],
-        "user": creds[USER_ENV],
-        "database": creds["DRT_SMOKE_SNOWFLAKE_DATABASE"],
-        "schema": creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"],
-        "managed_schema": creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"],
-        "warehouse": creds["DRT_SMOKE_SNOWFLAKE_WAREHOUSE"],
-    }
-    if os.environ.get(KEY_ENV):
-        kwargs["private_key_env"] = KEY_ENV
-    else:
-        kwargs["password_env"] = PASSWORD_ENV
-    return SnowflakeProfile.model_validate(kwargs)
+    use_key = bool(os.environ.get(KEY_ENV))
+    return SnowflakeProfile(
+        type="snowflake",
+        account=creds[ACCOUNT_ENV],
+        user=creds[USER_ENV],
+        database=creds["DRT_SMOKE_SNOWFLAKE_DATABASE"],
+        schema=creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"],
+        managed_schema=creds["DRT_SMOKE_SNOWFLAKE_SCHEMA"],
+        warehouse=creds["DRT_SMOKE_SNOWFLAKE_WAREHOUSE"],
+        private_key_env=KEY_ENV if use_key else None,
+        password_env=None if use_key else PASSWORD_ENV,
+    )
 
 
 def _connect(creds: dict[str, str]):
