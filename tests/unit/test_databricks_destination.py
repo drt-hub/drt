@@ -33,7 +33,11 @@ def _diff_options(removed_keys: list[dict[str, Any]] | None) -> SyncOptions:
         mirror={"strategy": "diff"},
     )
     opts._diff_removed_keys = removed_keys
+    opts._sync_name = "orders_sync"
     return opts
+
+
+DIFF_KEYS_TBL = "main.default.__drt_mirror_keys_user_scores_diff_orders_sync_498a38c7"
 
 
 def _config(**overrides: Any) -> DatabricksDestinationConfig:
@@ -815,7 +819,7 @@ class TestDatabricksMirrorMode:
 
         assert result is not None
         calls = conn._cur.execute.call_args_list
-        keys_tbl = "main.default.__drt_mirror_keys_user_scores"
+        keys_tbl = DIFF_KEYS_TBL
         key_insert = next(
             call
             for call in calls
@@ -848,7 +852,7 @@ class TestDatabricksMirrorMode:
             DatabricksDestination().finalize_sync(config, opts)
 
         calls = conn._cur.execute.call_args_list
-        keys_tbl = "main.default.__drt_mirror_keys_user_scores"
+        keys_tbl = DIFF_KEYS_TBL
         key_insert = next(
             call
             for call in calls
@@ -865,6 +869,31 @@ class TestDatabricksMirrorMode:
             "ON t.tenant_id = s.tenant_id AND t.user_id = s.user_id "
             "WHEN MATCHED THEN DELETE",
         )
+
+    def test_diff_mirror_staging_table_is_isolated_per_sync(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Concurrent diff syncs on one table must not share a staging table."""
+        _set_creds(monkeypatch)
+        config = _config(mode="merge", upsert_key=["id"])
+        staging: list[str] = []
+        for sync_name in ("orders_sync", "orders.v2", "orders_sync"):
+            conn = _fake_conn()
+            opts = _diff_options([{"id": 1}])
+            opts._sync_name = sync_name
+            with patch.dict("sys.modules", _mocked_databricks_modules(conn)):
+                DatabricksDestination().finalize_sync(config, opts)
+            create = next(
+                c.args[0]
+                for c in conn._cur.execute.call_args_list
+                if c.args and c.args[0].startswith("CREATE OR REPLACE TABLE")
+            )
+            staging.append(create.split()[4])
+
+        assert staging[0] == DIFF_KEYS_TBL
+        assert staging[0] != staging[1]
+        assert staging[0] == staging[2]  # stable per sync, so crash leftovers self-heal
+        assert "orders_v2_15ab348b" in staging[1]
 
     def test_diff_mirror_finalize_skips_empty_removed_list(
         self, monkeypatch: pytest.MonkeyPatch

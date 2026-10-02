@@ -6,6 +6,7 @@ This test exercises a removal-only second run with a composite upsert key.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -64,7 +65,10 @@ def test_databricks_mirror_diff_deletes_composite_removed_key(tmp_path: Path) ->
     baseline, scratch = source._snapshot_table_names(sync_name)
     baseline_fq = _quoted_fqn(creds, baseline)
     scratch_fq = _quoted_fqn(creds, scratch)
-    mirror_keys_fq = _quoted_fqn(creds, f"__drt_mirror_keys_{destination_table}")
+    sync_digest = hashlib.sha1(sync_name.encode()).hexdigest()[:8]
+    mirror_keys_fq = _quoted_fqn(
+        creds, f"__drt_mirror_keys_{destination_table}_diff_{sync_name}_{sync_digest}"
+    )
 
     destination = DatabricksDestinationConfig(
         **{

@@ -48,7 +48,9 @@ Example sync YAML:
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from datetime import timedelta
 from typing import Any
 
@@ -923,7 +925,16 @@ class DatabricksDestination(BaseSqlDestination):
         assert upsert_cols  # guarded in load()
         keys = [tuple(row[col] for col in upsert_cols) for row in removed_keys]
         table_fq = f"{config.catalog}.{config.schema_}.{config.table}"
-        keys_table = f"{config.catalog}.{config.schema_}.__drt_mirror_keys_{config.table}"
+        # Per-sync staging name: two diff syncs writing the same table (e.g.
+        # ``drt run --threads``) must not share one scratch table. Stable per
+        # sync, so a crashed run's leftover is replaced by CREATE OR REPLACE.
+        sync_name = getattr(sync_options, "_sync_name", None) or ""
+        digest = hashlib.sha1(sync_name.encode()).hexdigest()[:8]
+        readable = re.sub(r"[^A-Za-z0-9_]", "_", sync_name)[:60]
+        keys_table = (
+            f"{config.catalog}.{config.schema_}.__drt_mirror_keys_{config.table}_diff_"
+            f"{readable}_{digest}"
+        )
 
         conn = self._connect(config, query_tags=sync_options._query_tags)
         try:
