@@ -70,7 +70,7 @@ bigquery = ["google-cloud-bigquery>=3.0"]
 duckdb = ["duckdb>=0.10"]
 postgres = ["psycopg2-binary>=2.9"]
 redshift = ["psycopg2-binary>=2.9"]  # Redshift uses PostgreSQL wire protocol
-clickhouse = ["clickhouse-connect>=0.7.0"]
+clickhouse = ["clickhouse-connect>=0.7.0,<2"]
 snowflake = ["snowflake-connector-python>=3.0"]
 databricks = ["databricks-sql-connector>=3.0"]
 deltalake = ["deltalake>=0.17"]

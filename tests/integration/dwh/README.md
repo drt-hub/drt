@@ -100,6 +100,14 @@ Databricks prerequisites (#672):
   unreliable on an idle/auto-stopped warehouse (observed 2026-08-27). The
   complex-type leg uses a `VARIANT` column, so the warehouse must be on a
   channel that supports VARIANT (current serverless/pro warehouses do).
+- **Free Edition deactivates the whole workspace** after a period of
+  inactivity (the start API answers `DENY_NEW_AND_EXISTING_RESOURCES` with
+  `denyReason: INACTIVE`). The API cannot reactivate it — only pressing Start
+  under *SQL Warehouses* in the Databricks console can. A *scheduled* `dwh-smoke`
+  run reports this as a `Databricks smoke skipped` warning instead of failing;
+  a manual `workflow_dispatch` run fails on purpose so a skipped leg is never
+  mistaken for a green verification. If the warning appears, reactivate the
+  workspace and re-dispatch the workflow before trusting a Databricks change.
 - Least-privilege grants for the token principal: `USE CATALOG` + `USE SCHEMA`,
   plus `CREATE TABLE` / `MODIFY` on the smoke schema — the swap leg builds and
   drops a `<table>__drt_swap` shadow, and the complex-type leg creates ARRAY /
