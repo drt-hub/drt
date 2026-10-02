@@ -15,6 +15,7 @@ Example ~/.drt/profiles.yml:
 from __future__ import annotations
 
 import hashlib
+import re
 import uuid
 from collections.abc import Iterator
 from typing import Any, Literal
@@ -369,7 +370,11 @@ class DatabricksSource:
         # Unity Catalog identifiers are case-insensitive, while sync names are
         # not. The digest keeps names that differ only by case distinct.
         digest = hashlib.sha1(sync_name.encode()).hexdigest()[:8]
-        base = f"_drt_snapshot_{sync_name}_{digest}"
+        # Unity Catalog rejects '.' and '/' in table names and caps their length
+        # even when quoted; the digest of the raw name keeps sanitised/truncated
+        # names distinct.
+        readable = re.sub(r"[^A-Za-z0-9_-]", "_", sync_name)[:100]
+        base = f"_drt_snapshot_{readable}_{digest}"
         return base, f"{base}_scratch"
 
     def _snapshot_token_key(

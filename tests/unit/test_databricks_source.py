@@ -872,6 +872,19 @@ class TestSnapshotDiffSource:
         assert lower == ("_drt_snapshot_users_5b7dcd14", "_drt_snapshot_users_5b7dcd14_scratch")
         assert {name.casefold() for name in lower}.isdisjoint({name.casefold() for name in upper})
 
+    def test_table_names_are_unity_catalog_safe_and_stay_distinct(self) -> None:
+        source = DatabricksSource()
+        dotted = source._snapshot_table_names("a.b/c")
+        assert dotted[0].startswith("_drt_snapshot_a_b_c_")
+        assert not any(ch in dotted[0] for ch in "./")
+        # Sanitising collapses these to the same readable part; the digest of
+        # the raw name must keep them apart.
+        assert source._snapshot_table_names("a.b")[0] != source._snapshot_table_names("a/b")[0]
+        long_name = "x" * 400
+        base, scratch = source._snapshot_table_names(long_name)
+        assert len(scratch) < 255
+        assert source._snapshot_table_names(long_name + "y")[0] != base
+
     def test_commit_uses_atomic_replace_and_preserves_scratch(self) -> None:
         conn = self._conn()
         cur = conn.cursor.return_value
