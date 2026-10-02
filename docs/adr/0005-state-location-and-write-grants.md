@@ -204,7 +204,7 @@ structurally cannot close it.
 | 2 | Object-storage backend for state / history / DLQ | **not required** | Shipped, v0.9.0 (#756) |
 | 3 | Warehouse managed-table primitive (shared by 4 and 5) | required | Postgres-only, [#960](https://github.com/drt-hub/drt/issues/960) — [#1103](https://github.com/drt-hub/drt/pull/1103) |
 | 4 | Warehouse state backend (SQL observability) | required | Postgres-only, [#920](https://github.com/drt-hub/drt/issues/920) — [#1104](https://github.com/drt-hub/drt/pull/1104) |
-| 5 | #755 diff-based incremental | required | Postgres + Snowflake ([#1112](https://github.com/drt-hub/drt/issues/1112)); Snowflake live verification pending `dwh-smoke` |
+| 5 | #755 diff-based incremental | required | Postgres + Snowflake ([#1112](https://github.com/drt-hub/drt/issues/1112)) + Databricks ([#1114](https://github.com/drt-hub/drt/issues/1114)); dialect-specific live verification in `dwh-smoke` |
 
 Steps 3 and 4 are Postgres-first, matching this ADR's own emphasis on landing what's
 live-verifiable rather than shipping multiple dialects behind mock-cursor tests alone. Snowflake,

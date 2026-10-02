@@ -14,16 +14,82 @@ Example ~/.drt/profiles.yml:
 
 from __future__ import annotations
 
+import hashlib
+import uuid
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, Literal
 
 from drt.config.credentials import DatabricksProfile, ProfileConfigLike, resolve_env
 from drt.config.models import RetryConfig
 from drt.destinations.retry import with_retry
+from drt.sources.base import SnapshotDiffResult
+
+_SNAPSHOT_TOKEN_PROPERTY = "drt.snapshot_run_token"
+
+
+def _raise_diff_concurrency_race(sync_name: str) -> None:
+    """Fail loudly when another run replaced this run's scratch snapshot."""
+    raise RuntimeError(
+        f"sync.incremental_strategy: diff — another run of sync "
+        f"{sync_name!r} appears to be building the same snapshot table "
+        f"concurrently. diff-strategy syncs must not run concurrently "
+        f"for the same sync — see drt serve's request coalescing (#854) "
+        f"or your scheduler's own overlap protection."
+    )
+
+
+def _quote_identifier(identifier: str) -> str:
+    """Quote one Databricks identifier without changing its case."""
+    return f"`{identifier.replace('`', '``')}`"
+
+
+def _managed_table_identifier(config: DatabricksProfile, table_name: str) -> str:
+    assert config.catalog is not None
+    return ".".join(
+        _quote_identifier(part) for part in (config.catalog, config.managed_schema, table_name)
+    )
+
+
+def _column_ref(alias: str, column: str) -> str:
+    return f"{alias}.{_quote_identifier(column)}"
+
+
+def _resolve_output_column(name: str, actual_columns: list[str]) -> str | None:
+    """Resolve a configured name using Delta's case-insensitive identifiers."""
+    if name in actual_columns:
+        return name
+    folded = name.casefold()
+    return next((column for column in actual_columns if column.casefold() == folded), None)
+
+
+def _key_join_condition(key_columns: list[str], left: str, right: str) -> str:
+    return " AND ".join(
+        f"{_column_ref(left, column)} = {_column_ref(right, column)}" for column in key_columns
+    )
+
+
+def _diff_hash_expr(columns: list[str], alias: str) -> str:
+    """Build a typed Databricks row hash that distinguishes NULL from values.
+
+    Spark's xxhash64 accepts typed expressions directly. Pairing every value
+    with an explicit nullness boolean prevents its normal NULL-skipping
+    behaviour from making SQL NULL indistinguishable from an empty string.
+    """
+    arguments = [
+        expression
+        for column in columns
+        for expression in (f"isnull({_column_ref(alias, column)})", _column_ref(alias, column))
+    ]
+    return f"xxhash64({', '.join(arguments)})"
 
 
 class DatabricksSource:
     """Extract records from a Databricks SQL Warehouse."""
+
+    def __init__(self) -> None:
+        # One source instance performs both extraction and commit. The token
+        # identifies the fixed-name scratch table built by this invocation.
+        self._snapshot_diff_tokens: dict[tuple[str, str, str], str] = {}
 
     def _is_transient(self, exc: Exception) -> bool:
         """Is ``exc`` worth retrying? (#766)
@@ -294,5 +360,345 @@ class DatabricksSource:
         try:
             cur = conn.cursor()
             cur.execute(f"DROP TABLE IF EXISTS {catalog}.{config.managed_schema}.{table_name}")
+        finally:
+            conn.close()
+
+    # --- SnapshotDiffSource (#755/#1114, ADR 0005 step 5) -------------------
+
+    def _snapshot_table_names(self, sync_name: str) -> tuple[str, str]:
+        # Unity Catalog identifiers are case-insensitive, while sync names are
+        # not. The digest keeps names that differ only by case distinct.
+        digest = hashlib.sha1(sync_name.encode()).hexdigest()[:8]
+        base = f"_drt_snapshot_{sync_name}_{digest}"
+        return base, f"{base}_scratch"
+
+    def _snapshot_token_key(
+        self, config: DatabricksProfile, sync_name: str
+    ) -> tuple[str, str, str]:
+        return self._require_catalog(config).casefold(), config.managed_schema.casefold(), sync_name
+
+    @staticmethod
+    def _managed_table_exists(cur: Any, config: DatabricksProfile, table_name: str) -> bool:
+        assert config.catalog is not None
+        cur.execute(
+            f"SELECT 1 FROM {_quote_identifier(config.catalog)}.information_schema.tables "
+            "WHERE lower(table_schema) = lower(?) AND lower(table_name) = lower(?) LIMIT 1",
+            [config.managed_schema, table_name],
+        )
+        return cur.fetchone() is not None
+
+    @staticmethod
+    def _managed_table_columns(cur: Any, config: DatabricksProfile, table_name: str) -> list[str]:
+        assert config.catalog is not None
+        columns_table = f"{_quote_identifier(config.catalog)}.information_schema.columns"
+        cur.execute(
+            f"SELECT column_name FROM {columns_table} "
+            "WHERE lower(table_schema) = lower(?) AND lower(table_name) = lower(?) "
+            "ORDER BY ordinal_position",
+            [config.managed_schema, table_name],
+        )
+        return [str(row[0]) for row in cur.fetchall()]
+
+    def _managed_table_token(
+        self, cur: Any, config: DatabricksProfile, table_name: str
+    ) -> tuple[bool, str | None]:
+        if not self._managed_table_exists(cur, config, table_name):
+            return False, None
+        cur.execute(
+            f"SHOW TBLPROPERTIES {_managed_table_identifier(config, table_name)} "
+            f"('{_SNAPSHOT_TOKEN_PROPERTY}')"
+        )
+        row = cur.fetchone()
+        return True, None if row is None else str(row[-1])
+
+    def _assert_snapshot_token(
+        self,
+        cur: Any,
+        config: DatabricksProfile,
+        table_name: str,
+        expected_token: str,
+        sync_name: str,
+    ) -> None:
+        exists, actual_token = self._managed_table_token(cur, config, table_name)
+        if not exists or actual_token != expected_token:
+            _raise_diff_concurrency_race(sync_name)
+
+    def extract_snapshot_diff(
+        self,
+        query: str,
+        config: ProfileConfigLike,
+        *,
+        sync_name: str,
+        key_columns: list[str],
+        hash_columns: Literal["all"] | list[str],
+        query_tags: dict[str, str] | None = None,
+    ) -> SnapshotDiffResult:
+        """See ``SnapshotDiffSource.extract_snapshot_diff``."""
+        assert isinstance(config, DatabricksProfile)
+        self._require_catalog(config)
+
+        current_table, scratch_table = self._snapshot_table_names(sync_name)
+        current_ident = _managed_table_identifier(config, current_table)
+        scratch_ident = _managed_table_identifier(config, scratch_table)
+        run_token = str(uuid.uuid4())
+
+        def _setup() -> tuple[bool, bool, list[str], dict[str, str], list[str]]:
+            self.ensure_managed_schema(config)
+            conn = self._connect(config, query_tags=query_tags)
+            try:
+                cur = conn.cursor()
+                # One Delta CTAS commit replaces an abandoned scratch atomically.
+                # The locally-generated UUID is safe to inline; keeping model SQL
+                # out of a parameterized statement also preserves native `?`
+                # markers the model itself may contain.
+                cur.execute(
+                    f"CREATE OR REPLACE TABLE {scratch_ident} USING DELTA "
+                    f"TBLPROPERTIES ('{_SNAPSHOT_TOKEN_PROPERTY}' = '{run_token}') AS {query}"
+                )
+                self._snapshot_diff_tokens[self._snapshot_token_key(config, sync_name)] = run_token
+                all_columns = self._managed_table_columns(cur, config, scratch_table)
+
+                resolved_keys = [_resolve_output_column(c, all_columns) for c in key_columns]
+                missing_keys = [
+                    c for c, resolved in zip(key_columns, resolved_keys) if resolved is None
+                ]
+                if missing_keys:
+                    raise ValueError(
+                        "sync.incremental_strategy: diff — destination "
+                        f"upsert_key column(s) {missing_keys} not found in the "
+                        f"model's output columns {all_columns}."
+                    )
+                sql_keys = [resolved for resolved in resolved_keys if resolved is not None]
+                key_rename = {
+                    resolved: configured
+                    for resolved, configured in zip(sql_keys, key_columns)
+                    if resolved != configured
+                }
+
+                if hash_columns == "all":
+                    key_folds = {column.casefold() for column in sql_keys}
+                    diff_columns = [
+                        column for column in all_columns if column.casefold() not in key_folds
+                    ]
+                else:
+                    resolved_hash = [
+                        _resolve_output_column(column, all_columns) for column in hash_columns
+                    ]
+                    missing_hash = [
+                        column
+                        for column, resolved in zip(hash_columns, resolved_hash)
+                        if resolved is None
+                    ]
+                    if missing_hash:
+                        raise ValueError(
+                            f"sync.diff.hash_columns: column(s) {missing_hash} "
+                            "not found in the model's output columns "
+                            f"{all_columns} — check for a typo."
+                        )
+                    diff_columns = [resolved for resolved in resolved_hash if resolved is not None]
+
+                is_first_run = not self._managed_table_exists(cur, config, current_table)
+                reclassify_all_existing = False
+                if not is_first_run:
+                    baseline_columns = self._managed_table_columns(cur, config, current_table)
+                    if any(
+                        _resolve_output_column(column, baseline_columns) is None
+                        for column in sql_keys
+                    ):
+                        is_first_run = True
+                    else:
+                        reclassify_all_existing = any(
+                            _resolve_output_column(column, baseline_columns) is None
+                            for column in diff_columns
+                        )
+                        diff_columns = [
+                            column
+                            for column in diff_columns
+                            if _resolve_output_column(column, baseline_columns) is not None
+                        ]
+            finally:
+                conn.close()
+            return is_first_run, reclassify_all_existing, sql_keys, key_rename, diff_columns
+
+        is_first_run, reclassify_all_existing, sql_keys, key_rename, diff_columns = with_retry(
+            _setup, RetryConfig(), retry_on=self._is_transient
+        )
+
+        if is_first_run:
+            added = self._stream_query(
+                config,
+                f"SELECT * FROM {scratch_ident}",
+                rename=key_rename,
+                scratch_table=scratch_table,
+                expected_token=run_token,
+                sync_name=sync_name,
+                query_tags=query_tags,
+            )
+            changed: Iterator[dict[str, Any]] = iter(())
+            removed_keys: Iterator[dict[str, Any]] = iter(())
+        else:
+            join_condition = _key_join_condition(sql_keys, "s", "c")
+            added = self._stream_query(
+                config,
+                f"SELECT s.* FROM {scratch_ident} AS s "
+                f"LEFT JOIN {current_ident} AS c ON {join_condition} "
+                f"WHERE {_column_ref('c', sql_keys[0])} IS NULL",
+                rename=key_rename,
+                scratch_table=scratch_table,
+                expected_token=run_token,
+                sync_name=sync_name,
+                query_tags=query_tags,
+            )
+            removed_keys = self._stream_query(
+                config,
+                "SELECT "
+                + ", ".join(
+                    _column_ref("c", resolved)
+                    + ("" if resolved == configured else f" AS {_quote_identifier(configured)}")
+                    for resolved, configured in zip(sql_keys, key_columns)
+                )
+                + f" FROM {current_ident} AS c LEFT JOIN {scratch_ident} AS s ON "
+                + _key_join_condition(sql_keys, "c", "s")
+                + f" WHERE {_column_ref('s', sql_keys[0])} IS NULL",
+                scratch_table=scratch_table,
+                expected_token=run_token,
+                sync_name=sync_name,
+                query_tags=query_tags,
+            )
+            if diff_columns or reclassify_all_existing:
+                changed_filter = (
+                    ""
+                    if reclassify_all_existing
+                    else f" WHERE {_diff_hash_expr(diff_columns, 's')} "
+                    f"<> {_diff_hash_expr(diff_columns, 'c')}"
+                )
+                changed = self._stream_query(
+                    config,
+                    f"SELECT s.* FROM {scratch_ident} AS s "
+                    f"JOIN {current_ident} AS c ON {join_condition}" + changed_filter,
+                    rename=key_rename,
+                    scratch_table=scratch_table,
+                    expected_token=run_token,
+                    sync_name=sync_name,
+                    query_tags=query_tags,
+                )
+            else:
+                changed = iter(())
+
+        return SnapshotDiffResult(
+            added=added,
+            changed=changed,
+            removed_keys=removed_keys,
+            is_first_run=is_first_run,
+        )
+
+    def _stream_query(
+        self,
+        config: DatabricksProfile,
+        query: str,
+        *,
+        scratch_table: str,
+        expected_token: str,
+        sync_name: str,
+        query_tags: dict[str, str] | None,
+        rename: dict[str, str] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Stream one classification query with best-effort overlap checks."""
+
+        def _connect_and_execute() -> tuple[Any, Any, list[str]]:
+            conn = self._connect(config, query_tags=query_tags)
+            try:
+                cur = conn.cursor()
+                self._assert_snapshot_token(cur, config, scratch_table, expected_token, sync_name)
+                cur.execute(query)
+                return conn, cur, [str(desc[0]) for desc in cur.description]
+            except BaseException:
+                conn.close()
+                raise
+
+        conn, cur, columns = with_retry(
+            _connect_and_execute, RetryConfig(), retry_on=self._is_transient
+        )
+        if rename:
+            columns = [rename.get(column, column) for column in columns]
+        try:
+            for row in cur:
+                yield dict(zip(columns, row))
+            self._assert_snapshot_token(cur, config, scratch_table, expected_token, sync_name)
+        finally:
+            cur.close()
+            conn.close()
+
+    def commit_snapshot_diff(self, config: ProfileConfigLike, sync_name: str) -> None:
+        """Promote scratch through one atomic Delta table replacement.
+
+        Databricks has no transaction spanning the token check and CTAS. A
+        replacement in that gap is detected by checking scratch again after
+        CTAS; the prior Delta version is then restored (or a first-run table
+        dropped). A still narrower same-sync overlap can race that recovery,
+        so concurrent runs remain unsupported rather than lock-safe.
+        """
+        assert isinstance(config, DatabricksProfile)
+        token_key = self._snapshot_token_key(config, sync_name)
+        expected_token = self._snapshot_diff_tokens.get(token_key)
+        if expected_token is None:
+            return
+
+        current_table, scratch_table = self._snapshot_table_names(sync_name)
+        current_ident = _managed_table_identifier(config, current_table)
+        scratch_ident = _managed_table_identifier(config, scratch_table)
+
+        conn = self._connect(config)
+        try:
+            cur = conn.cursor()
+            scratch_exists, scratch_token = self._managed_table_token(cur, config, scratch_table)
+            if not scratch_exists:
+                promoted, current_token = self._managed_table_token(cur, config, current_table)
+                if promoted and current_token == expected_token:
+                    self._snapshot_diff_tokens.pop(token_key, None)
+                    return
+                _raise_diff_concurrency_race(sync_name)
+            if scratch_token != expected_token:
+                _raise_diff_concurrency_race(sync_name)
+
+            current_exists = self._managed_table_exists(cur, config, current_table)
+            previous_version: int | None = None
+            if current_exists:
+                cur.execute(f"DESCRIBE HISTORY {current_ident} LIMIT 1")
+                row = cur.fetchone()
+                if row is None:
+                    raise RuntimeError(
+                        "sync.incremental_strategy: diff — could not read the "
+                        f"current Delta version for {current_table!r}; baseline "
+                        "promotion was not attempted."
+                    )
+                previous_version = int(row[0])
+
+            # CREATE OR REPLACE is a single atomic Delta commit and preserves
+            # table history and grants. It is the closest Databricks analogue
+            # to Snowflake's SWAP; DROP + RENAME would expose an absent table.
+            cur.execute(
+                f"CREATE OR REPLACE TABLE {current_ident} USING DELTA "
+                f"TBLPROPERTIES ('{_SNAPSHOT_TOKEN_PROPERTY}' = '{expected_token}') "
+                f"AS SELECT * FROM {scratch_ident}"
+            )
+            try:
+                self._assert_snapshot_token(cur, config, scratch_table, expected_token, sync_name)
+                self._assert_snapshot_token(cur, config, current_table, expected_token, sync_name)
+            except RuntimeError:
+                try:
+                    if previous_version is None:
+                        cur.execute(f"DROP TABLE IF EXISTS {current_ident}")
+                    else:
+                        cur.execute(
+                            f"RESTORE TABLE {current_ident} TO VERSION AS OF {previous_version}"
+                        )
+                except Exception:
+                    pass
+                raise
+            # Leave scratch in place. The next CREATE OR REPLACE heals it,
+            # while a post-check DROP would introduce a new window in which
+            # this run could delete a concurrent run's freshly-built scratch.
+            self._snapshot_diff_tokens.pop(token_key, None)
         finally:
             conn.close()

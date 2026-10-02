@@ -276,7 +276,7 @@ jobs:
           echo "Warehouse is running."
       - name: Run Databricks smoke
         if: steps.creds.outputs.has_creds == 'true' && steps.warehouse.outputs.workspace_inactive != 'true'
-        # #1108's managed-table and warehouse-state-backend smoke suites live
+        # #1108's managed-table/warehouse-state suites and #1114's diff suite live
         # in tests/integration/dwh/ alongside test_databricks_smoke.py -- each
         # job here names its files explicitly, not the whole directory, so
         # they must be listed or they silently never run.
@@ -285,6 +285,7 @@ jobs:
             tests/integration/dwh/test_databricks_smoke.py \
             tests/integration/dwh/test_databricks_managed_table_smoke.py \
             tests/integration/dwh/test_databricks_warehouse_state_smoke.py \
+            tests/integration/dwh/test_databricks_diff_incremental_smoke.py \
             -v
 
   bigquery:

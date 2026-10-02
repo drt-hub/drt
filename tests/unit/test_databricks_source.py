@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from typing import Any, Literal
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -595,3 +597,375 @@ class TestManagedTableCapable:
         from drt.sources.base import ManagedTableCapable
 
         assert isinstance(DatabricksSource(), ManagedTableCapable)
+
+
+class TestSnapshotDiffSource:
+    """#1114 — Databricks snapshot-diff SQL and lifecycle contract.
+
+    Mock cursors cannot validate Databricks SQL grammar or Delta atomicity;
+    the gated DWH smoke test covers that real-warehouse boundary.
+    """
+
+    @staticmethod
+    def _conn() -> MagicMock:
+        conn = MagicMock()
+        conn.cursor.return_value = MagicMock()
+        return conn
+
+    @staticmethod
+    def _extract_with_columns(
+        scratch_columns: list[str],
+        *,
+        baseline_columns: list[str] | None,
+        key_columns: list[str] | None = None,
+        hash_columns: Literal["all"] | list[str] = "all",
+    ) -> tuple[Any, MagicMock, DatabricksSource]:
+        conn = TestSnapshotDiffSource._conn()
+        source = DatabricksSource()
+        column_results = [scratch_columns]
+        if baseline_columns is not None:
+            column_results.append(baseline_columns)
+        with (
+            patch.object(source, "ensure_managed_schema"),
+            patch.object(source, "_connect", return_value=conn),
+            patch.object(source, "_managed_table_columns", side_effect=column_results),
+            patch.object(
+                source, "_managed_table_exists", return_value=baseline_columns is not None
+            ),
+            patch.object(
+                source, "_stream_query", side_effect=[iter(()), iter(()), iter(())]
+            ) as stream,
+        ):
+            result = source.extract_snapshot_diff(
+                "SELECT * FROM users",
+                _profile(catalog="main"),
+                sync_name="users",
+                key_columns=key_columns or ["id"],
+                hash_columns=hash_columns,
+            )
+        return result, stream, source
+
+    def test_first_run_classifies_every_row_as_added_and_tags_setup(self) -> None:
+        conn = self._conn()
+        source = DatabricksSource()
+        with (
+            patch.object(source, "ensure_managed_schema"),
+            patch.object(source, "_connect", return_value=conn) as connect,
+            patch.object(source, "_managed_table_columns", return_value=["id", "note"]),
+            patch.object(source, "_managed_table_exists", return_value=False),
+            patch.object(
+                source, "_stream_query", return_value=iter([{"id": 1, "note": None}])
+            ) as stream,
+        ):
+            result = source.extract_snapshot_diff(
+                "SELECT id, note FROM users",
+                _profile(catalog="main"),
+                sync_name="daily-users",
+                key_columns=["id"],
+                hash_columns="all",
+                query_tags={"sync": "daily-users"},
+            )
+
+        assert result.is_first_run is True
+        assert list(result.added) == [{"id": 1, "note": None}]
+        assert list(result.changed) == []
+        assert list(result.removed_keys) == []
+        create_sql = conn.cursor.return_value.execute.call_args.args[0]
+        assert create_sql.startswith(
+            "CREATE OR REPLACE TABLE `main`.`_drt`."
+            "`_drt_snapshot_daily-users_4c0b66a8_scratch` USING DELTA "
+            "TBLPROPERTIES ('drt.snapshot_run_token' = '"
+        )
+        token = re.search(r"snapshot_run_token' = '([0-9a-f-]{36})'", create_sql).group(1)
+        assert create_sql.endswith(" AS SELECT id, note FROM users")
+        assert stream.call_args.kwargs["expected_token"] == token
+        connect.assert_called_once_with(
+            _profile(catalog="main"), query_tags={"sync": "daily-users"}
+        )
+
+    def test_transient_setup_failure_retries_with_stable_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        exc_mod = _install_fake_dbsql_exc(monkeypatch)
+        failing = self._conn()
+        failing.cursor.return_value.execute.side_effect = exc_mod.OperationalError("cold start")
+        good = self._conn()
+        source = DatabricksSource()
+        with (
+            patch.object(source, "ensure_managed_schema"),
+            patch.object(source, "_connect", side_effect=[failing, good]) as connect,
+            patch.object(source, "_managed_table_columns", return_value=["id"]),
+            patch.object(source, "_managed_table_exists", return_value=False),
+            patch.object(source, "_stream_query", return_value=iter(())) as stream,
+            patch("drt.destinations.retry.time.sleep"),
+        ):
+            source.extract_snapshot_diff(
+                "SELECT id FROM users",
+                _profile(catalog="main"),
+                sync_name="users",
+                key_columns=["id"],
+                hash_columns="all",
+            )
+
+        assert connect.call_count == 2
+        failed_sql = failing.cursor.return_value.execute.call_args.args[0]
+        good_sql = good.cursor.return_value.execute.call_args.args[0]
+        failed_token = re.search(r"snapshot_run_token' = '([0-9a-f-]{36})'", failed_sql).group(1)
+        good_token = re.search(r"snapshot_run_token' = '([0-9a-f-]{36})'", good_sql).group(1)
+        assert failed_token == good_token
+        assert stream.call_args.kwargs["expected_token"] == good_token
+        failing.close.assert_called_once()
+        good.close.assert_called_once()
+
+    def test_auth_failure_in_setup_is_not_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        exc_mod = _install_fake_dbsql_exc(monkeypatch)
+        conn = self._conn()
+        conn.cursor.return_value.execute.side_effect = exc_mod.RequestError(
+            "unauthorized", {"http-code": 401}
+        )
+        source = DatabricksSource()
+        with (
+            patch.object(source, "ensure_managed_schema"),
+            patch.object(source, "_connect", return_value=conn) as connect,
+            patch("drt.destinations.retry.time.sleep") as sleep,
+            pytest.raises(exc_mod.RequestError),
+        ):
+            source.extract_snapshot_diff(
+                "SELECT id FROM users",
+                _profile(catalog="main"),
+                sync_name="users",
+                key_columns=["id"],
+                hash_columns="all",
+            )
+
+        assert connect.call_count == 1
+        sleep.assert_not_called()
+
+    def test_missing_key_column_is_not_retried(self) -> None:
+        conn = self._conn()
+        source = DatabricksSource()
+        with (
+            patch.object(source, "ensure_managed_schema"),
+            patch.object(source, "_connect", return_value=conn) as connect,
+            patch.object(source, "_managed_table_columns", return_value=["note"]),
+            patch("drt.destinations.retry.time.sleep") as sleep,
+            pytest.raises(ValueError, match="not found in the model's output columns"),
+        ):
+            source.extract_snapshot_diff(
+                "SELECT note FROM users",
+                _profile(catalog="main"),
+                sync_name="users",
+                key_columns=["id"],
+                hash_columns="all",
+            )
+
+        assert connect.call_count == 1
+        sleep.assert_not_called()
+
+    def test_snapshot_metadata_queries_use_native_question_mark_params(self) -> None:
+        cur = MagicMock()
+        cur.fetchall.return_value = [("id",), ("note",)]
+        profile = _profile(catalog="main", managed_schema="drt-state")
+
+        assert DatabricksSource._managed_table_columns(cur, profile, "snapshot-name") == [
+            "id",
+            "note",
+        ]
+
+        sql, params = cur.execute.call_args.args
+        assert "lower(table_schema) = lower(?)" in sql
+        assert "lower(table_name) = lower(?)" in sql
+        assert params == ["drt-state", "snapshot-name"]
+
+    def test_column_added_since_baseline_resends_every_existing_row(self) -> None:
+        _, stream, _ = self._extract_with_columns(
+            ["id", "note", "plan"], baseline_columns=["id", "note"]
+        )
+        changed_sql = stream.call_args_list[2].args[1]
+        assert "xxhash64" not in changed_sql
+        assert " WHERE " not in changed_sql
+
+    def test_column_dropped_hashes_only_shared_columns(self) -> None:
+        _, stream, _ = self._extract_with_columns(
+            ["id", "note"], baseline_columns=["id", "note", "old"]
+        )
+        changed_sql = stream.call_args_list[2].args[1]
+        assert "old" not in changed_sql
+        assert "xxhash64(isnull(s.`note`), s.`note`)" in changed_sql
+
+    def test_key_missing_from_baseline_restarts_as_first_run(self) -> None:
+        result, stream, _ = self._extract_with_columns(["id", "note"], baseline_columns=["note"])
+        assert result.is_first_run is True
+        assert len(stream.call_args_list) == 1
+        assert stream.call_args.args[1].startswith("SELECT * FROM")
+
+    def test_hash_sql_null_tags_distinguish_null_from_empty_string(self) -> None:
+        _, stream, _ = self._extract_with_columns(
+            ["id", "note"], baseline_columns=["id", "note"], hash_columns=["note"]
+        )
+        changed_sql = stream.call_args_list[2].args[1]
+        assert "xxhash64(isnull(s.`note`), s.`note`)" in changed_sql
+        assert "xxhash64(isnull(c.`note`), c.`note`)" in changed_sql
+        assert "coalesce" not in changed_sql.lower()
+
+    def test_case_insensitive_key_resolution_restores_configured_name(self) -> None:
+        _, stream, _ = self._extract_with_columns(
+            ["ID", "NOTE"],
+            baseline_columns=["id", "note"],
+            key_columns=["id"],
+            hash_columns=["note"],
+        )
+        added_sql, removed_sql, changed_sql = [call.args[1] for call in stream.call_args_list]
+        assert "s.`ID` = c.`ID`" in added_sql
+        assert "SELECT c.`ID` AS `id` FROM" in removed_sql
+        assert "xxhash64(isnull(s.`NOTE`), s.`NOTE`)" in changed_sql
+        assert stream.call_args_list[0].kwargs["rename"] == {"ID": "id"}
+        assert stream.call_args_list[2].kwargs["rename"] == {"ID": "id"}
+
+    def test_hash_column_typo_raises_loudly(self) -> None:
+        conn = self._conn()
+        source = DatabricksSource()
+        with (
+            patch.object(source, "ensure_managed_schema"),
+            patch.object(source, "_connect", return_value=conn),
+            patch.object(source, "_managed_table_columns", return_value=["id", "note"]),
+            pytest.raises(ValueError, match=r"hash_columns.*\['ntoe'\].*typo"),
+        ):
+            source.extract_snapshot_diff(
+                "SELECT * FROM users",
+                _profile(catalog="main"),
+                sync_name="users",
+                key_columns=["id"],
+                hash_columns=["ntoe"],
+            )
+
+    def test_stream_checks_token_before_and_after_and_renames_key(self) -> None:
+        conn = self._conn()
+        cur = conn.cursor.return_value
+        cur.description = [("ID",), ("note",)]
+        cur.__iter__.return_value = iter([(1, "ok")])
+        source = DatabricksSource()
+        with (
+            patch.object(source, "_connect", return_value=conn) as connect,
+            patch.object(source, "_assert_snapshot_token") as check,
+        ):
+            rows = list(
+                source._stream_query(
+                    _profile(catalog="main"),
+                    "SELECT * FROM scratch",
+                    scratch_table="scratch",
+                    expected_token="run-token",
+                    sync_name="users",
+                    query_tags={"sync": "users"},
+                    rename={"ID": "id"},
+                )
+            )
+
+        assert rows == [{"id": 1, "note": "ok"}]
+        assert check.call_count == 2
+        connect.assert_called_once_with(_profile(catalog="main"), query_tags={"sync": "users"})
+
+    def test_table_names_separate_case_insensitive_collisions(self) -> None:
+        source = DatabricksSource()
+        lower = source._snapshot_table_names("users")
+        upper = source._snapshot_table_names("Users")
+        assert lower == ("_drt_snapshot_users_5b7dcd14", "_drt_snapshot_users_5b7dcd14_scratch")
+        assert {name.casefold() for name in lower}.isdisjoint({name.casefold() for name in upper})
+
+    def test_commit_uses_atomic_replace_and_preserves_scratch(self) -> None:
+        conn = self._conn()
+        cur = conn.cursor.return_value
+        source = DatabricksSource()
+        profile = _profile(catalog="main")
+        source._snapshot_diff_tokens[source._snapshot_token_key(profile, "users")] = "run-token"
+        with (
+            patch.object(source, "_connect", return_value=conn),
+            patch.object(
+                source,
+                "_managed_table_token",
+                side_effect=[(True, "run-token")],
+            ),
+            patch.object(source, "_managed_table_exists", return_value=True),
+            patch.object(source, "_assert_snapshot_token") as check,
+        ):
+            cur.fetchone.return_value = (7,)
+            source.commit_snapshot_diff(profile, "users")
+
+        executed = [call.args[0] for call in cur.execute.call_args_list]
+        assert any(sql.startswith("DESCRIBE HISTORY ") for sql in executed)
+        promote = next(sql for sql in executed if sql.startswith("CREATE OR REPLACE TABLE"))
+        assert "USING DELTA TBLPROPERTIES ('drt.snapshot_run_token' = 'run-token')" in promote
+        assert " AS SELECT * FROM " in promote
+        assert not any("DROP TABLE" in sql for sql in executed)
+        assert check.call_count == 2
+
+    def test_commit_race_after_replace_restores_previous_delta_version(self) -> None:
+        conn = self._conn()
+        cur = conn.cursor.return_value
+        cur.fetchone.return_value = (9,)
+        source = DatabricksSource()
+        profile = _profile(catalog="main")
+        source._snapshot_diff_tokens[source._snapshot_token_key(profile, "users")] = "ours"
+        with (
+            patch.object(source, "_connect", return_value=conn),
+            patch.object(source, "_managed_table_token", return_value=(True, "ours")),
+            patch.object(source, "_managed_table_exists", return_value=True),
+            patch.object(
+                source,
+                "_assert_snapshot_token",
+                side_effect=RuntimeError("must not run concurrently"),
+            ),
+            pytest.raises(RuntimeError, match="must not run concurrently"),
+        ):
+            source.commit_snapshot_diff(profile, "users")
+
+        executed = [call.args[0] for call in cur.execute.call_args_list]
+        assert any("RESTORE TABLE" in sql and "VERSION AS OF 9" in sql for sql in executed)
+
+    def test_first_commit_race_drops_the_untrusted_new_baseline(self) -> None:
+        conn = self._conn()
+        source = DatabricksSource()
+        profile = _profile(catalog="main")
+        source._snapshot_diff_tokens[source._snapshot_token_key(profile, "users")] = "ours"
+        with (
+            patch.object(source, "_connect", return_value=conn),
+            patch.object(source, "_managed_table_token", return_value=(True, "ours")),
+            patch.object(source, "_managed_table_exists", return_value=False),
+            patch.object(
+                source,
+                "_assert_snapshot_token",
+                side_effect=RuntimeError("must not run concurrently"),
+            ),
+            pytest.raises(RuntimeError, match="must not run concurrently"),
+        ):
+            source.commit_snapshot_diff(profile, "users")
+
+        executed = [call.args[0] for call in conn.cursor.return_value.execute.call_args_list]
+        assert any(sql.startswith("CREATE OR REPLACE TABLE") for sql in executed)
+        assert any(sql.startswith("DROP TABLE IF EXISTS") for sql in executed)
+
+    def test_commit_token_mismatch_does_not_replace_baseline(self) -> None:
+        conn = self._conn()
+        source = DatabricksSource()
+        profile = _profile(catalog="main")
+        source._snapshot_diff_tokens[source._snapshot_token_key(profile, "users")] = "ours"
+        with (
+            patch.object(source, "_connect", return_value=conn),
+            patch.object(source, "_managed_table_token", return_value=(True, "another-run")),
+            pytest.raises(RuntimeError, match="must not run concurrently"),
+        ):
+            source.commit_snapshot_diff(profile, "users")
+
+        executed = [call.args[0] for call in conn.cursor.return_value.execute.call_args_list]
+        assert not any(sql.startswith("CREATE OR REPLACE TABLE") for sql in executed)
+
+    def test_commit_without_remembered_token_is_noop(self) -> None:
+        source = DatabricksSource()
+        with patch.object(source, "_connect") as connect:
+            source.commit_snapshot_diff(_profile(catalog="main"), "users")
+        connect.assert_not_called()
+
+    def test_snapshot_diff_protocol_satisfied(self) -> None:
+        from drt.sources.base import SnapshotDiffSource
+
+        assert isinstance(DatabricksSource(), SnapshotDiffSource)

@@ -255,7 +255,10 @@ def test_diff_strategy_rejected_for_a_source_without_the_capability(tmp_path: Pa
     dest = FakeDestination()
     sync = _make_diff_sync()
 
-    with pytest.raises(NotImplementedError, match="supported sources are Postgres and Snowflake"):
+    with pytest.raises(
+        NotImplementedError,
+        match="supported sources are Postgres, Snowflake, and Databricks",
+    ):
         run_sync(sync, PlainFakeSource(), dest, _make_profile(), tmp_path)
 
 

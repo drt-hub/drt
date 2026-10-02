@@ -255,6 +255,65 @@ keeps the SQL warehouse busy for the duration. Per
 [#766](https://github.com/drt-hub/drt/issues/766) a failure after the first row has been yielded is
 not retried.
 
+## As a source — diff-based incremental ([#1114](https://github.com/drt-hub/drt/issues/1114))
+
+Databricks supports `sync.incremental_strategy: diff` for models without a reliable cursor column.
+Each run materializes the full model result in a Delta table named
+`_drt_snapshot_<sync_name>_<digest>` under the source profile's `managed_schema`, then classifies
+added, changed, and removed rows with server-side joins on `destination.upsert_key`. Added and
+changed rows follow the normal upsert path; removed keys are exposed through
+`SyncResult.diff_removed_keys`, power `mirror.strategy: diff` where the destination supports it,
+and appear in `--dry-run --diff` deletion previews.
+
+```yaml
+# ~/.drt/profiles.yml
+databricks_prod:
+  type: databricks
+  server_hostname: dbc-abc123.cloud.databricks.com
+  http_path: /sql/1.0/warehouses/abc123xyz
+  access_token_env: DATABRICKS_TOKEN
+  catalog: main             # required for drt-managed snapshot tables
+  schema: analytics
+  managed_schema: _drt      # default; drt needs table create/replace here
+```
+
+```yaml
+destination:
+  type: databricks
+  # ... connection fields ...
+  mode: merge
+  upsert_key: [id]
+
+sync:
+  mode: upsert               # or mirror
+  incremental_strategy: diff
+  diff:
+    hash_columns: all        # or an explicit non-empty column list
+```
+
+Column matching follows Delta's case-insensitive identifier rules (`id` finds `ID`), while emitted
+key names are restored to the spelling configured in `upsert_key`. `hash_columns: all` compares
+every output column except the key; an explicit list is validated against the actual CTAS schema.
+Changed-row SQL uses typed `xxhash64(...)` inputs paired with an explicit nullness flag for every
+column, so SQL `NULL` and an empty string are distinct without delimiter ambiguity.
+
+The baseline advances only after a non-dry-run, unlimited sync finishes with zero row failures.
+Scratch is rebuilt atomically with Delta `CREATE OR REPLACE TABLE ... AS SELECT`, so a failed
+delivery leaves the old baseline intact and the same diff is detected on the next run. Promotion
+is another single `CREATE OR REPLACE TABLE ... AS SELECT` Delta commit; unlike `DROP` + `RENAME`,
+readers never observe an absent or partially populated baseline. Diff therefore requires
+`CREATE TABLE`/`MODIFY` privileges in `managed_schema`; cursor incremental remains the read-only
+alternative.
+
+Concurrent runs of the **same** diff sync are unsupported. A per-run UUID is stored in the scratch
+table's `TBLPROPERTIES`; each classification stream checks it before and after reading, and commit
+checks it before and after baseline replacement. If another run replaced scratch during promotion,
+drt restores the previous Delta baseline version (or removes the first-run baseline) and fails
+loudly. This is best-effort overlap detection, not a lock: Databricks has no multi-statement
+transaction that can span extraction, destination delivery, the property check, and replacement,
+so a narrow check-to-statement/recovery race remains. Use `drt serve` request coalescing
+([#854](https://github.com/drt-hub/drt/issues/854)) or scheduler overlap protection.
+
 ## Notes
 
 - Requires `pip install drt-core[databricks]` (depends on `databricks-sql-connector>=3.0`).
