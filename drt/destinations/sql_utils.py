@@ -96,23 +96,15 @@ def unsupported_tracked_scope_msg(dialect: str) -> str:
 
 def unsupported_diff_strategy_msg(dialect: str) -> str:
     """Message for ``mirror.strategy: diff`` (#1110) on a destination whose
-    ``_finalize_mirror()`` doesn't go through ``BaseSqlDestination``'s shared
-    implementation.
+    finalizer has not explicitly opted into exact removed-key deletion.
 
-    ClickHouse and Databricks each carry their own bespoke ``_finalize_mirror()``
-    (mutation-based / staged-key deletion respectively, #720) that has no
-    concept of ``mirror.strategy: diff`` at all — reaching it with delta
-    (added+changed-only) keys as though they were the complete source would
-    silently run the wrong deletion algorithm (caught in Codex review: a
-    ``destination``-strategy whole-table `NOT IN` delete against a partial
-    key list deletes unchanged rows, or a removal-only run deletes nothing).
-    Postgres/MySQL/Snowflake all inherit the shared finalizer and support
-    ``diff`` from day one, so this only fires for the two dialects with their
-    own finalizer — never a config error on the other three."""
+    Every current mirror-capable destination opts in. This remains the
+    fail-fast default for a future dialect until its finalizer explicitly
+    implements the exact removed-key delete."""
     return (
         f"mirror.strategy: diff is not supported on {dialect} — its own "
         "_finalize_mirror() does not implement it (supported: postgres, mysql, "
-        "snowflake)."
+        "snowflake, clickhouse, databricks)."
     )
 
 
@@ -161,11 +153,10 @@ def check_mirror_supported(
       (``supports_tracked_scope``) — reject them where unsupported rather
       than silently falling back to the (co-writer-unsafe) destination diff.
     - ``mirror.strategy: diff`` (#1110) is opt-in per dialect too
-      (``supports_diff_strategy``) — reject it where the dialect's
-      ``_finalize_mirror()`` doesn't go through the shared base
-      implementation that knows about it (caught in Codex review: reaching
-      an incompatible finalizer with delta-only keys runs the wrong
-      deletion algorithm rather than erroring).
+      (``supports_diff_strategy``) — reject it unless the dialect finalizer
+      explicitly implements exact removed-key deletion (caught in Codex
+      review: reaching an incompatible finalizer with delta-only keys runs
+      the wrong deletion algorithm rather than erroring).
     - where supported, ``scope`` + ``strategy: tracked`` additionally requires
       ``scope ⊆ upsert_key`` (#694).
 

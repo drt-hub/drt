@@ -41,6 +41,12 @@ def _options(**kwargs: Any) -> SyncOptions:
     return SyncOptions(**defaults)
 
 
+def _diff_options(removed_keys: list[dict[str, Any]] | None) -> SyncOptions:
+    opts = _options(incremental_strategy="diff", mirror={"strategy": "diff"})
+    opts._diff_removed_keys = removed_keys
+    return opts
+
+
 def _config(**overrides: Any) -> ClickHouseDestinationConfig:
     defaults: dict[str, Any] = {
         "type": "clickhouse",
@@ -225,6 +231,56 @@ def test_finalize_mirror_composite_key_delete_shape() -> None:
     assert pairs == {("a", "x"), ("b", "y")}
 
 
+def test_finalize_diff_mirror_deletes_exact_removed_keys() -> None:
+    """Diff mirror uses IN against the removed list, independent of loaded keys."""
+    dest = ClickHouseDestination()
+    client = _fake_client()
+    config = _config()
+    opts = _diff_options([{"id": 2}, {"id": 4}])
+
+    with patch.object(ClickHouseDestination, "_connect", return_value=client):
+        result = dest.finalize_sync(config, opts)
+
+    assert result is not None
+    args, kwargs = client.command.call_args
+    assert "ALTER TABLE `scores` DELETE" in args[0]
+    assert "toString(`id`) IN {keys:Array(String)}" in args[0]
+    assert " NOT IN " not in args[0]
+    assert kwargs["parameters"] == {"keys": ["2", "4"]}
+    assert kwargs["settings"] == {"mutations_sync": 1}
+
+
+def test_finalize_diff_mirror_supports_composite_keys() -> None:
+    dest = ClickHouseDestination()
+    client = _fake_client()
+    config = _config(upsert_key=["tenant_id", "user_id"])
+    opts = _diff_options(
+        [
+            {"tenant_id": "a", "user_id": 1},
+            {"tenant_id": "b", "user_id": 2},
+        ]
+    )
+
+    with patch.object(ClickHouseDestination, "_connect", return_value=client):
+        dest.finalize_sync(config, opts)
+
+    args, kwargs = client.command.call_args
+    assert "(toString(`tenant_id`), toString(`user_id`))" in args[0]
+    assert "IN {keys:Array(Tuple(String, String))}" in args[0]
+    assert kwargs["parameters"]["keys"] == [("a", "1"), ("b", "2")]
+
+
+def test_finalize_diff_mirror_skips_empty_removed_list() -> None:
+    dest = ClickHouseDestination()
+    client = _fake_client()
+
+    with patch.object(ClickHouseDestination, "_connect", return_value=client):
+        result = dest.finalize_sync(_config(), _diff_options([]))
+
+    assert result is None
+    client.command.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Safety paths
 # ---------------------------------------------------------------------------
@@ -284,25 +340,17 @@ def test_mirror_raises_when_upsert_key_missing() -> None:
     client.insert.assert_not_called()
 
 
-def test_mirror_raises_for_diff_strategy() -> None:
-    """Regression for a Codex-review finding on #1110: ClickHouse's own
-    ``finalize_sync``/mirror-delete implementation (ALTER TABLE ... DELETE
-    mutation, this module's whole subject) has no concept of
-    ``mirror.strategy: diff`` — it only knows ``destination``/``tracked``.
-    Reaching it with delta-only (added+changed) keys instead of the full
-    source would run its whole-table ``NOT IN`` delete against a partial
-    key list, deleting unchanged destination rows. Must fail fast at
-    load(), before any INSERT."""
+def test_mirror_accepts_diff_strategy() -> None:
+    """ClickHouse opts into diff mirror once its exact-key finalizer exists."""
     dest = ClickHouseDestination()
     client = _fake_client()
     config = _config()
-    opts = _options(incremental_strategy="diff", mirror={"strategy": "diff"})
+    opts = _diff_options([])
 
     with patch.object(ClickHouseDestination, "_connect", return_value=client):
-        with pytest.raises(ValueError, match="mirror.strategy: diff is not supported"):
-            dest.load([{"id": 1, "score": 100}], config, opts)
+        result = dest.load([{"id": 1, "score": 100}], config, opts)
 
-    client.insert.assert_not_called()
+    assert result.success == 1
 
 
 def test_mirror_excludes_failed_record_keys_from_accumulation() -> None:

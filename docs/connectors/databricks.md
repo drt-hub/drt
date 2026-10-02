@@ -136,8 +136,10 @@ sync:
 
 End-of-sync, drt issues a single
 `DELETE FROM catalog.schema.table WHERE upsert_key NOT IN (observed)`
-against the destination. Composite keys use the
-`WHERE (c1, c2) NOT IN ((v1a, v1b), (v2a, v2b), ...)` form.
+against the destination. Keys are staged in a scratch Delta table so the
+operation is not limited by the driver's 255 native-parameter ceiling.
+Composite keys use Delta's supported `MERGE` anti-join with
+`WHEN NOT MATCHED BY SOURCE THEN DELETE`; Delta rejects tuple `IN` predicates.
 
 **Safety guard**: if no batch ever produced records (source returned
 zero rows), the DELETE is skipped entirely — protects against wiping
@@ -146,6 +148,20 @@ the destination when the source is transiently empty.
 Mirror semantics fit the same shape as Postgres / MySQL / ClickHouse /
 Snowflake mirror destinations (see #340) — same `upsert_key` contract,
 same source-key-cardinality memory bound on `_mirror_keys`.
+
+**Diff mirror (`mirror.strategy: diff`, [#1110](https://github.com/drt-hub/drt/issues/1110)/[#1177](https://github.com/drt-hub/drt/issues/1177)) — delete only source-snapshot removals:**
+
+```yaml
+sync:
+  mode: mirror
+  incremental_strategy: diff
+  mirror:
+    strategy: diff
+```
+
+Added and changed rows follow the normal Delta MERGE write path; `finalize_sync` stages exactly the keys source-side snapshot diff classified as removed and deletes only matches. Single-column keys use `DELETE ... IN (SELECT ...)`; composite keys use `MERGE ... WHEN MATCHED THEN DELETE`, avoiding Delta's unsupported multi-column tuple-`IN` predicate. A removal-only run still performs this finalizer even when no records were loaded in the run, and `--dry-run --diff` previews the same removed-key list without an additional destination scan.
+
+As on Postgres, MySQL, Snowflake, and ClickHouse, `strategy: diff` does not accept `mirror.scope`: the source snapshot comparison already provides the exact row-level removal set.
 
 **Tracked mirror (`mirror.strategy: tracked`, [#686](https://github.com/drt-hub/drt/issues/686)/[#692](https://github.com/drt-hub/drt/issues/692)) — for tables the application also writes to:**
 

@@ -344,6 +344,7 @@ class DatabricksDestination(BaseSqlDestination):
             sync_options,
             "databricks",
             supports_tracked_scope=True,
+            supports_diff_strategy=True,
         )
         if (
             sync_options.mode == "mirror"
@@ -860,16 +861,25 @@ class DatabricksDestination(BaseSqlDestination):
         Deletes rows whose ``upsert_key`` was not observed in the source, via
         :meth:`_delete_via_staged_keys`.
 
-        ``mirror.strategy: tracked`` (#692) dispatches to
-        :meth:`_finalize_mirror_tracked` instead — state-based diff rather
-        than the whole-table diff below. Shares the empty-source guard, so
-        a transient empty source also keeps a tracked baseline intact.
+        ``mirror.strategy: diff`` (#1177) deletes the exact source snapshot
+        removals even when no rows were loaded. ``mirror.strategy: tracked``
+        (#692) dispatches to :meth:`_finalize_mirror_tracked` instead —
+        state-based diff rather than the whole-table diff below. Tracked
+        mirror shares the empty-source guard, so a transient empty source
+        also keeps a tracked baseline intact.
 
         Returns ``None`` when ``_mirror_keys`` is empty or ``None`` — treats "no
         batch with records was ever observed" as a signal to skip the DELETE
         entirely, so a transient empty source doesn't wipe the destination.
         """
         assert isinstance(config, DatabricksDestinationConfig)
+
+        # mirror.strategy: diff (#1177) consumes the source snapshot diff's
+        # exact removed-key list. It must dispatch before the _mirror_keys
+        # guard because a removal-only run does not load any records.
+        if sync_options.mirror is not None and sync_options.mirror.strategy == "diff":
+            return self._finalize_mirror_diff(config, sync_options)
+
         if not self._mirror_keys:
             return None
 
@@ -895,6 +905,41 @@ class DatabricksDestination(BaseSqlDestination):
             with tagged_cursor(conn.cursor(), sync_options) as cur:
                 self._delete_via_staged_keys(
                     cur, table_fq, upsert_cols, keys, keys_table, scope_cols, scopes, negate=True
+                )
+        finally:
+            conn.close()
+
+        return SyncResult()
+
+    def _finalize_mirror_diff(
+        self, config: DatabricksDestinationConfig, sync_options: SyncOptions
+    ) -> SyncResult | None:
+        """Delete exactly the keys source-side snapshot diff marked removed."""
+        removed_keys = sync_options._diff_removed_keys
+        if not removed_keys:
+            return None
+
+        upsert_cols = config.upsert_key
+        assert upsert_cols  # guarded in load()
+        keys = [tuple(row[col] for col in upsert_cols) for row in removed_keys]
+        table_fq = f"{config.catalog}.{config.schema_}.{config.table}"
+        keys_table = f"{config.catalog}.{config.schema_}.__drt_mirror_keys_{config.table}"
+
+        conn = self._connect(config, query_tags=sync_options._query_tags)
+        try:
+            with tagged_cursor(conn.cursor(), sync_options) as cur:
+                # negate=False means exact membership deletion. Composite
+                # keys use the helper's Delta-safe MERGE ... WHEN MATCHED
+                # THEN DELETE path rather than unsupported tuple IN (#908).
+                self._delete_via_staged_keys(
+                    cur,
+                    table_fq,
+                    upsert_cols,
+                    keys,
+                    keys_table,
+                    None,
+                    None,
+                    negate=False,
                 )
         finally:
             conn.close()

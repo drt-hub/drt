@@ -71,6 +71,23 @@ def _clickhouse_config(
     )
 
 
+def _databricks_config(
+    table: str = "users", upsert_key: list[str] | None = None
+) -> DatabricksDestinationConfig:
+    return DatabricksDestinationConfig.model_validate(
+        {
+            "type": "databricks",
+            "host_env": "DB_HOST",
+            "http_path_env": "DB_HTTP_PATH",
+            "token_env": "DB_TOKEN",
+            "catalog": "main",
+            "schema": "default",
+            "table": table,
+            "upsert_key": upsert_key or ["id"],
+        }
+    )
+
+
 def _options(mode: str = "full") -> SyncOptions:
     return SyncOptions(mode=mode)  # type: ignore[arg-type]
 
@@ -1492,6 +1509,23 @@ class TestComputeDiffMirrorDiffStrategy:
         assert result.deleted == [{"id": "stale"}]
         assert result.delete_reason == "mirror"
         mock_fetch_keys.assert_not_called()
+
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_databricks_diff_mirror_previews_removed_keys(self, mock_fetch_keys: Any) -> None:
+        """Databricks uses the shared removed-key preview without a delete scan."""
+        mock_fetch_keys.return_value = [{"tenant_id": "a", "id": 1, "score": 0.9}]
+        removed = [{"tenant_id": "b", "id": 2}]
+
+        result = compute_diff(
+            [{"tenant_id": "a", "id": 1, "score": 0.9}],
+            _databricks_config(upsert_key=["tenant_id", "id"]),
+            _mirror_diff_options(removed),
+            limit=20,
+        )
+
+        assert result.deleted == removed
+        assert result.delete_reason == "mirror"
+        mock_fetch_keys.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

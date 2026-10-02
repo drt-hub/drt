@@ -154,7 +154,11 @@ class ClickHouseDestination:
                 from drt.destinations.sql_utils import check_mirror_supported
 
                 check_mirror_supported(
-                    config, sync_options, "clickhouse", supports_tracked_scope=True
+                    config,
+                    sync_options,
+                    "clickhouse",
+                    supports_tracked_scope=True,
+                    supports_diff_strategy=True,
                 )
                 if sync_options.mode == "mirror" and config.upsert_key:
                     # #1091, caught in Codex review on #1135: a record
@@ -539,10 +543,12 @@ class ClickHouseDestination:
         any index on the upsert_key column; the temp-table strategy (#340
         follow-up) targets the high-cardinality case.
 
-        ``mirror.strategy: tracked`` (#692) dispatches to
-        :meth:`_finalize_mirror_tracked` instead — state-based diff rather
-        than the whole-table diff below. Shares the empty-source guard, so
-        a transient empty source also keeps a tracked baseline intact.
+        ``mirror.strategy: diff`` (#1177) deletes the exact source snapshot
+        removals even when no rows were loaded. ``mirror.strategy: tracked``
+        (#692) dispatches to :meth:`_finalize_mirror_tracked` instead —
+        state-based diff rather than the whole-table diff below. Tracked
+        mirror shares the empty-source guard, so a transient empty source
+        also keeps a tracked baseline intact.
 
         Returns ``None`` when ``_mirror_keys`` is empty or ``None`` —
         treats "no batch with records was ever observed" as a signal to
@@ -550,6 +556,14 @@ class ClickHouseDestination:
         wipe the destination.
         """
         assert isinstance(config, ClickHouseDestinationConfig)
+
+        # mirror.strategy: diff (#1177) consumes the source snapshot diff's
+        # exact removed-key list. It is independent of _mirror_keys: a run
+        # with removals only legitimately loads no records but still needs
+        # this finalize-time DELETE.
+        if sync_options.mirror is not None and sync_options.mirror.strategy == "diff":
+            return self._finalize_mirror_diff(config, sync_options)
+
         if not self._mirror_keys:
             return None
 
@@ -583,6 +597,39 @@ class ClickHouseDestination:
         # SyncResult has no dedicated `deleted` field; future work tracks
         # this separately. Returning a bare SyncResult signals "finalize
         # ran successfully" to the engine without inflating success/failed.
+        return SyncResult()
+
+    def _finalize_mirror_diff(
+        self, config: ClickHouseDestinationConfig, sync_options: SyncOptions
+    ) -> SyncResult | None:
+        """Delete exactly the keys source-side snapshot diff marked removed."""
+        removed_keys = sync_options._diff_removed_keys
+        if not removed_keys:
+            return None
+
+        upsert_cols = config.upsert_key
+        assert upsert_cols  # guarded in load()
+        keys = [tuple(row[col] for col in upsert_cols) for row in removed_keys]
+        table_q = self._quote_ident(config.table)
+
+        client = self._connect(config)
+        try:
+            sql, params = self._build_mirror_delete(
+                table_q,
+                upsert_cols,
+                keys,
+                None,
+                None,
+                negate=False,
+            )
+            client.command(
+                tag_query(sql, sync_options),
+                parameters=params,
+                settings={"mutations_sync": 1},
+            )
+        finally:
+            client.close()
+
         return SyncResult()
 
     def _finalize_mirror_tracked(self, config: Any, sync_options: SyncOptions) -> SyncResult | None:

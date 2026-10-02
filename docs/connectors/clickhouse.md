@@ -127,7 +127,21 @@ Safety guards:
 
 Memory constraint: the in-process key set is memory-bound to source key cardinality. Mirror as shipped today is appropriate for small/medium reference tables.
 
-Same `sync.mode: mirror` is supported on **Postgres** (Step 1), **MySQL** (Step 2), and **Snowflake** (Step 4). BigQuery follows once contributor PR [#584](https://github.com/drt-hub/drt/pull/584) lands.
+Same `sync.mode: mirror` is supported on **Postgres**, **MySQL**, **Snowflake**, and **Databricks**.
+
+**Diff mirror (`mirror.strategy: diff`, [#1110](https://github.com/drt-hub/drt/issues/1110)/[#1177](https://github.com/drt-hub/drt/issues/1177)) — delete only source-snapshot removals:**
+
+```yaml
+sync:
+  mode: mirror
+  incremental_strategy: diff
+  mirror:
+    strategy: diff
+```
+
+This composes mirror deletion with source-side snapshot diff: added and changed rows follow the normal ClickHouse INSERT path, while `finalize_sync` deletes exactly the keys classified as removed. The DELETE reuses the synchronous mutation above with `IN {keys:Array(String)}` for a single key or `IN {keys:Array(Tuple(String, ...))}` for a composite key. A removal-only run still executes the mutation even though no records were loaded in that run; an empty removed-key list issues no mutation. `--dry-run --diff` previews the same removed-key list without scanning ClickHouse.
+
+Like the Postgres, MySQL, and Snowflake implementations, `strategy: diff` does not accept `mirror.scope`: the source snapshot comparison has already produced an exact row-level removal set, so there is no destination-side delete set left to narrow.
 
 **Tracked mirror (`mirror.strategy: tracked`, [#686](https://github.com/drt-hub/drt/issues/686)/[#692](https://github.com/drt-hub/drt/issues/692)) — for tables the application also writes to:**
 
