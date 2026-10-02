@@ -105,24 +105,34 @@ class FileDestination:
     def _write_csv(self, path: str, records: list[dict[str, Any]]) -> None:
         columns = self._csv_columns.get(path)
         first_batch = columns is None
+        batch_columns = tuple(dict.fromkeys(key for record in records for key in record))
         if columns is None:
-            columns = tuple(records[0].keys())
+            # The header has not been emitted yet, so every field in this
+            # batch can safely contribute a column. ``dict.fromkeys`` above
+            # preserves first-seen order, keeping homogeneous output
+            # byte-identical while allowing omitted fields to use restval.
+            columns = batch_columns
 
         expected_columns = set(columns)
-        for index, record in enumerate(records):
-            actual_columns = set(record)
-            if actual_columns != expected_columns:
-                missing = sorted(expected_columns - actual_columns)
-                unexpected = sorted(actual_columns - expected_columns)
-                raise ValueError(
-                    f"CSV column mismatch for '{path}' at batch record {index}: "
-                    f"expected {list(columns)!r}; missing {missing!r}; "
-                    f"unexpected {unexpected!r}"
-                )
+        unexpected = sorted(set(batch_columns) - expected_columns)
+        if unexpected:
+            # A previous batch's rows are already positioned under ``columns``.
+            # Appending a wider row would either be rejected by DictWriter or
+            # silently misalign/drop data. Fail before opening the file instead
+            # of rewriting a potentially large streaming output.
+            raise ValueError(
+                f"CSV columns cannot change after the header was written for "
+                f"'{path}': expected {list(columns)!r}; unexpected {unexpected!r}"
+            )
 
         mode = "w" if first_batch else "a"
         with open(path, mode, newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=columns, extrasaction="raise")
+            writer = csv.DictWriter(
+                f,
+                fieldnames=columns,
+                restval="",
+                extrasaction="raise",
+            )
             if first_batch:
                 writer.writeheader()
             writer.writerows(records)

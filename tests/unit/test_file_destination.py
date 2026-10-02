@@ -149,6 +149,35 @@ class TestCsvDestination:
         assert reader[0]["name"] == "alice"
         assert reader[1]["name"] == "bob"
 
+    def test_csv_homogeneous_output_is_unchanged(self, tmp_path: Path) -> None:
+        records = [
+            {"id": 1, "name": "alice"},
+            {"id": 2, "name": "bob"},
+        ]
+        config = _config(tmp_path)
+
+        result = FileDestination().load(records, config, _options())
+
+        assert result.success == 2
+        assert Path(config.path).read_bytes() == b"id,name\r\n1,alice\r\n2,bob\r\n"
+
+    def test_csv_uses_all_batch_keys_and_blank_fills_missing_fields(self, tmp_path: Path) -> None:
+        records = [
+            {"id": 1, "name": "alice"},
+            {"id": 2, "email": "bob@example.com"},
+        ]
+        config = _config(tmp_path)
+
+        result = FileDestination().load(records, config, _options())
+
+        assert result.success == 2
+        assert result.failed == 0
+        with open(config.path, newline="", encoding="utf-8") as f:
+            assert list(csv.DictReader(f)) == [
+                {"id": "1", "name": "alice", "email": ""},
+                {"id": "2", "name": "", "email": "bob@example.com"},
+            ]
+
     def test_csv_creates_parent_dirs(self, tmp_path: Path) -> None:
         deep_path = str(tmp_path / "a" / "b" / "output.csv")
         config = _config(tmp_path, path=deep_path)
@@ -289,7 +318,7 @@ def test_separate_destination_instances_do_not_share_write_state(tmp_path: Path)
     assert _read_records(second_path, "jsonl") == second_records
 
 
-def test_csv_column_mismatch_fails_batch_and_on_error_fail_stops(
+def test_csv_new_column_after_header_fails_batch_and_on_error_fail_stops(
     tmp_path: Path,
 ) -> None:
     first_batch = [{"id": i, "name": f"user-{i}"} for i in range(100)]
@@ -310,10 +339,35 @@ def test_csv_column_mismatch_fails_batch_and_on_error_fail_stops(
     assert result.failed == 100
     assert result.rows_extracted == 200
     assert len(result.errors) == 1
-    assert "CSV column mismatch" in result.errors[0]
-    assert "missing ['name']" in result.errors[0]
+    assert "CSV columns cannot change after the header was written" in result.errors[0]
     assert "unexpected ['email']" in result.errors[0]
     assert _read_records(output_path, "csv") == first_batch
+
+
+def test_csv_later_batch_missing_header_column_writes_blank(tmp_path: Path) -> None:
+    output_path = tmp_path / "missing.csv"
+    sync = _sync(output_path, "csv", batch_size=2)
+    records = [
+        {"id": 1, "name": "alice"},
+        {"id": 2, "name": "bob"},
+        {"id": 3},
+    ]
+
+    result = run_sync(
+        sync,
+        _RowsSource(records),
+        FileDestination(),
+        _profile(),
+        tmp_path,
+    )
+
+    assert result.success == 3
+    with output_path.open(newline="", encoding="utf-8") as f:
+        assert list(csv.DictReader(f)) == [
+            {"id": "1", "name": "alice"},
+            {"id": "2", "name": "bob"},
+            {"id": "3", "name": ""},
+        ]
 
 
 @pytest.mark.parametrize("file_format", ["csv", "json", "jsonl"])

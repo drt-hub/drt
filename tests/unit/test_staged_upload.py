@@ -60,9 +60,7 @@ def test_serialize_csv() -> None:
     dest = StagedUploadDestination()
     dest._records = [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
     data = dest._serialize("csv").decode()
-    assert "id,name" in data
-    assert "Alice" in data
-    assert "Bob" in data
+    assert data.splitlines() == ["id,name", "1,Alice", "2,Bob"]
 
 
 def test_serialize_csv_does_not_drop_a_field_appearing_only_in_a_later_record() -> None:
@@ -75,13 +73,13 @@ def test_serialize_csv_does_not_drop_a_field_appearing_only_in_a_later_record() 
     dest = StagedUploadDestination()
     dest._records = [
         {"id": 1, "name": "Alice"},
-        {"id": 2, "name": "Bob", "note": "flagged"},
+        {"id": 2, "note": "flagged"},
     ]
     data = dest._serialize("csv").decode()
     lines = data.splitlines()
     assert lines[0] == "id,name,note"
     assert lines[1] == "1,Alice,"
-    assert lines[2] == "2,Bob,flagged"
+    assert lines[2] == "2,,flagged"
 
 
 def test_serialize_jsonl() -> None:

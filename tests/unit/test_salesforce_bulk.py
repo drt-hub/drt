@@ -116,6 +116,8 @@ def test_finalize_full_lifecycle_success(monkeypatch: pytest.MonkeyPatch) -> Non
     assert result.failed == 0
     assert result.rows_extracted == 2
     assert result.row_errors == []
+    csv_body = mock_client.put.call_args.kwargs["content"].decode("utf-8")
+    assert csv_body.splitlines() == ["id,name", "1,Alice", "2,Bob"]
 
 
 def test_finalize_csv_does_not_drop_a_field_appearing_only_in_a_later_record(
@@ -136,7 +138,7 @@ def test_finalize_csv_does_not_drop_a_field_appearing_only_in_a_later_record(
     dest.stage(
         [
             {"id": "1", "name": "Alice"},
-            {"id": "2", "name": "Bob", "note": "flagged"},
+            {"id": "2", "note": "flagged"},
         ],
         config,
         options,
@@ -168,7 +170,7 @@ def test_finalize_csv_does_not_drop_a_field_appearing_only_in_a_later_record(
     lines = csv_body.splitlines()
     assert lines[0] == "id,name,note"
     assert lines[1] == "1,Alice,"
-    assert lines[2] == "2,Bob,flagged"
+    assert lines[2] == "2,,flagged"
 
 
 # ---------------------------------------------------------------------------

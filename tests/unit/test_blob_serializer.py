@@ -50,12 +50,12 @@ class TestSerialiseRecordsText:
         order, with a blank cell for a record missing a given column."""
         records = [
             {"id": 1, "name": "alice"},
-            {"id": 2, "name": "bob", "note": "flagged"},
+            {"id": 2, "note": "flagged"},
         ]
         body, _, _ = serialise_records(records, format="csv", compression="none")
 
         text = body.decode("utf-8")
-        assert text.splitlines() == ["id,name,note", "1,alice,", "2,bob,flagged"]
+        assert text.splitlines() == ["id,name,note", "1,alice,", "2,,flagged"]
 
     def test_json_emits_array_of_objects(self) -> None:
         records = [{"id": 1}, {"id": 2}]
