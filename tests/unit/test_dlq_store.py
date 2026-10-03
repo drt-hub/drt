@@ -256,6 +256,22 @@ def test_occurrence_decoder_preserves_unique_legacy_and_explicit_ids() -> None:
     assert decoded[1].id == "operator-supplied"
 
 
+def test_capped_append_keeps_surviving_legacy_twin_id_stable(tmp_path: Path) -> None:
+    raw = '{"record": {"id": 1}, "error_message": "boom"}'
+    store = DlqStore(tmp_path)
+    path = tmp_path / ".drt" / "dlq" / "s.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{raw}\n{raw}\n")
+    _first, second = store.read("s")
+
+    store.append("s", [_dl(99)], max_records=2)
+
+    survivors = store.read("s")
+    assert len(survivors) == 2
+    assert survivors[0].id == second.id
+    assert survivors[0].id.endswith("-1")
+
+
 def test_reconcile_removes_only_one_of_two_identical_legacy_lines(tmp_path: Path) -> None:
     raw = '{"record": {"id": 1}, "error_message": "boom"}'
     store = DlqStore(tmp_path)

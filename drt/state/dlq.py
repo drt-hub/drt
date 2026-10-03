@@ -238,7 +238,11 @@ class LocalDlqStore:
         with advisory_lock(path):
             with self._lock:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                lines = self._read_raw(path)
+                # Materialise occurrence-qualified legacy ids (#1147) before the
+                # FIFO cap can evict the oldest twin: otherwise the survivor is
+                # renumbered on the next read and a concurrent retry's
+                # confirmed id would hit it instead.
+                lines = [json.dumps(asdict(e)) for e in self._read_entries(sync_name)]
                 lines.extend(json.dumps(asdict(e)) for e in entries)
                 if max_records > 0 and len(lines) > max_records:
                     lines = lines[-max_records:]
