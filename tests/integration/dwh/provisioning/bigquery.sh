@@ -41,6 +41,19 @@ gcloud projects add-iam-policy-binding "${PROJECT}" \
   --member="serviceAccount:${SA_EMAIL}" \
   --role="roles/bigquery.jobUser" --condition=None >/dev/null
 
+# ... plus a create-only custom role so the smoke SA can create its own
+# throwaway datasets (managed-table / warehouse-state legs, #1107/#1113/#1055).
+# bigquery.datasets.create is the only permission; the creator becomes OWNER of
+# the datasets it creates, so no project-wide dataEditor is needed.
+gcloud iam roles create drtSmokeDatasetCreator --project="${PROJECT}" \
+  --title="drt smoke dataset creator" \
+  --permissions=bigquery.datasets.create --stage=GA 2>/dev/null \
+  || echo "role drtSmokeDatasetCreator already exists"
+gcloud projects add-iam-policy-binding "${PROJECT}" \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="projects/${PROJECT}/roles/drtSmokeDatasetCreator" \
+  --condition=None >/dev/null
+
 # ... plus dataEditor scoped to the smoke dataset only (create/insert/drop the
 # target + <table>_drt_tmp). Avoid project-wide dataEditor.
 bq update --dataset \

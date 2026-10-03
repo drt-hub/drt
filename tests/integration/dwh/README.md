@@ -135,6 +135,11 @@ BigQuery prerequisites (#673):
   project (to run load/query/MERGE jobs) **plus** dataset-scoped
   `roles/bigquery.dataEditor` on the smoke dataset (to create/insert/drop the
   target + `_drt_tmp` tables). Avoid granting project-wide `dataEditor`.
+- Legs that create their own throwaway datasets (managed table, warehouse state)
+  additionally need a **create-only** project-level custom role
+  (`drtSmokeDatasetCreator`, containing just `bigquery.datasets.create`);
+  the creating principal becomes OWNER of each dataset it creates. The
+  provisioning script grants it.
 - Caveat: if the org enforces the `iam.disableServiceAccountKeyCreation`
   constraint, a keyfile can't be minted for the SA — provision the key in a
   project/folder where that policy is not enforced, or use an exempted SA.
