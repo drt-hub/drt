@@ -858,20 +858,10 @@ def test_retry_persists_dlq_removal_for_earlier_chunk_before_a_later_chunk_raise
 def test_retry_exception_path_does_not_delete_an_untouched_legacy_duplicate(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Codex review round 2 on #1146: the exception-path reconcile() must not
-    delete an untouched legacy dead letter just because a *different*
-    physical entry sharing its content-derived id was confirmed by an
-    earlier chunk. Two byte-identical pre-#955 legacy lines (no ``id`` key)
-    decode to the same SHA-256 fallback id (``decode_dead_letter_line()``).
-    batch_size: 1 puts them in separate chunks; the fake destination
-    succeeds on the first load() call (confirming the first physical entry)
-    and raises on the second (the second physical entry's own chunk — it is
-    never actually attempted). Before the guard, naming that shared id in
-    the exception-path reconcile()'s remove_ids would delete both physical
-    entries, silently discarding the untouched second one."""
+    """An exception after one confirmed legacy twin leaves the other queued."""
     from drt.cli.commands.retry import replay_dead_letters
     from drt.config.parser import load_syncs
-    from drt.state.dlq import decode_dead_letter_line
+    from drt.state.dlq import decode_dead_letter_lines
 
     (project / "syncs" / "post_users.yml").write_text(
         yaml.dump(
@@ -884,10 +874,8 @@ def test_retry_exception_path_does_not_delete_an_untouched_legacy_duplicate(
         )
     )
     raw_line = '{"record": {"n": 1}, "error_message": "boom"}'
-    # Precondition: confirm these two byte-identical legacy lines really do
-    # collide on id before relying on that to make the rest of the test
-    # meaningful (otherwise this would pass vacuously).
-    assert decode_dead_letter_line(raw_line).id == decode_dead_letter_line(raw_line).id
+    first, second = decode_dead_letter_lines([raw_line, raw_line])
+    assert first.id != second.id
 
     dlq_path = project / ".drt" / "dlq" / "post_users.jsonl"
     dlq_path.parent.mkdir(parents=True, exist_ok=True)
@@ -900,28 +888,18 @@ def test_retry_exception_path_does_not_delete_an_untouched_legacy_duplicate(
     with pytest.raises(RuntimeError, match="boom"):
         replay_dead_letters(sync, project_dir=project)
 
-    # Both physical entries survive: the confirmed one wasn't safe to remove
-    # without also removing its untouched, never-attempted twin.
-    assert len(store.read("post_users")) == 2
+    remaining = store.read("post_users")
+    assert [entry.id for entry in remaining] == [second.id]
+    assert remaining[0].attempts == 1
 
 
 def test_retry_exception_path_does_not_delete_an_untouched_legacy_duplicate_beyond_limit(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Codex review round 3 on #1146: the first version of the exception-path
-    guard only excluded ``to_retry``'s own unprocessed suffix from
-    ``remove_ids`` — it missed a legacy duplicate excluded from ``to_retry``
-    entirely by ``--limit`` (``untouched``). Queue: [A, B, A2], where A and
-    A2 are byte-identical legacy lines (same content-derived id) and B is
-    distinct. ``--limit 2`` + ``batch_size: 1`` means ``to_retry = [A, B]``
-    and ``untouched = [A2]``; the fake destination succeeds on A (confirming
-    it) and raises on B. Before this round's fix, A's id would still land in
-    the exception-path reconcile()'s remove_ids (nothing in `to_retry`'s
-    unprocessed suffix — just B — shares A's id), silently deleting A2 too
-    even though `--limit` was never meant to touch it."""
+    """The exception path preserves both the failed row and limited twin."""
     from drt.cli.commands.retry import replay_dead_letters
     from drt.config.parser import load_syncs
-    from drt.state.dlq import decode_dead_letter_line
+    from drt.state.dlq import decode_dead_letter_lines
 
     (project / "syncs" / "post_users.yml").write_text(
         yaml.dump(
@@ -935,10 +913,8 @@ def test_retry_exception_path_does_not_delete_an_untouched_legacy_duplicate_beyo
     )
     line_a = '{"record": {"n": 1}, "error_message": "boom"}'
     line_b = '{"record": {"n": 2}, "error_message": "boom"}'
-    # Preconditions: A/A2 collide on id, and B's id genuinely differs from
-    # A's — otherwise this test wouldn't isolate what it claims to.
-    assert decode_dead_letter_line(line_a).id == decode_dead_letter_line(line_a).id
-    assert decode_dead_letter_line(line_a).id != decode_dead_letter_line(line_b).id
+    first_a, b, second_a = decode_dead_letter_lines([line_a, line_b, line_a])
+    assert len({first_a.id, b.id, second_a.id}) == 3
 
     dlq_path = project / ".drt" / "dlq" / "post_users.jsonl"
     dlq_path.parent.mkdir(parents=True, exist_ok=True)
@@ -951,29 +927,17 @@ def test_retry_exception_path_does_not_delete_an_untouched_legacy_duplicate_beyo
     with pytest.raises(RuntimeError, match="boom"):
         replay_dead_letters(sync, project_dir=project, limit=2)
 
-    # All three physical entries survive: A's confirmed delivery isn't safe
-    # to reconcile while A2 -- excluded from this retry entirely by --limit
-    # -- still shares its id.
-    assert len(store.read("post_users")) == 3
+    remaining = store.read("post_users")
+    assert [entry.record for entry in remaining] == [{"n": 2}, {"n": 1}]
+    assert [entry.attempts for entry in remaining] == [1, 1]
 
 
 def test_retry_normal_completion_does_not_delete_an_untouched_legacy_duplicate_beyond_limit(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#1147: the always-run, end-of-function reconcile() call (reached when
-    the retry loop completes with no exception at all) had no `untouched`
-    guard, unlike the exception path (#1146, rounds 2-3) -- a legacy
-    duplicate excluded from `to_retry` by `--limit` could be silently
-    deleted just because its content-identical twin, included in `to_retry`,
-    was successfully retried. Queue: [A, B, A2], where A and A2 are
-    byte-identical legacy lines (same content-derived id) and B is
-    distinct. ``--limit 2`` + ``batch_size: 1`` means ``to_retry = [A, B]``
-    and ``untouched = [A2]``; both A and B succeed, so the retry loop
-    completes normally -- no exception, so the exception-path guard never
-    runs; this is the one reconcile() call site that guard doesn't cover."""
+    """#1147: --limit 1 removes one twin without bumping the untouched one."""
     from drt.cli.commands.retry import replay_dead_letters
     from drt.config.parser import load_syncs
-    from drt.state.dlq import decode_dead_letter_line
 
     (project / "syncs" / "post_users.yml").write_text(
         yaml.dump(
@@ -986,29 +950,23 @@ def test_retry_normal_completion_does_not_delete_an_untouched_legacy_duplicate_b
         )
     )
     line_a = '{"record": {"n": 1}, "error_message": "boom"}'
-    line_b = '{"record": {"n": 2}, "error_message": "boom"}'
-    # Preconditions: A/A2 collide on id, and B's id genuinely differs from
-    # A's — otherwise this test wouldn't isolate what it claims to.
-    assert decode_dead_letter_line(line_a).id == decode_dead_letter_line(line_a).id
-    assert decode_dead_letter_line(line_a).id != decode_dead_letter_line(line_b).id
 
     dlq_path = project / ".drt" / "dlq" / "post_users.jsonl"
     dlq_path.parent.mkdir(parents=True, exist_ok=True)
-    dlq_path.write_text(line_a + "\n" + line_b + "\n" + line_a + "\n")
+    dlq_path.write_text(line_a + "\n" + line_a + "\n")
 
     store = DlqStore(project)
+    _, untouched = store.read("post_users")
     _patch_dest(monkeypatch, _FakeDestination(fail_ids=set()))
     sync = next(s for s in load_syncs(project) if s.name == "post_users")
 
-    result = replay_dead_letters(sync, project_dir=project, limit=2)
+    result = replay_dead_letters(sync, project_dir=project, limit=1)
 
     assert result["status"] == "ok"
-    # B is gone (succeeded, no id collision); both A copies survive -- A's
-    # confirmed delivery isn't safe to reconcile while A2, excluded from
-    # this retry entirely by --limit, still shares its id.
     remaining = store.read("post_users")
-    assert len(remaining) == 2
-    assert all(e.record == {"n": 1} for e in remaining)
+    assert [entry.id for entry in remaining] == [untouched.id]
+    assert remaining[0].record == {"n": 1}
+    assert remaining[0].attempts == 1
 
 
 def test_retry_excludes_unattributed_skip_from_ledger_and_audit(

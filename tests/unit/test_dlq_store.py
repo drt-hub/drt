@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
-from drt.state.dlq import DeadLetter, DlqStore
+from drt.state.dlq import (
+    DeadLetter,
+    DlqStore,
+    decode_dead_letter_line,
+    decode_dead_letter_lines,
+)
 from tests.conftest import public_methods
 
 
@@ -170,8 +177,6 @@ def test_a_pre_762_jsonl_line_still_loads(tmp_path: Path) -> None:
     """`read()` unpacks each line via DeadLetter(**data); a line written
     before this field existed has no sync_run_id key at all, and must still
     load — via the dataclass default, not a migration."""
-    import json
-
     store = DlqStore(tmp_path)
     path = tmp_path / ".drt" / "dlq" / "s.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -208,8 +213,6 @@ def test_legacy_line_gets_the_same_id_on_repeated_reads(tmp_path: Path) -> None:
     not decoding the same JSONL bytes twice). The content-hash fallback in
     ``decode_dead_letter_line`` must agree across independent reads of the
     same unchanged line."""
-    import json
-
     store = DlqStore(tmp_path)
     path = tmp_path / ".drt" / "dlq" / "s.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -228,13 +231,74 @@ def test_legacy_line_gets_the_same_id_on_repeated_reads(tmp_path: Path) -> None:
     assert first_read.id == second_read.id
 
 
+def test_legacy_duplicate_ids_are_occurrence_aware_and_stable(tmp_path: Path) -> None:
+    raw = '{"record": {"id": 1}, "error_message": "boom"}'
+    expected = hashlib.sha256(raw.encode()).hexdigest()
+    store = DlqStore(tmp_path)
+    path = tmp_path / ".drt" / "dlq" / "s.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join([raw, raw, raw]) + "\n")
+
+    first_read = store.read("s")
+    second_read = store.read("s")
+
+    assert [entry.id for entry in first_read] == [expected, f"{expected}-1", f"{expected}-2"]
+    assert [entry.id for entry in second_read] == [entry.id for entry in first_read]
+
+
+def test_occurrence_decoder_preserves_unique_legacy_and_explicit_ids() -> None:
+    legacy = '{"record": {"id": 1}, "error_message": "boom"}'
+    explicit = json.dumps({"record": {"id": 2}, "error_message": "boom", "id": "operator-supplied"})
+
+    decoded = decode_dead_letter_lines(["", legacy, explicit])
+
+    assert decoded[0].id == decode_dead_letter_line(legacy).id
+    assert decoded[1].id == "operator-supplied"
+
+
+def test_reconcile_removes_only_one_of_two_identical_legacy_lines(tmp_path: Path) -> None:
+    raw = '{"record": {"id": 1}, "error_message": "boom"}'
+    store = DlqStore(tmp_path)
+    path = tmp_path / ".drt" / "dlq" / "s.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{raw}\n{raw}\n")
+    first, second = store.read("s")
+
+    result = store.reconcile("s", remove_ids={first.id})
+
+    assert [entry.id for entry in result] == [second.id]
+    assert [entry.id for entry in store.read("s")] == [second.id]
+    assert '"id":' in path.read_text()  # reconcile persists the derived id
+
+
+def test_reconcile_removes_confirmed_twin_and_updates_refailed_twin(tmp_path: Path) -> None:
+    raw = '{"record": {"id": 1}, "error_message": "boom"}'
+    store = DlqStore(tmp_path)
+    path = tmp_path / ".drt" / "dlq" / "s.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{raw}\n{raw}\n")
+    confirmed, refailed = store.read("s")
+    bumped = DeadLetter(
+        id=refailed.id,
+        record=refailed.record,
+        error_message="still failing",
+        timestamp=refailed.timestamp,
+        attempts=refailed.attempts + 1,
+    )
+
+    result = store.reconcile("s", remove_ids={confirmed.id}, updates={refailed.id: bumped})
+
+    assert len(result) == 1
+    assert result[0].id == refailed.id
+    assert result[0].attempts == 2
+    assert store.read("s")[0].attempts == 2
+
+
 def test_reconcile_matches_a_legacy_entry_by_its_content_hash_id(tmp_path: Path) -> None:
     """End-to-end version of the test above: a caller that reads a legacy
     queue, decides to remove an entry by the id from that read, and then
     calls reconcile() must have that id actually match on reconcile's own
     fresh internal read."""
-    import json
-
     store = DlqStore(tmp_path)
     path = tmp_path / ".drt" / "dlq" / "s.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -256,12 +320,8 @@ def test_reconcile_matches_a_legacy_entry_by_its_content_hash_id(tmp_path: Path)
 
 def test_a_pre_955_jsonl_line_still_loads(tmp_path: Path) -> None:
     """A line written before ``id`` existed has no ``id`` key at all — the
-    dataclass default assigns a fresh one per read rather than failing to
-    parse. See the field's own comment in ``drt/state/dlq.py`` for why a
-    fresh id per read is an acceptable, self-healing gap for pre-existing
-    entries rather than something that needs a migration."""
-    import json
-
+    JSONL decoder assigns its deterministic content hash rather than the
+    dataclass's random default or requiring a migration."""
     store = DlqStore(tmp_path)
     path = tmp_path / ".drt" / "dlq" / "s.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -408,32 +408,15 @@ def replay_dead_letters(
         # bump here, unlike the staged path above where finalize() already
         # covers the whole accumulated set.
         #
-        # Guard against a legacy-duplicate-id false removal (Codex review on
-        # #1146, rounds 2 and 3): reconcile()'s remove_ids is an id-set
-        # filter, not an occurrence-count filter (see LocalDlqStore.reconcile()
-        # ) -- if a legacy (pre-#955) DLQ holds two byte-identical entries
-        # that therefore share the same content-derived id, and one was
-        # confirmed by an earlier (fully processed) chunk while its twin was
-        # never actually retried this invocation, naming that id in
-        # remove_ids would delete BOTH physical entries, silently discarding
-        # the untouched one. An entry can escape being retried this
-        # invocation two ways: it's in `to_retry` but a later exception cut
-        # the loop off before its own chunk ran (`to_retry[processed_count:]`
-        # -- see the comment above `processed_count`'s declaration), or it
-        # was excluded from `to_retry` altogether by `--limit` (`untouched`,
-        # computed near the top of this function). Both sets name entries
-        # this call will not touch either way, so excluding both from
-        # remove_ids here means an id with a still-queued twin is simply
-        # left queued instead of removed -- costs one more retry cycle,
-        # nothing is lost.
+        # Keep the #1146 guard that excludes entries this invocation never
+        # processed: either a later exception cut the loop off before their
+        # chunk ran, or --limit excluded them from `to_retry`. File-backed
+        # pre-#955 twins now receive occurrence-qualified ids (#1147), so
+        # byte-identical legacy lines no longer collide here. The guard is
+        # still harmless and protects a backend that returns duplicate ids.
         #
-        # `updates` is deliberately left unfiltered: it's keyed by id too, so
-        # an untouched twin sharing a removed entry's id would pick up that
-        # entry's bumped `attempts`/error content -- cosmetically wrong, but
-        # excluding the id here instead would mean the entry that WAS
-        # actually retried-and-failed also loses its own attempts bump
-        # (reconcile() has no way to address one occurrence of a shared id
-        # without the other), which is strictly worse (#1147).
+        # `updates` remains unfiltered, preserving the existing behavior for
+        # third-party backends with the frozen reconcile() contract.
         #
         # This closes the *exception* path only: a hard process kill
         # (SIGKILL/OOM) between an earlier chunk's success and this handler
@@ -464,13 +447,9 @@ def replay_dead_letters(
     # loop for why (#1127/#1128). `duplicate_ids` entries are deliberately
     # not named here — they stay queued (see above).
     #
-    # `untouched` (beyond --limit) was never retried this invocation either,
-    # and needs the same legacy-duplicate-id exclusion from `remove_ids` the
-    # except block above already applies (#1147) — this line is the one
-    # place that guard was missing (the loop completing with no exception
-    # means `processed_count == len(to_retry)`, so `to_retry[processed_count:]`
-    # is empty and the exclusion set reduces to just `untouched`). `updates`
-    # stays unfiltered here too, for the same reason given in that comment.
+    # Keep the #1146/#1160 safety guard for `untouched` entries. It is a no-op
+    # for occurrence-qualified legacy ids, but remains compatible with a
+    # third-party backend that returns duplicate ids.
     final = store.reconcile(
         sync.name, remove_ids=remove_ids - {e.id for e in untouched}, updates=updates
     )

@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol, runtime_checkable
 
-from drt.state.dlq import DeadLetter, decode_dead_letter_line
+from drt.state.dlq import DeadLetter, decode_dead_letter_lines
 from drt.state.errors import StateContentionError
 from drt.state.history import HistoryEntry
 from drt.state.manager import SyncState
@@ -329,15 +329,7 @@ class ObjectStoreDlqBackend(_ObjectStoreBase):
     def _decode(body: bytes | None) -> list[DeadLetter]:
         if body is None:
             return []
-        entries: list[DeadLetter] = []
-        for raw in body.decode(errors="replace").splitlines():
-            if not raw.strip():
-                continue
-            try:
-                entries.append(decode_dead_letter_line(raw))
-            except (json.JSONDecodeError, TypeError):
-                continue
-        return entries
+        return decode_dead_letter_lines(body.decode(errors="replace").splitlines())
 
     @staticmethod
     def _encode(entries: list[DeadLetter]) -> bytes:

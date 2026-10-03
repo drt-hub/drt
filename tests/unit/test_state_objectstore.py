@@ -426,6 +426,32 @@ def test_dlq_legacy_entry_matches_by_id_across_read_then_reconcile() -> None:
     assert store.depth("s") == 0
 
 
+def test_dlq_legacy_duplicate_reconcile_is_occurrence_aware() -> None:
+    raw = (
+        b'{"record": {"id": 1}, "error_message": "boom", "http_status": 500, '
+        b'"timestamp": "2026-01-01T00:00:00Z", "attempts": 1}\n'
+    )
+    client = MemoryObjectClient()
+    client.objects["dlq/s.jsonl"] = raw * 3
+    store = ObjectStoreDlqBackend(client)
+    confirmed, refailed, untouched = store.read("s")
+    assert len({confirmed.id, refailed.id, untouched.id}) == 3
+    bumped = DeadLetter(
+        id=refailed.id,
+        record=refailed.record,
+        error_message="still failing",
+        timestamp=refailed.timestamp,
+        attempts=2,
+    )
+
+    result = store.reconcile("s", remove_ids={confirmed.id}, updates={refailed.id: bumped})
+
+    assert [entry.id for entry in result] == [refailed.id, untouched.id]
+    assert [entry.attempts for entry in result] == [2, 1]
+    assert [entry.id for entry in store.read("s")] == [refailed.id, untouched.id]
+    assert all(b'"id":' in line for line in client.objects["dlq/s.jsonl"].splitlines())
+
+
 def test_dlq_reconcile_removes_and_updates_by_id_leaves_others_untouched() -> None:
     store = ObjectStoreDlqBackend(MemoryObjectClient())
     store.append("s", [_dead(1), _dead(2), _dead(3)])
