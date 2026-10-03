@@ -327,4 +327,10 @@ jobs:
           echo "DRT_SMOKE_BIGQUERY_KEYFILE=$RUNNER_TEMP/bq-sa.json" >> "$GITHUB_ENV"
       - name: Run BigQuery smoke
         if: steps.creds.outputs.has_creds == 'true'
-        run: pytest -m dwh_smoke tests/integration/dwh/test_bigquery_smoke.py -v
+        # Each BigQuery smoke file is explicit rather than directory-wide;
+        # capability legs such as #1107 must be listed here or they never run.
+        run: |
+          pytest -m dwh_smoke \
+            tests/integration/dwh/test_bigquery_smoke.py \
+            tests/integration/dwh/test_bigquery_managed_table_smoke.py \
+            -v
