@@ -272,6 +272,32 @@ def test_capped_append_keeps_surviving_legacy_twin_id_stable(tmp_path: Path) -> 
     assert survivors[0].id.endswith("-1")
 
 
+def test_twins_with_an_already_persisted_shared_id_are_disambiguated(tmp_path: Path) -> None:
+    line = json.dumps({"record": {"id": 1}, "error_message": "boom", "id": "shared"})
+    store = DlqStore(tmp_path)
+    path = tmp_path / ".drt" / "dlq" / "s.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{line}\n{line}\n")
+
+    first, second = store.read("s")
+    result = store.reconcile("s", remove_ids={first.id})
+
+    assert (first.id, second.id) == ("shared", "shared-1")
+    assert [entry.id for entry in result] == ["shared-1"]
+
+
+def test_append_preserves_undecodable_lines(tmp_path: Path) -> None:
+    store = DlqStore(tmp_path)
+    path = tmp_path / ".drt" / "dlq" / "s.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('not json\n{"record": {"id": 1}, "error_message": "boom"}\n')
+
+    store.append("s", [_dl(99)], max_records=0)
+
+    assert "not json" in path.read_text().splitlines()
+    assert len(store.read("s")) == 2
+
+
 def test_reconcile_removes_only_one_of_two_identical_legacy_lines(tmp_path: Path) -> None:
     raw = '{"record": {"id": 1}, "error_message": "boom"}'
     store = DlqStore(tmp_path)

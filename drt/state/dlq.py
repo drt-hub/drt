@@ -104,37 +104,62 @@ def decode_dead_letter_line(raw_line: str) -> DeadLetter:
     return entry
 
 
-def decode_dead_letter_lines(lines: Iterable[str]) -> list[DeadLetter]:
-    """Parse a DLQ JSONL sequence with occurrence-aware legacy ids.
+def _decode_unique(lines: Iterable[str]) -> list[tuple[str, DeadLetter | None]]:
+    """Pair each non-blank raw line with its decoded entry (``None`` if undecodable).
 
-    A pre-#955 line has no durable ``id``, so its single-line fallback is a
-    content hash. Byte-identical legacy lines would otherwise collide. Keep
-    the first occurrence's historical hash unchanged and suffix later ones
-    with their zero-based occurrence ordinal. Explicit ids are never changed.
-
-    The ids are deterministic for an unchanged file, which is required when
-    retry re-reads the queue during reconciliation (#1127). One narrow race
-    remains: if capped ``append()`` concurrently evicts the oldest twin
-    between retry's read and reconcile, the remaining twins' ordinals shift;
-    that cannot be fixed without durable identity in the legacy input.
+    Ids are made unique in file order: the first holder of an id keeps it and
+    later holders get ``<id>-<n>`` (first free ``n``). This covers both
+    byte-identical pre-#955 lines (same content hash) and twins whose shared
+    hash an older writer already persisted as an explicit ``id``.
     """
-    occurrences: dict[str, int] = {}
-    entries: list[DeadLetter] = []
+    seen: set[str] = set()
+    out: list[tuple[str, DeadLetter | None]] = []
     for raw_line in lines:
         if not raw_line.strip():
             continue
         try:
-            entry, legacy = _decode_dead_letter_line_with_origin(raw_line)
+            entry, _ = _decode_dead_letter_line_with_origin(raw_line)
         except (json.JSONDecodeError, TypeError):
             # A single malformed line should not abort an entire retry.
+            out.append((raw_line, None))
             continue
-        if legacy:
-            ordinal = occurrences.get(entry.id, 0)
-            occurrences[entry.id] = ordinal + 1
-            if ordinal:
-                entry.id = f"{entry.id}-{ordinal}"
-        entries.append(entry)
-    return entries
+        if entry.id in seen:
+            n = 1
+            while f"{entry.id}-{n}" in seen:
+                n += 1
+            entry.id = f"{entry.id}-{n}"
+        seen.add(entry.id)
+        out.append((raw_line, entry))
+    return out
+
+
+def decode_dead_letter_lines(lines: Iterable[str]) -> list[DeadLetter]:
+    """Parse a DLQ JSONL sequence into entries with unique ids (#1147).
+
+    A pre-#955 line has no durable ``id``, so its single-line fallback is a
+    content hash and byte-identical lines would collide, making id-keyed
+    ``reconcile()`` hit every twin. Ids are therefore de-duplicated in file
+    order (see :func:`_decode_unique`); the first occurrence keeps its
+    historical hash and unique explicit ids are never changed.
+
+    Deterministic for an unchanged file, as retry's re-read during
+    reconciliation requires (#1127). Writers that evict entries must persist
+    the derived ids first (see :func:`materialize_dead_letter_lines`), or the
+    survivors would be renumbered on the next read.
+    """
+    return [entry for _, entry in _decode_unique(lines) if entry is not None]
+
+
+def materialize_dead_letter_lines(lines: Iterable[str]) -> list[str]:
+    """Return ``lines`` with decodable entries rewritten to carry their unique id.
+
+    Undecodable lines are kept verbatim so a rewrite never destroys
+    repairable data.
+    """
+    return [
+        raw_line if entry is None else json.dumps(asdict(entry))
+        for raw_line, entry in _decode_unique(lines)
+    ]
 
 
 @runtime_checkable
@@ -238,11 +263,10 @@ class LocalDlqStore:
         with advisory_lock(path):
             with self._lock:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                # Materialise occurrence-qualified legacy ids (#1147) before the
-                # FIFO cap can evict the oldest twin: otherwise the survivor is
-                # renumbered on the next read and a concurrent retry's
-                # confirmed id would hit it instead.
-                lines = [json.dumps(asdict(e)) for e in self._read_entries(sync_name)]
+                # Persist unique ids (#1147) before the FIFO cap can evict an
+                # earlier twin; otherwise the survivor is renumbered on the
+                # next read and a concurrent retry's confirmed id hits it.
+                lines = materialize_dead_letter_lines(self._read_raw(path))
                 lines.extend(json.dumps(asdict(e)) for e in entries)
                 if max_records > 0 and len(lines) > max_records:
                     lines = lines[-max_records:]
