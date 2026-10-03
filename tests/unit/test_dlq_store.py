@@ -286,6 +286,30 @@ def test_twins_with_an_already_persisted_shared_id_are_disambiguated(tmp_path: P
     assert [entry.id for entry in result] == ["shared-1"]
 
 
+def test_generated_suffix_never_steals_a_later_explicit_id() -> None:
+    def line(i: str) -> str:
+        return json.dumps({"record": {}, "error_message": "e", "id": i})
+
+    decoded = decode_dead_letter_lines([line("x"), line("x"), line("x-1")])
+
+    assert [d.id for d in decoded] == ["x", "x-2", "x-1"]
+
+
+def test_malformed_id_line_is_skipped_not_fatal() -> None:
+    good = json.dumps({"record": {}, "error_message": "e", "id": "ok"})
+    bad = json.dumps({"record": {}, "error_message": "e", "id": []})
+
+    assert [d.id for d in decode_dead_letter_lines([bad, good])] == ["ok"]
+
+
+def test_many_identical_twins_decode_quickly_with_unique_ids() -> None:
+    raw = '{"record": {"id": 1}, "error_message": "boom"}'
+
+    decoded = decode_dead_letter_lines([raw] * 5000)
+
+    assert len({d.id for d in decoded}) == 5000
+
+
 def test_append_preserves_undecodable_lines(tmp_path: Path) -> None:
     store = DlqStore(tmp_path)
     path = tmp_path / ".drt" / "dlq" / "s.jsonl"

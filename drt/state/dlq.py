@@ -112,25 +112,37 @@ def _decode_unique(lines: Iterable[str]) -> list[tuple[str, DeadLetter | None]]:
     byte-identical pre-#955 lines (same content hash) and twins whose shared
     hash an older writer already persisted as an explicit ``id``.
     """
-    seen: set[str] = set()
-    out: list[tuple[str, DeadLetter | None]] = []
+    decoded: list[tuple[str, DeadLetter | None]] = []
     for raw_line in lines:
         if not raw_line.strip():
             continue
         try:
             entry, _ = _decode_dead_letter_line_with_origin(raw_line)
+            if not isinstance(entry.id, str):
+                raise TypeError("id must be a string")
         except (json.JSONDecodeError, TypeError):
             # A single malformed line should not abort an entire retry.
-            out.append((raw_line, None))
+            decoded.append((raw_line, None))
             continue
-        if entry.id in seen:
-            n = 1
-            while f"{entry.id}-{n}" in seen:
+        decoded.append((raw_line, entry))
+
+    # Reserve every persisted id first so a generated suffix can never steal
+    # a unique explicit id that appears later in the file.
+    reserved = {entry.id for _, entry in decoded if entry is not None}
+    assigned: set[str] = set()
+    next_suffix: dict[str, int] = {}
+    for _, item in decoded:
+        if item is None:
+            continue
+        if item.id in assigned:
+            base = item.id
+            n = next_suffix.get(base, 1)
+            while f"{base}-{n}" in reserved or f"{base}-{n}" in assigned:
                 n += 1
-            entry.id = f"{entry.id}-{n}"
-        seen.add(entry.id)
-        out.append((raw_line, entry))
-    return out
+            next_suffix[base] = n + 1
+            item.id = f"{base}-{n}"
+        assigned.add(item.id)
+    return decoded
 
 
 def decode_dead_letter_lines(lines: Iterable[str]) -> list[DeadLetter]:
