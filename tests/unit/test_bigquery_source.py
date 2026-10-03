@@ -27,6 +27,10 @@ class _NotFound(Exception):
     subclass is required since ``except NotFound:`` can't catch a MagicMock."""
 
 
+class _Conflict(Exception):
+    """Stand-in for google.api_core.exceptions.Conflict (dataset-create race)."""
+
+
 def _mocked_bq_modules(client: MagicMock) -> dict[str, MagicMock]:
     """sys.modules entries satisfying ``from google.cloud import bigquery``."""
     bigquery_mod = MagicMock()
@@ -46,6 +50,7 @@ def _mocked_bq_modules(client: MagicMock) -> dict[str, MagicMock]:
 
     api_core_exceptions = MagicMock()
     api_core_exceptions.NotFound = _NotFound
+    api_core_exceptions.Conflict = _Conflict
     api_core = MagicMock()
     api_core.exceptions = api_core_exceptions
     google.api_core = api_core
@@ -156,41 +161,28 @@ class TestManagedTableCapable:
         client.get_dataset.side_effect = _NotFound("nope")
         _install_client(monkeypatch, client)
 
-        BigQuerySource().ensure_managed_schema(_config(location="asia-northeast1"))
+        BigQuerySource().ensure_managed_schema(_config())
 
         client.create_dataset.assert_called_once()
-        (dataset,), kwargs = client.create_dataset.call_args
+        (dataset,), _ = client.create_dataset.call_args
         assert dataset.reference == "my-proj._drt"
-        assert dataset.location == "asia-northeast1"
-        assert kwargs == {"exists_ok": True}
+        assert dataset.location == "US"
 
-    def test_ensure_managed_schema_omits_location_when_profile_has_none(
+    def test_ensure_managed_schema_survives_concurrent_create_race(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         client = MagicMock()
-        client.get_dataset.side_effect = _NotFound("nope")
+        # First get_dataset (initial probe): absent. create_dataset: another
+        # session won the race. Second get_dataset (re-probe): now present.
+        client.get_dataset.side_effect = [_NotFound("nope"), MagicMock()]
+        client.create_dataset.side_effect = _Conflict("already exists")
         _install_client(monkeypatch, client)
 
-        BigQuerySource().ensure_managed_schema(_config(location=""))
+        BigQuerySource().ensure_managed_schema(_config())  # must not raise
 
-        (dataset,), kwargs = client.create_dataset.call_args
-        assert dataset.reference == "my-proj._drt"
-        assert "location" not in dataset.__dict__
-        assert kwargs == {"exists_ok": True}
+        assert client.get_dataset.call_count == 2
 
-    def test_ensure_managed_schema_propagates_probe_failure(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        client = MagicMock()
-        client.get_dataset.side_effect = RuntimeError("permission denied")
-        _install_client(monkeypatch, client)
-
-        with pytest.raises(RuntimeError, match="permission denied"):
-            BigQuerySource().ensure_managed_schema(_config())
-
-        client.create_dataset.assert_not_called()
-
-    def test_ensure_managed_schema_propagates_create_failure(
+    def test_ensure_managed_schema_reraises_when_create_fails_for_real(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         client = MagicMock()

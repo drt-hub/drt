@@ -118,8 +118,10 @@ class BigQuerySource:
            locked-down principal with no ``bigquery.datasets.create``
            permission, but an admin-pre-provisioned dataset, must never have
            ``create_dataset`` called at all.
-        2. **Concurrent first use**: ``create_dataset(..., exists_ok=True)``
-           makes a second caller that loses the create race a safe no-op.
+        2. **Concurrent first use**: on any exception from ``create_dataset``,
+           re-probe rather than assuming failure — if the dataset exists now
+           (another session won a first-use race, surfaced by BigQuery as
+           ``Conflict``), that's success; anything else re-raises.
         """
         assert isinstance(config, BigQueryProfile)
         from google.api_core.exceptions import NotFound
@@ -132,10 +134,23 @@ class BigQuerySource:
             return
         except NotFound:
             pass
-        dataset = bigquery.Dataset(dataset_ref)
-        if config.location:
+        try:
+            dataset = bigquery.Dataset(dataset_ref)
             dataset.location = config.location
-        client.create_dataset(dataset, exists_ok=True)
+            client.create_dataset(dataset)
+        except Exception:
+            # Re-probe rather than assuming failure: another session may
+            # have won a first-use race (surfaced as Conflict, but caught
+            # broadly since the exact type isn't load-bearing here). The
+            # inner except's `pass` exits that frame before the bare
+            # `raise` below, so `raise` re-raises the original create
+            # failure being handled by this outer `except`, not NotFound.
+            try:
+                client.get_dataset(dataset_ref)
+                return
+            except NotFound:
+                pass
+            raise
 
     def managed_table_exists(self, config: ProfileConfigLike, table_name: str) -> bool:
         """Only a plain base ``TABLE`` counts — a view/materialized view/
