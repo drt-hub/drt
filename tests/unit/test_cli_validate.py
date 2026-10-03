@@ -255,6 +255,31 @@ def test_cli_validate_strict_promotes_secret_warning(
     assert "hardcoded secret" in result.output
 
 
+def test_cli_validate_strict_accepts_high_entropy_rate_limit_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1089: the staged-upload quota identity is explicitly non-secret and
+    must not make strict validation reject an otherwise valid sync."""
+    sync = {
+        "name": "staged-upload",
+        "model": "SELECT 1",
+        "destination": {
+            "type": "staged_upload",
+            "stage": {"url": "https://storage.example.com/upload"},
+            "trigger": {"url": "https://api.vendor.com/jobs"},
+            "rate_limit_key": "tenant-9f3a1c7e82b45d60aa17",
+        },
+    }
+    _write_sync(tmp_path / "syncs", "staged-upload", sync)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["validate", "--strict"])
+
+    assert result.exit_code == 0
+    assert "hardcoded secret" not in result.output
+    assert "staged-upload" in result.output
+
+
 def test_cli_validate_json_includes_secret_warnings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

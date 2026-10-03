@@ -148,13 +148,19 @@ class StagedUploadDestination:
                 # assumes the rendered host is stable per vendor in practice
                 # (varies by job path, not by job host) — a vendor issuing a
                 # genuinely per-job *hostname* would register one limiter per
-                # job in a long-lived process. True multi-tenant quota
-                # identity (an explicit override field) is tracked separately.
+                # job in a long-lived process. An explicit rate_limit_key
+                # names the real vendor quota identity when host inference is
+                # not accurate (#1089), and must win over this rendered host.
+                limiter_key = (
+                    config.rate_limit_key()
+                    if config.rate_limit_key_override is not None
+                    else f"{config.type}:{urlparse(poll_url).netloc}"
+                )
                 rate_limiter = resolve_rate_limiter(
                     config,
                     sync_options,
                     limiter_factory=RateLimiter,
-                    key_override=f"{config.type}:{urlparse(poll_url).netloc}",
+                    key_override=limiter_key,
                 )
                 self._poll(config.poll, context, retry_config, rate_limiter, url=poll_url)
 

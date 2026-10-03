@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from drt.config.base import (
     LITERAL_CREDENTIAL_KEY,
@@ -1013,6 +1013,8 @@ class StagedUploadPollConfig(BaseModel):
 
 
 class StagedUploadDestinationConfig(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     type: Literal["staged_upload"]
     stage: StagedUploadPhaseConfig
     trigger: StagedUploadPhaseConfig
@@ -1020,6 +1022,24 @@ class StagedUploadDestinationConfig(BaseModel):
     format: Literal["csv", "json", "jsonl"] = "csv"
     retry: RetryConfig | None = None  # destination-level override of sync.retry
     rate_limit: RateLimitConfig | None = None  # destination-level override of sync.rate_limit
+    # Public YAML name is ``rate_limit_key``. The internal name avoids
+    # colliding with the RateLimitKeyed Protocol method below.
+    rate_limit_key_override: str | None = Field(
+        default=None,
+        alias="rate_limit_key",
+        min_length=1,
+    )
+
+    @field_validator("rate_limit_key_override")
+    @classmethod
+    def strip_rate_limit_key_override(cls, value: str | None) -> str | None:
+        """Normalize the operator-provided quota identity."""
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("rate_limit_key must not be blank")
+        return stripped
 
     def describe(self) -> str:
         return "staged_upload"
@@ -1028,7 +1048,14 @@ class StagedUploadDestinationConfig(BaseModel):
         return self.describe()  # detail is object identity only (#696)
 
     def rate_limit_key(self) -> str:
-        """Per polling host when configured, else per trigger host (#769, #1068).
+        """Explicit quota identity when set, otherwise per polling host
+        when configured or per trigger host (#769, #1068, #1089).
+
+        ``rate_limit_key`` is an opt-in YAML override for vendors whose real
+        quota boundary cannot be inferred from a URL. It takes precedence
+        over every host-derived fallback, including a runtime-rendered poll
+        URL handled by :meth:`StagedUploadDestination.finalize`.
+
         A staged upload talks to several URLs, but the stage step is usually a
         one-shot presigned URL on a storage host, so it's excluded either way.
         When a ``poll`` phase is configured, it's the one that's actually hit
@@ -1053,6 +1080,8 @@ class StagedUploadDestinationConfig(BaseModel):
         ``describe()`` is the bare constant ``"staged_upload"``.
         (``BaseModel``-direct config.)
         """
+        if self.rate_limit_key_override is not None:
+            return f"{self.type}:{self.rate_limit_key_override}"
         poll_host = urlparse(self.poll.url).netloc if self.poll is not None else ""
         host = poll_host or urlparse(self.trigger.url).netloc
         return f"{self.type}:{host}"

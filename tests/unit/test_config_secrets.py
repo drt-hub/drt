@@ -62,6 +62,29 @@ def test_find_hardcoded_secrets_ignores_env_and_path_suffixes(tmp_path: Path) ->
     assert find_hardcoded_secrets(tmp_path) == []
 
 
+def test_rate_limit_key_is_exempt_but_api_key_remains_scanned(tmp_path: Path) -> None:
+    """#1089: a quota label is not a credential, even when it has enough
+    entropy to trigger the fallback used for real secret-bearing fields."""
+    value = "tenant-9f3a1c7e82b45d60aa17"
+    syncs_dir = tmp_path / "syncs"
+    syncs_dir.mkdir()
+    (syncs_dir / "quota.yml").write_text(
+        "\n".join(
+            [
+                "name: quota",
+                "destination:",
+                f"  rate_limit_key: {value}",
+                f"  api_key: {value}",
+            ]
+        )
+    )
+
+    findings = find_hardcoded_secrets(tmp_path)
+
+    assert [finding.path for finding in findings] == ["destination.api_key"]
+    assert findings[0].reason.startswith("high entropy")
+
+
 def test_secret_reason_uses_entropy_and_ignores_blank_values() -> None:
     assert _secret_reason("   ") is None
     assert _secret_reason("abc123abc123") is None

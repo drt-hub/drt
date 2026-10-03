@@ -10,6 +10,7 @@ This is a building block for vendor bulk/batch APIs that follow the **upload →
 destination:
   type: staged_upload
   format: csv                    # "csv" (default) | "json" | "jsonl"
+  rate_limit_key: vendor-account-a
   stage:
     url: https://api.example.com/v1/uploads
     method: POST
@@ -36,6 +37,7 @@ destination:
 |---|---|---|---|
 | `type` | `"staged_upload"` | — | Required |
 | `format` | `"csv"` \| `"json"` \| `"jsonl"` | `"csv"` | Serialisation of the staged batch. |
+| `rate_limit_key` | string \| null | null | Stable, non-secret identity of the vendor quota boundary; overrides host-derived rate-limit keying. |
 | `stage` | phase | — | Phase 1 — upload the file. **Required** |
 | `trigger` | phase | — | Phase 2 — kick off the import job. **Required** |
 | `poll` | poll \| null | null | Phase 3 — poll the job to completion (optional; omit for fire-and-forget). |
@@ -43,6 +45,15 @@ destination:
 **Phase (`stage` / `trigger`)**: `url`, `method` (`POST` default), `headers`, `auth`, `body_template`, `response_extract` (a `{name: JSONPath}` map that pulls values out of the response for later phases — e.g. an upload ID or signed URL).
 
 **Poll (`poll`)**: `url`, `method` (`GET` default), `headers`, `auth`, `status_field` (default `status`), `success_values` (default `[SUCCEEDED, COMPLETED]`), `failure_values` (default `[FAILED, ERROR]`), `interval_seconds` (default 30), `timeout_seconds` (default 3600).
+
+## Rate limiting
+
+By default, a staged upload with a `poll` phase uses the rendered poll URL's
+hostname as its rate-limit identity; without polling, it uses the trigger
+hostname. Set `rate_limit_key` when one vendor quota spans multiple regional
+hosts, or when independent accounts share one centralized host. Configurations
+with the same explicit key share a limiter bucket, so use a stable, non-secret
+operator-defined label. Leaving it unset preserves the host-derived behavior.
 
 ## How it works
 

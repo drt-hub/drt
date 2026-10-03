@@ -592,6 +592,58 @@ def test_finalize_keys_rate_limiter_by_rendered_poll_host_not_trigger_host() -> 
     assert different != same_a
 
 
+def test_finalize_explicit_rate_limit_key_wins_over_rendered_poll_host() -> None:
+    """#1089: one vendor account can span several polling hosts, while
+    several accounts can share one host. The explicit quota identity must
+    therefore win after a fully templated poll URL is rendered."""
+    limiter = MagicMock()
+
+    def _run(account: str, poll_host: str) -> str:
+        config = StagedUploadDestinationConfig.model_validate(
+            {
+                "type": "staged_upload",
+                "stage": {"url": "https://storage.example.com/upload"},
+                "trigger": {
+                    "url": "https://api.vendor.com/jobs",
+                    "response_extract": {"status_url": "statusUrl"},
+                },
+                "poll": {
+                    "url": "{{ status_url }}",
+                    "interval_seconds": 0,
+                    "timeout_seconds": 5,
+                },
+                "rate_limit_key": account,
+            }
+        )
+        dest = StagedUploadDestination()
+        dest._records = [{"x": 1}]
+        with (
+            patch.object(
+                dest,
+                "_http_phase",
+                side_effect=[{}, {"statusUrl": f"https://{poll_host}/status/abc"}],
+            ),
+            patch("drt.destinations.staged_upload.httpx.Client"),
+            patch(
+                "drt.destinations.staged_upload.resolve_rate_limiter",
+                return_value=limiter,
+            ) as resolve_limiter,
+            patch.object(dest, "_poll"),
+        ):
+            result = dest.finalize(config, _options())
+        assert result.success == 1
+        return resolve_limiter.call_args.kwargs["key_override"]
+
+    account_a_us = _run("vendor-account-a", "us.vendor.com")
+    account_a_eu = _run("vendor-account-a", "eu.vendor.com")
+    account_b_us = _run("vendor-account-b", "us.vendor.com")
+
+    assert account_a_us == "staged_upload:vendor-account-a"
+    assert account_a_us == account_a_eu
+    assert account_b_us == "staged_upload:vendor-account-b"
+    assert account_b_us != account_a_us
+
+
 def test_finalize_stage_error(httpserver: HTTPServer) -> None:
     """Stage endpoint returns 500."""
     httpserver.expect_request("/upload").respond_with_data("error", status=500)

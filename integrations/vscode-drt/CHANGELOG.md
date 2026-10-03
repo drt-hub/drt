@@ -6,6 +6,9 @@ drt-core version its bundled schemas were generated from.
 
 ## [0.1.13] - Unreleased
 
+- Bundled JSON Schemas regenerated from drt-core: `staged_upload` gains an
+  optional `rate_limit_key` for explicitly identifying a vendor quota boundary
+  instead of deriving it from the poll host (drt-hub/drt#1089).
 - Bundled JSON Schema hover text now reflects that warehouse-side
   `incremental_strategy: diff` supports Snowflake as well as Postgres
   (drt-hub/drt#1112).

@@ -4522,6 +4522,19 @@
             }
           ],
           "default": null
+        },
+        "rate_limit_key": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rate Limit Key"
         }
       },
       "required": [

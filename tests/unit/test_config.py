@@ -2060,6 +2060,83 @@ class TestRateLimitKey:
         )
         assert cfg.rate_limit_key() == "staged_upload:api.vendor.com"
 
+    def test_staged_upload_rate_limit_key_uses_explicit_quota_identity(self) -> None:
+        """#1089: the operator-provided identity is the quota boundary even
+        when two configs poll different regional hosts."""
+        from drt.config.destinations_saas import (
+            StagedUploadDestinationConfig,
+        )
+
+        def _config(poll_host: str) -> StagedUploadDestinationConfig:
+            return StagedUploadDestinationConfig.model_validate(
+                {
+                    "type": "staged_upload",
+                    "stage": {"url": "https://storage.example.com/upload"},
+                    "trigger": {"url": "https://api.vendor.com/jobs"},
+                    "poll": {"url": f"https://{poll_host}/status"},
+                    "rate_limit_key": "vendor-account-a",
+                }
+            )
+
+        region_a = _config("us.vendor.com")
+        region_b = _config("eu.vendor.com")
+
+        assert region_a.rate_limit_key_override == "vendor-account-a"
+        assert region_a.rate_limit_key() == "staged_upload:vendor-account-a"
+        assert region_a.rate_limit_key() == region_b.rate_limit_key()
+        assert region_a.model_dump(by_alias=True)["rate_limit_key"] == "vendor-account-a"
+
+    def test_staged_upload_rate_limit_key_survives_model_dump_round_trip(self) -> None:
+        """The internal field name emitted by a normal model dump must remain
+        valid input; otherwise serialization silently discards the override."""
+        from drt.config.destinations_saas import StagedUploadDestinationConfig
+
+        config = StagedUploadDestinationConfig.model_validate(
+            {
+                "type": "staged_upload",
+                "stage": {"url": "https://storage.example.com/upload"},
+                "trigger": {"url": "https://api.vendor.com/jobs"},
+                "rate_limit_key": "vendor-account-a",
+            }
+        )
+
+        reparsed = StagedUploadDestinationConfig.model_validate(config.model_dump())
+
+        assert reparsed.rate_limit_key_override == "vendor-account-a"
+        assert reparsed.rate_limit_key() == "staged_upload:vendor-account-a"
+
+    def test_staged_upload_null_rate_limit_key_uses_host_fallback(self) -> None:
+        """An explicit YAML null is equivalent to omitting the override."""
+        from drt.config.destinations_saas import StagedUploadDestinationConfig
+
+        config = StagedUploadDestinationConfig.model_validate(
+            {
+                "type": "staged_upload",
+                "stage": {"url": "https://storage.example.com/upload"},
+                "trigger": {"url": "https://api.vendor.com/jobs"},
+                "rate_limit_key": None,
+            }
+        )
+
+        assert config.rate_limit_key_override is None
+        assert config.rate_limit_key() == "staged_upload:api.vendor.com"
+
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_staged_upload_rate_limit_key_rejects_empty_override(self, value: str) -> None:
+        """An explicitly empty identity must not silently become a shared
+        catch-all bucket or fall back to host inference."""
+        from drt.config.destinations_saas import StagedUploadDestinationConfig
+
+        with pytest.raises(ValidationError):
+            StagedUploadDestinationConfig.model_validate(
+                {
+                    "type": "staged_upload",
+                    "stage": {"url": "https://storage.example.com/upload"},
+                    "trigger": {"url": "https://api.vendor.com/jobs"},
+                    "rate_limit_key": value,
+                }
+            )
+
     def test_staged_upload_rate_limit_key_prefers_poll_host_when_configured(self) -> None:
         """#1068: poll is independently configurable and can hit a different
         host than trigger — that host is what's actually paced by the wait

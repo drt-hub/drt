@@ -109,6 +109,11 @@ def _find_in_value(
 
 def _is_secret_field(field_name: str) -> bool:
     lower = field_name.lower()
+    # staged_upload.rate_limit_key is an operator-defined, non-secret quota
+    # identity (#1089), not an API credential. Keep this exemption exact so
+    # every other *_key field continues through the secret scanner.
+    if lower == "rate_limit_key":
+        return False
     if lower.endswith(_NON_SECRET_SUFFIXES):
         return False
     return (
