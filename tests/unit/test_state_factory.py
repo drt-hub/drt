@@ -470,6 +470,60 @@ def test_warehouse_backend_rejects_databricks_audit_trail(tmp_path: Path, monkey
         build_state_bundle(project, tmp_path)
 
 
+def test_warehouse_backend_builds_bigquery_bundle(tmp_path: Path, monkeypatch) -> None:
+    from drt.config.credentials import BigQueryProfile
+    from drt.state.warehouse_bigquery import (
+        BigQueryWarehouseDlqBackend,
+        BigQueryWarehouseHistoryStore,
+        BigQueryWarehouseStateStore,
+    )
+
+    profile = BigQueryProfile(type="bigquery", project="p", dataset="analytics")
+    monkeypatch.setattr(
+        "drt.config.credentials.load_profile", lambda name, config_dir=None: profile
+    )
+
+    project = ProjectConfig(
+        name="test",
+        state=StateConfig(backend="warehouse", connection_profile="bq_main"),
+    )
+    bundle = build_state_bundle(project, tmp_path)
+
+    assert isinstance(bundle.state, BigQueryWarehouseStateStore)
+    assert isinstance(bundle.history, BigQueryWarehouseHistoryStore)
+    assert isinstance(bundle.dlq, BigQueryWarehouseDlqBackend)
+    assert bundle.state._profile is profile
+    assert bundle.ledger is None
+    assert bundle.audit_trail is None
+
+
+@pytest.mark.parametrize("capability", ["idempotency", "audit_trail"])
+def test_warehouse_backend_rejects_bigquery_optional_postgres_capabilities(
+    tmp_path: Path, monkeypatch, capability: str
+) -> None:
+    from drt.config.base import AuditTrailConfig
+    from drt.config.credentials import BigQueryProfile
+
+    profile = BigQueryProfile(type="bigquery", project="p", dataset="analytics")
+    monkeypatch.setattr(
+        "drt.config.credentials.load_profile", lambda name, config_dir=None: profile
+    )
+    state_kwargs: dict = {
+        "backend": "warehouse",
+        "connection_profile": "bq_main",
+    }
+    if capability == "idempotency":
+        state_kwargs["idempotency"] = True
+    else:
+        state_kwargs["audit_trail"] = AuditTrailConfig(
+            enabled=True, retain_days=30, fields=["email"]
+        )
+    project = ProjectConfig(name="test", state=StateConfig(**state_kwargs))
+
+    with pytest.raises(NotImplementedError, match=f"{capability}.*not yet supported.*BigQuery"):
+        build_state_bundle(project, tmp_path)
+
+
 def test_warehouse_backend_rejects_unsupported_dialect_profiles(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -485,5 +539,8 @@ def test_warehouse_backend_rejects_unsupported_dialect_profiles(
         state=StateConfig(backend="warehouse", connection_profile="mysql_main"),
     )
 
-    with pytest.raises(NotImplementedError, match="only supports Postgres.*Snowflake.*mysql"):
+    with pytest.raises(
+        NotImplementedError,
+        match="only supports Postgres.*Snowflake.*Databricks.*BigQuery.*mysql",
+    ):
         build_state_bundle(project, tmp_path)

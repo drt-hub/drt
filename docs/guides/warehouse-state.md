@@ -1,4 +1,4 @@
-# Warehouse-backed state, history, and DLQ (Postgres, Snowflake, Databricks)
+# Warehouse-backed state, history, and DLQ (Postgres, Snowflake, Databricks, BigQuery)
 
 [Remote state on GCS or S3](remote-state.md) makes run state, execution history, and the dead
 letter queue (DLQ) durable and shareable across a team — but the data stays opaque JSON/JSONL
@@ -10,12 +10,13 @@ This is [ADR 0005](../adr/0005-state-location-and-write-grants.md)'s step 4 — 
 observability half of the state-location split, distinct from GCS/S3's durability half (step 2).
 Postgres ([#920](https://github.com/drt-hub/drt/issues/920)), Snowflake
 ([#1106](https://github.com/drt-hub/drt/issues/1106)), and Databricks
-([#1108](https://github.com/drt-hub/drt/issues/1108)) connections are supported today; see
-[#1107](https://github.com/drt-hub/drt/issues/1107) for the remaining dialect (BigQuery), blocked
-on live-verifiable credentials rather than deferred indefinitely. `state.idempotency`/
+([#1108](https://github.com/drt-hub/drt/issues/1108)), and BigQuery
+([#1107](https://github.com/drt-hub/drt/issues/1107)) connections are supported today.
+`state.idempotency`/
 `state.audit_trail.enabled` remain Postgres-only ([#1099](https://github.com/drt-hub/drt/issues/1099)/
-[#1100](https://github.com/drt-hub/drt/issues/1100)) — enabling either on a Snowflake or
-Databricks `connection_profile` fails loudly at startup rather than silently doing nothing.
+[#1100](https://github.com/drt-hub/drt/issues/1100)) — enabling either on a Snowflake,
+Databricks, or BigQuery `connection_profile` fails loudly at startup rather than silently doing
+nothing.
 
 ## Quick start
 
@@ -42,11 +43,11 @@ connection fields (no `host`/`user`/`password` under `state:`) the way `gcs`/`s3
 `bucket`. It reuses whatever connection that profile already resolves to, whether or not that
 same profile is also used as a sync's source.
 
-Install the matching extra before running drt — a base `drt-core` install does not pull in
-`psycopg2`:
+Install the matching extra before running drt — a base `drt-core` install does not pull in the
+warehouse drivers:
 
 ```bash
-pip install 'drt-core[postgres]'
+pip install 'drt-core[postgres]'   # or [snowflake], [databricks], [bigquery]
 ```
 
 ## Configuration reference
@@ -59,7 +60,8 @@ pip install 'drt-core[postgres]'
 The managed schema name is **not** a `state:` field — it lives on the connection profile itself
 (`managed_schema`, default `_drt` on every dialect — `PostgresProfile.managed_schema`,
 `SnowflakeProfile.managed_schema` inside `database`, `DatabricksProfile.managed_schema` inside
-`catalog`; see [the Postgres connector guide](../connectors/postgres.md#as-a-source--drts-own-managed-bookkeeping-schema-960)),
+`catalog`, `BigQueryProfile.managed_schema` inside `project`; see
+[the Postgres connector guide](../connectors/postgres.md#as-a-source--drts-own-managed-bookkeeping-schema-960)),
 not a second, independent `state.schema` knob. Two projects that intentionally share one
 connection should give each project's profile a distinct `managed_schema` — the same
 isolation convention `gcs`/`s3` already use via a distinct `prefix` (see
@@ -240,6 +242,54 @@ not the schema. `errors`/`record` are `VARIANT`, matching Snowflake's shape abov
 reason (drt's write path emits it, a plain `STRING` column breaks the write rather than just
 narrowing a type).
 
+### BigQuery
+
+`managed_schema` is a BigQuery dataset inside the profile's `project`. Identifiers are validated
+and backtick-quoted by drt; every state/history/DLQ value is sent as a named query parameter.
+`errors` and `record` are intentionally plain `STRING` columns containing JSON text.
+
+```sql
+CREATE SCHEMA `drt-project._drt` OPTIONS(location = 'US');
+CREATE TABLE `drt-project._drt._drt_runs` (
+    sync_name STRING NOT NULL,
+    last_run_at STRING NOT NULL,
+    records_synced INT64 NOT NULL,
+    status STRING NOT NULL,
+    error STRING,
+    last_cursor_value STRING
+);
+CREATE TABLE `drt-project._drt._drt_history` (
+    sync_name STRING NOT NULL,
+    started_at STRING NOT NULL,
+    completed_at STRING NOT NULL,
+    duration_seconds FLOAT64 NOT NULL,
+    status STRING NOT NULL,
+    records_synced INT64 NOT NULL,
+    records_failed INT64 NOT NULL,
+    errors STRING NOT NULL,
+    cursor_value_used STRING,
+    dry_run BOOL NOT NULL,
+    run_id STRING,
+    sync_run_id STRING
+);
+CREATE TABLE `drt-project._drt._drt_dlq` (
+    id STRING NOT NULL,
+    sync_name STRING NOT NULL,
+    record STRING NOT NULL,
+    error_message STRING NOT NULL,
+    http_status INT64,
+    ts STRING NOT NULL,
+    attempts INT64 NOT NULL,
+    sync_run_id STRING
+);
+```
+
+For automatic first-use bootstrap, the principal needs project-level permissions to create query
+jobs and datasets; a dataset creator owns datasets it creates. For the least-privilege escape
+hatch, an admin can pre-create the dataset and three tables above, grant the runtime principal
+`roles/bigquery.dataEditor` on that dataset plus `roles/bigquery.jobUser` on the project, and omit
+dataset-create permission entirely. Adjust the DDL location to the profile's `location`.
+
 Reversible by design ([ADR 0005](../adr/0005-state-location-and-write-grants.md#decision)
 Decision 4): switch `state.backend` back to `local`/`gcs`/`s3` — the three tables are simply no
 longer read or written, and `DROP TABLE`/`DROP SCHEMA` when convenient (or leave them, harmlessly
@@ -271,21 +321,24 @@ Postgres/Snowflake preserve). `replace()` instead deletes ids absent from the ne
 id and upserts the rest via a `MERGE` sourced from a `VALUES` table constructor, chunked to a
 parameter budget — a single chunk is one atomic Delta commit, but a `replace()` spanning more than
 one chunk is not atomic as a whole. What's still guaranteed: a crash mid-`replace()` never leaves
-the queue empty or destroys entries outside the chunk that failed. Databricks' `save_sync()` and
-`DlqBackend.append()` are the one place this backend's usual guarantee narrows: with no `MERGE`
-available under the documented escape hatch (see above) and no unique constraint Delta enforces,
-these do a client-side probe (`SELECT` for existence) followed by `UPDATE` or `INSERT` rather than
-one atomic statement — two concurrent writers touching the *same* `sync_name`/DLQ `id`
-simultaneously can both observe absence and both insert, producing a duplicate row (mirroring the
-already-accepted "concurrent runs of the same sync" limitation below, not a new failure class).
-The same probe-then-act window has a second, narrower shape for `save_sync()` specifically: if
+the queue empty or destroys entries outside the chunk that failed. BigQuery also has no
+multi-statement transaction across query jobs. Its `replace()` uses chunked `MERGE ... USING
+UNNEST(@rows)` statements and only then explicitly deletes stale IDs, so it has the same
+upsert-before-delete safety property; its `save_sync()` and `DlqBackend.append()` use a
+client-side existence probe followed by `UPDATE` or `INSERT`. Databricks' `save_sync()` uses the
+same probe-then-act shape (Databricks `append()` is a chunked `MERGE`). Two concurrent writers on
+a probe-then-act path touching the same `sync_name`/DLQ `id` can both observe absence and both
+insert, producing a duplicate row (mirroring the already-accepted "concurrent runs of the same
+sync" limitation below, not a new failure class). The same probe-then-act window has a second,
+narrower shape for `save_sync()` specifically: if
 `drt state reset` deletes that sync's row between the probe and the `UPDATE`, the `UPDATE` matches
 zero rows and `save_sync()` returns normally — the run appears to have persisted state while the
 row (and its cursor) is actually gone, rather than raising or retrying. This needs a genuinely
 concurrent `reset()` and `save_sync()` against the same `sync_name` to trigger, which is already an
 unusual operational pattern; it's called out here rather than silently left as a surprise.
 Every other write on every dialect — Postgres's `ON CONFLICT`, Snowflake's `MERGE`/transaction,
-Databricks' `replace()`/`reconcile()` — is atomic per statement with no such window. Across all of
+Databricks' `append()`/`replace()`/`reconcile()`, and BigQuery's
+`replace()`/`reconcile()` — is atomic per statement with no such window. Across all of
 this, unlike the [GCS/S3 backends](remote-state.md), there is no client-side read-modify-write
 *retry* cycle, so this backend **never raises `StateContentionError`** — the failure class that
 error exists to prevent (a writer silently clobbering another's read-modify-write and getting no
@@ -317,8 +370,6 @@ Same rule as [remote state](remote-state.md#project-state-and-sync-watermarks-ar
 - **Not a replacement for GCS/S3 durability.** If the only problem is "a CI runner's disk
   disappears," [remote state](remote-state.md) solves that without a warehouse write grant —
   see ADR 0005's Decision 2 for why that ordering matters.
-- **Not every dialect yet.** Postgres, Snowflake, and Databricks; BigQuery remains open — see
-  the issues linked at the top of this guide.
 - **Not warehouse-managed watermark storage.** `sync.watermark.storage: bigquery` is a separate,
   already-shipped mechanism predating this backend, for a different Protocol
   (`WatermarkStorage`, not `StateStore`).

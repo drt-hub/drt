@@ -272,9 +272,9 @@ class StateConfig(BaseModel):
     already has a top-level ``profile`` field meaning "the project's default
     connection profile", a different concept this deliberately avoids
     colliding with. The managed-schema name for that connection stays on
-    the profile itself (``PostgresProfile.managed_schema``, #960) rather
-    than a second, independent ``state.schema`` knob that could disagree
-    with it.
+    the profile itself (``managed_schema`` on Postgres, Snowflake,
+    Databricks, and BigQuery profiles) rather than a second, independent
+    ``state.schema`` knob that could disagree with it.
 
     ``backend`` and ``connection_profile`` widen/land together in the same
     PR that carries the warehouse backend implementation — not before it —

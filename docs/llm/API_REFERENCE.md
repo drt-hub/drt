@@ -22,7 +22,8 @@ state:                    # optional: persistence backend (#756, #920); see docs
   #   aws_access_key_id_env, aws_secret_access_key_env, aws_session_token_env,
   #   endpoint_url (S3-compatible endpoints — MinIO, R2, etc.).
   # backend: warehouse required fields: connection_profile (names a profiles.yml
-  #   entry — Postgres only today). See docs/guides/warehouse-state.md.
+  #   entry — Postgres, Snowflake, Databricks, or BigQuery). See
+  #   docs/guides/warehouse-state.md.
   # Every field above is rejected when backend is local; bucket is required
   # for both gcs and s3, the six S3-only fields are rejected under gcs, and
   # connection_profile is only valid under warehouse.

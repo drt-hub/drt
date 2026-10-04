@@ -333,4 +333,5 @@ jobs:
           pytest -m dwh_smoke \
             tests/integration/dwh/test_bigquery_smoke.py \
             tests/integration/dwh/test_bigquery_managed_table_smoke.py \
+            tests/integration/dwh/test_bigquery_warehouse_state_smoke.py \
             -v

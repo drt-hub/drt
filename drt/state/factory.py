@@ -128,6 +128,7 @@ def build_state_bundle(project: ProjectConfig, project_dir: Path) -> StateBundle
                 )
             elif backend == "warehouse":
                 from drt.config.credentials import (
+                    BigQueryProfile,
                     DatabricksProfile,
                     PostgresProfile,
                     SnowflakeProfile,
@@ -187,10 +188,24 @@ def build_state_bundle(project: ProjectConfig, project_dir: Path) -> StateBundle
                         history=DatabricksWarehouseHistoryStore(profile),
                         dlq=DatabricksWarehouseDlqBackend(profile),
                     )
+                elif isinstance(profile, BigQueryProfile):
+                    _reject_unsupported_ledger_and_audit_trail(project, "BigQuery", "#1107")
+                    from drt.state.warehouse_bigquery import (
+                        BigQueryWarehouseDlqBackend,
+                        BigQueryWarehouseHistoryStore,
+                        BigQueryWarehouseStateStore,
+                    )
+
+                    bundle = StateBundle(
+                        state=BigQueryWarehouseStateStore(profile),
+                        history=BigQueryWarehouseHistoryStore(profile),
+                        dlq=BigQueryWarehouseDlqBackend(profile),
+                    )
                 else:
                     raise NotImplementedError(
                         f"state.backend: warehouse only supports Postgres (#920), "
-                        f"Snowflake (#1106), and Databricks (#1108) profiles today; "
+                        f"Snowflake (#1106), Databricks (#1108), and BigQuery "
+                        f"(#1107) profiles today; "
                         f"'{project.state.connection_profile}' is a {profile.type} "
                         "profile. Other dialects are tracked as follow-up issues."
                     )
