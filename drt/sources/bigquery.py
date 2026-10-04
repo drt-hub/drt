@@ -354,17 +354,16 @@ class BigQuerySource:
     ) -> Any:
         from google.cloud import bigquery
 
-        labels = None
-        if query_tags:
-            labels = {
-                normalize_bigquery_label(key): normalize_bigquery_label(value)
-                for key, value in query_tags.items()
-            }
-        return bigquery.QueryJobConfig(
-            labels=labels,
+        config = bigquery.QueryJobConfig(
             destination=destination,
             write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
         )
+        if query_tags:
+            config.labels = {
+                normalize_bigquery_label(key): normalize_bigquery_label(value)
+                for key, value in query_tags.items()
+            }
+        return config
 
     @staticmethod
     def _copy_job_config() -> Any:

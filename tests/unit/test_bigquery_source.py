@@ -36,14 +36,30 @@ class _Transient(Exception):
     """Stand-in for an error accepted by google-api-core's retry predicate."""
 
 
+class _FakeJobConfig(dict):  # type: ignore[type-arg]
+    """Dict-comparable stand-in for QueryJobConfig/CopyJobConfig.
+
+    Like the real client, rejects ``labels=None`` ("Pass a dict") and accepts
+    attribute assignment after construction.
+    """
+
+    def __init__(self, **kw: Any) -> None:
+        if "labels" in kw and not isinstance(kw["labels"], dict):
+            raise ValueError("Pass a dict")
+        super().__init__(**kw)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        self[name] = value
+
+
 def _mocked_bq_modules(client: MagicMock) -> dict[str, MagicMock]:
     """sys.modules entries satisfying ``from google.cloud import bigquery``."""
     bigquery_mod = MagicMock()
     bigquery_mod.Client.return_value = client
     # QueryJobConfig(labels=...) needs to round-trip its kwargs for
     # assertions below, not collapse into an opaque MagicMock.
-    bigquery_mod.QueryJobConfig.side_effect = lambda **kw: kw
-    bigquery_mod.CopyJobConfig.side_effect = lambda **kw: kw
+    bigquery_mod.QueryJobConfig.side_effect = _FakeJobConfig
+    bigquery_mod.CopyJobConfig.side_effect = _FakeJobConfig
     bigquery_mod.WriteDisposition.WRITE_TRUNCATE = "WRITE_TRUNCATE"
     # Dataset(ref) needs a real-ish object so `.location = ...` sticks and
     # is inspectable, rather than silently accepted by a bare MagicMock
