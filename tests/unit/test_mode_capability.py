@@ -111,8 +111,9 @@ def test_capable_destination_rejects_an_undeclared_advanced_mode() -> None:
         SnowflakeDestination(),
         DatabricksDestination(),
         ClickHouseDestination(),
+        BigQueryDestination(),
     ],
-    ids=["postgres", "mysql", "snowflake", "databricks", "clickhouse"],
+    ids=["postgres", "mysql", "snowflake", "databricks", "clickhouse", "bigquery"],
 )
 @pytest.mark.parametrize("mode", ["replace", "mirror"])
 def test_existing_advanced_mode_destinations_remain_supported(
@@ -121,12 +122,6 @@ def test_existing_advanced_mode_destinations_remain_supported(
     assert isinstance(destination, ModeCapable)
     assert destination.supported_modes() == frozenset({"replace", "mirror"})
     _check_mode_supported(mode, destination)
-
-
-def test_bigquery_destination_does_not_claim_sync_mode_capability() -> None:
-    assert not isinstance(BigQueryDestination(), ModeCapable)
-    with pytest.raises(ValueError, match="not supported by BigQueryDestination"):
-        _check_mode_supported("mirror", BigQueryDestination())
 
 
 def test_incomplete_base_sql_destination_subclass_does_not_inherit_the_capability() -> None:

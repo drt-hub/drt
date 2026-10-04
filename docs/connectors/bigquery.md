@@ -1,6 +1,6 @@
 # BigQuery
 
-> Extract from BigQuery or INSERT (append) / MERGE (upsert) rows into BigQuery tables using `google-cloud-bigquery`.
+> Extract from BigQuery, or INSERT / MERGE / replace / mirror rows into BigQuery tables using `google-cloud-bigquery`.
 
 ## YAML Example
 
@@ -15,6 +15,10 @@ destination:
   method: application_default  # "application_default" (default) | "keyfile"
   # keyfile: /path/to/sa.json  # required when method: keyfile
   # location: US               # optional dataset location
+
+sync:
+  mode: mirror                 # full | incremental | upsert | replace | mirror
+  # replace_strategy: swap     # truncate (default) | swap; replace mode only
 ```
 
 ## Configuration
@@ -56,7 +60,13 @@ destination:
   keyfile: /secrets/bq-writer.json
 ```
 
-The principal needs `bigquery.tables.updateData` on the target table (plus `bigquery.tables.create` + `bigquery.jobs.create` on the dataset for the merge-path temp table).
+The principal needs `bigquery.tables.updateData` on the target table and
+`bigquery.jobs.create`. MERGE, mirror, and swap-replace also create and delete
+scratch tables in the target dataset, so they need `bigquery.tables.create`,
+`bigquery.tables.get`, `bigquery.tables.getData`, and
+`bigquery.tables.delete` as applicable to load,
+copy, query, and cleanup jobs. `roles/bigquery.dataEditor` on the dataset plus
+`roles/bigquery.jobUser` on the project covers the normal setup.
 
 ## Write modes
 
@@ -102,7 +112,75 @@ then drops the temp table. Composite keys are supported (`upsert_key: [tenant_id
 | `full` | Re-extracts every run + writes via `config.mode` (insert / merge). |
 | `incremental` | Watermark-based — extracts rows with `cursor_field > last_value`, writes via `config.mode`. |
 | `upsert` | Same as `incremental` with `upsert_key` enforced. |
-| `mirror` / `replace` | Not yet supported on BigQuery — follow-ups (the temp-table + MERGE machinery is the natural basis for both). |
+| `replace` | Rebuilds the table through load jobs. `replace_strategy: truncate` writes the first batch with `WRITE_TRUNCATE` and later batches with `WRITE_APPEND`; `swap` builds a shadow and atomically copies it over the target at end of sync. |
+| `mirror` | Forces the MERGE path, stages observed keys, then deletes target rows not present in the staged key table. Requires `destination.upsert_key`. |
+
+### Replace details
+
+The default `replace_strategy: truncate` deliberately does **not** issue
+`TRUNCATE TABLE`. The first batch is a load job with `WRITE_TRUNCATE`; later
+batches are load jobs with `WRITE_APPEND`. BigQuery applies each completed load
+job atomically, but a multi-batch run is still visible batch by batch and can
+leave a partial replacement if a later batch fails. `WRITE_TRUNCATE` also uses
+the load-job schema and can replace table metadata such as constraints and
+column descriptions.
+
+For a whole-sync atomic cutover, use:
+
+```yaml
+sync:
+  mode: replace
+  replace_strategy: swap
+```
+
+On the first batch, drt copies the target to
+`<table>__drt_swap` in the same dataset, truncates that shadow (which has no
+streaming buffer), and appends every batch via load jobs. At end of sync, one
+BigQuery copy job with `WRITE_TRUNCATE` atomically overwrites the target, and
+the shadow is dropped in a `finally` cleanup. BigQuery has no atomic table
+rename, so this copy-job cutover is the atomic option. The target must already
+exist; seeding the shadow from it preserves its schema, partitioning, and
+clustering for the replacement.
+
+### Mirror details
+
+```yaml
+destination:
+  type: bigquery
+  mode: insert              # mirror overrides this and uses MERGE
+  upsert_key: [user_id]
+  ...
+
+sync:
+  mode: mirror
+```
+
+Each source batch is loaded to `<table>_drt_tmp`, and its keys are copied into
+`<table>__drt_mirror_keys` before the existing MERGE runs. After all batches,
+drt issues one anti-join delete:
+
+```sql
+DELETE FROM `project.dataset.table` AS T
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM `project.dataset.table__drt_mirror_keys` AS K
+  WHERE T.user_id = K.user_id
+)
+```
+
+This avoids a giant value-interpolated `IN (...)` list: record values reach
+BigQuery through the load job, while generated SQL contains only validated,
+backtick-quoted identifiers. Composite keys and `sync.mirror.scope` are
+supported. An empty source does not delete anything. `mirror.strategy:
+tracked` is not yet supported; `mirror.strategy: diff` fails fast with a
+reference to the required BigQuery diff-source work in #1113.
+
+Both MERGE and mirror use query-job DML. Rows previously written with the
+legacy streaming insert API can remain in BigQuery's streaming buffer and be
+temporarily unavailable to UPDATE/DELETE or table-copy operations. Avoid
+switching a recently streamed target directly to mirror/swap, or wait until
+its streaming buffer clears. Rows written by mirror and replace themselves use
+load/query jobs rather than streaming inserts.
 
 ## As a source — diff-based incremental ([#1113](https://github.com/drt-hub/drt/issues/1113))
 
@@ -168,7 +246,7 @@ a narrow check-to-operation race remains. Use `drt serve` request coalescing
 ## Notes
 
 - Requires `pip install drt-core[bigquery]` (`google-cloud-bigquery`).
-- **Query tagging** ([#768](https://github.com/drt-hub/drt/issues/768)): `mode: merge`'s load + `MERGE` jobs get `labels` (BigQuery's native cost-attribution mechanism, queryable via `INFORMATION_SCHEMA.JOBS`) by default. `mode: insert`'s streaming insert (`insert_rows_json`) is a REST call, not a job, so it isn't labeled — labels are job-scoped. See `query_tagging` in `docs/llm/API_REFERENCE.md`.
+- **Query tagging** ([#768](https://github.com/drt-hub/drt/issues/768)): MERGE, mirror, and replace load/query/copy jobs get `labels` (BigQuery's native cost-attribution mechanism, queryable via `INFORMATION_SCHEMA.JOBS`) by default. `mode: insert`'s streaming insert (`insert_rows_json`) is a REST call, not a job, so it isn't labeled — labels are job-scoped. See `query_tagging` in `docs/llm/API_REFERENCE.md`.
 - Tables are addressed fully-qualified as `<project>.<dataset>.<table>`.
 - The target table must already exist with a compatible schema — drt writes into it, it does not create it.
 - `--dry-run` is honoured — `destination.load()` is never called when dry_run is on.

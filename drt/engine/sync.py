@@ -163,7 +163,7 @@ def _check_mode_supported(mode: str, destination: Destination | StagedDestinatio
             f"Supported here: "
             f"{', '.join(sorted(supported)) or 'full / incremental / upsert only'}. "
             "replace / mirror currently ship on the Postgres, MySQL, Snowflake, "
-            "Databricks, and ClickHouse destinations (#1042)."
+            "Databricks, ClickHouse, and BigQuery destinations (#1042/#1055)."
         )
 
 
