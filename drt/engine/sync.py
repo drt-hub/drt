@@ -750,7 +750,7 @@ def _run_sync_body(
             raise NotImplementedError(
                 f"sync.incremental_strategy: diff is not supported by "
                 f"{type(source).__name__} — supported sources are Postgres, "
-                "Snowflake, and Databricks (#755/#1112/#1114)."
+                "Snowflake, Databricks, and BigQuery (#755/#1112/#1114/#1113)."
             )
         key_columns = getattr(sync.destination, "upsert_key", None)
         if not key_columns:

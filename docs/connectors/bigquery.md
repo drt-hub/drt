@@ -1,6 +1,6 @@
-# BigQuery Destination
+# BigQuery
 
-> INSERT (append) or MERGE (upsert) rows into BigQuery tables using `google-cloud-bigquery`.
+> Extract from BigQuery or INSERT (append) / MERGE (upsert) rows into BigQuery tables using `google-cloud-bigquery`.
 
 ## YAML Example
 
@@ -103,6 +103,67 @@ then drops the temp table. Composite keys are supported (`upsert_key: [tenant_id
 | `incremental` | Watermark-based — extracts rows with `cursor_field > last_value`, writes via `config.mode`. |
 | `upsert` | Same as `incremental` with `upsert_key` enforced. |
 | `mirror` / `replace` | Not yet supported on BigQuery — follow-ups (the temp-table + MERGE machinery is the natural basis for both). |
+
+## As a source — diff-based incremental ([#1113](https://github.com/drt-hub/drt/issues/1113))
+
+BigQuery supports `sync.incremental_strategy: diff` for models without a reliable cursor column.
+Each run materializes the full model result in `_drt_snapshot_<sync_name>_<digest>` under the
+source profile's `managed_schema`, then classifies added, changed, and removed rows with
+server-side joins on `destination.upsert_key`. Added and changed rows follow the normal upsert
+path; removed keys are exposed through `SyncResult.diff_removed_keys`, power
+`mirror.strategy: diff` where the destination supports it, and appear in `--dry-run --diff`
+deletion previews.
+
+```yaml
+# ~/.drt/profiles.yml
+bigquery_prod:
+  type: bigquery
+  project: my-gcp-project
+  dataset: analytics
+  method: application_default
+  location: US
+  managed_schema: _drt       # default; drt needs table create/update here
+```
+
+```yaml
+destination:
+  type: rest_api
+  url: https://api.example.com/users
+  upsert_key: [id]
+
+sync:
+  mode: upsert               # or mirror
+  incremental_strategy: diff
+  diff:
+    hash_columns: all        # or an explicit non-empty column list
+```
+
+BigQuery output column matching is exact-case: an `upsert_key` or explicit `hash_columns` name
+must match the materialized model column exactly, and a typo fails loudly. `hash_columns: all`
+compares every non-key output column. The row hash uses `FARM_FINGERPRINT` over a deterministic
+typed STRUCT serialization with an explicit NULL flag beside every value; it does not use
+`CONCAT`, whose NULL propagation would otherwise make a `NULL` → `''` transition ambiguous. A
+new model column re-sends existing rows once, while a removed model column is simply omitted from
+the next shared-schema comparison, matching the Snowflake and Databricks legs.
+
+The baseline advances only after a non-dry-run, unlimited sync finishes with zero row failures.
+Scratch materialization uses a query destination with `WRITE_TRUNCATE`; promotion uses a table
+copy job with the same disposition. BigQuery documents those job write actions as one atomic
+update that occurs only after successful completion, so readers see the complete old or complete
+new baseline. A skipped commit leaves the prior baseline unchanged, and the next extract
+atomically overwrites abandoned scratch. Diff therefore needs `bigquery.jobs.create` plus
+`bigquery.tables.create`, `get`, `getData`, `update`, and `updateData` in `managed_schema`; cursor
+incremental remains the read-only-source alternative. An administrator can pre-create the dataset
+and grant only its dataset-local permissions, using the same escape hatch as warehouse-backed
+state.
+
+Concurrent runs of the **same** diff sync are unsupported. A UUID is stored in a table label on
+scratch; every classification stream checks it before and after reading, and commit checks it
+around the atomic copy. If a replacement is detected after promotion, drt attempts to restore the
+previous backup (or removes a first-run baseline) and fails loudly. This is best-effort overlap
+detection, not a lock: table-label updates and copy jobs cannot share one BigQuery transaction, so
+a narrow check-to-operation race remains. Use `drt serve` request coalescing
+([#854](https://github.com/drt-hub/drt/issues/854)) or scheduler overlap protection.
 
 ## Notes
 

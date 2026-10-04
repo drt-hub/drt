@@ -328,10 +328,11 @@ jobs:
       - name: Run BigQuery smoke
         if: steps.creds.outputs.has_creds == 'true'
         # Each BigQuery smoke file is explicit rather than directory-wide;
-        # capability legs such as #1107 must be listed here or they never run.
+        # capability legs such as #1107/#1113 must be listed here or they never run.
         run: |
           pytest -m dwh_smoke \
             tests/integration/dwh/test_bigquery_smoke.py \
             tests/integration/dwh/test_bigquery_managed_table_smoke.py \
             tests/integration/dwh/test_bigquery_warehouse_state_smoke.py \
+            tests/integration/dwh/test_bigquery_diff_incremental_smoke.py \
             -v

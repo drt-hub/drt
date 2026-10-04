@@ -257,7 +257,7 @@ def test_diff_strategy_rejected_for_a_source_without_the_capability(tmp_path: Pa
 
     with pytest.raises(
         NotImplementedError,
-        match="supported sources are Postgres, Snowflake, and Databricks",
+        match="supported sources are Postgres, Snowflake, Databricks, and BigQuery",
     ):
         run_sync(sync, PlainFakeSource(), dest, _make_profile(), tmp_path)
 
