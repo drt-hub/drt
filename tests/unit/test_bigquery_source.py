@@ -440,6 +440,7 @@ class TestSnapshotDiffSource:
             patch.object(source, "_build_client", return_value=client),
             patch.object(source, "_snapshot_query_job_config", return_value={}),
             patch.object(source, "_set_snapshot_token"),
+            patch.object(source, "_is_transient", return_value=False),
             patch.object(source, "_managed_table_columns", return_value=["id", "note"]),
             pytest.raises(ValueError, match=r"upsert_key.*\['ID'\]"),
         ):
@@ -455,6 +456,7 @@ class TestSnapshotDiffSource:
             patch.object(source, "_build_client", return_value=client),
             patch.object(source, "_snapshot_query_job_config", return_value={}),
             patch.object(source, "_set_snapshot_token"),
+            patch.object(source, "_is_transient", return_value=False),
             patch.object(source, "_managed_table_columns", return_value=["id", "note"]),
             pytest.raises(ValueError, match=r"hash_columns.*\['ntoe'\].*typo"),
         ):
