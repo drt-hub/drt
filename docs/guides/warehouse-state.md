@@ -324,13 +324,14 @@ one chunk is not atomic as a whole. What's still guaranteed: a crash mid-`replac
 the queue empty or destroys entries outside the chunk that failed. BigQuery also has no
 multi-statement transaction across query jobs. Its `replace()` uses chunked `MERGE ... USING
 UNNEST(@rows)` statements and only then explicitly deletes stale IDs, so it has the same
-upsert-before-delete safety property; its `save_sync()` and `DlqBackend.append()` use a
-client-side existence probe followed by `UPDATE` or `INSERT`. Databricks' `save_sync()` uses the
-same probe-then-act shape (Databricks `append()` is a chunked `MERGE`). Two concurrent writers on
-a probe-then-act path touching the same `sync_name`/DLQ `id` can both observe absence and both
-insert, producing a duplicate row (mirroring the already-accepted "concurrent runs of the same
-sync" limitation below, not a new failure class). The same probe-then-act window has a second,
-narrower shape for `save_sync()` specifically: if
+upsert-before-delete safety property. Its DLQ `append()` uses the same struct-array `MERGE`, with
+chunks bounded by both row count and encoded parameter size; DLQ rows match on the per-queue
+`(sync_name, id)` identity. BigQuery and Databricks `save_sync()` use a client-side existence
+probe followed by `UPDATE` or `INSERT` (Databricks `append()` is also a chunked `MERGE`). Two
+concurrent writers on a probe-then-act state path touching the same `sync_name` can both observe
+absence and both insert, producing a duplicate row (mirroring the already-accepted "concurrent
+runs of the same sync" limitation below, not a new failure class). The same probe-then-act window
+has a second, narrower shape for `save_sync()` specifically: if
 `drt state reset` deletes that sync's row between the probe and the `UPDATE`, the `UPDATE` matches
 zero rows and `save_sync()` returns normally — the run appears to have persisted state while the
 row (and its cursor) is actually gone, rather than raising or retrying. This needs a genuinely
@@ -338,7 +339,7 @@ concurrent `reset()` and `save_sync()` against the same `sync_name` to trigger, 
 unusual operational pattern; it's called out here rather than silently left as a surprise.
 Every other write on every dialect — Postgres's `ON CONFLICT`, Snowflake's `MERGE`/transaction,
 Databricks' `append()`/`replace()`/`reconcile()`, and BigQuery's
-`replace()`/`reconcile()` — is atomic per statement with no such window. Across all of
+`append()`/`replace()`/`reconcile()` — is atomic per statement with no such window. Across all of
 this, unlike the [GCS/S3 backends](remote-state.md), there is no client-side read-modify-write
 *retry* cycle, so this backend **never raises `StateContentionError`** — the failure class that
 error exists to prevent (a writer silently clobbering another's read-modify-write and getting no

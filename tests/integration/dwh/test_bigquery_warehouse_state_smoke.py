@@ -218,3 +218,53 @@ def test_dlq_replace_upserts_before_removing_stale_entries(
 
     dlq.replace(sync_name, [])
     assert dlq.read(sync_name) == []
+
+
+def test_dlq_same_id_is_isolated_between_syncs_across_append_and_replace(
+    warehouse_profile: BigQueryProfile,
+) -> None:
+    dlq = BigQueryWarehouseDlqBackend(warehouse_profile)
+    suffix = uuid.uuid4().hex[:8]
+    sync_a = f"same_id_a_{suffix}"
+    sync_b = f"same_id_b_{suffix}"
+    shared_id = f"shared-{suffix}"
+
+    dlq.append(
+        sync_a,
+        [DeadLetter(record={"owner": "a"}, error_message="a-old", id=shared_id)],
+    )
+    dlq.append(
+        sync_b,
+        [DeadLetter(record={"owner": "b"}, error_message="b-old", id=shared_id)],
+    )
+    assert [(item.id, item.record["owner"]) for item in dlq.read(sync_a)] == [(shared_id, "a")]
+    assert [(item.id, item.record["owner"]) for item in dlq.read(sync_b)] == [(shared_id, "b")]
+
+    dlq.replace(
+        sync_a,
+        [DeadLetter(record={"owner": "a-updated"}, error_message="a-new", id=shared_id)],
+    )
+    assert dlq.read(sync_a)[0].record["owner"] == "a-updated"
+    assert dlq.read(sync_b)[0].record["owner"] == "b"
+    assert dlq.read(sync_b)[0].error_message == "b-old"
+
+
+def test_dlq_append_larger_than_one_merge_chunk_round_trips(
+    warehouse_profile: BigQueryProfile,
+) -> None:
+    dlq = BigQueryWarehouseDlqBackend(warehouse_profile)
+    sync_name = f"multi_chunk_{uuid.uuid4().hex[:8]}"
+    entries = [
+        DeadLetter(
+            record={"index": index},
+            error_message="chunked",
+            timestamp=f"2026-10-04T00:00:00+00:00-{index:04d}",
+            id=f"chunk-{index:04d}",
+        )
+        for index in range(501)
+    ]
+
+    assert dlq.append(sync_name, entries, max_records=0) == len(entries)
+    round_tripped = dlq.read(sync_name)
+    assert len(round_tripped) == len(entries)
+    assert {item.record["index"] for item in round_tripped} == set(range(len(entries)))

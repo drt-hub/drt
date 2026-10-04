@@ -9,10 +9,10 @@ using :class:`drt.sources.bigquery.BigQuerySource`'s managed-table probes. All
 row writes are query-job DML with named query parameters; user-controlled
 values are never interpolated into SQL. BigQuery has no multi-statement
 transaction spanning these jobs, so the write ordering mirrors the
-Databricks leg: state and append upserts probe then act, while DLQ replacement
-upserts every chunk before deleting stale IDs. A multi-chunk replacement is
-not fully atomic, but a failed upsert cannot first erase the old queue (the
-#955 failure class).
+Databricks leg: state upserts probe then act, while DLQ append/replacement use
+chunked ``MERGE`` statements and replacement upserts every chunk before
+deleting stale IDs. A multi-chunk replacement is not fully atomic, but a
+failed upsert cannot first erase the old queue (the #955 failure class).
 
 ``_drt_history.errors`` and ``_drt_dlq.record`` deliberately use ``STRING``.
 They are serialized with ``json.dumps`` and parsed with ``json.loads`` rather
@@ -40,6 +40,7 @@ _RUNS_TABLE = "_drt_runs"
 _HISTORY_TABLE = "_drt_history"
 _DLQ_TABLE = "_drt_dlq"
 _DLQ_MERGE_CHUNK_SIZE = 500
+_DLQ_STRUCT_ARRAY_MAX_BYTES = 5 * 1024 * 1024
 _IDENTIFIER_PATTERNS = {
     "project": re.compile(r"^[A-Za-z0-9_.:-]+$"),
     "dataset": re.compile(r"^[A-Za-z0-9_]+$"),
@@ -435,23 +436,57 @@ def _struct_array(name: str, rows: Sequence[Any], fields: Sequence[tuple[str, st
     return bigquery.ArrayQueryParameter(name, struct_type, list(rows))
 
 
-def _chunks(items: Sequence[Any], size: int = _DLQ_MERGE_CHUNK_SIZE) -> list[Sequence[Any]]:
+def _chunks(items: Sequence[Any], size: int | None = None) -> list[Sequence[Any]]:
+    if size is None:
+        size = _DLQ_MERGE_CHUNK_SIZE
     return [items[start : start + size] for start in range(0, len(items), size)]
+
+
+def _struct_chunks(
+    rows: Sequence[tuple[str, tuple[Any, ...]]],
+    fields: Sequence[tuple[str, str]],
+) -> list[list[tuple[Any, ...]]]:
+    """Bound struct-array parameters by both row count and encoded payload size."""
+    chunks: list[list[tuple[Any, ...]]] = []
+    chunk: list[tuple[Any, ...]] = []
+    chunk_bytes = 2  # JSON array brackets.
+    for entry_id, values in rows:
+        payload = {name: value for (name, _), value in zip(fields, values, strict=True)}
+        row_bytes = len(
+            json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        )
+        if row_bytes + 2 > _DLQ_STRUCT_ARRAY_MAX_BYTES:
+            raise ValueError(
+                f"DLQ entry {entry_id!r} encoded parameter payload is {row_bytes} bytes; "
+                f"maximum is {_DLQ_STRUCT_ARRAY_MAX_BYTES} bytes"
+            )
+        separator_bytes = 1 if chunk else 0
+        if chunk and (
+            len(chunk) >= _DLQ_MERGE_CHUNK_SIZE
+            or chunk_bytes + separator_bytes + row_bytes > _DLQ_STRUCT_ARRAY_MAX_BYTES
+        ):
+            chunks.append(chunk)
+            chunk = []
+            chunk_bytes = 2
+            separator_bytes = 0
+        chunk.append(values)
+        chunk_bytes += separator_bytes + row_bytes
+    if chunk:
+        chunks.append(chunk)
+    return chunks
 
 
 def _upsert_dlq_entries(
     client: Any, table: str, sync_name: str, entries: Sequence[DeadLetter]
 ) -> None:
     """Chunked BigQuery ``MERGE`` from a real ``ARRAY<STRUCT>`` parameter."""
-    for chunk in _chunks(entries):
-        rows = [
-            _struct_parameter(_dead_letter_values(sync_name, entry), _DLQ_STRUCT_FIELDS)
-            for entry in chunk
-        ]
+    prepared_rows = [(entry.id, _dead_letter_values(sync_name, entry)) for entry in entries]
+    for chunk in _struct_chunks(prepared_rows, _DLQ_STRUCT_FIELDS):
+        rows = [_struct_parameter(values, _DLQ_STRUCT_FIELDS) for values in chunk]
         _query(
             client,
             f"MERGE {table} AS t USING (SELECT * FROM UNNEST(@rows)) AS s "
-            "ON t.id = s.id "
+            "ON t.sync_name = s.sync_name AND t.id = s.id "
             "WHEN MATCHED THEN UPDATE SET record = s.record, "
             "error_message = s.error_message, http_status = s.http_status, ts = s.ts, "
             "attempts = s.attempts, sync_run_id = s.sync_run_id "
@@ -468,22 +503,23 @@ def _update_dlq_entries(
     sync_name: str,
     update_items: Sequence[tuple[str, DeadLetter]],
 ) -> None:
-    for chunk in _chunks(update_items):
-        rows = [
-            _struct_parameter(
-                (
-                    entry_id,
-                    json.dumps(entry.record),
-                    entry.error_message,
-                    entry.http_status,
-                    entry.timestamp,
-                    entry.attempts,
-                    entry.sync_run_id,
-                ),
-                _DLQ_UPDATE_STRUCT_FIELDS,
-            )
-            for entry_id, entry in chunk
-        ]
+    prepared_rows = [
+        (
+            entry_id,
+            (
+                entry_id,
+                json.dumps(entry.record),
+                entry.error_message,
+                entry.http_status,
+                entry.timestamp,
+                entry.attempts,
+                entry.sync_run_id,
+            ),
+        )
+        for entry_id, entry in update_items
+    ]
+    for chunk in _struct_chunks(prepared_rows, _DLQ_UPDATE_STRUCT_FIELDS):
+        rows = [_struct_parameter(values, _DLQ_UPDATE_STRUCT_FIELDS) for values in chunk]
         _query(
             client,
             f"MERGE {table} AS t USING (SELECT * FROM UNNEST(@rows)) AS s "
@@ -519,38 +555,7 @@ class BigQueryWarehouseDlqBackend:
         client = _connect(self._profile)
         self._ensure_table(client)
         table = _qualified(self._profile, _DLQ_TABLE)
-        for entry in deduped.values():
-            id_parameter = _scalar("id", "STRING", entry.id)
-            exists = bool(
-                list(
-                    _query(
-                        client,
-                        f"SELECT 1 FROM {table} WHERE id = @id LIMIT 1",
-                        [id_parameter],
-                    )
-                )
-            )
-            values = _dead_letter_values(sync_name, entry)
-            parameters = [
-                _scalar(name, type_, value)
-                for (name, type_), value in zip(_DLQ_STRUCT_FIELDS, values, strict=True)
-            ]
-            if exists:
-                _query(
-                    client,
-                    f"UPDATE {table} SET record = @record, error_message = @error_message, "
-                    "http_status = @http_status, ts = @ts, attempts = @attempts, "
-                    "sync_run_id = @sync_run_id WHERE id = @id",
-                    [parameter for parameter in parameters if parameter.name != "sync_name"],
-                )
-            else:
-                _query(
-                    client,
-                    f"INSERT INTO {table} (id, sync_name, record, error_message, "
-                    "http_status, ts, attempts, sync_run_id) VALUES (@id, @sync_name, "
-                    "@record, @error_message, @http_status, @ts, @attempts, @sync_run_id)",
-                    parameters,
-                )
+        _upsert_dlq_entries(client, table, sync_name, list(deduped.values()))
         if max_records > 0:
             _query(
                 client,
