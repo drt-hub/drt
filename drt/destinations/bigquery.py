@@ -474,8 +474,9 @@ class BigQueryDestination:
         mirror = sync_options.mirror
         if mirror is not None and mirror.strategy == "diff":
             raise ValueError(
-                "mirror.strategy: diff is not supported on bigquery until the "
-                "BigQuery diff-source leg ships (#1113)."
+                "mirror.strategy: diff is not yet supported on bigquery "
+                "(the BigQuery diff source exists, but the destination does not "
+                "consume its removed keys yet); use the default mirror strategy."
             )
         if mirror is not None and mirror.strategy == "tracked":
             raise ValueError(unsupported_tracked_scope_msg("bigquery"))

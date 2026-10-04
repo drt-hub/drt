@@ -220,7 +220,7 @@ No breaking changes — drop-in upgrade from v0.10.0.
 | Capability | Postgres | Snowflake | Databricks | BigQuery |
 |---|---|---|---|---|
 | Managed-table primitive (#960) | ✅ | ✅ | ✅ | ✅ source side (#1124) |
-| Warehouse state / history / DLQ (#920) | ✅ | ✅ | ✅ | implemented; live verification pending ([#1107](https://github.com/drt-hub/drt/issues/1107)) |
+| Warehouse state / history / DLQ (#920) | ✅ | ✅ | ✅ | ✅ ([#1107](https://github.com/drt-hub/drt/issues/1107)) |
 | Diff-based incremental (#755) | ✅ | [#1112](https://github.com/drt-hub/drt/issues/1112) | [#1114](https://github.com/drt-hub/drt/issues/1114) | ✅ ([#1113](https://github.com/drt-hub/drt/issues/1113)) |
 | `sync.mode: replace` / `mirror` (destination) | ✅ | ✅ | ✅ | ✅ [#1055](https://github.com/drt-hub/drt/issues/1055) |
 

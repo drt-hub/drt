@@ -172,8 +172,8 @@ This avoids a giant value-interpolated `IN (...)` list: record values reach
 BigQuery through the load job, while generated SQL contains only validated,
 backtick-quoted identifiers. Composite keys and `sync.mirror.scope` are
 supported. An empty source does not delete anything. `mirror.strategy:
-tracked` is not yet supported; `mirror.strategy: diff` fails fast with a
-reference to the required BigQuery diff-source work in #1113.
+tracked` is not yet supported; `mirror.strategy: diff` also fails fast for now
+(the BigQuery diff source exists, but the destination does not yet consume its removed keys).
 
 Both MERGE and mirror use query-job DML. Rows previously written with the
 legacy streaming insert API can remain in BigQuery's streaming buffer and be

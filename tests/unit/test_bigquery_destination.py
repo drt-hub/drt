@@ -646,7 +646,7 @@ class TestBigQueryMirrorMode:
         ("mirror", "message"),
         [
             ({"strategy": "tracked"}, "not yet supported on bigquery"),
-            ({"strategy": "diff"}, r"#1113"),
+            ({"strategy": "diff"}, "not yet supported on bigquery"),
         ],
     )
     def test_unsupported_mirror_strategies_fail_before_client(
