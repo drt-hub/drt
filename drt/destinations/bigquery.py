@@ -38,7 +38,7 @@ protocol (``load`` returning a ``SyncResult``, per-row error capture, and
 from __future__ import annotations
 
 import os
-import re
+import unicodedata
 from typing import Any
 
 from drt.config.models import BigQueryDestinationConfig, DestinationConfig, SyncOptions
@@ -54,12 +54,6 @@ from drt.destinations.sql_utils import (
 _SWAP_SUFFIX = "__drt_swap"
 _MIRROR_KEYS_SUFFIX = "__drt_mirror_keys"
 _TMP_SUFFIX = "_drt_tmp"
-_IDENTIFIER_PATTERNS = {
-    "project": re.compile(r"^[A-Za-z0-9_.:-]+$"),
-    "dataset": re.compile(r"^[A-Za-z0-9_]+$"),
-    "table": re.compile(r"^[A-Za-z0-9_]+$"),
-    "column": re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$"),
-}
 
 
 class BigQueryDestination:
@@ -223,13 +217,14 @@ class BigQueryDestination:
                 # anti-join could delete rows this run actually observed.
                 self._mirror_aborted = True
             result.failed += len(records)
-            result.row_errors.append(
+            result.row_errors.extend(
                 RowError(
-                    batch_index=0,
-                    record_preview=str(records[0])[:200],
+                    batch_index=i,
+                    record_preview=str(record)[:200],
                     http_status=None,
                     error_message=str(e),
                 )
+                for i, record in enumerate(records)
             )
             if sync_options.on_error == "fail":
                 if mirror:
@@ -265,12 +260,15 @@ class BigQueryDestination:
                     destination,
                     job_config=self._copy_job_config(labels),
                 ).result()
+                # Track the shadow as soon as the copy succeeds so the
+                # unconditional reset hook can remove it even if the
+                # following TRUNCATE or a later source batch fails.
+                self._swap_table_id = table_id
                 client.query(
                     f"TRUNCATE TABLE {self._quote_table(destination)}",
                     job_config=self._query_job_config(labels),
                 ).result()
                 self._swap_shadow_created = True
-                self._swap_table_id = table_id
 
             disposition = "append" if swap or self._replace_started else "truncate"
             client.load_table_from_json(
@@ -283,13 +281,14 @@ class BigQueryDestination:
                 self._replace_started = True
         except Exception as e:
             result.failed = len(records)
-            result.row_errors.append(
+            result.row_errors.extend(
                 RowError(
-                    batch_index=0,
-                    record_preview=str(records[0])[:200],
+                    batch_index=i,
+                    record_preview=str(record)[:200],
                     http_status=None,
                     error_message=str(e),
                 )
+                for i, record in enumerate(records)
             )
             if sync_options.on_error == "fail":
                 if swap:
@@ -421,6 +420,51 @@ class BigQueryDestination:
         self._swap_shadow_created = False
         self._swap_table_id = None
 
+    def reset_write_state(
+        self,
+        config: DestinationConfig,
+        sync_options: SyncOptions,
+    ) -> None:
+        """Drop incomplete per-run staging and clear all write bookkeeping.
+
+        Unlike :meth:`finalize_sync`, the engine calls this hook on every exit
+        path, including a source failure after one or more batches. Cleanup is
+        best-effort: attempt every known table, retain the first failure for
+        the engine's warning path, and always clear in-memory state so a reused
+        destination instance starts its next run fresh.
+        """
+        assert isinstance(config, BigQueryDestinationConfig)
+        del sync_options
+
+        cleanup_table_ids: list[str] = []
+        if self._swap_table_id is not None:
+            cleanup_table_ids.append(f"{self._swap_table_id}{_SWAP_SUFFIX}")
+        if self._mirror_keys_table_id is not None:
+            cleanup_table_ids.append(self._mirror_keys_table_id)
+
+        cleanup_error: Exception | None = None
+        try:
+            if cleanup_table_ids:
+                try:
+                    client = self._build_client(config)
+                except Exception as exc:  # noqa: BLE001 — best-effort cleanup hook
+                    cleanup_error = exc
+                else:
+                    for table_id in cleanup_table_ids:
+                        try:
+                            client.delete_table(table_id, not_found_ok=True)
+                        except Exception as exc:  # noqa: BLE001 — try remaining tables
+                            if cleanup_error is None:
+                                cleanup_error = exc
+        finally:
+            self._replace_started = False
+            self._reset_swap_state()
+            self._mirror_keys_table_id = None
+            self._mirror_aborted = False
+
+        if cleanup_error is not None:
+            raise cleanup_error
+
     def _validate_mirror(
         self,
         records: list[dict[str, Any]],
@@ -445,6 +489,16 @@ class BigQueryDestination:
         )
         assert config.upsert_key
         self._validate_upsert_keys_present(records, config.upsert_key)
+        null_key_indices = [
+            i
+            for i, record in enumerate(records)
+            if any(record[key] is None for key in config.upsert_key)
+        ]
+        if null_key_indices:
+            raise ValueError(
+                "sync.mode: mirror does not support NULL destination.upsert_key "
+                f"values (record indexes: {null_key_indices})"
+            )
         if mirror is not None and mirror.scope:
             missing = [c for c in mirror.scope if not all(c in record for record in records)]
             if missing:
@@ -476,7 +530,8 @@ class BigQueryDestination:
 
     @staticmethod
     def _validate_identifier(kind: str, value: str) -> str:
-        if not value or _IDENTIFIER_PATTERNS[kind].fullmatch(value) is None:
+        unsafe = any(char in {"`", "\\"} or unicodedata.category(char) == "Cc" for char in value)
+        if not value or unsafe:
             raise ValueError(f"Invalid BigQuery {kind} identifier: {value!r}")
         return value
 

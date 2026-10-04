@@ -168,6 +168,16 @@ class TestBigQueryDestinationLoad:
         assert result.failed == 0
         client.insert_rows_json.assert_called_once_with("my-proj.analytics.user_scores", records)
 
+    def test_insert_preserves_hyphenated_table_and_partition_decorator(self) -> None:
+        client = _fake_client()
+        modules = _mocked_bq_modules(client)
+        config = _config(project="hyphenated-project", table="daily-events$20261004")
+        with patch.dict("sys.modules", modules):
+            BigQueryDestination().load([{"id": 1}], config, _options())
+        client.insert_rows_json.assert_called_once_with(
+            "hyphenated-project.analytics.daily-events$20261004", [{"id": 1}]
+        )
+
     def test_insert_per_row_error_on_error_skip(self) -> None:
         client = _fake_client()
         client.insert_rows_json.return_value = [{"index": 0, "errors": [{"r": "bad"}]}]
@@ -257,6 +267,27 @@ class TestBigQueryDestinationLoad:
             "my-proj.analytics.user_scores_drt_tmp", not_found_ok=True
         )
 
+    def test_merge_preserves_extended_identifiers(self) -> None:
+        client = _fake_client()
+        modules = _mocked_bq_modules(client)
+        records = [{"識別子": 1, "顧客名": "Alice"}]
+        config = _config(
+            project="hyphenated-project",
+            table="daily-events$20261004",
+            mode="merge",
+            upsert_key=["識別子"],
+        )
+        with patch.dict("sys.modules", modules):
+            BigQueryDestination().load(records, config, _options())
+        assert client.load_table_from_json.call_args.args == (
+            records,
+            "hyphenated-project.analytics.daily-events$20261004_drt_tmp",
+        )
+        merge = next(sql for sql in _sqls(client) if sql.startswith("MERGE"))
+        assert "MERGE `hyphenated-project.analytics.daily-events$20261004` T" in merge
+        assert "ON T.`識別子` = S.`識別子`" in merge
+        assert "UPDATE SET `顧客名` = S.`顧客名`" in merge
+
     def test_unsupported_mode_raises(self) -> None:
         # Defensive branch — `mode` is a Literal, so reach it by bypassing validation.
         client = _fake_client()
@@ -293,7 +324,11 @@ class TestBigQueryDestinationLoad:
                 _options(),
             )
         with pytest.raises(ValueError, match="project identifier"):
-            BigQueryDestination().load([{"id": 1}], _config(project="bad project"), _options())
+            BigQueryDestination().load([{"id": 1}], _config(project="bad`project"), _options())
+        with pytest.raises(ValueError, match="table identifier"):
+            BigQueryDestination().load([{"id": 1}], _config(table="bad\\table"), _options())
+        with pytest.raises(ValueError, match="dataset identifier"):
+            BigQueryDestination().load([{"id": 1}], _config(dataset="bad\ndataset"), _options())
 
     def test_merge_all_columns_are_key_skips_update(self) -> None:
         client = _fake_client()
@@ -328,7 +363,8 @@ class TestBigQueryDestinationLoad:
                 [{"id": 1}, {"id": 2}], config, _options(on_error="skip")
             )
         assert result.failed == 2
-        assert len(result.row_errors) == 1
+        assert [error.batch_index for error in result.row_errors] == [0, 1]
+        assert [error.record_preview for error in result.row_errors] == ["{'id': 1}", "{'id': 2}"]
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +419,8 @@ class TestBigQueryReplaceMode:
                 _options(mode="replace", on_error="skip"),
             )
             assert skipped.failed == 2
-            assert skipped.row_errors[0].error_message == "load boom"
+            assert [error.batch_index for error in skipped.row_errors] == [0, 1]
+            assert {error.error_message for error in skipped.row_errors} == {"load boom"}
             with pytest.raises(RuntimeError, match="load boom"):
                 dest.load(
                     [{"id": 3}],
@@ -481,6 +518,69 @@ class TestBigQueryReplaceMode:
             dest.finalize_sync(_config(), _options(mode="replace", replace_strategy="swap")) is None
         )
 
+    def test_reset_write_state_drops_staging_and_clears_all_state(self) -> None:
+        client = _fake_client()
+        modules = _mocked_bq_modules(client)
+        dest = BigQueryDestination()
+        dest._replace_started = True
+        dest._swap_shadow_created = True
+        dest._swap_table_id = "my-proj.analytics.user_scores"
+        dest._mirror_keys_table_id = "my-proj.analytics.user_scores__drt_mirror_keys"
+        dest._mirror_aborted = True
+
+        with patch.dict("sys.modules", modules):
+            dest.reset_write_state(_config(), _options(mode="replace"))
+
+        client.delete_table.assert_has_calls(
+            [
+                call("my-proj.analytics.user_scores__drt_swap", not_found_ok=True),
+                call(
+                    "my-proj.analytics.user_scores__drt_mirror_keys",
+                    not_found_ok=True,
+                ),
+            ]
+        )
+        assert dest._replace_started is False
+        assert dest._swap_shadow_created is False
+        assert dest._swap_table_id is None
+        assert dest._mirror_keys_table_id is None
+        assert dest._mirror_aborted is False
+
+    def test_reset_write_state_attempts_all_cleanup_before_reporting_failure(self) -> None:
+        client = _fake_client()
+        client.delete_table.side_effect = [RuntimeError("drop swap"), None]
+        modules = _mocked_bq_modules(client)
+        dest = BigQueryDestination()
+        dest._swap_shadow_created = True
+        dest._swap_table_id = "my-proj.analytics.user_scores"
+        dest._mirror_keys_table_id = "my-proj.analytics.user_scores__drt_mirror_keys"
+
+        with patch.dict("sys.modules", modules):
+            with pytest.raises(RuntimeError, match="drop swap"):
+                dest.reset_write_state(_config(), _options())
+
+        assert client.delete_table.call_count == 2
+        assert dest._swap_table_id is None
+        assert dest._mirror_keys_table_id is None
+
+    def test_reset_write_state_clears_state_when_client_creation_fails(self) -> None:
+        dest = BigQueryDestination()
+        dest._replace_started = True
+        dest._swap_shadow_created = True
+        dest._swap_table_id = "my-proj.analytics.user_scores"
+        with patch.object(dest, "_build_client", side_effect=RuntimeError("auth boom")):
+            with pytest.raises(RuntimeError, match="auth boom"):
+                dest.reset_write_state(_config(), _options())
+        assert dest._replace_started is False
+        assert dest._swap_shadow_created is False
+        assert dest._swap_table_id is None
+
+    def test_reset_write_state_is_safe_before_any_batch(self) -> None:
+        dest = BigQueryDestination()
+        with patch.object(dest, "_build_client") as build:
+            dest.reset_write_state(_config(), _options())
+        build.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # sync.mode: mirror (#1055)
@@ -576,6 +676,18 @@ class TestBigQueryMirrorMode:
                 _options(mode="mirror", mirror={"scope": ["parent_id"]}),
             )
 
+    def test_mirror_rejects_null_upsert_keys_before_staging(self) -> None:
+        with pytest.raises(ValueError, match=r"does not support NULL.*\[1, 2\]"):
+            BigQueryDestination().load(
+                [
+                    {"tenant_id": 1, "id": 1},
+                    {"tenant_id": 1, "id": None},
+                    {"tenant_id": None, "id": 3},
+                ],
+                _config(upsert_key=["tenant_id", "id"]),
+                _options(mode="mirror"),
+            )
+
     def test_empty_source_finalize_is_safe_noop(self) -> None:
         dest = BigQueryDestination()
         assert dest.finalize_sync(_config(upsert_key=["id"]), _options(mode="mirror")) is None
@@ -589,9 +701,10 @@ class TestBigQueryMirrorMode:
         config = _config(upsert_key=["id"])
         opts = _options(mode="mirror", on_error="skip")
         with patch.dict("sys.modules", modules):
-            result = dest.load([{"id": 1}], config, opts)
+            result = dest.load([{"id": 1}, {"id": 2}], config, opts)
             final = dest.finalize_sync(config, opts)
-        assert result.failed == 1
+        assert result.failed == 2
+        assert [error.batch_index for error in result.row_errors] == [0, 1]
         assert final is None
         assert not any(sql.startswith("DELETE FROM") for sql in _sqls(client))
 
