@@ -145,6 +145,9 @@ def test_bigquery_mirror_null_scope_deletes_only_within_null_scope(tmp_path: Pat
     conn = duckdb.connect(profile.database)
     try:
         conn.execute("ALTER TABLE users ADD COLUMN parent_id INTEGER")
+        # Mixed NULL / non-NULL: an all-NULL column would be autodetected as
+        # STRING by the temp-table load job (pre-existing behaviour, all modes).
+        conn.execute("UPDATE users SET parent_id = 7 WHERE id = 3")
     finally:
         conn.close()
 
@@ -169,7 +172,7 @@ def test_bigquery_mirror_null_scope_deletes_only_within_null_scope(tmp_path: Pat
         client.query(
             f"INSERT INTO {target} VALUES "
             "(98, 'stale-null', 'stale-null@example.com', NULL), "
-            "(99, 'other-scope', 'other-scope@example.com', 7)"
+            "(99, 'other-scope', 'other-scope@example.com', 8)"
         ).result()
 
         second = run_sync(sync, source, BigQueryDestination(), profile, tmp_path)
@@ -179,8 +182,8 @@ def test_bigquery_mirror_null_scope_deletes_only_within_null_scope(tmp_path: Pat
         assert [(row["id"], row["parent_id"]) for row in rows] == [
             (1, None),
             (2, None),
-            (3, None),
-            (99, 7),
+            (3, 7),
+            (99, 8),
         ]
     finally:
         _drop_scratch(client, table_id)
