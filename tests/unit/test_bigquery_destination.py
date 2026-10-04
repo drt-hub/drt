@@ -669,7 +669,7 @@ class TestBigQueryMirrorMode:
         assert "SELECT DISTINCT `parent_id`, `id`" in stage
         delete = next(sql for sql in _sqls(client) if sql.startswith("DELETE FROM"))
         assert "EXISTS" in delete
-        assert "T.`parent_id` IS NOT DISTINCT FROM K.`parent_id`" in delete
+        assert "TO_JSON_STRING(T.`parent_id`) = TO_JSON_STRING(K.`parent_id`)" in delete
 
     def test_null_scope_uses_null_safe_match(self) -> None:
         client = _fake_client()
@@ -681,7 +681,7 @@ class TestBigQueryMirrorMode:
             dest.load([{"id": 1, "parent_id": None}], config, opts)
             dest.finalize_sync(config, opts)
         delete = next(sql for sql in _sqls(client) if sql.startswith("DELETE FROM"))
-        assert "T.`parent_id` IS NOT DISTINCT FROM K.`parent_id`" in delete
+        assert "TO_JSON_STRING(T.`parent_id`) = TO_JSON_STRING(K.`parent_id`)" in delete
 
     @pytest.mark.parametrize(
         ("mirror", "message"),

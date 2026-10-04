@@ -395,9 +395,14 @@ class BigQueryDestination:
             scope = sync_options.mirror.scope if sync_options.mirror is not None else None
             scope_prefix = ""
             if scope:
+                # BigQuery rejects a correlated EXISTS that isn't a plain
+                # equality (IS NOT DISTINCT FROM fails: "LEFT SEMI JOIN
+                # cannot be used without ... equality"); TO_JSON_STRING keeps
+                # it an equality while mapping NULL to 'null' on both sides.
                 scope_match = " AND ".join(
                     [
-                        f"T.{self._quote_column(c)} IS NOT DISTINCT FROM K.{self._quote_column(c)}"
+                        f"TO_JSON_STRING(T.{self._quote_column(c)}) = "
+                        f"TO_JSON_STRING(K.{self._quote_column(c)})"
                         for c in scope
                     ]
                 )
