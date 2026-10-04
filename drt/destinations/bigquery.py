@@ -73,6 +73,7 @@ class BigQueryDestination:
         sync_options: SyncOptions,
     ) -> SyncResult:
         assert isinstance(config, BigQueryDestinationConfig)
+        self._validate_sync_options(config, sync_options)
         if not records:
             return SyncResult()
 
@@ -337,6 +338,11 @@ class BigQueryDestination:
     ) -> SyncResult | None:
         """Finish a swap replace or the mirror delete pass."""
         assert isinstance(config, BigQueryDestinationConfig)
+        # This must run before every no-op guard below. In particular, a
+        # removal-only ``mirror.strategy: diff`` run never calls load(); if
+        # finalize silently returned here, the engine would promote the new
+        # source snapshot and permanently forget the removed keys.
+        self._validate_sync_options(config, sync_options)
         if sync_options.mode == "mirror":
             return self._finalize_mirror(config, sync_options)
         if sync_options.mode == "replace" and sync_options.replace_strategy != "swap":
@@ -390,7 +396,10 @@ class BigQueryDestination:
             scope_prefix = ""
             if scope:
                 scope_match = " AND ".join(
-                    [f"T.{self._quote_column(c)} = K.{self._quote_column(c)}" for c in scope]
+                    [
+                        f"T.{self._quote_column(c)} IS NOT DISTINCT FROM K.{self._quote_column(c)}"
+                        for c in scope
+                    ]
                 )
                 scope_prefix = (
                     f"EXISTS (SELECT 1 FROM {self._quote_table(keys_table_id)} K "
@@ -465,6 +474,42 @@ class BigQueryDestination:
         if cleanup_error is not None:
             raise cleanup_error
 
+    def _validate_sync_options(
+        self,
+        config: BigQueryDestinationConfig,
+        sync_options: SyncOptions,
+    ) -> None:
+        """Reject unsupported run shapes before any BigQuery operation."""
+        mirror = sync_options.mirror
+        if sync_options.mode == "mirror":
+            if mirror is not None and mirror.strategy == "diff":
+                raise ValueError(
+                    "mirror.strategy: diff is not yet supported on bigquery "
+                    "(the BigQuery diff source exists, but the destination does not "
+                    "consume its removed keys yet); use the default mirror strategy."
+                )
+            if mirror is not None and mirror.strategy == "tracked":
+                raise ValueError(unsupported_tracked_scope_msg("bigquery"))
+            check_mirror_supported(
+                config,
+                sync_options,
+                "bigquery",
+                # BigQuery supports scope with destination strategy. The tracked
+                # strategy was rejected explicitly just above.
+                supports_tracked_scope=True,
+            )
+
+        if (
+            sync_options.mode == "replace"
+            and sync_options.replace_strategy == "swap"
+            and "$" in config.table
+        ):
+            raise ValueError(
+                "replace_strategy: swap is not supported for BigQuery "
+                f"partition-decorated target {config.table!r}; use "
+                "replace_strategy: truncate to replace that partition."
+            )
+
     def _validate_mirror(
         self,
         records: list[dict[str, Any]],
@@ -472,22 +517,6 @@ class BigQueryDestination:
         sync_options: SyncOptions,
     ) -> None:
         mirror = sync_options.mirror
-        if mirror is not None and mirror.strategy == "diff":
-            raise ValueError(
-                "mirror.strategy: diff is not yet supported on bigquery "
-                "(the BigQuery diff source exists, but the destination does not "
-                "consume its removed keys yet); use the default mirror strategy."
-            )
-        if mirror is not None and mirror.strategy == "tracked":
-            raise ValueError(unsupported_tracked_scope_msg("bigquery"))
-        check_mirror_supported(
-            config,
-            sync_options,
-            "bigquery",
-            # BigQuery supports scope with destination strategy. The tracked
-            # strategy was rejected explicitly just above.
-            supports_tracked_scope=True,
-        )
         assert config.upsert_key
         self._validate_upsert_keys_present(records, config.upsert_key)
         null_key_indices = [

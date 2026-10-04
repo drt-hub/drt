@@ -136,3 +136,51 @@ def test_bigquery_mirror_deletes_removed_key(tmp_path: Path) -> None:
         ]
     finally:
         _drop_scratch(client, table_id)
+
+
+def test_bigquery_mirror_null_scope_deletes_only_within_null_scope(tmp_path: Path) -> None:
+    duckdb = pytest.importorskip("duckdb")
+    creds = _credentials()
+    source, profile = seed_duckdb_users(tmp_path)
+    conn = duckdb.connect(profile.database)
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN parent_id INTEGER")
+    finally:
+        conn.close()
+
+    table = unique_table("drt_mirror_null_scope")
+    table_id = _table_id(creds, table)
+    target = f"`{table_id}`"
+    client = _client(creds)
+    destination = _destination(creds, table, upsert=True)
+    sync = SyncConfig(
+        name=unique_table("bigquery_mirror_null_scope"),
+        model="ref('users')",
+        destination=destination,
+        sync=SyncOptions(mode="mirror", mirror={"scope": ["parent_id"]}),
+    )
+
+    try:
+        client.query(
+            f"CREATE TABLE {target} (id INT64, name STRING, email STRING, parent_id INT64)"
+        ).result()
+        first = run_sync(sync, source, BigQueryDestination(), profile, tmp_path)
+        assert first.success == 3
+        client.query(
+            f"INSERT INTO {target} VALUES "
+            "(98, 'stale-null', 'stale-null@example.com', NULL), "
+            "(99, 'other-scope', 'other-scope@example.com', 7)"
+        ).result()
+
+        second = run_sync(sync, source, BigQueryDestination(), profile, tmp_path)
+        assert second.success == 3
+        assert second.failed == 0
+        rows = list(client.query(f"SELECT id, parent_id FROM {target} ORDER BY id").result())
+        assert [(row["id"], row["parent_id"]) for row in rows] == [
+            (1, None),
+            (2, None),
+            (3, None),
+            (99, 7),
+        ]
+    finally:
+        _drop_scratch(client, table_id)

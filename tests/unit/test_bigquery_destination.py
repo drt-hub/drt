@@ -11,15 +11,20 @@ contribution.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, call, patch
 
 import pytest
 from pydantic import ValidationError
 
-from drt.config.models import BigQueryDestinationConfig, SyncOptions
+from drt.config.credentials import BigQueryProfile, ProfileConfig
+from drt.config.models import BigQueryDestinationConfig, SyncConfig, SyncOptions
 from drt.destinations.base import ConnectionTestable
 from drt.destinations.bigquery import BigQueryDestination
+from drt.engine.sync import run_sync
+from drt.sources.base import SnapshotDiffResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -385,6 +390,30 @@ class TestBigQueryReplaceMode:
         assert result.success == 1
         client.query.assert_not_called()
 
+    def test_partition_decorator_allows_truncate_but_rejects_swap_before_client(self) -> None:
+        client = _fake_client()
+        modules = _mocked_bq_modules(client)
+        config = _config(table="daily-events$20261004")
+        with patch.dict("sys.modules", modules):
+            result = BigQueryDestination().load(
+                [{"id": 1}],
+                config,
+                _options(mode="replace", replace_strategy="truncate"),
+            )
+        assert result.success == 1
+        assert client.load_table_from_json.call_args.args[1] == (
+            "my-proj.analytics.daily-events$20261004"
+        )
+
+        dest = BigQueryDestination()
+        opts = _options(mode="replace", replace_strategy="swap")
+        with patch.object(dest, "_build_client") as build_client:
+            with pytest.raises(ValueError, match=r"swap.*partition-decorated.*truncate"):
+                dest.load([{"id": 1}], config, opts)
+            with pytest.raises(ValueError, match=r"swap.*partition-decorated.*truncate"):
+                dest.finalize_sync(config, opts)
+        build_client.assert_not_called()
+
     def test_truncate_uses_load_job_then_appends_and_resets_at_finalize(self) -> None:
         client = _fake_client()
         modules = _mocked_bq_modules(client)
@@ -640,7 +669,19 @@ class TestBigQueryMirrorMode:
         assert "SELECT DISTINCT `parent_id`, `id`" in stage
         delete = next(sql for sql in _sqls(client) if sql.startswith("DELETE FROM"))
         assert "EXISTS" in delete
-        assert "T.`parent_id` = K.`parent_id`" in delete
+        assert "T.`parent_id` IS NOT DISTINCT FROM K.`parent_id`" in delete
+
+    def test_null_scope_uses_null_safe_match(self) -> None:
+        client = _fake_client()
+        modules = _mocked_bq_modules(client)
+        dest = BigQueryDestination()
+        config = _config(mode="merge", upsert_key=["id"])
+        opts = _options(mode="mirror", mirror={"scope": ["parent_id"]})
+        with patch.dict("sys.modules", modules):
+            dest.load([{"id": 1, "parent_id": None}], config, opts)
+            dest.finalize_sync(config, opts)
+        delete = next(sql for sql in _sqls(client) if sql.startswith("DELETE FROM"))
+        assert "T.`parent_id` IS NOT DISTINCT FROM K.`parent_id`" in delete
 
     @pytest.mark.parametrize(
         ("mirror", "message"),
@@ -692,6 +733,64 @@ class TestBigQueryMirrorMode:
         dest = BigQueryDestination()
         assert dest.finalize_sync(_config(upsert_key=["id"]), _options(mode="mirror")) is None
         assert dest._mirror_aborted is False
+
+    def test_removal_only_diff_rejects_before_baseline_commit(self, tmp_path: Path) -> None:
+        class RemovalOnlySource:
+            def __init__(self) -> None:
+                self.extract_calls = 0
+                self.commit_calls = 0
+
+            def extract(
+                self,
+                query: str,
+                config: ProfileConfig,
+                *,
+                query_tags: dict[str, str] | None = None,
+            ) -> Iterator[dict[str, Any]]:
+                raise AssertionError("ordinary extraction must not run")
+
+            def extract_snapshot_diff(
+                self,
+                query: str,
+                config: ProfileConfig,
+                *,
+                sync_name: str,
+                key_columns: list[str],
+                hash_columns: Any,
+                query_tags: dict[str, str] | None = None,
+            ) -> SnapshotDiffResult:
+                self.extract_calls += 1
+                return SnapshotDiffResult(
+                    added=iter(()),
+                    changed=iter(()),
+                    removed_keys=iter(({"id": 7},)),
+                    is_first_run=False,
+                )
+
+            def commit_snapshot_diff(self, config: ProfileConfig, sync_name: str) -> None:
+                self.commit_calls += 1
+
+        source = RemovalOnlySource()
+        destination = BigQueryDestination()
+        sync = SyncConfig(
+            name="bigquery_removal_only",
+            model="ref('users')",
+            destination=_config(upsert_key=["id"]),
+            sync=_options(
+                mode="mirror",
+                incremental_strategy="diff",
+                mirror={"strategy": "diff"},
+            ),
+        )
+        profile = BigQueryProfile(type="bigquery", project="p", dataset="d")
+
+        with patch.object(destination, "load", wraps=destination.load) as load:
+            with pytest.raises(ValueError, match="not yet supported on bigquery"):
+                run_sync(sync, source, destination, profile, tmp_path)
+
+        load.assert_not_called()
+        assert source.extract_calls == 1
+        assert source.commit_calls == 0
 
     def test_failed_key_stage_aborts_delete(self) -> None:
         client = _fake_client()
