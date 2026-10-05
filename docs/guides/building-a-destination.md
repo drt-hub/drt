@@ -8,14 +8,14 @@ We will build a fictional **Webhook** destination as our running example -- a ge
 
 ## Overview
 
-Adding a destination requires four changes:
+Adding an in-tree destination requires four groups of changes:
 
 | Step | File(s) | What you add |
 |------|---------|-------------|
 | 1. Config model | `drt/config/models.py` | Pydantic model for YAML config |
 | 2. Destination class | `drt/destinations/webhook.py` | `load()` implementation |
-| 3. CLI registration | `drt/cli/main.py` | isinstance branch |
-| 4. Tests | `tests/unit/test_webhook_destination.py` | Unit tests |
+| 3. Registry wiring | `drt/connectors/registry.py` | Config and destination imports plus a `register_destination()` entry |
+| 4. Tests and docs | `tests/unit/test_webhook_destination.py`, `docs/connectors/webhook.md` | Unit tests and user-facing documentation; add an optional extra in `pyproject.toml` if needed and a `CHANGELOG.md` entry |
 
 ## Prerequisites
 
@@ -238,19 +238,19 @@ same extension pattern as `ConnectionTestable`, `MatchPolicyCapable`, `StagedDes
 
 ---
 
-## Step 3: CLI Registration
+## Step 3: Registry Wiring
 
-Open `drt/cli/main.py` and add your destination to `_get_destination()`:
+Update `_register_all_connectors()` in `drt/connectors/registry.py`:
 
 ```python
+from drt.config.models import WebhookDestinationConfig
 from drt.destinations.webhook import WebhookDestination
 
-# Inside _get_destination():
-if isinstance(dest, WebhookDestinationConfig):
-    return WebhookDestination()
+# Alongside the other built-in registrations:
+register_destination("webhook", WebhookDestinationConfig, WebhookDestination)
 ```
 
-Add it before the final `raise ValueError(...)` line. No plugin registry needed.
+The CLI, MCP server, and integrations all resolve destinations through this registry; there is no separate `isinstance` branch to add in `drt/cli/main.py`.
 
 ---
 
@@ -383,8 +383,11 @@ make test       # all tests
 - [ ] Uses `try/finally` for connection cleanup (database destinations)
 - [ ] Builds `RowError` on per-row failures
 - [ ] Respects `on_error` ("fail" returns early, "skip" continues)
-- [ ] isinstance branch in `_get_destination()` in `drt/cli/main.py`
+- [ ] Config and destination imported and registered with `register_destination()` in `drt/connectors/registry.py`
 - [ ] Tests cover: success, skip, fail-stops-early, missing config
+- [ ] Connector documentation added under `docs/connectors/`
+- [ ] Optional dependency extra added to `pyproject.toml` (if needed)
+- [ ] `CHANGELOG.md` updated under `[Unreleased]`
 - [ ] `make lint` passes
 - [ ] `make test` passes
 

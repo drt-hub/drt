@@ -301,39 +301,22 @@ class ConsoleDestination:
 - Handle empty records as an early return
 - Use `try/finally` to close connections (see `PostgresDestination` for the pattern)
 
-### Step 3: Register in the CLI
+### Step 3: Register the destination
 
-Open `drt/cli/main.py`. Three changes:
-
-**a) Add to `TYPE_CHECKING` imports (top of file):**
+Open `drt/connectors/registry.py` and update `_register_all_connectors()`. Add the config and destination imports alongside the other built-ins:
 
 ```python
-if TYPE_CHECKING:
-    from drt.destinations.console import ConsoleDestination
-    # ... existing imports ...
+from drt.config.models import ConsoleDestinationConfig
+from drt.destinations.console import ConsoleDestination
 ```
 
-**b) Add to `_get_destination()` return type:**
+Then add the registry entry:
 
 ```python
-def _get_destination(sync: SyncConfig) -> (
-    RestApiDestination
-    # ... existing types ...
-    | ConsoleDestination  # <-- add here
-):
+register_destination("console", ConsoleDestinationConfig, ConsoleDestination)
 ```
 
-**c) Add the isinstance check inside `_get_destination()`:**
-
-```python
-    if isinstance(dest, ConsoleDestinationConfig):
-        from drt.destinations.console import ConsoleDestination
-        return ConsoleDestination()
-```
-
-Also add `ConsoleDestinationConfig` to the lazy imports inside the function body.
-
-**Why lazy imports?** Destinations may have heavy optional dependencies (e.g. `clickhouse-connect`). Importing them at module level would force every user to install every extra. Lazy imports inside the function keep startup fast.
+The CLI, MCP server, and integrations all resolve destinations through this registry; there is no separate `isinstance` branch to add in `drt/cli/main.py`.
 
 ### Step 4: Write tests
 
@@ -431,8 +414,8 @@ Add an entry under `[Unreleased] > Added`:
 
 ```bash
 git checkout -b feat/console-destination
-git add drt/destinations/console.py drt/config/models.py drt/cli/main.py \
-        tests/unit/test_console_destination.py CHANGELOG.md
+git add drt/destinations/console.py drt/config/models.py drt/connectors/registry.py \
+        tests/unit/test_console_destination.py docs/connectors/console.md CHANGELOG.md
 git commit -m "feat: add Console destination connector" -m "Closes #NNN"
 make lint   # ruff + mypy must pass
 make test   # all tests must pass
@@ -451,8 +434,9 @@ Open a PR with:
 New connector checklist:
   drt/config/models.py           → add YourDestinationConfig + add to union
   drt/destinations/your_dest.py  → implement load() method
-  drt/cli/main.py                → TYPE_CHECKING import + return type + isinstance check
+  drt/connectors/registry.py     → import config/class + register_destination() entry
   tests/unit/test_your_dest.py   → config + load tests
+  docs/connectors/your_dest.md   → document configuration and usage
   pyproject.toml                 → add [your_dest] extra (if external deps)
   CHANGELOG.md                   → document under [Unreleased]
 ```
