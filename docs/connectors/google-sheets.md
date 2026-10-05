@@ -63,5 +63,6 @@ sync:
 - Requires `pip install drt-core[sheets]` (uses `gspread` + `google-auth`)
 - `overwrite` clears the sheet first, then writes headers + data
 - `append` adds rows without clearing — combine with `mode: incremental` to avoid duplicates
+- Columns are positional. The first batch of a run fixes the column set (the union of every record's keys, in first-seen order); a record missing a column gets an empty cell. A later batch that introduces a column the first batch did not have fails the sync with a `column mismatch` error instead of dropping data. If a source has sparse fields that may first appear late, raise `sync.batch_size` so the first batch sees them.
 - Google Sheets API has a quota of 300 requests/minute per project
 - `spreadsheet_id` is the long string in the spreadsheet URL: `https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit`
