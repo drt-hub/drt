@@ -43,6 +43,7 @@ Checks Python version, the `~/.drt/profiles.yml` file, the active
 drt profile list                 # confirm the profile in drt_project.yml exists
 drt profile show <name>          # inspect it (secrets masked)
 echo "$YOUR_PASSWORD_ENV"        # confirm the referenced env vars are actually set
+drt plugins list                 # installed extensions and isolated load failures
 ```
 
 - **✅ green when:** the profile named in `drt_project.yml` exists in
@@ -52,6 +53,9 @@ echo "$YOUR_PASSWORD_ENV"        # confirm the referenced env vars are actually 
   or `DRT_PROFILE` to override); env var unset or exported in a different
   shell; secret hardcoded in YAML instead of an env reference (`drt validate`
   flags this since v0.7.5).
+- **Secret-provider URIs:** `aws-sm://`, `gcp-sm://`, and `vault://` values in
+  `*_env` fields are provider references, not shell variables. Check the
+  matching optional extra plus IAM/path when one does not resolve.
 
 ### 3. Connectivity
 
@@ -85,6 +89,10 @@ drt list                         # confirm your sync is actually discovered
   `model: ref('table')` pointing at a table that doesn't exist; an
   `upsert`/`mirror` mode without the required `upsert_key`; deprecation
   warnings (v0.7.2+) that will become errors.
+- **Managed features:** `incremental_strategy: diff` requires
+  `mode: upsert|mirror`, no `cursor_field`, a destination `upsert_key`, and a
+  Postgres/Snowflake/Databricks/BigQuery source. `state.backend: warehouse`
+  requires `connection_profile`; both use that profile's `managed_schema`.
 
 ### 5. Dry run (the data preview)
 
@@ -97,6 +105,10 @@ This is the single most useful step for "the sync runs but the data looks
 wrong" — it shows exactly what would be written without touching the
 destination.
 
+For sparse records, omission is meaningful: an upsert preserves a missing
+field, replace displays `<default>`, and append-only output is labelled INSERT.
+An explicit null remains a real null write (#1138).
+
 - **✅ green when:** the row count is what you expect and the previewed
   records / `--diff` look correct.
 - **🔴 common failures:** 0 rows (the source query / `model` filters
@@ -107,6 +119,11 @@ destination.
   merely advanced, v0.8.4+); `{{ row.field }}`
   referencing a column the source doesn't return (use `tojson_safe` for
   datetime/Decimal/UUID, v0.7.6+); wrong column names in the template.
+- **Snapshot diff:** the first run correctly emits every row because no
+  baseline exists. Later runs still materialize the full model but emit only
+  added/changed rows. Confirm create/write/drop access to `managed_schema`,
+  prevent same-sync overlap, and remember `--limit` leaves the baseline
+  unchanged.
 
 ### 6. First real run
 
@@ -121,6 +138,8 @@ drt status --output json                     # machine-readable, for CI
 records"), so you can inspect them in the destination UI before opening the
 tap. The watermark never advances on a sampled run, and it's refused for
 `mode: mirror` / `replace` (a sampled mirror would delete the rows it skipped).
+For a snapshot-diff upsert, the snapshot baseline also never advances on a
+limited run.
 When verifying a whole project, add `--fail-fast` (#775) so a systemic failure
 (expired credential, warehouse down) stops after the first sync instead of
 burning quota — skipped syncs report `status: "skipped"` in `--output json`.
@@ -131,6 +150,12 @@ burning quota — skipped syncs report `status: "skipped"` in `--output json`.
   HubSpot max 9/s, GitHub Actions 5/s); per-row auth/permission errors
   (`on_error: skip` to see the full failure count instead of stopping at the
   first); partial success where some rows fail validation downstream.
+- **Staged Upload 429s:** set `destination.rate_limit_key` to the stable,
+  non-secret quota identity when one vendor quota spans several hosts or
+  separate accounts share one host.
+- **Google Sheets `column mismatch`:** the first batch fixes the positional
+  column union. Normalize sparse records or raise `sync.batch_size` so a
+  later-only field appears in batch one; missing known fields become blanks.
 - **Recovering partial failures:** enable the dead letter queue
   (`sync.dlq.enabled: true` + `on_error: skip`, v0.7.9+) so failed records
   persist to `.drt/dlq/<sync>.jsonl` instead of being dropped. `drt status`
@@ -154,6 +179,7 @@ burning quota — skipped syncs report `status: "skipped"` in `--output json`.
 
 ```bash
 drt test --select <name>                     # freshness / unique / accepted_values tests, if defined
+drt test --unit --select <name>              # offline unit_tests fixtures through transforms
 ```
 
 - **✅ green when:** all declared tests pass (or there are none — that's not a
@@ -161,6 +187,9 @@ drt test --select <name>                     # freshness / unique / accepted_val
 - **🔴 common failures:** the sync reported success but downstream `unique` /
   `freshness` tests fail — the data moved but isn't what was expected. This
   usually points back to the source query (step 5), not the sync itself.
+- **Run artifact:** CI can inspect `target/drt/run_results.json` even when the
+  console used text mode. It omits raw exception text and is not written for a
+  preflight failure before sync selection; `--target-path` relocates it.
 
 ## When you've found the failing layer
 

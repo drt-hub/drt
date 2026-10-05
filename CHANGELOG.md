@@ -64,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-06
+
+**Warehouse parity.** Every capability that shipped Postgres-first in v1.0 (managed tables, warehouse-backed state/history/DLQ, diff-based incremental, `replace`/`mirror`, `mirror.strategy: diff`) now reaches Snowflake, Databricks and BigQuery, each leg verified against a live warehouse. No breaking changes — drop-in upgrade from v1.0.0.
+
 ### Added
 
 - **Reconciliation sync guide and BigQuery → GitHub Actions example** (contributed by [@Muawiya-contact](https://github.com/Muawiya-contact) in [#1197](https://github.com/drt-hub/drt/pull/1197)): documents the slower full-sync anti-join sweep for recovering expected downstream work that never completed or never reached a fire-and-forget destination. The guide defines the landing-evidence, stable-key, idempotency, and bounded-lookback requirements and explains how reconciliation complements retry policy and the DLQ; the runnable example pairs an incremental deployment dispatch with a separately scheduled reconciliation sync.
@@ -80,6 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **LLM docs, Claude skills and MCP descriptions brought up to date** (release-readiness sweep): `docs/llm/*`, the five `drt-*` skills and MCP tool/server descriptions now cover `sync.incremental_strategy: diff`, `sync.mirror.strategy`, `managed_schema`, warehouse-backed state on all four warehouses, BigQuery `replace`/`mirror`, `staged_upload.rate_limit_key`, `klaviyo.backfill`, `drt plugins list`, and correct the location of `unit_tests` (top-level, not under `sync`). Wording only — no tool signatures or config models changed.
 - **`drt-core[clickhouse]` now caps `clickhouse-connect` below 2.0** (`>=0.7.0,<2`). The extra was unbounded, so a future major release could break the ClickHouse source/destination on a fresh install; the cap is lifted once a new major is verified.
 
 ### Fixed

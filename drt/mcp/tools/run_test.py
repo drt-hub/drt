@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 
 def _run_unit_tests(syncs: list[SyncConfig], *, fail_fast: bool = False) -> dict[str, Any]:
-    """``unit=True`` path — sync.unit_tests (#780), no destination touched.
+    """``unit=True`` path — top-level unit_tests (#780), no destination touched.
 
     Delegates to :func:`drt.cli.commands.test.run_unit_test_suite`, shared
     with ``drt test --unit`` (#870) — this used to be a third inline copy

@@ -40,7 +40,9 @@ Help the user migrate from an existing Reverse ETL tool (Census, Hightouch, Poly
    Only after the diff looks right should they run it uncapped. Flag explicitly
    that `mode: mirror` and `replace` **delete or truncate** destination rows, and
    that `--limit` is refused for both — so those two modes go straight from
-   `--dry-run --diff` to a full run, with no sampled middle step.
+   `--dry-run --diff` to a full run, with no sampled middle step. For
+   snapshot-diff incremental, `--limit` is allowed in upsert mode but never
+   promotes the full snapshot baseline.
 
 ## Concept Mapping
 
@@ -51,8 +53,8 @@ Help the user migrate from an existing Reverse ETL tool (Census, Hightouch, Poly
 | Source (BigQuery model) | `model: ref('table')` or raw SQL |
 | Destination connection | `destination.type` + auth config |
 | Sync behavior: Full | `sync.mode: full` (every run, no dedup) |
-| Sync behavior: Append (incremental) | `sync.mode: incremental` + `cursor_field` |
-| Sync behavior: Mirror (upsert + delete-removed) | `sync.mode: mirror` (v0.7.7+) + `upsert_key` — supported on postgres / mysql / clickhouse / snowflake / databricks (v0.7.9). Tune deletes via `sync.mirror` (v0.7.10, postgres / mysql only): `strategy: tracked` (#686, delete only rows drt itself synced — safe when the app also writes the table) and `scope: [col]` (#687, restrict deletes to observed parents) |
+| Sync behavior: Append (incremental) | Cursor: `sync.mode: incremental` + `cursor_field`. No reliable cursor on a Postgres/Snowflake/Databricks/BigQuery source: `mode: upsert` + `incremental_strategy: diff` + destination `upsert_key` (source snapshots in `managed_schema`). |
+| Sync behavior: Mirror (upsert + delete-removed) | `sync.mode: mirror` + `upsert_key` — Postgres / MySQL / ClickHouse / Snowflake / Databricks / BigQuery. `strategy: destination` compares with the target; `tracked` protects co-written rows and combines with `scope` on all except BigQuery; `diff` deletes exact removals produced by `incremental_strategy: diff` on all six and rejects `scope`. |
 | Sync behavior: Replace (overwrite table) | `sync.mode: replace` (TRUNCATE + INSERT, zero-downtime via `replace_strategy: swap` on supported DWHs) |
 | Field mappings (rename columns) | `sync.field_mappings: {source_column: destination_field}` (v0.7.9, #415) — first-class column rename applied just before the destination; use instead of aliasing in SQL |
 | Field mappings (compute / reshape a value) | `sync.computed_fields: {name: "<jinja>"}` (#763) — derived columns for **every** destination, applied before `field_mappings` / `mask`; a single-expression template keeps the value's Python type. `body_template` / `properties_template` remain for shaping the whole payload of the destinations that have them |
@@ -67,9 +69,10 @@ Help the user migrate from an existing Reverse ETL tool (Census, Hightouch, Poly
 |------------|----------|-------|
 | "Re-send everything every run" | `full` | Default. Idempotent destinations only — REST API / Slack / file outputs. |
 | "Append new rows since last run" | `incremental` + `cursor_field` | Watermark-based. `--cursor-value` overrides for backfill. |
+| "Send added/changed rows without a cursor" | `upsert` + `incremental_strategy: diff` + `upsert_key` | Postgres/Snowflake/Databricks/BigQuery sources. Needs writable `managed_schema`; same-sync runs must not overlap; `--limit` never advances the baseline. |
 | "Upsert by key" | `upsert` + `upsert_key` | Census's most common "Update" shape. |
-| "Upsert by key AND delete rows removed from source" | `mirror` + `upsert_key` | Census's "Full Sync with Deletion" / Hightouch's "Mirror" semantic. v0.7.7+, postgres / mysql / clickhouse / snowflake / databricks. Source key cardinality fits in memory. On a table the app also writes, use `sync.mirror.strategy: tracked` (postgres / mysql). |
-| "Overwrite the destination table each run" | `replace` | TRUNCATE + INSERT. Set `replace_strategy: swap` (Postgres / MySQL / ClickHouse / Snowflake / Databricks) for zero-downtime via staging-table swap. |
+| "Upsert by key AND delete rows removed from source" | `mirror` + `upsert_key` | Census's "Full Sync with Deletion" / Hightouch's "Mirror" semantic. All six SQL warehouse destinations. Use `tracked` for co-written tables (not BigQuery), or pair source diff with `mirror.strategy: diff` for exact removal keys. |
+| "Overwrite the destination table each run" | `replace` | Full rebuild on all six SQL warehouse destinations. `replace_strategy: swap` uses an atomic shadow-table cutover, including BigQuery copy jobs. |
 
 ### Auth migration
 
@@ -79,6 +82,8 @@ Help the user migrate from an existing Reverse ETL tool (Census, Hightouch, Poly
 | OAuth app | Use token from OAuth flow → `token_env` |
 | Service account JSON | Set `GOOGLE_APPLICATION_CREDENTIALS` for BigQuery source |
 | Connection string | Source profile field in `~/.drt/profiles.yml` (env-var-substituted via `${VAR}`) |
+| Managed state/history in the old service | `state.backend: warehouse` + `connection_profile`; Postgres/Snowflake/Databricks/BigQuery persist run state, history, and DLQ under the profile's `managed_schema` |
+| Cloud secret reference | Put an `aws-sm://`, `gcp-sm://`, or `vault://` URI in the relevant `*_env` field; install the matching extra |
 
 ## Output Format
 

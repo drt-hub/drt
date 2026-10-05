@@ -17,10 +17,10 @@ Debug a failing drt sync.
 3. Reproduce with more signal — pick the right verbosity:
    - `drt run --select <name> --verbose` — row-level error details
    - `drt run --select <name> --dry-run` — config parses, no data sent
-   - `drt run --select <name> --dry-run --diff` — record-level preview (added/updated/deleted) for queryable destinations (v0.7.1+)
+   - `drt run --select <name> --dry-run --diff` — record-level preview for queryable destinations. It distinguishes omitted fields from explicit nulls: partial updates preserve them, replace shows `<default>`, and append-only writes show INSERT (#1138)
    - `drt run --output json` / `drt status --output json` — structured output for CI / scripting (v0.7+)
    - `drt run --log-format json` — JSON Lines logs to stderr (separate from `--output`)
-   - `drt run --select <name> --limit 10` — really load ≤10 rows (#774) to reproduce with a small, inspectable send; watermark won't advance (refused for `mode: mirror` / `replace`)
+   - `drt run --select <name> --limit 10` — really load ≤10 rows (#774) to reproduce with a small, inspectable send; cursor watermarks and snapshot-diff baselines do not advance (refused for `mode: mirror` / `replace`)
    - `drt run --failed` — re-run only the syncs whose last status wasn't `success` (#773) — the tight loop while fixing one red sync in a larger project
    - `drt run --fail-fast` — stop after the first failure (#775) instead of running the whole set when the cause is systemic
 
@@ -33,6 +33,7 @@ Debug a failing drt sync.
 ### Auth errors (401, 403)
 - **Cause**: `token_env` or `value_env` env var not set, or token has wrong permissions.
 - **Fix**: Check `echo $MY_TOKEN`, verify token scopes. For HubSpot, confirm Private App has CRM write scope. For GitHub, confirm `actions: write`.
+- **Provider URI**: an `*_env` value beginning `aws-sm://`, `gcp-sm://`, or `vault://` is a secret-provider URI, not an env-var name. Install its matching extra, then use `drt doctor` to distinguish a missing provider dependency from an IAM/path error.
 - **Hardcoded-secret detection (v0.7.5+)**: if `drt validate` flags `hardcoded secret detected`, the YAML literally contains a token instead of `token_env`. Move it to an env var and reference it.
 
 ### Rate limit (429)
@@ -40,6 +41,7 @@ Debug a failing drt sync.
 - **Fix**: Lower `sync.rate_limit.requests_per_second`. HubSpot max: 9 req/s. GitHub Actions: 5 req/s.
 - **Also**: Add retry config — 429 is retryable by default; in v0.7+ you can also set a per-destination retry override.
 - **Recover the rows that still failed**: enable the dead letter queue (`sync.dlq.enabled: true` + `on_error: skip`, v0.7.9+) so per-record failures persist to `.drt/dlq/<sync>.jsonl` instead of being dropped, then `drt retry <sync>` re-sends just those once the limit clears. `drt status` shows the queue depth.
+- **Staged Upload**: when one vendor quota spans multiple hosts, or separate accounts share one host, set `destination.rate_limit_key` to the real stable quota identity; this public YAML field overrides the host-derived key (`rate_limit_key_override` is internal, not YAML).
 
 ### Connection errors / timeouts
 - **Cause**: Wrong URL, network issue, or destination is down.
@@ -55,8 +57,9 @@ Debug a failing drt sync.
 - **Fix**: Stage tag narrows the search. For `finalize` failures on `sync.mode: mirror` (v0.7.7+), check `upsert_key` is set and the source key cardinality is small enough to hold in memory.
 
 ### Incremental sync not filtering
-- **Cause**: `mode: incremental` set but no saved cursor yet (first run syncs all rows).
-- **Fix**: Expected on the first run. Check `drt status` after first run — `last_cursor_value` should be set. To replay or backfill, use `drt run --cursor-value '<value>' --select <name>` (v0.6.2+).
+- **Cursor strategy cause**: `mode: incremental` has no saved cursor yet, so the first run syncs all rows.
+- **Cursor fix**: Check `drt status` after the first run — `last_cursor_value` should be set. To probe a backfill boundary, use `drt run --cursor-value '<value>' --select <name>`.
+- **Snapshot-diff strategy**: `incremental_strategy: diff` deliberately reads the full model into a warehouse snapshot, then emits only added/changed rows. It requires `mode: upsert|mirror`, a destination `upsert_key`, no `cursor_field`, and a Postgres/Snowflake/Databricks/BigQuery source profile with writable `managed_schema`. A first run has no prior baseline, so every row is added. Same-sync overlapping runs are unsupported. `--limit` does not promote the baseline.
 
 ### Poisoned or stuck watermark
 - **Cause**: a bad cursor value got persisted (a timezone bug, a bad backfill, a rebuilt source table), so the sync now filters out rows it should send — or sends nothing at all.
@@ -82,14 +85,23 @@ Debug a failing drt sync.
 - **Cause**: `sync.mode: mirror` forces the MERGE write path regardless of `config.mode` (v0.7.7+).
 - **Fix**: This is intentional. Don't rely on `replace` semantics for Snowflake mirror — Snowflake's mirror doesn't have a swap path.
 
+### Managed-schema permission failures
+- **Cause**: `incremental_strategy: diff` or `state.backend: warehouse` needs drt-owned tables under the connection profile's `managed_schema` (default `_drt`), but the role cannot create/probe/write them.
+- **Fix**: Grant the connector guide's managed-schema permissions, or have an administrator pre-create the schema and feature tables and grant only the documented table privileges. `managed_schema` is on the Postgres/Snowflake/Databricks/BigQuery profile, not under `sync.diff` or project `state`.
+
+### Google Sheets `column mismatch`
+- **Cause**: Sheets is positional: the first batch fixes the column order from the union of keys it sees, and a later batch introduced a new field.
+- **Fix**: Make records structurally consistent or raise `sync.batch_size` so every sparse field appears in the first batch. Missing values for already-known columns are written as empty cells.
+
 ### Slack / webhook delivery failed (silent)
 - **Cause**: Webhook URL returned 4xx but the upstream sync still succeeded; you missed it.
-- **Fix**: Configure failure alerts (`failure_alerts` block in `drt_project.yml`, v0.7.0+ via #414) — Slack / webhook notifications fire when any sync run hits a hard failure.
+- **Fix**: Configure the sync's `alerts.on_failure` channels — Slack / webhook notifications fire when the run hits a hard failure.
 
 ## Tools to escalate to
 
 - `drt test --select <name>` — runs the post-sync validation tests (freshness / unique / accepted_values) declared in the sync YAML; use this when "the sync says success but the data looks wrong".
 - `drt_run_test` MCP tool (v0.7.5+) — same as `drt test` but callable from Claude/Cursor without leaving the chat.
+- `target/drt/run_results.json` — durable per-invocation results even in text output mode. Raw exception text is intentionally omitted; use console/`--output json` for the full error. A preflight failure before sync selection does not produce the artifact, and `--target-path` relocates it.
 - OTel traces (v0.7+, Phase 1+2 shipped) — set `observability.otel.endpoint` in `drt_project.yml` and `pip install drt-core[otel]` to capture spans. Phase 3 engine spans (`drt.sync.run` / `drt.sync.extract` / `drt.sync.load`) shipped v0.7.10 (`pip install drt-core[otel]`).
 
 ## Telemetry

@@ -14,7 +14,7 @@ dlt (load into DWH) → dbt (transform) → drt (activate out of DWH)
 - **Tagline:** "Reverse ETL as code — no UI, no lock-in, no per-row bill."
 - **Install:** `pip install drt-core` or `uv add drt-core`
 - **Package name:** `drt-core` (PyPI) — CLI command is `drt`
-- **Current version:** v1.0.0
+- **Current version:** v1.1.0
 
 ## What drt is NOT
 
@@ -35,12 +35,10 @@ excluded from `drt-core`, not merely unbuilt — see
 - Not an audience/segmentation builder — building the record set to sync is
   a SQL/dbt-modeling problem; drt syncs exactly what the sync config's
   `model` field points it at (raw SQL or a dbt-style reference)
-- Not a gatekept connector catalog, though not yet fully wired: the plugin
-  system discovers third-party `drt.destinations` entry points without
-  drt-hub approval, but a registered type can't be named in sync YAML yet
-  (closed config union — see ADR 0009, follow-up #997). No standing
-  gatekeeping policy exists, unlike a commercial vendor's closed catalog
-  loop
+- Not a gatekept connector catalog: installed `drt.sources` and
+  `drt.destinations` plugins register types that can be named directly in
+  profiles/sync YAML (#997). `drt plugins list` reports every discovered
+  entry point and isolates a broken plugin instead of taking down the CLI.
 
 ## Architecture
 
@@ -72,15 +70,15 @@ my-project/
 
 | Source | Extra | Notes |
 |--------|-------|-------|
-| BigQuery | `drt-core[bigquery]` | Uses ADC or keyfile. Supports `location` (e.g. `"EU"`, `"asia-northeast1"`) |
+| BigQuery | `drt-core[bigquery]` | Uses ADC or keyfile. Supports `location` and `managed_schema` |
 | DuckDB | (core) | Local `.duckdb` file |
 | SQLite | (core) | Built-in `sqlite3`, no extra dependencies. Local `.sqlite` files or `:memory:` |
-| PostgreSQL | `drt-core[postgres]` | Connection string via env |
+| PostgreSQL | `drt-core[postgres]` | Supports `managed_schema` for drt-owned bookkeeping tables |
 | Redshift | `drt-core[redshift]` | PostgreSQL wire protocol via psycopg2. Supports `schema` (search_path). Port defaults to 5439. |
 | ClickHouse | `drt-core[clickhouse]` | HTTP interface via `clickhouse-connect`. Supports host, port, database, user, password_env. |
-| Snowflake | `drt-core[snowflake]` | Supports account, user, private_key_env (key-pair, preferred — #737) / password_env, database, schema, warehouse, role |
+| Snowflake | `drt-core[snowflake]` | Supports account, user, private_key_env (key-pair, preferred — #737) / password_env, database, schema, warehouse, role, managed_schema |
 | MySQL | `drt-core[mysql]` | Uses pymysql. Supports host, port, dbname, user, password_env |
-| Databricks | `drt-core[databricks]` | SQL Warehouse via databricks-sql-connector. Supports Unity Catalog, access_token_env |
+| Databricks | `drt-core[databricks]` | SQL Warehouse via databricks-sql-connector. Supports Unity Catalog, access_token_env, managed_schema |
 | SQL Server | `drt-core[sqlserver]` | Microsoft SQL Server via pure-Python pymssql. Supports host, port, database, user, password_env |
 
 Source is configured in `~/.drt/profiles.yml` (dbt-style):
@@ -122,6 +120,8 @@ default:
 | Email SMTP | `email_smtp` | Send emails via SMTP (plain text or HTML) |
 | Salesforce Bulk API 2.0 | `salesforce_bulk` | Upsert via Bulk API 2.0 with CSV serialization |
 | Snowflake | `snowflake` | INSERT / MERGE upsert. Requires `drt-core[snowflake]` |
+| Databricks | `databricks` | INSERT / MERGE, replace, and mirror into Delta tables. Requires `drt-core[databricks]` |
+| BigQuery | `bigquery` | INSERT / MERGE, load-job replace, and mirror. Requires `drt-core[bigquery]` |
 | Amplitude | `amplitude` | Identify API (user properties) or HTTP V2 API (events). No extra dependencies. |
 
 ## CLI Commands
@@ -141,6 +141,7 @@ drt run --select 'users_*'        # glob selection (#771)
 drt run --select tag:<tag>        # run syncs matching a tag (repeat --select to union)
 drt run --select destination:hubspot  # select by destination type (#771)
 drt run --exclude <name-or-selector>  # subtract from the selection (#771)
+drt run --select state:modified --state <manifest.json>  # run definitions changed since a schema-v3 docs manifest (#772); also works with build/test/validate
 drt run --failed                  # re-run only syncs whose last status != success (#773; record-level replay is `drt retry`)
 drt run --limit 10                # sampled run (#774): extract at most N rows; watermark does NOT advance; refused for mirror/replace
 drt run --fail-fast               # stop scheduling after first failure (#775); remaining syncs report status=skipped; also on drt test
@@ -150,10 +151,12 @@ drt run --cursor-value '2026-01-01 00:00:00'  # override watermark cursor for ba
 drt test                          # run post-sync validation tests
 drt test --select <sync-name>     # test a specific sync
 drt test --store-failures         # sample up to N failing rows/failed test (#779); sync.mask applied
+drt test --unit                   # run unit_tests fixture rows through transforms; no credentials/network (#780)
 drt build                         # run + test per sync in one pass (#777); test failure = sync failed (no rollback); sequential
 drt build --select tag:crm --fail-fast
 drt sources                       # list available source connectors
 drt destinations                  # list available destination connectors
+drt plugins list                  # list installed entry-point plugins and load failures (#297/#997)
 drt status                        # show recent sync results
 drt status --output json          # JSON output for status
 drt mcp run                       # start MCP server (requires drt-core[mcp])
@@ -181,10 +184,20 @@ drt mcp run   # starts stdio MCP server
 |------|-------------|
 | `drt_list_syncs` | Returns all sync definitions (name, model, destination type, mode) |
 | `drt_run_sync(sync_name, dry_run=False)` | Runs a sync; returns success/failed counts and errors |
+| `drt_run_test(sync_name=None, unit=False)` | Runs destination tests, or offline `unit_tests` when `unit=True` |
 | `drt_get_status(sync_name=None)` | Returns last run result(s); omit sync_name for all |
+| `drt_state_show(sync_name=None)` | Returns stored watermark and last-run state |
+| `drt_state_reset(...)` | Explicitly resets watermark, run, and/or tracked-mirror state |
+| `drt_get_history(sync_name=None, limit=20)` | Returns past execution entries |
 | `drt_validate()` | Validates all sync YAMLs; returns valid list and errors dict |
 | `drt_get_schema(schema_type="sync")` | Returns JSON Schema for "sync" or "project" config |
 | `drt_list_connectors()` | Lists all available sources and destinations |
+| `drt_dlq(sync_name=None)` | Inspects failed records persisted for replay |
+| `drt_retry(sync_name, ...)` | Replays or clears a sync's DLQ |
+| `drt_get_manifest(...)` | Returns the machine-readable docs/lineage manifest |
+| `drt_list_profiles()` | Lists credential profile names and source types without secrets |
+| `drt_test_profile(name)` | Tests a source profile connection |
+| `drt_doctor()` | Returns structured environment diagnostics |
 
 The MCP server reads from the current working directory (the drt project root).
 
@@ -235,7 +248,7 @@ The v0.4 API also includes:
 
 ## AI Skills for Claude Code
 
-Four skills available via the Claude Code plugin marketplace:
+Five skills available via the Claude Code plugin marketplace:
 
 ```bash
 /plugin marketplace add drt-hub/drt
@@ -248,6 +261,7 @@ Four skills available via the Claude Code plugin marketplace:
 | `drt-debug` | `skills/drt/skills/drt-debug/SKILL.md` | Diagnose and fix failing syncs |
 | `drt-init` | `skills/drt/skills/drt-init/SKILL.md` | Guide through project initialization |
 | `drt-migrate` | `skills/drt/skills/drt-migrate/SKILL.md` | Migrate from Census/Hightouch to drt |
+| `drt-troubleshoot` | `skills/drt/skills/drt-troubleshoot/SKILL.md` | Walk a setup through end-to-end diagnosis |
 
 Slash command versions also available in `.claude/commands/` for manual installation.
 
@@ -269,23 +283,65 @@ Slash command versions also available in `.claude/commands/` for manual installa
 - **Overlap window** (#759): `sync.watermark.lag` re-reads a window behind the stored watermark (`"1 hour"` for timestamp cursors — same grammar as `freshness.max_age` — or a positive int for numeric cursors) so late-arriving rows are re-synced. Applies only to storage-sourced watermarks (never `--cursor-value` or `default_value`), and the persisted watermark itself is never lagged. Overlap rows are re-sent every run, so the destination must tolerate duplicates (e.g. `upsert_key`).
 - **REST API source** (#767): set `incremental: {start_param: updated_since}` on the `rest_api` profile — the engine hands the watermark to the source, which sends it as a request query param so the API filters server-side. Without `start_param`, `mode: incremental` re-extracts the full endpoint every run (warning logged).
 
+**Snapshot-diff incremental** (#755): For a model without a reliable cursor, set
+`sync.mode: upsert` (or `mirror`), `sync.incremental_strategy: diff`, and a
+destination `upsert_key`. Postgres, Snowflake, Databricks, and BigQuery sources
+materialize the full model under the profile's `managed_schema`, compare it to
+the last successful baseline in warehouse SQL, and send only added/changed
+rows. `sync.diff.hash_columns` is `all` by default or an explicit non-empty
+column list. Removed keys can drive `sync.mirror.strategy: diff`. The baseline
+advances only after a successful, non-dry-run, unlimited run; `--limit` never
+promotes it. This opt-in strategy needs source-warehouse write privileges and
+same-sync runs must not overlap.
+
 **Upsert mode**: Semantic alias for `mode: full` when `upsert_key` is set. Makes YAML intent explicit.
 - Set `sync.mode: upsert` — behaves identically to `mode: full`
 
-**Replace mode**: TRUNCATE the destination table, then INSERT all rows (full table refresh).
+**Replace mode**: Rebuild the destination table from the full source snapshot.
 - Set `sync.mode: replace`
 - `upsert_key` is not required (no conflict resolution needed)
 - Useful for junction/mapping tables where deleted source rows must be removed from destination
-- PostgreSQL/MySQL: wrapped in a transaction for safety
-- ClickHouse: `TRUNCATE TABLE` then INSERT
+- Supported by Postgres, MySQL, ClickHouse, Snowflake, Databricks, and
+  BigQuery. BigQuery uses load/copy jobs rather than `TRUNCATE TABLE`.
+- `replace_strategy: swap` uses a staging/shadow table for an atomic cutover
+  on supported warehouse destinations.
 
 **Mirror mode** (#340 — v0.7.7): Upsert every source row, then DELETE destination rows whose `upsert_key` tuple was not observed in the source — application-side differential delete. Lighter than `replace` (no TRUNCATE / re-insert), heavier than `upsert` (extra DELETE pass).
 - Set `sync.mode: mirror`
 - `destination.upsert_key` is **required** (used to identify which rows to DELETE)
-- Supported destinations: Postgres (#596), MySQL (#597), ClickHouse (#598, via `ALTER TABLE ... DELETE` mutation), Snowflake (#599), Databricks (v0.7.9).
-- **`sync.mirror` tuning (v0.7.10; expanded v0.8.4 — Postgres, MySQL, Snowflake, ClickHouse, Databricks):** `strategy: tracked` (#686) deletes only rows drt itself previously synced — state kept per sync in a drt-managed `_drt_synced_keys` table in the destination; first run baselines without deleting, lost state re-baselines with a WARN. Safe when the application also writes to the table. `scope: [parent_id]` (#687) restricts deletes to rows whose scope-column values appeared in this run's source (stateless fit for parent+child regeneration). Tracked strategy and scope can be combined on all five mirror destinations.
+- Supported destinations: Postgres, MySQL, ClickHouse, Snowflake,
+  Databricks, and BigQuery.
+- **`strategy: destination` (default):** compares with the destination and is
+  correct when drt owns the whole target. `scope: [parent_id]` can narrow
+  deletes to parents observed in this run.
+- **`strategy: tracked`:** deletes only rows drt previously synced, using
+  `_drt_synced_keys`; safe for co-written tables. It can be combined with
+  `scope` on Postgres, MySQL, Snowflake, ClickHouse, and Databricks, but is
+  unsupported on BigQuery.
+- **`strategy: diff`:** deletes exactly the removal keys produced by
+  `incremental_strategy: diff`; supported on every mirror-capable SQL
+  destination. It requires that incremental strategy and rejects `scope`
+  because the source removal set is already exact.
 - Safety: if the source produces no batches with records, the DELETE is skipped — a transient empty source can't wipe the destination
-- Memory-bound to source key cardinality; for tables larger than a few million rows, the temp-table strategy is a planned follow-up
+
+### Managed bookkeeping and shared state
+
+Postgres, Snowflake, Databricks, and BigQuery source profiles expose
+`managed_schema` (default `_drt`). It is a schema/dataset owned by drt for
+opt-in bookkeeping such as snapshot-diff baselines and warehouse-backed
+state; it does not change how `model:` SQL resolves tables. Operators may let
+drt create its tables or pre-provision them and grant only table-level access.
+
+At project level, `state.backend: warehouse` plus `connection_profile` stores
+run state, history, and the DLQ as `_drt_runs`, `_drt_history`, and `_drt_dlq`
+under that profile's `managed_schema`. All four warehouses above are
+supported. Postgres additionally supports `state.idempotency` and
+`state.audit_trail`; those two capabilities fail loudly on the other three.
+
+Secrets can remain outside env vars: any `*_env` field can name an
+`aws-sm://`, `gcp-sm://`, or `vault://` provider URI (with the matching
+optional extra). Resolution order is explicit YAML, environment, local
+secrets file, then provider URI.
 
 ### Model Reference
 

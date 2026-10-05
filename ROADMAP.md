@@ -213,11 +213,11 @@ No breaking changes — drop-in upgrade from v0.10.0.
 
 ---
 
-## v1.1 — Warehouse parity
+## v1.1 — Warehouse parity ✅ Shipped 2026-10-06
 
 **Theme: every capability that shipped Postgres-first in v1.0 reaches the other warehouses.** v1.0 landed ADR 0005's warehouse-write track (managed-table primitive, warehouse state, diff-based incremental) by proving each piece live against one dialect at a time, because a mock cursor cannot prove SQL validity (#908, #1175). v1.1 finishes the matrix, one live-verified dialect per landing, instead of adding new engine surface.
 
-**Status: shipped in development — all milestone issues are closed; release pending.**
+Released as **v1.1.0** on 2026-10-06. See [CHANGELOG.md](CHANGELOG.md#110---2026-10-06) and the [GitHub Release](https://github.com/drt-hub/drt/releases/tag/v1.1.0) for the full feature list.
 
 | Capability | Postgres | Snowflake | Databricks | BigQuery |
 |---|---|---|---|---|

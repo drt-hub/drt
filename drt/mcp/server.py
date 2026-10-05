@@ -69,7 +69,9 @@ def create_server(project_dir: Path | None = None) -> Any:
         instructions=(
             "drt is a Reverse ETL CLI tool. "
             "Use these tools to list, run, validate, and monitor data syncs "
-            "from a data warehouse to external services."
+            "from a data warehouse to external services. Sync configuration "
+            "supports cursor or warehouse snapshot-diff incremental delivery, "
+            "replace/mirror modes, and local, object-store, or warehouse state."
         ),
     )
 
@@ -111,6 +113,10 @@ def create_server(project_dir: Path | None = None) -> Any:
                 record-level diff (added / updated / deleted / unchanged)
                 against the destination. Queryable destinations get a true
                 diff; non-queryable destinations get a sample preview.
+                Missing fields keep write semantics: partial upserts preserve
+                them, replace reports ``<default>``, and append-only writes
+                report INSERT. Snapshot-diff mirror previews use the exact
+                removed-key set without a destination delete scan.
                 Mirrors ``drt run --dry-run --diff`` (v0.7.1+).
             diff_limit: Cap on records per diff category (default 20).
             cursor_value: Override the incremental watermark for a bounded
@@ -126,8 +132,9 @@ def create_server(project_dir: Path | None = None) -> Any:
                 and read its warning before doing so.
             limit: Extract at most N rows — a sampled run for safe first
                 sends (mirrors ``drt run --limit``, #774). Watermarks do not
-                advance; rejected for ``mode: mirror``/``replace`` syncs,
-                where a sample would delete or replace real rows.
+                advance, and neither does an ``incremental_strategy: diff``
+                snapshot baseline; rejected for ``mode: mirror``/``replace``
+                syncs, where a sample would delete or replace real rows.
             vars: Override project vars for this run, e.g.
                 ``{"lookback_days": 1, "tag": "crm"}`` (mirrors
                 ``drt run --vars``, already parsed — no string form needed
@@ -174,7 +181,7 @@ def create_server(project_dir: Path | None = None) -> Any:
         Args:
             sync_name: Restrict to one sync. If omitted, runs tests for
                 every sync that has tests defined.
-            unit: Run `sync.unit_tests` instead of `sync.tests` (#780) —
+            unit: Run top-level `unit_tests` instead of top-level `tests` (#780) —
                 fixture rows through the transform pipeline, zero
                 credentials, zero network. No destination is touched, so a
                 sync with `destination.lookups` configured reports a failed
@@ -250,6 +257,9 @@ def create_server(project_dir: Path | None = None) -> Any:
     @mcp.tool()
     def drt_state_show(sync_name: str | None = None) -> dict[str, Any]:
         """Show drt's stored state for a sync (watermark + last run).
+
+        Project state may be local, GCS/S3-backed, or warehouse-backed through
+        a Postgres, Snowflake, Databricks, or BigQuery connection profile.
 
         Args:
             sync_name: Sync to inspect. If omitted, returns all syncs.
@@ -329,8 +339,10 @@ def create_server(project_dir: Path | None = None) -> Any:
 
         Args:
             check_connection: Also test connectivity to SQL destinations
-                (Postgres, MySQL, ClickHouse, Snowflake). Adds a
-                'connection_tests' dict keyed by sync name.
+                and every other destination implementing the optional
+                ConnectionTestable capability. Adds a 'connection_tests'
+                dict keyed by sync name; unsupported destinations are marked
+                skipped rather than failed.
             strict: Treat hardcoded-secret warnings as validation errors —
                 a sync with a warning moves from 'valid' into 'errors' and
                 its messages appear there instead of in 'warnings'.
@@ -358,6 +370,9 @@ def create_server(project_dir: Path | None = None) -> Any:
     def drt_get_schema(schema_type: str = "sync") -> dict[str, Any]:
         """Return the JSON Schema for drt configuration files.
 
+        The sync schema reflects installed connector plugins that registered
+        a YAML-usable destination type before this call.
+
         Args:
             schema_type: "sync" for sync YAML schema, "project" for
                          drt_project.yml schema.
@@ -373,7 +388,13 @@ def create_server(project_dir: Path | None = None) -> Any:
 
     @mcp.tool()
     def drt_list_connectors() -> dict[str, list[dict[str, str]]]:
-        """List all available source and destination connectors.
+        """List drt-core's built-in source and destination connector inventory.
+
+        Installed entry-point connectors are loaded and usable by normal MCP
+        sync parsing, but this inventory remains the built-in installation
+        catalog. Use CLI ``drt plugins list --format json`` to inspect plugin
+        package/version/load status and failures; there is no plugin-status MCP
+        tool.
 
         Returns:
             Dict with 'sources' and 'destinations' lists, each containing

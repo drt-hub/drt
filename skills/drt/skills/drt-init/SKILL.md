@@ -62,6 +62,13 @@ Guide the user through initializing a new drt project.
    - **DuckDB / SQLite**: nothing — file path only
    - **REST API source**: set the bearer token env var the profile references (e.g. `export REST_API_TOKEN=...`)
 
+   For deployed environments, an `*_env` field may contain an `aws-sm://`,
+   `gcp-sm://`, or `vault://` provider URI instead of an env-var name; install
+   the matching optional extra. For Postgres, Snowflake, Databricks, and
+   BigQuery, keep `managed_schema: _drt` (default) or choose an isolated
+   schema/dataset if snapshot-diff incremental or warehouse-backed state will
+   be used. This is drt bookkeeping space, not the query's default schema.
+
    Both `drt init` flows already write a profile to `~/.drt/profiles.yml`. To add
    another later (a second warehouse, a prod/dev split) without re-running init:
    ```bash
@@ -76,6 +83,7 @@ Guide the user through initializing a new drt project.
    drt doctor                # env-level triage — catches missing env vars, malformed profile, etc.
    drt validate              # YAML schema check
    drt list                  # confirm syncs are discovered
+   drt plugins list          # installed entry-point extensions + isolated load failures
    ```
    `drt doctor` and `drt validate` inspect configuration; only `drt profile test`
    proves the warehouse accepts the credential. Run it before the first sync so a
@@ -89,8 +97,12 @@ Guide the user through initializing a new drt project.
 - Put each sync in a separate `syncs/<name>.yml` file (sync discovery is glob-based).
 - `drt sources --detailed` and `drt destinations --detailed` print every connector's required env vars and a sample YAML stanza — useful when hand-authoring beyond the templates.
 - `drt run --dry-run` runs through the engine without writing data; `--dry-run --diff` previews record-level changes for queryable destinations. `drt run --limit 10` (#774) really loads at most 10 rows for a safe first send (watermark won't advance; refused for `mode: mirror` / `replace`).
+- A project that needs shared, SQL-queryable state can set `state: {backend: warehouse, connection_profile: <profile>}`. Postgres, Snowflake, Databricks, and BigQuery store `_drt_runs`, `_drt_history`, and `_drt_dlq` under that profile's `managed_schema`; this is separate from `sync.watermark.storage`.
 - `drt build` (#777) runs each sync and then its `tests:` in one pass — the `dbt build` shape; `drt build --select tag:crm --fail-fast` stops at the first failure.
+- `drt test --unit` runs top-level `unit_tests:` fixture rows through computed fields, mappings, masking, and metadata without source/destination credentials.
 - `drt status` shows recent run results; `drt status --output json` is the CI-friendly form.
+- Every `drt run` that resolves syncs also writes `target/drt/run_results.json`; `--target-path` relocates it for CI artifact upload.
+- PR CI can generate a schema-v3 manifest and run only changed definitions with `--select state:modified --state <manifest.json>` (also valid on build/test/validate).
 - `drt docs generate` (v0.7.11+) renders a static HTML catalog of your project — every sync, its model, destination, and a lineage DAG — to `target/docs/`. Labels are docs-safe by default (endpoints/emails/phones stripped, #696); add `--format mermaid` or `--format json` for other outputs.
 - For non-US BigQuery datasets, set `location` in `profiles.yml` (e.g. `"EU"`, `"asia-northeast1"`).
 - Want to try drt without installing locally? Open the repo in GitHub Codespaces — the devcontainer ships drt + a seeded DuckDB warehouse + the `duckdb_to_rest` template pre-scaffolded.
