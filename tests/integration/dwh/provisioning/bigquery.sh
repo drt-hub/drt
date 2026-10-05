@@ -55,7 +55,7 @@ gcloud projects add-iam-policy-binding "${PROJECT}" \
   --condition=None >/dev/null
 
 # ... plus dataEditor scoped to the smoke dataset only (create/insert/drop the
-# target + <table>_drt_tmp). Avoid project-wide dataEditor.
+# target + <table>_drt_tmp_<run-id>). Avoid project-wide dataEditor.
 bq update --dataset \
   --source <(bq show --format=prettyjson "${PROJECT}:${DATASET}" \
     | python3 -c "import json,sys;d=json.load(sys.stdin);d.setdefault('access',[]).append({'role':'WRITER','userByEmail':'${SA_EMAIL}'});print(json.dumps(d))") \

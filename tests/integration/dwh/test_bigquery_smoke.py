@@ -87,14 +87,13 @@ def test_bigquery_merge_roundtrip(tmp_path: Path) -> None:
     """MERGE mode upserts via a temp table + cleans it up (#645).
 
     Drives the second BigQuery write path (``mode: merge``) end-to-end: the
-    engine loads the batch into ``<table>_drt_tmp`` (``load_table_from_json``),
+    engine loads the batch into ``<table>_drt_tmp_<run-id>``
+    (``load_table_from_json``),
     runs one ``MERGE INTO target USING tmp`` (UPDATE matched / INSERT unmatched),
     then drops the temp table. The target is pre-seeded with a stale ``id=1`` row
     so the run exercises both MERGE branches (UPDATE id=1, INSERT id=2,3), and we
-    assert the ``_drt_tmp`` staging table no longer exists afterwards.
+    assert no per-run ``_drt_tmp_`` staging table remains afterwards.
     """
-    from google.cloud.exceptions import NotFound
-
     creds = require_env(
         "DRT_SMOKE_BIGQUERY_PROJECT",
         "DRT_SMOKE_BIGQUERY_DATASET",
@@ -106,8 +105,8 @@ def test_bigquery_merge_roundtrip(tmp_path: Path) -> None:
     dataset = creds["DRT_SMOKE_BIGQUERY_DATASET"]
     keyfile = creds["DRT_SMOKE_BIGQUERY_KEYFILE"]
     fqn = f"`{project}`.`{dataset}`.`{table}`"
-    # Matches the destination's temp-table naming: f"{project}.{dataset}.{table}_drt_tmp".
-    tmp_table_id = f"{project}.{dataset}.{table}_drt_tmp"
+    dataset_id = f"{project}.{dataset}"
+    tmp_prefix = f"{table}_drt_tmp_"
 
     dest = BigQueryDestinationConfig(
         **{
@@ -150,12 +149,16 @@ def test_bigquery_merge_roundtrip(tmp_path: Path) -> None:
             3: "Carol",
         }, f"expected id=1 UPDATED to Alice + id=2,3 INSERTed, got {by_id}"
 
-        # Temp staging table must be dropped (#645).
-        with pytest.raises(NotFound):
-            client.get_table(tmp_table_id)
+        # Every execution-unique temp staging table must be dropped (#645/#1134).
+        assert not any(
+            candidate.table_id.startswith(tmp_prefix)
+            for candidate in client.list_tables(dataset_id)
+        )
     finally:
         client.query(f"DROP TABLE IF EXISTS {fqn}").result()
-        client.query(f"DROP TABLE IF EXISTS `{tmp_table_id}`").result()
+        for candidate in client.list_tables(dataset_id):
+            if candidate.table_id.startswith(tmp_prefix):
+                client.delete_table(f"{dataset_id}.{candidate.table_id}", not_found_ok=True)
 
 
 def test_bigquery_connection() -> None:

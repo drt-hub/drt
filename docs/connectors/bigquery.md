@@ -93,27 +93,40 @@ destination:
   ...
 ```
 
-drt loads the batch into a temp table `<table>_drt_tmp` (`load_table_from_json`), runs a single
+drt partitions each batch into contiguous runs whose records have the same
+exact key set. For each run it loads only that run's fields into the
+execution-unique temp table `<table>_drt_tmp_<run-id>`
+(`load_table_from_json`) and runs
 
 ```sql
 MERGE `project.dataset.table` T
-USING `project.dataset.table_drt_tmp` S
+USING `project.dataset.table_drt_tmp_a1b2c3d4` S
 ON T.user_id = S.user_id
 WHEN MATCHED THEN UPDATE SET <non-key columns>
 WHEN NOT MATCHED THEN INSERT (...) VALUES (...)
 ```
 
-then drops the temp table. When the target exists and contains every batch
-column, drt supplies those target fields as the temp-table load schema instead
-of relying on autodetect. This preserves types for all-`NULL` columns (which
-BigQuery otherwise detects as `STRING`). A missing target or a batch column not
-yet present in the target retains BigQuery's existing autodetect behavior.
+before loading the next signature run into the same temp table. A field omitted
+from a record is therefore absent from that run's UPDATE and INSERT lists: an
+UPDATE leaves the existing target value alone, and an INSERT lets the target's
+normal omitted-column behavior apply. A field present with an explicit `null`
+remains part of the run and writes SQL `NULL`.
+
+When the target exists and contains every run column, drt supplies those target
+fields as the temp-table load schema instead of relying on autodetect. This
+preserves types for all-`NULL` columns (which BigQuery otherwise detects as
+`STRING`). A missing target or a run column not yet present in the target
+retains BigQuery's existing autodetect behavior. The per-run-id suffix prevents
+overlapping sync executions against one target from sharing staging data.
 Composite keys are supported (`upsert_key: [tenant_id, user_id]` → AND-joined
 `ON`). When every column is in `upsert_key`, the `WHEN MATCHED` UPDATE is
-skipped (effectively insert-if-not-exists). Because BigQuery load + MERGE are
-**job-level** operations, merge error handling is **batch-level** (the whole
-batch succeeds or fails) — coarser than the per-row staging used by the
-Snowflake / Databricks destinations.
+skipped (effectively insert-if-not-exists). Because each BigQuery load + MERGE
+pair is independently committed, error handling is **signature-run-level**. On
+`on_error: skip`, every record in a failed run gets a `RowError` at its original
+batch index and later runs continue. On `on_error: fail`, processing stops, but
+earlier completed runs cannot be rolled back and remain committed. This is
+coarser than the per-row staging used by the Snowflake / Databricks
+destinations.
 
 ## Sync modes
 
@@ -166,14 +179,16 @@ sync:
   mode: mirror
 ```
 
-Each source batch is loaded to `<table>_drt_tmp`. On the first batch, drt creates
+Each source batch is split into the same signature-scoped
+`<table>_drt_tmp_<run-id>` load/MERGE jobs described above. Before those jobs,
+drt stages the whole batch's keys exactly once, so sparse signature runs cannot
+leave mirror deletion with an incomplete observed-key set. On the first batch, drt creates
 an empty `<table>__drt_mirror_keys_<run-id>` table by selecting the configured
 key and scope columns from the target with `WHERE FALSE`, then loads each
-batch's observed key/scope values into that typed table before the existing
-MERGE runs. One target-schema lookup per batch supplies explicit types to both
-the MERGE temp load and mirror-key load, avoiding BigQuery autodetect choosing
-`STRING` when a nullable target column is all `NULL`. After all batches, drt
-issues one anti-join delete:
+batch's observed key/scope values into that typed table. One target-schema
+lookup per batch supplies explicit types to every signature temp load and the
+mirror-key load, avoiding BigQuery autodetect choosing `STRING` when a nullable
+target column is all `NULL`. After all batches, drt issues one anti-join delete:
 
 ```sql
 DELETE FROM `project.dataset.table` AS T

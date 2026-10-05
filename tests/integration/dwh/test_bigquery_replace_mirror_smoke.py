@@ -63,8 +63,11 @@ def _table_id(creds: dict[str, str], table: str) -> str:
 def _drop_scratch(client: Any, table_id: str) -> None:
     dataset_id, table = table_id.rsplit(".", 1)
     client.delete_table(table_id, not_found_ok=True)
-    client.delete_table(f"{table_id}_drt_tmp", not_found_ok=True)
-    scratch_prefixes = (f"{table}__drt_swap_", f"{table}__drt_mirror_keys_")
+    scratch_prefixes = (
+        f"{table}_drt_tmp_",
+        f"{table}__drt_swap_",
+        f"{table}__drt_mirror_keys_",
+    )
     for scratch in client.list_tables(dataset_id):
         if scratch.table_id.startswith(scratch_prefixes):
             client.delete_table(f"{dataset_id}.{scratch.table_id}", not_found_ok=True)

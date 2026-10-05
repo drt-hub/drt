@@ -129,12 +129,14 @@ BigQuery prerequisites (#673):
 - A **billing-enabled** project (BigQuery jobs require an active billing account,
   even for tiny throwaway tables).
 - **Service-account keyfile** auth. The BigQuery leg drives two write paths — the
-  streaming `insert` path and the temp-table `MERGE` path (`<table>_drt_tmp` →
-  `MERGE` → drop, #645) — both against a throwaway dataset.
+  streaming `insert` path and the temp-table `MERGE` path
+  (`<table>_drt_tmp_<run-id>` → `MERGE` → drop, #645/#1134) — both against a
+  throwaway dataset.
 - Least-privilege roles for the service account: `roles/bigquery.jobUser` on the
   project (to run load/query/MERGE jobs) **plus** dataset-scoped
   `roles/bigquery.dataEditor` on the smoke dataset (to create/insert/drop the
-  target + `_drt_tmp` tables). Avoid granting project-wide `dataEditor`.
+  target + `_drt_tmp_<run-id>` tables). Avoid granting project-wide
+  `dataEditor`.
 - Legs that create their own throwaway datasets (managed table, warehouse state)
   additionally need a **create-only** project-level custom role
   (`drtSmokeDatasetCreator`, containing just `bigquery.datasets.create`);
