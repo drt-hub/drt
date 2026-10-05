@@ -134,13 +134,14 @@ sync:
 ```
 
 On the first batch, drt copies the target to
-`<table>__drt_swap` in the same dataset, truncates that shadow (which has no
+`<table>__drt_swap_<run-id>` in the same dataset, truncates that shadow (which has no
 streaming buffer), and appends every batch via load jobs. At end of sync, one
 BigQuery copy job with `WRITE_TRUNCATE` atomically overwrites the target, and
 the shadow is dropped in a `finally` cleanup. BigQuery has no atomic table
 rename, so this copy-job cutover is the atomic option. The target must already
 exist; seeding the shadow from it preserves its schema, partitioning, and
-clustering for the replacement.
+clustering for the replacement. The per-run suffix prevents overlapping runs
+against the same target from sharing a shadow table.
 
 ### Mirror details
 
@@ -155,15 +156,19 @@ sync:
   mode: mirror
 ```
 
-Each source batch is loaded to `<table>_drt_tmp`, and its keys are copied into
-`<table>__drt_mirror_keys` before the existing MERGE runs. After all batches,
-drt issues one anti-join delete:
+Each source batch is loaded to `<table>_drt_tmp`. On the first batch, drt creates
+an empty `<table>__drt_mirror_keys_<run-id>` table by selecting the configured
+key and scope columns from the target with `WHERE FALSE`, then loads each
+batch's observed key/scope values into that typed table before the existing
+MERGE runs. Copying the target column types avoids BigQuery autodetect choosing
+`STRING` when a nullable scope column is all `NULL` in the first batch. After
+all batches, drt issues one anti-join delete:
 
 ```sql
 DELETE FROM `project.dataset.table` AS T
 WHERE NOT EXISTS (
   SELECT 1
-  FROM `project.dataset.table__drt_mirror_keys` AS K
+  FROM `project.dataset.table__drt_mirror_keys_a1b2c3d4` AS K
   WHERE T.user_id = K.user_id
 )
 ```
@@ -174,6 +179,11 @@ backtick-quoted identifiers. Composite keys and `sync.mirror.scope` are
 supported. An empty source does not delete anything. `mirror.strategy:
 tracked` is not yet supported; `mirror.strategy: diff` also fails fast for now
 (the BigQuery diff source exists, but the destination does not yet consume its removed keys).
+An interrupted run also skips the anti-join delete because its staged keys
+cover only a processed prefix; the unconditional write-state reset drops that
+run's key table. The per-run suffix keeps overlapping invocations isolated.
+Mirror mode rejects partition-decorated targets such as `events$20261005`;
+target the base table instead.
 
 Both MERGE and mirror use query-job DML. Rows previously written with the
 legacy streaming insert API can remain in BigQuery's streaming buffer and be

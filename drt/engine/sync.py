@@ -620,6 +620,10 @@ def _run_sync_body(
     # inside the engine boundary.
     _check_mode_supported(sync.sync.mode, destination)
     _check_match_policy_supported(sync.sync.match_policy, destination)
+    # SyncOptions can be reused across invocations. Reset the private
+    # finalize-time signal before extraction, then flip it only when the
+    # cooperative stop path actually truncates the source stream.
+    sync.sync._interrupted = False
 
     # Load last cursor value for incremental syncs (fallback chain)
     cursor_field = sync.sync.cursor_field if sync.sync.mode == "incremental" else None
@@ -876,6 +880,7 @@ def _run_sync_body(
             # stays consistent because the loop body never starts on this batch.
             if stop_event is not None and stop_event.is_set():
                 total_result.interrupted = True
+                sync.sync._interrupted = True
                 observer.on_interrupted(sync.name, batches_processed)
                 break
 

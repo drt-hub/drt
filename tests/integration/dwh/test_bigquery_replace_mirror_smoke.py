@@ -61,8 +61,13 @@ def _table_id(creds: dict[str, str], table: str) -> str:
 
 
 def _drop_scratch(client: Any, table_id: str) -> None:
-    for suffix in ("", "__drt_swap", "__drt_mirror_keys", "_drt_tmp"):
-        client.delete_table(f"{table_id}{suffix}", not_found_ok=True)
+    dataset_id, table = table_id.rsplit(".", 1)
+    client.delete_table(table_id, not_found_ok=True)
+    client.delete_table(f"{table_id}_drt_tmp", not_found_ok=True)
+    scratch_prefixes = (f"{table}__drt_swap_", f"{table}__drt_mirror_keys_")
+    for scratch in client.list_tables(dataset_id):
+        if scratch.table_id.startswith(scratch_prefixes):
+            client.delete_table(f"{dataset_id}.{scratch.table_id}", not_found_ok=True)
 
 
 @pytest.mark.parametrize("strategy", ["truncate", "swap"])
@@ -145,8 +150,8 @@ def test_bigquery_mirror_null_scope_deletes_only_within_null_scope(tmp_path: Pat
     conn = duckdb.connect(profile.database)
     try:
         conn.execute("ALTER TABLE users ADD COLUMN parent_id INTEGER")
-        # Mixed NULL / non-NULL: an all-NULL column would be autodetected as
-        # STRING by the temp-table load job (pre-existing behaviour, all modes).
+        # ids 1/2 form an all-NULL first batch; id 3 carries INT64 in batch 2.
+        # The mirror key table must retain the target's INT64 scope type.
         conn.execute("UPDATE users SET parent_id = 7 WHERE id = 3")
     finally:
         conn.close()
@@ -160,7 +165,7 @@ def test_bigquery_mirror_null_scope_deletes_only_within_null_scope(tmp_path: Pat
         name=unique_table("bigquery_mirror_null_scope"),
         model="ref('users')",
         destination=destination,
-        sync=SyncOptions(mode="mirror", mirror={"scope": ["parent_id"]}),
+        sync=SyncOptions(mode="mirror", mirror={"scope": ["parent_id"]}, batch_size=2),
     )
 
     try:

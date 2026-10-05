@@ -407,6 +407,12 @@ class SyncOptions(BaseModel):
     # dialect's duck-typed hook would otherwise have to accept unchanged.
     _diff_removed_keys: list[dict[str, Any]] | None = PrivateAttr(default=None)
 
+    # Cooperative-shutdown signal, injected by the engine for the duration of
+    # one run. Destinations whose finalize hook can perform destructive work
+    # use it to distinguish a complete source snapshot from the processed
+    # prefix without changing the frozen hook signatures.
+    _interrupted: bool = PrivateAttr(default=False)
+
     @model_validator(mode="after")
     def _check_incremental_cursor(self) -> SyncOptions:
         if self.mode == "incremental" and not self.cursor_field:

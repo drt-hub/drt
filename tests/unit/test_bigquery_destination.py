@@ -11,6 +11,7 @@ contribution.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,15 @@ from drt.sources.base import SnapshotDiffResult
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _stable_scratch_run_id() -> Iterator[None]:
+    """Keep scratch-table assertions deterministic without importing GCP."""
+    token = MagicMock()
+    token.hex = "a1b2c3d4ffffffffffffffffffffffff"
+    with patch("drt.destinations.bigquery.uuid4", return_value=token):
+        yield
 
 
 def _options(**kwargs: Any) -> SyncOptions:
@@ -471,21 +481,21 @@ class TestBigQueryReplaceMode:
 
         assert result is not None
         assert [c.args[1] for c in client.load_table_from_json.call_args_list] == [
-            "my-proj.analytics.user_scores__drt_swap",
-            "my-proj.analytics.user_scores__drt_swap",
+            "my-proj.analytics.user_scores__drt_swap_a1b2c3d4",
+            "my-proj.analytics.user_scores__drt_swap_a1b2c3d4",
         ]
         assert [c.args for c in client.copy_table.call_args_list] == [
             (
                 "my-proj.analytics.user_scores",
-                "my-proj.analytics.user_scores__drt_swap",
+                "my-proj.analytics.user_scores__drt_swap_a1b2c3d4",
             ),
             (
-                "my-proj.analytics.user_scores__drt_swap",
+                "my-proj.analytics.user_scores__drt_swap_a1b2c3d4",
                 "my-proj.analytics.user_scores",
             ),
         ]
         assert any(
-            sql == "TRUNCATE TABLE `my-proj.analytics.user_scores__drt_swap`"
+            sql == "TRUNCATE TABLE `my-proj.analytics.user_scores__drt_swap_a1b2c3d4`"
             for sql in _sqls(client)
         )
         bq = modules["google.cloud.bigquery"]
@@ -500,7 +510,7 @@ class TestBigQueryReplaceMode:
             ),
         ]
         client.delete_table.assert_called_with(
-            "my-proj.analytics.user_scores__drt_swap", not_found_ok=True
+            "my-proj.analytics.user_scores__drt_swap_a1b2c3d4", not_found_ok=True
         )
         assert dest._swap_shadow_created is False
 
@@ -518,7 +528,7 @@ class TestBigQueryReplaceMode:
             with pytest.raises(RuntimeError, match="copy boom"):
                 dest.finalize_sync(_config(), opts)
         client.delete_table.assert_called_with(
-            "my-proj.analytics.user_scores__drt_swap", not_found_ok=True
+            "my-proj.analytics.user_scores__drt_swap_a1b2c3d4", not_found_ok=True
         )
         assert dest._swap_table_id is None
 
@@ -532,7 +542,7 @@ class TestBigQueryReplaceMode:
             with pytest.raises(RuntimeError, match="load boom"):
                 dest.load([{"id": 1}], _config(), opts)
         client.delete_table.assert_called_once_with(
-            "my-proj.analytics.user_scores__drt_swap", not_found_ok=True
+            "my-proj.analytics.user_scores__drt_swap_a1b2c3d4", not_found_ok=True
         )
         assert dest._swap_shadow_created is False
 
@@ -554,7 +564,7 @@ class TestBigQueryReplaceMode:
         dest._replace_started = True
         dest._swap_shadow_created = True
         dest._swap_table_id = "my-proj.analytics.user_scores"
-        dest._mirror_keys_table_id = "my-proj.analytics.user_scores__drt_mirror_keys"
+        dest._mirror_keys_table_id = "my-proj.analytics.user_scores__drt_mirror_keys_a1b2c3d4"
         dest._mirror_aborted = True
 
         with patch.dict("sys.modules", modules):
@@ -562,9 +572,9 @@ class TestBigQueryReplaceMode:
 
         client.delete_table.assert_has_calls(
             [
-                call("my-proj.analytics.user_scores__drt_swap", not_found_ok=True),
+                call("my-proj.analytics.user_scores__drt_swap_a1b2c3d4", not_found_ok=True),
                 call(
-                    "my-proj.analytics.user_scores__drt_mirror_keys",
+                    "my-proj.analytics.user_scores__drt_mirror_keys_a1b2c3d4",
                     not_found_ok=True,
                 ),
             ]
@@ -582,7 +592,7 @@ class TestBigQueryReplaceMode:
         dest = BigQueryDestination()
         dest._swap_shadow_created = True
         dest._swap_table_id = "my-proj.analytics.user_scores"
-        dest._mirror_keys_table_id = "my-proj.analytics.user_scores__drt_mirror_keys"
+        dest._mirror_keys_table_id = "my-proj.analytics.user_scores__drt_mirror_keys_a1b2c3d4"
 
         with patch.dict("sys.modules", modules):
             with pytest.raises(RuntimeError, match="drop swap"):
@@ -610,6 +620,21 @@ class TestBigQueryReplaceMode:
             dest.reset_write_state(_config(), _options())
         build.assert_not_called()
 
+    def test_scratch_ids_are_unique_per_instance_and_rotate_on_reset(self) -> None:
+        tokens = []
+        for value in ("11111111", "22222222", "33333333"):
+            token = MagicMock()
+            token.hex = f"{value}ffffffffffffffffffffffff"
+            tokens.append(token)
+
+        with patch("drt.destinations.bigquery.uuid4", side_effect=tokens):
+            first = BigQueryDestination()
+            second = BigQueryDestination()
+            assert first._scratch_table_id("p.d.t", "__drt_swap") == ("p.d.t__drt_swap_11111111")
+            assert second._scratch_table_id("p.d.t", "__drt_swap") == ("p.d.t__drt_swap_22222222")
+            first.reset_write_state(_config(), _options())
+            assert first._scratch_table_id("p.d.t", "__drt_swap") == ("p.d.t__drt_swap_33333333")
+
 
 # ---------------------------------------------------------------------------
 # sync.mode: mirror (#1055)
@@ -631,15 +656,20 @@ class TestBigQueryMirrorMode:
         assert final is not None
         sqls = _sqls(client)
         assert any(
-            "CREATE OR REPLACE TABLE `my-proj.analytics.user_scores__drt_mirror_keys`" in sql
-            and "SELECT DISTINCT `tenant_id`, `id`" in sql
+            "CREATE OR REPLACE TABLE `my-proj.analytics.user_scores__drt_mirror_keys_a1b2c3d4`"
+            in sql
+            and "SELECT `tenant_id`, `id` FROM `my-proj.analytics.user_scores` WHERE FALSE" in sql
             for sql in sqls
         )
-        assert any(
-            "INSERT INTO `my-proj.analytics.user_scores__drt_mirror_keys`" in sql
-            and "SELECT DISTINCT `tenant_id`, `id`" in sql
-            for sql in sqls
-        )
+        key_loads = [
+            c
+            for c in client.load_table_from_json.call_args_list
+            if c.args[1] == "my-proj.analytics.user_scores__drt_mirror_keys_a1b2c3d4"
+        ]
+        assert [c.args[0] for c in key_loads] == [
+            [{"tenant_id": 1, "id": 1}],
+            [{"tenant_id": 1, "id": 2}],
+        ]
         delete = next(sql for sql in sqls if sql.startswith("DELETE FROM"))
         assert "NOT EXISTS" in delete
         assert "T.`tenant_id` = K.`tenant_id` AND T.`id` = K.`id`" in delete
@@ -649,7 +679,7 @@ class TestBigQueryMirrorMode:
                 call("my-proj.analytics.user_scores_drt_tmp", not_found_ok=True),
                 call("my-proj.analytics.user_scores_drt_tmp", not_found_ok=True),
                 call(
-                    "my-proj.analytics.user_scores__drt_mirror_keys",
+                    "my-proj.analytics.user_scores__drt_mirror_keys_a1b2c3d4",
                     not_found_ok=True,
                 ),
             ]
@@ -666,7 +696,7 @@ class TestBigQueryMirrorMode:
             dest.load([{"parent_id": 1, "id": 2}], config, opts)
             dest.finalize_sync(config, opts)
         stage = next(sql for sql in _sqls(client) if sql.startswith("CREATE OR REPLACE"))
-        assert "SELECT DISTINCT `parent_id`, `id`" in stage
+        assert "SELECT `parent_id`, `id` FROM `my-proj.analytics.user_scores` WHERE FALSE" in stage
         delete = next(sql for sql in _sqls(client) if sql.startswith("DELETE FROM"))
         assert "EXISTS" in delete
         assert "TO_JSON_STRING(T.`parent_id`) = TO_JSON_STRING(K.`parent_id`)" in delete
@@ -682,6 +712,117 @@ class TestBigQueryMirrorMode:
             dest.finalize_sync(config, opts)
         delete = next(sql for sql in _sqls(client) if sql.startswith("DELETE FROM"))
         assert "TO_JSON_STRING(T.`parent_id`) = TO_JSON_STRING(K.`parent_id`)" in delete
+
+    def test_nullable_scope_schema_comes_from_target_across_batches(self) -> None:
+        client = _fake_client()
+        modules = _mocked_bq_modules(client)
+        dest = BigQueryDestination()
+        config = _config(mode="merge", upsert_key=["id"])
+        opts = _options(mode="mirror", mirror={"scope": ["parent_id"]})
+
+        with patch.dict("sys.modules", modules):
+            dest.load([{"id": 1, "parent_id": None}], config, opts)
+            dest.load([{"id": 2, "parent_id": 42}], config, opts)
+
+        create = [sql for sql in _sqls(client) if sql.startswith("CREATE OR REPLACE")]
+        assert create == [
+            "CREATE OR REPLACE TABLE "
+            "`my-proj.analytics.user_scores__drt_mirror_keys_a1b2c3d4` AS "
+            "SELECT `id`, `parent_id` FROM `my-proj.analytics.user_scores` WHERE FALSE"
+        ]
+        key_loads = [
+            c.args[0]
+            for c in client.load_table_from_json.call_args_list
+            if c.args[1] == "my-proj.analytics.user_scores__drt_mirror_keys_a1b2c3d4"
+        ]
+        assert key_loads == [
+            [{"id": 1, "parent_id": None}],
+            [{"id": 2, "parent_id": 42}],
+        ]
+
+    def test_partition_decorated_target_fails_before_any_operation(self) -> None:
+        dest = BigQueryDestination()
+        config = _config(table="events$20261005", upsert_key=["id"])
+        opts = _options(mode="mirror")
+        with patch.object(dest, "_build_client") as build_client:
+            with pytest.raises(ValueError, match=r"mirror.*partition-decorated.*base table"):
+                dest.load([], config, opts)
+            with pytest.raises(ValueError, match=r"mirror.*partition-decorated.*base table"):
+                dest.finalize_sync(config, opts)
+        build_client.assert_not_called()
+
+    def test_interrupted_finalize_leaves_key_cleanup_to_reset(self) -> None:
+        client = _fake_client()
+        modules = _mocked_bq_modules(client)
+        dest = BigQueryDestination()
+        config = _config(upsert_key=["id"])
+        opts = _options(mode="mirror")
+        with patch.dict("sys.modules", modules):
+            dest.load([{"id": 1}], config, opts)
+            opts._interrupted = True
+            assert dest.finalize_sync(config, opts) is None
+            assert not any(sql.startswith("DELETE FROM") for sql in _sqls(client))
+            dest.reset_write_state(config, opts)
+        assert opts._interrupted is False
+        client.delete_table.assert_any_call(
+            "my-proj.analytics.user_scores__drt_mirror_keys_a1b2c3d4",
+            not_found_ok=True,
+        )
+
+    def test_engine_interruption_skips_delete_and_resets_staging(self, tmp_path: Path) -> None:
+        class TwoRowSource:
+            def extract(
+                self,
+                query: str,
+                config: ProfileConfig,
+                *,
+                query_tags: dict[str, str] | None = None,
+            ) -> Iterator[dict[str, Any]]:
+                yield {"id": 1}
+                yield {"id": 2}
+
+        client = _fake_client()
+        modules = _mocked_bq_modules(client)
+        destination = BigQueryDestination()
+        stop_event = threading.Event()
+        original_load = destination.load
+
+        def load_then_stop(
+            records: list[dict[str, Any]],
+            config: BigQueryDestinationConfig,
+            sync_options: SyncOptions,
+        ) -> Any:
+            result = original_load(records, config, sync_options)
+            stop_event.set()
+            return result
+
+        sync = SyncConfig(
+            name="interrupted_bigquery_mirror",
+            model="SELECT 1",
+            destination=_config(upsert_key=["id"]),
+            sync=_options(mode="mirror", batch_size=1),
+        )
+        profile = BigQueryProfile(type="bigquery", project="p", dataset="d")
+        with (
+            patch.dict("sys.modules", modules),
+            patch.object(destination, "load", side_effect=load_then_stop),
+        ):
+            result = run_sync(
+                sync,
+                TwoRowSource(),
+                destination,
+                profile,
+                tmp_path,
+                stop_event=stop_event,
+            )
+
+        assert result.interrupted is True
+        assert result.success == 1
+        assert not any(sql.startswith("DELETE FROM") for sql in _sqls(client))
+        client.delete_table.assert_any_call(
+            "my-proj.analytics.user_scores__drt_mirror_keys_a1b2c3d4",
+            not_found_ok=True,
+        )
 
     @pytest.mark.parametrize(
         ("mirror", "message"),
@@ -809,11 +950,14 @@ class TestBigQueryMirrorMode:
 
     def test_failed_later_key_stage_drops_existing_keys_without_delete(self) -> None:
         client = _fake_client()
-        ok_stage = MagicMock()
-        ok_merge = MagicMock()
         failed_stage = MagicMock()
         failed_stage.result.side_effect = RuntimeError("stage boom")
-        client.query.side_effect = [ok_stage, ok_merge, failed_stage]
+        client.load_table_from_json.side_effect = [
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            failed_stage,
+        ]
         modules = _mocked_bq_modules(client)
         dest = BigQueryDestination()
         config = _config(upsert_key=["id"])
@@ -824,7 +968,7 @@ class TestBigQueryMirrorMode:
             assert dest.finalize_sync(config, opts) is None
         assert result.failed == 1
         client.delete_table.assert_any_call(
-            "my-proj.analytics.user_scores__drt_mirror_keys", not_found_ok=True
+            "my-proj.analytics.user_scores__drt_mirror_keys_a1b2c3d4", not_found_ok=True
         )
 
     def test_failed_merge_after_key_stage_can_finalize_safely(self) -> None:
@@ -847,11 +991,14 @@ class TestBigQueryMirrorMode:
 
     def test_fail_policy_cleans_existing_key_stage_before_raising(self) -> None:
         client = _fake_client()
-        ok_stage = MagicMock()
-        ok_merge = MagicMock()
         failed_stage = MagicMock()
         failed_stage.result.side_effect = RuntimeError("stage boom")
-        client.query.side_effect = [ok_stage, ok_merge, failed_stage]
+        client.load_table_from_json.side_effect = [
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            failed_stage,
+        ]
         modules = _mocked_bq_modules(client)
         dest = BigQueryDestination()
         config = _config(upsert_key=["id"])
@@ -860,7 +1007,7 @@ class TestBigQueryMirrorMode:
             with pytest.raises(RuntimeError, match="stage boom"):
                 dest.load([{"id": 2}], config, _options(mode="mirror", on_error="fail"))
         client.delete_table.assert_any_call(
-            "my-proj.analytics.user_scores__drt_mirror_keys", not_found_ok=True
+            "my-proj.analytics.user_scores__drt_mirror_keys_a1b2c3d4", not_found_ok=True
         )
         assert dest._mirror_keys_table_id is None
 
