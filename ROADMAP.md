@@ -217,15 +217,17 @@ No breaking changes — drop-in upgrade from v0.10.0.
 
 **Theme: every capability that shipped Postgres-first in v1.0 reaches the other warehouses.** v1.0 landed ADR 0005's warehouse-write track (managed-table primitive, warehouse state, diff-based incremental) by proving each piece live against one dialect at a time, because a mock cursor cannot prove SQL validity (#908, #1175). v1.1 finishes the matrix, one live-verified dialect per landing, instead of adding new engine surface.
 
+**Status: shipped in development — all milestone issues are closed; release pending.**
+
 | Capability | Postgres | Snowflake | Databricks | BigQuery |
 |---|---|---|---|---|
-| Managed-table primitive (#960) | ✅ | ✅ | ✅ | ✅ source side (#1124) |
+| Managed-table primitive (#960) | ✅ | ✅ | ✅ | ✅ ([#1107](https://github.com/drt-hub/drt/issues/1107)) |
 | Warehouse state / history / DLQ (#920) | ✅ | ✅ | ✅ | ✅ ([#1107](https://github.com/drt-hub/drt/issues/1107)) |
-| Diff-based incremental (#755) | ✅ | [#1112](https://github.com/drt-hub/drt/issues/1112) | [#1114](https://github.com/drt-hub/drt/issues/1114) | ✅ ([#1113](https://github.com/drt-hub/drt/issues/1113)) |
+| Diff-based incremental (#755) | ✅ | ✅ ([#1112](https://github.com/drt-hub/drt/issues/1112)) | ✅ ([#1114](https://github.com/drt-hub/drt/issues/1114)) | ✅ ([#1113](https://github.com/drt-hub/drt/issues/1113)) |
 | `sync.mode: replace` / `mirror` (destination) | ✅ | ✅ | ✅ | ✅ [#1055](https://github.com/drt-hub/drt/issues/1055) |
 | `mirror.strategy: diff` | ✅ | ✅ | ✅ | ✅ |
 
-**Also in scope:** the BigQuery `_merge` leg of [#1134](https://github.com/drt-hub/drt/issues/1134) (its blocker, #1137, is closed). `sync.mirror.strategy: diff` now covers every mirror-capable SQL destination, including BigQuery's source/destination pair.
+**Also in scope — complete:** [#1134](https://github.com/drt-hub/drt/issues/1134) is closed across every leg: ClickHouse and the SQL base ([#1091](https://github.com/drt-hub/drt/issues/1091)); CSV, blob, and `staged_upload` ([#1193](https://github.com/drt-hub/drt/pull/1193)); BigQuery ([#1213](https://github.com/drt-hub/drt/pull/1213)); and Google Sheets ([#1144](https://github.com/drt-hub/drt/issues/1144)), with its positional column-set behavior documented in [#1214](https://github.com/drt-hub/drt/pull/1214). `sync.mirror.strategy: diff` now covers every mirror-capable SQL destination, including BigQuery's source/destination pair.
 
 **Community-welcome (unscheduled, no milestone):** new destinations and recipes open for contribution, not v1.1 commitments — tested `rest_api` recipes for long-tail SaaS ([#1179](https://github.com/drt-hub/drt/issues/1179), recipes first per ADR 0011; a connector only where `rest_api` cannot express the semantics), Kafka ([#1180](https://github.com/drt-hub/drt/issues/1180)), Pub/Sub ([#1181](https://github.com/drt-hub/drt/issues/1181)), SQS ([#1182](https://github.com/drt-hub/drt/issues/1182)), Pipedrive ([#1183](https://github.com/drt-hub/drt/issues/1183)), MongoDB ([#1184](https://github.com/drt-hub/drt/issues/1184)), Redis ([#1185](https://github.com/drt-hub/drt/issues/1185)), TikTok Events API ([#1186](https://github.com/drt-hub/drt/issues/1186)) and LinkedIn Conversions API ([#1187](https://github.com/drt-hub/drt/issues/1187)).
 
