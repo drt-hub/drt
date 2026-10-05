@@ -1151,6 +1151,16 @@ def _run_sync_body(
         extract_span.set_attribute("extract.rows_extracted", total_result.rows_extracted)
         extract_span.end()
 
+    # A removal-only snapshot diff has no added/changed records, so the batch
+    # loop above never gets a chance to observe a shutdown request. Check once
+    # more before any finalize hook: destructive mirror deletes and diff
+    # baseline promotion must both remain off for an interrupted run, even
+    # when there was no destination load batch at all.
+    if stop_event is not None and stop_event.is_set() and not total_result.interrupted:
+        total_result.interrupted = True
+        sync.sync._interrupted = True
+        observer.on_interrupted(sync.name, batches_processed)
+
     # Finalize staged destinations (upload file, trigger job, poll).
     # finalize() is authoritative for staged success/failed counts —
     # stage() only buffers, so records aren't "successful" until finalize.
@@ -1197,17 +1207,19 @@ def _run_sync_body(
 
     # Promote this run's snapshot to be the next diff's baseline (#755) —
     # only after a run with zero row failures across extraction and any
-    # destination finalize step above, and never for a dry run. On partial
-    # failure the baseline is deliberately left stale, so the same rows are
-    # reclassified as added/changed again next run rather than risking a
-    # row that never reached the destination being treated as delivered —
-    # same conservative posture as #920's/#955's reconcile-on-next-run fixes.
+    # destination finalize step above, and never for a dry or interrupted
+    # run. On partial failure/interruption the baseline is deliberately left
+    # stale, so the same rows are reclassified as added/changed/removed again
+    # next run rather than risking a row or removal that never reached the
+    # destination being treated as delivered — same conservative posture as
+    # #920's/#955's reconcile-on-next-run fixes.
     # A --limit run delivers only a prefix of the diff, so promoting the full
     # snapshot would make the skipped rows look delivered on the next run.
     if (
         sync.sync.incremental_strategy == "diff"
         and not dry_run
         and total_result.failed == 0
+        and not total_result.interrupted
         and extract_limit is None
         and isinstance(source, SnapshotDiffSource)
     ):

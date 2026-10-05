@@ -223,8 +223,9 @@ No breaking changes — drop-in upgrade from v0.10.0.
 | Warehouse state / history / DLQ (#920) | ✅ | ✅ | ✅ | ✅ ([#1107](https://github.com/drt-hub/drt/issues/1107)) |
 | Diff-based incremental (#755) | ✅ | [#1112](https://github.com/drt-hub/drt/issues/1112) | [#1114](https://github.com/drt-hub/drt/issues/1114) | ✅ ([#1113](https://github.com/drt-hub/drt/issues/1113)) |
 | `sync.mode: replace` / `mirror` (destination) | ✅ | ✅ | ✅ | ✅ [#1055](https://github.com/drt-hub/drt/issues/1055) |
+| `mirror.strategy: diff` | ✅ | ✅ | ✅ | ✅ |
 
-**Also in scope:** `sync.mirror.strategy: diff` for ClickHouse and Databricks (the shared finalizer only covers Postgres/MySQL/Snowflake today), and the BigQuery `_merge` leg of [#1134](https://github.com/drt-hub/drt/issues/1134) (its blocker, #1137, is closed). BigQuery destination replace/mirror parity shipped via #1055; its diff mirror strategy remains intentionally coupled to the separate BigQuery source leg #1113.
+**Also in scope:** the BigQuery `_merge` leg of [#1134](https://github.com/drt-hub/drt/issues/1134) (its blocker, #1137, is closed). `sync.mirror.strategy: diff` now covers every mirror-capable SQL destination, including BigQuery's source/destination pair.
 
 **Community-welcome (unscheduled, no milestone):** new destinations and recipes open for contribution, not v1.1 commitments — tested `rest_api` recipes for long-tail SaaS ([#1179](https://github.com/drt-hub/drt/issues/1179), recipes first per ADR 0011; a connector only where `rest_api` cannot express the semantics), Kafka ([#1180](https://github.com/drt-hub/drt/issues/1180)), Pub/Sub ([#1181](https://github.com/drt-hub/drt/issues/1181)), SQS ([#1182](https://github.com/drt-hub/drt/issues/1182)), Pipedrive ([#1183](https://github.com/drt-hub/drt/issues/1183)), MongoDB ([#1184](https://github.com/drt-hub/drt/issues/1184)), Redis ([#1185](https://github.com/drt-hub/drt/issues/1185)), TikTok Events API ([#1186](https://github.com/drt-hub/drt/issues/1186)) and LinkedIn Conversions API ([#1187](https://github.com/drt-hub/drt/issues/1187)).
 

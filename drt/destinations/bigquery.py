@@ -20,8 +20,9 @@ Supports:
 - ``sync.mode: mirror`` (#1055) — MERGE each batch, stage its observed keys in
   ``<table>__drt_mirror_keys_<run-id>``, then delete target rows missing from that key
   table in :meth:`finalize_sync`. ``mirror.strategy: destination`` (the
-  default) and ``mirror.scope`` are supported; ``tracked`` and ``diff`` are
-  rejected explicitly.
+  default), ``mirror.scope``, and ``mirror.strategy: diff`` are supported;
+  ``tracked`` is rejected explicitly. Diff mirror stages only the exact keys
+  the source snapshot classified as removed and deletes their matches.
 
 Auth mirrors the BigQuery source: Application Default Credentials by default,
 or a service-account ``keyfile``.
@@ -54,6 +55,7 @@ from drt.destinations.sql_utils import (
 
 _SWAP_SUFFIX = "__drt_swap"
 _MIRROR_KEYS_SUFFIX = "__drt_mirror_keys"
+_MIRROR_DIFF_KEYS_SUFFIX = "__drt_mirror_keys_diff"
 _TMP_SUFFIX = "_drt_tmp"
 
 
@@ -93,13 +95,17 @@ class BigQueryDestination:
         if sync_options.mode == "replace":
             return self._replace(client, table_id, records, sync_options)
         if sync_options.mode == "mirror":
+            mirror_diff = sync_options.mirror is not None and sync_options.mirror.strategy == "diff"
             return self._merge(
                 client,
                 table_id,
                 records,
                 config,
                 sync_options,
-                mirror=True,
+                # Diff mirror consumes the source-side removed-key list at
+                # finalize time. Staging added/changed keys here would mix
+                # them into that exact-delete set.
+                mirror=not mirror_diff,
             )
 
         result = SyncResult()
@@ -323,18 +329,21 @@ class BigQueryDestination:
         sync_options: SyncOptions,
         labels: dict[str, str] | None,
         target_schema: list[Any] | None,
+        *,
+        scratch_suffix: str = _MIRROR_KEYS_SUFFIX,
     ) -> None:
-        """Stage observed keys with the target's types, never an IN list.
+        """Stage key records with the target's types, never an IN list.
 
         The empty CTAS copies the key/scope column types from the target. The
         subsequent JSON load appends into that existing schema, so an all-NULL
-        scope in the first batch cannot be autodetected as STRING and conflict
-        with a typed value in a later batch.
+        scope in the first destination-strategy batch cannot be autodetected as
+        STRING and conflict with a typed value in a later batch. Diff strategy
+        reuses the same typed path for its exact removed-key set.
         """
         scope = sync_options.mirror.scope if sync_options.mirror is not None else None
         columns = list(dict.fromkeys([*upsert_key, *(scope or [])]))
         column_sql = ", ".join(self._quote_column(c) for c in columns)
-        keys_table_id = self._scratch_table_id(table_id, _MIRROR_KEYS_SUFFIX)
+        keys_table_id = self._scratch_table_id(table_id, scratch_suffix)
         keys_table = self._quote_table(keys_table_id)
         if self._mirror_keys_table_id is None:
             sql = (
@@ -407,6 +416,9 @@ class BigQueryDestination:
         config: BigQueryDestinationConfig,
         sync_options: SyncOptions,
     ) -> SyncResult | None:
+        if sync_options.mirror is not None and sync_options.mirror.strategy == "diff":
+            return self._finalize_mirror_diff(config, sync_options)
+
         keys_table_id = self._mirror_keys_table_id
         if keys_table_id is None:
             self._mirror_aborted = False
@@ -453,6 +465,58 @@ class BigQueryDestination:
             finally:
                 self._mirror_keys_table_id = None
                 self._mirror_aborted = False
+
+    def _finalize_mirror_diff(
+        self,
+        config: BigQueryDestinationConfig,
+        sync_options: SyncOptions,
+    ) -> SyncResult | None:
+        """Delete exactly the keys source-side snapshot diff marked removed.
+
+        A removal-only run never calls :meth:`load`, so this path owns the
+        complete scratch-table lifecycle. Removed values are loaded into an
+        empty target-shaped table rather than interpolated into a giant
+        ``IN`` predicate; that also preserves composite-key types.
+        """
+        removed_keys = sync_options._diff_removed_keys
+        if not removed_keys:
+            return None
+
+        self._validate_records(removed_keys)
+        self._validate_sql_columns(removed_keys)
+        self._validate_mirror(removed_keys, config, sync_options)
+
+        table_id = self._table_id(config)
+        client = self._build_client(config)
+        labels = self._labels(sync_options._query_tags)
+        upsert_key = config.upsert_key
+        assert upsert_key  # guarded by _validate_sync_options()
+        try:
+            target_schema = self._get_target_schema(client, table_id)
+            self._stage_mirror_keys(
+                client,
+                table_id,
+                removed_keys,
+                upsert_key,
+                sync_options,
+                labels,
+                target_schema,
+                scratch_suffix=_MIRROR_DIFF_KEYS_SUFFIX,
+            )
+            keys_table_id = self._mirror_keys_table_id
+            assert keys_table_id is not None
+            key_match = " AND ".join(
+                [f"T.{self._quote_column(c)} = K.{self._quote_column(c)}" for c in upsert_key]
+            )
+            sql = (
+                f"DELETE FROM {self._quote_table(table_id)} AS T "
+                f"WHERE EXISTS (SELECT 1 FROM {self._quote_table(keys_table_id)} K "
+                f"WHERE {key_match})"
+            )
+            client.query(sql, job_config=self._query_job_config(labels)).result()
+            return SyncResult()
+        finally:
+            self._cleanup_mirror_staging(client)
 
     def _cleanup_mirror_staging(self, client: Any) -> None:
         if self._mirror_keys_table_id is not None:
@@ -528,12 +592,6 @@ class BigQueryDestination:
                     f"partition-decorated target {config.table!r}; target the "
                     "base table instead."
                 )
-            if mirror is not None and mirror.strategy == "diff":
-                raise ValueError(
-                    "mirror.strategy: diff is not yet supported on bigquery "
-                    "(the BigQuery diff source exists, but the destination does not "
-                    "consume its removed keys yet); use the default mirror strategy."
-                )
             if mirror is not None and mirror.strategy == "tracked":
                 raise ValueError(unsupported_tracked_scope_msg("bigquery"))
             check_mirror_supported(
@@ -543,6 +601,7 @@ class BigQueryDestination:
                 # BigQuery supports scope with destination strategy. The tracked
                 # strategy was rejected explicitly just above.
                 supports_tracked_scope=True,
+                supports_diff_strategy=True,
             )
 
         if (

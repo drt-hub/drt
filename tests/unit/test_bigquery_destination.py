@@ -945,22 +945,12 @@ class TestBigQueryMirrorMode:
             not_found_ok=True,
         )
 
-    @pytest.mark.parametrize(
-        ("mirror", "message"),
-        [
-            ({"strategy": "tracked"}, "not yet supported on bigquery"),
-            ({"strategy": "diff"}, "not yet supported on bigquery"),
-        ],
-    )
-    def test_unsupported_mirror_strategies_fail_before_client(
-        self, mirror: dict[str, str], message: str
-    ) -> None:
-        option_overrides = {"incremental_strategy": "diff"} if mirror["strategy"] == "diff" else {}
-        with pytest.raises(ValueError, match=message):
+    def test_tracked_mirror_strategy_fails_before_client(self) -> None:
+        with pytest.raises(ValueError, match="not yet supported on bigquery"):
             BigQueryDestination().load(
                 [{"id": 1}],
                 _config(upsert_key=["id"]),
-                _options(mode="mirror", mirror=mirror, **option_overrides),
+                _options(mode="mirror", mirror={"strategy": "tracked"}),
             )
 
     def test_mirror_requires_key_and_complete_scope(self) -> None:
@@ -996,7 +986,136 @@ class TestBigQueryMirrorMode:
         assert dest.finalize_sync(_config(upsert_key=["id"]), _options(mode="mirror")) is None
         assert dest._mirror_aborted is False
 
-    def test_removal_only_diff_rejects_before_baseline_commit(self, tmp_path: Path) -> None:
+    def test_diff_stages_typed_composite_removed_keys_and_deletes_exact_matches(self) -> None:
+        client = _fake_client()
+        tenant_field = _schema_field("tenant_id")
+        id_field = _schema_field("id")
+        label_field = _schema_field("label")
+        client.get_table.return_value.schema = [tenant_field, id_field, label_field]
+        modules = _mocked_bq_modules(client)
+        destination = BigQueryDestination()
+        config = _config(upsert_key=["tenant_id", "id"])
+        options = _options(
+            mode="mirror",
+            incremental_strategy="diff",
+            mirror={"strategy": "diff"},
+        )
+        options._diff_removed_keys = [
+            {"tenant_id": 1, "id": 2},
+            {"tenant_id": 2, "id": 1},
+        ]
+        options._query_tags = {"sync": "mirror-diff"}
+
+        with patch.dict("sys.modules", modules):
+            result = destination.finalize_sync(config, options)
+
+        assert result is not None
+        scratch = "my-proj.analytics.user_scores__drt_mirror_keys_diff_a1b2c3d4"
+        sqls = _sqls(client)
+        assert sqls[0] == (
+            f"CREATE OR REPLACE TABLE `{scratch}` AS "
+            "SELECT `tenant_id`, `id` FROM `my-proj.analytics.user_scores` WHERE FALSE"
+        )
+        assert sqls[1] == (
+            "DELETE FROM `my-proj.analytics.user_scores` AS T "
+            f"WHERE EXISTS (SELECT 1 FROM `{scratch}` K "
+            "WHERE T.`tenant_id` = K.`tenant_id` AND T.`id` = K.`id`)"
+        )
+        assert " IN (" not in sqls[1]
+        client.load_table_from_json.assert_called_once()
+        assert client.load_table_from_json.call_args.args == (options._diff_removed_keys, scratch)
+        bq = modules["google.cloud.bigquery"]
+        assert client.load_table_from_json.call_args.kwargs["job_config"] == (
+            bq.LoadJobConfig.return_value
+        )
+        bq.LoadJobConfig.assert_called_once_with(
+            labels={"sync": "mirror-diff"},
+            write_disposition=bq.WriteDisposition.WRITE_APPEND,
+            schema=[tenant_field, id_field],
+            autodetect=False,
+        )
+        client.delete_table.assert_called_once_with(scratch, not_found_ok=True)
+        assert destination._mirror_keys_table_id is None
+
+    def test_diff_load_does_not_stage_added_or_changed_keys(self) -> None:
+        client = _fake_client()
+        modules = _mocked_bq_modules(client)
+        destination = BigQueryDestination()
+        options = _options(
+            mode="mirror",
+            incremental_strategy="diff",
+            mirror={"strategy": "diff"},
+        )
+        with patch.dict("sys.modules", modules):
+            result = destination.load(
+                [{"id": 1, "label": "changed"}],
+                _config(upsert_key=["id"]),
+                options,
+            )
+
+        assert result.success == 1
+        assert not any(sql.startswith("CREATE OR REPLACE TABLE") for sql in _sqls(client))
+        assert destination._mirror_keys_table_id is None
+        assert all(
+            call_.args[1] != "my-proj.analytics.user_scores__drt_mirror_keys_diff_a1b2c3d4"
+            for call_ in client.load_table_from_json.call_args_list
+        )
+
+    @pytest.mark.parametrize("removed_keys", [None, []])
+    def test_diff_with_no_removed_keys_is_a_noop(
+        self, removed_keys: list[dict[str, Any]] | None
+    ) -> None:
+        destination = BigQueryDestination()
+        options = _options(
+            mode="mirror",
+            incremental_strategy="diff",
+            mirror={"strategy": "diff"},
+        )
+        options._diff_removed_keys = removed_keys
+        with patch.object(destination, "_build_client") as build_client:
+            assert destination.finalize_sync(_config(upsert_key=["id"]), options) is None
+        build_client.assert_not_called()
+
+    def test_diff_removed_key_validation_runs_before_client_creation(self) -> None:
+        destination = BigQueryDestination()
+        options = _options(
+            mode="mirror",
+            incremental_strategy="diff",
+            mirror={"strategy": "diff"},
+        )
+        with patch.object(destination, "_build_client") as build_client:
+            options._diff_removed_keys = [{"tenant_id": 1}]
+            with pytest.raises(ValueError, match="upsert_key columns missing"):
+                destination.finalize_sync(_config(upsert_key=["tenant_id", "id"]), options)
+            options._diff_removed_keys = [{"tenant_id": 1, "id": None}]
+            with pytest.raises(ValueError, match="does not support NULL"):
+                destination.finalize_sync(_config(upsert_key=["tenant_id", "id"]), options)
+        build_client.assert_not_called()
+
+    def test_diff_delete_failure_still_drops_staged_keys(self) -> None:
+        client = _fake_client()
+        delete_job = MagicMock()
+        delete_job.result.side_effect = RuntimeError("delete boom")
+        client.query.side_effect = [MagicMock(), delete_job]
+        modules = _mocked_bq_modules(client)
+        destination = BigQueryDestination()
+        options = _options(
+            mode="mirror",
+            incremental_strategy="diff",
+            mirror={"strategy": "diff"},
+        )
+        options._diff_removed_keys = [{"id": 7}]
+
+        with patch.dict("sys.modules", modules):
+            with pytest.raises(RuntimeError, match="delete boom"):
+                destination.finalize_sync(_config(upsert_key=["id"]), options)
+
+        client.delete_table.assert_called_once_with(
+            "my-proj.analytics.user_scores__drt_mirror_keys_diff_a1b2c3d4",
+            not_found_ok=True,
+        )
+
+    def test_removal_only_diff_deletes_before_baseline_commit(self, tmp_path: Path) -> None:
         class RemovalOnlySource:
             def __init__(self) -> None:
                 self.extract_calls = 0
@@ -1034,6 +1153,8 @@ class TestBigQueryMirrorMode:
 
         source = RemovalOnlySource()
         destination = BigQueryDestination()
+        client = _fake_client()
+        modules = _mocked_bq_modules(client)
         sync = SyncConfig(
             name="bigquery_removal_only",
             model="ref('users')",
@@ -1046,12 +1167,88 @@ class TestBigQueryMirrorMode:
         )
         profile = BigQueryProfile(type="bigquery", project="p", dataset="d")
 
-        with patch.object(destination, "load", wraps=destination.load) as load:
-            with pytest.raises(ValueError, match="not yet supported on bigquery"):
-                run_sync(sync, source, destination, profile, tmp_path)
+        with (
+            patch.dict("sys.modules", modules),
+            patch.object(destination, "load", wraps=destination.load) as load,
+        ):
+            result = run_sync(sync, source, destination, profile, tmp_path)
 
+        assert result.success == 0
+        assert result.failed == 0
+        assert result.diff_removed_keys == [{"id": 7}]
+        delete = next(sql for sql in _sqls(client) if sql.startswith("DELETE FROM"))
+        assert "T.`id` = K.`id`" in delete
         load.assert_not_called()
         assert source.extract_calls == 1
+        assert source.commit_calls == 1
+
+    def test_interrupted_diff_does_not_delete_or_commit_baseline(self, tmp_path: Path) -> None:
+        class InterruptedDiffSource:
+            def __init__(self) -> None:
+                self.commit_calls = 0
+
+            def extract(
+                self,
+                query: str,
+                config: ProfileConfig,
+                *,
+                query_tags: dict[str, str] | None = None,
+            ) -> Iterator[dict[str, Any]]:
+                raise AssertionError("ordinary extraction must not run")
+
+            def extract_snapshot_diff(
+                self,
+                query: str,
+                config: ProfileConfig,
+                *,
+                sync_name: str,
+                key_columns: list[str],
+                hash_columns: Any,
+                query_tags: dict[str, str] | None = None,
+            ) -> SnapshotDiffResult:
+                return SnapshotDiffResult(
+                    added=iter(()),
+                    changed=iter(()),
+                    removed_keys=iter(({"id": 7},)),
+                    is_first_run=False,
+                )
+
+            def commit_snapshot_diff(self, config: ProfileConfig, sync_name: str) -> None:
+                self.commit_calls += 1
+
+        source = InterruptedDiffSource()
+        destination = BigQueryDestination()
+        client = _fake_client()
+        modules = _mocked_bq_modules(client)
+        stop_event = threading.Event()
+        stop_event.set()
+
+        sync = SyncConfig(
+            name="interrupted_bigquery_diff_mirror",
+            model="ref('users')",
+            destination=_config(upsert_key=["id"]),
+            sync=_options(
+                mode="mirror",
+                incremental_strategy="diff",
+                mirror={"strategy": "diff"},
+                batch_size=1,
+            ),
+        )
+        profile = BigQueryProfile(type="bigquery", project="p", dataset="d")
+
+        with patch.dict("sys.modules", modules):
+            result = run_sync(
+                sync,
+                source,
+                destination,
+                profile,
+                tmp_path,
+                stop_event=stop_event,
+            )
+
+        assert result.interrupted is True
+        assert sync.sync._interrupted is False  # cleared by reset_write_state()
+        assert not any(sql.startswith("DELETE FROM") for sql in _sqls(client))
         assert source.commit_calls == 0
 
     def test_failed_key_stage_aborts_delete(self) -> None:

@@ -135,7 +135,7 @@ def test_unsupported_diff_strategy_message_names_dialect() -> None:
     assert msg == (
         "mirror.strategy: diff is not supported on newdialect — its own "
         "_finalize_mirror() does not implement it (supported: postgres, mysql, "
-        "snowflake, clickhouse, databricks)."
+        "snowflake, clickhouse, databricks, bigquery)."
     )
 
 
@@ -147,7 +147,7 @@ def test_check_mirror_supported_rejects_diff_by_default() -> None:
 
 
 def test_check_mirror_supported_allows_diff_when_dialect_opts_in() -> None:
-    """All five mirror-capable dialects pass supports_diff_strategy=True."""
+    """All six mirror-capable dialects pass supports_diff_strategy=True."""
     cfg = SimpleNamespace(upsert_key=["id"])
     check_mirror_supported(
         cfg, _mirror_opts(strategy="diff"), "snowflake", supports_diff_strategy=True

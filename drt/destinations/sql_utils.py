@@ -104,7 +104,7 @@ def unsupported_diff_strategy_msg(dialect: str) -> str:
     return (
         f"mirror.strategy: diff is not supported on {dialect} — its own "
         "_finalize_mirror() does not implement it (supported: postgres, mysql, "
-        "snowflake, clickhouse, databricks)."
+        "snowflake, clickhouse, databricks, bigquery)."
     )
 
 

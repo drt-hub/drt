@@ -123,7 +123,7 @@ Snowflake / Databricks destinations.
 | `incremental` | Watermark-based — extracts rows with `cursor_field > last_value`, writes via `config.mode`. |
 | `upsert` | Same as `incremental` with `upsert_key` enforced. |
 | `replace` | Rebuilds the table through load jobs. `replace_strategy: truncate` writes the first batch with `WRITE_TRUNCATE` and later batches with `WRITE_APPEND`; `swap` builds a shadow and atomically copies it over the target at end of sync. |
-| `mirror` | Forces the MERGE path, stages observed keys, then deletes target rows not present in the staged key table. Requires `destination.upsert_key`. |
+| `mirror` | Forces the MERGE path. The default strategy stages observed keys and deletes target rows not present in that table; `strategy: diff` stages and deletes only keys the source snapshot classified as removed. Requires `destination.upsert_key`. |
 
 ### Replace details
 
@@ -187,14 +187,34 @@ WHERE NOT EXISTS (
 This avoids a giant value-interpolated `IN (...)` list: record values reach
 BigQuery through the load job, while generated SQL contains only validated,
 backtick-quoted identifiers. Composite keys and `sync.mirror.scope` are
-supported. An empty source does not delete anything. `mirror.strategy:
-tracked` is not yet supported; `mirror.strategy: diff` also fails fast for now
-(the BigQuery diff source exists, but the destination does not yet consume its removed keys).
-An interrupted run also skips the anti-join delete because its staged keys
-cover only a processed prefix; the unconditional write-state reset drops that
-run's key table. The per-run suffix keeps overlapping invocations isolated.
+supported by the default destination strategy; scope matching uses NULL-safe
+`TO_JSON_STRING` equality. An empty source does not delete anything.
+`mirror.strategy: tracked` is not yet supported. An interrupted run also skips
+the anti-join delete because its staged keys cover only a processed prefix;
+the unconditional write-state reset drops that run's key table, and an
+interrupted diff run does not promote its source snapshot baseline. The
+per-run suffix keeps overlapping invocations isolated.
 Mirror mode rejects partition-decorated targets such as `events$20261005`;
 target the base table instead.
+
+For a BigQuery diff source, exact source-side removals can drive mirror deletes
+without scanning the destination or staging every unchanged source key:
+
+```yaml
+sync:
+  mode: mirror
+  incremental_strategy: diff
+  mirror:
+    strategy: diff
+```
+
+Added and changed rows still use the normal MERGE path. At finalize time, drt
+loads the removed keys into a target-typed, per-run
+`<table>__drt_mirror_keys_diff_<run-id>` table and deletes matching target rows
+with an `EXISTS` join. Removal-only runs therefore still perform the delete;
+composite keys are AND-joined, and no value-interpolated `IN (...)` list is
+generated. `strategy: diff` does not accept `mirror.scope` because its removed
+key list is already the exact row-level deletion set.
 
 Both MERGE and mirror use query-job DML. Rows previously written with the
 legacy streaming insert API can remain in BigQuery's streaming buffer and be
@@ -210,7 +230,7 @@ Each run materializes the full model result in `_drt_snapshot_<sync_name>_<diges
 source profile's `managed_schema`, then classifies added, changed, and removed rows with
 server-side joins on `destination.upsert_key`. Added and changed rows follow the normal upsert
 path; removed keys are exposed through `SyncResult.diff_removed_keys`, power
-`mirror.strategy: diff` where the destination supports it, and appear in `--dry-run --diff`
+`mirror.strategy: diff`, and appear in `--dry-run --diff`
 deletion previews.
 
 ```yaml
