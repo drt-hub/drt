@@ -172,15 +172,24 @@ class BigQueryDestination:
         if result is None:
             result = SyncResult()
         tmp_table_id = f"{table_id}{_TMP_SUFFIX}"
-        columns = list(records[0].keys())
+        merge_columns = list(records[0].keys())
+        # The JSON staging schema must cover every field in the upload even
+        # though the existing MERGE statement deliberately retains its
+        # first-record shape pending the sparse-row semantics work in #1137.
+        batch_columns = _union_columns(records)
         labels = self._labels(sync_options._query_tags)
         mirror_keys_staged = False
 
         try:
+            target_schema = self._get_target_schema(client, table_id)
             client.load_table_from_json(
                 records,
                 tmp_table_id,
-                job_config=self._load_job_config(labels, write_disposition="truncate"),
+                job_config=self._load_job_config(
+                    labels,
+                    write_disposition="truncate",
+                    schema=self._schema_for_columns(target_schema, batch_columns),
+                ),
             ).result()
 
             if mirror:
@@ -191,18 +200,19 @@ class BigQueryDestination:
                     keys,
                     sync_options,
                     labels,
+                    target_schema,
                 )
                 mirror_keys_staged = True
 
             on_clause = " AND ".join(
                 [f"T.{self._quote_column(k)} = S.{self._quote_column(k)}" for k in keys]
             )
-            update_cols = [c for c in columns if c not in keys]
+            update_cols = [c for c in merge_columns if c not in keys]
             update_set = ", ".join(
                 [f"{self._quote_column(c)} = S.{self._quote_column(c)}" for c in update_cols]
             )
-            insert_cols = ", ".join(self._quote_column(c) for c in columns)
-            insert_vals = ", ".join([f"S.{self._quote_column(c)}" for c in columns])
+            insert_cols = ", ".join(self._quote_column(c) for c in merge_columns)
+            insert_vals = ", ".join([f"S.{self._quote_column(c)}" for c in merge_columns])
             matched = f"WHEN MATCHED THEN UPDATE SET {update_set} " if update_cols else ""
 
             merge_sql = (
@@ -312,6 +322,7 @@ class BigQueryDestination:
         upsert_key: list[str],
         sync_options: SyncOptions,
         labels: dict[str, str] | None,
+        target_schema: list[Any] | None,
     ) -> None:
         """Stage observed keys with the target's types, never an IN list.
 
@@ -338,7 +349,11 @@ class BigQueryDestination:
         client.load_table_from_json(
             key_records,
             keys_table_id,
-            job_config=self._load_job_config(labels, write_disposition="append"),
+            job_config=self._load_job_config(
+                labels,
+                write_disposition="append",
+                schema=self._schema_for_columns(target_schema, columns),
+            ),
         ).result()
 
     def finalize_sync(
@@ -628,8 +643,9 @@ class BigQueryDestination:
         labels: dict[str, str] | None,
         *,
         write_disposition: str | None = None,
+        schema: list[Any] | None = None,
     ) -> Any:
-        if labels is None and write_disposition is None:
+        if labels is None and write_disposition is None and schema is None:
             return None
         from google.cloud import bigquery
 
@@ -642,7 +658,37 @@ class BigQueryDestination:
                 "append": bigquery.WriteDisposition.WRITE_APPEND,
             }
             kwargs["write_disposition"] = dispositions[write_disposition]
+        if schema is not None:
+            kwargs["schema"] = schema
+            kwargs["autodetect"] = False
         return bigquery.LoadJobConfig(**kwargs)
+
+    @staticmethod
+    def _get_target_schema(client: Any, table_id: str) -> list[Any] | None:
+        """Fetch a target schema once for all staging loads in this batch."""
+        from google.api_core.exceptions import NotFound
+
+        try:
+            return list(client.get_table(table_id).schema)
+        except NotFound:
+            # Preserve load_table_from_json's existing autodetect behavior for
+            # a target that does not exist yet.
+            return None
+
+    @staticmethod
+    def _schema_for_columns(
+        target_schema: list[Any] | None,
+        columns: list[str],
+    ) -> list[Any] | None:
+        """Select target fields in input order, or retain autodetect fallback."""
+        if target_schema is None:
+            return None
+        fields_by_name = {field.name: field for field in target_schema}
+        if any(column not in fields_by_name for column in columns):
+            # A partial explicit schema would reject or discard fields absent
+            # from the target. Keep the pre-existing autodetect path instead.
+            return None
+        return [fields_by_name[column] for column in columns]
 
     def _query_job_config(self, labels: dict[str, str] | None) -> Any:
         if labels is None:

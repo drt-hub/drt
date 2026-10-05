@@ -103,7 +103,17 @@ WHEN MATCHED THEN UPDATE SET <non-key columns>
 WHEN NOT MATCHED THEN INSERT (...) VALUES (...)
 ```
 
-then drops the temp table. Composite keys are supported (`upsert_key: [tenant_id, user_id]` → AND-joined `ON`). When every column is in `upsert_key`, the `WHEN MATCHED` UPDATE is skipped (effectively insert-if-not-exists). Because BigQuery load + MERGE are **job-level** operations, merge error handling is **batch-level** (the whole batch succeeds or fails) — coarser than the per-row staging used by the Snowflake / Databricks destinations.
+then drops the temp table. When the target exists and contains every batch
+column, drt supplies those target fields as the temp-table load schema instead
+of relying on autodetect. This preserves types for all-`NULL` columns (which
+BigQuery otherwise detects as `STRING`). A missing target or a batch column not
+yet present in the target retains BigQuery's existing autodetect behavior.
+Composite keys are supported (`upsert_key: [tenant_id, user_id]` → AND-joined
+`ON`). When every column is in `upsert_key`, the `WHEN MATCHED` UPDATE is
+skipped (effectively insert-if-not-exists). Because BigQuery load + MERGE are
+**job-level** operations, merge error handling is **batch-level** (the whole
+batch succeeds or fails) — coarser than the per-row staging used by the
+Snowflake / Databricks destinations.
 
 ## Sync modes
 
@@ -160,9 +170,10 @@ Each source batch is loaded to `<table>_drt_tmp`. On the first batch, drt create
 an empty `<table>__drt_mirror_keys_<run-id>` table by selecting the configured
 key and scope columns from the target with `WHERE FALSE`, then loads each
 batch's observed key/scope values into that typed table before the existing
-MERGE runs. Copying the target column types avoids BigQuery autodetect choosing
-`STRING` when a nullable scope column is all `NULL` in the first batch. After
-all batches, drt issues one anti-join delete:
+MERGE runs. One target-schema lookup per batch supplies explicit types to both
+the MERGE temp load and mirror-key load, avoiding BigQuery autodetect choosing
+`STRING` when a nullable target column is all `NULL`. After all batches, drt
+issues one anti-join delete:
 
 ```sql
 DELETE FROM `project.dataset.table` AS T

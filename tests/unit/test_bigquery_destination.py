@@ -32,6 +32,10 @@ from drt.sources.base import SnapshotDiffResult
 # ---------------------------------------------------------------------------
 
 
+class _NotFound(Exception):
+    """Stand-in for google.api_core.exceptions.NotFound."""
+
+
 @pytest.fixture(autouse=True)
 def _stable_scratch_run_id() -> Iterator[None]:
     """Keep scratch-table assertions deterministic without importing GCP."""
@@ -62,12 +66,13 @@ def _fake_client() -> MagicMock:
     client.load_table_from_json.return_value = MagicMock()
     client.query.return_value = MagicMock()
     client.copy_table.return_value = MagicMock()
+    client.get_table.return_value.schema = []
     return client
 
 
 def _mocked_bq_modules(
     client: MagicMock | None = None, creds: Any = "fake-creds"
-) -> dict[str, MagicMock]:
+) -> dict[str, Any]:
     """sys.modules entries satisfying `from google.cloud import bigquery` etc."""
     bigquery_mod = MagicMock()
     if client is not None:
@@ -80,17 +85,30 @@ def _mocked_bq_modules(
     cloud.bigquery = bigquery_mod
     oauth2 = MagicMock()
     oauth2.service_account = sa_mod
+    api_core_exceptions = MagicMock()
+    api_core_exceptions.NotFound = _NotFound
+    api_core = MagicMock()
+    api_core.exceptions = api_core_exceptions
     google = MagicMock()
     google.cloud = cloud
     google.oauth2 = oauth2
+    google.api_core = api_core
 
     return {
         "google": google,
+        "google.api_core": api_core,
+        "google.api_core.exceptions": api_core_exceptions,
         "google.cloud": cloud,
         "google.cloud.bigquery": bigquery_mod,
         "google.oauth2": oauth2,
         "google.oauth2.service_account": sa_mod,
     }
+
+
+def _schema_field(name: str) -> MagicMock:
+    field = MagicMock()
+    field.name = name
+    return field
 
 
 def _sqls(client: MagicMock) -> list[str]:
@@ -278,6 +296,89 @@ class TestBigQueryDestinationLoad:
         assert "ON T.`id` = S.`id`" in merge
         assert "WHEN MATCHED THEN UPDATE SET `score` = S.`score`" in merge
         assert "WHEN NOT MATCHED THEN INSERT" in merge
+        client.delete_table.assert_called_once_with(
+            "my-proj.analytics.user_scores_drt_tmp", not_found_ok=True
+        )
+
+    def test_merge_temp_load_uses_target_schema_in_batch_column_order(self) -> None:
+        client = _fake_client()
+        id_field = _schema_field("id")
+        score_field = _schema_field("score")
+        other_field = _schema_field("other")
+        client.get_table.return_value.schema = [score_field, other_field, id_field]
+        modules = _mocked_bq_modules(client)
+        records = [{"id": 1, "score": None}, {"id": 2, "score": None, "other": 3}]
+
+        with patch.dict("sys.modules", modules):
+            result = BigQueryDestination().load(
+                records,
+                _config(mode="merge", upsert_key=["id"]),
+                _options(),
+            )
+
+        assert result.success == 2
+        client.get_table.assert_called_once_with("my-proj.analytics.user_scores")
+        bq = modules["google.cloud.bigquery"]
+        bq.LoadJobConfig.assert_called_once_with(
+            write_disposition=bq.WriteDisposition.WRITE_TRUNCATE,
+            schema=[id_field, score_field, other_field],
+            autodetect=False,
+        )
+
+    def test_merge_temp_load_keeps_autodetect_when_target_column_is_absent(self) -> None:
+        client = _fake_client()
+        client.get_table.return_value.schema = [_schema_field("id")]
+        modules = _mocked_bq_modules(client)
+
+        with patch.dict("sys.modules", modules):
+            result = BigQueryDestination().load(
+                [{"id": 1, "new_column": "value"}],
+                _config(mode="merge", upsert_key=["id"]),
+                _options(),
+            )
+
+        assert result.success == 1
+        bq = modules["google.cloud.bigquery"]
+        bq.LoadJobConfig.assert_called_once_with(
+            write_disposition=bq.WriteDisposition.WRITE_TRUNCATE
+        )
+
+    def test_merge_temp_load_keeps_autodetect_when_target_does_not_exist(self) -> None:
+        client = _fake_client()
+        client.get_table.side_effect = _NotFound("absent")
+        modules = _mocked_bq_modules(client)
+
+        with patch.dict("sys.modules", modules):
+            result = BigQueryDestination().load(
+                [{"id": 1}],
+                _config(mode="merge", upsert_key=["id"]),
+                _options(),
+            )
+
+        assert result.success == 1
+        bq = modules["google.cloud.bigquery"]
+        bq.LoadJobConfig.assert_called_once_with(
+            write_disposition=bq.WriteDisposition.WRITE_TRUNCATE
+        )
+
+    def test_merge_target_schema_error_keeps_batch_row_errors(self) -> None:
+        client = _fake_client()
+        client.get_table.side_effect = RuntimeError("schema lookup failed")
+        modules = _mocked_bq_modules(client)
+        records = [{"id": 1}, {"id": 2}]
+
+        with patch.dict("sys.modules", modules):
+            result = BigQueryDestination().load(
+                records,
+                _config(mode="merge", upsert_key=["id"]),
+                _options(on_error="skip"),
+            )
+
+        assert result.success == 0
+        assert result.failed == 2
+        assert [error.batch_index for error in result.row_errors] == [0, 1]
+        assert {error.error_message for error in result.row_errors} == {"schema lookup failed"}
+        client.load_table_from_json.assert_not_called()
         client.delete_table.assert_called_once_with(
             "my-proj.analytics.user_scores_drt_tmp", not_found_ok=True
         )
@@ -587,7 +688,10 @@ class TestBigQueryReplaceMode:
 
     def test_reset_write_state_attempts_all_cleanup_before_reporting_failure(self) -> None:
         client = _fake_client()
-        client.delete_table.side_effect = [RuntimeError("drop swap"), None]
+        client.delete_table.side_effect = [
+            RuntimeError("drop swap"),
+            RuntimeError("drop mirror"),
+        ]
         modules = _mocked_bq_modules(client)
         dest = BigQueryDestination()
         dest._swap_shadow_created = True
@@ -703,6 +807,9 @@ class TestBigQueryMirrorMode:
 
     def test_null_scope_uses_null_safe_match(self) -> None:
         client = _fake_client()
+        id_field = _schema_field("id")
+        parent_id_field = _schema_field("parent_id")
+        client.get_table.return_value.schema = [parent_id_field, id_field]
         modules = _mocked_bq_modules(client)
         dest = BigQueryDestination()
         config = _config(mode="merge", upsert_key=["id"])
@@ -712,6 +819,20 @@ class TestBigQueryMirrorMode:
             dest.finalize_sync(config, opts)
         delete = next(sql for sql in _sqls(client) if sql.startswith("DELETE FROM"))
         assert "TO_JSON_STRING(T.`parent_id`) = TO_JSON_STRING(K.`parent_id`)" in delete
+        client.get_table.assert_called_once_with("my-proj.analytics.user_scores")
+        bq = modules["google.cloud.bigquery"]
+        assert bq.LoadJobConfig.call_args_list == [
+            call(
+                write_disposition=bq.WriteDisposition.WRITE_TRUNCATE,
+                schema=[id_field, parent_id_field],
+                autodetect=False,
+            ),
+            call(
+                write_disposition=bq.WriteDisposition.WRITE_APPEND,
+                schema=[id_field, parent_id_field],
+                autodetect=False,
+            ),
+        ]
 
     def test_nullable_scope_schema_comes_from_target_across_batches(self) -> None:
         client = _fake_client()
@@ -1017,6 +1138,22 @@ class TestBigQueryHelpers:
         dest = BigQueryDestination()
         assert dest.supported_modes() == frozenset({"replace", "mirror"})
         assert dest._load_job_config(None) is None
+
+    def test_schema_only_load_config_and_empty_mirror_cleanup(self) -> None:
+        modules = _mocked_bq_modules()
+        field = _schema_field("id")
+        dest = BigQueryDestination()
+        client = _fake_client()
+
+        with patch.dict("sys.modules", modules):
+            dest._load_job_config(None, schema=[field])
+        modules["google.cloud.bigquery"].LoadJobConfig.assert_called_once_with(
+            schema=[field], autodetect=False
+        )
+
+        dest._cleanup_mirror_staging(client)
+        client.delete_table.assert_not_called()
+        assert dest._mirror_aborted is False
 
     def test_copy_job_config_without_labels(self) -> None:
         modules = _mocked_bq_modules()

@@ -151,7 +151,8 @@ def test_bigquery_mirror_null_scope_deletes_only_within_null_scope(tmp_path: Pat
     try:
         conn.execute("ALTER TABLE users ADD COLUMN parent_id INTEGER")
         # ids 1/2 form an all-NULL first batch; id 3 carries INT64 in batch 2.
-        # The mirror key table must retain the target's INT64 scope type.
+        # Both the MERGE temp table and mirror key table must retain the
+        # target's INT64 scope type rather than autodetecting STRING.
         conn.execute("UPDATE users SET parent_id = 7 WHERE id = 3")
     finally:
         conn.close()
