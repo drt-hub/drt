@@ -233,9 +233,59 @@ No breaking changes — drop-in upgrade from v0.10.0.
 
 **Patch lane (v1.0.x):** correctness fixes found after launch ship as patch releases without waiting for v1.1.
 
-**Deliberately not in v1.1:** the schema-management cluster (#760/#761/#896) is the v1.2 candidate; scheduler / fan-out / `depends_on` (#428/#425/#426) stay parked until there is user demand and, for #428, an ADR 0004 re-decision.
+**Deliberately not in v1.1:** the schema-management cluster (#760/#761/#896) and fan-out / `depends_on` (#425/#426) move to the milestones below. The built-in scheduler (#428) was closed as not planned on 2026-10-06 under ADR 0004's no-daemon posture; the underlying need is covered by scheduler scaffolds in v1.3 ([#1225](https://github.com/drt-hub/drt/issues/1225)).
 
 **Progress:** [milestone/14](https://github.com/drt-hub/drt/milestone/14)
+
+---
+
+## v1.2 — Reviewable syncs
+
+**Theme: see exactly what a sync will do, approve it, then let it run.** v1.1 made every capability work on every warehouse. v1.2 makes a sync reviewable *before* it writes. `drt run --dry-run --diff` previews changes today, but the preview is ephemeral, capped at `diff_limit` samples, and nothing connects "what I reviewed" to "what ran". Mirror deletes and bulk updates are one-way doors; the review step is the highest-leverage safety improvement left in reverse ETL, and it fits drt's positioning ([ADR 0011](docs/adr/0011-subtraction-positioning-vs-reverse-etl.md): no UI; [ADR 0004](docs/adr/0004-streaming-and-event-triggered-syncs.md): no daemon) — the review surfaces are CI, Git and MCP, not a console.
+
+```
+drt plan <sync> --out plan.json     # compute + persist a reviewable change set
+drt apply plan.json                 # execute only if the world still matches
+```
+
+**Epic: [#1227](https://github.com/drt-hub/drt/issues/1227) — `drt plan` / `drt apply`, built as a full feature, not a minimal one.** Design principles: the plan is a versioned, deterministic, redacted artifact (keys and hashes, `sync.mask` honoured); apply is guarded by verify-by-replan and aborts on drift; destinations that cannot answer "what exists today" report *plan unavailable, with a reason* rather than a silent partial plan; the capability Protocol is additive (ADR 0007).
+
+| Order | Issue | Scope |
+|---|---|---|
+| 1 | [#1216](https://github.com/drt-hub/drt/issues/1216) | `drt plan` — full key-level change set, `plan.json` schema, `--detailed-exitcode` |
+| 2 | [#1217](https://github.com/drt-hub/drt/issues/1217) | `drt apply` — verify-by-replan, single-use plans, drift report |
+| 3 | [#1218](https://github.com/drt-hub/drt/issues/1218) | Change guards — `max_deletes` / percentage thresholds at plan, apply and run |
+| 4 | [#1219](https://github.com/drt-hub/drt/issues/1219) | PR review workflow — plan comment on the pull request, apply on merge |
+| 5 | [#1220](https://github.com/drt-hub/drt/issues/1220) | MCP `drt_plan` / `drt_apply` with an approval record |
+| — | [#472](https://github.com/drt-hub/drt/issues/472), [#471](https://github.com/drt-hub/drt/issues/471) | API-based diff for SaaS destinations (widens plan coverage), `--diff-fields` |
+| — | [#761](https://github.com/drt-hub/drt/issues/761), [#896](https://github.com/drt-hub/drt/issues/896) | Schema-management cluster (detect/report first; `on_schema_change` itself is v1.3) |
+| — | [#1224](https://github.com/drt-hub/drt/issues/1224) | Sync-level freshness — `alerts.on_stale` + `drt status --check` (catches the sync that silently stopped running) |
+
+**Sequencing:** #1216 → #1217 → #1218 is the foundation and ships in that order; #1219/#1220 build on it. Scope is allowed to slip to v1.3 by design — a thinner, correct foundation beats a wide, unverified one (every leg lands only after a live smoke, as in v1.1).
+
+**Out of scope:** any UI or hosted approval console; a plan format that stores row values by default (see the opt-in exact-replay issue in v1.3).
+
+**Progress:** [milestone/15](https://github.com/drt-hub/drt/milestone/15)
+
+---
+
+## v1.3 — Depth and durability
+
+**Theme: make the review loop auditable and keep it honest.** v1.2 ships `plan` / `apply`; v1.3 deepens it and adds the continuous-improvement mechanism, then picks up the schema, windowing and orchestration items that were parked.
+
+| Area | Issue | Scope |
+|---|---|---|
+| plan/apply | [#1221](https://github.com/drt-hub/drt/issues/1221) | Exact-replay apply — age-encrypted payloads, opt-in (`--include-values` / `--exact`) |
+| plan/apply | [#1222](https://github.com/drt-hub/drt/issues/1222) | Lineage — `plan_id` / approver in history, `run_results.json` and the compliance audit trail |
+| plan/apply | [#1223](https://github.com/drt-hub/drt/issues/1223) | **Continuous improvement**: plan-coverage matrix generated from the connector registry (new destinations must declare plan status) + nightly plan-vs-apply fidelity check in dwh-smoke; re-ranked every release |
+| schema | [#760](https://github.com/drt-hub/drt/issues/760) | `manage_table` / `on_schema_change` (not implemented anywhere yet) |
+| orchestration | [#1225](https://github.com/drt-hub/drt/issues/1225) | Scheduler scaffolds — `drt deploy cloud-run-job`, `drt deploy k8s-cronjob`, plus a scheduling decision guide (replaces #428) |
+| ecosystem | [#1226](https://github.com/drt-hub/drt/issues/1226) | Exposures carry owner/freshness; docs site shows last-applied plan and staleness |
+| backlog | [#758](https://github.com/drt-hub/drt/issues/758), [#764](https://github.com/drt-hub/drt/issues/764), [#425](https://github.com/drt-hub/drt/issues/425), [#426](https://github.com/drt-hub/drt/issues/426) | Windowed backfill, pre/post-sync SQL hooks, multi-destination fan-out, sync dependency graph — scoped when picked up |
+
+**Out of scope:** a drt-owned scheduler or watcher (ADR 0004).
+
+**Progress:** [milestone/16](https://github.com/drt-hub/drt/milestone/16)
 
 ---
 
