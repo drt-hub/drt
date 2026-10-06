@@ -10,6 +10,8 @@ already established for the primitive this backend is built on.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from drt.config.credentials import PostgresProfile
@@ -106,6 +108,10 @@ def test_state_store_upsert_read_and_reset_round_trip(pg_profile: PostgresProfil
 
 def test_history_store_append_read_and_prune(pg_profile: PostgresProfile) -> None:
     history = PostgresWarehouseHistoryStore(pg_profile)
+    recent_start = (datetime.now(timezone.utc) - timedelta(days=1)).replace(microsecond=0)
+    recent_end = recent_start + timedelta(minutes=1)
+    recent_start_iso = recent_start.isoformat()
+    recent_end_iso = recent_end.isoformat()
 
     assert history.read() == []
 
@@ -124,8 +130,8 @@ def test_history_store_append_read_and_prune(pg_profile: PostgresProfile) -> Non
     history.append(
         HistoryEntry(
             sync_name="orders",
-            started_at="2026-09-06T00:00:00+00:00",
-            completed_at="2026-09-06T00:01:00+00:00",
+            started_at=recent_start_iso,
+            completed_at=recent_end_iso,
             duration_seconds=30.0,
             status="failed",
             records_synced=0,
@@ -137,8 +143,8 @@ def test_history_store_append_read_and_prune(pg_profile: PostgresProfile) -> Non
     history.append(
         HistoryEntry(
             sync_name="customers",
-            started_at="2026-09-06T00:00:00+00:00",
-            completed_at="2026-09-06T00:01:00+00:00",
+            started_at=recent_start_iso,
+            completed_at=recent_end_iso,
             duration_seconds=5.0,
             status="success",
             records_synced=2,
@@ -155,10 +161,10 @@ def test_history_store_append_read_and_prune(pg_profile: PostgresProfile) -> Non
     assert {e.sync_name for e in merged} == {"orders", "customers"}
 
     # 2020 entry is older than any real retention window -- gets pruned;
-    # the 2026 entries survive.
+    # the recent entries survive.
     removed = history.prune("orders", retention_days=30)
     assert removed == 1
-    assert [e.started_at for e in history.read("orders")] == ["2026-09-06T00:00:00+00:00"]
+    assert [e.started_at for e in history.read("orders")] == [recent_start_iso]
 
 
 def test_dlq_backend_fifo_reconcile_and_clear(pg_profile: PostgresProfile) -> None:
