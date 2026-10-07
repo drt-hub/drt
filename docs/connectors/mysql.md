@@ -104,6 +104,10 @@ The default `upsert` policy inserts missing rows and updates existing rows.
   values into warnings and insert coerced data, and it does not use a no-op
   `ON DUPLICATE KEY UPDATE`, because that would activate UPDATE triggers on rows
   promised to remain untouched.
+  `create_only` also assumes `upsert_key` is backed by a PRIMARY or UNIQUE index:
+  without one MySQL raises no `1062`, so the plain `INSERT` would add the duplicate
+  row (the same assumption the default `upsert` already makes via
+  `ON DUPLICATE KEY UPDATE`).
 
 Both policies require a non-empty `upsert_key` and `SELECT` access to the target
 table (the probes run only for ambiguous zero-row updates or duplicate inserts).

@@ -271,6 +271,63 @@ class TestMySQLMatchPolicy:
         assert result.failed == 0
 
     @patch("drt.destinations.mysql.MySQLDestination._connect")
+    def test_create_only_probe_failure_is_a_row_error(self, mock_connect: MagicMock) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+
+        def execute_side_effect(sql: str, *args: Any) -> None:
+            if sql.startswith("INSERT INTO"):
+                raise Exception(1062, "Duplicate entry for PRIMARY")
+            if sql.startswith("SELECT 1 FROM"):
+                raise Exception("lost connection during probe")
+
+        cur.execute.side_effect = execute_side_effect
+        mock_connect.return_value = conn
+
+        result = MySQLDestination().load(
+            [{"user_id": 1, "company_id": 5, "score": 0.95}],
+            _config(),
+            _options(match_policy="create_only", on_error="skip"),
+        )
+
+        assert result.skipped == 0
+        assert result.skipped_no_match == 0
+        assert result.failed == 1
+        assert "could not verify a duplicate" in result.row_errors[0].error_message
+
+    @patch("drt.destinations.mysql.MySQLDestination._connect")
+    def test_create_only_duplicate_skip_aborts_when_savepoint_recovery_fails(
+        self, mock_connect: MagicMock
+    ) -> None:
+        conn = _fake_connection()
+        cur = conn.cursor()
+
+        def execute_side_effect(sql: str, *args: Any) -> None:
+            if sql.startswith("INSERT INTO"):
+                raise Exception(1062, "Duplicate entry for PRIMARY")
+            if sql.startswith("ROLLBACK TO SAVEPOINT"):
+                raise Exception("deadlock rolled back the whole transaction")
+
+        cur.execute.side_effect = execute_side_effect
+        cur.fetchone.return_value = (1,)
+        mock_connect.return_value = conn
+
+        result = MySQLDestination().load(
+            [
+                {"user_id": 1, "company_id": 5, "score": 0.95},
+                {"user_id": 2, "company_id": 5, "score": 0.80},
+            ],
+            _config(),
+            _options(match_policy="create_only", on_error="skip"),
+        )
+
+        assert result.success == 0
+        assert result.failed == 1
+        assert result.skipped == 1
+        assert result.skipped_no_match == 1
+        conn.rollback.assert_called()
+
+    @patch("drt.destinations.mysql.MySQLDestination._connect")
     def test_update_only_binds_updates_then_composite_key(self, mock_connect: MagicMock) -> None:
         conn = _fake_connection()
         conn.cursor().rowcount = 1
