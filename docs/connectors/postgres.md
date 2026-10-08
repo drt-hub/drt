@@ -107,7 +107,7 @@ By default `mode: upsert` (and `full` / `incremental`) both *update* rows that a
 
 Skipped rows are counted in the run's **`skipped`** total (`drt run` prints `… N skipped`), not as errors. `match_policy` composes with `field_mappings`, `mask`, and `lookups`. It is **rejected for `mode: replace`** (the TRUNCATE makes only-update / only-create meaningless) and **`mode: mirror`** (its delete pass is a separate design) at validate time, and a destination that doesn't implement it **fails fast** rather than silently upserting. Prior art: Census / Hightouch "Update Only" / "Create Only" sync behaviours.
 
-> **Availability:** supported by **Postgres**, **MySQL**, and **HubSpot**. Salesforce, Intercom, Klaviyo, and other destinations follow as separate destination-specific PRs on the same engine seam ([#757](https://github.com/drt-hub/drt/issues/757)).
+> **Availability:** supported by **Postgres**, **MySQL**, **HubSpot**, and **Intercom**. Salesforce, Klaviyo, and other destinations follow as separate destination-specific PRs on the same engine seam ([#757](https://github.com/drt-hub/drt/issues/757)).
 
 **Mirror mode (differential delete, [#340](https://github.com/drt-hub/drt/issues/340) — v0.7.7+):**
 

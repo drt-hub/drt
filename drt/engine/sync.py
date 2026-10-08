@@ -136,7 +136,7 @@ def _check_match_policy_supported(
             f"sync.match_policy: {match_policy} is not supported by "
             f"{dest_name}. Supported here: "
             f"{', '.join(sorted(supported)) or 'upsert only'}. "
-            "match_policy currently ships on the Postgres, MySQL, and HubSpot "
+            "match_policy currently ships on the Postgres, MySQL, HubSpot, and Intercom "
             "destinations (update_only / create_only); other destinations follow (#757)."
         )
 
