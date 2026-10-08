@@ -4,3 +4,4 @@ scripts/**
 node_modules/**
 **/*.map
 **/.DS_Store
+RELEASING.md
