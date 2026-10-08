@@ -4,7 +4,10 @@ All notable changes to the **drt — Reverse ETL** VS Code extension are documen
 here. This extension versions independently of `drt-core`; each release notes the
 drt-core version its bundled schemas were generated from.
 
-## [0.1.13] - Unreleased
+## [0.1.13] - 2026-10-08
+
+First public release on the VS Code Marketplace and Open VSX. Bundled schemas
+match drt-core 1.1.0.
 
 - Bundled JSON Schemas regenerated from drt-core: `staged_upload` gains an
   optional `rate_limit_key` for explicitly identifying a vendor quota boundary
