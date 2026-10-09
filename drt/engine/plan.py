@@ -61,6 +61,7 @@ class Plan:
     drt_version: str
     created_at: str
     cursor_hash: str | None = None
+    redact_keys: bool = False
     available: bool = True
     unavailable_reason: str | None = None
     total_source_rows: int = 0
@@ -81,17 +82,11 @@ class Plan:
     @property
     def digest(self) -> str:
         """Hash of the action set (what would change), not of the metadata."""
-        body = {
-            "sync": self.sync_name,
-            "config_hash": self.config_hash,
-            "entries": [e.to_dict() for e in self.entries],
-        }
-        return "sha256:" + _sha256(_canonical(body))
+        return digest_of(self.sync_name, self.config_hash, [e.to_dict() for e in self.entries])
 
     @property
     def plan_id(self) -> str:
-        seed = _canonical({"digest": self.digest, "cursor": self.cursor_hash})
-        return "plan-" + _sha256(seed)[:16]
+        return plan_id_of(self.digest, self.cursor_hash)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -105,6 +100,7 @@ class Plan:
                 "match_policy": self.match_policy,
             },
             "destination": self.destination,
+            "options": {"redact_keys": self.redact_keys},
             "fingerprints": {
                 "config_hash": self.config_hash,
                 "cursor_hash": self.cursor_hash,
@@ -124,6 +120,15 @@ class Plan:
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), indent=2, sort_keys=True, default=str) + "\n"
+
+
+def digest_of(sync_name: str, config_fingerprint: str, entries: list[dict[str, Any]]) -> str:
+    body = {"sync": sync_name, "config_hash": config_fingerprint, "entries": entries}
+    return "sha256:" + _sha256(_canonical(body))
+
+
+def plan_id_of(digest: str, cursor_hash: str | None) -> str:
+    return "plan-" + _sha256(_canonical({"digest": digest, "cursor": cursor_hash}))[:16]
 
 
 def _canonical(value: Any) -> str:
@@ -200,6 +205,7 @@ def build_plan(
         drt_version=drt_version,
         created_at=created_at or datetime.now(timezone.utc).isoformat(),
         cursor_hash=hash_value(cursor_value) if cursor_value is not None else None,
+        redact_keys=redact_keys,
         total_source_rows=diff.total_source_rows,
         total_destination_rows=diff.total_destination_rows,
     )
@@ -247,6 +253,62 @@ def build_plan(
 
     plan.entries = sorted(entries, key=_entry_sort_key)
     return plan
+
+
+class PlanDocumentError(ValueError):
+    """A plan file that must not be applied (unreadable, tampered or unusable)."""
+
+
+def load_plan_document(text: str) -> dict[str, Any]:
+    """Parse and integrity-check a ``plan.json``.
+
+    The digest and ``plan_id`` are recomputed from the entries, so a plan that
+    was edited by hand (or truncated) is rejected instead of trusted.
+    """
+    try:
+        doc = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise PlanDocumentError(f"plan file is not valid JSON: {e}") from e
+    if not isinstance(doc, dict):
+        raise PlanDocumentError("plan file must contain a JSON object")
+    try:
+        version = doc["schema_version"]
+        if version != PLAN_SCHEMA_VERSION:
+            raise PlanDocumentError(
+                f"unsupported plan schema_version {version!r} "
+                f"(this drt reads {PLAN_SCHEMA_VERSION})"
+            )
+        if not doc["status"]["available"]:
+            raise PlanDocumentError("the plan is marked unavailable and cannot be applied")
+        entries = doc["entries"]
+        digest = digest_of(doc["sync"]["name"], doc["fingerprints"]["config_hash"], entries)
+        if digest != doc["digest"]:
+            raise PlanDocumentError("plan digest does not match its entries (file was modified)")
+        if plan_id_of(digest, doc["fingerprints"]["cursor_hash"]) != doc["plan_id"]:
+            raise PlanDocumentError("plan_id does not match the plan contents")
+        doc["options"]["redact_keys"]
+        doc["created_at"]
+        doc["drt_version"]
+    except (KeyError, TypeError) as e:
+        raise PlanDocumentError(f"plan file is missing or malformed field: {e}") from e
+    return doc
+
+
+def drift_report(
+    planned: list[dict[str, Any]], current: list[dict[str, Any]]
+) -> dict[str, list[dict[str, Any]]]:
+    """Compare two entry lists by key: what appeared, disappeared or changed."""
+    old = {_canonical(e["key"]): e for e in planned}
+    new = {_canonical(e["key"]): e for e in current}
+    return {
+        "appeared": [new[k] for k in sorted(new.keys() - old.keys())],
+        "disappeared": [old[k] for k in sorted(old.keys() - new.keys())],
+        "changed": [
+            {"key": new[k]["key"], "planned": old[k], "current": new[k]}
+            for k in sorted(old.keys() & new.keys())
+            if old[k] != new[k]
+        ],
+    }
 
 
 def unsupported_reason(sync: Any) -> str | None:
@@ -297,6 +359,7 @@ PLAN_JSON_SCHEMA: dict[str, Any] = {
         "drt_version",
         "sync",
         "destination",
+        "options",
         "fingerprints",
         "status",
         "summary",
@@ -318,6 +381,11 @@ PLAN_JSON_SCHEMA: dict[str, Any] = {
             },
         },
         "destination": {"type": "string"},
+        "options": {
+            "type": "object",
+            "required": ["redact_keys"],
+            "properties": {"redact_keys": {"type": "boolean"}},
+        },
         "fingerprints": {
             "type": "object",
             "required": ["config_hash", "cursor_hash"],

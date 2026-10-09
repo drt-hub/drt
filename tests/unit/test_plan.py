@@ -267,3 +267,41 @@ def test_markdown_for_an_empty_plan() -> None:
     plan = build_plan(DiffResult(total_source_rows=1, total_destination_rows=1), **_BASE)
 
     assert "No changes." in render_markdown(plan)
+
+
+def test_plan_document_round_trips_and_detects_tampering() -> None:
+    from drt.engine.plan import PlanDocumentError, drift_report, load_plan_document
+
+    plan = build_plan(_diff(), **_BASE)
+    doc = load_plan_document(plan.to_json())
+    assert doc["plan_id"] == plan.plan_id
+
+    tampered = json.loads(plan.to_json())
+    tampered["entries"].pop()
+    with pytest.raises(PlanDocumentError, match="modified"):
+        load_plan_document(json.dumps(tampered))
+
+    bad_id = json.loads(plan.to_json())
+    bad_id["plan_id"] = "plan-0000000000000000"
+    with pytest.raises(PlanDocumentError, match="plan_id"):
+        load_plan_document(json.dumps(bad_id))
+
+    for text in ("not json", "[]", "{}"):
+        with pytest.raises(PlanDocumentError):
+            load_plan_document(text)
+
+    wrong_version = json.loads(plan.to_json())
+    wrong_version["schema_version"] = 99
+    with pytest.raises(PlanDocumentError, match="schema_version"):
+        load_plan_document(json.dumps(wrong_version))
+
+    unavailable = build_plan(DiffResult(supported=False, fallback_reason="x"), **_BASE)
+    with pytest.raises(PlanDocumentError, match="unavailable"):
+        load_plan_document(unavailable.to_json())
+
+    old = [e.to_dict() for e in plan.entries]
+    new = [{**old[0], "action": "update"}, {"key": {"id": 77}, "action": "create"}]
+    report = drift_report(old, new)
+    assert [e["key"] for e in report["appeared"]] == [{"id": 77}]
+    assert len(report["disappeared"]) == len(old) - 1
+    assert len(report["changed"]) == 1

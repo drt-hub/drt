@@ -66,6 +66,17 @@
       ],
       "type": "object"
     },
+    "options": {
+      "properties": {
+        "redact_keys": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "redact_keys"
+      ],
+      "type": "object"
+    },
     "plan_id": {
       "pattern": "^plan-[0-9a-f]{16}$",
       "type": "string"
@@ -163,6 +174,7 @@
     "drt_version",
     "sync",
     "destination",
+    "options",
     "fingerprints",
     "status",
     "summary",

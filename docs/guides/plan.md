@@ -1,4 +1,4 @@
-# Plan: review a sync before it writes
+# Plan and apply: review a sync before it writes
 
 `drt plan` computes what a sync **would** change and saves it as a reviewable
 file. It is the same read-only comparison as `drt run --dry-run --diff`, but it
@@ -13,8 +13,8 @@ drt plan orders_to_pg --out plan.json --output markdown     # markdown on stdout
 ```
 
 `drt plan` never writes to the destination, never advances a watermark and
-never persists run state. Applying a plan (`drt apply`) is a separate step
-([#1217](https://github.com/drt-hub/drt/issues/1217)).
+never persists run state. Applying a plan is a separate step, `drt apply`
+(see below).
 
 ## What is in `plan.json`
 
@@ -75,3 +75,43 @@ reason when:
 | 0 | Plan computed (with `--detailed-exitcode`: no changes) |
 | 1 | Error, or the plan is unavailable |
 | 2 | Plan computed and changes are present (`--detailed-exitcode` only) |
+
+## Applying a plan
+
+```bash
+drt plan orders_to_pg --out plan.json      # review plan.json (or the markdown)
+drt apply plan.json                        # prompts; --auto-approve in CI
+drt apply plan.json --auto-approve --max-age 2h
+```
+
+`drt apply` **recomputes** the plan through the same code `drt plan` uses and
+only writes if the result is the same change set (verify-by-replan). That keeps
+row values out of the plan file and reuses the exact comparison that produced
+it. The write itself is the normal `drt run` path: rate limiting, DLQ, history,
+watermarks and alerts behave as they do for `drt run`.
+
+Nothing is written, and the command exits 1, when:
+
+| Situation | Why |
+|---|---|
+| the file was edited or truncated | `digest` and `plan_id` are recomputed from the entries |
+| the plan is older than `--max-age` (default 24h) | the world has had time to move |
+| the plan came from another drt **major** version | formats are only promised within a major |
+| the sync file, or the model SQL it references, changed | the plan describes a different sync |
+| the incremental watermark moved | the plan covers a different window (the plan stores only a hash of the cursor) |
+| the change set differs | a **drift report** lists the keys that appeared, disappeared or changed action |
+| the plan was already applied | a plan is single-use |
+| history is disabled | single use is recorded in run history, so it cannot be enforced |
+
+`--allow-drift-pct N` proceeds if at most N percent of the planned keys
+drifted (default 0); the drift is printed. Without a terminal, `--auto-approve`
+is required.
+
+**How "already applied" works.** The plan's `plan_id` is used as the `run_id`
+of the apply run, so it lands in run history and in
+`target/drt/run_results.json`. A plan is applied when history holds an entry for
+that sync with `run_id == plan_id`. No new state is stored.
+
+**Limits.** Extraction runs once to verify and once to write, so the source can
+still change in between; verify-by-replan narrows that window, it does not make
+the write transactional. Exact replay of the planned rows is a later opt-in.
