@@ -43,15 +43,15 @@ class PlanContext:
     cursor_value_used: str | None = None
 
 
-def sync_fingerprint(sync: SyncConfig) -> str:
+def sync_fingerprint(sync: SyncConfig, project_dir: Path = Path(".")) -> str:
     """Hash of the sync file *and* the model SQL it references (#772's fingerprint)."""
     from drt.config.fingerprint import sync_fingerprints
 
-    from_files = sync_fingerprints(Path(".")).get(sync.name)
+    from_files = sync_fingerprints(project_dir).get(sync.name)
     return f"sha256:{from_files}" if from_files else config_hash(sync)
 
 
-def load_plan_key() -> bytes:
+def load_plan_key(project_dir: Path = Path(".")) -> bytes:
     """The secret that keys every hash in a plan.
 
     ``DRT_PLAN_KEY`` wins (set the same secret in the jobs that plan and apply);
@@ -61,7 +61,7 @@ def load_plan_key() -> bytes:
     env = os.environ.get("DRT_PLAN_KEY")
     if env:
         return env.encode("utf-8")
-    path = Path(".drt") / "plan.key"
+    path = project_dir / ".drt" / "plan.key"
     try:
         return path.read_bytes()
     except FileNotFoundError:
@@ -127,8 +127,9 @@ def compute_plan(
     *,
     redact_keys: bool = False,
     cursor_value: str | None = None,
-    vars_raw: str | None = None,
+    cli_vars: dict[str, Any] | None = None,
     profile_name: str | None = None,
+    project_dir: Path = Path("."),
     preflight: Callable[[Any, Any, SyncConfig], None] | None = None,
 ) -> PlanContext:
     """Plan one sync, read-only. Raises :class:`PlanCliError` when it cannot run at all.
@@ -142,12 +143,12 @@ def compute_plan(
     """
     from drt.config.credentials import load_profile
     from drt.config.parser import load_project, load_syncs
-    from drt.config.vars import VarError, parse_cli_vars, resolve_vars
+    from drt.config.vars import VarError, resolve_vars
     from drt.engine.sync import run_sync
     from drt.state.factory import build_state_bundle
 
     try:
-        project = load_project(Path("."))
+        project = load_project(project_dir)
     except FileNotFoundError as e:
         raise PlanCliError(str(e)) from e
 
@@ -157,9 +158,8 @@ def compute_plan(
         raise PlanCliError(str(e)) from e
 
     try:
-        cli_vars = parse_cli_vars(vars_raw) if vars_raw else None
         project_vars = resolve_vars(project.vars, cli_vars)
-        syncs = load_syncs(Path("."), vars=project_vars)
+        syncs = load_syncs(project_dir, vars=project_vars)
     except VarError as e:
         raise PlanCliError(str(e)) from e
 
@@ -172,7 +172,7 @@ def compute_plan(
     if blocker is not None:
         raise PlanCliError(f"Plan unavailable for '{sync.name}': {blocker}.")
 
-    state_bundle = build_state_bundle(project, Path("."))
+    state_bundle = build_state_bundle(project, project_dir)
     if preflight is not None:
         # Cheap checks that must run before the (possibly expensive) extraction.
         preflight(project, state_bundle, sync)
@@ -182,10 +182,10 @@ def compute_plan(
             get_source(profile),
             get_destination(sync),
             profile,
-            Path("."),
+            project_dir,
             True,
             state_bundle.state,
-            watermark_storage=get_watermark_storage(sync, Path(".")),
+            watermark_storage=get_watermark_storage(sync, project_dir),
             cursor_value_override=cursor_value if sync.sync.mode == "incremental" else None,
             compute_diff=True,
             # Not a sample: a plan needs every changed key.
@@ -206,7 +206,7 @@ def compute_plan(
             f"{', interrupted' if result.interrupted else ''})."
         )
 
-    plan_key = load_plan_key()
+    plan_key = load_plan_key(project_dir)
     destination = sync.destination
     plan = build_plan(
         result.diff,
@@ -214,7 +214,7 @@ def compute_plan(
         sync_mode=sync.sync.mode,
         match_policy=sync.sync.match_policy,
         destination=getattr(destination, "describe_safe", lambda: str(destination.type))(),
-        config_fingerprint=sync_fingerprint(sync),
+        config_fingerprint=sync_fingerprint(sync, project_dir),
         environment_fingerprint=environment_fingerprint(sync, project_vars, profile, plan_key),
         plan_key=plan_key,
         drt_version=__version__,
@@ -228,3 +228,13 @@ def compute_plan(
     return PlanContext(
         plan, sync, project, profile, state_bundle, project_vars, result.cursor_value_used
     )
+
+
+def parse_vars_option(vars_raw: str | None) -> dict[str, Any] | None:
+    """The CLI's ``--vars 'k: v'`` string as the dict ``compute_plan`` takes."""
+    from drt.config.vars import VarError, parse_cli_vars
+
+    try:
+        return parse_cli_vars(vars_raw) if vars_raw else None
+    except VarError as e:
+        raise PlanCliError(str(e)) from e

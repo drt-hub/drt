@@ -190,6 +190,8 @@ drt mcp run   # starts stdio MCP server
 | `drt_get_status(sync_name=None)` | Returns last run result(s); omit sync_name for all |
 | `drt_state_show(sync_name=None)` | Returns stored watermark and last-run state |
 | `drt_state_reset(...)` | Explicitly resets watermark, run, and/or tracked-mirror state |
+| `drt_plan(sync_name, redact_keys=False, max_entries=100)` | Read-only change set (keys, actions, counts, tripped guards) + `plan_id`; never row values |
+| `drt_apply(plan_id, approved_by, ...)` | Applies a plan fetched with `drt_plan` only if recomputing it matches; `approved_by` is mandatory; call only after a human approved |
 | `drt_get_history(sync_name=None, limit=20)` | Returns past execution entries |
 | `drt_validate()` | Validates all sync YAMLs; returns valid list and errors dict |
 | `drt_get_schema(schema_type="sync")` | Returns JSON Schema for "sync" or "project" config |
@@ -261,6 +263,7 @@ Five skills available via the Claude Code plugin marketplace:
 |-------|------|---------|
 | `drt-create-sync` | `skills/drt/skills/drt-create-sync/SKILL.md` | Generate sync YAML from user intent |
 | `drt-debug` | `skills/drt/skills/drt-debug/SKILL.md` | Diagnose and fix failing syncs |
+| `drt-review-sync` | `skills/drt/skills/drt-review-sync/SKILL.md` | Plan a sync, explain the change set, apply only after human approval |
 | `drt-init` | `skills/drt/skills/drt-init/SKILL.md` | Guide through project initialization |
 | `drt-migrate` | `skills/drt/skills/drt-migrate/SKILL.md` | Migrate from Census/Hightouch to drt |
 | `drt-troubleshoot` | `skills/drt/skills/drt-troubleshoot/SKILL.md` | Walk a setup through end-to-end diagnosis |

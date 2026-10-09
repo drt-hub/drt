@@ -58,7 +58,7 @@ def plan(
       drt plan orders_to_pg --out plan.json
       drt plan orders_to_pg --out plan.json --detailed-exitcode
     """
-    from drt.cli._plan_runner import PlanCliError, compute_plan
+    from drt.cli._plan_runner import PlanCliError, compute_plan, parse_vars_option
     from drt.engine.plan import render_markdown, render_text
 
     if output not in ("text", "json", "markdown"):
@@ -70,7 +70,7 @@ def plan(
             sync_name,
             redact_keys=redact_keys,
             cursor_value=cursor_value,
-            vars_raw=vars_raw,
+            cli_vars=parse_vars_option(vars_raw),
             profile_name=profile_name,
         ).plan
     except PlanCliError as e:

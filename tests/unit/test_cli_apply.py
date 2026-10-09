@@ -237,7 +237,7 @@ def test_applying_twice_is_refused_the_second_time(project: Path, world: _World)
 def test_losing_the_claim_race_writes_nothing(
     project: Path, world: _World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from drt.cli.commands import apply as apply_cmd
+    from drt.cli import _apply_flow as apply_cmd
 
     def lost(*_a: Any, **_k: Any) -> None:
         raise FileExistsError
@@ -807,3 +807,57 @@ def test_plan_command_reports_guards_without_failing(project: Path, world: _Worl
 
     assert result.exit_code == 0
     assert "GUARD TRIPPED" in result.output
+
+
+def test_bad_vars_and_unreadable_plan_file_are_clean_errors(project: Path) -> None:
+    _plan(project)
+
+    bad_vars = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--vars", "::"])
+    unreadable = runner.invoke(app, ["apply", str(project / "syncs"), "--auto-approve"])
+
+    assert bad_vars.exit_code == 1
+    assert unreadable.exit_code == 1 and "Cannot apply" in unreadable.output
+
+
+def test_the_library_refuses_when_nobody_can_approve(project: Path, world: _World) -> None:
+    from drt.cli._apply_flow import ApplyRefused, apply_plan
+
+    _plan(project)
+
+    with pytest.raises(ApplyRefused, match="Approval is required"):
+        apply_plan((project / "plan.json").read_text(), project_dir=project)
+    assert _writes(world) == []
+
+
+def test_approved_by_is_recorded_from_the_cli(project: Path, world: _World) -> None:
+    plan = _plan(project)
+
+    result = runner.invoke(
+        app, ["apply", "plan.json", "--auto-approve", "--approved-by", "masukai"]
+    )
+
+    assert result.exit_code == 0, result.output
+    claim = json.loads((project / ".drt" / "applied_plans" / f"{plan['plan_id']}.json").read_text())
+    assert claim["approved_by"] == "masukai"
+    results = json.loads((project / "target" / "drt" / "run_results.json").read_text())
+    assert results["results"][0]["approved_by"] == "masukai"
+
+
+def test_declining_the_prompt_is_aborted_not_an_error(
+    project: Path, world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import typer
+
+    class _Tty:
+        def isatty(self) -> bool:
+            return True
+
+    _plan(project)
+    monkeypatch.setattr(typer, "get_text_stream", lambda *_a, **_k: _Tty())
+    monkeypatch.setattr(typer, "confirm", lambda *_a, **_k: False)
+
+    result = runner.invoke(app, ["apply", "plan.json"])
+
+    assert result.exit_code == 1
+    assert "Aborted. Nothing was written." in result.output
+    assert "Error" not in result.output
