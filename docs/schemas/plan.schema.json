@@ -73,6 +73,50 @@
       ],
       "type": "object"
     },
+    "guards": {
+      "properties": {
+        "configured": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "tripped": {
+          "items": {
+            "properties": {
+              "guard": {
+                "type": "string"
+              },
+              "limit": {
+                "type": "number"
+              },
+              "message": {
+                "type": "string"
+              },
+              "observed": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "guard",
+              "limit",
+              "observed",
+              "message"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "configured",
+        "tripped"
+      ],
+      "type": "object"
+    },
     "options": {
       "properties": {
         "key_id": {
@@ -193,6 +237,7 @@
     "fingerprints",
     "status",
     "summary",
+    "guards",
     "digest",
     "seal",
     "entries"

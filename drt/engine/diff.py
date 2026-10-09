@@ -128,6 +128,9 @@ class DiffResult:
     # field ordering.  See the class docstring for why this can be true while
     # ``total_destination_rows`` remains ``None``.
     destination_keys_scanned: bool = False
+    # How many rows the delete pass looked at: the denominator for a delete
+    # percentage (#1218). ``None`` when the strategy cannot report it.
+    delete_baseline: int | None = None
 
     @staticmethod
     def changed_fields(
@@ -238,7 +241,7 @@ def _preview_destination_mirror_deletes(
     upsert_key: list[str],
     source_keys: set[tuple[Any, ...]],
     records: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], str | None]:
+) -> tuple[list[dict[str, Any]], str | None, int | None]:
     """Read-only preview of the rows destination-strategy mirror would DELETE.
 
     The real pass is ``_build_mirror_delete(..., negate=True)``: "DELETE the rows
@@ -275,7 +278,7 @@ def _preview_destination_mirror_deletes(
     try:
         dest_keys = fetch_all_keys(config, upsert_key, scope_cols, scopes)
     except Exception as error:
-        return [], f"{type(error).__name__}: {error}"
+        return [], f"{type(error).__name__}: {error}", None
     if isinstance(config, ClickHouseDestinationConfig):
         comparison_keys = {tuple(str(v) for v in key) for key in source_keys}
 
@@ -290,6 +293,7 @@ def _preview_destination_mirror_deletes(
     return (
         [dict(zip(upsert_key, key)) for key in dest_keys if _normalize(key) not in comparison_keys],
         None,
+        len(dest_keys),
     )
 
 
@@ -299,7 +303,7 @@ def _preview_tracked_mirror_deletes(
     upsert_key: list[str],
     source_keys: set[tuple[Any, ...]],
     records: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], str | None]:
+) -> tuple[list[dict[str, Any]], str | None, int | None]:
     """Read-only preview of the rows tracked mirror would DELETE (#693).
 
     Reads the drt-managed ``_drt_synced_keys`` state for this sync and returns
@@ -321,7 +325,7 @@ def _preview_tracked_mirror_deletes(
     try:
         previous = fetch_tracked_state(config, sync_name)
         if not previous:
-            return [], None
+            return [], None, 0
 
         # Scope filtering (and the final diff) stay inside this same guard
         # (caught in review, #1061): decode_key()/diff_keys() can raise on
@@ -341,11 +345,12 @@ def _preview_tracked_mirror_deletes(
             }
         deleted_keys = diff_keys(previous, list(source_keys))
     except Exception as error:
-        return [], f"{type(error).__name__}: {error}"
+        return [], f"{type(error).__name__}: {error}", None
 
     return (
         [dict(zip(upsert_key, key)) for key in deleted_keys],
         None,
+        len(previous),
     )
 
 
@@ -373,17 +378,26 @@ def _append_only_diff(
     delete_reason: str | None = None
     delete_preview_unavailable_reason: str | None = None
     destination_keys_scanned = False
+    delete_baseline: int | None = None
 
     if sync_options.mode == "mirror":
         assert upsert_key is not None
         if _is_tracked_mirror(sync_options) and records:
-            deleted, delete_preview_unavailable_reason = _preview_tracked_mirror_deletes(
+            (
+                deleted,
+                delete_preview_unavailable_reason,
+                delete_baseline,
+            ) = _preview_tracked_mirror_deletes(
                 config, sync_options, upsert_key, source_keys, records
             )
             delete_reason = "mirror"
         elif _is_destination_mirror(sync_options) and records:
             destination_keys_scanned = True
-            deleted, delete_preview_unavailable_reason = _preview_destination_mirror_deletes(
+            (
+                deleted,
+                delete_preview_unavailable_reason,
+                delete_baseline,
+            ) = _preview_destination_mirror_deletes(
                 config, sync_options, upsert_key, source_keys, records
             )
             delete_reason = "mirror_scan"
@@ -402,6 +416,7 @@ def _append_only_diff(
         supported=True,
         delete_reason=delete_reason if deleted else None,
         delete_preview_unavailable_reason=delete_preview_unavailable_reason,
+        delete_baseline=delete_baseline,
     )
 
 
@@ -566,22 +581,30 @@ def compute_diff(
     delete_reason: str | None = None
     delete_preview_unavailable_reason: str | None = None
     destination_keys_scanned = False
+    delete_baseline = None
     if sync_options.mode == "replace":
         deleted = [row for key, row in dest_by_key.items() if key not in source_keys]
         delete_reason = "replace"
+        delete_baseline = len(dest_by_key)
     # ``and records`` on both mirror legs: ``_finalize_mirror`` returns early
     # when no key was observed (``if not self._mirror_keys: return None``), and
     # that guard sits *above* the tracked dispatch — so a transient empty source
     # deletes nothing, on either strategy. Previewing a full wipe would tell the
     # operator the opposite of what the run would do.
     elif _is_tracked_mirror(sync_options) and records:
-        deleted, delete_preview_unavailable_reason = _preview_tracked_mirror_deletes(
-            config, sync_options, upsert_key, source_keys, records
-        )
+        (
+            deleted,
+            delete_preview_unavailable_reason,
+            delete_baseline,
+        ) = _preview_tracked_mirror_deletes(config, sync_options, upsert_key, source_keys, records)
         delete_reason = "mirror"
     elif _is_destination_mirror(sync_options) and records:
         destination_keys_scanned = True
-        deleted, delete_preview_unavailable_reason = _preview_destination_mirror_deletes(
+        (
+            deleted,
+            delete_preview_unavailable_reason,
+            delete_baseline,
+        ) = _preview_destination_mirror_deletes(
             config, sync_options, upsert_key, source_keys, records
         )
         delete_reason = "mirror_scan"
@@ -614,4 +637,5 @@ def compute_diff(
         delete_reason=delete_reason if deleted else None,
         delete_preview_unavailable_reason=delete_preview_unavailable_reason,
         writes_full_row=writes_full_row,
+        delete_baseline=delete_baseline,
     )

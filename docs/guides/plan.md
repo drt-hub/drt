@@ -77,6 +77,36 @@ reason when:
   extraction writes scratch tables, so it is not read-only), or an engine
   metadata column inside `upsert_key`.
 
+## Change guards
+
+`sync.guards` sets limits on how much one run may change:
+
+```yaml
+sync:
+  mode: mirror
+  guards:
+    max_creates: 10000
+    max_deletes: 500
+    max_delete_pct: 10      # of the rows the delete pass looked at
+    max_updates_pct: 50     # of the source rows
+```
+
+`drt plan` reports a tripped guard (text, markdown and the `guards` block of
+`plan.json`) without changing its exit code. `drt apply` evaluates the guards on
+the **recomputed** plan, not the file, and refuses to write when one trips; it
+names the guard, the observed value and the limit. `--force-guards` applies
+anyway, prints what it overrode, and records it in `run_results.json` and the
+plan's claim file.
+
+- A percentage that cannot be evaluated trips instead of passing. Delete
+  percentages need a count of the rows the delete pass looked at: destination
+  keys (`strategy: destination`), tracked keys (`strategy: tracked`) or the
+  table (`mode: replace`). `strategy: diff` does not report one, so use
+  `max_deletes` there.
+- Unknown keys under `guards` are rejected, so a typo cannot disable a guard.
+- **`drt run` does not enforce guards yet.** Today they protect the plan/apply
+  path only; enforcing them before a plain run's `DELETE` is the next step.
+
 ## Exit codes
 
 | Code | Meaning |

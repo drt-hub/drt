@@ -10,6 +10,7 @@ from typing import Annotated, Any, Literal, get_args
 
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Discriminator,
     Field,
     PrivateAttr,
@@ -168,6 +169,31 @@ class MaskRule(BaseModel):
 
 
 MaskSpec = Literal["hash", "redact"] | MaskRule
+
+
+class GuardsConfig(BaseModel):
+    """``sync.guards`` — limits on how much one run may change (#1218).
+
+    Evaluated against the change set a plan computes: ``drt plan`` reports a
+    trip, ``drt apply`` refuses to write (``--force-guards`` overrides, loudly).
+    ``drt run`` does not enforce them yet.
+
+    - ``max_creates`` — rows to be created (including append-only inserts).
+    - ``max_deletes`` — rows to be deleted (mirror / replace).
+    - ``max_delete_pct`` — deletes as a percentage of the rows the delete pass
+      looked at (destination keys, tracked keys, or the table for ``replace``).
+      A strategy that cannot report that total trips the guard rather than
+      silently passing.
+    - ``max_updates_pct`` — updates as a percentage of the source rows.
+    """
+
+    # A safety setting must not ignore a typo such as ``max_delete: 5``.
+    model_config = ConfigDict(extra="forbid")
+
+    max_creates: int | None = Field(default=None, ge=0)
+    max_deletes: int | None = Field(default=None, ge=0)
+    max_delete_pct: float | None = Field(default=None, ge=0, le=100)
+    max_updates_pct: float | None = Field(default=None, ge=0, le=100)
 
 
 class MirrorConfig(BaseModel):
@@ -367,6 +393,7 @@ class SyncOptions(BaseModel):
     dlq: DLQConfig | None = None
     # Mirror-mode delete behaviour (#686). None = destination strategy (#340).
     mirror: MirrorConfig | None = None
+    guards: GuardsConfig | None = None
     # Per-record dedup key for the warehouse-backed idempotency ledger
     # (#1099), Jinja template read against the record as it reaches the
     # destination (after field_mappings/mask, same seam as metadata_columns

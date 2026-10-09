@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from drt.engine.diff import DiffResult
+from drt.engine.guards import GuardTrip, evaluate_guards
 
 PLAN_SCHEMA_VERSION = 1
 
@@ -75,6 +76,9 @@ class Plan:
     unavailable_reason: str | None = None
     total_source_rows: int = 0
     total_destination_rows: int | None = None
+    delete_baseline: int | None = None
+    guards_configured: dict[str, Any] | None = None
+    guard_trips: list[GuardTrip] = field(default_factory=list)
     entries: list[PlanEntry] = field(default_factory=list)
 
     @property
@@ -135,6 +139,10 @@ class Plan:
                 **self.summary,
                 "total_source_rows": self.total_source_rows,
                 "total_destination_rows": self.total_destination_rows,
+            },
+            "guards": {
+                "configured": self.guards_configured,
+                "tripped": [t.to_dict() for t in self.guard_trips],
             },
             "digest": self.digest,
             "entries": [e.to_dict() for e in self.entries],
@@ -249,6 +257,7 @@ def build_plan(
     mask_columns: set[str] | None = None,
     redact_keys: bool = False,
     exclude_columns: set[str] | None = None,
+    guards: Any = None,
     cursor_value: str | None = None,
     created_at: str | None = None,
 ) -> Plan:
@@ -272,6 +281,7 @@ def build_plan(
         key_id=key_id_of(plan_key),
         total_source_rows=diff.total_source_rows,
         total_destination_rows=diff.total_destination_rows,
+        delete_baseline=diff.delete_baseline,
     )
 
     if not diff.supported:
@@ -330,6 +340,17 @@ def build_plan(
         )
 
     plan.entries = sorted(entries, key=_entry_sort_key)
+    if guards is not None:
+        plan.guards_configured = guards.model_dump(exclude_none=True)
+        counts = plan.summary
+        plan.guard_trips = evaluate_guards(
+            guards,
+            creates=counts["create"] + counts["insert"],
+            updates=counts["update"] + counts["replace"],
+            deletes=counts["delete"],
+            source_rows=plan.total_source_rows,
+            delete_baseline=plan.delete_baseline,
+        )
     return plan
 
 
@@ -445,6 +466,7 @@ PLAN_JSON_SCHEMA: dict[str, Any] = {
         "fingerprints",
         "status",
         "summary",
+        "guards",
         "digest",
         "seal",
         "entries",
@@ -493,6 +515,26 @@ PLAN_JSON_SCHEMA: dict[str, Any] = {
                 **{action: {"type": "integer", "minimum": 0} for action in _ACTION_ORDER},
                 "total_source_rows": {"type": "integer", "minimum": 0},
                 "total_destination_rows": {"type": ["integer", "null"], "minimum": 0},
+            },
+        },
+        "guards": {
+            "type": "object",
+            "required": ["configured", "tripped"],
+            "properties": {
+                "configured": {"type": ["object", "null"]},
+                "tripped": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["guard", "limit", "observed", "message"],
+                        "properties": {
+                            "guard": {"type": "string"},
+                            "limit": {"type": "number"},
+                            "observed": {"type": ["number", "null"]},
+                            "message": {"type": "string"},
+                        },
+                    },
+                },
             },
         },
         "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
@@ -565,6 +607,8 @@ def render_markdown(plan: Plan) -> str:
                 f"\n_{hidden} more entries not shown; the full list is in the JSON plan "
                 "(`drt plan ... --out plan.json`)._"
             )
+    for trip in plan.guard_trips:
+        lines += ["", f"**Guard tripped:** {_code(trip.message, _MARKDOWN_REASON_LIMIT)}"]
     lines += ["", f"{_code(plan.plan_id)} - digest {_code(plan.digest[:23])}", ""]
     return "\n".join(lines)
 
@@ -581,6 +625,8 @@ def render_text(plan: Plan) -> str:
     lines.append(f"  Source rows: {plan.total_source_rows}")
     if plan.total_destination_rows is not None:
         lines.append(f"  Destination rows read: {plan.total_destination_rows}")
+    for trip in plan.guard_trips:
+        lines.append(f"  GUARD TRIPPED: {trip.message}")
     lines.append(f"  plan_id: {plan.plan_id}")
     lines.append(f"  digest:  {plan.digest}")
     return "\n".join(lines) + "\n"
