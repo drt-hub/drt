@@ -104,7 +104,10 @@ def apply(
             notify=lambda message: typer.echo(message, err=True),
         )
     except ApplyRefused as e:
-        print_error(str(e))
+        if str(e).startswith("Aborted."):  # the person declined: not an error
+            console.print(str(e), markup=False)
+        else:
+            print_error(str(e))
         raise typer.Exit(1)
 
     if not outcome.applied:

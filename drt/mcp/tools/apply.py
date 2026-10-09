@@ -37,7 +37,7 @@ def apply(
             "applied": False,
             "error": "approved_by is required: name the person who approved this apply.",
         }
-    if not PLAN_ID_PATTERN.match(plan_id or ""):
+    if not PLAN_ID_PATTERN.fullmatch(plan_id or ""):
         return {"applied": False, "error": "plan_id must be an id returned by drt_plan."}
     try:
         max_age_delta = parse_duration(max_age)
@@ -70,6 +70,7 @@ def apply(
             profile_name=profile_name,
             json_output=True,
             notify=notes.append,
+            expect_plan_id=plan_id,
         )
     except ApplyRefused as e:
         return {"applied": False, "plan_id": plan_id, "error": str(e), "notes": notes}

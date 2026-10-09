@@ -96,7 +96,7 @@ def create_server(project_dir: Path | None = None) -> Any:
     # drt_run_sync
     # -----------------------------------------------------------------------
 
-    @mcp.tool()
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True})
     def drt_run_sync(
         sync_name: str,
         dry_run: bool = False,
@@ -163,7 +163,7 @@ def create_server(project_dir: Path | None = None) -> Any:
             vars=vars,
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
     def drt_plan(
         sync_name: str,
         redact_keys: bool = False,
@@ -212,7 +212,7 @@ def create_server(project_dir: Path | None = None) -> Any:
             max_entries=max_entries,
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True})
     def drt_apply(
         plan_id: str,
         approved_by: str,

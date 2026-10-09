@@ -841,3 +841,23 @@ def test_approved_by_is_recorded_from_the_cli(project: Path, world: _World) -> N
     assert claim["approved_by"] == "masukai"
     results = json.loads((project / "target" / "drt" / "run_results.json").read_text())
     assert results["results"][0]["approved_by"] == "masukai"
+
+
+def test_declining_the_prompt_is_aborted_not_an_error(
+    project: Path, world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import typer
+
+    class _Tty:
+        def isatty(self) -> bool:
+            return True
+
+    _plan(project)
+    monkeypatch.setattr(typer, "get_text_stream", lambda *_a, **_k: _Tty())
+    monkeypatch.setattr(typer, "confirm", lambda *_a, **_k: False)
+
+    result = runner.invoke(app, ["apply", "plan.json"])
+
+    assert result.exit_code == 1
+    assert "Aborted. Nothing was written." in result.output
+    assert "Error" not in result.output

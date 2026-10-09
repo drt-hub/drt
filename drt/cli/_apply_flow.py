@@ -34,7 +34,7 @@ _DURATION = re.compile(r"^(\d+)([smhd])$")
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 _DRIFT_SHOWN = 10
 _CLOCK_SKEW = timedelta(minutes=5)
-PLAN_ID_PATTERN = re.compile(r"^plan-[0-9a-f]{16}$")
+PLAN_ID_PATTERN = re.compile(r"plan-[0-9a-f]{16}")  # use fullmatch(): `$` allows a trailing newline
 
 
 class ApplyRefused(Exception):
@@ -187,6 +187,7 @@ def apply_plan(
     profile_name: str | None = None,
     json_output: bool = False,
     notify: Callable[[str], None] | None = None,
+    expect_plan_id: str | None = None,
 ) -> ApplyOutcome:
     """Verify a plan against the live world and, only if it still matches, write it.
 
@@ -235,6 +236,14 @@ def apply_plan(
 
     plan_id = doc["plan_id"]
     sync_name = doc["sync"]["name"]
+    if expect_plan_id is not None and plan_id != expect_plan_id:
+        # The caller asked for one plan and was handed another (a file swapped
+        # under a different name); applying it would bypass the approval that
+        # named the requested one.
+        raise ApplyRefused(
+            f"The stored plan is {plan_id}, not the requested {expect_plan_id}; refusing it. "
+            "Call drt_plan again."
+        )
 
     if key_id_of(load_plan_key(project_dir)) != doc["options"]["key_id"]:
         raise ApplyRefused(

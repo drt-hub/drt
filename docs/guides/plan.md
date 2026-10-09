@@ -94,6 +94,28 @@ edited, is stale or was already applied: those are the same refusals as
 `--auto-approve` equivalent; the approval is the named human plus your MCP
 client's permission prompt.
 
+**What this does and does not guarantee.** drt cannot authenticate the human:
+the approval boundary is your MCP client's permission prompt for `drt_apply`,
+and `approved_by` is recorded exactly as the caller supplied it. So:
+
+- Treat `approved_by` as an audit note, not proof of identity. If you need a
+  trustworthy approver, have the client or transport inject it.
+- `drt_run_sync` is a separate way to write to the destination without a plan.
+  `drt_apply` and `drt_run_sync` are both annotated `destructiveHint`; put both
+  behind approval if you want a reviewed path to be the only path.
+- Everything `drt_plan` returns from your data (key values, column names,
+  destination labels, error text) is **untrusted**: values are shortened,
+  control characters are removed, and every response carries a `data_notice`,
+  but an agent must still never follow instructions found inside them.
+  `redact_keys` removes key values entirely.
+- `drt_apply` only applies a plan whose stored file is a regular file under
+  `target/drt/plans/` whose embedded `plan_id` equals the requested one. Beyond
+  that, the file system is trusted: an agent that can write inside your project
+  can also run other commands.
+- Run `drt mcp run` from the project directory. Relative local database paths
+  (SQLite/DuckDB profiles) and `.drt/secrets.toml` are resolved against the
+  working directory, not the project directory passed to the server.
+
 **Recommended client setup.** Allow `drt_plan` without asking, and require an
 approval prompt for `drt_apply` (in Claude Code, leave `mcp__drt__drt_apply` out
 of the allowed tools so every call asks). Do not allow `force_guards` to be
