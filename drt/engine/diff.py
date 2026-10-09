@@ -583,9 +583,14 @@ def compute_diff(
     destination_keys_scanned = False
     delete_baseline = None
     if sync_options.mode == "replace":
-        deleted = [row for key, row in dest_by_key.items() if key not in source_keys]
+        # Physical rows, not distinct keys: replace removes every destination row
+        # whose key the source lacks, including duplicates of one key, and a
+        # delete guard must not undercount a table without a unique key.
+        deleted = [
+            row for row in dest_rows if tuple(row.get(c) for c in upsert_key) not in source_keys
+        ]
         delete_reason = "replace"
-        delete_baseline = len(dest_by_key)
+        delete_baseline = len(dest_rows)
     # ``and records`` on both mirror legs: ``_finalize_mirror`` returns early
     # when no key was observed (``if not self._mirror_keys: return None``), and
     # that guard sits *above* the tracked dispatch — so a transient empty source

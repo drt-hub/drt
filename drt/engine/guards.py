@@ -29,7 +29,17 @@ class GuardTrip:
 
 
 def _pct(part: int, whole: int) -> float:
+    """For display only: limits are compared exactly (see :func:`_exceeds`)."""
     return round(100.0 * part / whole, 2)
+
+
+def _exceeds(part: int, whole: int, limit_pct: float) -> bool:
+    """``part / whole`` strictly above ``limit_pct``, with no rounding.
+
+    Cross-multiplied so a limit of 0 trips on one row in 20,001 and a limit of
+    0.33 trips on 1 in 300, which a two-decimal rounding would let through.
+    """
+    return part * 100 > limit_pct * whole
 
 
 def evaluate_guards(
@@ -83,7 +93,7 @@ def evaluate_guards(
             )
         else:
             observed = _pct(deletes, delete_baseline)
-            if observed > limit:
+            if _exceeds(deletes, delete_baseline, limit):
                 trips.append(
                     GuardTrip(
                         "max_delete_pct",
@@ -107,7 +117,7 @@ def evaluate_guards(
             )
         else:
             observed = _pct(updates, source_rows)
-            if observed > limit:
+            if _exceeds(updates, source_rows, limit):
                 trips.append(
                     GuardTrip(
                         "max_updates_pct",

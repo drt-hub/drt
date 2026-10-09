@@ -106,6 +106,11 @@ plan's claim file.
 - Unknown keys under `guards` are rejected, so a typo cannot disable a guard.
 - **`drt run` does not enforce guards yet.** Today they protect the plan/apply
   path only; enforcing them before a plain run's `DELETE` is the next step.
+- **`drt apply` judges the guards on the verification extraction.** The write
+  extracts again, so a source that shrinks between the two is not re-checked
+  until the engine enforces guards itself (that same next step). Treat the
+  apply-time guard as a check on what you verified, not a limit on what is
+  written.
 
 ## Exit codes
 

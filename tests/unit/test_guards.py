@@ -126,3 +126,14 @@ def test_plan_without_guards_or_trips_reports_none() -> None:
 
     assert clean["guards"]["tripped"] == []
     assert unset["guards"] == {"configured": None, "tripped": []}
+
+
+def test_percentage_limits_are_compared_without_rounding() -> None:
+    # 1 in 20,001 is 0.00499...%, which rounds to 0.00 but is above a limit of 0.
+    assert _eval(GuardsConfig(max_delete_pct=0), deletes=1, delete_baseline=20_001)
+    # 1 in 300 is 0.3333...%, above a 0.33 limit although it rounds to 0.33.
+    assert _eval(GuardsConfig(max_delete_pct=0.33), deletes=1, delete_baseline=300)
+    assert _eval(GuardsConfig(max_updates_pct=0), updates=1, source_rows=20_001)
+    # Exactly at the limit is within it.
+    assert _eval(GuardsConfig(max_delete_pct=25), deletes=1, delete_baseline=4) == []
+    assert _eval(GuardsConfig(max_delete_pct=0), deletes=0) == []

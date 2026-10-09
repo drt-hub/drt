@@ -1649,3 +1649,14 @@ class TestDeleteBaseline:
         )
 
         assert result.delete_baseline is None
+
+
+class TestReplaceDeletesCountPhysicalRows:
+    @patch("drt.engine.diff.fetch_rows")
+    def test_duplicate_destination_keys_are_all_counted(self, mock_fetch: Any) -> None:
+        mock_fetch.return_value = [{"id": 1, "score": 0.5, "name": "x"} for _ in range(100)]
+
+        result = compute_diff([], _pg_config(), _options("replace"), limit=500)
+
+        assert len(result.deleted) == 100
+        assert result.delete_baseline == 100
