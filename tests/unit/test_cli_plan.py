@@ -53,6 +53,8 @@ def _patch_engine(monkeypatch: pytest.MonkeyPatch, diff: DiffResult, calls: list
 
     class _Result:
         cursor_value_used: str | None = None
+        failed = 0
+        interrupted = False
 
         def __init__(self) -> None:
             self.diff = diff
@@ -132,6 +134,45 @@ def test_unavailable_plan_exits_1_and_writes_no_file(
     assert result.exit_code == 1
     assert "no comparison available" in result.output
     assert not (project / "plan.json").exists()
+
+
+def test_partial_extraction_is_never_an_available_plan(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.cli.commands import plan as plan_cmd
+    from drt.engine import sync as sync_module
+
+    _patch_engine(monkeypatch, DiffResult(total_source_rows=0), [])
+
+    class _Failed:
+        failed = 1
+        interrupted = False
+        cursor_value_used: str | None = None
+        diff = DiffResult(total_source_rows=0)
+
+    monkeypatch.setattr(sync_module, "run_sync", lambda *_a, **_k: _Failed())
+    monkeypatch.setattr(plan_cmd, "get_source", lambda *_a, **_k: object())
+
+    result = runner.invoke(app, ["plan", "orders_to_pg", "--out", "plan.json"])
+
+    assert result.exit_code == 1
+    assert "did not complete" in result.output
+    assert not (project / "plan.json").exists()
+
+
+def test_unsupported_sync_is_refused_before_the_engine_runs(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[Any] = []
+    _patch_engine(monkeypatch, _changes(), calls)
+    cfg = {**SYNC_YML, "sync": {"mode": "upsert", "match_policy": "update_only"}}
+    (project / "syncs" / "orders_to_pg.yml").write_text(yaml.dump(cfg))
+
+    result = runner.invoke(app, ["plan", "orders_to_pg"])
+
+    assert result.exit_code == 1
+    assert "match_policy" in result.output
+    assert calls == []  # nothing was extracted, nothing could have been written
 
 
 def test_unknown_sync_is_an_error(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:

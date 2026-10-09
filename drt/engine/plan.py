@@ -59,7 +59,7 @@ class Plan:
     config_hash: str
     drt_version: str
     created_at: str
-    cursor_value: str | None = None
+    cursor_hash: str | None = None
     available: bool = True
     unavailable_reason: str | None = None
     total_source_rows: int = 0
@@ -89,7 +89,7 @@ class Plan:
 
     @property
     def plan_id(self) -> str:
-        seed = _canonical({"digest": self.digest, "cursor": self.cursor_value})
+        seed = _canonical({"digest": self.digest, "cursor": self.cursor_hash})
         return "plan-" + _sha256(seed)[:16]
 
     def to_dict(self) -> dict[str, Any]:
@@ -106,7 +106,7 @@ class Plan:
             "destination": self.destination,
             "fingerprints": {
                 "config_hash": self.config_hash,
-                "cursor_value": self.cursor_value,
+                "cursor_hash": self.cursor_hash,
             },
             "status": {
                 "available": self.available,
@@ -158,8 +158,15 @@ def _key_of(
     return key
 
 
-def _entry_sort_key(entry: PlanEntry) -> tuple[int, str]:
-    return (_ACTION_ORDER[entry.action], _canonical(entry.key))
+def _entry_sort_key(entry: PlanEntry) -> tuple[int, str, str, str]:
+    # Full tie-breaker: two entries for one key (a source with duplicate keys)
+    # must not depend on the order an unordered query returned them in.
+    return (
+        _ACTION_ORDER[entry.action],
+        _canonical(entry.key),
+        _canonical(entry.changed_columns),
+        entry.delete_reason or "",
+    )
 
 
 def build_plan(
@@ -191,7 +198,7 @@ def build_plan(
         config_hash=config_fingerprint,
         drt_version=drt_version,
         created_at=created_at or datetime.now(timezone.utc).isoformat(),
-        cursor_value=cursor_value,
+        cursor_hash=hash_value(cursor_value) if cursor_value is not None else None,
         total_source_rows=diff.total_source_rows,
         total_destination_rows=diff.total_destination_rows,
     )
@@ -239,6 +246,43 @@ def build_plan(
 
     plan.entries = sorted(entries, key=_entry_sort_key)
     return plan
+
+
+def unsupported_reason(sync: Any) -> str | None:
+    """Why this sync cannot be planned *yet*, checked before anything runs.
+
+    These are cases where a plan would be wrong or would not be read-only, so
+    the answer is "unavailable, with a reason" rather than a best effort.
+    """
+    options = sync.sync
+    policy = getattr(options, "match_policy", "upsert")
+    if policy != "upsert":
+        return (
+            f"sync.match_policy: {policy} is not supported by drt plan yet "
+            "(the plan would list creates/updates the destination skips)"
+        )
+    if (
+        options.mode == "incremental"
+        and getattr(options, "incremental_strategy", "cursor") == "diff"
+    ):
+        return (
+            "incremental_strategy: diff is not supported by drt plan yet "
+            "(snapshot extraction writes scratch tables, so it is not read-only)"
+        )
+    metadata = getattr(options, "metadata_columns", None)
+    if metadata is not None:
+        targets = {
+            getattr(metadata, name)
+            for name in ("synced_at", "run_id", "sync_name")
+            if getattr(metadata, name, None)
+        }
+        overlap = sorted(targets & set(getattr(sync.destination, "upsert_key", None) or []))
+        if overlap:
+            return (
+                f"upsert_key includes engine-written metadata column(s) {overlap}; "
+                "their values differ between a plan and a real run"
+            )
+    return None
 
 
 def render_text(plan: Plan) -> str:

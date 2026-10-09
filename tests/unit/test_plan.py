@@ -6,7 +6,13 @@ import json
 from typing import Any
 
 from drt.engine.diff import DiffResult
-from drt.engine.plan import PLAN_SCHEMA_VERSION, build_plan, config_hash, render_text
+from drt.engine.plan import (
+    PLAN_SCHEMA_VERSION,
+    build_plan,
+    config_hash,
+    render_text,
+    unsupported_reason,
+)
 
 _BASE: dict[str, Any] = {
     "sync_name": "orders_to_pg",
@@ -139,3 +145,50 @@ def test_config_hash_tracks_sync_definition() -> None:
 
     assert config_hash(_Cfg(1)) == config_hash(_Cfg(1))
     assert config_hash(_Cfg(1)) != config_hash(_Cfg(2))
+
+
+def test_cursor_is_hashed_never_written_raw() -> None:
+    plan = build_plan(_diff(), **_BASE, cursor_value="alice@example.com")
+
+    assert "alice@example.com" not in plan.to_json()
+    assert plan.to_dict()["fingerprints"]["cursor_hash"].startswith("sha256:")
+    other = build_plan(_diff(), **_BASE, cursor_value="bob@example.com")
+    assert plan.plan_id != other.plan_id
+
+
+def test_duplicate_keys_sort_deterministically() -> None:
+    a = ({"id": 2, "x": 1, "y": 1}, {"id": 2, "x": 2, "y": 1})
+    b = ({"id": 2, "x": 1, "y": 1}, {"id": 2, "x": 1, "y": 2})
+
+    forward = build_plan(_diff(added=[], deleted=[], updated=[a, b]), **_BASE)
+    backward = build_plan(_diff(added=[], deleted=[], updated=[b, a]), **_BASE)
+
+    assert forward.digest == backward.digest
+    assert forward.plan_id == backward.plan_id
+
+
+class _Opts:
+    def __init__(self, **kw: Any) -> None:
+        self.mode = kw.get("mode", "upsert")
+        self.match_policy = kw.get("match_policy", "upsert")
+        self.incremental_strategy = kw.get("incremental_strategy", "cursor")
+        self.metadata_columns = kw.get("metadata_columns")
+
+
+class _Sync:
+    def __init__(self, upsert_key: list[str] | None = None, **kw: Any) -> None:
+        self.sync = _Opts(**kw)
+        self.destination = type("D", (), {"upsert_key": upsert_key or ["id"]})()
+
+
+def test_unsupported_reasons_are_reported_before_anything_runs() -> None:
+    assert unsupported_reason(_Sync()) is None
+    assert "match_policy" in (unsupported_reason(_Sync(match_policy="update_only")) or "")
+    assert "incremental_strategy" in (
+        unsupported_reason(_Sync(mode="incremental", incremental_strategy="diff")) or ""
+    )
+    meta = type("M", (), {"synced_at": "synced_at", "run_id": None, "sync_name": None})()
+    assert "metadata column" in (
+        unsupported_reason(_Sync(["id", "synced_at"], metadata_columns=meta)) or ""
+    )
+    assert unsupported_reason(_Sync(["id"], metadata_columns=meta)) is None

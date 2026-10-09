@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 
@@ -22,6 +23,9 @@ from drt.cli._helpers import (
     resolve_profile_name,
 )
 from drt.cli.output import console, print_error
+
+if TYPE_CHECKING:
+    from drt.config.models import SyncConfig
 
 
 @app.command()
@@ -66,7 +70,7 @@ def plan(
     from drt.config.credentials import load_profile
     from drt.config.parser import load_project, load_syncs
     from drt.config.vars import VarError, parse_cli_vars, resolve_vars
-    from drt.engine.plan import build_plan, config_hash, render_text
+    from drt.engine.plan import build_plan, render_text, unsupported_reason
     from drt.engine.sync import run_sync
     from drt.state.factory import build_state_bundle
 
@@ -100,6 +104,11 @@ def plan(
         raise typer.Exit(1)
     sync = matches[0]
 
+    blocker = unsupported_reason(sync)
+    if blocker is not None:
+        print_error(f"Plan unavailable for '{sync.name}': {blocker}.")
+        raise typer.Exit(1)
+
     state_bundle = build_state_bundle(project, Path("."))
     try:
         result = run_sync(
@@ -125,6 +134,14 @@ def plan(
     if result.diff is None:
         print_error(f"No diff was produced for '{sync_name}'.")
         raise typer.Exit(1)
+    if result.failed or result.interrupted:
+        # A diff over a partial extraction would read as "nothing else changes".
+        print_error(
+            f"Plan unavailable for '{sync_name}': extraction did not complete "
+            f"({result.failed} failed row(s)"
+            f"{', interrupted' if result.interrupted else ''})."
+        )
+        raise typer.Exit(1)
 
     destination = sync.destination
     plan_obj = build_plan(
@@ -133,7 +150,7 @@ def plan(
         sync_mode=sync.sync.mode,
         match_policy=sync.sync.match_policy,
         destination=getattr(destination, "describe_safe", lambda: str(destination.type))(),
-        config_fingerprint=config_hash(sync),
+        config_fingerprint=_fingerprint(sync),
         drt_version=__version__,
         key_columns=list(getattr(destination, "upsert_key", None) or []),
         mask_columns=set(sync.sync.mask or {}),
@@ -157,3 +174,12 @@ def plan(
 
     if detailed_exitcode:
         raise typer.Exit(2 if plan_obj.has_changes else 0)
+
+
+def _fingerprint(sync: SyncConfig) -> str:
+    """Hash of the sync file *and* the model SQL it references (#772's fingerprint)."""
+    from drt.config.fingerprint import sync_fingerprints
+    from drt.engine.plan import config_hash
+
+    from_files = sync_fingerprints(Path(".")).get(sync.name)
+    return f"sha256:{from_files}" if from_files else config_hash(sync)
