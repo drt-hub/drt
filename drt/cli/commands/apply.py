@@ -1,14 +1,17 @@
 """``drt apply`` -- execute a saved plan only if the world still matches (#1217).
 
 Verify-by-replan: the plan is recomputed through the same code ``drt plan``
-uses and compared before anything is written. The plan's ``plan_id`` becomes
-the apply run's ``run_id``, which is how a plan is recorded as applied (in run
-history and ``run_results.json``) and why a plan can only be applied once.
+uses and compared before anything is written. A plan can be applied once: a
+claim file under ``.drt/applied_plans/`` is created atomically (``O_EXCL``)
+before the write and updated with the outcome. The claim is local to the
+workspace, so it stops concurrent and repeated applies there; coordinating
+applies across machines needs a shared claim store (not built yet).
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -24,6 +27,7 @@ from drt.cli.output import console, print_error
 _DURATION = re.compile(r"^(\d+)([smhd])$")
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 _DRIFT_SHOWN = 10
+_CLOCK_SKEW = timedelta(minutes=5)
 
 
 def _parse_duration(text: str) -> timedelta:
@@ -33,21 +37,81 @@ def _parse_duration(text: str) -> timedelta:
     return timedelta(seconds=int(match.group(1)) * _UNITS[match.group(2)])
 
 
-def _describe_drift(report: dict[str, list[dict[str, Any]]]) -> str:
+def _describe_drift(report: dict[str, Any]) -> str:
     lines = ["The world no longer matches the plan:"]
     for label, items in (
-        ("appeared since the plan", report["appeared"]),
-        ("disappeared since the plan", report["disappeared"]),
-        ("changed action since the plan", report["changed"]),
+        ("planned but no longer the case", report["removed"]),
+        ("not in the plan", report["added"]),
     ):
         if not items:
             continue
-        lines.append(f"  {len(items)} key(s) {label}:")
+        lines.append(f"  {len(items)} entr{'y' if len(items) == 1 else 'ies'} {label}:")
         for item in items[:_DRIFT_SHOWN]:
-            lines.append(f"    - {json.dumps(item.get('key'), default=str, sort_keys=True)}")
+            shown = {"action": item.get("action"), "key": item.get("key")}
+            lines.append(f"    - {json.dumps(shown, default=str, sort_keys=True)}")
         if len(items) > _DRIFT_SHOWN:
             lines.append(f"    ... and {len(items) - _DRIFT_SHOWN} more")
     return "\n".join(lines)
+
+
+_CLAIMS_DIR = Path(".drt") / "applied_plans"
+
+
+def _claim_path(plan_id: str) -> Path:
+    return _CLAIMS_DIR / f"{plan_id}.json"
+
+
+def _read_claim(plan_id: str) -> dict[str, Any] | None:
+    try:
+        return json.loads(_claim_path(plan_id).read_text(encoding="utf-8"))  # type: ignore[no-any-return]
+    except (OSError, ValueError):
+        return None
+
+
+def _refuse_if_claimed(plan_id: str) -> None:
+    from drt.cli._plan_runner import PlanCliError
+
+    claim = _read_claim(plan_id)
+    if claim is None and not _claim_path(plan_id).exists():
+        return
+    state = (claim or {}).get("state", "unknown")
+    when = (claim or {}).get("claimed_at", "?")
+    if state == "success":
+        message = f"Plan {plan_id} was already applied ({when})."
+    elif state == "pending":
+        message = (
+            f"Plan {plan_id} is being applied, or an earlier apply stopped part-way "
+            f"(claimed {when}). Check the destination before doing anything else; "
+            f"{_claim_path(plan_id)} records the attempt."
+        )
+    else:
+        message = f"Plan {plan_id} was already attempted (state: {state}, {when})."
+    raise PlanCliError(f"{message} A plan is single-use; run `drt plan` again.")
+
+
+def _claim(plan_id: str, sync_name: str, run_id: str) -> None:
+    """Atomically take the plan. Raises ``FileExistsError`` if someone already did."""
+    _CLAIMS_DIR.mkdir(parents=True, exist_ok=True)
+    fd = os.open(_claim_path(plan_id), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "plan_id": plan_id,
+                "sync": sync_name,
+                "run_id": run_id,
+                "state": "pending",
+                "claimed_at": datetime.now(timezone.utc).isoformat(),
+            },
+            handle,
+        )
+
+
+def _finish_claim(plan_id: str, state: str) -> None:
+    claim = _read_claim(plan_id) or {"plan_id": plan_id}
+    claim.update(state=state, finished_at=datetime.now(timezone.utc).isoformat())
+    tmp = _claim_path(plan_id).with_suffix(".tmp")
+    tmp.write_text(json.dumps(claim), encoding="utf-8")
+    tmp.replace(_claim_path(plan_id))
 
 
 @app.command()
@@ -63,6 +127,11 @@ def apply(
         0.0,
         "--allow-drift-pct",
         help="Proceed if at most this percent of the planned keys drifted (logged). Default 0.",
+    ),
+    cursor_value: str = typer.Option(
+        None,
+        "--cursor-value",
+        help="The cursor override the plan was made with (`drt plan --cursor-value`).",
     ),
     output: str = typer.Option("text", "--output", "-o", help="Output format: text or json."),
     vars_raw: str = typer.Option(None, "--vars", help="Override project vars, as for `drt run`."),
@@ -80,6 +149,7 @@ def apply(
       drt apply plan.json
       drt apply plan.json --auto-approve --max-age 2h   # in CI
     """
+    from drt._identifiers import new_run_id
     from drt.cli._plan_runner import PlanCliError, compute_plan
     from drt.cli.commands.run import _run_one, _RunContext, _write_run_results
     from drt.engine.plan import PlanDocumentError, drift_report, load_plan_document
@@ -118,6 +188,9 @@ def apply(
     if created.tzinfo is None:
         created = created.replace(tzinfo=timezone.utc)
     age = datetime.now(timezone.utc) - created
+    if age < -_CLOCK_SKEW:
+        print_error("The plan's created_at is in the future; refusing it. Re-run `drt plan`.")
+        raise typer.Exit(1)
     if age > max_age_delta:
         print_error(f"The plan is {age} old, older than --max-age {max_age}. Re-run `drt plan`.")
         raise typer.Exit(1)
@@ -125,25 +198,14 @@ def apply(
     plan_id = doc["plan_id"]
     sync_name = doc["sync"]["name"]
 
-    def preflight(project: Any, state_bundle: Any, _sync: Any) -> None:
-        # Single use is recorded as a history entry whose run_id is the plan_id,
-        # so it cannot be enforced without history.
-        if not project.history.enabled:
-            raise PlanCliError(
-                "drt apply needs history enabled (history.enabled: true): an applied plan "
-                "is recorded there, and without it a plan could be applied twice."
-            )
-        for entry in state_bundle.history.read(sync_name, limit=1000):
-            if entry.run_id == plan_id:
-                raise PlanCliError(
-                    f"Plan {plan_id} was already applied ({entry.started_at}). "
-                    "A plan is single-use; run `drt plan` again."
-                )
+    def preflight(_project: Any, _state_bundle: Any, _sync: Any) -> None:
+        _refuse_if_claimed(plan_id)
 
     try:
         ctx_plan = compute_plan(
             sync_name,
             redact_keys=bool(doc["options"]["redact_keys"]),
+            cursor_value=cursor_value,
             vars_raw=vars_raw,
             profile_name=profile_name,
             preflight=preflight,
@@ -162,6 +224,13 @@ def apply(
             "was made. Re-run `drt plan`."
         )
         raise typer.Exit(1)
+    if current.environment_hash != doc["fingerprints"]["environment_hash"]:
+        print_error(
+            "The environment differs from the one the plan was made in (profile, project "
+            "vars, environment variables or the resolved destination). Re-run `drt plan` "
+            "here, or apply from the environment that made the plan."
+        )
+        raise typer.Exit(1)
     if current.cursor_hash != doc["fingerprints"]["cursor_hash"]:
         print_error(
             "The incremental watermark moved since the plan was made, so the plan covers a "
@@ -171,18 +240,21 @@ def apply(
 
     if current.digest != doc["digest"]:
         report = drift_report(doc["entries"], [e.to_dict() for e in current.entries])
-        drifted = len(report["appeared"]) + len(report["disappeared"]) + len(report["changed"])
+        drifted = report["drifted"]
         pct = 100.0 * drifted / max(len(doc["entries"]), 1)
-        if pct > allow_drift_pct:
+        # Zero tolerance means any difference at all; the percentage is only
+        # consulted when the operator opted into some drift.
+        if allow_drift_pct == 0 or pct > allow_drift_pct:
             print_error(_describe_drift(report))
             console.print(
-                f"  {drifted} key(s) drifted ({pct:.1f}% of the plan; allowed "
-                f"{allow_drift_pct}%). Nothing was written.",
+                f"  {drifted} entr{'y' if drifted == 1 else 'ies'} drifted ({pct:.1f}% of the "
+                f"plan; allowed {allow_drift_pct}%). Nothing was written.",
                 markup=False,
             )
             raise typer.Exit(1)
         console.print(
-            f"Proceeding despite drift: {drifted} key(s) ({pct:.1f}% <= {allow_drift_pct}%).",
+            f"Proceeding despite drift: {drifted} entr{'y' if drifted == 1 else 'ies'} "
+            f"({pct:.1f}% <= {allow_drift_pct}%).",
             markup=False,
         )
 
@@ -206,6 +278,16 @@ def apply(
     state_bundle = ctx_plan.state_bundle
     from drt.cli._helpers import get_source
 
+    run_id = new_run_id()
+    try:
+        _claim(plan_id, sync_name, run_id)
+    except FileExistsError:
+        print_error(
+            f"Plan {plan_id} was just taken by another apply. A plan is single-use; "
+            "nothing was written by this command."
+        )
+        raise typer.Exit(1)
+
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.monotonic()
     ctx = _RunContext(
@@ -219,20 +301,26 @@ def apply(
         verbose=False,
         quiet=False,
         log_json=False,
-        cursor_value=None,
+        # The window the plan was verified over, not whatever the watermark says now.
+        cursor_value=ctx_plan.cursor_value_used,
         vars=ctx_plan.project_vars,
         query_tagging=project.query_tagging,
-        run_id=plan_id,
+        run_id=run_id,
         idempotency_ledger=state_bundle.ledger,
         audit_trail=state_bundle.audit_trail,
         audit_fields=project.state.audit_trail.fields,
         audit_retain_days=project.state.audit_trail.retain_days or 30,
     )
-    name, entry, had_error = _run_one(ctx_plan.sync, ctx, ctx_plan.profile)
+    try:
+        name, entry, had_error = _run_one(ctx_plan.sync, ctx, ctx_plan.profile)
+    except BaseException:
+        _finish_claim(plan_id, "failed")
+        raise
+    _finish_claim(plan_id, "failed" if had_error else "success")
     entry["plan_id"] = plan_id
     _write_run_results(
         Path("target/drt"),
-        run_id=plan_id,
+        run_id=run_id,
         started_at=started_at,
         results=[entry],
         succeeded=0 if had_error else 1,
@@ -242,6 +330,11 @@ def apply(
         exit_code=1 if had_error else 0,
     )
     if output == "json":
-        print(json.dumps({"plan_id": plan_id, "sync": name, "result": entry}, default=str))
+        print(
+            json.dumps(
+                {"plan_id": plan_id, "run_id": run_id, "sync": name, "result": entry},
+                default=str,
+            )
+        )
     if had_error:
         raise typer.Exit(1)

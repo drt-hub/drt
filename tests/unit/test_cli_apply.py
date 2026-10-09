@@ -36,7 +36,7 @@ class _World:
     """What the faked source/destination currently look like."""
 
     def __init__(self) -> None:
-        self.added: list[dict[str, Any]] = [{"id": 1}, {"id": 2}]
+        self.added: list[dict[str, Any]] = [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]
         self.cursor: str | None = None
         self.calls: list[dict[str, Any]] = []
         self.fail_writes = False
@@ -120,13 +120,25 @@ def _rewrite(project: Path, edit: Any) -> None:
     path.write_text(json.dumps(doc))
 
 
+def _forge(project: Path, edit: Any) -> None:
+    """Edit plan.json like a determined editor: recompute plan_id and the seal."""
+    from drt.engine.plan import plan_id_of, seal_of
+
+    path = project / "plan.json"
+    doc = json.loads(path.read_text())
+    edit(doc)
+    doc["plan_id"] = plan_id_of(
+        doc["digest"], doc["fingerprints"]["cursor_hash"], doc["created_at"]
+    )
+    doc["seal"] = seal_of(doc)
+    path.write_text(json.dumps(doc))
+
+
 def _writes(world: _World) -> list[dict[str, Any]]:
     return [c for c in world.calls if not c["dry_run"]]
 
 
-def test_apply_writes_through_the_normal_run_path_with_plan_id_as_run_id(
-    project: Path, world: _World
-) -> None:
+def test_apply_writes_through_the_normal_run_path(project: Path, world: _World) -> None:
     plan = _plan(project)
 
     result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
@@ -134,15 +146,21 @@ def test_apply_writes_through_the_normal_run_path_with_plan_id_as_run_id(
     assert result.exit_code == 0, result.output
     writes = _writes(world)
     assert len(writes) == 1
-    assert writes[0]["run_id"] == plan["plan_id"]
+    # A normal UUID run id (metadata_columns.run_id may be a UUID column); the plan
+    # is linked through the claim record and run_results.json instead.
+    assert writes[0]["run_id"] != plan["plan_id"]
+    assert len(writes[0]["run_id"]) == 36
     results = json.loads((project / "target" / "drt" / "run_results.json").read_text())
-    assert results["invocation"]["run_id"] == plan["plan_id"]
+    assert results["invocation"]["run_id"] == writes[0]["run_id"]
     assert results["results"][0]["plan_id"] == plan["plan_id"]
+    claim = json.loads((project / ".drt" / "applied_plans" / f"{plan['plan_id']}.json").read_text())
+    assert claim["state"] == "success"
+    assert claim["run_id"] == writes[0]["run_id"]
 
 
 def test_drift_aborts_before_any_write_and_reports_the_keys(project: Path, world: _World) -> None:
     _plan(project)
-    world.added.append({"id": 3})
+    world.added.append({"id": 3, "name": "c"})
 
     result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
 
@@ -154,7 +172,7 @@ def test_drift_aborts_before_any_write_and_reports_the_keys(project: Path, world
 
 def test_allow_drift_pct_permits_small_drift(project: Path, world: _World) -> None:
     _plan(project)
-    world.added.append({"id": 3})  # 1 of 2 planned keys => 50%
+    world.added.append({"id": 3, "name": "c"})  # 1 of 2 planned keys => 50%
 
     refused = runner.invoke(
         app, ["apply", "plan.json", "--auto-approve", "--allow-drift-pct", "40"]
@@ -169,48 +187,80 @@ def test_allow_drift_pct_permits_small_drift(project: Path, world: _World) -> No
     assert len(_writes(world)) == 1
 
 
-def test_a_plan_is_single_use(project: Path, world: _World) -> None:
-    from drt.config.parser import load_project
-    from drt.state.factory import build_state_bundle
-    from drt.state.history import HistoryEntry
+def _claim_file(project: Path, plan_id: str, state: str) -> None:
+    folder = project / ".drt" / "applied_plans"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"{plan_id}.json").write_text(
+        json.dumps({"plan_id": plan_id, "state": state, "claimed_at": "2026-10-09T00:00:00+00:00"})
+    )
+
+
+@pytest.mark.parametrize(
+    ("state", "message"),
+    [
+        ("success", "already applied"),
+        ("pending", "being applied"),
+        ("failed", "already attempted"),
+    ],
+)
+def test_a_claimed_plan_is_refused_in_every_state(
+    project: Path, world: _World, state: str, message: str
+) -> None:
+    plan = _plan(project)
+    _claim_file(project, plan["plan_id"], state)
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
+
+    assert result.exit_code == 1
+    assert message in result.output
+    assert _writes(world) == []
+
+
+def test_applying_twice_is_refused_the_second_time(project: Path, world: _World) -> None:
+    _plan(project)
+
+    assert runner.invoke(app, ["apply", "plan.json", "--auto-approve"]).exit_code == 0
+    second = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
+
+    assert second.exit_code == 1
+    assert "already applied" in second.output
+    assert len(_writes(world)) == 1
+
+
+def test_losing_the_claim_race_writes_nothing(
+    project: Path, world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.cli.commands import apply as apply_cmd
+
+    def lost(*_a: Any, **_k: Any) -> None:
+        raise FileExistsError
+
+    monkeypatch.setattr(apply_cmd, "_claim", lost)
+    _plan(project)
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
+
+    assert result.exit_code == 1
+    assert "just taken" in result.output
+    assert _writes(world) == []
+
+
+def test_a_crashed_write_leaves_a_failed_claim(
+    project: Path, world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.cli.commands import run as run_cmd
 
     plan = _plan(project)
-    bundle = build_state_bundle(load_project(Path(".")), Path("."))
-    bundle.history.append(
-        HistoryEntry(
-            sync_name="orders_to_pg",
-            started_at="2026-10-09T00:00:00+00:00",
-            completed_at="2026-10-09T00:01:00+00:00",
-            duration_seconds=1.0,
-            status="success",
-            records_synced=2,
-            records_failed=0,
-            run_id=plan["plan_id"],
-        )
-    )
 
-    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
+    def boom(*_a: Any, **_k: Any) -> None:
+        raise KeyboardInterrupt
 
-    assert result.exit_code == 1
-    assert "already applied" in result.output
-    assert _writes(world) == []
+    monkeypatch.setattr(run_cmd, "_run_one", boom)
 
+    runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
 
-def test_history_disabled_refuses_because_single_use_cannot_be_enforced(
-    project: Path, world: _World
-) -> None:
-    _plan(project)
-    (project / "drt_project.yml").write_text(
-        yaml.dump(
-            {"name": "t", "version": "0.1", "profile": "default", "history": {"enabled": False}}
-        )
-    )
-
-    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
-
-    assert result.exit_code == 1
-    assert "history" in result.output
-    assert _writes(world) == []
+    claim = json.loads((project / ".drt" / "applied_plans" / f"{plan['plan_id']}.json").read_text())
+    assert claim["state"] == "failed"
 
 
 def test_edited_plan_is_rejected(project: Path, world: _World) -> None:
@@ -224,10 +274,22 @@ def test_edited_plan_is_rejected(project: Path, world: _World) -> None:
     assert _writes(world) == []
 
 
+def test_hand_editing_created_at_or_version_is_caught_by_the_seal(
+    project: Path, world: _World
+) -> None:
+    _plan(project)
+    _rewrite(project, lambda d: d.update(created_at=datetime.now(timezone.utc).isoformat()))
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
+
+    assert result.exit_code == 1
+    assert "modified" in result.output
+
+
 def test_stale_plan_is_rejected(project: Path, world: _World) -> None:
     _plan(project)
     old = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat()
-    _rewrite(project, lambda d: d.update(created_at=old))
+    _forge(project, lambda d: d.update(created_at=old))
 
     result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
 
@@ -239,9 +301,20 @@ def test_stale_plan_is_rejected(project: Path, world: _World) -> None:
     )
 
 
+def test_future_created_at_is_rejected(project: Path, world: _World) -> None:
+    _plan(project)
+    future = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+    _forge(project, lambda d: d.update(created_at=future))
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
+
+    assert result.exit_code == 1
+    assert "future" in result.output
+
+
 def test_different_major_version_is_rejected(project: Path, world: _World) -> None:
     _plan(project)
-    _rewrite(project, lambda d: d.update(drt_version="9.0.0"))
+    _forge(project, lambda d: d.update(drt_version="9.0.0"))
 
     result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
 
@@ -304,7 +377,7 @@ def test_bad_options_and_missing_file(project: Path) -> None:
 
 def test_invalid_created_at_is_rejected(project: Path, world: _World) -> None:
     _plan(project)
-    _rewrite(project, lambda d: d.update(created_at="yesterday"))
+    _forge(project, lambda d: d.update(created_at="yesterday"))
 
     result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
 
@@ -315,7 +388,7 @@ def test_invalid_created_at_is_rejected(project: Path, world: _World) -> None:
 def test_naive_created_at_is_treated_as_utc(project: Path, world: _World) -> None:
     _plan(project)
     naive = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
-    _rewrite(project, lambda d: d.update(created_at=naive))
+    _forge(project, lambda d: d.update(created_at=naive))
 
     assert runner.invoke(app, ["apply", "plan.json", "--auto-approve"]).exit_code == 0
 
@@ -339,7 +412,7 @@ def test_destination_that_became_unplannable_is_not_applied(
 
 def test_large_drift_report_is_truncated(project: Path, world: _World) -> None:
     _plan(project)
-    world.added.extend({"id": i} for i in range(100, 125))
+    world.added.extend({"id": i, "name": "x"} for i in range(100, 125))
 
     result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
 
@@ -382,3 +455,72 @@ def test_json_output_and_failed_write(project: Path, world: _World) -> None:
 
     assert result.exit_code == 1
     assert plan["plan_id"] in result.output
+
+
+def test_a_changed_value_is_drift_even_though_key_and_action_match(
+    project: Path, world: _World
+) -> None:
+    _plan(project)
+    world.added[0] = {"id": 1, "name": "CHANGED"}
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
+
+    assert result.exit_code == 1
+    assert "no longer matches" in result.output
+    assert "CHANGED" not in result.output  # values never reach the report
+    assert _writes(world) == []
+
+
+def test_duplicate_planned_keys_cannot_hide_drift(project: Path, world: _World) -> None:
+    world.added.append({"id": 1, "name": "a"})  # same key and row twice
+    _plan(project)
+    world.added.pop()
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
+
+    assert result.exit_code == 1
+    assert _writes(world) == []
+
+
+def test_a_different_environment_is_refused(project: Path, world: _World) -> None:
+    _plan(project)
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--vars", "region: eu"])
+
+    assert result.exit_code == 1
+    assert "environment" in result.output
+    assert _writes(world) == []
+
+
+def test_cursor_override_round_trips_and_pins_the_real_run_to_the_verified_window(
+    project: Path, world: _World
+) -> None:
+    cfg = {**SYNC_YML, "sync": {"mode": "incremental", "cursor_field": "updated_at"}}
+    (project / "syncs" / "orders_to_pg.yml").write_text(yaml.dump(cfg))
+    world.cursor = "2026-10-01"
+    result = runner.invoke(
+        app, ["plan", "orders_to_pg", "--out", "plan.json", "--cursor-value", "2026-10-01"]
+    )
+    assert result.exit_code == 0, result.output
+    world.cursor = "2026-10-08"  # the stored watermark moved after the plan
+
+    refused = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
+    world.cursor = "2026-10-01"
+    applied = runner.invoke(
+        app, ["apply", "plan.json", "--auto-approve", "--cursor-value", "2026-10-01"]
+    )
+
+    assert refused.exit_code == 1
+    assert applied.exit_code == 0, applied.output
+    assert _writes(world)[0]["cursor_value_override"] == "2026-10-01"
+
+
+def test_metadata_columns_do_not_break_planning_or_apply(project: Path, world: _World) -> None:
+    cfg = {
+        **SYNC_YML,
+        "sync": {"mode": "upsert", "metadata_columns": {"synced_at": "synced_at"}},
+    }
+    (project / "syncs" / "orders_to_pg.yml").write_text(yaml.dump(cfg))
+    _plan(project)
+
+    assert runner.invoke(app, ["apply", "plan.json", "--auto-approve"]).exit_code == 0

@@ -20,15 +20,17 @@ never persists run state. Applying a plan is a separate step, `drt apply`
 
 | Field | Meaning |
 |---|---|
-| `digest` | Derived from content only: the sync name, its config fingerprint and the entries. The same sync definition and the same changes give the same digest. |
-| `plan_id` | Derived from the digest and the cursor hash, so two plans over the same changes but a different incremental window have different ids. |
-| `created_at` | The one wall-clock field; excluded from `plan_id` and `digest`. |
+| `digest` | Derived from content only: the sync name, the config and environment fingerprints, and the entries. The same sync, environment and changes give the same digest. |
+| `plan_id` | Unique per plan file (digest + cursor hash + `created_at`), so a plan made later over the same changes is a new plan. |
+| `seal` | Hash of the whole document. It catches accidental edits (including to `created_at` and `drt_version`); it is not a signature. |
+| `created_at` | The one wall-clock field; part of `plan_id` and `seal`, not of `digest`. |
 | `fingerprints.config_hash` | Hash of the sync file and the model SQL it references. |
+| `fingerprints.environment_hash` | Hash of what the sync resolves to here: resolved config, project vars and profile. Only the hash is stored, never the values. |
 | `fingerprints.cursor_hash` | Hash of the incremental cursor (never the raw value). |
 | `summary` | Counts of `create`, `insert`, `update`, `replace`, `delete`. |
-| `entries[]` | `{key, action, changed_columns, delete_reason}` per changed record. |
+| `entries[]` | `{key, action, value_hash, changed_columns, delete_reason}` per changed record. `value_hash` is a salted hash of the row to be written, so a changed value is detected without the value being stored. |
 
-Entries are sorted, so a plan is stable across runs. The JSON Schema is in
+Entries are sorted, so the content of a plan is stable across runs. The JSON Schema is in
 [`docs/schemas/plan.schema.json`](../schemas/plan.schema.json).
 
 ### Actions
@@ -85,33 +87,54 @@ drt apply plan.json --auto-approve --max-age 2h
 ```
 
 `drt apply` **recomputes** the plan through the same code `drt plan` uses and
-only writes if the result is the same change set (verify-by-replan). That keeps
-row values out of the plan file and reuses the exact comparison that produced
-it. The write itself is the normal `drt run` path: rate limiting, DLQ, history,
-watermarks and alerts behave as they do for `drt run`.
+only writes if the result matches (verify-by-replan). That keeps row values out
+of the plan file and reuses the exact comparison that produced it.
 
 Nothing is written, and the command exits 1, when:
 
 | Situation | Why |
 |---|---|
-| the file was edited or truncated | `digest` and `plan_id` are recomputed from the entries |
-| the plan is older than `--max-age` (default 24h) | the world has had time to move |
+| the file was edited or truncated | the `seal`, `digest` and `plan_id` are recomputed |
+| the plan is older than `--max-age` (default 24h), or dated in the future | the world has had time to move |
 | the plan came from another drt **major** version | formats are only promised within a major |
 | the sync file, or the model SQL it references, changed | the plan describes a different sync |
-| the incremental watermark moved | the plan covers a different window (the plan stores only a hash of the cursor) |
-| the change set differs | a **drift report** lists the keys that appeared, disappeared or changed action |
-| the plan was already applied | a plan is single-use |
-| history is disabled | single use is recorded in run history, so it cannot be enforced |
+| the environment differs (profile, project vars, environment variables, resolved destination) | the same keys and actions could write different values somewhere else |
+| the incremental watermark moved | the plan covers a different window (pass `--cursor-value` if the plan was made with one) |
+| the change set differs, including a changed **value** | a **drift report** lists the entries that disappeared or appeared; it never prints values |
+| the plan was already claimed | a plan is single-use |
 
-`--allow-drift-pct N` proceeds if at most N percent of the planned keys
-drifted (default 0); the drift is printed. Without a terminal, `--auto-approve`
-is required.
+`--allow-drift-pct N` proceeds if at most N percent of the planned entries
+drifted. The default, 0, refuses any difference at all. Without a terminal,
+`--auto-approve` is required.
 
-**How "already applied" works.** The plan's `plan_id` is used as the `run_id`
-of the apply run, so it lands in run history and in
-`target/drt/run_results.json`. A plan is applied when history holds an entry for
-that sync with `run_id == plan_id`. No new state is stored.
+### What apply guarantees, and what it does not
 
-**Limits.** Extraction runs once to verify and once to write, so the source can
-still change in between; verify-by-replan narrows that window, it does not make
-the write transactional. Exact replay of the planned rows is a later opt-in.
+`drt apply` is a **guard in front of a normal run**, not a transaction and not
+a filtered write.
+
+- After verification it runs the normal `drt run` path (rate limiting, DLQ,
+  history, watermarks, alerts). That path extracts again and writes **every
+  extracted row**, not only the entries listed in the plan. Rows that were
+  already equal are upserted too, so triggers and "updated at" columns behave
+  exactly as they do for `drt run`.
+- The source can still change between the verification extraction and the write.
+  Verification narrows that window; it does not close it.
+- For incremental syncs the write is pinned to the cursor the plan was verified
+  over, not to whatever the watermark says by then.
+- Writing exactly the verified rows needs the planned payloads to be stored,
+  which is the later exact-replay option
+  ([#1221](https://github.com/drt-hub/drt/issues/1221)).
+
+### Single use
+
+Before the write, `drt apply` creates `.drt/applied_plans/<plan_id>.json`
+atomically (`O_EXCL`) with state `pending`, then updates it to `success` or
+`failed`. A second apply of the same plan, concurrent or later, finds the file
+and refuses. A `pending` file means another apply is running or one stopped
+part-way: check the destination before doing anything else.
+
+This claim lives in the workspace. It stops repeated and concurrent applies
+there, but two machines with separate workspaces do not see each other's claims;
+coordinating those needs a shared claim store, which is not built yet. The apply
+run gets a normal `run_id`; the claim file and `run_results.json` link it to the
+`plan_id`.

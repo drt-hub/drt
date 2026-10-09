@@ -20,7 +20,7 @@ from drt.cli._helpers import (
     resolve_profile_name,
 )
 from drt.config.models import SyncConfig
-from drt.engine.plan import Plan, build_plan, config_hash, unsupported_reason
+from drt.engine.plan import Plan, build_plan, config_hash, hash_value, unsupported_reason
 
 
 class PlanCliError(Exception):
@@ -35,6 +35,9 @@ class PlanContext:
     profile: Any
     state_bundle: Any
     project_vars: dict[str, Any] | None
+    # In-memory only (never written to plan.json): the window the plan was
+    # computed over, so `drt apply` can run the same window.
+    cursor_value_used: str | None = None
 
 
 def sync_fingerprint(sync: SyncConfig) -> str:
@@ -43,6 +46,32 @@ def sync_fingerprint(sync: SyncConfig) -> str:
 
     from_files = sync_fingerprints(Path(".")).get(sync.name)
     return f"sha256:{from_files}" if from_files else config_hash(sync)
+
+
+def environment_fingerprint(
+    sync: SyncConfig, project_vars: dict[str, Any] | None, profile: Any
+) -> str:
+    """Hash of what the sync *resolves to* in this environment.
+
+    The file fingerprint deliberately ignores environment variables, project
+    vars and the profile; for a plan those decide where and what gets written,
+    so a plan made in one environment must not verify in another. Only the hash
+    is stored, never the resolved values (which may hold secrets).
+    """
+    dump = profile.model_dump(mode="json") if hasattr(profile, "model_dump") else repr(profile)
+    body = {"sync": sync.model_dump(mode="json"), "vars": project_vars or {}, "profile": dump}
+    return hash_value(body)
+
+
+def _engine_written_columns(sync: SyncConfig) -> set[str]:
+    metadata = getattr(sync.sync, "metadata_columns", None)
+    if metadata is None:
+        return set()
+    return {
+        target
+        for name in ("synced_at", "run_id", "sync_name")
+        if (target := getattr(metadata, name, None))
+    }
 
 
 def compute_plan(
@@ -137,10 +166,14 @@ def compute_plan(
         match_policy=sync.sync.match_policy,
         destination=getattr(destination, "describe_safe", lambda: str(destination.type))(),
         config_fingerprint=sync_fingerprint(sync),
+        environment_fingerprint=environment_fingerprint(sync, project_vars, profile),
         drt_version=__version__,
         key_columns=list(getattr(destination, "upsert_key", None) or []),
         mask_columns=set(sync.sync.mask or {}),
         redact_keys=redact_keys,
+        exclude_columns=_engine_written_columns(sync),
         cursor_value=result.cursor_value_used,
     )
-    return PlanContext(plan, sync, project, profile, state_bundle, project_vars)
+    return PlanContext(
+        plan, sync, project, profile, state_bundle, project_vars, result.cursor_value_used
+    )

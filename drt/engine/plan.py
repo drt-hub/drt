@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -41,9 +42,14 @@ class PlanEntry:
     action: str
     changed_columns: list[str] = field(default_factory=list)
     delete_reason: str | None = None
+    # Salted hash of the row that would be written, so a changed *value* is
+    # drift even when key, action and changed column names are unchanged.
+    value_hash: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"key": self.key, "action": self.action}
+        if self.value_hash:
+            out["value_hash"] = self.value_hash
         if self.changed_columns:
             out["changed_columns"] = self.changed_columns
         if self.delete_reason:
@@ -58,6 +64,7 @@ class Plan:
     match_policy: str
     destination: str
     config_hash: str
+    environment_hash: str
     drt_version: str
     created_at: str
     cursor_hash: str | None = None
@@ -82,13 +89,25 @@ class Plan:
     @property
     def digest(self) -> str:
         """Hash of the action set (what would change), not of the metadata."""
-        return digest_of(self.sync_name, self.config_hash, [e.to_dict() for e in self.entries])
+        return digest_of(
+            self.sync_name,
+            self.config_hash,
+            self.environment_hash,
+            [e.to_dict() for e in self.entries],
+        )
 
     @property
     def plan_id(self) -> str:
-        return plan_id_of(self.digest, self.cursor_hash)
+        """Unique per plan *artifact* (the digest is the deterministic part), so a
+        later plan over the same drift is not mistaken for an already-applied one."""
+        return plan_id_of(self.digest, self.cursor_hash, self.created_at)
 
     def to_dict(self) -> dict[str, Any]:
+        document = self._body()
+        document["seal"] = seal_of(document)
+        return document
+
+    def _body(self) -> dict[str, Any]:
         return {
             "schema_version": PLAN_SCHEMA_VERSION,
             "plan_id": self.plan_id,
@@ -103,6 +122,7 @@ class Plan:
             "options": {"redact_keys": self.redact_keys},
             "fingerprints": {
                 "config_hash": self.config_hash,
+                "environment_hash": self.environment_hash,
                 "cursor_hash": self.cursor_hash,
             },
             "status": {
@@ -122,13 +142,36 @@ class Plan:
         return json.dumps(self.to_dict(), indent=2, sort_keys=True, default=str) + "\n"
 
 
-def digest_of(sync_name: str, config_fingerprint: str, entries: list[dict[str, Any]]) -> str:
-    body = {"sync": sync_name, "config_hash": config_fingerprint, "entries": entries}
+def digest_of(
+    sync_name: str,
+    config_fingerprint: str,
+    environment_fingerprint: str,
+    entries: list[dict[str, Any]],
+) -> str:
+    body = {
+        "sync": sync_name,
+        "config_hash": config_fingerprint,
+        "environment_hash": environment_fingerprint,
+        "entries": entries,
+    }
     return "sha256:" + _sha256(_canonical(body))
 
 
-def plan_id_of(digest: str, cursor_hash: str | None) -> str:
-    return "plan-" + _sha256(_canonical({"digest": digest, "cursor": cursor_hash}))[:16]
+def plan_id_of(digest: str, cursor_hash: str | None, created_at: str) -> str:
+    seed = _canonical({"digest": digest, "cursor": cursor_hash, "created_at": created_at})
+    return "plan-" + _sha256(seed)[:16]
+
+
+def seal_of(document: dict[str, Any]) -> str:
+    """Hash over the whole document except the seal itself.
+
+    It catches accidental edits (a hand-changed ``created_at`` or ``drt_version``
+    would otherwise slip past the content digest). It is not a signature: anyone
+    who can write the file can recompute it, which is why ``drt apply`` also
+    re-verifies the plan against the live world.
+    """
+    body = {k: v for k, v in document.items() if k != "seal"}
+    return "sha256:" + _sha256(_canonical(body))
 
 
 def _canonical(value: Any) -> str:
@@ -183,10 +226,12 @@ def build_plan(
     match_policy: str,
     destination: str,
     config_fingerprint: str,
+    environment_fingerprint: str,
     drt_version: str,
     key_columns: list[str],
     mask_columns: set[str] | None = None,
     redact_keys: bool = False,
+    exclude_columns: set[str] | None = None,
     cursor_value: str | None = None,
     created_at: str | None = None,
 ) -> Plan:
@@ -202,6 +247,7 @@ def build_plan(
         match_policy=match_policy,
         destination=destination,
         config_hash=config_fingerprint,
+        environment_hash=environment_fingerprint,
         drt_version=drt_version,
         created_at=created_at or datetime.now(timezone.utc).isoformat(),
         cursor_hash=hash_value(cursor_value) if cursor_value is not None else None,
@@ -235,17 +281,32 @@ def build_plan(
     def key(record: dict[str, Any]) -> dict[str, Any]:
         return _key_of(record, key_columns, hashed, redact_keys)
 
+    skipped_columns = exclude_columns or set()
+    salt = f"{sync_name}\x00{config_fingerprint}"
+
+    def value(record: dict[str, Any]) -> str:
+        # Engine-written bookkeeping columns (synced_at, run_id) differ between
+        # a plan and the run it describes by construction; they are not drift.
+        row = {k: v for k, v in record.items() if k not in skipped_columns}
+        return hash_value({"salt": salt, "row": row})
+
     entries: list[PlanEntry] = []
     for record in diff.added:
-        entries.append(PlanEntry(key=key(record), action="create"))
+        entries.append(PlanEntry(key=key(record), action="create", value_hash=value(record)))
     for record in diff.inserted:
-        entries.append(PlanEntry(key=key(record), action="insert"))
+        entries.append(PlanEntry(key=key(record), action="insert", value_hash=value(record)))
     for old, new in diff.updated:
         columns = sorted(DiffResult.changed_fields(old, new))
-        entries.append(PlanEntry(key=key(new), action="update", changed_columns=columns))
+        entries.append(
+            PlanEntry(key=key(new), action="update", changed_columns=columns, value_hash=value(new))
+        )
     for old, new in diff.replaced:
         columns = sorted(DiffResult.changed_fields(old, new, include_removed=True))
-        entries.append(PlanEntry(key=key(new), action="replace", changed_columns=columns))
+        entries.append(
+            PlanEntry(
+                key=key(new), action="replace", changed_columns=columns, value_hash=value(new)
+            )
+        )
     for record in diff.deleted:
         entries.append(
             PlanEntry(key=key(record), action="delete", delete_reason=diff.delete_reason)
@@ -262,8 +323,8 @@ class PlanDocumentError(ValueError):
 def load_plan_document(text: str) -> dict[str, Any]:
     """Parse and integrity-check a ``plan.json``.
 
-    The digest and ``plan_id`` are recomputed from the entries, so a plan that
-    was edited by hand (or truncated) is rejected instead of trusted.
+    The seal, digest and ``plan_id`` are recomputed, so a plan that was edited
+    by hand (or truncated) is rejected instead of trusted.
     """
     try:
         doc = json.loads(text)
@@ -280,35 +341,38 @@ def load_plan_document(text: str) -> dict[str, Any]:
             )
         if not doc["status"]["available"]:
             raise PlanDocumentError("the plan is marked unavailable and cannot be applied")
-        entries = doc["entries"]
-        digest = digest_of(doc["sync"]["name"], doc["fingerprints"]["config_hash"], entries)
+        if seal_of(doc) != doc["seal"]:
+            raise PlanDocumentError("plan seal does not match its contents (file was modified)")
+        fingerprints = doc["fingerprints"]
+        digest = digest_of(
+            doc["sync"]["name"],
+            fingerprints["config_hash"],
+            fingerprints["environment_hash"],
+            doc["entries"],
+        )
         if digest != doc["digest"]:
             raise PlanDocumentError("plan digest does not match its entries (file was modified)")
-        if plan_id_of(digest, doc["fingerprints"]["cursor_hash"]) != doc["plan_id"]:
+        if plan_id_of(digest, fingerprints["cursor_hash"], doc["created_at"]) != doc["plan_id"]:
             raise PlanDocumentError("plan_id does not match the plan contents")
         doc["options"]["redact_keys"]
-        doc["created_at"]
         doc["drt_version"]
     except (KeyError, TypeError) as e:
         raise PlanDocumentError(f"plan file is missing or malformed field: {e}") from e
     return doc
 
 
-def drift_report(
-    planned: list[dict[str, Any]], current: list[dict[str, Any]]
-) -> dict[str, list[dict[str, Any]]]:
-    """Compare two entry lists by key: what appeared, disappeared or changed."""
-    old = {_canonical(e["key"]): e for e in planned}
-    new = {_canonical(e["key"]): e for e in current}
-    return {
-        "appeared": [new[k] for k in sorted(new.keys() - old.keys())],
-        "disappeared": [old[k] for k in sorted(old.keys() - new.keys())],
-        "changed": [
-            {"key": new[k]["key"], "planned": old[k], "current": new[k]}
-            for k in sorted(old.keys() & new.keys())
-            if old[k] != new[k]
-        ],
-    }
+def drift_report(planned: list[dict[str, Any]], current: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compare two entry lists as multisets (duplicate keys count each time).
+
+    ``removed`` are planned entries that no longer exist, ``added`` are entries
+    that were not planned; an entry whose action or values changed appears in
+    both. ``drifted`` is the larger of the two, so a changed entry counts once.
+    """
+    old = Counter(_canonical(e) for e in planned)
+    new = Counter(_canonical(e) for e in current)
+    removed = [json.loads(k) for k in sorted((old - new).elements())]
+    added = [json.loads(k) for k in sorted((new - old).elements())]
+    return {"removed": removed, "added": added, "drifted": max(len(removed), len(added))}
 
 
 def unsupported_reason(sync: Any) -> str | None:
@@ -364,6 +428,7 @@ PLAN_JSON_SCHEMA: dict[str, Any] = {
         "status",
         "summary",
         "digest",
+        "seal",
         "entries",
     ],
     "properties": {
@@ -388,9 +453,10 @@ PLAN_JSON_SCHEMA: dict[str, Any] = {
         },
         "fingerprints": {
             "type": "object",
-            "required": ["config_hash", "cursor_hash"],
+            "required": ["config_hash", "environment_hash", "cursor_hash"],
             "properties": {
                 "config_hash": {"type": "string"},
+                "environment_hash": {"type": "string"},
                 "cursor_hash": {"type": ["string", "null"]},
             },
         },
@@ -412,6 +478,7 @@ PLAN_JSON_SCHEMA: dict[str, Any] = {
             },
         },
         "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "seal": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
         "entries": {
             "type": "array",
             "items": {
@@ -420,6 +487,7 @@ PLAN_JSON_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "key": {"type": "object"},
                     "action": {"enum": list(_ACTION_ORDER)},
+                    "value_hash": {"type": "string"},
                     "changed_columns": {"type": "array", "items": {"type": "string"}},
                     "delete_reason": {"type": "string"},
                 },
