@@ -224,3 +224,9 @@ def test_published_schema_file_matches_the_code() -> None:
 
     path = Path(__file__).resolve().parents[2] / "docs" / "schemas" / "plan.schema.json"
     assert json.loads(path.read_text()) == json.loads(json.dumps(PLAN_JSON_SCHEMA))
+
+
+def test_markdown_for_an_empty_plan() -> None:
+    plan = build_plan(DiffResult(total_source_rows=1, total_destination_rows=1), **_BASE)
+
+    assert "No changes." in render_markdown(plan)
