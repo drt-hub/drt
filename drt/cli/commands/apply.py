@@ -60,7 +60,7 @@ def apply(
       drt apply plan.json
       drt apply plan.json --auto-approve --max-age 2h   # in CI
     """
-    from drt.cli._apply_flow import ApplyRefused, apply_plan, parse_duration
+    from drt.cli._apply_flow import ApplyAborted, ApplyRefused, apply_plan, parse_duration
     from drt.cli._plan_runner import PlanCliError, parse_vars_option
 
     if output not in ("text", "json"):
@@ -104,7 +104,7 @@ def apply(
             notify=lambda message: typer.echo(message, err=True),
         )
     except ApplyRefused as e:
-        if str(e).startswith("Aborted."):  # the person declined: not an error
+        if isinstance(e, ApplyAborted):  # the person declined: not an error
             console.print(str(e), markup=False)
         else:
             print_error(str(e))

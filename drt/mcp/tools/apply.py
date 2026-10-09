@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from drt.mcp._untrusted import DATA_NOTICE, message
+
 if TYPE_CHECKING:
     from drt.mcp._context import McpContext
 
@@ -29,6 +31,7 @@ def apply(
     vars: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from drt.cli._apply_flow import PLAN_ID_PATTERN, ApplyRefused, apply_plan, parse_duration
+    from drt.cli._plan_runner import load_plan_key
     from drt.mcp.tools.plan import load_stored_plan
 
     who = (approved_by or "").strip()
@@ -73,7 +76,14 @@ def apply(
             expect_plan_id=plan_id,
         )
     except ApplyRefused as e:
-        return {"applied": False, "plan_id": plan_id, "error": str(e), "notes": notes}
+        plan_key = load_plan_key(ctx.project_dir)
+        return {
+            "applied": False,
+            "plan_id": plan_id,
+            "error": message(str(e), plan_key),
+            "notes": [message(n, plan_key, 400) for n in notes],
+            "data_notice": DATA_NOTICE,
+        }
 
     if not outcome.applied:
         return {"applied": False, "plan_id": plan_id, "message": outcome.message}
@@ -84,7 +94,16 @@ def apply(
         "sync": outcome.sync,
         "approved_by": who,
         "failed": outcome.had_error,
-        "result": {k: outcome.entry[k] for k in _RESULT_KEYS if k in outcome.entry},
+        "result": _result(outcome.entry, load_plan_key(ctx.project_dir)),
         "guards_forced": [t["guard"] for t in outcome.guards_forced],
-        "notes": notes,
+        "notes": [message(n, load_plan_key(ctx.project_dir), 400) for n in notes],
+        "data_notice": DATA_NOTICE,
     }
+
+
+def _result(entry: dict[str, Any], plan_key: bytes) -> dict[str, Any]:
+    """The run's outcome, with connector error text treated as untrusted data."""
+    shown = {k: entry[k] for k in _RESULT_KEYS if k in entry}
+    if isinstance(shown.get("error"), str):
+        shown["error"] = message(shown["error"], plan_key, 500)
+    return shown

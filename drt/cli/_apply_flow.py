@@ -34,11 +34,16 @@ _DURATION = re.compile(r"^(\d+)([smhd])$")
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 _DRIFT_SHOWN = 10
 _CLOCK_SKEW = timedelta(minutes=5)
+_DRIFT_ITEM_CHARS = 300
 PLAN_ID_PATTERN = re.compile(r"plan-[0-9a-f]{16}")  # use fullmatch(): `$` allows a trailing newline
 
 
 class ApplyRefused(Exception):
     """Nothing was written, for the reason in the message."""
+
+
+class ApplyAborted(ApplyRefused):
+    """The person declined the confirmation: nothing was written, and it is not an error."""
 
 
 @dataclass
@@ -72,7 +77,10 @@ def describe_drift(report: dict[str, Any]) -> str:
         lines.append(f"  {len(items)} entr{'y' if len(items) == 1 else 'ies'} {label}:")
         for item in items[:_DRIFT_SHOWN]:
             shown = {"action": item.get("action"), "key": item.get("key")}
-            lines.append(f"    - {json.dumps(shown, default=str, sort_keys=True)}")
+            text = json.dumps(shown, default=str, sort_keys=True)
+            if len(text) > _DRIFT_ITEM_CHARS:
+                text = f"{text[:_DRIFT_ITEM_CHARS]}... (+{len(text) - _DRIFT_ITEM_CHARS} chars)"
+            lines.append(f"    - {text}")
         if len(items) > _DRIFT_SHOWN:
             lines.append(f"    ... and {len(items) - _DRIFT_SHOWN} more")
     return "\n".join(lines)
@@ -331,7 +339,7 @@ def apply_plan(
             raise ApplyRefused("Approval is required to apply a plan.")
         question = f"Apply plan {plan_id} to {current.destination}: {', '.join(parts)}."
         if not confirm(question):
-            raise ApplyRefused("Aborted. Nothing was written.")
+            raise ApplyAborted("Aborted. Nothing was written.")
 
     project = ctx_plan.project
     state_bundle = ctx_plan.state_bundle
