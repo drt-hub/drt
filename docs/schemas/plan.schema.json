@@ -38,6 +38,9 @@
           },
           "key": {
             "type": "object"
+          },
+          "value_hash": {
+            "type": "string"
           }
         },
         "required": [
@@ -58,11 +61,30 @@
             "string",
             "null"
           ]
+        },
+        "environment_hash": {
+          "type": "string"
         }
       },
       "required": [
         "config_hash",
+        "environment_hash",
         "cursor_hash"
+      ],
+      "type": "object"
+    },
+    "options": {
+      "properties": {
+        "key_id": {
+          "type": "string"
+        },
+        "redact_keys": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "redact_keys",
+        "key_id"
       ],
       "type": "object"
     },
@@ -72,6 +94,10 @@
     },
     "schema_version": {
       "const": 1
+    },
+    "seal": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
     },
     "status": {
       "properties": {
@@ -163,10 +189,12 @@
     "drt_version",
     "sync",
     "destination",
+    "options",
     "fingerprints",
     "status",
     "summary",
     "digest",
+    "seal",
     "entries"
   ],
   "title": "drt plan",

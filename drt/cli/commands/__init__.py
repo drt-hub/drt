@@ -15,6 +15,7 @@ from __future__ import annotations
 # the command on drt.cli._app.app. Namespace sub-Typers (config, cloud,
 # docs, mcp) sit alongside top-level commands.
 from drt.cli.commands import (
+    apply,  # noqa: F401 — registers `drt apply` (#1217)
     build,  # noqa: F401 — registers `drt build` (run + test in one pass)
     clean,  # noqa: F401
     cloud,  # noqa: F401

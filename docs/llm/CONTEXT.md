@@ -134,6 +134,7 @@ drt run                           # run all syncs
 drt run --select <sync-name>      # run one sync
 drt run --dry-run                 # preview without writing data
 drt plan <sync> --out plan.json   # save the full, reviewable change set (read-only; v1.2, #1216)
+drt apply plan.json               # apply a plan only if recomputing it gives the same change set (#1217)
 drt run --verbose                 # show row-level error details on failure
 drt run --output json             # structured JSON output for CI/scripting
 drt run --log-format json         # structured JSON logging to stderr

@@ -95,6 +95,7 @@ UNMAPPED_COMMANDS: dict[str, str] = {
     "docs serve": "runs a local web server",
     "build": "run + test in one pass; composed by calling drt_run_sync then drt_run_test",
     # #1216. Move to COMMAND_TO_TOOLS when #1220 adds the `drt_plan` MCP tool.
+    "apply": "MCP `drt_apply` is tracked separately in #1220 (reviewable syncs epic #1227)",
     "plan": "MCP `drt_plan` is tracked separately in #1220 (reviewable syncs epic #1227)",
     "profile add": "interactive prompt flow; writes credentials to disk",
     "profile remove": "destructive credential edit",

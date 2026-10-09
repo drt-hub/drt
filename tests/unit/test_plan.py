@@ -24,6 +24,8 @@ _BASE: dict[str, Any] = {
     "match_policy": "upsert",
     "destination": "postgres",
     "config_fingerprint": "sha256:cfg",
+    "environment_fingerprint": "sha256:env",
+    "plan_key": b"test-key",
     "drt_version": "1.1.0",
     "key_columns": ["id"],
     "created_at": "2026-10-09T00:00:00+00:00",
@@ -80,8 +82,8 @@ def test_same_inputs_produce_identical_output_apart_from_created_at() -> None:
     b = build_plan(ordered, **{**_BASE, "created_at": "2030-01-01T00:00:00+00:00"})
 
     assert a.digest == b.digest
-    assert a.plan_id == b.plan_id
-    strip = lambda p: {k: v for k, v in p.to_dict().items() if k != "created_at"}  # noqa: E731
+    volatile = {"created_at", "plan_id", "seal"}  # unique per artifact, not per content
+    strip = lambda p: {k: v for k, v in p.to_dict().items() if k not in volatile}  # noqa: E731
     assert json.dumps(strip(a), sort_keys=True) == json.dumps(strip(b), sort_keys=True)
 
 
@@ -99,11 +101,11 @@ def test_masked_and_redacted_keys_are_hashed() -> None:
     masked = build_plan(diff, **{**_BASE, "key_columns": ["id", "email"]}, mask_columns={"email"})
     key = masked.entries[0].key
     assert key["id"] == 1
-    assert key["email"].startswith("sha256:")
+    assert key["email"].startswith("hmac-sha256:")
     assert "a@example.com" not in masked.to_json()
 
     redacted = build_plan(diff, **_BASE, redact_keys=True)
-    assert redacted.entries[0].key["id"].startswith("sha256:")
+    assert redacted.entries[0].key["id"].startswith("hmac-sha256:")
 
 
 def test_unsupported_destination_is_unavailable_with_reason() -> None:
@@ -155,7 +157,7 @@ def test_cursor_is_hashed_never_written_raw() -> None:
     plan = build_plan(_diff(), **_BASE, cursor_value="alice@example.com")
 
     assert "alice@example.com" not in plan.to_json()
-    assert plan.to_dict()["fingerprints"]["cursor_hash"].startswith("sha256:")
+    assert plan.to_dict()["fingerprints"]["cursor_hash"].startswith("hmac-sha256:")
     other = build_plan(_diff(), **_BASE, cursor_value="bob@example.com")
     assert plan.plan_id != other.plan_id
 
@@ -168,7 +170,6 @@ def test_duplicate_keys_sort_deterministically() -> None:
     backward = build_plan(_diff(added=[], deleted=[], updated=[b, a]), **_BASE)
 
     assert forward.digest == backward.digest
-    assert forward.plan_id == backward.plan_id
 
 
 class _Opts:
@@ -267,3 +268,133 @@ def test_markdown_for_an_empty_plan() -> None:
     plan = build_plan(DiffResult(total_source_rows=1, total_destination_rows=1), **_BASE)
 
     assert "No changes." in render_markdown(plan)
+
+
+def test_plan_document_round_trips_and_detects_tampering() -> None:
+    from drt.engine.plan import PlanDocumentError, load_plan_document
+
+    plan = build_plan(_diff(), **_BASE)
+    doc = load_plan_document(plan.to_json())
+    assert doc["plan_id"] == plan.plan_id
+
+    tampered = json.loads(plan.to_json())
+    tampered["entries"].pop()
+    with pytest.raises(PlanDocumentError, match="modified"):
+        load_plan_document(json.dumps(tampered))
+
+    # Envelope fields are sealed too: bumping created_at cannot skip --max-age.
+    envelope = json.loads(plan.to_json())
+    envelope["created_at"] = "2030-01-01T00:00:00+00:00"
+    with pytest.raises(PlanDocumentError, match="modified"):
+        load_plan_document(json.dumps(envelope))
+    version = json.loads(plan.to_json())
+    version["drt_version"] = "9.9.9"
+    with pytest.raises(PlanDocumentError, match="modified"):
+        load_plan_document(json.dumps(version))
+
+    for text in ("not json", "[]", "{}"):
+        with pytest.raises(PlanDocumentError):
+            load_plan_document(text)
+
+    wrong_version = json.loads(plan.to_json())
+    wrong_version["schema_version"] = 99
+    with pytest.raises(PlanDocumentError, match="schema_version"):
+        load_plan_document(json.dumps(wrong_version))
+
+    unavailable = build_plan(DiffResult(supported=False, fallback_reason="x"), **_BASE)
+    with pytest.raises(PlanDocumentError, match="unavailable"):
+        load_plan_document(unavailable.to_json())
+
+
+def test_plan_id_is_unique_per_artifact_but_the_digest_is_deterministic() -> None:
+    first = build_plan(_diff(), **_BASE)
+    later = build_plan(_diff(), **{**_BASE, "created_at": "2026-10-10T00:00:00+00:00"})
+
+    assert first.digest == later.digest
+    assert first.plan_id != later.plan_id
+
+
+def test_value_change_is_drift_even_when_key_action_and_columns_match() -> None:
+    def plan_with(email: str) -> Any:
+        diff = _diff(
+            added=[],
+            deleted=[],
+            updated=[({"id": 2, "email": "old"}, {"id": 2, "email": email})],
+        )
+        return build_plan(diff, **_BASE)
+
+    assert plan_with("b").digest != plan_with("c").digest
+    assert "value_hash" in plan_with("b").to_dict()["entries"][0]
+    assert '"b"' not in plan_with("b").to_json()  # the value itself is never written
+
+
+def test_engine_written_columns_are_not_part_of_the_value_hash() -> None:
+    def plan_with(run_id: str) -> Any:
+        diff = _diff(added=[{"id": 1, "name": "a", "run": run_id}], updated=[], deleted=[])
+        return build_plan(diff, **_BASE, exclude_columns={"run"})
+
+    assert plan_with("r1").digest == plan_with("r2").digest
+
+
+def test_environment_fingerprint_is_part_of_the_digest() -> None:
+    a = build_plan(_diff(), **_BASE)
+    b = build_plan(_diff(), **{**_BASE, "environment_fingerprint": "sha256:other"})
+
+    assert a.digest != b.digest
+
+
+def test_drift_report_counts_duplicates() -> None:
+    from drt.engine.plan import drift_report
+
+    entry = {"key": {"id": 1}, "action": "create"}
+    report = drift_report([entry, entry], [entry])
+
+    assert report["drifted"] == 1
+    assert len(report["removed"]) == 1
+    assert report["added"] == []
+    assert drift_report([entry], [entry])["drifted"] == 0
+    changed = drift_report([entry], [{**entry, "action": "update"}])
+    assert changed["drifted"] == 1 and len(changed["added"]) == 1
+
+
+def test_a_resealed_forgery_still_fails_the_digest_and_plan_id_checks() -> None:
+    from drt.engine.plan import PlanDocumentError, load_plan_document, seal_of
+
+    plan = build_plan(_diff(), **_BASE)
+
+    def forged(edit: Any) -> str:
+        doc = json.loads(plan.to_json())
+        edit(doc)
+        doc["seal"] = seal_of(doc)
+        return json.dumps(doc)
+
+    with pytest.raises(PlanDocumentError, match="digest"):
+        load_plan_document(forged(lambda d: d["entries"].pop()))
+    with pytest.raises(PlanDocumentError, match="plan_id"):
+        load_plan_document(forged(lambda d: d.update(plan_id="plan-0000000000000000")))
+
+
+def test_hashes_are_keyed_so_the_artifact_alone_cannot_confirm_a_guess() -> None:
+    import hashlib
+
+    def plan_with(key: bytes) -> Any:
+        diff = _diff(added=[{"id": 1, "email": "a@example.com"}], updated=[], deleted=[])
+        return build_plan(diff, **{**_BASE, "plan_key": key}, cursor_value="alice@example.com")
+
+    a, b = plan_with(b"key-one"), plan_with(b"key-two")
+    assert a.digest != b.digest
+    assert a.to_dict()["options"]["key_id"] != b.to_dict()["options"]["key_id"]
+    # A plain SHA-256 of a guessed value (what a public salt would allow) matches nothing.
+    guess = hashlib.sha256(b'"alice@example.com"').hexdigest()
+    assert guess[:16] not in a.to_json() and guess[:32] not in a.to_json()
+    assert b"key-one" not in a.to_json().encode()
+
+
+def test_duplicate_keys_with_different_values_sort_by_value_not_source_order() -> None:
+    first = {"id": 5, "name": "x"}
+    second = {"id": 5, "name": "y"}
+
+    forward = build_plan(_diff(added=[first, second], updated=[], deleted=[]), **_BASE)
+    backward = build_plan(_diff(added=[second, first], updated=[], deleted=[]), **_BASE)
+
+    assert forward.digest == backward.digest

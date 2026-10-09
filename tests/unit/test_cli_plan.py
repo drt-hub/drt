@@ -47,7 +47,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _patch_engine(monkeypatch: pytest.MonkeyPatch, diff: DiffResult, calls: list[Any]) -> None:
-    from drt.cli.commands import plan as plan_cmd
+    from drt.cli import _plan_runner as plan_cmd
     from drt.config import credentials as creds
     from drt.engine import sync as sync_module
 
@@ -139,7 +139,7 @@ def test_unavailable_plan_exits_1_and_writes_no_file(
 def test_partial_extraction_is_never_an_available_plan(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from drt.cli.commands import plan as plan_cmd
+    from drt.cli import _plan_runner as plan_cmd
     from drt.engine import sync as sync_module
 
     _patch_engine(monkeypatch, DiffResult(total_source_rows=0), [])
@@ -190,7 +190,7 @@ def test_redact_keys_hashes_key_values(project: Path, monkeypatch: pytest.Monkey
     result = runner.invoke(app, ["plan", "orders_to_pg", "--output", "json", "--redact-keys"])
 
     keys = [e["key"]["id"] for e in json.loads(result.output)["entries"]]
-    assert all(isinstance(k, str) and k.startswith("sha256:") for k in keys)
+    assert all(isinstance(k, str) and k.startswith("hmac-sha256:") for k in keys)
 
 
 def test_markdown_output(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
