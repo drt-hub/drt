@@ -40,10 +40,17 @@ class _World:
         self.cursor: str | None = None
         self.calls: list[dict[str, Any]] = []
         self.fail_writes = False
+        self.deleted: list[dict[str, Any]] = []
+        self.baseline: int | None = None
 
     def diff(self) -> DiffResult:
         return DiffResult(
-            added=list(self.added), total_source_rows=len(self.added), total_destination_rows=0
+            added=list(self.added),
+            deleted=list(self.deleted),
+            delete_reason="mirror" if self.deleted else None,
+            delete_baseline=self.baseline,
+            total_source_rows=len(self.added),
+            total_destination_rows=0,
         )
 
 
@@ -722,3 +729,81 @@ def test_an_unremovable_temp_file_does_not_change_the_outcome(
     result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
 
     assert result.exit_code == 0, result.output
+
+
+def _guarded_sync(project: Path, guards: dict[str, Any]) -> None:
+    cfg = {**SYNC_YML, "sync": {"mode": "upsert", "guards": guards}}
+    (project / "syncs" / "orders_to_pg.yml").write_text(yaml.dump(cfg))
+
+
+def test_apply_refuses_when_a_guard_trips_and_names_it(project: Path, world: _World) -> None:
+    world.deleted = [{"id": i} for i in range(100, 120)]
+    world.baseline = 40
+    _guarded_sync(project, {"max_deletes": 5, "max_delete_pct": 90})
+    plan = _plan(project)
+    assert [t["guard"] for t in plan["guards"]["tripped"]] == ["max_deletes"]
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
+
+    assert result.exit_code == 1
+    assert "Change guards tripped" in result.output
+    assert "max_deletes" in result.output
+    assert "--force-guards" in result.output
+    assert _writes(world) == []
+
+
+def test_force_guards_applies_and_records_the_override(project: Path, world: _World) -> None:
+    world.deleted = [{"id": i} for i in range(100, 120)]
+    world.baseline = 40
+    _guarded_sync(project, {"max_deletes": 5})
+    plan = _plan(project)
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve", "--force-guards"])
+
+    assert result.exit_code == 0, result.output
+    assert len(_writes(world)) == 1
+    results = json.loads((project / "target" / "drt" / "run_results.json").read_text())
+    assert results["results"][0]["guards_forced"][0]["guard"] == "max_deletes"
+    claim = json.loads((project / ".drt" / "applied_plans" / f"{plan['plan_id']}.json").read_text())
+    assert claim["guards_forced"] == ["max_deletes"]
+
+
+def test_guards_judge_the_recomputed_plan_not_the_file(project: Path, world: _World) -> None:
+    _guarded_sync(project, {"max_creates": 1})
+    plan = _plan(project)
+    assert [t["guard"] for t in plan["guards"]["tripped"]] == ["max_creates"]
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
+
+    assert result.exit_code == 1  # two creates against a limit of 1
+    assert _writes(world) == []
+
+
+def test_within_limits_applies_normally(project: Path, world: _World) -> None:
+    _guarded_sync(project, {"max_creates": 5, "max_deletes": 0})
+    _plan(project)
+
+    assert runner.invoke(app, ["apply", "plan.json", "--auto-approve"]).exit_code == 0
+
+
+def test_unevaluable_percentage_guard_blocks_the_apply(project: Path, world: _World) -> None:
+    world.deleted = [{"id": 100}]
+    world.baseline = None
+    _guarded_sync(project, {"max_delete_pct": 50})
+    _plan(project)
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
+
+    assert result.exit_code == 1
+    assert "cannot be evaluated" in result.output
+
+
+def test_plan_command_reports_guards_without_failing(project: Path, world: _World) -> None:
+    world.deleted = [{"id": i} for i in range(100, 110)]
+    world.baseline = 20
+    _guarded_sync(project, {"max_deletes": 1})
+
+    result = runner.invoke(app, ["plan", "orders_to_pg"])
+
+    assert result.exit_code == 0
+    assert "GUARD TRIPPED" in result.output

@@ -1809,6 +1809,68 @@
       "title": "GoogleSheetsDestinationConfig",
       "type": "object"
     },
+    "GuardsConfig": {
+      "additionalProperties": false,
+      "description": "``sync.guards`` \u2014 limits on how much one run may change (#1218).\n\nEvaluated against the change set a plan computes: ``drt plan`` reports a\ntrip, ``drt apply`` refuses to write (``--force-guards`` overrides, loudly).\n``drt run`` does not enforce them yet.\n\n- ``max_creates`` \u2014 rows to be created (including append-only inserts).\n- ``max_deletes`` \u2014 rows to be deleted (mirror / replace).\n- ``max_delete_pct`` \u2014 deletes as a percentage of the rows the delete pass\n  looked at (destination keys, tracked keys, or the table for ``replace``).\n  A strategy that cannot report that total trips the guard rather than\n  silently passing.\n- ``max_updates_pct`` \u2014 updates as a percentage of the source rows.",
+      "properties": {
+        "max_creates": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Creates"
+        },
+        "max_deletes": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Deletes"
+        },
+        "max_delete_pct": {
+          "anyOf": [
+            {
+              "maximum": 100,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Delete Pct"
+        },
+        "max_updates_pct": {
+          "anyOf": [
+            {
+              "maximum": 100,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Updates Pct"
+        }
+      },
+      "title": "GuardsConfig",
+      "type": "object"
+    },
     "HubSpotDestinationConfig": {
       "properties": {
         "type": {
@@ -4922,6 +4984,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/MirrorConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "guards": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GuardsConfig"
             },
             {
               "type": "null"

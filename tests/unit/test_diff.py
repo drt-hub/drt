@@ -1564,3 +1564,99 @@ class TestDiffResult:
         changed = DiffResult.changed_fields(old, new)
 
         assert changed == {}
+
+
+class TestDeleteBaseline:
+    """The denominator a delete-percentage guard needs (#1218)."""
+
+    @patch("drt.engine.diff.fetch_all_keys")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_destination_mirror_reports_the_scanned_key_count(
+        self, mock_fetch_keys: Any, mock_all_keys: Any
+    ) -> None:
+        mock_fetch_keys.return_value = []
+        mock_all_keys.return_value = [("a",), ("b",), ("c",), ("d",)]
+
+        result = compute_diff(
+            [{"id": "a", "score": 1}], _pg_config(), _mirror_destination_options(), limit=20
+        )
+
+        assert result.delete_baseline == 4
+
+    @patch("drt.engine.diff.fetch_tracked_state")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_tracked_mirror_reports_the_tracked_key_count(
+        self, mock_fetch_keys: Any, mock_state: Any
+    ) -> None:
+        mock_fetch_keys.return_value = []
+        mock_state.return_value = {key_hash((k,)): key_json((k,)) for k in ("a", "b", "c")}
+
+        result = compute_diff(
+            [{"id": "a", "score": 1}], _pg_config(), _mirror_tracked_options(), limit=20
+        )
+
+        assert result.delete_baseline == 3
+
+    @patch("drt.engine.diff.fetch_tracked_state")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_tracked_mirror_with_no_prior_state_has_a_zero_baseline(
+        self, mock_fetch_keys: Any, mock_state: Any
+    ) -> None:
+        mock_fetch_keys.return_value = []
+        mock_state.return_value = {}
+
+        result = compute_diff(
+            [{"id": "a", "score": 1}], _pg_config(), _mirror_tracked_options(), limit=20
+        )
+
+        assert result.delete_baseline == 0
+
+    @patch("drt.engine.diff.fetch_rows")
+    def test_replace_reports_the_table_size(self, mock_fetch: Any) -> None:
+        mock_fetch.return_value = [{"id": i, "score": 0.5, "name": "x"} for i in range(5)]
+
+        result = compute_diff(
+            [{"id": 0, "score": 0.5, "name": "x"}], _pg_config(), _options("replace"), limit=20
+        )
+
+        assert result.delete_baseline == 5
+
+    @patch("drt.engine.diff.fetch_all_keys")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_unreadable_delete_set_has_no_baseline(
+        self, mock_fetch_keys: Any, mock_all_keys: Any
+    ) -> None:
+        mock_fetch_keys.return_value = []
+        mock_all_keys.side_effect = RuntimeError("boom")
+
+        result = compute_diff(
+            [{"id": "a", "score": 1}], _pg_config(), _mirror_destination_options(), limit=20
+        )
+
+        assert result.delete_baseline is None
+        assert result.delete_preview_unavailable_reason is not None
+
+    @patch("drt.engine.diff.fetch_tracked_state")
+    @patch("drt.engine.diff.fetch_rows_by_keys")
+    def test_unreadable_tracked_state_has_no_baseline(
+        self, mock_fetch_keys: Any, mock_state: Any
+    ) -> None:
+        mock_fetch_keys.return_value = []
+        mock_state.side_effect = RuntimeError("boom")
+
+        result = compute_diff(
+            [{"id": "a", "score": 1}], _pg_config(), _mirror_tracked_options(), limit=20
+        )
+
+        assert result.delete_baseline is None
+
+
+class TestReplaceDeletesCountPhysicalRows:
+    @patch("drt.engine.diff.fetch_rows")
+    def test_duplicate_destination_keys_are_all_counted(self, mock_fetch: Any) -> None:
+        mock_fetch.return_value = [{"id": 1, "score": 0.5, "name": "x"} for _ in range(100)]
+
+        result = compute_diff([], _pg_config(), _options("replace"), limit=500)
+
+        assert len(result.deleted) == 100
+        assert result.delete_baseline == 100

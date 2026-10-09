@@ -92,7 +92,7 @@ def _refuse_if_claimed(plan_id: str) -> None:
     raise PlanCliError(f"{message} A plan is single-use; run `drt plan` again.")
 
 
-def _claim(plan_id: str, sync_name: str, run_id: str) -> None:
+def _claim(plan_id: str, sync_name: str, run_id: str, forced: list[str] | None = None) -> None:
     """Atomically take the plan. Raises ``FileExistsError`` if someone already did."""
     _CLAIMS_DIR.mkdir(parents=True, exist_ok=True)
     fd = os.open(_claim_path(plan_id), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -104,6 +104,7 @@ def _claim(plan_id: str, sync_name: str, run_id: str) -> None:
                 "run_id": run_id,
                 "state": "pending",
                 "claimed_at": datetime.now(timezone.utc).isoformat(),
+                **({"guards_forced": forced} if forced else {}),
             },
             handle,
         )
@@ -151,6 +152,11 @@ def apply(
         0.0,
         "--allow-drift-pct",
         help="Proceed if at most this percent of the planned keys drifted (logged). Default 0.",
+    ),
+    force_guards: bool = typer.Option(
+        False,
+        "--force-guards",
+        help="Apply even though a sync.guards limit trips (recorded in the run results).",
     ),
     cursor_value: str = typer.Option(
         None,
@@ -299,6 +305,23 @@ def apply(
     if not current.has_changes:
         console.print("The plan has no changes; nothing to apply.", markup=False)
         raise typer.Exit(0)
+
+    # Guards are judged on the freshly recomputed plan, not on the file: the file
+    # records what was true when it was made, this is what would be written now.
+    tripped = [t.to_dict() for t in current.guard_trips]
+    if tripped and not force_guards:
+        print_error(
+            "Change guards tripped; nothing was written:\n"
+            + "\n".join(f"  - {t['message']}" for t in tripped)
+            + "\nFix the cause, or review and re-run with --force-guards."
+        )
+        raise typer.Exit(1)
+    if tripped:
+        typer.echo(
+            "Applying despite tripped guards (--force-guards): "
+            + "; ".join(str(t["message"]) for t in tripped),
+            err=True,
+        )
     if not auto_approve:
         if not typer.get_text_stream("stdin").isatty():
             print_error("--auto-approve is required without a terminal.")
@@ -316,7 +339,7 @@ def apply(
 
     run_id = new_run_id()
     try:
-        _claim(plan_id, sync_name, run_id)
+        _claim(plan_id, sync_name, run_id, [str(t["guard"]) for t in tripped])
     except FileExistsError:
         print_error(
             f"Plan {plan_id} was just taken by another apply. A plan is single-use; "
@@ -354,6 +377,8 @@ def apply(
         raise
     _finish_claim(plan_id, "failed" if had_error else "success")
     entry["plan_id"] = plan_id
+    if tripped:
+        entry["guards_forced"] = tripped
     _write_run_results(
         Path("target/drt"),
         run_id=run_id,

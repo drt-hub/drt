@@ -222,6 +222,7 @@ def compute_plan(
         mask_columns=set(sync.sync.mask or {}),
         redact_keys=redact_keys,
         exclude_columns=_engine_written_columns(sync),
+        guards=sync.sync.guards,
         cursor_value=result.cursor_value_used,
     )
     return PlanContext(

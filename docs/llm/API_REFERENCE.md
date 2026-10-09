@@ -397,6 +397,28 @@ tests:                      # optional: post-sync validation (DB destinations on
     severity: warn                    # optional on every type: "warn" | "error" (default)
 ```
 
+### Change guards (`sync.guards`, #1218)
+
+Limits on how much one run may change. They are evaluated against the change set
+`drt plan` computes: `drt plan` reports a trip (exit code unchanged) and
+`drt apply` refuses to write (`--force-guards` overrides and is recorded in
+`run_results.json`). `drt run` does not enforce them yet. Unknown keys are
+rejected, so a typo cannot silently disable a guard.
+
+```yaml
+sync:
+  mode: mirror
+  guards:
+    max_creates: 10000     # rows to create (incl. append-only inserts)
+    max_deletes: 500       # rows to delete (mirror / replace)
+    max_delete_pct: 10     # deletes as % of the rows the delete pass looked at
+    max_updates_pct: 50    # updates as % of source rows
+```
+
+A percentage that cannot be evaluated (a delete strategy that does not report
+how many rows it looked at, such as `strategy: diff`) trips the guard instead of
+passing; use `max_deletes` there.
+
 ### Snapshot-diff incremental and diff mirror (#755/#1110)
 
 `incremental_strategy: diff` is for curated models that have no reliable
