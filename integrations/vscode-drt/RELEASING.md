@@ -52,14 +52,40 @@ published version". Check the diff since the last `vscode-drt` version in
    use **New extension → Visual Studio Code** (first release) or the extension's
    `…` menu → **Update** (later releases). Upload the `.vsix`. Status shows
    "Verifying…" for a few minutes, then the new version number.
-7. **Open VSX:** publish the same `.vsix` with
-   `npx --yes ovsx publish ~/Downloads/vscode-drt-<version>.vsix -p <token>`
-   (token from <https://open-vsx.org/user-settings/tokens>; namespace `drt-hub`).
+7. **Open VSX:** publish the same `.vsix` from a terminal, passing the token
+   only through the environment (never paste it into chats or commit it):
+
+   ```bash
+   OVSX_PAT=<token> npx --yes ovsx publish ~/Downloads/vscode-drt-<version>.vsix
+   ```
+
+   Create the token at <https://open-vsx.org/user-settings/tokens> (shown once;
+   revoke it afterwards and make a new one next time). It succeeds with
+   `Published drt-hub.vscode-drt v<version>`.
+
+   The extension stays **inactive** (the public API returns "Extension not
+   found") until the `drt-hub` namespace ownership claim is approved. The claim
+   is a GitHub issue in EclipseFdn/open-vsx.org (see "Open VSX setup" below).
 8. Verify the listings:
    - <https://marketplace.visualstudio.com/items?itemName=drt-hub.vscode-drt>
    - <https://open-vsx.org/extension/drt-hub/vscode-drt>
 9. Tag the release for the record: `git tag vscode-drt-v<version> && git push origin vscode-drt-v<version>`
    (no workflow listens to this tag yet).
+
+## Open VSX setup (one-time, done 2026-10-09)
+
+1. Log in at <https://open-vsx.org> with GitHub.
+2. Create an Eclipse Foundation account (usernames are alphanumeric only, so no
+   hyphen) and link the GitHub account on its **Link GitHub Account** page. The
+   Eclipse Contributor Agreement is not needed for publishing.
+3. Back on Open VSX, sign the **Publisher Agreement** (Settings → Profile).
+4. Create namespace `drt-hub` (Settings → Namespaces), then **Claim Ownership**,
+   which opens a form issue in EclipseFdn/open-vsx.org. We used Option 1 (VS Code
+   Publisher with Repo): the namespace is a Marketplace publisher with an
+   extension whose `package.json` repo is owned by the claiming GitHub ID's org.
+   The sub-choice checkboxes are disabled in the form, so state it in the
+   claim evidence. The claim is
+   <https://github.com/EclipseFdn/open-vsx.org/issues/13941>.
 
 ## Accounts
 
