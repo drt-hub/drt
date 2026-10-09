@@ -5,11 +5,15 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from drt.engine.diff import DiffResult
 from drt.engine.plan import (
+    PLAN_JSON_SCHEMA,
     PLAN_SCHEMA_VERSION,
     build_plan,
     config_hash,
+    render_markdown,
     render_text,
     unsupported_reason,
 )
@@ -192,3 +196,74 @@ def test_unsupported_reasons_are_reported_before_anything_runs() -> None:
         unsupported_reason(_Sync(["id", "synced_at"], metadata_columns=meta)) or ""
     )
     assert unsupported_reason(_Sync(["id"], metadata_columns=meta)) is None
+
+
+def test_plan_conforms_to_its_published_json_schema() -> None:
+    import jsonschema
+
+    validator = jsonschema.Draft202012Validator(PLAN_JSON_SCHEMA)
+    for diff in (_diff(), DiffResult(total_source_rows=0), DiffResult(supported=False)):
+        validator.validate(build_plan(diff, **_BASE).to_dict())
+
+
+def test_markdown_lists_actions() -> None:
+    diff = _diff(added=[{"id": 7}], updated=[], deleted=[])
+    text = render_markdown(build_plan(diff, **_BASE))
+
+    assert "| create | 1 |" in text
+    assert "| create | `id=7` | - |" in text
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["a|b", "a`b", "``", "safe\r\r### injected\r", "line1\nline2", "<img src=x>", "[x](http://e)"],
+)
+def test_markdown_keys_cannot_break_out_of_their_cell(value: str) -> None:
+    diff = _diff(added=[{"id": value}], updated=[], deleted=[])
+    lines = render_markdown(build_plan(diff, **_BASE)).splitlines()
+
+    rows = [ln for ln in lines if ln.startswith("| create |") and "`" in ln]
+    assert len(rows) == 1  # one physical row: no raw CR/LF escaped the key
+    assert not any(ln.startswith("###") and "injected" in ln for ln in lines)
+    assert "\r" not in "".join(rows) and "\n" not in "".join(rows)
+
+
+def test_markdown_distinct_keys_render_distinctly() -> None:
+    a = render_markdown(build_plan(_diff(added=[{"id": "a`b"}], updated=[], deleted=[]), **_BASE))
+    b = render_markdown(build_plan(_diff(added=[{"id": "a'b"}], updated=[], deleted=[]), **_BASE))
+
+    assert a != b
+
+
+def test_markdown_shortens_very_long_values_and_untrusted_names() -> None:
+    huge = "x" * 1_000_000
+    diff = _diff(added=[{"id": huge}], updated=[], deleted=[])
+    plan = build_plan(
+        diff,
+        **{**_BASE, "sync_name": "n`<script>"},
+    )
+    text = render_markdown(plan)
+
+    assert len(text) < 2_000
+    assert "(+" in text and "chars)" in text
+    assert "<script>" not in text.replace("`<script>`", "")  # only ever inside a code span
+
+
+def test_markdown_truncates_long_plans_and_reports_unavailable() -> None:
+    many = _diff(added=[{"id": i} for i in range(60)], updated=[], deleted=[])
+    assert "10 more entries not shown" in render_markdown(build_plan(many, **_BASE))
+    unavailable = build_plan(DiffResult(supported=False, fallback_reason="why"), **_BASE)
+    assert "Plan unavailable" in render_markdown(unavailable)
+
+
+def test_published_schema_file_matches_the_code() -> None:
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[2] / "docs" / "schemas" / "plan.schema.json"
+    assert json.loads(path.read_text()) == json.loads(json.dumps(PLAN_JSON_SCHEMA))
+
+
+def test_markdown_for_an_empty_plan() -> None:
+    plan = build_plan(DiffResult(total_source_rows=1, total_destination_rows=1), **_BASE)
+
+    assert "No changes." in render_markdown(plan)

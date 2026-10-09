@@ -191,3 +191,123 @@ def test_redact_keys_hashes_key_values(project: Path, monkeypatch: pytest.Monkey
 
     keys = [e["key"]["id"] for e in json.loads(result.output)["entries"]]
     assert all(isinstance(k, str) and k.startswith("sha256:") for k in keys)
+
+
+def test_markdown_output(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_engine(monkeypatch, _changes(), [])
+
+    result = runner.invoke(app, ["plan", "orders_to_pg", "--output", "markdown"])
+
+    assert result.exit_code == 0
+    assert "### drt plan" in result.output
+    assert "| create | 1 |" in result.output
+
+
+def test_invalid_output_format_is_rejected(project: Path) -> None:
+    result = runner.invoke(app, ["plan", "orders_to_pg", "--output", "yaml"])
+
+    assert result.exit_code == 1
+    assert "--output must be" in result.output
+
+
+def test_outside_a_project_is_an_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["plan", "orders_to_pg"])
+
+    assert result.exit_code == 1
+
+
+def test_missing_profile_is_an_error(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from drt.config import credentials as creds
+
+    def boom(*_a: Any, **_k: Any) -> None:
+        raise FileNotFoundError("no such profile")
+
+    monkeypatch.setattr(creds, "load_profile", boom)
+
+    result = runner.invoke(app, ["plan", "orders_to_pg"])
+
+    assert result.exit_code == 1
+    assert "no such profile" in result.output
+
+
+def test_undefined_var_is_an_error(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_engine(monkeypatch, _changes(), [])
+    cfg = {**SYNC_YML, "description": "{{ var('missing') }}"}
+    (project / "syncs" / "orders_to_pg.yml").write_text(yaml.dump(cfg))
+
+    result = runner.invoke(app, ["plan", "orders_to_pg"])
+
+    assert result.exit_code == 1
+
+
+def test_engine_failure_is_reported_not_raised(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.engine import sync as sync_module
+
+    _patch_engine(monkeypatch, _changes(), [])
+
+    def boom(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("warehouse unreachable")
+
+    monkeypatch.setattr(sync_module, "run_sync", boom)
+
+    result = runner.invoke(app, ["plan", "orders_to_pg"])
+
+    assert result.exit_code == 1
+    assert "Could not compute a plan" in result.output
+
+
+def test_missing_diff_is_an_error(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from drt.engine import sync as sync_module
+
+    _patch_engine(monkeypatch, _changes(), [])
+
+    class _NoDiff:
+        failed = 0
+        interrupted = False
+        cursor_value_used: str | None = None
+        diff = None
+
+    monkeypatch.setattr(sync_module, "run_sync", lambda *_a, **_k: _NoDiff())
+
+    result = runner.invoke(app, ["plan", "orders_to_pg"])
+
+    assert result.exit_code == 1
+    assert "No diff was produced" in result.output
+
+
+def test_unavailable_plan_renders_markdown_too(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    unsupported = DiffResult(supported=False, fallback_reason="not queryable")
+    _patch_engine(monkeypatch, unsupported, [])
+
+    result = runner.invoke(app, ["plan", "orders_to_pg", "--output", "markdown"])
+
+    assert result.exit_code == 1
+    assert "Plan unavailable" in result.output
+
+
+def test_markdown_with_detailed_exitcode_still_prints_and_exits_2(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_engine(monkeypatch, _changes(), [])
+
+    result = runner.invoke(
+        app, ["plan", "orders_to_pg", "--output", "markdown", "--detailed-exitcode"]
+    )
+
+    assert result.exit_code == 2
+    assert "### drt plan" in result.output
+
+
+def test_markdown_honours_redact_keys(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_engine(monkeypatch, _changes(), [])
+
+    result = runner.invoke(app, ["plan", "orders_to_pg", "--output", "markdown", "--redact-keys"])
+
+    assert "sha256:" in result.output
+    assert "id=1" not in result.output

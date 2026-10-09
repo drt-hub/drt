@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -283,6 +284,135 @@ def unsupported_reason(sync: Any) -> str | None:
                 "their values differ between a plan and a real run"
             )
     return None
+
+
+PLAN_JSON_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "drt plan",
+    "type": "object",
+    "required": [
+        "schema_version",
+        "plan_id",
+        "created_at",
+        "drt_version",
+        "sync",
+        "destination",
+        "fingerprints",
+        "status",
+        "summary",
+        "digest",
+        "entries",
+    ],
+    "properties": {
+        "schema_version": {"const": PLAN_SCHEMA_VERSION},
+        "plan_id": {"type": "string", "pattern": "^plan-[0-9a-f]{16}$"},
+        "created_at": {"type": "string"},
+        "drt_version": {"type": "string"},
+        "sync": {
+            "type": "object",
+            "required": ["name", "mode", "match_policy"],
+            "properties": {
+                "name": {"type": "string"},
+                "mode": {"type": "string"},
+                "match_policy": {"type": "string"},
+            },
+        },
+        "destination": {"type": "string"},
+        "fingerprints": {
+            "type": "object",
+            "required": ["config_hash", "cursor_hash"],
+            "properties": {
+                "config_hash": {"type": "string"},
+                "cursor_hash": {"type": ["string", "null"]},
+            },
+        },
+        "status": {
+            "type": "object",
+            "required": ["available", "reason"],
+            "properties": {
+                "available": {"type": "boolean"},
+                "reason": {"type": ["string", "null"]},
+            },
+        },
+        "summary": {
+            "type": "object",
+            "required": [*_ACTION_ORDER, "total_source_rows", "total_destination_rows"],
+            "properties": {
+                **{action: {"type": "integer", "minimum": 0} for action in _ACTION_ORDER},
+                "total_source_rows": {"type": "integer", "minimum": 0},
+                "total_destination_rows": {"type": ["integer", "null"], "minimum": 0},
+            },
+        },
+        "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "entries": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["key", "action"],
+                "properties": {
+                    "key": {"type": "object"},
+                    "action": {"enum": list(_ACTION_ORDER)},
+                    "changed_columns": {"type": "array", "items": {"type": "string"}},
+                    "delete_reason": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+}
+
+_MARKDOWN_ENTRY_LIMIT = 50
+_MARKDOWN_CELL_LIMIT = 120
+_MARKDOWN_REASON_LIMIT = 500
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f\u2028\u2029]")
+
+
+def _code(text: str, limit: int = _MARKDOWN_CELL_LIMIT) -> str:
+    """Render untrusted text as one inline code span that cannot escape itself.
+
+    Keys and column names are user data. Inside a code span HTML, links and
+    emphasis are inert; control characters (newlines would end the table row or
+    the paragraph) are shown as visible ``\\xNN`` escapes, the delimiter is
+    longer than any backtick run in the text so distinct values stay distinct,
+    and a ``|`` is escaped so it cannot split a table cell.
+    """
+    shown = _CONTROL_CHARS.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
+    if len(shown) > limit:
+        shown = f"{shown[:limit]}... (+{len(shown) - limit} chars)"
+    longest = max((len(run) for run in re.findall(r"`+", shown)), default=0)
+    fence = "`" * (longest + 1)
+    pad = " " if shown.startswith("`") or shown.endswith("`") else ""
+    return f"{fence}{pad}{shown.replace('|', chr(92) + '|')}{pad}{fence}"
+
+
+def render_markdown(plan: Plan) -> str:
+    """Markdown for a PR comment or a CI job summary (the JSON stays the artifact).
+
+    Every value that comes from data or configuration goes through :func:`_code`.
+    """
+    if not plan.available:
+        reason = _code(plan.unavailable_reason or "", _MARKDOWN_REASON_LIMIT)
+        return f"### drt plan: {_code(plan.sync_name)}\n\n**Plan unavailable.** {reason}\n"
+    summary = plan.summary
+    lines = [f"### drt plan: {_code(plan.sync_name)} -> {_code(plan.destination)}", ""]
+    if not plan.entries:
+        lines.append("No changes.")
+    else:
+        lines += ["| Action | Count |", "|---|---:|"]
+        lines += [f"| {a} | {summary[a]} |" for a in _ACTION_ORDER if summary[a]]
+        lines += ["", "| Action | Key | Changed columns |", "|---|---|---|"]
+        for entry in plan.entries[:_MARKDOWN_ENTRY_LIMIT]:
+            key = ", ".join(f"{k}={v}" for k, v in entry.key.items())
+            columns = ", ".join(_code(c, 60) for c in entry.changed_columns) or "-"
+            lines.append(f"| {entry.action} | {_code(key)} | {columns} |")
+        hidden = len(plan.entries) - _MARKDOWN_ENTRY_LIMIT
+        if hidden > 0:
+            lines.append(
+                f"\n_{hidden} more entries not shown; the full list is in the JSON plan "
+                "(`drt plan ... --out plan.json`)._"
+            )
+    lines += ["", f"{_code(plan.plan_id)} - digest {_code(plan.digest[:23])}", ""]
+    return "\n".join(lines)
 
 
 def render_text(plan: Plan) -> str:
