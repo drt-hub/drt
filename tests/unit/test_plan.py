@@ -25,6 +25,7 @@ _BASE: dict[str, Any] = {
     "destination": "postgres",
     "config_fingerprint": "sha256:cfg",
     "environment_fingerprint": "sha256:env",
+    "plan_key": b"test-key",
     "drt_version": "1.1.0",
     "key_columns": ["id"],
     "created_at": "2026-10-09T00:00:00+00:00",
@@ -100,11 +101,11 @@ def test_masked_and_redacted_keys_are_hashed() -> None:
     masked = build_plan(diff, **{**_BASE, "key_columns": ["id", "email"]}, mask_columns={"email"})
     key = masked.entries[0].key
     assert key["id"] == 1
-    assert key["email"].startswith("sha256:")
+    assert key["email"].startswith("hmac-sha256:")
     assert "a@example.com" not in masked.to_json()
 
     redacted = build_plan(diff, **_BASE, redact_keys=True)
-    assert redacted.entries[0].key["id"].startswith("sha256:")
+    assert redacted.entries[0].key["id"].startswith("hmac-sha256:")
 
 
 def test_unsupported_destination_is_unavailable_with_reason() -> None:
@@ -156,7 +157,7 @@ def test_cursor_is_hashed_never_written_raw() -> None:
     plan = build_plan(_diff(), **_BASE, cursor_value="alice@example.com")
 
     assert "alice@example.com" not in plan.to_json()
-    assert plan.to_dict()["fingerprints"]["cursor_hash"].startswith("sha256:")
+    assert plan.to_dict()["fingerprints"]["cursor_hash"].startswith("hmac-sha256:")
     other = build_plan(_diff(), **_BASE, cursor_value="bob@example.com")
     assert plan.plan_id != other.plan_id
 
@@ -371,3 +372,29 @@ def test_a_resealed_forgery_still_fails_the_digest_and_plan_id_checks() -> None:
         load_plan_document(forged(lambda d: d["entries"].pop()))
     with pytest.raises(PlanDocumentError, match="plan_id"):
         load_plan_document(forged(lambda d: d.update(plan_id="plan-0000000000000000")))
+
+
+def test_hashes_are_keyed_so_the_artifact_alone_cannot_confirm_a_guess() -> None:
+    import hashlib
+
+    def plan_with(key: bytes) -> Any:
+        diff = _diff(added=[{"id": 1, "email": "a@example.com"}], updated=[], deleted=[])
+        return build_plan(diff, **{**_BASE, "plan_key": key}, cursor_value="alice@example.com")
+
+    a, b = plan_with(b"key-one"), plan_with(b"key-two")
+    assert a.digest != b.digest
+    assert a.to_dict()["options"]["key_id"] != b.to_dict()["options"]["key_id"]
+    # A plain SHA-256 of a guessed value (what a public salt would allow) matches nothing.
+    guess = hashlib.sha256(b'"alice@example.com"').hexdigest()
+    assert guess[:16] not in a.to_json() and guess[:32] not in a.to_json()
+    assert b"key-one" not in a.to_json().encode()
+
+
+def test_duplicate_keys_with_different_values_sort_by_value_not_source_order() -> None:
+    first = {"id": 5, "name": "x"}
+    second = {"id": 5, "name": "y"}
+
+    forward = build_plan(_diff(added=[first, second], updated=[], deleted=[]), **_BASE)
+    backward = build_plan(_diff(added=[second, first], updated=[], deleted=[]), **_BASE)
+
+    assert forward.digest == backward.digest

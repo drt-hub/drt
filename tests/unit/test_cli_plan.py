@@ -190,7 +190,7 @@ def test_redact_keys_hashes_key_values(project: Path, monkeypatch: pytest.Monkey
     result = runner.invoke(app, ["plan", "orders_to_pg", "--output", "json", "--redact-keys"])
 
     keys = [e["key"]["id"] for e in json.loads(result.output)["entries"]]
-    assert all(isinstance(k, str) and k.startswith("sha256:") for k in keys)
+    assert all(isinstance(k, str) and k.startswith("hmac-sha256:") for k in keys)
 
 
 def test_markdown_output(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:

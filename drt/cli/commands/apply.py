@@ -11,8 +11,11 @@ applies across machines needs a shared claim store (not built yet).
 from __future__ import annotations
 
 import json
+import logging
+import math
 import os
 import re
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -107,11 +110,32 @@ def _claim(plan_id: str, sync_name: str, run_id: str) -> None:
 
 
 def _finish_claim(plan_id: str, state: str) -> None:
-    claim = _read_claim(plan_id) or {"plan_id": plan_id}
-    claim.update(state=state, finished_at=datetime.now(timezone.utc).isoformat())
-    tmp = _claim_path(plan_id).with_suffix(".tmp")
-    tmp.write_text(json.dumps(claim), encoding="utf-8")
-    tmp.replace(_claim_path(plan_id))
+    """Record the outcome. Never raises: by now the destination may already have
+    been written, and a bookkeeping failure must not hide that (or an earlier error)."""
+    log = logging.getLogger(__name__)
+    try:
+        claim = _read_claim(plan_id) or {"plan_id": plan_id}
+        claim.update(state=state, finished_at=datetime.now(timezone.utc).isoformat())
+        # Private, exclusive temp file in the same directory (mkstemp is 0600 and
+        # does not follow a pre-existing symlink), then an atomic rename.
+        fd, tmp_name = tempfile.mkstemp(dir=_CLAIMS_DIR, prefix=f".{plan_id}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(claim, handle)
+            os.replace(tmp_name, _claim_path(plan_id))
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+    except Exception as e:  # noqa: BLE001 - see docstring
+        log.warning(
+            "Could not record the outcome of plan %s (%s); %s still says 'pending'.",
+            plan_id,
+            e,
+            _claim_path(plan_id),
+        )
 
 
 @app.command()
@@ -157,7 +181,7 @@ def apply(
     if output not in ("text", "json"):
         print_error("--output must be 'text' or 'json'.")
         raise typer.Exit(1)
-    if allow_drift_pct < 0 or allow_drift_pct > 100:
+    if not math.isfinite(allow_drift_pct) or allow_drift_pct < 0 or allow_drift_pct > 100:
         print_error("--allow-drift-pct must be between 0 and 100.")
         raise typer.Exit(1)
     try:
@@ -197,6 +221,17 @@ def apply(
 
     plan_id = doc["plan_id"]
     sync_name = doc["sync"]["name"]
+
+    from drt.cli._plan_runner import load_plan_key
+    from drt.engine.plan import key_id_of
+
+    if key_id_of(load_plan_key()) != doc["options"]["key_id"]:
+        print_error(
+            "The plan was made with a different plan key, so its hashes cannot be checked "
+            "here. Set the same DRT_PLAN_KEY where you plan and where you apply, or apply "
+            "from the workspace that made the plan."
+        )
+        raise typer.Exit(1)
 
     def preflight(_project: Any, _state_bundle: Any, _sync: Any) -> None:
         _refuse_if_claimed(plan_id)
@@ -252,10 +287,11 @@ def apply(
                 markup=False,
             )
             raise typer.Exit(1)
-        console.print(
+        # stderr, so `--output json` stays one parseable document on stdout.
+        typer.echo(
             f"Proceeding despite drift: {drifted} entr{'y' if drifted == 1 else 'ies'} "
             f"({pct:.1f}% <= {allow_drift_pct}%).",
-            markup=False,
+            err=True,
         )
 
     summary = current.summary
@@ -314,7 +350,7 @@ def apply(
     try:
         name, entry, had_error = _run_one(ctx_plan.sync, ctx, ctx_plan.profile)
     except BaseException:
-        _finish_claim(plan_id, "failed")
+        _finish_claim(plan_id, "failed")  # never raises, so it cannot mask this error
         raise
     _finish_claim(plan_id, "failed" if had_error else "success")
     entry["plan_id"] = plan_id

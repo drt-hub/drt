@@ -20,6 +20,7 @@ low-entropy key (an email address) unguessable.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import re
 from collections import Counter
@@ -69,6 +70,7 @@ class Plan:
     created_at: str
     cursor_hash: str | None = None
     redact_keys: bool = False
+    key_id: str = ""
     available: bool = True
     unavailable_reason: str | None = None
     total_source_rows: int = 0
@@ -119,7 +121,7 @@ class Plan:
                 "match_policy": self.match_policy,
             },
             "destination": self.destination,
-            "options": {"redact_keys": self.redact_keys},
+            "options": {"redact_keys": self.redact_keys, "key_id": self.key_id},
             "fingerprints": {
                 "config_hash": self.config_hash,
                 "environment_hash": self.environment_hash,
@@ -182,8 +184,20 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def hash_value(value: Any) -> str:
-    return "sha256:" + _sha256(_canonical(value))[:16]
+def hash_value(value: Any, plan_key: bytes) -> str:
+    """Keyed hash (HMAC-SHA256) of a value.
+
+    Keyed, not salted with public data: anyone holding a ``plan.json`` could
+    otherwise test guesses for a low-entropy email, status or password offline.
+    The key never appears in the artifact.
+    """
+    mac = hmac.new(plan_key, _canonical(value).encode("utf-8"), hashlib.sha256)
+    return "hmac-sha256:" + mac.hexdigest()[:32]
+
+
+def key_id_of(plan_key: bytes) -> str:
+    """Identifies which key made a plan without revealing it (so apply can say why)."""
+    return hmac.new(plan_key, b"drt-plan-key-id", hashlib.sha256).hexdigest()[:16]
 
 
 def config_hash(sync_config: Any) -> str:
@@ -196,18 +210,19 @@ def _key_of(
     key_columns: list[str],
     hashed_columns: set[str],
     redact_keys: bool,
+    plan_key: bytes,
 ) -> dict[str, Any]:
     key: dict[str, Any] = {}
     for column in key_columns:
         value = record.get(column)
         if redact_keys or column in hashed_columns:
-            key[column] = hash_value(value)
+            key[column] = hash_value(value, plan_key)
         else:
             key[column] = value
     return key
 
 
-def _entry_sort_key(entry: PlanEntry) -> tuple[int, str, str, str]:
+def _entry_sort_key(entry: PlanEntry) -> tuple[int, str, str, str, str]:
     # Full tie-breaker: two entries for one key (a source with duplicate keys)
     # must not depend on the order an unordered query returned them in.
     return (
@@ -215,6 +230,7 @@ def _entry_sort_key(entry: PlanEntry) -> tuple[int, str, str, str]:
         _canonical(entry.key),
         _canonical(entry.changed_columns),
         entry.delete_reason or "",
+        entry.value_hash or "",
     )
 
 
@@ -227,6 +243,7 @@ def build_plan(
     destination: str,
     config_fingerprint: str,
     environment_fingerprint: str,
+    plan_key: bytes,
     drt_version: str,
     key_columns: list[str],
     mask_columns: set[str] | None = None,
@@ -250,8 +267,9 @@ def build_plan(
         environment_hash=environment_fingerprint,
         drt_version=drt_version,
         created_at=created_at or datetime.now(timezone.utc).isoformat(),
-        cursor_hash=hash_value(cursor_value) if cursor_value is not None else None,
+        cursor_hash=hash_value(cursor_value, plan_key) if cursor_value is not None else None,
         redact_keys=redact_keys,
+        key_id=key_id_of(plan_key),
         total_source_rows=diff.total_source_rows,
         total_destination_rows=diff.total_destination_rows,
     )
@@ -279,16 +297,15 @@ def build_plan(
     hashed = mask_columns or set()
 
     def key(record: dict[str, Any]) -> dict[str, Any]:
-        return _key_of(record, key_columns, hashed, redact_keys)
+        return _key_of(record, key_columns, hashed, redact_keys, plan_key)
 
     skipped_columns = exclude_columns or set()
-    salt = f"{sync_name}\x00{config_fingerprint}"
 
     def value(record: dict[str, Any]) -> str:
         # Engine-written bookkeeping columns (synced_at, run_id) differ between
         # a plan and the run it describes by construction; they are not drift.
         row = {k: v for k, v in record.items() if k not in skipped_columns}
-        return hash_value({"salt": salt, "row": row})
+        return hash_value({"sync": sync_name, "row": row}, plan_key)
 
     entries: list[PlanEntry] = []
     for record in diff.added:
@@ -355,6 +372,7 @@ def load_plan_document(text: str) -> dict[str, Any]:
         if plan_id_of(digest, fingerprints["cursor_hash"], doc["created_at"]) != doc["plan_id"]:
             raise PlanDocumentError("plan_id does not match the plan contents")
         doc["options"]["redact_keys"]
+        doc["options"]["key_id"]
         doc["drt_version"]
     except (KeyError, TypeError) as e:
         raise PlanDocumentError(f"plan file is missing or malformed field: {e}") from e
@@ -448,8 +466,8 @@ PLAN_JSON_SCHEMA: dict[str, Any] = {
         "destination": {"type": "string"},
         "options": {
             "type": "object",
-            "required": ["redact_keys"],
-            "properties": {"redact_keys": {"type": "boolean"}},
+            "required": ["redact_keys", "key_id"],
+            "properties": {"redact_keys": {"type": "boolean"}, "key_id": {"type": "string"}},
         },
         "fingerprints": {
             "type": "object",

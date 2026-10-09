@@ -25,10 +25,10 @@ never persists run state. Applying a plan is a separate step, `drt apply`
 | `seal` | Hash of the whole document. It catches accidental edits (including to `created_at` and `drt_version`); it is not a signature. |
 | `created_at` | The one wall-clock field; part of `plan_id` and `seal`, not of `digest`. |
 | `fingerprints.config_hash` | Hash of the sync file and the model SQL it references. |
-| `fingerprints.environment_hash` | Hash of what the sync resolves to here: resolved config, project vars and profile. Only the hash is stored, never the values. |
+| `fingerprints.environment_hash` | Keyed hash of what the sync resolves to here: resolved config, project vars and profile. Only the hash is stored, never the values. |
 | `fingerprints.cursor_hash` | Hash of the incremental cursor (never the raw value). |
 | `summary` | Counts of `create`, `insert`, `update`, `replace`, `delete`. |
-| `entries[]` | `{key, action, value_hash, changed_columns, delete_reason}` per changed record. `value_hash` is a salted hash of the row to be written, so a changed value is detected without the value being stored. |
+| `entries[]` | `{key, action, value_hash, changed_columns, delete_reason}` per changed record. `value_hash` is a keyed hash of the row to be written, so a changed value is detected without the value being stored. |
 
 Entries are sorted, so the content of a plan is stable across runs. The JSON Schema is in
 [`docs/schemas/plan.schema.json`](../schemas/plan.schema.json).
@@ -52,9 +52,16 @@ values are shortened to 120 characters, and control characters appear as
 
 Row **values** never appear. `changed_columns` lists names only. Key values are
 shown so a reviewer can tell which record changes; use `--redact-keys` to hash
-them, and any column in `sync.mask` is always hashed. The hash is an unsalted
-SHA-256 prefix: it lets you compare two plans, but it does not make a
-low-entropy key such as an email address unguessable.
+them, and any column in `sync.mask` is always hashed.
+
+Every hash in a plan (keys, row values, the cursor, the environment) is an
+HMAC-SHA256 keyed with a secret that is **not** in the file, so someone who only
+has `plan.json` cannot confirm a guess such as a particular email address. The
+key is `DRT_PLAN_KEY` if set, otherwise a random key drt creates once in
+`.drt/plan.key` (mode 0600; keep `.drt/` out of version control). `drt apply`
+needs the same key: set the same `DRT_PLAN_KEY` secret in the CI jobs that plan
+and apply, or apply from the workspace that made the plan. Without the key a
+plan can still be reviewed, but it cannot be applied.
 
 ## When a plan is unavailable
 
@@ -124,6 +131,18 @@ a filtered write.
 - Writing exactly the verified rows needs the planned payloads to be stored,
   which is the later exact-replay option
   ([#1221](https://github.com/drt-hub/drt/issues/1221)).
+
+### Plans that cannot be applied
+
+A plan is verified by recomputing it, so output that changes by itself between
+two extractions never verifies. A model that returns `CURRENT_TIMESTAMP`,
+`random()` or another volatile value in a written column produces plans that
+report drift every time. Keep volatile expressions out of the written columns
+(use `metadata_columns.synced_at` for a run timestamp: those columns are
+excluded from the comparison), or wait for exact replay
+([#1221](https://github.com/drt-hub/drt/issues/1221)). Any change to the resolved
+config, a project var or the profile (including a rotated literal credential)
+is treated as a different environment, which is deliberately conservative.
 
 ### Single use
 

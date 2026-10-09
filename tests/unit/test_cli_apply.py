@@ -524,3 +524,201 @@ def test_metadata_columns_do_not_break_planning_or_apply(project: Path, world: _
     _plan(project)
 
     assert runner.invoke(app, ["apply", "plan.json", "--auto-approve"]).exit_code == 0
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-1", "101"])
+def test_drift_percentage_must_be_a_finite_number_in_range(project: Path, value: str) -> None:
+    _plan(project)
+
+    result = runner.invoke(app, ["apply", "plan.json", "--allow-drift-pct", value])
+
+    assert result.exit_code == 1
+
+
+def test_nan_cannot_switch_drift_enforcement_off(project: Path, world: _World) -> None:
+    _plan(project)
+    world.added.append({"id": 3, "name": "c"})
+
+    result = runner.invoke(
+        app, ["apply", "plan.json", "--auto-approve", "--allow-drift-pct", "nan"]
+    )
+
+    assert result.exit_code == 1
+    assert _writes(world) == []
+
+
+def test_a_plan_from_another_plan_key_is_refused(
+    project: Path, world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DRT_PLAN_KEY", "ci-secret-one")
+    _plan(project)
+    monkeypatch.setenv("DRT_PLAN_KEY", "ci-secret-two")
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
+
+    assert result.exit_code == 1
+    assert "plan key" in result.output
+    assert _writes(world) == []
+
+
+def test_a_shared_plan_key_lets_another_workspace_apply(
+    project: Path, world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DRT_PLAN_KEY", "ci-secret")
+    _plan(project)
+
+    assert runner.invoke(app, ["apply", "plan.json", "--auto-approve"]).exit_code == 0
+    assert "ci-secret" not in (project / "plan.json").read_text()
+
+
+def test_plan_key_file_is_created_private_and_reused(project: Path) -> None:
+    import stat
+
+    from drt.cli._plan_runner import load_plan_key
+
+    first = load_plan_key()
+    key_file = project / ".drt" / "plan.key"
+
+    assert stat.S_IMODE(key_file.stat().st_mode) == 0o600
+    assert load_plan_key() == first
+
+
+def test_allowed_drift_keeps_json_output_parseable(project: Path, world: _World) -> None:
+    _plan(project)
+    world.added.append({"id": 3, "name": "c"})
+
+    result = runner.invoke(
+        app, ["apply", "plan.json", "--auto-approve", "--allow-drift-pct", "60", "--output", "json"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["plan_id"]  # stdout is a single JSON document
+    assert "Proceeding despite drift" not in result.stdout
+
+
+def test_a_claim_finalization_failure_does_not_mask_the_write(
+    project: Path, world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tempfile
+
+    def broken(*_a: Any, **_k: Any) -> None:
+        raise OSError("disk full")
+
+    plan = _plan(project)
+    monkeypatch.setattr(tempfile, "mkstemp", broken)
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
+
+    assert result.exit_code == 0, result.output  # the write happened and is reported
+    assert len(_writes(world)) == 1
+    assert (project / "target" / "drt" / "run_results.json").exists()
+    claim = json.loads((project / ".drt" / "applied_plans" / f"{plan['plan_id']}.json").read_text())
+    assert claim["state"] == "pending"  # still protects against a second apply
+
+
+def test_finalized_claim_stays_private(project: Path, world: _World) -> None:
+    import stat
+
+    plan = _plan(project)
+    runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
+
+    claim = project / ".drt" / "applied_plans" / f"{plan['plan_id']}.json"
+    assert stat.S_IMODE(claim.stat().st_mode) == 0o600
+    assert not list(claim.parent.glob("*.tmp"))
+
+
+def test_profiles_are_fingerprinted_canonically_or_refused() -> None:
+    import dataclasses
+
+    from drt.cli._plan_runner import PlanCliError, _canonical_profile
+
+    @dataclasses.dataclass
+    class _Profile:
+        host: str
+
+    class _Plain:
+        def __init__(self) -> None:
+            self.host = "h"
+
+    class _Slotted:
+        __slots__ = ()
+
+    from pydantic import BaseModel
+
+    class _Model(BaseModel):
+        host: str
+
+    assert _canonical_profile(_Model(host="h")) == {"host": "h"}
+    assert _canonical_profile(_Profile("h")) == {"host": "h"}
+    assert _canonical_profile(_Plain()) == {"host": "h"}
+    with pytest.raises(PlanCliError, match="cannot be fingerprinted"):
+        _canonical_profile(_Slotted())
+
+
+def test_two_processes_creating_the_plan_key_agree(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.cli import _plan_runner
+
+    key_file = project / ".drt" / "plan.key"
+    key_file.write_bytes(b"created-by-the-other-process")
+    real_read = Path.read_bytes
+    calls = {"n": 0}
+
+    def first_read_misses(self: Path) -> bytes:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise FileNotFoundError
+        return real_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", first_read_misses)
+
+    assert _plan_runner.load_plan_key() == b"created-by-the-other-process"
+
+
+def test_a_failed_claim_rename_cleans_up_its_temp_file(
+    project: Path, world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    def broken_replace(*_a: Any, **_k: Any) -> None:
+        raise OSError("read-only filesystem")
+
+    plan = _plan(project)
+    real_replace = os.replace
+
+    def only_claims(src: Any, dst: Any) -> None:
+        if str(dst).endswith(f"{plan['plan_id']}.json"):
+            broken_replace()
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", only_claims)
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
+
+    assert result.exit_code == 0, result.output
+    assert not list((project / ".drt" / "applied_plans").glob("*.tmp"))
+
+
+def test_an_unremovable_temp_file_does_not_change_the_outcome(
+    project: Path, world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    plan = _plan(project)
+    real_replace = os.replace
+
+    def deny(*_a: Any, **_k: Any) -> None:
+        raise OSError("denied")
+
+    def only_claims(src: Any, dst: Any) -> None:
+        if str(dst).endswith(f"{plan['plan_id']}.json"):
+            deny()
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", only_claims)
+    monkeypatch.setattr(os, "unlink", deny)
+
+    result = runner.invoke(app, ["apply", "plan.json", "--auto-approve"])
+
+    assert result.exit_code == 0, result.output

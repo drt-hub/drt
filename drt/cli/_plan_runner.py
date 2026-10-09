@@ -6,6 +6,9 @@ through exactly the same code or "the plan still matches" would mean nothing.
 
 from __future__ import annotations
 
+import dataclasses
+import os
+import secrets
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -48,19 +51,64 @@ def sync_fingerprint(sync: SyncConfig) -> str:
     return f"sha256:{from_files}" if from_files else config_hash(sync)
 
 
+def load_plan_key() -> bytes:
+    """The secret that keys every hash in a plan.
+
+    ``DRT_PLAN_KEY`` wins (set the same secret in the jobs that plan and apply);
+    otherwise a random key is created once in ``.drt/plan.key`` (mode 0600), so a
+    plan applies in the workspace that made it. The key is never written to a plan.
+    """
+    env = os.environ.get("DRT_PLAN_KEY")
+    if env:
+        return env.encode("utf-8")
+    path = Path(".drt") / "plan.key"
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    key = secrets.token_hex(32).encode("ascii")
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:  # another process created it first
+        return path.read_bytes()
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(key)
+    return key
+
+
+def _canonical_profile(profile: Any) -> Any:
+    if hasattr(profile, "model_dump"):
+        return profile.model_dump(mode="json")
+    if dataclasses.is_dataclass(profile) and not isinstance(profile, type):
+        return dataclasses.asdict(profile)
+    if hasattr(profile, "__dict__"):
+        return vars(profile)
+    raise PlanCliError(
+        f"The profile type {type(profile).__name__} cannot be fingerprinted for a plan; "
+        "it must be a Pydantic model or a dataclass."
+    )
+
+
 def environment_fingerprint(
-    sync: SyncConfig, project_vars: dict[str, Any] | None, profile: Any
+    sync: SyncConfig, project_vars: dict[str, Any] | None, profile: Any, plan_key: bytes
 ) -> str:
-    """Hash of what the sync *resolves to* in this environment.
+    """Keyed hash of what the sync *resolves to* in this environment.
 
     The file fingerprint deliberately ignores environment variables, project
     vars and the profile; for a plan those decide where and what gets written,
-    so a plan made in one environment must not verify in another. Only the hash
-    is stored, never the resolved values (which may hold secrets).
+    so a plan made in one environment must not verify in another. The inputs
+    include resolved secrets, so the hash is keyed and only the hash is stored.
+    It is deliberately conservative: any change to the resolved config, any
+    project var or the profile (including a rotated literal credential) is
+    treated as a different environment.
     """
-    dump = profile.model_dump(mode="json") if hasattr(profile, "model_dump") else repr(profile)
-    body = {"sync": sync.model_dump(mode="json"), "vars": project_vars or {}, "profile": dump}
-    return hash_value(body)
+    body = {
+        "sync": sync.model_dump(mode="json"),
+        "vars": project_vars or {},
+        "profile": _canonical_profile(profile),
+    }
+    return hash_value(body, plan_key)
 
 
 def _engine_written_columns(sync: SyncConfig) -> set[str]:
@@ -158,6 +206,7 @@ def compute_plan(
             f"{', interrupted' if result.interrupted else ''})."
         )
 
+    plan_key = load_plan_key()
     destination = sync.destination
     plan = build_plan(
         result.diff,
@@ -166,7 +215,8 @@ def compute_plan(
         match_policy=sync.sync.match_policy,
         destination=getattr(destination, "describe_safe", lambda: str(destination.type))(),
         config_fingerprint=sync_fingerprint(sync),
-        environment_fingerprint=environment_fingerprint(sync, project_vars, profile),
+        environment_fingerprint=environment_fingerprint(sync, project_vars, profile, plan_key),
+        plan_key=plan_key,
         drt_version=__version__,
         key_columns=list(getattr(destination, "upsert_key", None) or []),
         mask_columns=set(sync.sync.mask or {}),

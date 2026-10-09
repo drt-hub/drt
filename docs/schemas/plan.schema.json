@@ -75,12 +75,16 @@
     },
     "options": {
       "properties": {
+        "key_id": {
+          "type": "string"
+        },
         "redact_keys": {
           "type": "boolean"
         }
       },
       "required": [
-        "redact_keys"
+        "redact_keys",
+        "key_id"
       ],
       "type": "object"
     },
