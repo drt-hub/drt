@@ -27,6 +27,7 @@ from drt.cli.commands import (
     init,  # noqa: F401
     list_syncs,  # noqa: F401
     mcp,  # noqa: F401
+    plan,  # noqa: F401 — registers `drt plan` (#1216)
     plugins,  # noqa: F401 — registers `drt plugins` sub-app (#297)
     profile,  # noqa: F401 — registers `drt profile` sub-app
     retry,  # noqa: F401 — registers `drt retry` (DLQ replay)
