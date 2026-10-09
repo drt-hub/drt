@@ -163,6 +163,11 @@ COMMAND_EXCLUSIONS: dict[str, dict[str, str]] = {
     "plan": {
         "--out": "drt_plan stores the plan itself and returns its plan_id (#1220)",
         "--detailed-exitcode": "exit codes do not exist over MCP; the response carries has_changes",
+        "--all": (
+            "CI convenience that plans every sync into one comment; drt_plan plans one "
+            "sync per call and an agent lists syncs with drt_list_syncs (#1219)"
+        ),
+        "--out-dir": "only meaningful with --all; drt_plan stores each plan itself (#1219)",
     },
     "apply": {
         "--auto-approve": (

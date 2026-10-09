@@ -9,16 +9,31 @@ persists run state.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 
 from drt.cli._app import app
 from drt.cli.output import console, print_error
 
+if TYPE_CHECKING:
+    from drt.engine.plan import Plan
+
 
 @app.command()
 def plan(
-    sync_name: str = typer.Argument(..., help="Name of the sync to plan."),
+    sync_name: str = typer.Argument(None, help="Name of the sync to plan (or use --all)."),
+    all_syncs: bool = typer.Option(
+        False,
+        "--all",
+        help=(
+            "Plan every sync (for CI). Writes one <sync>.json per plannable sync into "
+            "--out-dir; a sync that cannot be planned is reported, not fatal."
+        ),
+    ),
+    out_dir: Path = typer.Option(
+        Path("plans"), "--out-dir", help="Where --all writes the per-sync plans."
+    ),
     out: Path | None = typer.Option(
         None, "--out", help="Write the plan to this file (plan.json). Omit to only summarize."
     ),
@@ -57,6 +72,7 @@ def plan(
     Examples:
       drt plan orders_to_pg --out plan.json
       drt plan orders_to_pg --out plan.json --detailed-exitcode
+      drt plan --all --out-dir plans --output markdown   # one PR comment for every sync
     """
     from drt.cli._plan_runner import PlanCliError, compute_plan, parse_vars_option
     from drt.engine.plan import render_markdown, render_text
@@ -64,6 +80,15 @@ def plan(
     if output not in ("text", "json", "markdown"):
         print_error("--output must be 'text', 'json' or 'markdown'.")
         raise typer.Exit(1)
+
+    if all_syncs or sync_name is None:
+        if not all_syncs or sync_name is not None or out is not None:
+            print_error("Give a sync name, or --all (not both, and --all uses --out-dir).")
+            raise typer.Exit(1)
+        _plan_all(
+            out_dir, output, detailed_exitcode, redact_keys, cursor_value, vars_raw, profile_name
+        )
+        return
 
     try:
         plan_obj = compute_plan(
@@ -98,3 +123,95 @@ def plan(
 
     if detailed_exitcode:
         raise typer.Exit(2 if plan_obj.has_changes else 0)
+
+
+def _plan_all(
+    out_dir: Path,
+    output: str,
+    detailed_exitcode: bool,
+    redact_keys: bool,
+    cursor_value: str | None,
+    vars_raw: str | None,
+    profile_name: str | None,
+) -> None:
+    """``drt plan --all``: every sync, one combined report, never fatal per sync."""
+    import json
+
+    from drt.cli._plan_runner import PlanCliError, compute_plan, parse_vars_option
+    from drt.config.parser import load_project, load_syncs
+    from drt.config.vars import VarError, resolve_vars
+    from drt.engine.plan import render_text
+
+    try:
+        cli_vars = parse_vars_option(vars_raw)
+        project = load_project(Path("."))
+        names = [s.name for s in load_syncs(Path("."), vars=resolve_vars(project.vars, cli_vars))]
+    except (PlanCliError, FileNotFoundError, VarError) as e:
+        print_error(str(e))
+        raise typer.Exit(1)
+    if not names:
+        print_error("No syncs found in syncs/.")
+        raise typer.Exit(1)
+
+    results: list[tuple[str, Plan | None, str | None]] = []
+    for name in names:
+        try:
+            one = compute_plan(
+                name,
+                redact_keys=redact_keys,
+                cursor_value=cursor_value,
+                cli_vars=cli_vars,
+                profile_name=profile_name,
+            ).plan
+        except PlanCliError as e:
+            results.append((name, None, str(e)))
+            continue
+        results.append((name, one if one.available else None, one.unavailable_reason))
+
+    written: list[str] = []
+    for name, planned, _reason in results:
+        if planned is not None:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / f"{name}.json").write_text(planned.to_json(), encoding="utf-8")
+            written.append(name)
+
+    if output == "json":
+        documents = [
+            planned.to_dict()
+            if planned
+            else {"sync": {"name": name}, "status": {"available": False, "reason": reason}}
+            for name, planned, reason in results
+        ]
+        print(json.dumps({"plans": documents}, indent=2, default=str))
+    elif output == "markdown":
+        print(_markdown_report(results), end="")
+    else:
+        for name, planned, reason in results:
+            if planned is not None:
+                console.print(render_text(planned), end="", markup=False)
+            else:
+                console.print(
+                    f"Plan for sync '{name}'\n  Plan unavailable: {reason}\n", markup=False
+                )
+        console.print(f"Wrote {len(written)} plan(s) to {out_dir}/", markup=False)
+
+    if detailed_exitcode and any(p is not None and p.has_changes for _n, p, _r in results):
+        raise typer.Exit(2)
+
+
+def _markdown_report(results: list[tuple[str, Plan | None, str | None]]) -> str:
+    """One comment for every sync. ``<!-- drt-plan -->`` lets CI update it in place."""
+    from drt.engine.plan import render_markdown
+    from drt.mcp._untrusted import MESSAGE_CHARS
+
+    parts = ["<!-- drt-plan -->", "## drt plan", ""]
+    changed = sum(1 for _n, p, _r in results if p is not None and p.has_changes)
+    parts.append(f"{len(results)} sync(s); {changed} with changes.")
+    parts.append("")
+    for name, planned, reason in results:
+        if planned is not None:
+            parts.append(render_markdown(planned))
+        else:
+            text = (reason or "no reason given")[:MESSAGE_CHARS].replace("`", "'")
+            parts.append(f"### drt plan: `{name}`\n\n**Plan unavailable.** `{text}`\n")
+    return "\n".join(parts)

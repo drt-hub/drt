@@ -77,6 +77,85 @@ reason when:
   extraction writes scratch tables, so it is not read-only), or an engine
   metadata column inside `upsert_key`.
 
+## Review loop in CI (GitHub Actions)
+
+```bash
+drt deploy github-actions --with-plan
+```
+
+scaffolds two workflows that give you the Terraform loop in pull requests:
+
+| Workflow | When | What it does |
+|---|---|---|
+| `drt-plan.yml` | a pull request touches `syncs/**`, `drt_project.yml` or `profiles.yml` | runs `drt plan --all`, posts **one comment** (updated in place) with every sync's change set, and uploads the plans as the `drt-plans` artifact |
+| `drt-apply.yml` | the PR is merged to `main` (or run manually with a plan run id) | finds the plan run for the merged PR, downloads its plans and runs `drt apply plans --auto-approve --approved-by "merge of PR #N by @user"` |
+
+The comment is keys and counts only, never row values (`--redact-keys` also
+hashes the keys, in the comment and in the artifact). `drt apply` recomputes
+each plan first, so if the world changed between the review and the merge it
+**refuses and the job fails** instead of writing something nobody saw. Merging a
+change to the sync itself (or to the SQL it references) also invalidates the
+reviewed plan; re-run the plan workflow on the new commit and apply it with
+`workflow_dispatch`.
+
+**Secrets.** Besides your connector secrets, create one plan key and give both
+workflows the same value, or apply refuses the plan:
+
+```bash
+openssl rand -hex 32 | gh secret set DRT_PLAN_KEY
+```
+
+**Pull requests from forks are skipped, on purpose.** A plan reads your
+warehouse with real credentials, and GitHub does not give secrets to fork
+workflows. Do not "fix" that with `pull_request_target`: it would run the fork's
+code with your credentials. Plan a fork's change by pushing it to a branch in
+your repository.
+
+**Approval gate.** `drt-apply.yml` has a commented `environment: production`
+line; with required reviewers on that environment a second person approves the
+write after the merge. `--max-age` (default `7d` in the scaffold) bounds how old
+a reviewed plan may be. Applies never overlap (`concurrency`).
+
+The same loop on GitLab CI, as a merge request job (adapt the secret handling to
+your runner; post the comment with the GitLab API or `glab mr note`):
+
+```yaml
+drt-plan:
+  stage: test
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script:
+    - pip install "drt-core[postgres]"
+    - mkdir -p ~/.drt && cp profiles.yml ~/.drt/profiles.yml
+    - drt plan --all --out-dir plans --output markdown > plan-comment.md
+    - glab mr note "$CI_MERGE_REQUEST_IID" --message "$(head -c 60000 plan-comment.md)"
+  artifacts:
+    paths: [plans/]
+    expire_in: 14 days
+  variables:
+    DRT_PLAN_KEY: $DRT_PLAN_KEY   # the same CI variable in the apply job
+
+drt-apply:
+  stage: deploy
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual            # a person presses the button after merge
+  script:
+    - pip install "drt-core[postgres]"
+    - mkdir -p ~/.drt && cp profiles.yml ~/.drt/profiles.yml
+    - drt apply plans --auto-approve --max-age 7d --approved-by "$GITLAB_USER_LOGIN"
+  needs:
+    - project: $CI_PROJECT_PATH
+      job: drt-plan
+      ref: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+      artifacts: true
+```
+
+`drt plan --all` writes one `<sync>.json` per plannable sync into `--out-dir`
+and reports a sync that cannot be planned (with the reason) instead of failing
+the job; `drt apply <directory>` applies the plans in file-name order and stops
+at the first one that is refused or fails.
+
 ## Agents: plan and apply over MCP
 
 An agent can do the review work and a human can do the approving, with no UI.

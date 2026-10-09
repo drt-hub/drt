@@ -135,6 +135,8 @@ drt run --select <sync-name>      # run one sync
 drt run --dry-run                 # preview without writing data
 drt plan <sync> --out plan.json   # save the full, reviewable change set (read-only; v1.2, #1216)
 drt apply plan.json               # apply a plan only if recomputing it gives the same change set (#1217)
+drt plan --all --out-dir plans    # plan every sync (CI); `drt apply plans/` applies the directory (#1219)
+drt deploy github-actions --with-plan  # scaffold the PR plan comment + apply-on-merge workflows (#1219)
 drt run --verbose                 # show row-level error details on failure
 drt run --output json             # structured JSON output for CI/scripting
 drt run --log-format json         # structured JSON logging to stderr
