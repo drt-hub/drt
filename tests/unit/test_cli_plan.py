@@ -289,3 +289,25 @@ def test_unavailable_plan_renders_markdown_too(
 
     assert result.exit_code == 1
     assert "Plan unavailable" in result.output
+
+
+def test_markdown_with_detailed_exitcode_still_prints_and_exits_2(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_engine(monkeypatch, _changes(), [])
+
+    result = runner.invoke(
+        app, ["plan", "orders_to_pg", "--output", "markdown", "--detailed-exitcode"]
+    )
+
+    assert result.exit_code == 2
+    assert "### drt plan" in result.output
+
+
+def test_markdown_honours_redact_keys(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_engine(monkeypatch, _changes(), [])
+
+    result = runner.invoke(app, ["plan", "orders_to_pg", "--output", "markdown", "--redact-keys"])
+
+    assert "sha256:" in result.output
+    assert "id=1" not in result.output

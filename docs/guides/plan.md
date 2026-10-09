@@ -9,7 +9,7 @@ reviewer.
 ```bash
 drt plan orders_to_pg --out plan.json
 drt plan orders_to_pg --out plan.json --detailed-exitcode   # 0 = no changes, 2 = changes
-drt plan orders_to_pg --output markdown                     # for a PR comment / CI summary
+drt plan orders_to_pg --out plan.json --output markdown     # markdown on stdout (PR comment / CI summary), full plan in the file
 ```
 
 `drt plan` never writes to the destination, never advances a watermark and
@@ -20,7 +20,8 @@ never persists run state. Applying a plan (`drt apply`) is a separate step
 
 | Field | Meaning |
 |---|---|
-| `plan_id`, `digest` | Derived from the content only: the same changes give the same ids. |
+| `digest` | Derived from content only: the sync name, its config fingerprint and the entries. The same sync definition and the same changes give the same digest. |
+| `plan_id` | Derived from the digest and the cursor hash, so two plans over the same changes but a different incremental window have different ids. |
 | `created_at` | The one wall-clock field; excluded from `plan_id` and `digest`. |
 | `fingerprints.config_hash` | Hash of the sync file and the model SQL it references. |
 | `fingerprints.cursor_hash` | Hash of the incremental cursor (never the raw value). |
@@ -36,6 +37,14 @@ Entries are sorted, so a plan is stable across runs. The JSON Schema is in
 - `insert`: an append-only destination always adds a row, even if the key exists.
 - `replace`: `mode: replace` rebuilds the row; omitted columns reset.
 - `delete`: a `mirror` or `replace` run removes this key (`delete_reason` says why).
+
+## Markdown output
+
+`--output markdown` is meant for a PR comment or a CI job summary. It shows the
+summary and the first 50 entries; the full list is in the JSON plan (use
+`--out`). Keys, column names and reasons are rendered as inline code, long
+values are shortened to 120 characters, and control characters appear as
+`\\xNN`, so a record's data cannot add headings or links to the comment.
 
 ## What is hidden
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from drt.engine.diff import DiffResult
 from drt.engine.plan import (
     PLAN_JSON_SCHEMA,
@@ -204,17 +206,52 @@ def test_plan_conforms_to_its_published_json_schema() -> None:
         validator.validate(build_plan(diff, **_BASE).to_dict())
 
 
-def test_markdown_lists_actions_and_escapes_table_breakers() -> None:
-    diff = _diff(added=[{"id": "a|b`c"}], updated=[], deleted=[])
+def test_markdown_lists_actions() -> None:
+    diff = _diff(added=[{"id": 7}], updated=[], deleted=[])
     text = render_markdown(build_plan(diff, **_BASE))
 
     assert "| create | 1 |" in text
-    assert "a\\|b'c" in text  # the pipe and backtick cannot break the table
+    assert "| create | `id=7` | - |" in text
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["a|b", "a`b", "``", "safe\r\r### injected\r", "line1\nline2", "<img src=x>", "[x](http://e)"],
+)
+def test_markdown_keys_cannot_break_out_of_their_cell(value: str) -> None:
+    diff = _diff(added=[{"id": value}], updated=[], deleted=[])
+    lines = render_markdown(build_plan(diff, **_BASE)).splitlines()
+
+    rows = [ln for ln in lines if ln.startswith("| create |") and "`" in ln]
+    assert len(rows) == 1  # one physical row: no raw CR/LF escaped the key
+    assert not any(ln.startswith("###") and "injected" in ln for ln in lines)
+    assert "\r" not in "".join(rows) and "\n" not in "".join(rows)
+
+
+def test_markdown_distinct_keys_render_distinctly() -> None:
+    a = render_markdown(build_plan(_diff(added=[{"id": "a`b"}], updated=[], deleted=[]), **_BASE))
+    b = render_markdown(build_plan(_diff(added=[{"id": "a'b"}], updated=[], deleted=[]), **_BASE))
+
+    assert a != b
+
+
+def test_markdown_shortens_very_long_values_and_untrusted_names() -> None:
+    huge = "x" * 1_000_000
+    diff = _diff(added=[{"id": huge}], updated=[], deleted=[])
+    plan = build_plan(
+        diff,
+        **{**_BASE, "sync_name": "n`<script>"},
+    )
+    text = render_markdown(plan)
+
+    assert len(text) < 2_000
+    assert "(+" in text and "chars)" in text
+    assert "<script>" not in text.replace("`<script>`", "")  # only ever inside a code span
 
 
 def test_markdown_truncates_long_plans_and_reports_unavailable() -> None:
     many = _diff(added=[{"id": i} for i in range(60)], updated=[], deleted=[])
-    assert "10 more in plan.json" in render_markdown(build_plan(many, **_BASE))
+    assert "10 more entries not shown" in render_markdown(build_plan(many, **_BASE))
     unavailable = build_plan(DiffResult(supported=False, fallback_reason="why"), **_BASE)
     assert "Plan unavailable" in render_markdown(unavailable)
 

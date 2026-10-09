@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -361,16 +362,39 @@ PLAN_JSON_SCHEMA: dict[str, Any] = {
 }
 
 _MARKDOWN_ENTRY_LIMIT = 50
+_MARKDOWN_CELL_LIMIT = 120
+_MARKDOWN_REASON_LIMIT = 500
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f\u2028\u2029]")
+
+
+def _code(text: str, limit: int = _MARKDOWN_CELL_LIMIT) -> str:
+    """Render untrusted text as one inline code span that cannot escape itself.
+
+    Keys and column names are user data. Inside a code span HTML, links and
+    emphasis are inert; control characters (newlines would end the table row or
+    the paragraph) are shown as visible ``\\xNN`` escapes, the delimiter is
+    longer than any backtick run in the text so distinct values stay distinct,
+    and a ``|`` is escaped so it cannot split a table cell.
+    """
+    shown = _CONTROL_CHARS.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
+    if len(shown) > limit:
+        shown = f"{shown[:limit]}... (+{len(shown) - limit} chars)"
+    longest = max((len(run) for run in re.findall(r"`+", shown)), default=0)
+    fence = "`" * (longest + 1)
+    pad = " " if shown.startswith("`") or shown.endswith("`") else ""
+    return f"{fence}{pad}{shown.replace('|', chr(92) + '|')}{pad}{fence}"
 
 
 def render_markdown(plan: Plan) -> str:
-    """Markdown for a PR comment or a CI job summary (the JSON stays the artifact)."""
+    """Markdown for a PR comment or a CI job summary (the JSON stays the artifact).
+
+    Every value that comes from data or configuration goes through :func:`_code`.
+    """
     if not plan.available:
-        return (
-            f"### drt plan: `{plan.sync_name}`\n\n**Plan unavailable.** {plan.unavailable_reason}\n"
-        )
+        reason = _code(plan.unavailable_reason or "", _MARKDOWN_REASON_LIMIT)
+        return f"### drt plan: {_code(plan.sync_name)}\n\n**Plan unavailable.** {reason}\n"
     summary = plan.summary
-    lines = [f"### drt plan: `{plan.sync_name}` -> {plan.destination}", ""]
+    lines = [f"### drt plan: {_code(plan.sync_name)} -> {_code(plan.destination)}", ""]
     if not plan.entries:
         lines.append("No changes.")
     else:
@@ -379,17 +403,16 @@ def render_markdown(plan: Plan) -> str:
         lines += ["", "| Action | Key | Changed columns |", "|---|---|---|"]
         for entry in plan.entries[:_MARKDOWN_ENTRY_LIMIT]:
             key = ", ".join(f"{k}={v}" for k, v in entry.key.items())
-            columns = ", ".join(entry.changed_columns) or "-"
-            lines.append(f"| {entry.action} | `{_md_escape(key)}` | {_md_escape(columns)} |")
+            columns = ", ".join(_code(c, 60) for c in entry.changed_columns) or "-"
+            lines.append(f"| {entry.action} | {_code(key)} | {columns} |")
         hidden = len(plan.entries) - _MARKDOWN_ENTRY_LIMIT
         if hidden > 0:
-            lines.append(f"\n_{hidden} more in plan.json._")
-    lines += ["", f"`{plan.plan_id}` · digest `{plan.digest[:23]}`", ""]
+            lines.append(
+                f"\n_{hidden} more entries not shown; the full list is in the JSON plan "
+                "(`drt plan ... --out plan.json`)._"
+            )
+    lines += ["", f"{_code(plan.plan_id)} - digest {_code(plan.digest[:23])}", ""]
     return "\n".join(lines)
-
-
-def _md_escape(text: str) -> str:
-    return text.replace("|", "\\|").replace("`", "'").replace("\n", " ")
 
 
 def render_text(plan: Plan) -> str:
