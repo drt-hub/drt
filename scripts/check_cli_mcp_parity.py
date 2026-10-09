@@ -59,6 +59,8 @@ import sys
 # satisfied by whichever tool exposes it.
 COMMAND_TO_TOOLS: dict[str, tuple[str, ...]] = {
     "run": ("run_sync",),
+    "plan": ("plan",),
+    "apply": ("apply",),
     "test": ("run_test",),
     "validate": ("validate",),
     "status": ("get_status", "get_history"),
@@ -95,7 +97,6 @@ UNMAPPED_COMMANDS: dict[str, str] = {
     "docs serve": "runs a local web server",
     "build": "run + test in one pass; composed by calling drt_run_sync then drt_run_test",
     # #1216. Move to COMMAND_TO_TOOLS when #1220 adds the `drt_plan` MCP tool.
-    "apply": "MCP `drt_apply` is tracked separately in #1220 (reviewable syncs epic #1227)",
     "plan": "MCP `drt_plan` is tracked separately in #1220 (reviewable syncs epic #1227)",
     "profile add": "interactive prompt flow; writes credentials to disk",
     "profile remove": "destructive credential edit",
@@ -160,6 +161,16 @@ COMMAND_EXCLUSIONS: dict[str, dict[str, str]] = {
             "call's own return value"
         ),
     },
+    "plan": {
+        "--out": "drt_plan stores the plan itself and returns its plan_id (#1220)",
+        "--detailed-exitcode": "exit codes do not exist over MCP; the response carries has_changes",
+    },
+    "apply": {
+        "--auto-approve": (
+            "MCP approval is the client's permission prompt for drt_apply plus the "
+            "mandatory approved_by, both recorded with the run (#1220)"
+        ),
+    },
     "docs generate": {
         "--inline": "HTML packaging (single-object bundling); MCP returns the manifest",
     },
@@ -180,6 +191,8 @@ COMMAND_EXCLUSIONS: dict[str, dict[str, str]] = {
 # reachable, which is what parity means here, so the polarity flip is fine.
 OPTION_ALIASES: dict[str, dict[str, str]] = {
     "run": {"--diff": "compute_diff", "--profile": "profile_name"},
+    "plan": {"--profile": "profile_name"},
+    "apply": {"--profile": "profile_name"},
     "status": {"--sync": "sync_name"},
     "docs generate": {"--no-state": "include_state"},
 }

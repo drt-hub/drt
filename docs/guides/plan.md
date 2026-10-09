@@ -77,6 +77,30 @@ reason when:
   extraction writes scratch tables, so it is not read-only), or an engine
   metadata column inside `upsert_key`.
 
+## Agents: plan and apply over MCP
+
+An agent can do the review work and a human can do the approving, with no UI.
+Two MCP tools (`pip install drt-core[mcp]`, `drt mcp run`) wrap the same code as
+the CLI:
+
+| Tool | What it does |
+|---|---|
+| `drt_plan(sync_name, ...)` | Read-only. Returns a `plan_id`, the summary counts, tripped guards and the first `max_entries` changed keys (never values). The full plan is stored under `target/drt/plans/`. |
+| `drt_apply(plan_id, approved_by, ...)` | Writes. Applies only a plan fetched with `drt_plan` on this project, through the guarded apply path. `approved_by` is mandatory and is recorded in `run_results.json` and the plan's claim. |
+
+The agent cannot apply a plan it never fetched, nor one that drifted, was
+edited, is stale or was already applied: those are the same refusals as
+`drt apply`, returned as `applied: false` with the reason. `drt_apply` has no
+`--auto-approve` equivalent; the approval is the named human plus your MCP
+client's permission prompt.
+
+**Recommended client setup.** Allow `drt_plan` without asking, and require an
+approval prompt for `drt_apply` (in Claude Code, leave `mcp__drt__drt_apply` out
+of the allowed tools so every call asks). Do not allow `force_guards` to be
+set without a person reading the tripped guard. The `/drt-review-sync` skill
+teaches an agent this flow: plan, explain the deletes first, wait for a named
+approver, apply, report.
+
 ## Change guards
 
 `sync.guards` sets limits on how much one run may change:

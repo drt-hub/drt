@@ -151,6 +151,9 @@ class _RunContext:
     audit_trail: ComplianceAuditTrail | None = None
     audit_fields: list[str] | None = None
     audit_retain_days: int = 30
+    # Where the project lives. ``drt run`` is always invoked from it; the MCP
+    # server may not be, so ``drt apply`` passes it explicitly.
+    project_dir: Path = Path(".")
 
 
 def _build_observer(sync: SyncConfig, ctx: _RunContext, wm_storage: Any) -> Any:
@@ -217,7 +220,7 @@ def _run_one(
             # only by the success path, so widening the try changes nothing
             # about what a run_sync() failure itself reports.
             dest = get_destination(sync)
-            wm_storage = get_watermark_storage(sync, Path("."))
+            wm_storage = get_watermark_storage(sync, ctx.project_dir)
             observer = _build_observer(sync, ctx, wm_storage)
             if not ctx.json_mode and not ctx.dry_run and not ctx.quiet:
                 print_sync_start(sync.name, ctx.dry_run)
@@ -229,7 +232,7 @@ def _run_one(
                 ctx.source,
                 dest,
                 profile,
-                Path("."),
+                ctx.project_dir,
                 ctx.dry_run,
                 ctx.state_mgr,
                 watermark_storage=wm_storage,
