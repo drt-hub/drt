@@ -35,7 +35,10 @@ def plan(
         None, "--out", help="Write the plan to this file (plan.json). Omit to only summarize."
     ),
     output: str = typer.Option(
-        "text", "--output", "-o", help="Stdout format: text (summary) or json (the full plan)."
+        "text",
+        "--output",
+        "-o",
+        help="Stdout format: text (summary), json (the full plan) or markdown (PR comment).",
     ),
     detailed_exitcode: bool = typer.Option(
         False,
@@ -70,12 +73,12 @@ def plan(
     from drt.config.credentials import load_profile
     from drt.config.parser import load_project, load_syncs
     from drt.config.vars import VarError, parse_cli_vars, resolve_vars
-    from drt.engine.plan import build_plan, render_text, unsupported_reason
+    from drt.engine.plan import build_plan, render_markdown, render_text, unsupported_reason
     from drt.engine.sync import run_sync
     from drt.state.factory import build_state_bundle
 
-    if output not in ("text", "json"):
-        print_error("--output must be 'text' or 'json'.")
+    if output not in ("text", "json", "markdown"):
+        print_error("--output must be 'text', 'json' or 'markdown'.")
         raise typer.Exit(1)
 
     try:
@@ -159,7 +162,10 @@ def plan(
     )
 
     if not plan_obj.available:
-        console.print(render_text(plan_obj), end="", markup=False)
+        if output == "markdown":
+            print(render_markdown(plan_obj), end="")
+        else:
+            console.print(render_text(plan_obj), end="", markup=False)
         raise typer.Exit(1)
 
     if out is not None:
@@ -167,6 +173,8 @@ def plan(
 
     if output == "json":
         print(plan_obj.to_json(), end="")
+    elif output == "markdown":
+        print(render_markdown(plan_obj), end="")
     else:
         console.print(render_text(plan_obj), end="", markup=False)
         if out is not None:

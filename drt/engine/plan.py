@@ -285,6 +285,113 @@ def unsupported_reason(sync: Any) -> str | None:
     return None
 
 
+PLAN_JSON_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "drt plan",
+    "type": "object",
+    "required": [
+        "schema_version",
+        "plan_id",
+        "created_at",
+        "drt_version",
+        "sync",
+        "destination",
+        "fingerprints",
+        "status",
+        "summary",
+        "digest",
+        "entries",
+    ],
+    "properties": {
+        "schema_version": {"const": PLAN_SCHEMA_VERSION},
+        "plan_id": {"type": "string", "pattern": "^plan-[0-9a-f]{16}$"},
+        "created_at": {"type": "string"},
+        "drt_version": {"type": "string"},
+        "sync": {
+            "type": "object",
+            "required": ["name", "mode", "match_policy"],
+            "properties": {
+                "name": {"type": "string"},
+                "mode": {"type": "string"},
+                "match_policy": {"type": "string"},
+            },
+        },
+        "destination": {"type": "string"},
+        "fingerprints": {
+            "type": "object",
+            "required": ["config_hash", "cursor_hash"],
+            "properties": {
+                "config_hash": {"type": "string"},
+                "cursor_hash": {"type": ["string", "null"]},
+            },
+        },
+        "status": {
+            "type": "object",
+            "required": ["available", "reason"],
+            "properties": {
+                "available": {"type": "boolean"},
+                "reason": {"type": ["string", "null"]},
+            },
+        },
+        "summary": {
+            "type": "object",
+            "required": [*_ACTION_ORDER, "total_source_rows", "total_destination_rows"],
+            "properties": {
+                **{action: {"type": "integer", "minimum": 0} for action in _ACTION_ORDER},
+                "total_source_rows": {"type": "integer", "minimum": 0},
+                "total_destination_rows": {"type": ["integer", "null"], "minimum": 0},
+            },
+        },
+        "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "entries": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["key", "action"],
+                "properties": {
+                    "key": {"type": "object"},
+                    "action": {"enum": list(_ACTION_ORDER)},
+                    "changed_columns": {"type": "array", "items": {"type": "string"}},
+                    "delete_reason": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+}
+
+_MARKDOWN_ENTRY_LIMIT = 50
+
+
+def render_markdown(plan: Plan) -> str:
+    """Markdown for a PR comment or a CI job summary (the JSON stays the artifact)."""
+    if not plan.available:
+        return (
+            f"### drt plan: `{plan.sync_name}`\n\n**Plan unavailable.** {plan.unavailable_reason}\n"
+        )
+    summary = plan.summary
+    lines = [f"### drt plan: `{plan.sync_name}` -> {plan.destination}", ""]
+    if not plan.entries:
+        lines.append("No changes.")
+    else:
+        lines += ["| Action | Count |", "|---|---:|"]
+        lines += [f"| {a} | {summary[a]} |" for a in _ACTION_ORDER if summary[a]]
+        lines += ["", "| Action | Key | Changed columns |", "|---|---|---|"]
+        for entry in plan.entries[:_MARKDOWN_ENTRY_LIMIT]:
+            key = ", ".join(f"{k}={v}" for k, v in entry.key.items())
+            columns = ", ".join(entry.changed_columns) or "-"
+            lines.append(f"| {entry.action} | `{_md_escape(key)}` | {_md_escape(columns)} |")
+        hidden = len(plan.entries) - _MARKDOWN_ENTRY_LIMIT
+        if hidden > 0:
+            lines.append(f"\n_{hidden} more in plan.json._")
+    lines += ["", f"`{plan.plan_id}` · digest `{plan.digest[:23]}`", ""]
+    return "\n".join(lines)
+
+
+def _md_escape(text: str) -> str:
+    return text.replace("|", "\\|").replace("`", "'").replace("\n", " ")
+
+
 def render_text(plan: Plan) -> str:
     """Human summary for the terminal (the JSON file is the reviewable artifact)."""
     lines = [f"Plan for sync '{plan.sync_name}' -> {plan.destination}"]

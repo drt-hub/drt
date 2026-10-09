@@ -166,6 +166,7 @@ drt test --select <name>    # test a specific sync
 drt test --store-failures   # sample up to N failing rows per failed test (masked)
 drt build                   # run each sync and its tests in one pass
 drt validate                # validate sync YAML configs
+drt plan <sync> --out plan.json   # save a reviewable change set (read-only)
 drt status                  # show recent sync status
 drt status --output json    # JSON output for status
 drt profile list            # list credential profiles in ~/.drt/profiles.yml

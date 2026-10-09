@@ -191,3 +191,13 @@ def test_redact_keys_hashes_key_values(project: Path, monkeypatch: pytest.Monkey
 
     keys = [e["key"]["id"] for e in json.loads(result.output)["entries"]]
     assert all(isinstance(k, str) and k.startswith("sha256:") for k in keys)
+
+
+def test_markdown_output(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_engine(monkeypatch, _changes(), [])
+
+    result = runner.invoke(app, ["plan", "orders_to_pg", "--output", "markdown"])
+
+    assert result.exit_code == 0
+    assert "### drt plan" in result.output
+    assert "| create | 1 |" in result.output
