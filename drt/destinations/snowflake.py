@@ -134,22 +134,31 @@ def _build_merge_sql(
     upsert_key: list[str],
     using_subquery: str,
     fill_cols: set[str] | frozenset[str] = frozenset(),
+    null_only_cols: set[str] | frozenset[str] = frozenset(),
 ) -> str:
     """Build the full ``MERGE INTO ... USING (<subquery>) AS source`` statement.
 
     ``fill_cols`` (``write_policy: fill_empty``, #1238) keep a stored value
     unless it is NULL, ``''`` or only spaces. The STRING cast is for the
     comparison only, so non-text values such as ``0`` remain non-empty.
+    ``null_only_cols`` (a subset of ``fill_cols``, semi-structured columns) are
+    empty only when NULL: their text form is not what drt compares, and a
+    VARIANT holding ``\"\"`` is a value.
     """
     key_clause = " AND ".join([f"target.{k} = source.{k}" for k in upsert_key])
     update_cols = [c for c in columns if c not in upsert_key]
-    update_clause = ", ".join(
-        f"{c} = CASE WHEN target.{c} IS NULL OR TRIM(target.{c}::STRING) = '' "
-        f"THEN source.{c} ELSE target.{c} END"
-        if c in fill_cols
-        else f"{c} = source.{c}"
-        for c in update_cols
-    )
+
+    def _assignment(c: str) -> str:
+        if c not in fill_cols:
+            return f"{c} = source.{c}"
+        if c in null_only_cols:
+            return f"{c} = CASE WHEN target.{c} IS NULL THEN source.{c} ELSE target.{c} END"
+        return (
+            f"{c} = CASE WHEN target.{c} IS NULL OR TRIM(target.{c}::STRING) = '' "
+            f"THEN source.{c} ELSE target.{c} END"
+        )
+
+    update_clause = ", ".join(_assignment(c) for c in update_cols)
     insert_cols = ", ".join(columns)
     insert_vals = ", ".join([f"source.{c}" for c in columns])
     matched_clause = f"WHEN MATCHED THEN UPDATE SET {update_clause}" if update_cols else ""
@@ -349,6 +358,11 @@ class SnowflakeDestination(BaseSqlDestination):
         if effective_mode == "merge" and not upsert_key:
             raise ValueError("upsert_key is required for merge mode")
 
+        if effective_mode == "insert" and sync_options.uses_fill_empty:
+            raise ValueError(
+                "sync.write_policy: fill_empty needs destination.mode: merge (or sync.mode: "
+                "mirror); mode: insert appends rows and would ignore the policy."
+            )
         self._validate_write_policy_overrides(sync_options, schema_map)
 
         # Built per contiguous key-signature run (#1091), not once for the
@@ -391,7 +405,18 @@ class SnowflakeDestination(BaseSqlDestination):
                 update_cols = [c for c in run_columns if c not in upsert_key]
                 # write_policy: fill_empty (#1238): these columns keep a
                 # non-empty destination value in both bulk and fallback MERGEs.
-                fill_cols = sync_options.fill_empty_columns(update_cols)
+                # Snowflake folds unquoted names, so an override spelled in another
+                # case still names the column (validation above is case-insensitive).
+                overrides = {k.lower(): v for k, v in sync_options.write_policy_overrides.items()}
+                fill_cols = {
+                    c
+                    for c in update_cols
+                    if overrides.get(c.lower(), sync_options.write_policy) == "fill_empty"
+                }
+                folded = {str(k).lower(): v for k, v in (schema_map or {}).items()}
+                null_only_cols = {
+                    c for c in fill_cols if folded.get(c.lower(), "scalar") != "scalar"
+                }
                 # #988: chunked MERGE ... USING (VALUES ...) replaces the old
                 # CREATE TEMP TABLE staging step — no DDL privilege needed at
                 # all now. A chunk-level failure falls back to one MERGE per
@@ -402,7 +427,7 @@ class SnowflakeDestination(BaseSqlDestination):
                     try:
                         using_sql = _merge_using_subquery(run_columns, schema_map, len(chunk))
                         merge_sql = _build_merge_sql(
-                            table_fq, run_columns, upsert_key, using_sql, fill_cols
+                            table_fq, run_columns, upsert_key, using_sql, fill_cols, null_only_cols
                         )
                         flat_params: list[Any] = [
                             v for row in chunk for v in _bind_row(row, run_columns, json_cols)
@@ -420,6 +445,7 @@ class SnowflakeDestination(BaseSqlDestination):
                                     upsert_key,
                                     using_sql,
                                     fill_cols,
+                                    null_only_cols,
                                 )
                                 cur.execute(merge_sql, _bind_row(row, run_columns, json_cols))
                                 result.success += 1

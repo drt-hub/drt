@@ -482,3 +482,18 @@ def test_the_plan_schema_keeps_kept_values_optional_so_v1_plans_stay_valid() -> 
 
     assert "kept_values" not in PLAN_JSON_SCHEMA["properties"]["summary"]["required"]
     assert "kept_values" in PLAN_JSON_SCHEMA["properties"]["summary"]["properties"]
+
+
+def test_snowflake_merge_semi_structured_fill_columns_are_null_only() -> None:
+    sql = _build_merge_sql(
+        "DB.PUBLIC.T",
+        ["id", "tags", "name"],
+        ["id"],
+        "SELECT v0 AS id, v1 AS tags, v2 AS name",
+        {"tags", "name"},
+        {"tags"},
+    )
+
+    assert "tags = CASE WHEN target.tags IS NULL THEN source.tags ELSE target.tags END" in sql
+    assert "TRIM(target.name::STRING) = ''" in sql
+    assert "TRIM(target.tags" not in sql

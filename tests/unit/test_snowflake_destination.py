@@ -421,6 +421,68 @@ class TestSnowflakeDestinationLoad:
         assert "TRIM(target.industry::STRING) = ''" in merge_sql
         assert "CASE WHEN" not in delete_sql
 
+    def test_fill_empty_is_refused_in_insert_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+
+        with (
+            patch.dict("sys.modules", _mocked_snowflake_modules(conn)),
+            pytest.raises(ValueError, match="needs destination.mode: merge"),
+        ):
+            SnowflakeDestination().load(
+                [{"id": 1, "industry": "Software"}],
+                _config(mode="insert"),
+                _options(write_policy="fill_empty"),
+            )
+
+        assert not conn._cur.execute.called
+
+    def test_override_in_another_case_still_applies_to_the_column(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+
+        with (
+            patch.dict("sys.modules", _mocked_snowflake_modules(conn)),
+            patch(
+                "drt.destinations.schema.describe_columns",
+                return_value={"ID": "scalar", "INDUSTRY": "scalar", "SCORE": "scalar"},
+            ),
+        ):
+            SnowflakeDestination().load(
+                [{"id": 1, "industry": "Software", "score": 1}],
+                _config(introspect_schema=True, mode="merge", upsert_key=["id"]),
+                _options(write_policy_overrides={"INDUSTRY": "fill_empty"}),
+            )
+
+        merge_sql = next(s for s in _sqls(conn._cur) if "MERGE INTO" in s)
+        assert "industry = CASE WHEN" in merge_sql
+        assert "score = source.score" in merge_sql
+
+    def test_semi_structured_fill_column_is_null_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+
+        with (
+            patch.dict("sys.modules", _mocked_snowflake_modules(conn)),
+            patch(
+                "drt.destinations.schema.describe_columns",
+                return_value={"ID": "scalar", "TAGS": "json", "NAME": "scalar"},
+            ),
+        ):
+            SnowflakeDestination().load(
+                [{"id": 1, "tags": {"a": 1}, "name": "x"}],
+                _config(introspect_schema=True, mode="merge", upsert_key=["id"]),
+                _options(write_policy="fill_empty"),
+            )
+
+        merge_sql = next(s for s in _sqls(conn._cur) if "MERGE INTO" in s)
+        assert "tags = CASE WHEN target.tags IS NULL THEN" in merge_sql
+        assert "TRIM(target.name::STRING) = ''" in merge_sql
+
     def test_heterogeneous_batch_does_not_drop_a_field_appearing_in_a_later_record(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

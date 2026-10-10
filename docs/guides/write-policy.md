@@ -35,7 +35,13 @@ tell padding from content; a tab or a newline is a value. (The comparison casts 
 column to text and trims spaces for the check only; the column's own type is never
 changed. The diff reads the destination value and applies the same rule, so
 `--dry-run --diff` and `drt plan` agree with the write.) Binary columns (`bytea`,
-`BLOB`) are not meaningful here: leave them on `overwrite`.
+`BLOB`, Snowflake `BINARY`) are not meaningful here: leave them on `overwrite`.
+On Snowflake, `VARIANT` / `OBJECT` / `ARRAY` columns count as empty only when SQL
+`NULL` (a stored JSON `""` is a value), and the destination must use
+`mode: merge` (or `sync.mode: mirror`): `mode: insert` only appends, so
+`fill_empty` is refused there rather than ignored. Repeated source keys in one
+Snowflake batch are not collapsed (as with `overwrite`): keep the model output
+unique per `upsert_key`.
 
 ## Behaviour
 
