@@ -4838,6 +4838,26 @@
           "title": "Match Policy",
           "type": "string"
         },
+        "write_policy": {
+          "default": "overwrite",
+          "enum": [
+            "overwrite",
+            "fill_empty"
+          ],
+          "title": "Write Policy",
+          "type": "string"
+        },
+        "write_policy_overrides": {
+          "additionalProperties": {
+            "enum": [
+              "overwrite",
+              "fill_empty"
+            ],
+            "type": "string"
+          },
+          "title": "Write Policy Overrides",
+          "type": "object"
+        },
         "cursor_field": {
           "anyOf": [
             {

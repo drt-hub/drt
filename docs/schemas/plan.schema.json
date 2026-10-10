@@ -175,6 +175,10 @@
           "minimum": 0,
           "type": "integer"
         },
+        "kept_values": {
+          "minimum": 0,
+          "type": "integer"
+        },
         "replace": {
           "minimum": 0,
           "type": "integer"
@@ -202,7 +206,8 @@
         "replace",
         "delete",
         "total_source_rows",
-        "total_destination_rows"
+        "total_destination_rows",
+        "kept_values"
       ],
       "type": "object"
     },
