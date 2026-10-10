@@ -26,12 +26,16 @@ that must always track the warehouse, or `overwrite` by default with a
 
 | Column | Empty when |
 |---|---|
-| text (`TEXT`, `VARCHAR`, ...) | `NULL` or `''` |
+| text (`TEXT`, `VARCHAR`, `CHAR(n)`, ...) | `NULL`, `''`, or **only spaces** |
 | any other type (integer, boolean, date, ...) | `NULL` only |
 
-A stored `0`, `false` or whitespace-only string is a **value**, not empty, so it
-is kept. (The comparison casts the column to text for the check only; the
-column's own type is never changed.)
+A stored `0` or `false` is a **value**, not empty, so it is kept. Spaces-only
+counts as empty because a `CHAR(n)` column pads with spaces and the database cannot
+tell padding from content; a tab or a newline is a value. (The comparison casts the
+column to text and trims spaces for the check only; the column's own type is never
+changed. The diff reads the destination value and applies the same rule, so
+`--dry-run --diff` and `drt plan` agree with the write.) Binary columns (`bytea`,
+`BLOB`) are not meaningful here: leave them on `overwrite`.
 
 ## Behaviour
 
@@ -43,9 +47,18 @@ column's own type is never changed.)
   fill.
 - `mode: replace` is rejected: it rebuilds the table, so there is no existing
   value to keep.
-- A name in `write_policy_overrides` that no record in the batch carries is an
-  error and nothing is committed: a typo on an override would otherwise apply the
-  default policy to the column you meant.
+- A name in `write_policy_overrides` that is not a column of the destination
+  table is an error and nothing is written: a typo would otherwise apply the
+  default policy to the column you meant (overwriting, when the default is
+  `overwrite`). This is checked against the destination's own columns, so it is
+  exact however the source batches its rows; it needs schema introspection
+  (`introspect_schema`, the default, and no `json_columns`). `drt plan` and
+  `drt run --dry-run --diff` also check the names against the columns the source
+  produces and report the sync as unavailable, with the reason, when one is
+  missing.
+- A key that repeats in the source behaves as the real writes do: the first row
+  fills an empty column, and a later row finds it taken. The diff and the plan model
+  that order too.
 
 ## Where it works
 
@@ -55,10 +68,11 @@ column's own type is never changed.)
 | MySQL | yes: in the `ON DUPLICATE KEY UPDATE` expression (and `UPDATE` for `update_only`) |
 | Others | refused up front with a clear message, never silently overwritten. Snowflake, Databricks, BigQuery and HubSpot follow ([#1238](https://github.com/drt-hub/drt/issues/1238)). |
 
-The generated SQL for a fill column is, for Postgres,
-`col = CASE WHEN col IS NULL OR col::text = '' THEN EXCLUDED.col ELSE col END`,
+The generated SQL for a fill column is, for Postgres (the target is aliased,
+because an unqualified column is ambiguous with `EXCLUDED`),
+`col = CASE WHEN t.col IS NULL OR btrim(t.col::text) = '' THEN EXCLUDED.col ELSE t.col END`,
 and for MySQL
-`col = IF(col IS NULL OR CAST(col AS CHAR) = '', VALUES(col), col)`.
+`col = IF(col IS NULL OR TRIM(CAST(col AS CHAR)) = '', VALUES(col), col)`.
 
 ## Seeing what is kept
 

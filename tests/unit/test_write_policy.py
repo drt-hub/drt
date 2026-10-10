@@ -78,8 +78,11 @@ def test_postgres_upsert_keeps_a_non_empty_value_for_fill_columns_only() -> None
         )
     )
 
-    assert "CASE WHEN" in sql and "::text = ''" in sql and "EXCLUDED" in sql
+    assert "CASE WHEN" in sql and "btrim(" in sql and "::text" in sql and "EXCLUDED" in sql
     assert sql.count("CASE WHEN") == 1  # score stays a plain overwrite
+    # In ON CONFLICT DO UPDATE an unqualified column is ambiguous with EXCLUDED, so the
+    # target is aliased and every reference to the stored value is qualified.
+    assert "_drt_target" in sql and sql.count("Identifier('_drt_target')") >= 4
     assert sql.count("EXCLUDED") == 2  # industry (inside the CASE) and score (plain)
 
 
@@ -101,9 +104,9 @@ def test_mysql_upsert_and_update_only_build_the_fill_expression() -> None:
     upsert = MySQLDestination._build_upsert_sql("t", ["id", "a", "b"], ["a", "b"], {"a"})
     update = MySQLDestination._build_update_only_sql("t", ["a", "b"], ["id"], {"a"})
 
-    assert "`a` = IF(`a` IS NULL OR CAST(`a` AS CHAR) = '', VALUES(`a`), `a`)" in upsert
+    assert "`a` = IF(`a` IS NULL OR TRIM(CAST(`a` AS CHAR)) = '', VALUES(`a`), `a`)" in upsert
     assert "`b` = VALUES(`b`)" in upsert
-    assert "`a` = IF(`a` IS NULL OR CAST(`a` AS CHAR) = '', %s, `a`)" in update
+    assert "`a` = IF(`a` IS NULL OR TRIM(CAST(`a` AS CHAR)) = '', %s, `a`)" in update
     assert "`b` = %s" in update
     assert update.count("%s") == 3  # one value per column plus the key, unchanged order
 
@@ -292,24 +295,42 @@ def test_postgres_load_runs_the_fill_statement_and_commits() -> None:
         )
 
     query = str(conn.cursor.return_value.execute.call_args.args[0])
-    assert "CASE WHEN" in query and "::text = ''" in query
+    assert "CASE WHEN" in query and "btrim(" in query and "_drt_target" in query
     assert result.success == 1 and conn.commit.called and not conn.rollback.called
 
 
-def test_postgres_typo_in_an_override_rolls_back_instead_of_overwriting() -> None:
+def _with_schema(destination: Any, columns: dict[str, str] | None) -> Any:
+    destination._resolve_schema = lambda _config: columns  # type: ignore[method-assign]
+    return destination
+
+
+def test_an_override_that_is_not_a_destination_column_is_refused_before_any_write() -> None:
     conn = _conn()
     options = SyncOptions(write_policy_overrides={"industy": "fill_empty"})  # typo
+    destination = _with_schema(PostgresDestination(), {"id": "int", "industry": "text"})
 
     with patch.object(PostgresDestination, "_connect", return_value=conn):
-        with pytest.raises(ValueError, match=r"\['industy'\]"):
-            PostgresDestination().load(
-                [{"id": 1, "industry": "Software"}], _pg_dest_config(), options
-            )
+        with pytest.raises(ValueError, match=r"\['industy'\].*not columns of the destination"):
+            destination.load([{"id": 1, "industry": "x"}], _pg_dest_config(), options)
 
-    assert conn.rollback.called and not conn.commit.called
+    assert not conn.cursor.return_value.execute.called  # nothing was attempted
 
 
-def test_mysql_load_runs_the_fill_statement_and_a_typo_rolls_back() -> None:
+def test_the_check_ignores_case_and_needs_introspection() -> None:
+    options = SyncOptions(write_policy_overrides={"Industry": "fill_empty"})
+
+    with patch.object(PostgresDestination, "_connect", return_value=_conn()):
+        _with_schema(PostgresDestination(), {"industry": "text"}).load(
+            [{"id": 1, "industry": "x"}], _pg_dest_config(), options
+        )
+        # No introspection (introspect_schema: false / json_columns): nothing to check against,
+        # and `drt plan` / `--dry-run --diff` still check the names against the source.
+        _with_schema(PostgresDestination(), None).load(
+            [{"id": 1, "industry": "x"}], _pg_dest_config(), options
+        )
+
+
+def test_mysql_load_runs_the_fill_statement_and_refuses_an_unknown_override() -> None:
     conn = _conn()
     fill = SyncOptions(write_policy="fill_empty")
     typo = SyncOptions(write_policy_overrides={"industy": "overwrite"})
@@ -319,19 +340,112 @@ def test_mysql_load_runs_the_fill_statement_and_a_typo_rolls_back() -> None:
         assert "IF(`industry` IS NULL" in conn.cursor.return_value.execute.call_args.args[0]
         assert ok.success == 1 and conn.commit.called
         conn.reset_mock()
-        with pytest.raises(ValueError, match=r"\['industy'\]"):
-            MySQLDestination().load([{"id": 1, "industry": "x"}], _mysql_dest_config(), typo)
+        with pytest.raises(ValueError, match="not columns of the destination"):
+            _with_schema(MySQLDestination(), {"industry": "text"}).load(
+                [{"id": 1, "industry": "x"}], _mysql_dest_config(), typo
+            )
 
-    assert conn.rollback.called and not conn.commit.called
+    assert not conn.cursor.return_value.execute.called
 
 
-def test_a_heterogeneous_batch_only_needs_each_override_somewhere() -> None:
+def test_an_optional_override_column_missing_from_a_batch_is_fine() -> None:
+    """The old per-batch check raised here; the destination column list makes it exact."""
     conn = _conn()
     options = SyncOptions(write_policy_overrides={"industry": "fill_empty", "score": "overwrite"})
+    destination = _with_schema(
+        PostgresDestination(), {"id": "int", "industry": "text", "score": "int"}
+    )
 
     with patch.object(PostgresDestination, "_connect", return_value=conn):
-        result = PostgresDestination().load(
-            [{"id": 1, "industry": "a"}, {"id": 2, "score": 3}], _pg_dest_config(), options
-        )
+        first = destination.load([{"id": 1, "industry": "a"}], _pg_dest_config(), options)
+        second = destination.load([{"id": 2, "score": 3}], _pg_dest_config(), options)
 
-    assert result.success == 2 and conn.commit.called
+    assert first.success == 1 and second.success == 1 and conn.commit.call_count == 2
+
+
+# --- emptiness, duplicate keys, typos in the diff -----------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "empty"),
+    [
+        (None, True),
+        ("", True),
+        ("   ", True),  # spaces only: a CHAR(n) column's padding, as the SQL btrim/TRIM
+        ("\t", False),  # a tab is a value (btrim / TRIM strip spaces only)
+        ("x", False),
+        (0, False),
+        (False, False),
+        (b"", False),
+    ],
+)
+def test_diff_emptiness_matches_the_sql(value: Any, empty: bool) -> None:
+    from drt.engine.diff import _is_empty
+
+    assert _is_empty(value) is empty
+
+
+@patch("drt.engine.diff.fetch_rows_by_keys")
+def test_diff_models_first_writer_wins_for_a_repeated_source_key(fetch: MagicMock) -> None:
+    fetch.return_value = [{"id": 1, "industry": None}]
+    options = SyncOptions(write_policy="fill_empty")
+
+    result = compute_diff(
+        [{"id": 1, "industry": "A"}, {"id": 1, "industry": "B"}], _pg_config(), options, limit=20
+    )
+
+    # Live SQL stores "A" and then keeps it when "B" arrives.
+    assert result.kept_values == 1
+    assert [(new["industry"]) for _o, new in result.updated] == ["A", "A"][:1] or len(
+        result.updated
+    ) == 1
+    assert result.updated[0][1]["industry"] == "A"
+
+
+@patch("drt.engine.diff.fetch_rows_by_keys")
+def test_diff_models_a_repeated_key_for_a_new_row(fetch: MagicMock) -> None:
+    fetch.return_value = []
+    options = SyncOptions(write_policy="fill_empty")
+
+    result = compute_diff(
+        [{"id": 9, "industry": "A"}, {"id": 9, "industry": "B"}], _pg_config(), options, limit=20
+    )
+
+    assert len(result.added) == 1 and result.kept_values == 1  # the second row finds "A" taken
+    assert result.updated == []
+
+
+@patch("drt.engine.diff.fetch_rows_by_keys")
+def test_without_fill_empty_the_diff_is_unchanged_for_repeated_keys(fetch: MagicMock) -> None:
+    fetch.return_value = []
+
+    result = compute_diff(
+        [{"id": 9, "industry": "A"}, {"id": 9, "industry": "B"}],
+        _pg_config(),
+        SyncOptions(),
+        limit=20,
+    )
+
+    assert len(result.added) == 2  # existing behaviour, untouched
+
+
+@patch("drt.engine.diff.fetch_rows_by_keys")
+def test_an_override_naming_a_column_the_source_does_not_produce_makes_the_plan_unavailable(
+    fetch: MagicMock,
+) -> None:
+    options = SyncOptions(write_policy_overrides={"industy": "fill_empty"})
+
+    result = compute_diff([{"id": 1, "industry": "x"}], _pg_config(), options, limit=20)
+
+    assert result.supported is False
+    assert "industy" in (result.fallback_reason or "")
+    plan = build_plan(result, **_BASE)
+    assert plan.available is False and "industy" in (plan.unavailable_reason or "")
+    assert not fetch.called
+
+
+def test_the_plan_schema_keeps_kept_values_optional_so_v1_plans_stay_valid() -> None:
+    from drt.engine.plan import PLAN_JSON_SCHEMA
+
+    assert "kept_values" not in PLAN_JSON_SCHEMA["properties"]["summary"]["required"]
+    assert "kept_values" in PLAN_JSON_SCHEMA["properties"]["summary"]["properties"]

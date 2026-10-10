@@ -546,10 +546,10 @@ class MySQLDestination(BaseSqlDestination):
         use_savepoint = sync_options.on_error == "skip"
         no_match_indices: set[int] = set()
 
+        self._validate_write_policy_overrides(sync_options, schema_map)
+
         base_index = 0
-        seen_columns: set[str] = set()
         for run_columns, run_records in self._contiguous_signature_runs(records):
-            seen_columns.update(run_columns)
             update_cols = [c for c in run_columns if c not in config.upsert_key]
             # write_policy: fill_empty (#1238): these columns keep a non-empty destination value.
             fill_cols = sync_options.fill_empty_columns(update_cols)
@@ -683,15 +683,6 @@ class MySQLDestination(BaseSqlDestination):
                     continue
             base_index += len(run_records)
 
-        unseen = sync_options.unseen_write_policy_overrides(seen_columns)
-        if unseen:
-            # A typo'd override would silently apply the default policy to the column
-            # it meant (overwriting, when the default is overwrite). Nothing is committed.
-            conn.rollback()
-            raise ValueError(
-                f"sync.write_policy_overrides names column(s) {unseen} that no record in "
-                "this batch carries; check the spelling."
-            )
         conn.commit()
         return result
 
@@ -713,8 +704,8 @@ class MySQLDestination(BaseSqlDestination):
         """Build INSERT ... ON DUPLICATE KEY UPDATE SQL.
 
         ``fill_cols`` (``write_policy: fill_empty``, #1238) keep the stored value unless it
-        is NULL or ``''``; the CHAR cast is for the comparison only, so it is valid for any
-        column type.
+        is NULL, ``''`` or only spaces; the CHAR cast is for the comparison only, so it is valid for
+        any column type.
         """
         cols_str = ", ".join(f"`{c}`" for c in columns)
         placeholders = ", ".join(["%s"] * len(columns))
@@ -722,7 +713,7 @@ class MySQLDestination(BaseSqlDestination):
 
         if update_cols:
             set_clause = ", ".join(
-                f"`{c}` = IF(`{c}` IS NULL OR CAST(`{c}` AS CHAR) = '', VALUES(`{c}`), `{c}`)"
+                f"`{c}` = IF(`{c}` IS NULL OR TRIM(CAST(`{c}` AS CHAR)) = '', VALUES(`{c}`), `{c}`)"
                 if c in fill_cols
                 else f"`{c}` = VALUES(`{c}`)"
                 for c in update_cols
@@ -744,7 +735,8 @@ class MySQLDestination(BaseSqlDestination):
         """Build an UPDATE that cannot create a missing destination row."""
         table_q = MySQLDestination._quote_ident(table)
         set_clause = ", ".join(
-            f"`{column}` = IF(`{column}` IS NULL OR CAST(`{column}` AS CHAR) = '', %s, `{column}`)"
+            f"`{column}` = IF(`{column}` IS NULL OR "
+            f"TRIM(CAST(`{column}` AS CHAR)) = '', %s, `{column}`)"
             if column in fill_cols
             else f"`{column}` = %s"
             for column in update_cols

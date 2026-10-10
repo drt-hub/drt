@@ -25,32 +25,36 @@ pymysql = pytest.importorskip("pymysql")
 testcontainers_postgres = pytest.importorskip("testcontainers.postgres")
 testcontainers_mysql = pytest.importorskip("testcontainers.mysql")
 
-# Existing destination rows: (id, industry, score, employees, notes)
+# Existing destination rows: (id, industry, score, employees, notes, code CHAR(5))
 _EXISTING = [
-    (1, "Retail", 5, None, ""),  # industry kept; employees NULL and notes '' are filled
-    (2, None, None, None, None),  # everything empty: everything is filled
-    (3, "", 1, 10, "kept"),  # industry '' is filled; employees 10 and notes are kept
-    (4, "Bank", 0, 0, "x"),  # a stored 0 is a value, not empty
+    (1, "Retail", 5, None, "", "ab"),  # industry and code kept; employees NULL, notes '' filled
+    (2, None, None, None, None, None),  # everything empty: everything is filled
+    (3, "", 1, 10, "kept", "   "),  # industry '' and a blank CHAR filled; employees, notes kept
+    (4, "Bank", 0, 0, "x", "zz"),  # a stored 0 is a value, not empty: all four kept
+    (6, "   ", 2, None, "  ", "  "),  # spaces only counts as empty (TEXT, VARCHAR and CHAR alike)
 ]
 
 _INCOMING = [
-    {"id": 1, "industry": "Software", "score": 9, "employees": 100, "notes": "n"},
-    {"id": 2, "industry": "Software", "score": 9, "employees": 100, "notes": "n"},
-    {"id": 3, "industry": "Software", "score": 9, "employees": 100, "notes": "n"},
-    {"id": 4, "industry": "Software", "score": 9, "employees": 100, "notes": "n"},
-    {"id": 5, "industry": "Software", "score": 9, "employees": 100, "notes": "n"},  # new row
+    {"id": i, "industry": "Software", "score": 9, "employees": 100, "notes": "n", "code": "new"}
+    for i in (1, 2, 3, 4, 5, 6)  # 5 is a new row
 ]
 
 # score is always overwritten (override); everything else is fill-only.
 _OPTIONS = {"write_policy": "fill_empty", "write_policy_overrides": {"score": "overwrite"}}
 
 _EXPECTED = [
-    (1, "Retail", 9, 100, "n"),
-    (2, "Software", 9, 100, "n"),
-    (3, "Software", 9, 10, "kept"),
-    (4, "Bank", 9, 0, "x"),
-    (5, "Software", 9, 100, "n"),  # inserted in full
+    (1, "Retail", 9, 100, "n", "ab"),
+    (2, "Software", 9, 100, "n", "new"),
+    (3, "Software", 9, 10, "kept", "new"),
+    (4, "Bank", 9, 0, "x", "zz"),
+    (5, "Software", 9, 100, "n", "new"),  # inserted in full
+    (6, "Software", 9, 100, "n", "new"),
 ]
+
+
+def _rows(rows: Any) -> list[tuple[Any, ...]]:
+    """CHAR(5) comes back padded on Postgres; compare the value, not the padding."""
+    return [(*row[:-1], row[-1].rstrip() if isinstance(row[-1], str) else row[-1]) for row in rows]
 
 
 def test_postgres_fill_empty() -> None:
@@ -66,9 +70,9 @@ def test_postgres_fill_empty() -> None:
             with conn.cursor() as cur:
                 cur.execute(
                     "CREATE TABLE contacts (id INTEGER PRIMARY KEY, industry TEXT, "
-                    "score INTEGER, employees INTEGER, notes TEXT)"
+                    "score INTEGER, employees INTEGER, notes TEXT, code CHAR(5))"
                 )
-                cur.executemany("INSERT INTO contacts VALUES (%s, %s, %s, %s, %s)", _EXISTING)
+                cur.executemany("INSERT INTO contacts VALUES (%s, %s, %s, %s, %s, %s)", _EXISTING)
             conn.commit()
 
             config = PostgresDestinationConfig(
@@ -84,15 +88,15 @@ def test_postgres_fill_empty() -> None:
             options = SyncOptions(**_OPTIONS)  # type: ignore[arg-type]
 
             diff = compute_diff(_INCOMING, config, options, limit=100)
-            # r1: industry; r3: employees, notes; r4: industry, employees (a stored 0), notes
-            assert diff.kept_values == 6
+            # r1: industry, code; r3: employees, notes; r4: all four (a stored 0 is a value)
+            assert diff.kept_values == 8
 
             result = PostgresDestination().load(_INCOMING, config, options)
-            assert result.success == 5 and result.failed == 0
+            assert result.success == 6 and result.failed == 0
 
             with conn.cursor() as cur:
                 cur.execute("SELECT * FROM contacts ORDER BY id")
-                assert cur.fetchall() == _EXPECTED
+                assert _rows(cur.fetchall()) == _EXPECTED
         finally:
             conn.close()
 
@@ -162,9 +166,9 @@ def test_mysql_fill_empty() -> None:
             with conn.cursor() as cur:
                 cur.execute(
                     "CREATE TABLE contacts (id INT PRIMARY KEY, industry VARCHAR(40), "
-                    "score INT, employees INT, notes VARCHAR(40))"
+                    "score INT, employees INT, notes VARCHAR(40), code CHAR(5))"
                 )
-                cur.executemany("INSERT INTO contacts VALUES (%s, %s, %s, %s, %s)", _EXISTING)
+                cur.executemany("INSERT INTO contacts VALUES (%s, %s, %s, %s, %s, %s)", _EXISTING)
             conn.commit()
 
             config = MySQLDestinationConfig(
@@ -181,10 +185,48 @@ def test_mysql_fill_empty() -> None:
             options = SyncOptions(**_OPTIONS)  # type: ignore[arg-type]
 
             result = MySQLDestination().load(_INCOMING, config, options)
-            assert result.success == 5 and result.failed == 0
+            assert result.success == 6 and result.failed == 0
 
             with conn.cursor() as cur:
                 cur.execute("SELECT * FROM contacts ORDER BY id")
-                assert list(cur.fetchall()) == _EXPECTED
+                assert _rows(cur.fetchall()) == _EXPECTED
+        finally:
+            conn.close()
+
+
+def test_postgres_a_repeated_source_key_keeps_the_first_fill_and_the_diff_agrees() -> None:
+    require_docker()
+    with testcontainers_postgres.PostgresContainer(
+        "postgres:16-alpine", username="admin", password="adminpass", dbname="testdb", driver=None
+    ) as pg:
+        host, port = pg.get_container_host_ip(), int(pg.get_exposed_port(5432))
+        conn = psycopg2.connect(
+            host=host, port=port, dbname="testdb", user="admin", password="adminpass"
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute("CREATE TABLE contacts (id INTEGER PRIMARY KEY, industry TEXT)")
+                cur.execute("INSERT INTO contacts VALUES (1, NULL)")
+            conn.commit()
+            config = PostgresDestinationConfig(
+                type="postgres",
+                host=host,
+                port=port,
+                dbname="testdb",
+                user="admin",
+                password="adminpass",
+                table="contacts",
+                upsert_key=["id"],
+            )
+            options = SyncOptions(write_policy="fill_empty")
+            incoming = [{"id": 1, "industry": "A"}, {"id": 1, "industry": "B"}]
+
+            diff = compute_diff(incoming, config, options, limit=100)
+            PostgresDestination().load(incoming, config, options)
+
+            assert diff.kept_values == 1 and len(diff.updated) == 1
+            with conn.cursor() as cur:
+                cur.execute("SELECT industry FROM contacts WHERE id = 1")
+                assert cur.fetchone() == ("A",)  # what the diff predicted
         finally:
             conn.close()

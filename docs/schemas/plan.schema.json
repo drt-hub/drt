@@ -206,8 +206,7 @@
         "replace",
         "delete",
         "total_source_rows",
-        "total_destination_rows",
-        "kept_values"
+        "total_destination_rows"
       ],
       "type": "object"
     },

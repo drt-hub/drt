@@ -571,12 +571,7 @@ PLAN_JSON_SCHEMA: dict[str, Any] = {
         },
         "summary": {
             "type": "object",
-            "required": [
-                *_ACTION_ORDER,
-                "total_source_rows",
-                "total_destination_rows",
-                "kept_values",
-            ],
+            "required": [*_ACTION_ORDER, "total_source_rows", "total_destination_rows"],
             "properties": {
                 **{action: {"type": "integer", "minimum": 0} for action in _ACTION_ORDER},
                 "total_source_rows": {"type": "integer", "minimum": 0},

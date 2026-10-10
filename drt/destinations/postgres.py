@@ -727,10 +727,10 @@ class PostgresDestination(BaseSqlDestination):
         use_savepoint = sync_options.on_error == "skip"
         no_match_indices: set[int] = set()
 
+        self._validate_write_policy_overrides(sync_options, schema_map)
+
         base_index = 0
-        seen_columns: set[str] = set()
         for run_columns, run_records in self._contiguous_signature_runs(records):
-            seen_columns.update(run_columns)
             update_cols = [c for c in run_columns if c not in config.upsert_key]
             # write_policy: fill_empty (#1238): these columns keep a non-empty destination value.
             fill_cols = sync_options.fill_empty_columns(update_cols)
@@ -821,15 +821,6 @@ class PostgresDestination(BaseSqlDestination):
                     continue
             base_index += len(run_records)
 
-        unseen = sync_options.unseen_write_policy_overrides(seen_columns)
-        if unseen:
-            # A typo'd override would silently apply the default policy to the column
-            # it meant (overwriting, when the default is overwrite). Nothing is committed.
-            conn.rollback()
-            raise ValueError(
-                f"sync.write_policy_overrides names column(s) {unseen} that no record in "
-                "this batch carries; check the spelling."
-            )
         conn.commit()
         return result
 
@@ -861,15 +852,19 @@ class PostgresDestination(BaseSqlDestination):
     ) -> Any:
         from psycopg2 import sql as _pgsql
 
+        # fill_empty (#1238): in ON CONFLICT ... DO UPDATE an unqualified column name is
+        # ambiguous between the target row and EXCLUDED, so the target gets an alias.
+        alias = _pgsql.Identifier("_drt_target")
         if update_cols:
             set_clause = _pgsql.SQL(", ").join(
-                # fill_empty (#1238): keep the stored value unless it is NULL or ''. The
-                # ::text cast is for the comparison only, so it is valid for every column
-                # type (an integer column is "empty" only when NULL).
+                # Keep the stored value unless it is NULL, '' or only spaces. The ::text cast
+                # is for the comparison only, so it is valid for every column type (a
+                # number or boolean is "empty" only when NULL); btrim also makes a CHAR(n)
+                # column's padding irrelevant, matching how the diff reads the value.
                 _pgsql.SQL(
-                    "{col} = CASE WHEN {col} IS NULL OR {col}::text = '' "
-                    "THEN EXCLUDED.{col} ELSE {col} END"
-                ).format(col=_pgsql.Identifier(c))
+                    "{col} = CASE WHEN {t}.{col} IS NULL OR btrim({t}.{col}::text) = '' "
+                    "THEN EXCLUDED.{col} ELSE {t}.{col} END"
+                ).format(col=_pgsql.Identifier(c), t=alias)
                 if c in fill_cols
                 else _pgsql.SQL("{} = EXCLUDED.{}").format(
                     _pgsql.Identifier(c), _pgsql.Identifier(c)
@@ -880,8 +875,11 @@ class PostgresDestination(BaseSqlDestination):
         else:
             conflict_action = _pgsql.SQL("DO NOTHING")
 
+        target = _qualified_ident(table)
+        if fill_cols and update_cols:
+            target = _pgsql.SQL("{} AS {}").format(target, alias)
         return _pgsql.SQL("INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) {}").format(
-            _qualified_ident(table),
+            target,
             _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in columns),
             _pgsql.SQL(", ").join(_pgsql.Placeholder() for _ in columns),
             _pgsql.SQL(", ").join(_pgsql.Identifier(c) for c in upsert_key),
@@ -923,7 +921,8 @@ class PostgresDestination(BaseSqlDestination):
 
         set_clause = _pgsql.SQL(", ").join(
             _pgsql.SQL(
-                "{col} = CASE WHEN {col} IS NULL OR {col}::text = '' THEN {ph} ELSE {col} END"
+                "{col} = CASE WHEN {col} IS NULL OR btrim({col}::text) = '' "
+                "THEN {ph} ELSE {col} END"
             ).format(col=_pgsql.Identifier(c), ph=_pgsql.Placeholder())
             if c in fill_cols
             else _pgsql.SQL("{} = {}").format(_pgsql.Identifier(c), _pgsql.Placeholder())
