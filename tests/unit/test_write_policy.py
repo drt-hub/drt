@@ -9,6 +9,7 @@ import pytest
 
 from drt.config.models import SyncOptions
 from drt.destinations.base import WritePolicyCapable
+from drt.destinations.databricks import DatabricksDestination
 from drt.destinations.mysql import MySQLDestination
 from drt.destinations.postgres import PostgresDestination
 from drt.destinations.snowflake import SnowflakeDestination, _build_merge_sql
@@ -150,16 +151,26 @@ class _NoPolicy:
 
 
 def test_sql_destinations_with_fill_empty_declare_the_capability() -> None:
-    for destination in (PostgresDestination(), MySQLDestination(), SnowflakeDestination()):
+    for destination in (
+        PostgresDestination(),
+        MySQLDestination(),
+        SnowflakeDestination(),
+        DatabricksDestination(),
+    ):
         assert isinstance(destination, WritePolicyCapable)
         assert destination.supported_write_policies() == frozenset({"overwrite", "fill_empty"})
 
 
-def test_snowflake_accepts_fill_empty_but_still_rejects_update_only() -> None:
-    destination = SnowflakeDestination()
+@pytest.mark.parametrize("destination", [SnowflakeDestination(), DatabricksDestination()])
+def test_merge_destination_accepts_fill_empty_but_still_rejects_update_only(
+    destination: Any,
+) -> None:
 
     _check_write_policy_supported(SyncOptions(write_policy="fill_empty"), destination)
-    with pytest.raises(ValueError, match="match_policy: update_only.*SnowflakeDestination"):
+    with pytest.raises(
+        ValueError,
+        match=rf"match_policy: update_only.*{type(destination).__name__}",
+    ):
         _check_match_policy_supported("update_only", destination)
 
 

@@ -298,6 +298,7 @@ jobs:
             tests/integration/dwh/test_databricks_warehouse_state_smoke.py \
             tests/integration/dwh/test_databricks_diff_incremental_smoke.py \
             tests/integration/dwh/test_databricks_mirror_diff_smoke.py \
+            tests/integration/dwh/test_databricks_write_policy_smoke.py \
             -v
 
   bigquery:

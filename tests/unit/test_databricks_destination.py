@@ -337,6 +337,215 @@ class TestDatabricksDestinationLoad:
         # Staging table is dropped at the end so subsequent syncs don't trip
         assert any("DROP TABLE IF EXISTS main.default.__drt_staging_user_scores" in s for s in sqls)
 
+    def test_merge_fill_empty_wraps_sparse_expression_and_honours_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.fetchall.return_value = [
+            (
+                json.dumps(
+                    {
+                        "columns": [
+                            {"name": "id"},
+                            {"name": "industry", "default": "'unknown'"},
+                            {"name": "score"},
+                        ]
+                    }
+                ),
+            )
+        ]
+        destination = DatabricksDestination()
+        monkeypatch.setattr(
+            destination,
+            "_resolve_schema",
+            lambda _config: {"id": "scalar", "industry": "scalar", "score": "scalar"},
+        )
+        records = [
+            {"id": 1, "industry": "Software", "score": 10},
+            {"id": 2, "score": 20},
+        ]
+        options = _options(
+            write_policy="fill_empty",
+            write_policy_overrides={"score": "overwrite"},
+        )
+
+        with patch.dict("sys.modules", _mocked_databricks_modules(conn)):
+            result = destination.load(
+                records,
+                _config(mode="merge", upsert_key=["id"]),
+                options,
+            )
+
+        assert result.success == 2
+        sqls = _sqls(conn._cur)
+        staging_sql = next(
+            sql for sql in sqls if sql.startswith("INSERT INTO main.default.__drt_staging")
+        )
+        assert "__drt_has_industry" in staging_sql
+        assert "FALSE" in staging_sql  # row 2 omitted the fill-only column
+        merge_sql = next(sql for sql in sqls if sql.startswith("MERGE INTO"))
+        assert (
+            "industry = CASE WHEN target.industry IS NULL OR "
+            "TRIM(CAST(target.industry AS STRING)) = '' THEN "
+            "CASE WHEN source.__drt_has_industry THEN source.industry "
+            "ELSE target.industry END ELSE target.industry END"
+        ) in merge_sql
+        assert (
+            "score = CASE WHEN source.__drt_has_score THEN source.score ELSE target.score END"
+            in merge_sql
+        )
+        # INSERT/default handling is deliberately independent of write policy.
+        assert (
+            "CASE WHEN source.__drt_has_industry THEN source.industry ELSE 'unknown' END"
+            in merge_sql
+        )
+
+    def test_default_merge_sql_is_byte_identical_to_sparse_merge(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.fetchall.return_value = []
+
+        with patch.dict("sys.modules", _mocked_databricks_modules(conn)):
+            DatabricksDestination().load(
+                [{"id": 1, "score": 10, "note": "set"}],
+                _config(mode="merge", upsert_key=["id"]),
+                _options(),
+            )
+
+        merge_sql = next(sql for sql in _sqls(conn._cur) if sql.startswith("MERGE INTO"))
+        assert merge_sql == (
+            "MERGE INTO main.default.user_scores target "
+            "USING main.default.__drt_staging_user_scores source "
+            "ON target.id = source.id "
+            "WHEN MATCHED THEN UPDATE SET "
+            "score = CASE WHEN source.__drt_has_score THEN source.score ELSE target.score END, "
+            "note = CASE WHEN source.__drt_has_note THEN source.note ELSE target.note END "
+            "WHEN NOT MATCHED THEN INSERT (id, score, note) "
+            "VALUES (source.id, CASE WHEN source.__drt_has_score THEN source.score ELSE NULL END, "
+            "CASE WHEN source.__drt_has_note THEN source.note ELSE NULL END)"
+        )
+
+    def test_write_policy_override_typo_is_rejected_before_staging(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        destination = DatabricksDestination()
+        monkeypatch.setattr(
+            destination,
+            "_resolve_schema",
+            lambda _config: {"ID": "scalar", "INDUSTRY": "scalar"},
+        )
+
+        with (
+            patch.dict("sys.modules", _mocked_databricks_modules(conn)),
+            pytest.raises(
+                ValueError,
+                match=r"\['industy'\].*not columns of the destination",
+            ),
+        ):
+            destination.load(
+                [{"id": 1, "industry": "Software"}],
+                _config(mode="merge", upsert_key=["id"]),
+                _options(write_policy_overrides={"industy": "fill_empty"}),
+            )
+
+        assert not conn._cur.execute.called
+
+    def test_fill_empty_is_refused_in_insert_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+
+        with (
+            patch.dict("sys.modules", _mocked_databricks_modules(conn)),
+            pytest.raises(ValueError, match="needs destination.mode: merge"),
+        ):
+            DatabricksDestination().load(
+                [{"id": 1, "industry": "Software"}],
+                _config(mode="insert"),
+                _options(write_policy="fill_empty"),
+            )
+
+        assert not conn._cur.execute.called
+
+    def test_override_lookup_folds_case_like_destination_validation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.fetchall.return_value = []
+        destination = DatabricksDestination()
+        monkeypatch.setattr(
+            destination,
+            "_resolve_schema",
+            lambda _config: {"ID": "scalar", "INDUSTRY": "scalar", "SCORE": "scalar"},
+        )
+
+        with patch.dict("sys.modules", _mocked_databricks_modules(conn)):
+            destination.load(
+                [{"id": 1, "industry": "Software", "score": 10}],
+                _config(mode="merge", upsert_key=["id"]),
+                _options(write_policy_overrides={"INDUSTRY": "fill_empty"}),
+            )
+
+        merge_sql = next(sql for sql in _sqls(conn._cur) if sql.startswith("MERGE INTO"))
+        assert "industry = CASE WHEN target.industry IS NULL OR TRIM(CAST(" in merge_sql
+        assert (
+            "score = CASE WHEN source.__drt_has_score THEN source.score ELSE target.score END"
+            in merge_sql
+        )
+
+    def test_semi_structured_fill_column_is_null_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.fetchall.return_value = []
+        destination = DatabricksDestination()
+        monkeypatch.setattr(
+            destination,
+            "_resolve_schema",
+            lambda _config: {"id": "scalar", "tags": "json", "name": "scalar"},
+        )
+
+        with patch.dict("sys.modules", _mocked_databricks_modules(conn)):
+            destination.load(
+                [{"id": 1, "tags": {"a": 1}, "name": "new"}],
+                _config(mode="merge", upsert_key=["id"]),
+                _options(write_policy="fill_empty"),
+            )
+
+        merge_sql = next(sql for sql in _sqls(conn._cur) if sql.startswith("MERGE INTO"))
+        assert "tags = CASE WHEN target.tags IS NULL THEN" in merge_sql
+        assert "CAST(target.tags AS STRING)" not in merge_sql
+        assert "TRIM(CAST(target.name AS STRING)) = ''" in merge_sql
+
+    def test_mirror_fill_empty_merges_before_unchanged_delete_pass(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_creds(monkeypatch)
+        conn = _fake_conn()
+        conn._cur.fetchall.return_value = []
+        destination = DatabricksDestination()
+        config = _config(mode="insert", upsert_key=["id"])
+        options = _options(mode="mirror", write_policy="fill_empty")
+
+        with patch.dict("sys.modules", _mocked_databricks_modules(conn)):
+            result = destination.load([{"id": 1, "industry": "Software"}], config, options)
+            finalized = destination.finalize_sync(config, options)
+
+        assert result.success == 1 and finalized is not None
+        sqls = _sqls(conn._cur)
+        merge_sql = next(
+            sql for sql in sqls if sql.startswith("MERGE INTO") and "THEN DELETE" not in sql
+        )
+        delete_sql = next(sql for sql in sqls if sql.startswith("DELETE FROM"))
+        assert "TRIM(CAST(target.industry AS STRING)) = ''" in merge_sql
+        assert "CASE WHEN" not in delete_sql
+
     def test_heterogeneous_merge_uses_literal_flags_and_target_defaults(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

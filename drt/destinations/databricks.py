@@ -497,6 +497,13 @@ class DatabricksDestination(BaseSqlDestination):
         ddls = self._resolve_ddls(config)
         effective_mode = "merge" if sync_options.mode == "mirror" else config.mode
 
+        if effective_mode == "insert" and sync_options.uses_fill_empty:
+            raise ValueError(
+                "sync.write_policy: fill_empty needs destination.mode: merge (or sync.mode: "
+                "mirror); mode: insert appends rows and would ignore the policy."
+            )
+        self._validate_write_policy_overrides(sync_options, category_map)
+
         if effective_mode == "insert":
             # Built per contiguous key-signature run (#1091), not once for
             # the whole batch — a column absent from a run is omitted from
@@ -526,6 +533,24 @@ class DatabricksDestination(BaseSqlDestination):
 
             key_clause = " AND ".join([f"target.{k} = source.{k}" for k in config.upsert_key])
             update_cols = [c for c in columns if c not in config.upsert_key]
+            # write_policy: fill_empty (#1238): fold override names exactly as
+            # destination-column validation does. Delta identifiers are
+            # case-insensitive, so an override in another case still names the
+            # payload column. Semi-structured columns are empty only when SQL
+            # NULL; casting their JSON form to STRING would make a stored JSON
+            # empty string look like an empty destination value.
+            overrides = {k.lower(): v for k, v in sync_options.write_policy_overrides.items()}
+            fill_cols = {
+                column
+                for column in update_cols
+                if overrides.get(column.lower(), sync_options.write_policy) == "fill_empty"
+            }
+            folded_categories = {str(k).lower(): v for k, v in (category_map or {}).items()}
+            null_only_cols = {
+                column
+                for column in fill_cols
+                if folded_categories.get(column.lower(), "scalar") != "scalar"
+            }
             target_defaults = self._target_column_defaults(cur, config)
             # Reserve all payload names as well as every target name. A target
             # may already have a legitimate user column called
@@ -558,11 +583,29 @@ class DatabricksDestination(BaseSqlDestination):
                 result,
             )
 
-            update_clause = ", ".join(
-                f"{column} = CASE WHEN source.{flags[column]} "
-                f"THEN source.{column} ELSE target.{column} END"
-                for column in update_cols
-            )
+            def sparse_source_expression(column: str) -> str:
+                return (
+                    f"CASE WHEN source.{flags[column]} "
+                    f"THEN source.{column} ELSE target.{column} END"
+                )
+
+            def update_assignment(column: str) -> str:
+                sparse_source = sparse_source_expression(column)
+                if column not in fill_cols:
+                    # Keep the default-policy SQL byte-identical to #1137.
+                    return f"{column} = {sparse_source}"
+                if column in null_only_cols:
+                    empty_condition = f"target.{column} IS NULL"
+                else:
+                    empty_condition = (
+                        f"target.{column} IS NULL OR TRIM(CAST(target.{column} AS STRING)) = ''"
+                    )
+                return (
+                    f"{column} = CASE WHEN {empty_condition} "
+                    f"THEN {sparse_source} ELSE target.{column} END"
+                )
+
+            update_clause = ", ".join(update_assignment(column) for column in update_cols)
             insert_cols = ", ".join(columns)
             insert_defaults = {
                 column: _target_default_expression(target_defaults.get(column.lower())) or "NULL"
@@ -724,6 +767,10 @@ class DatabricksDestination(BaseSqlDestination):
     def supported_modes(self) -> frozenset[str]:
         """Declare the advanced sync modes implemented by Databricks (#1042)."""
         return frozenset({"replace", "mirror"})
+
+    def supported_write_policies(self) -> frozenset[str]:
+        """Databricks honours ``fill_empty`` in the MERGE update clause (#1238)."""
+        return frozenset({"overwrite", "fill_empty"})
 
     def _shadow_name(self, table: str) -> str:
         return f"{table}{_SWAP_SUFFIX}"
