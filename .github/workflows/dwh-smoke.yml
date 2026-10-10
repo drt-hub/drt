@@ -116,6 +116,7 @@ jobs:
                 tests/integration/dwh/test_snowflake_managed_table_smoke.py
                 tests/integration/dwh/test_snowflake_warehouse_state_smoke.py
                 tests/integration/dwh/test_snowflake_diff_incremental_smoke.py
+                tests/integration/dwh/test_snowflake_write_policy_smoke.py
               )
             fi
           else
