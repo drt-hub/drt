@@ -180,6 +180,126 @@ def _finish_claim(project_dir: Path, plan_id: str, state: str) -> None:
         )
 
 
+def preflight_document(
+    plan_text: str, *, project_dir: Path = Path("."), max_age: timedelta = timedelta(hours=24)
+) -> dict[str, Any]:
+    """Every check on a plan that needs no source or destination access.
+
+    Authenticity (keyed seal, digest, plan id), drt major version, age, and the
+    single-use claim. ``drt apply <dir>`` runs this on every plan *before* the
+    first write, so a plan that is already refusable cannot leave a deployment
+    half applied.
+    """
+    from drt.cli._plan_runner import PlanCliError, load_plan_key
+    from drt.engine.plan import PlanDocumentError, load_plan_document
+
+    try:
+        doc = load_plan_document(plan_text, load_plan_key(project_dir))
+    except PlanDocumentError as e:
+        message = f"Cannot apply the plan: {e}"
+        if "plan key" in str(e):
+            message += (
+                ". Set the same DRT_PLAN_KEY where you plan and where you apply, or apply "
+                "from the workspace that made the plan."
+            )
+        raise ApplyRefused(message) from e
+
+    plan_major = str(doc["drt_version"]).split(".")[0]
+    if plan_major != __version__.split(".")[0]:
+        raise ApplyRefused(
+            f"The plan was made by drt {doc['drt_version']} and cannot be applied by "
+            f"drt {__version__} (different major version). Re-run `drt plan`."
+        )
+
+    try:
+        created = datetime.fromisoformat(doc["created_at"])
+    except ValueError as e:
+        raise ApplyRefused("The plan's created_at is not a valid timestamp.") from e
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    age = datetime.now(timezone.utc) - created
+    if age < -_CLOCK_SKEW:
+        raise ApplyRefused(
+            "The plan's created_at is in the future; refusing it. Re-run `drt plan`."
+        )
+    if age > max_age:
+        raise ApplyRefused(
+            f"The plan is {age} old, older than --max-age {max_age}. Re-run `drt plan`."
+        )
+    try:
+        _refuse_if_claimed(project_dir, doc["plan_id"])
+    except PlanCliError as e:
+        raise ApplyRefused(str(e)) from e
+    return doc
+
+
+MANIFEST_NAME = "manifest.json"
+_PLAN_FILE = re.compile(r"\d{3,}-[A-Za-z0-9._-]+\.json")
+
+
+def load_plan_directory(
+    directory: Path, *, project_dir: Path = Path("."), max_age: timedelta = timedelta(hours=24)
+) -> list[tuple[str, str]]:
+    """The plans in a ``drt plan --all`` directory, in apply order, fully vetted.
+
+    A directory is only trusted through its authenticated manifest. It must come
+    from a run in which every sync was planned or knowingly unavailable (a sync
+    that *failed* to plan means the run was incomplete), hold exactly the files
+    the manifest lists, and each file must be the plan the manifest names. Every
+    plan then passes the offline checks before anything is written.
+    """
+    from drt.cli._plan_runner import load_plan_key
+    from drt.engine.plan import PlanDocumentError, load_manifest
+
+    try:
+        manifest = load_manifest(
+            (directory / MANIFEST_NAME).read_text(encoding="utf-8"), load_plan_key(project_dir)
+        )
+    except FileNotFoundError as e:
+        raise ApplyRefused(
+            f"{directory} has no {MANIFEST_NAME}. Plans are applied from a directory written "
+            "by `drt plan --all`, which records every sync it planned."
+        ) from e
+    except (OSError, PlanDocumentError) as e:
+        message = f"Cannot apply {directory}: {e}"
+        if "plan key" in str(e):
+            message += (
+                ". Set the same DRT_PLAN_KEY secret where you plan and where you apply "
+                "(an unset or empty secret makes each runner invent its own key)."
+            )
+        raise ApplyRefused(message) from e
+
+    failed = [e["sync"] for e in manifest["syncs"] if e.get("status") == "error"]
+    if failed:
+        raise ApplyRefused(
+            "The plan run was incomplete: "
+            + ", ".join(str(n) for n in failed)
+            + " could not be planned. Nothing was applied; fix the cause and re-run the plan."
+        )
+
+    planned = [e for e in manifest["syncs"] if e.get("status") == "planned"]
+    listed = {str(e["file"]) for e in planned}
+    present = {p.name for p in directory.glob("*.json") if p.name != MANIFEST_NAME}
+    if present != listed or any(not _PLAN_FILE.fullmatch(name) for name in listed):
+        extra, missing = sorted(present - listed), sorted(listed - present)
+        raise ApplyRefused(
+            "The plan files do not match the manifest"
+            + (f"; not in the manifest: {', '.join(extra)}" if extra else "")
+            + (f"; missing: {', '.join(missing)}" if missing else "")
+            + ". Re-run `drt plan --all` into an empty directory."
+        )
+
+    plans: list[tuple[str, str]] = []
+    for entry in planned:
+        name = str(entry["file"])
+        text = (directory / name).read_text(encoding="utf-8")
+        doc = preflight_document(text, project_dir=project_dir, max_age=max_age)
+        if doc["plan_id"] != entry.get("plan_id") or doc["sync"]["name"] != entry["sync"]:
+            raise ApplyRefused(f"{name} is not the plan the manifest recorded; refusing it.")
+        plans.append((name, text))
+    return plans
+
+
 def apply_plan(
     plan_text: str,
     *,
@@ -205,43 +325,16 @@ def apply_plan(
     """
     from drt._identifiers import new_run_id
     from drt.cli._helpers import get_source
-    from drt.cli._plan_runner import PlanCliError, compute_plan, load_plan_key
+    from drt.cli._plan_runner import PlanCliError, compute_plan
     from drt.cli.commands.run import _run_one, _RunContext, _write_run_results
-    from drt.engine.plan import PlanDocumentError, drift_report, key_id_of, load_plan_document
+    from drt.engine.plan import drift_report
 
     say = notify or (lambda _message: None)
 
     if not math.isfinite(allow_drift_pct) or allow_drift_pct < 0 or allow_drift_pct > 100:
         raise ApplyRefused("allow_drift_pct must be between 0 and 100.")
 
-    try:
-        doc = load_plan_document(plan_text)
-    except PlanDocumentError as e:
-        raise ApplyRefused(f"Cannot apply the plan: {e}") from e
-
-    plan_major = str(doc["drt_version"]).split(".")[0]
-    if plan_major != __version__.split(".")[0]:
-        raise ApplyRefused(
-            f"The plan was made by drt {doc['drt_version']} and cannot be applied by "
-            f"drt {__version__} (different major version). Re-run `drt plan`."
-        )
-
-    try:
-        created = datetime.fromisoformat(doc["created_at"])
-    except ValueError as e:
-        raise ApplyRefused("The plan's created_at is not a valid timestamp.") from e
-    if created.tzinfo is None:
-        created = created.replace(tzinfo=timezone.utc)
-    age = datetime.now(timezone.utc) - created
-    if age < -_CLOCK_SKEW:
-        raise ApplyRefused(
-            "The plan's created_at is in the future; refusing it. Re-run `drt plan`."
-        )
-    if age > max_age:
-        raise ApplyRefused(
-            f"The plan is {age} old, older than --max-age {max_age}. Re-run `drt plan`."
-        )
-
+    doc = preflight_document(plan_text, project_dir=project_dir, max_age=max_age)
     plan_id = doc["plan_id"]
     sync_name = doc["sync"]["name"]
     if expect_plan_id is not None and plan_id != expect_plan_id:
@@ -251,13 +344,6 @@ def apply_plan(
         raise ApplyRefused(
             f"The stored plan is {plan_id}, not the requested {expect_plan_id}; refusing it. "
             "Call drt_plan again."
-        )
-
-    if key_id_of(load_plan_key(project_dir)) != doc["options"]["key_id"]:
-        raise ApplyRefused(
-            "The plan was made with a different plan key, so its hashes cannot be checked "
-            "here. Set the same DRT_PLAN_KEY where you plan and where you apply, or apply "
-            "from the workspace that made the plan."
         )
 
     def preflight(_project: Any, _state_bundle: Any, _sync: Any) -> None:

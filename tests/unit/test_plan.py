@@ -18,6 +18,7 @@ from drt.engine.plan import (
     unsupported_reason,
 )
 
+_KEY = b"test-key"
 _BASE: dict[str, Any] = {
     "sync_name": "orders_to_pg",
     "sync_mode": "upsert",
@@ -274,36 +275,36 @@ def test_plan_document_round_trips_and_detects_tampering() -> None:
     from drt.engine.plan import PlanDocumentError, load_plan_document
 
     plan = build_plan(_diff(), **_BASE)
-    doc = load_plan_document(plan.to_json())
+    doc = load_plan_document(plan.to_json(), _KEY)
     assert doc["plan_id"] == plan.plan_id
 
     tampered = json.loads(plan.to_json())
     tampered["entries"].pop()
     with pytest.raises(PlanDocumentError, match="modified"):
-        load_plan_document(json.dumps(tampered))
+        load_plan_document(json.dumps(tampered), _KEY)
 
     # Envelope fields are sealed too: bumping created_at cannot skip --max-age.
     envelope = json.loads(plan.to_json())
     envelope["created_at"] = "2030-01-01T00:00:00+00:00"
     with pytest.raises(PlanDocumentError, match="modified"):
-        load_plan_document(json.dumps(envelope))
+        load_plan_document(json.dumps(envelope), _KEY)
     version = json.loads(plan.to_json())
     version["drt_version"] = "9.9.9"
     with pytest.raises(PlanDocumentError, match="modified"):
-        load_plan_document(json.dumps(version))
+        load_plan_document(json.dumps(version), _KEY)
 
     for text in ("not json", "[]", "{}"):
         with pytest.raises(PlanDocumentError):
-            load_plan_document(text)
+            load_plan_document(text, _KEY)
 
     wrong_version = json.loads(plan.to_json())
     wrong_version["schema_version"] = 99
     with pytest.raises(PlanDocumentError, match="schema_version"):
-        load_plan_document(json.dumps(wrong_version))
+        load_plan_document(json.dumps(wrong_version), _KEY)
 
     unavailable = build_plan(DiffResult(supported=False, fallback_reason="x"), **_BASE)
     with pytest.raises(PlanDocumentError, match="unavailable"):
-        load_plan_document(unavailable.to_json())
+        load_plan_document(unavailable.to_json(), _KEY)
 
 
 def test_plan_id_is_unique_per_artifact_but_the_digest_is_deterministic() -> None:
@@ -365,13 +366,13 @@ def test_a_resealed_forgery_still_fails_the_digest_and_plan_id_checks() -> None:
     def forged(edit: Any) -> str:
         doc = json.loads(plan.to_json())
         edit(doc)
-        doc["seal"] = seal_of(doc)
+        doc["seal"] = seal_of(doc, _KEY)
         return json.dumps(doc)
 
     with pytest.raises(PlanDocumentError, match="digest"):
-        load_plan_document(forged(lambda d: d["entries"].pop()))
+        load_plan_document(forged(lambda d: d["entries"].pop()), _KEY)
     with pytest.raises(PlanDocumentError, match="plan_id"):
-        load_plan_document(forged(lambda d: d.update(plan_id="plan-0000000000000000")))
+        load_plan_document(forged(lambda d: d.update(plan_id="plan-0000000000000000")), _KEY)
 
 
 def test_hashes_are_keyed_so_the_artifact_alone_cannot_confirm_a_guess() -> None:
@@ -398,3 +399,17 @@ def test_duplicate_keys_with_different_values_sort_by_value_not_source_order() -
     backward = build_plan(_diff(added=[second, first], updated=[], deleted=[]), **_BASE)
 
     assert forward.digest == backward.digest
+
+
+def test_a_failed_delete_preview_reports_only_the_error_class() -> None:
+    leaky = DiffResult(
+        delete_preview_unavailable_reason=(
+            "OperationalError: connection to postgres://admin:s3cret@db.internal:5432 failed"
+        )
+    )
+
+    plan = build_plan(leaky, **_BASE)
+
+    assert plan.available is False
+    assert "OperationalError" in (plan.unavailable_reason or "")
+    assert "s3cret" not in plan.to_json() and "db.internal" not in plan.to_json()

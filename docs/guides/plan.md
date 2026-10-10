@@ -22,7 +22,7 @@ never persists run state. Applying a plan is a separate step, `drt apply`
 |---|---|
 | `digest` | Derived from content only: the sync name, the config and environment fingerprints, and the entries. The same sync, environment and changes give the same digest. |
 | `plan_id` | Unique per plan file (digest + cursor hash + `created_at`), so a plan made later over the same changes is a new plan. |
-| `seal` | Hash of the whole document. It catches accidental edits (including to `created_at` and `drt_version`); it is not a signature. |
+| `seal` | HMAC of the whole document under the plan key. Without the key nobody can edit the file (including `created_at`, `drt_version` or `plan_id`) and still produce a valid seal, so a plan cannot be refreshed to dodge `--max-age` or single use. |
 | `created_at` | The one wall-clock field; part of `plan_id` and `seal`, not of `digest`. |
 | `fingerprints.config_hash` | Hash of the sync file and the model SQL it references. |
 | `fingerprints.environment_hash` | Keyed hash of what the sync resolves to here: resolved config, project vars and profile. Only the hash is stored, never the values. |
@@ -76,6 +76,129 @@ reason when:
   update_only` / `create_only`, `incremental_strategy: diff` (snapshot
   extraction writes scratch tables, so it is not read-only), or an engine
   metadata column inside `upsert_key`.
+
+## Review loop in CI (GitHub Actions)
+
+```bash
+drt deploy github-actions --with-plan
+```
+
+scaffolds two workflows that give you the Terraform loop in pull requests:
+
+| Workflow | When | What it does |
+|---|---|---|
+| `drt-plan.yml` | a pull request touches `syncs/**`, `drt_project.yml` or `profiles.yml` | runs `drt plan --all`, posts **one comment** (updated in place) with every sync's change set, and uploads the plans as the `drt-plans` artifact |
+| `drt-apply.yml` | the PR is merged to `main` (or run manually with a plan run id) | finds the plan run for the merged PR, downloads its plans and runs `drt apply plans --auto-approve --approved-by "merge of PR #N by @user"` |
+
+The comment is keys and counts only, never row values (`--redact-keys` also
+hashes the keys, in the comment and in the artifact). `drt apply` recomputes
+each plan first, so if the world changed between the review and the merge it
+**refuses and the job fails** instead of writing something nobody saw. Merging a
+change to the sync itself (or to the SQL it references) also invalidates the
+reviewed plan; re-run the plan workflow on the new commit and apply it with
+`workflow_dispatch`.
+
+**What the apply workflow refuses.** `drt plan --all` writes a sealed
+`manifest.json` that lists every sync with a status (`planned`, `unavailable` or
+`error`). `drt apply <directory>` only accepts a directory through that manifest:
+it refuses a run in which any sync **failed** to plan (the plan job also fails,
+and the comment says which), a directory holding a file the manifest does not
+list or missing one it does, and a file that is not the plan the manifest
+recorded. Every plan is vetted offline (seal, age, version, claim) **before the
+first write**, so a plan that is already refusable cannot leave a deployment half
+applied. The drift check still runs plan by plan, so a later plan that drifts
+after an earlier one was written leaves the earlier one applied; applying across
+syncs is not atomic. The apply job also **fails** (rather than passing quietly)
+when a merged commit has no pull request or no successful plan run. A sync whose
+destination cannot report its contents (`unavailable`) is listed in the comment
+with its reason (an error class, never the exception text, so a connection string
+cannot reach the comment) and is never applied through this loop. Sync names
+must be unique: `plan --all` refuses a project where two files define the same name.
+
+**Manual runs.** `drt-apply.yml` can be dispatched with a plan run id (for example
+after re-planning a stale plan). The id is not trusted: it must be a successful
+`pull_request` run of the `drt plan` workflow whose commit belongs to a pull
+request **merged into `main`**, and the job only runs on `main` at all
+(`if: github.ref == 'refs/heads/main'`), so an authentic plan for an unmerged
+branch cannot be applied by dispatching the workflow there. Both workflows also
+fail early, with a clear message, if the `DRT_PLAN_KEY` secret is unset or empty
+(an empty secret would otherwise make each runner invent its own key and every
+apply would refuse).
+
+**Known limits of the CI loop.**
+
+- The single-use claim is a file in the job's workspace, and GitHub runners are
+  ephemeral. Re-running the apply workflow, or dispatching it again with the same
+  plan run id, starts without the claim. For upserts the live recompute then shows
+  nothing left to do; for **append-only** destinations it would write the same
+  inserts again. Do not re-run a successful apply for append-only syncs. A shared
+  claim store is tracked in [#1245](https://github.com/drt-hub/drt/issues/1245).
+- The guard is not a transaction (see "What apply guarantees" above): after the
+  recompute matches, the sync runs and writes what it extracts, so the source can
+  still change in between. The workflows say "applies the reviewed plan if it still
+  matches", not "exactly what was reviewed".
+- `concurrency` uses `queue: max`; without it GitHub keeps one pending run and
+  cancels older ones, so a PR merged in a burst would never be applied.
+- The plan artifact (and the comment) show keys; use `--redact-keys` if keys are
+  personal data.
+
+**Secrets.** Besides your connector secrets, create one plan key and give both
+workflows the same value, or apply refuses the plan:
+
+```bash
+openssl rand -hex 32 | gh secret set DRT_PLAN_KEY
+```
+
+**Pull requests from forks are skipped, on purpose.** A plan reads your
+warehouse with real credentials, and GitHub does not give secrets to fork
+workflows. Do not "fix" that with `pull_request_target`: it would run the fork's
+code with your credentials. Plan a fork's change by pushing it to a branch in
+your repository.
+
+**Approval gate.** `drt-apply.yml` has a commented `environment: production`
+line; with required reviewers on that environment a second person approves the
+write after the merge. `--max-age` (default `7d` in the scaffold) bounds how old
+a reviewed plan may be. Applies never overlap (`concurrency`).
+
+The same loop on GitLab CI, as a merge request job (adapt the secret handling to
+your runner; post the comment with the GitLab API or `glab mr note`):
+
+```yaml
+drt-plan:
+  stage: test
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script:
+    - pip install "drt-core[postgres]"
+    - mkdir -p ~/.drt && cp profiles.yml ~/.drt/profiles.yml
+    - drt plan --all --out-dir plans --output markdown > plan-comment.md
+    - glab mr note "$CI_MERGE_REQUEST_IID" --message "$(head -c 60000 plan-comment.md)"
+  artifacts:
+    paths: [plans/]
+    expire_in: 14 days
+  variables:
+    DRT_PLAN_KEY: $DRT_PLAN_KEY   # the same CI variable in the apply job
+
+drt-apply:
+  stage: deploy
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual            # a person presses the button after merge
+  script:
+    - pip install "drt-core[postgres]"
+    - mkdir -p ~/.drt && cp profiles.yml ~/.drt/profiles.yml
+    - drt apply plans --auto-approve --max-age 7d --approved-by "$GITLAB_USER_LOGIN"
+  needs:
+    - project: $CI_PROJECT_PATH
+      job: drt-plan
+      ref: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+      artifacts: true
+```
+
+`drt plan --all` writes one `<sync>.json` per plannable sync into `--out-dir`
+and reports a sync that cannot be planned (with the reason) instead of failing
+the job; `drt apply <directory>` applies the plans in file-name order and stops
+at the first one that is refused or fails.
 
 ## Agents: plan and apply over MCP
 
@@ -182,7 +305,7 @@ Nothing is written, and the command exits 1, when:
 
 | Situation | Why |
 |---|---|
-| the file was edited or truncated | the `seal`, `digest` and `plan_id` are recomputed |
+| the file was edited, truncated or made with another plan key | the keyed `seal`, `digest` and `plan_id` are recomputed |
 | the plan is older than `--max-age` (default 24h), or dated in the future | the world has had time to move |
 | the plan came from another drt **major** version | formats are only promised within a major |
 | the sync file, or the model SQL it references, changed | the plan describes a different sync |

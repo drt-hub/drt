@@ -17,7 +17,13 @@ from drt.cli.output import console, print_error
 
 @app.command()
 def apply(
-    plan_file: Path = typer.Argument(..., help="plan.json written by `drt plan --out`."),
+    plan_file: Path = typer.Argument(
+        ...,
+        help=(
+            "plan.json written by `drt plan --out`, or a directory of them "
+            "(`drt plan --all`), applied in file-name order."
+        ),
+    ),
     auto_approve: bool = typer.Option(
         False, "--auto-approve", help="Do not prompt (required without a terminal, e.g. CI)."
     ),
@@ -55,12 +61,22 @@ def apply(
     The write itself is the normal `drt run` path (rate limiting, DLQ,
     history, watermarks, alerts).
 
+    A directory applies each plan in file-name order and stops at the first one
+    that is refused or fails; the plans before it stay applied.
+
     Examples:
       drt plan orders_to_pg --out plan.json
       drt apply plan.json
       drt apply plan.json --auto-approve --max-age 2h   # in CI
+      drt apply plans/ --auto-approve                    # every plan from `drt plan --all`
     """
-    from drt.cli._apply_flow import ApplyAborted, ApplyRefused, apply_plan, parse_duration
+    from drt.cli._apply_flow import (
+        ApplyAborted,
+        ApplyRefused,
+        apply_plan,
+        load_plan_directory,
+        parse_duration,
+    )
     from drt.cli._plan_runner import PlanCliError, parse_vars_option
 
     if output not in ("text", "json"):
@@ -72,8 +88,23 @@ def apply(
         print_error(f"--max-age: {e}")
         raise typer.Exit(1)
     try:
-        plan_text = plan_file.read_text(encoding="utf-8")
+        if plan_file.is_dir():
+            plan_texts = [
+                (Path(name), text)
+                for name, text in load_plan_directory(plan_file, max_age=max_age_delta)
+            ]
+            if not plan_texts:
+                console.print(
+                    "Every sync in the manifest is unplannable or has no plan; nothing to apply.",
+                    markup=False,
+                )
+                raise typer.Exit(0)
+        else:
+            plan_texts = [(plan_file, plan_file.read_text(encoding="utf-8"))]
         cli_vars = parse_vars_option(vars_raw)
+    except ApplyRefused as e:
+        print_error(str(e))
+        raise typer.Exit(1)
     except OSError as e:
         print_error(f"Cannot apply {plan_file}: {e}")
         raise typer.Exit(1)
@@ -87,43 +118,53 @@ def apply(
         console.print(question, markup=False)
         return typer.confirm("Apply?")
 
-    try:
-        outcome = apply_plan(
-            plan_text,
-            approved=auto_approve,
-            approved_by=approved_by,
-            confirm=confirm,
-            max_age=max_age_delta,
-            allow_drift_pct=allow_drift_pct,
-            force_guards=force_guards,
-            cursor_value=cursor_value,
-            cli_vars=cli_vars,
-            profile_name=profile_name,
-            json_output=output == "json",
-            # stderr, so `--output json` stays one parseable document on stdout.
-            notify=lambda message: typer.echo(message, err=True),
-        )
-    except ApplyRefused as e:
-        if isinstance(e, ApplyAborted):  # the person declined: not an error
-            console.print(str(e), markup=False)
-        else:
-            print_error(str(e))
-        raise typer.Exit(1)
+    documents: list[dict[str, object]] = []
+    failed = False
+    for source_file, plan_text in plan_texts:
+        try:
+            outcome = apply_plan(
+                plan_text,
+                approved=auto_approve,
+                approved_by=approved_by,
+                confirm=confirm,
+                max_age=max_age_delta,
+                allow_drift_pct=allow_drift_pct,
+                force_guards=force_guards,
+                cursor_value=cursor_value,
+                cli_vars=cli_vars,
+                profile_name=profile_name,
+                json_output=output == "json",
+                # stderr, so `--output json` stays one parseable document on stdout.
+                notify=lambda message: typer.echo(message, err=True),
+            )
+        except ApplyRefused as e:
+            if isinstance(e, ApplyAborted):  # the person declined: not an error
+                console.print(str(e), markup=False)
+            else:
+                label = f"{source_file.name}: " if len(plan_texts) > 1 else ""
+                print_error(f"{label}{e}")
+            raise typer.Exit(1)
 
-    if not outcome.applied:
-        console.print(outcome.message, markup=False)
-        raise typer.Exit(0)
-    if output == "json":
+        if not outcome.applied:
+            console.print(outcome.message, markup=False)
+            continue
+        documents.append(
+            {
+                "plan_id": outcome.plan_id,
+                "run_id": outcome.run_id,
+                "sync": outcome.sync,
+                "result": outcome.entry,
+            }
+        )
+        if outcome.had_error:
+            failed = True
+            break  # later plans may depend on this one having landed
+
+    if output == "json" and documents:
         print(
             json.dumps(
-                {
-                    "plan_id": outcome.plan_id,
-                    "run_id": outcome.run_id,
-                    "sync": outcome.sync,
-                    "result": outcome.entry,
-                },
-                default=str,
+                documents[0] if len(plan_texts) == 1 else {"applies": documents}, default=str
             )
         )
-    if outcome.had_error:
+    if failed:
         raise typer.Exit(1)

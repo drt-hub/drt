@@ -166,6 +166,10 @@ def compute_plan(
     matches = [s for s in syncs if s.name == sync_name]
     if not matches:
         raise PlanCliError(f"Sync '{sync_name}' not found in syncs/.")
+    if len(matches) > 1:
+        raise PlanCliError(
+            f"Sync name '{sync_name}' is defined more than once; sync names must be unique."
+        )
     sync = matches[0]
 
     blocker = unsupported_reason(sync)
