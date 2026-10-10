@@ -26,7 +26,8 @@ on:
         description: >-
           Space-separated Snowflake smoke files to run instead of the full
           set (e.g. tests/integration/dwh/test_snowflake_diff_incremental_smoke.py).
-          Empty runs all of them. Each run wakes the paid smoke warehouse, so
+          Empty runs all of them (the nightly schedule runs only the core file,
+          plus the full set on Sundays UTC). Each run wakes the paid smoke warehouse, so
           narrowing a development run keeps the account's credits down.
         required: false
         default: ''
@@ -95,19 +96,28 @@ jobs:
         if: steps.creds.outputs.has_creds == 'true'
         env:
           SNOWFLAKE_TESTS: ${{ inputs.snowflake_tests }}
+          EVENT_NAME: ${{ github.event_name }}
         # Each Snowflake smoke file is explicit rather than directory-wide;
         # new capability legs such as #1112 must be listed here or they never
         # run in the credentialed workflow. A manual dispatch may narrow the
         # set via `snowflake_tests`; the input goes through an env var and is
         # checked against the expected path shape before reaching pytest.
+        #
+        # Cost: every file wakes the paid smoke warehouse, and the full set
+        # raised the nightly spend about 2.5x after v1.1 (~0.08 -> ~0.2
+        # credit/night). The scheduled run therefore covers only the core
+        # file Monday-Saturday and the full set on Sundays (UTC); a manual
+        # dispatch with no input still runs everything.
         run: |
           if [ -z "$SNOWFLAKE_TESTS" ]; then
-            files=(
-              tests/integration/dwh/test_snowflake_smoke.py
-              tests/integration/dwh/test_snowflake_managed_table_smoke.py
-              tests/integration/dwh/test_snowflake_warehouse_state_smoke.py
-              tests/integration/dwh/test_snowflake_diff_incremental_smoke.py
-            )
+            files=(tests/integration/dwh/test_snowflake_smoke.py)
+            if [ "$EVENT_NAME" != "schedule" ] || [ "$(date -u +%u)" = "7" ]; then
+              files+=(
+                tests/integration/dwh/test_snowflake_managed_table_smoke.py
+                tests/integration/dwh/test_snowflake_warehouse_state_smoke.py
+                tests/integration/dwh/test_snowflake_diff_incremental_smoke.py
+              )
+            fi
           else
             files=()
             for f in $SNOWFLAKE_TESTS; do
