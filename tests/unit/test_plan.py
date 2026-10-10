@@ -399,3 +399,17 @@ def test_duplicate_keys_with_different_values_sort_by_value_not_source_order() -
     backward = build_plan(_diff(added=[second, first], updated=[], deleted=[]), **_BASE)
 
     assert forward.digest == backward.digest
+
+
+def test_a_failed_delete_preview_reports_only_the_error_class() -> None:
+    leaky = DiffResult(
+        delete_preview_unavailable_reason=(
+            "OperationalError: connection to postgres://admin:s3cret@db.internal:5432 failed"
+        )
+    )
+
+    plan = build_plan(leaky, **_BASE)
+
+    assert plan.available is False
+    assert "OperationalError" in (plan.unavailable_reason or "")
+    assert "s3cret" not in plan.to_json() and "db.internal" not in plan.to_json()

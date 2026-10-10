@@ -294,9 +294,12 @@ def build_plan(
         return plan
     if diff.delete_preview_unavailable_reason:
         plan.available = False
+        # Class name only: the reason is the exception text, which can carry a DSN,
+        # host or request detail, and this ends up in plan.json and the PR comment.
+        error_class = diff.delete_preview_unavailable_reason.split(":", 1)[0].strip()
         plan.unavailable_reason = (
-            f"the set of rows to delete could not be determined: "
-            f"{diff.delete_preview_unavailable_reason}"
+            f"the set of rows to delete could not be determined ({error_class}); "
+            "see the job log or run `drt run --dry-run --diff` locally for details"
         )
         return plan
     if diff.truncated:

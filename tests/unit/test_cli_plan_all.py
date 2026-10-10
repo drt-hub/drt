@@ -366,3 +366,59 @@ def test_plan_all_rejects_bad_vars(project: Path) -> None:
     result = runner.invoke(app, ["plan", "--all", "--vars", "::"])
 
     assert result.exit_code == 1
+
+
+def test_duplicate_sync_names_are_rejected_before_planning(project: Path, world: _World) -> None:
+    (project / "syncs" / "z_copy.yml").write_text(yaml.dump(_sync("a_orders", "other")))
+
+    result = runner.invoke(app, ["plan", "--all", "--out-dir", "plans"])
+    single = runner.invoke(app, ["plan", "a_orders"])
+
+    assert result.exit_code == 1 and "more than once" in result.output
+    assert single.exit_code == 1 and "more than once" in single.output
+    assert not (project / "plans").exists()
+
+
+def test_plan_all_never_writes_through_a_symlink_left_in_the_output_directory(
+    project: Path, world: _World
+) -> None:
+    victim = project / "victim.txt"
+    victim.write_text("precious")
+    plans = project / "plans"
+    plans.mkdir()
+    (plans / "001-a_orders.json").symlink_to(victim)
+    (plans / "manifest.json").symlink_to(project / "dangling-target")
+
+    result = runner.invoke(app, ["plan", "--all", "--out-dir", "plans"])
+
+    assert result.exit_code == 0, result.output
+    assert victim.read_text() == "precious"  # untouched
+    assert not (project / "dangling-target").exists()
+    assert not (plans / "001-a_orders.json").is_symlink()
+    assert not (plans / "manifest.json").is_symlink()
+    assert runner.invoke(app, ["apply", "plans", "--auto-approve"]).exit_code == 0
+
+
+def test_file_names_widen_past_999_syncs_and_apply_accepts_them() -> None:
+    from drt.cli._apply_flow import _PLAN_FILE
+    from drt.cli.commands.plan import _file_name
+
+    assert _file_name(7, 12, "orders") == "007-orders.json"
+    assert _file_name(1000, 1200, "orders") == "1000-orders.json"
+    assert _PLAN_FILE.fullmatch("1000-orders.json") and _PLAN_FILE.fullmatch("007-orders.json")
+    assert not _PLAN_FILE.fullmatch("1-orders.json")
+
+
+def test_a_directory_planned_with_another_key_says_how_to_share_the_key(
+    project: Path, world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DRT_PLAN_KEY", "key-from-the-plan-runner")
+    assert runner.invoke(app, ["plan", "--all", "--out-dir", "plans"]).exit_code == 0
+    monkeypatch.setenv("DRT_PLAN_KEY", "a-different-runner-key")
+
+    result = runner.invoke(app, ["apply", "plans", "--auto-approve"])
+
+    flat = " ".join(result.output.split())
+    assert result.exit_code == 1 and "same DRT_PLAN_KEY secret" in flat
+    assert "empty secret makes each runner invent its own key" in flat.replace("an unset or ", "")
+    assert world.writes == []

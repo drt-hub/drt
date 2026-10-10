@@ -234,7 +234,7 @@ def preflight_document(
 
 
 MANIFEST_NAME = "manifest.json"
-_PLAN_FILE = re.compile(r"\d{3}-[A-Za-z0-9._-]+\.json")
+_PLAN_FILE = re.compile(r"\d{3,}-[A-Za-z0-9._-]+\.json")
 
 
 def load_plan_directory(
@@ -261,7 +261,13 @@ def load_plan_directory(
             "by `drt plan --all`, which records every sync it planned."
         ) from e
     except (OSError, PlanDocumentError) as e:
-        raise ApplyRefused(f"Cannot apply {directory}: {e}") from e
+        message = f"Cannot apply {directory}: {e}"
+        if "plan key" in str(e):
+            message += (
+                ". Set the same DRT_PLAN_KEY secret where you plan and where you apply "
+                "(an unset or empty secret makes each runner invent its own key)."
+            )
+        raise ApplyRefused(message) from e
 
     failed = [e["sync"] for e in manifest["syncs"] if e.get("status") == "error"]
     if failed:

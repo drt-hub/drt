@@ -111,7 +111,19 @@ after an earlier one was written leaves the earlier one applied; applying across
 syncs is not atomic. The apply job also **fails** (rather than passing quietly)
 when a merged commit has no pull request or no successful plan run. A sync whose
 destination cannot report its contents (`unavailable`) is listed in the comment
-with its reason and is never applied through this loop.
+with its reason (an error class, never the exception text, so a connection string
+cannot reach the comment) and is never applied through this loop. Sync names
+must be unique: `plan --all` refuses a project where two files define the same name.
+
+**Manual runs.** `drt-apply.yml` can be dispatched with a plan run id (for example
+after re-planning a stale plan). The id is not trusted: it must be a successful
+`pull_request` run of the `drt plan` workflow whose commit belongs to a pull
+request **merged into `main`**, and the job only runs on `main` at all
+(`if: github.ref == 'refs/heads/main'`), so an authentic plan for an unmerged
+branch cannot be applied by dispatching the workflow there. Both workflows also
+fail early, with a clear message, if the `DRT_PLAN_KEY` secret is unset or empty
+(an empty secret would otherwise make each runner invent its own key and every
+apply would refuse).
 
 **Known limits of the CI loop.**
 
@@ -121,6 +133,10 @@ with its reason and is never applied through this loop.
   nothing left to do; for **append-only** destinations it would write the same
   inserts again. Do not re-run a successful apply for append-only syncs. A shared
   claim store is tracked in [#1245](https://github.com/drt-hub/drt/issues/1245).
+- The guard is not a transaction (see "What apply guarantees" above): after the
+  recompute matches, the sync runs and writes what it extracts, so the source can
+  still change in between. The workflows say "applies the reviewed plan if it still
+  matches", not "exactly what was reviewed".
 - `concurrency` uses `queue: max`; without it GitHub keeps one pending run and
   cancels older ones, so a PR merged in a burst would never be applied.
 - The plan artifact (and the comment) show keys; use `--redact-keys` if keys are

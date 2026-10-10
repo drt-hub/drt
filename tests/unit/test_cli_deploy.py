@@ -317,8 +317,9 @@ def test_with_plan_stages_the_profile_when_one_is_committed(project: Path) -> No
 def test_a_missing_reviewed_plan_fails_the_apply_job_instead_of_passing(project: Path) -> None:
     _, _, _, apply_text = _scaffold()
 
-    # Both "no pull request" and "no successful plan run" must be red, never a quiet success.
-    assert apply_text.count("::error::") == 2
+    # Every refusal path is red, never a quiet success: no key, an unverifiable run id,
+    # an unmerged PR, no pull request, no successful plan run.
+    assert apply_text.count("::error::") == 5
     assert "::warning::" not in apply_text and "::notice::" not in apply_text
     assert apply_text.count("exit 1") >= 2
 
@@ -350,3 +351,133 @@ def test_the_generated_comment_truncation_never_splits_a_character(
     out = (work / "comment.md").read_bytes()
     assert len(out) <= 60000 and len(out) % 3 == 0
     out.decode("utf-8")  # raises if a character was cut in half
+
+
+def test_the_apply_job_only_runs_on_main_and_checks_the_plan_key_first(project: Path) -> None:
+    plan, apply_, plan_text, apply_text = _scaffold()
+
+    assert apply_["jobs"]["apply"]["if"] == "github.ref == 'refs/heads/main'"
+    for workflow, job in ((plan, "plan"), (apply_, "apply")):
+        steps = [s.get("name", "") for s in workflow["jobs"][job]["steps"]]
+        key_check = steps.index("Check the plan key")
+        assert key_check < max(
+            steps.index(n) for n in steps if "Plan every" in n or "Find the" in n
+        )
+    assert 'if [ -z "$DRT_PLAN_KEY" ]' in plan_text and 'if [ -z "$DRT_PLAN_KEY" ]' in apply_text
+
+
+def test_the_generated_text_does_not_promise_a_transaction(project: Path) -> None:
+    result = runner.invoke(app, ["deploy", "github-actions", "--with-plan"])
+    apply_text = Path(".github/workflows/drt-apply.yml").read_text()
+
+    assert "not a transaction" in apply_text
+    assert "exactly what was reviewed" not in apply_text + result.output
+
+
+def _fake_gh(tmp_path: Path, **answers: str) -> Path:
+    """A `gh` that answers from environment variables, so the generated bash can run offline."""
+    script = tmp_path / "bin" / "gh"
+    script.parent.mkdir(exist_ok=True)
+    script.write_text(
+        """#!/usr/bin/env bash
+case "$1 $2" in
+  "run view") printf '%s' "$FAKE_RUN_META" ;;
+  "run list") printf '%s' "$FAKE_RUN_LIST" ;;
+  "run download") mkdir -p plans ;;
+  "pr view")
+    case "$*" in
+      *headRefOid*) printf '%s' "$FAKE_PR_HEAD" ;;
+      *) printf '%s' "$FAKE_MERGER" ;;
+    esac ;;
+  api*)
+    case "$*" in
+      *"$FAKE_META_SHA"*) printf '%s' "$FAKE_PR_BY_META" ;;
+      *) printf '%s' "$FAKE_PR_BY_PUSH" ;;
+    esac ;;
+esac
+"""
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _run_find_plan(tmp_path: Path, env_extra: dict[str, str]) -> tuple[int, str, str]:
+    import os
+    import subprocess
+
+    from drt.cli.commands.deploy import _FIND_PLAN_SCRIPT
+
+    _fake_gh(tmp_path)
+    out = tmp_path / "gh_output"
+    out.write_text("")
+    env = {
+        "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}",
+        "REPO": "o/r",
+        "SHA": "mergesha",
+        "ACTOR": "alice",
+        "GITHUB_OUTPUT": str(out),
+        "FAKE_META_SHA": "headsha",
+        **env_extra,
+    }
+    done = subprocess.run(
+        ["bash", "-c", _FIND_PLAN_SCRIPT],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    return done.returncode, done.stdout + done.stderr, out.read_text()
+
+
+def test_a_hand_typed_run_id_must_be_a_successful_pr_plan_run_of_a_merged_pr(
+    tmp_path: Path,
+) -> None:
+    good = "drt plan\tpull_request\tsuccess\theadsha"
+    base = {"PLAN_RUN_ID": "42", "FAKE_PR_BY_META": "7"}
+
+    ok = _run_find_plan(tmp_path, {**base, "FAKE_RUN_META": good})
+    assert ok[0] == 0 and "run_id=42" in ok[2]
+    assert "manual run by alice of plan run 42 (PR #7)" in ok[2]
+
+    for bad in (
+        "drt apply\tpull_request\tsuccess\theadsha",  # a different workflow
+        "drt plan\tworkflow_dispatch\tsuccess\theadsha",  # not a pull-request run
+        "drt plan\tpull_request\tfailure\theadsha",  # a failed plan
+    ):
+        code, text, written = _run_find_plan(tmp_path, {**base, "FAKE_RUN_META": bad})
+        assert code == 1 and "not a successful pull-request run" in text and written == ""
+
+
+def test_a_hand_typed_run_id_for_an_unmerged_branch_is_refused(tmp_path: Path) -> None:
+    code, text, written = _run_find_plan(
+        tmp_path,
+        {
+            "PLAN_RUN_ID": "42",
+            "FAKE_RUN_META": "drt plan\tpull_request\tsuccess\theadsha",
+            "FAKE_PR_BY_META": "",  # no merged pull request contains that commit
+        },
+    )
+
+    assert code == 1 and "not part of a pull request merged into main" in text
+    assert written == ""
+
+
+def test_the_push_path_applies_only_the_merged_prs_reviewed_plan(tmp_path: Path) -> None:
+    ok = _run_find_plan(
+        tmp_path,
+        {
+            "FAKE_PR_BY_PUSH": "9",
+            "FAKE_PR_HEAD": "headsha",
+            "FAKE_RUN_LIST": "555",
+            "FAKE_MERGER": "bob",
+        },
+    )
+    assert ok[0] == 0 and "run_id=555" in ok[2] and "merge of PR #9 by @bob" in ok[2]
+
+    no_pr = _run_find_plan(tmp_path, {"FAKE_PR_BY_PUSH": ""})
+    assert no_pr[0] == 1 and "without a pull request" in no_pr[1]
+
+    no_run = _run_find_plan(
+        tmp_path, {"FAKE_PR_BY_PUSH": "9", "FAKE_PR_HEAD": "headsha", "FAKE_RUN_LIST": ""}
+    )
+    assert no_run[0] == 1 and "No successful drt plan run" in no_run[1]

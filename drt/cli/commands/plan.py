@@ -134,6 +134,22 @@ def _slug(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", name).strip(".") or "sync"
 
 
+def _file_name(index: int, total: int, name: str) -> str:
+    """``001-orders.json``; wider than three digits once there are 1,000+ syncs."""
+    return f"{index:0{max(3, len(str(total)))}d}-{_slug(name)}.json"
+
+
+def _write_new_file(path: Path, text: str) -> None:
+    """Write a file without ever following a symlink that was left at its name."""
+    import os
+
+    if path.is_symlink():
+        path.unlink()  # removes the link, never its target
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
 def _clear_previous_plans(out_dir: Path) -> None:
     """Remove the plan files a previous ``drt plan --all`` wrote here (named in its manifest)."""
     import json
@@ -147,7 +163,7 @@ def _clear_previous_plans(out_dir: Path) -> None:
     except (OSError, ValueError, AttributeError):
         listed = []
     for name in listed:
-        if isinstance(name, str) and re.fullmatch(r"\d{3}-[A-Za-z0-9._-]+\.json", name):
+        if isinstance(name, str) and re.fullmatch(r"\d{3,}-[A-Za-z0-9._-]+\.json", name):
             (out_dir / name).unlink(missing_ok=True)
     manifest.unlink(missing_ok=True)
 
@@ -187,6 +203,13 @@ def _plan_all(
     if not names:
         print_error("No syncs found in syncs/.")
         raise typer.Exit(1)
+    duplicated = sorted({n for n in names if names.count(n) > 1})
+    if duplicated:
+        print_error(
+            f"Sync name(s) defined more than once: {', '.join(duplicated)}. "
+            "Names must be unique, or one definition would be planned twice and another not at all."
+        )
+        raise typer.Exit(1)
 
     plan_key = load_plan_key(Path("."))
     results: list[tuple[str, Plan | None, str, str | None]] = []  # name, plan, status, reason
@@ -213,18 +236,18 @@ def _plan_all(
     for index, (name, planned, status, reason) in enumerate(results, start=1):
         entry: dict[str, object] = {"sync": name, "status": status}
         if planned is not None:
-            file_name = f"{index:03d}-{_slug(name)}.json"
+            file_name = _file_name(index, len(results), name)
             out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / file_name).write_text(planned.to_json(), encoding="utf-8")
+            _write_new_file(out_dir / file_name, planned.to_json())
             entry["file"] = file_name
             entry["plan_id"] = planned.plan_id
         if reason:
             entry["reason"] = reason
         manifest_syncs.append(entry)
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "manifest.json").write_text(
+    _write_new_file(
+        out_dir / "manifest.json",
         json.dumps(build_manifest(manifest_syncs, plan_key), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
     )
 
     if output == "json":
