@@ -128,6 +128,20 @@ class RestApiDestinationConfig(DescribableConfig):
         return f"{self.type}:{urlparse(self.url).netloc}"
 
 
+class SQSDestinationConfig(DescribableConfig):
+    """Amazon SQS destination using the standard boto3 credential chain."""
+
+    type: Literal["sqs"]
+    queue_url_env: str
+    region: str | None = None
+    # FIFO-only fields; validation requires the resolved queue URL.
+    message_group_id_field: str | None = None
+    deduplication_id_field: str | None = None
+
+    def _describe_detail(self) -> str:
+        return self.queue_url_env
+
+
 class SlackDestinationConfig(DescribableConfig):
     _detail_is_public = True  # object identity only (#696) — safe for hosted docs
     type: Literal["slack"]

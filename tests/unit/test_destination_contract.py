@@ -24,6 +24,7 @@ from drt.destinations.postgres import PostgresDestination
 from drt.destinations.rest_api import RestApiDestination
 from drt.destinations.slack import SlackDestination
 from drt.destinations.snowflake import SnowflakeDestination
+from drt.destinations.sqs import SQSDestination
 from drt.destinations.teams import TeamsDestination
 from drt.destinations.zendesk import ZendeskDestination
 
@@ -43,6 +44,7 @@ ALL_DESTINATIONS = [
     PostgresDestination,
     RestApiDestination,
     SlackDestination,
+    SQSDestination,
     TeamsDestination,
     ZendeskDestination,
 ]
@@ -68,6 +70,7 @@ NON_CONNECTION_TESTABLE_DESTINATIONS = [
     ParquetDestination,
     RestApiDestination,
     SlackDestination,
+    SQSDestination,
     TeamsDestination,
 ]
 

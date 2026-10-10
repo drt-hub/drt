@@ -58,6 +58,7 @@ from drt.config.models import (
     SendGridDestinationConfig,
     SlackDestinationConfig,
     SnowflakeDestinationConfig,
+    SQSDestinationConfig,
     StagedUploadDestinationConfig,
     TeamsDestinationConfig,
     TwilioDestinationConfig,
@@ -179,6 +180,7 @@ SAMPLES: dict[str, object] = {
         table="USERS",
         warehouse="WH",
     ),
+    "sqs": SQSDestinationConfig(type="sqs", queue_url_env=f"{S}_QUEUE_URL"),
     "staged_upload": StagedUploadDestinationConfig(
         type="staged_upload",
         stage={"url": f"https://{S}.corp/upload"},
@@ -227,6 +229,7 @@ EXPECTED_SAFE: dict[str, str] = {
     "postgres": "postgres (public.users)",
     "rest_api": "rest_api",  # full endpoint URL dropped
     "s3": "s3 (crm/)",  # bucket dropped, per-sync routing prefix kept
+    "sqs": "sqs",
     "salesforce_bulk": "salesforce_bulk (Contact)",
     "sendgrid": "sendgrid (…@corp.example)",  # local part masked, org domain kept
     "slack": "slack (webhook)",
