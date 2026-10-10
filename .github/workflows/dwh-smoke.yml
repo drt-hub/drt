@@ -104,9 +104,9 @@ jobs:
         # checked against the expected path shape before reaching pytest.
         #
         # Cost: every file wakes the paid smoke warehouse, and the full set
-        # roughly doubled the nightly spend after v1.1 (~0.08 -> ~0.2
+        # raised the nightly spend about 2.5x after v1.1 (~0.08 -> ~0.2
         # credit/night). The scheduled run therefore covers only the core
-        # file on weekdays and the full set on Sundays (UTC); a manual
+        # file Monday-Saturday and the full set on Sundays (UTC); a manual
         # dispatch with no input still runs everything.
         run: |
           if [ -z "$SNOWFLAKE_TESTS" ]; then
