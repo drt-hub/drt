@@ -218,15 +218,19 @@ def _setup_steps(extras: str, has_profiles: bool) -> list[str]:
     return lines
 
 
-_COMMENT_SCRIPT = r"""# GitHub caps a comment at 65,536 characters.
-head -c 60000 plan-comment.md > comment.md
+_COMMENT_SCRIPT = r"""# GitHub caps a comment at 65,536 characters; cut on a character boundary.
+python3 - <<'PY'
+raw = open("plan-comment.md", "rb").read()[:60000]
+open("comment.md", "w", encoding="utf-8").write(raw.decode("utf-8", "ignore"))
+PY
+# Only our own comment: anyone can post the marker, but only the bot's can be edited.
 id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-  --jq '[.[] | select(.body | contains("<!-- drt-plan -->"))][0].id // empty')
+  --jq '[.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- drt-plan -->")))][0].id // empty')
 if [ -n "$id" ]; then
   gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@comment.md
 else
   gh pr comment "$PR" --repo "$REPO" --body-file comment.md
-fi"""
+fi"""  # noqa: E501
 
 _FIND_PLAN_SCRIPT = r"""set -euo pipefail
 pr=""
@@ -236,15 +240,15 @@ if [ -n "${PLAN_RUN_ID:-}" ]; then
 else
   pr=$(gh api "repos/$REPO/commits/$SHA/pulls" --jq '.[0].number // empty')
   if [ -z "$pr" ]; then
-    echo "::notice::$SHA is not from a pull request; nothing to apply."
-    exit 0
+    echo "::error::$SHA changed a sync without a pull request, so no plan was reviewed and nothing was applied."
+    exit 1
   fi
   head=$(gh pr view "$pr" --repo "$REPO" --json headRefOid --jq .headRefOid)
   run_id=$(gh run list --repo "$REPO" --workflow drt-plan.yml --commit "$head" \
     --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
   if [ -z "$run_id" ]; then
-    echo "::warning::No successful drt plan run for PR #$pr ($head); nothing was applied."
-    exit 0
+    echo "::error::No successful drt plan run for PR #$pr ($head), so nothing was applied. Re-run the plan, then run this workflow with its run id."
+    exit 1
   fi
   merger=$(gh pr view "$pr" --repo "$REPO" --json mergedBy --jq .mergedBy.login)
   approver="merge of PR #$pr by @$merger (plan run $run_id)"
@@ -252,7 +256,7 @@ fi
 gh run download "$run_id" --repo "$REPO" --name drt-plans --dir plans
 echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
 echo "approver=$approver" >> "$GITHUB_OUTPUT"
-"""
+"""  # noqa: E501
 
 
 def _script(text: str, indent: int) -> list[str]:
@@ -302,6 +306,7 @@ def _render_plan_workflow(
         "          if-no-files-found: ignore",
         "",
         "      - name: Post or update the plan comment",
+        "        if: always() && hashFiles('plan-comment.md') != ''",
         "        env:",
         "          GH_TOKEN: ${{ github.token }}",
         "          REPO: ${{ github.repository }}",
@@ -339,10 +344,13 @@ def _render_apply_workflow(
         "  pull-requests: read",
         "  actions: read",
         "",
-        "# Never two applies at once, and never cancel one that is writing.",
+        "# Never two applies at once, never cancel one that is writing, and queue the rest:",
+        "# without `queue: max` GitHub keeps ONE pending run and silently cancels the older",
+        "# ones, so a PR merged in a burst would never be applied.",
         "concurrency:",
         "  group: drt-apply",
         "  cancel-in-progress: false",
+        "  queue: max",
         "",
         "jobs:",
         "  apply:",

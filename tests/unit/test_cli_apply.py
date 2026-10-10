@@ -129,6 +129,7 @@ def _rewrite(project: Path, edit: Any) -> None:
 
 def _forge(project: Path, edit: Any) -> None:
     """Edit plan.json like a determined editor: recompute plan_id and the seal."""
+    from drt.cli._plan_runner import load_plan_key
     from drt.engine.plan import plan_id_of, seal_of
 
     path = project / "plan.json"
@@ -137,7 +138,7 @@ def _forge(project: Path, edit: Any) -> None:
     doc["plan_id"] = plan_id_of(
         doc["digest"], doc["fingerprints"]["cursor_hash"], doc["created_at"]
     )
-    doc["seal"] = seal_of(doc)
+    doc["seal"] = seal_of(doc, load_plan_key(project))
     path.write_text(json.dumps(doc))
 
 
@@ -816,7 +817,7 @@ def test_bad_vars_and_unreadable_plan_file_are_clean_errors(project: Path) -> No
     unreadable = runner.invoke(app, ["apply", str(project / "syncs"), "--auto-approve"])
 
     assert bad_vars.exit_code == 1
-    assert unreadable.exit_code == 1 and "Cannot apply" in unreadable.output
+    assert unreadable.exit_code == 1 and "manifest" in unreadable.output
 
 
 def test_the_library_refuses_when_nobody_can_approve(project: Path, world: _World) -> None:

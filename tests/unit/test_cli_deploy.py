@@ -224,7 +224,8 @@ def test_plan_workflow_plans_everything_and_keeps_one_sticky_comment(project: Pa
 
     assert "drt plan --all --out-dir plans --output markdown" in plan_text
     assert "<!-- drt-plan -->" in plan_text
-    assert "head -c 60000" in plan_text  # GitHub's comment size limit
+    assert "[:60000]" in plan_text  # GitHub's comment size limit, cut on a character boundary
+    assert '.user.login == "github-actions[bot]"' in plan_text  # only our own comment
     assert "name: drt-plans" in plan_text
 
 
@@ -241,7 +242,11 @@ def test_both_workflows_carry_the_plan_key_and_the_project_secrets(project: Path
 def test_apply_workflow_serialises_and_finds_the_reviewed_plan(project: Path) -> None:
     _, apply_, _, apply_text = _scaffold()
 
-    assert apply_["concurrency"] == {"group": "drt-apply", "cancel-in-progress": False}
+    assert apply_["concurrency"] == {
+        "group": "drt-apply",
+        "cancel-in-progress": False,
+        "queue": "max",  # without it GitHub keeps one pending run and cancels the rest
+    }
     assert apply_["permissions"]["actions"] == "read"
     assert "--workflow drt-plan.yml" in apply_text
     assert "gh run download" in apply_text
@@ -307,3 +312,41 @@ def test_with_plan_stages_the_profile_when_one_is_committed(project: Path) -> No
     assert (
         "cp profiles.yml ~/.drt/profiles.yml" in Path(".github/workflows/drt-plan.yml").read_text()
     )
+
+
+def test_a_missing_reviewed_plan_fails_the_apply_job_instead_of_passing(project: Path) -> None:
+    _, _, _, apply_text = _scaffold()
+
+    # Both "no pull request" and "no successful plan run" must be red, never a quiet success.
+    assert apply_text.count("::error::") == 2
+    assert "::warning::" not in apply_text and "::notice::" not in apply_text
+    assert apply_text.count("exit 1") >= 2
+
+
+def test_the_comment_step_runs_even_when_planning_failed(project: Path) -> None:
+    plan, _, _, _ = _scaffold()
+
+    comment = next(s for s in plan["jobs"]["plan"]["steps"] if "comment" in s.get("name", ""))
+    assert comment["if"].startswith("always()")
+
+
+def test_the_generated_comment_truncation_never_splits_a_character(
+    project: Path, tmp_path: Path
+) -> None:
+    import re
+    import subprocess
+    import sys
+
+    _, _, plan_text, _ = _scaffold()
+    snippet = re.search(r"python3 - <<'PY'\n(.*?)\n\s*PY\n", plan_text, re.S)
+    assert snippet is not None
+    code = "\n".join(line.strip() for line in snippet.group(1).splitlines())
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "plan-comment.md").write_bytes("\u3042".encode() * 30000)  # 3 bytes each, 90,000 bytes
+
+    subprocess.run([sys.executable, "-c", code], cwd=work, check=True)
+
+    out = (work / "comment.md").read_bytes()
+    assert len(out) <= 60000 and len(out) % 3 == 0
+    out.decode("utf-8")  # raises if a character was cut in half

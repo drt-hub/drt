@@ -22,7 +22,7 @@ never persists run state. Applying a plan is a separate step, `drt apply`
 |---|---|
 | `digest` | Derived from content only: the sync name, the config and environment fingerprints, and the entries. The same sync, environment and changes give the same digest. |
 | `plan_id` | Unique per plan file (digest + cursor hash + `created_at`), so a plan made later over the same changes is a new plan. |
-| `seal` | Hash of the whole document. It catches accidental edits (including to `created_at` and `drt_version`); it is not a signature. |
+| `seal` | HMAC of the whole document under the plan key. Without the key nobody can edit the file (including `created_at`, `drt_version` or `plan_id`) and still produce a valid seal, so a plan cannot be refreshed to dodge `--max-age` or single use. |
 | `created_at` | The one wall-clock field; part of `plan_id` and `seal`, not of `digest`. |
 | `fingerprints.config_hash` | Hash of the sync file and the model SQL it references. |
 | `fingerprints.environment_hash` | Keyed hash of what the sync resolves to here: resolved config, project vars and profile. Only the hash is stored, never the values. |
@@ -97,6 +97,34 @@ each plan first, so if the world changed between the review and the merge it
 change to the sync itself (or to the SQL it references) also invalidates the
 reviewed plan; re-run the plan workflow on the new commit and apply it with
 `workflow_dispatch`.
+
+**What the apply workflow refuses.** `drt plan --all` writes a sealed
+`manifest.json` that lists every sync with a status (`planned`, `unavailable` or
+`error`). `drt apply <directory>` only accepts a directory through that manifest:
+it refuses a run in which any sync **failed** to plan (the plan job also fails,
+and the comment says which), a directory holding a file the manifest does not
+list or missing one it does, and a file that is not the plan the manifest
+recorded. Every plan is vetted offline (seal, age, version, claim) **before the
+first write**, so a plan that is already refusable cannot leave a deployment half
+applied. The drift check still runs plan by plan, so a later plan that drifts
+after an earlier one was written leaves the earlier one applied; applying across
+syncs is not atomic. The apply job also **fails** (rather than passing quietly)
+when a merged commit has no pull request or no successful plan run. A sync whose
+destination cannot report its contents (`unavailable`) is listed in the comment
+with its reason and is never applied through this loop.
+
+**Known limits of the CI loop.**
+
+- The single-use claim is a file in the job's workspace, and GitHub runners are
+  ephemeral. Re-running the apply workflow, or dispatching it again with the same
+  plan run id, starts without the claim. For upserts the live recompute then shows
+  nothing left to do; for **append-only** destinations it would write the same
+  inserts again. Do not re-run a successful apply for append-only syncs. A shared
+  claim store is tracked in [#1245](https://github.com/drt-hub/drt/issues/1245).
+- `concurrency` uses `queue: max`; without it GitHub keeps one pending run and
+  cancels older ones, so a PR merged in a burst would never be applied.
+- The plan artifact (and the comment) show keys; use `--redact-keys` if keys are
+  personal data.
 
 **Secrets.** Besides your connector secrets, create one plan key and give both
 workflows the same value, or apply refuses the plan:
@@ -261,7 +289,7 @@ Nothing is written, and the command exits 1, when:
 
 | Situation | Why |
 |---|---|
-| the file was edited or truncated | the `seal`, `digest` and `plan_id` are recomputed |
+| the file was edited, truncated or made with another plan key | the keyed `seal`, `digest` and `plan_id` are recomputed |
 | the plan is older than `--max-age` (default 24h), or dated in the future | the world has had time to move |
 | the plan came from another drt **major** version | formats are only promised within a major |
 | the sync file, or the model SQL it references, changed | the plan describes a different sync |

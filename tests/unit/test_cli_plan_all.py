@@ -114,8 +114,9 @@ def test_plan_all_writes_one_plan_per_sync_and_one_markdown_report(project: Path
 
     assert result.exit_code == 0, result.output
     assert sorted(p.name for p in (project / "plans").glob("*.json")) == [
-        "a_orders.json",
-        "b_users.json",
+        "001-a_orders.json",
+        "002-b_users.json",
+        "manifest.json",
     ]
     assert result.output.startswith("<!-- drt-plan -->")
     assert "2 sync(s); 2 with changes." in result.output
@@ -129,7 +130,10 @@ def test_a_sync_that_cannot_be_planned_is_reported_not_fatal(project: Path, worl
 
     assert result.exit_code == 0, result.output
     assert "Plan unavailable" in result.output and "b_users: not queryable" in result.output
-    assert [p.name for p in (project / "plans").glob("*.json")] == ["a_orders.json"]
+    assert sorted(p.name for p in (project / "plans").glob("*.json")) == [
+        "001-a_orders.json",
+        "manifest.json",
+    ]
 
 
 def test_plan_all_json_and_text_outputs(project: Path, world: _World) -> None:
@@ -202,12 +206,160 @@ def test_apply_a_directory_stops_after_a_failed_write(project: Path, world: _Wor
     assert world.writes == ["a_orders"]  # b_users never ran
 
 
-def test_apply_an_empty_directory_is_an_error(project: Path) -> None:
+def test_apply_a_directory_without_a_manifest_is_refused(project: Path, world: _World) -> None:
     (project / "plans").mkdir()
+    (project / "plans" / "001-a_orders.json").write_text("{}")
 
     result = runner.invoke(app, ["apply", "plans", "--auto-approve"])
 
-    assert result.exit_code == 1 and "no *.json plans" in result.output
+    assert result.exit_code == 1 and "no manifest.json" in result.output
+    assert world.writes == []
+
+
+def _plans(project: Path) -> Path:
+    assert runner.invoke(app, ["plan", "--all", "--out-dir", "plans"]).exit_code == 0
+    return project / "plans"
+
+
+def test_a_run_where_a_sync_failed_to_plan_is_incomplete_and_cannot_be_applied(
+    project: Path, world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.cli import _plan_runner as plan_runner
+
+    real = plan_runner.compute_plan
+
+    def flaky(name: str, **kwargs: Any) -> Any:
+        if name == "b_users":
+            raise plan_runner.PlanCliError("warehouse exploded: password=hunter2")
+        return real(name, **kwargs)
+
+    monkeypatch.setattr(plan_runner, "compute_plan", flaky)
+
+    planned = runner.invoke(app, ["plan", "--all", "--out-dir", "plans", "--output", "markdown"])
+
+    assert planned.exit_code == 1  # the job goes red, but the report and plans are still written
+    assert "hunter2" not in planned.stdout  # connector error text never reaches the PR comment
+    assert "could not be planned" in planned.stdout and "b_users" in planned.stdout
+    assert "hunter2" in planned.stderr  # the detail stays in the job log
+    manifest = json.loads((project / "plans" / "manifest.json").read_text())
+    assert [e["status"] for e in manifest["syncs"]] == ["planned", "error"]
+
+    applied = runner.invoke(app, ["apply", "plans", "--auto-approve"])
+    assert applied.exit_code == 1 and "incomplete" in applied.output
+    assert world.writes == []  # not even the sync that did plan
+
+
+def test_an_edited_manifest_is_refused(project: Path, world: _World) -> None:
+    plans = _plans(project)
+    manifest = json.loads((plans / "manifest.json").read_text())
+    manifest["syncs"][1]["status"] = "unavailable"  # drop b_users from the run
+    (plans / "manifest.json").write_text(json.dumps(manifest))
+
+    result = runner.invoke(app, ["apply", "plans", "--auto-approve"])
+
+    assert result.exit_code == 1 and "manifest seal" in result.output
+    assert world.writes == []
+
+
+def test_a_stale_or_missing_plan_file_is_refused(project: Path, world: _World) -> None:
+    plans = _plans(project)
+    (plans / "003-old_sync.json").write_text(
+        (plans / "001-a_orders.json").read_text()
+    )  # left over from an earlier run
+
+    stale = runner.invoke(app, ["apply", "plans", "--auto-approve"])
+    (plans / "003-old_sync.json").unlink()
+    (plans / "002-b_users.json").unlink()
+    missing = runner.invoke(app, ["apply", "plans", "--auto-approve"])
+
+    flat = lambda r: " ".join(r.output.split())  # noqa: E731 - rich wraps long lines
+    assert stale.exit_code == 1 and "not in the manifest: 003-old_sync.json" in flat(stale)
+    assert missing.exit_code == 1 and "missing: 002-b_users.json" in flat(missing)
+    assert world.writes == []
+
+
+def test_swapping_one_plan_file_for_another_is_refused(project: Path, world: _World) -> None:
+    plans = _plans(project)
+    (plans / "001-a_orders.json").write_text((plans / "002-b_users.json").read_text())
+
+    result = runner.invoke(app, ["apply", "plans", "--auto-approve"])
+
+    assert result.exit_code == 1 and "not the plan the manifest recorded" in result.output
+    assert world.writes == []
+
+
+def test_every_plan_is_checked_before_the_first_write(project: Path, world: _World) -> None:
+    """A later plan that is already refusable must not leave the first one applied."""
+    plans = _plans(project)
+    from drt.cli._plan_runner import load_plan_key
+    from drt.engine.plan import plan_id_of, seal_of
+
+    doc = json.loads((plans / "002-b_users.json").read_text())
+    doc["created_at"] = "2020-01-01T00:00:00+00:00"  # stale, and correctly re-sealed
+    doc["plan_id"] = plan_id_of(
+        doc["digest"], doc["fingerprints"]["cursor_hash"], doc["created_at"]
+    )
+    doc["seal"] = seal_of(doc, load_plan_key(project))
+    (plans / "002-b_users.json").write_text(json.dumps(doc))
+    manifest = json.loads((plans / "manifest.json").read_text())
+    manifest["syncs"][1]["plan_id"] = doc["plan_id"]
+    from drt.engine.plan import build_manifest
+
+    (plans / "manifest.json").write_text(
+        json.dumps(build_manifest(manifest["syncs"], load_plan_key(project)))
+    )
+
+    result = runner.invoke(app, ["apply", "plans", "--auto-approve"])
+
+    assert result.exit_code == 1 and "older than" in result.output
+    assert world.writes == []  # a_orders was not applied before b_users was found stale
+
+
+def test_unplannable_syncs_are_not_applied_and_an_all_unavailable_run_is_a_noop(
+    project: Path, world: _World
+) -> None:
+    world.unsupported = {"a_orders", "b_users"}
+    plans = _plans(project)
+
+    result = runner.invoke(app, ["apply", "plans", "--auto-approve"])
+
+    assert result.exit_code == 0 and "nothing to apply" in result.output
+    assert sorted(p.name for p in plans.glob("*.json")) == ["manifest.json"]
+
+
+def test_a_second_plan_run_replaces_the_first_runs_files(project: Path, world: _World) -> None:
+    plans = _plans(project)
+    assert (plans / "002-b_users.json").exists()
+    world.unsupported = {"b_users"}
+
+    assert runner.invoke(app, ["plan", "--all", "--out-dir", "plans"]).exit_code == 0
+
+    assert not (plans / "002-b_users.json").exists()  # no stale plan survives
+    assert runner.invoke(app, ["apply", "plans", "--auto-approve"]).exit_code == 0
+
+
+def test_a_hostile_sync_name_cannot_escape_the_output_directory(
+    project: Path, world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.cli.commands import plan as plan_cmd
+
+    for hostile in ("../../etc/passwd", "a/b\\c", "x\ny", "..", "/abs"):
+        slug = plan_cmd._slug(hostile)
+        assert "/" not in slug and "\\" not in slug and "\n" not in slug
+        assert not slug.startswith(".") and slug
+    assert plan_cmd._slug("...") == "sync"
+
+
+def test_the_markdown_report_cannot_be_forged_by_a_sync_name_or_a_reason(
+    project: Path, world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drt.cli.commands.plan import _markdown_report
+
+    report = _markdown_report(
+        [("evil\n## injected <b>x</b>", None, "unavailable", "reason\n### also injected `x`")]
+    )
+
+    assert "\n## injected" not in report and "\n### also injected" not in report
 
 
 def test_plan_all_rejects_bad_vars(project: Path) -> None:

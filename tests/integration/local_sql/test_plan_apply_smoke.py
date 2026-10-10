@@ -204,3 +204,23 @@ def test_a_tripped_guard_blocks_apply_until_it_is_forced(
     assert _dest(project, pg) == [(1, "alpha")]
     results = json.loads((project / "target" / "drt" / "run_results.json").read_text())
     assert results["results"][0]["guards_forced"][0]["guard"] == "max_deletes"
+
+
+def test_the_ci_path_plan_all_then_apply_the_directory(project: Path, pg: PostgresProfile) -> None:
+    """What the generated workflows run: `drt plan --all`, then `drt apply <dir>`."""
+    _write_sync(project, pg)
+
+    planned = runner.invoke(app, ["plan", "--all", "--out-dir", "plans", "--output", "markdown"])
+    assert planned.exit_code == 0, planned.output
+    assert "<!-- drt-plan -->" in planned.stdout and "charlie" not in planned.stdout
+    manifest = json.loads((project / "plans" / "manifest.json").read_text())
+    assert [e["status"] for e in manifest["syncs"]] == ["planned"]
+
+    applied = runner.invoke(
+        app, ["apply", "plans", "--auto-approve", "--approved-by", "merge of PR #1 by @smoke"]
+    )
+    assert applied.exit_code == 0, applied.output
+    assert _dest(project, pg) == [(1, "alpha"), (2, "bravo"), (3, "charlie")]
+
+    again = runner.invoke(app, ["apply", "plans", "--auto-approve"])
+    assert again.exit_code == 1 and "already applied" in again.output

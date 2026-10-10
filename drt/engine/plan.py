@@ -80,6 +80,7 @@ class Plan:
     guards_configured: dict[str, Any] | None = None
     guard_trips: list[GuardTrip] = field(default_factory=list)
     entries: list[PlanEntry] = field(default_factory=list)
+    plan_key: bytes = field(default=b"", repr=False)
 
     @property
     def summary(self) -> dict[str, int]:
@@ -110,7 +111,7 @@ class Plan:
 
     def to_dict(self) -> dict[str, Any]:
         document = self._body()
-        document["seal"] = seal_of(document)
+        document["seal"] = seal_of(document, self.plan_key)
         return document
 
     def _body(self) -> dict[str, Any]:
@@ -172,16 +173,18 @@ def plan_id_of(digest: str, cursor_hash: str | None, created_at: str) -> str:
     return "plan-" + _sha256(seed)[:16]
 
 
-def seal_of(document: dict[str, Any]) -> str:
-    """Hash over the whole document except the seal itself.
+def seal_of(document: dict[str, Any], plan_key: bytes) -> str:
+    """HMAC-SHA256 over the whole document except the seal itself.
 
-    It catches accidental edits (a hand-changed ``created_at`` or ``drt_version``
-    would otherwise slip past the content digest). It is not a signature: anyone
-    who can write the file can recompute it, which is why ``drt apply`` also
-    re-verifies the plan against the live world.
+    Keyed with the plan key, so nobody who can read or write the file but does
+    not hold ``DRT_PLAN_KEY`` can refresh ``created_at`` (to dodge ``--max-age``),
+    mint a new ``plan_id`` (to dodge single use) or edit anything else and still
+    produce a valid seal. ``drt apply`` additionally re-verifies the plan against
+    the live world.
     """
     body = {k: v for k, v in document.items() if k != "seal"}
-    return "sha256:" + _sha256(_canonical(body))
+    mac = hmac.new(plan_key, _canonical(body).encode("utf-8"), hashlib.sha256)
+    return "hmac-sha256:" + mac.hexdigest()
 
 
 def _canonical(value: Any) -> str:
@@ -279,6 +282,7 @@ def build_plan(
         cursor_hash=hash_value(cursor_value, plan_key) if cursor_value is not None else None,
         redact_keys=redact_keys,
         key_id=key_id_of(plan_key),
+        plan_key=plan_key,
         total_source_rows=diff.total_source_rows,
         total_destination_rows=diff.total_destination_rows,
         delete_baseline=diff.delete_baseline,
@@ -358,11 +362,11 @@ class PlanDocumentError(ValueError):
     """A plan file that must not be applied (unreadable, tampered or unusable)."""
 
 
-def load_plan_document(text: str) -> dict[str, Any]:
-    """Parse and integrity-check a ``plan.json``.
+def load_plan_document(text: str, plan_key: bytes) -> dict[str, Any]:
+    """Parse and authenticate a ``plan.json``.
 
-    The seal, digest and ``plan_id`` are recomputed, so a plan that was edited
-    by hand (or truncated) is rejected instead of trusted.
+    The keyed seal, digest and ``plan_id`` are recomputed, so a plan that was
+    edited by hand, truncated, or made with another plan key is rejected.
     """
     try:
         doc = json.loads(text)
@@ -379,7 +383,11 @@ def load_plan_document(text: str) -> dict[str, Any]:
             )
         if not doc["status"]["available"]:
             raise PlanDocumentError("the plan is marked unavailable and cannot be applied")
-        if seal_of(doc) != doc["seal"]:
+        if doc["options"]["key_id"] != key_id_of(plan_key):
+            raise PlanDocumentError(
+                "the plan was made with a different plan key, so it cannot be verified here"
+            )
+        if not hmac.compare_digest(seal_of(doc, plan_key), str(doc["seal"])):
             raise PlanDocumentError("plan seal does not match its contents (file was modified)")
         fingerprints = doc["fingerprints"]
         digest = digest_of(
@@ -412,6 +420,53 @@ def drift_report(planned: list[dict[str, Any]], current: list[dict[str, Any]]) -
     removed = [json.loads(k) for k in sorted((old - new).elements())]
     added = [json.loads(k) for k in sorted((new - old).elements())]
     return {"removed": removed, "added": added, "drifted": max(len(removed), len(added))}
+
+
+MANIFEST_SCHEMA_VERSION = 1
+
+
+def build_manifest(
+    syncs: list[dict[str, Any]], plan_key: bytes, created_at: str | None = None
+) -> dict[str, Any]:
+    """The authenticated index of one ``drt plan --all`` run.
+
+    Every sync appears with a status (``planned`` / ``unavailable`` / ``error``),
+    so a directory of plans that is missing a sync, holds a stale file, or comes
+    from a run where a sync failed to plan can be recognised by ``drt apply``.
+    """
+    document: dict[str, Any] = {
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "kind": "drt-plan-manifest",
+        "created_at": created_at or datetime.now(timezone.utc).isoformat(),
+        "key_id": key_id_of(plan_key),
+        "syncs": syncs,
+    }
+    document["seal"] = seal_of(document, plan_key)
+    return document
+
+
+def load_manifest(text: str, plan_key: bytes) -> dict[str, Any]:
+    try:
+        doc = json.loads(text)
+        if not isinstance(doc, dict) or doc.get("kind") != "drt-plan-manifest":
+            raise PlanDocumentError("not a drt plan manifest")
+        if doc["schema_version"] != MANIFEST_SCHEMA_VERSION:
+            raise PlanDocumentError(
+                f"unsupported manifest schema_version {doc['schema_version']!r}"
+            )
+        if doc["key_id"] != key_id_of(plan_key):
+            raise PlanDocumentError(
+                "the manifest was made with a different plan key, so it cannot be verified here"
+            )
+        if not hmac.compare_digest(seal_of(doc, plan_key), str(doc["seal"])):
+            raise PlanDocumentError("manifest seal does not match its contents (file was modified)")
+        if not isinstance(doc["syncs"], list):
+            raise PlanDocumentError("manifest syncs must be a list")
+    except json.JSONDecodeError as e:
+        raise PlanDocumentError(f"manifest is not valid JSON: {e}") from e
+    except (KeyError, TypeError) as e:
+        raise PlanDocumentError(f"manifest is missing or malformed field: {e}") from e
+    return doc
 
 
 def unsupported_reason(sync: Any) -> str | None:
@@ -538,7 +593,7 @@ PLAN_JSON_SCHEMA: dict[str, Any] = {
             },
         },
         "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-        "seal": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "seal": {"type": "string", "pattern": "^hmac-sha256:[0-9a-f]{64}$"},
         "entries": {
             "type": "array",
             "items": {

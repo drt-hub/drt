@@ -70,7 +70,13 @@ def apply(
       drt apply plan.json --auto-approve --max-age 2h   # in CI
       drt apply plans/ --auto-approve                    # every plan from `drt plan --all`
     """
-    from drt.cli._apply_flow import ApplyAborted, ApplyRefused, apply_plan, parse_duration
+    from drt.cli._apply_flow import (
+        ApplyAborted,
+        ApplyRefused,
+        apply_plan,
+        load_plan_directory,
+        parse_duration,
+    )
     from drt.cli._plan_runner import PlanCliError, parse_vars_option
 
     if output not in ("text", "json"):
@@ -83,13 +89,22 @@ def apply(
         raise typer.Exit(1)
     try:
         if plan_file.is_dir():
-            files = sorted(plan_file.glob("*.json"))
-            if not files:
-                raise OSError(f"no *.json plans in {plan_file}")
+            plan_texts = [
+                (Path(name), text)
+                for name, text in load_plan_directory(plan_file, max_age=max_age_delta)
+            ]
+            if not plan_texts:
+                console.print(
+                    "Every sync in the manifest is unplannable or has no plan; nothing to apply.",
+                    markup=False,
+                )
+                raise typer.Exit(0)
         else:
-            files = [plan_file]
-        plan_texts = [(f, f.read_text(encoding="utf-8")) for f in files]
+            plan_texts = [(plan_file, plan_file.read_text(encoding="utf-8"))]
         cli_vars = parse_vars_option(vars_raw)
+    except ApplyRefused as e:
+        print_error(str(e))
+        raise typer.Exit(1)
     except OSError as e:
         print_error(f"Cannot apply {plan_file}: {e}")
         raise typer.Exit(1)
